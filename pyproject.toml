@@ -1,0 +1,45 @@
+[project]
+name = "nantai-infinite-village"
+version = "0.1.0"
+description = "照片驱动的无限3D村庄世界生成系统"
+requires-python = ">=3.11"
+dependencies = [
+    # L0 编排 (本机CPU可行)
+    "exifread>=3.0",
+    "Pillow>=10.4",
+    # L0 分割 (云端GPU, 本机可选)
+    # "segment-anything-2",  # 需 Python 3.11, 云端安装
+    # "groundingdino-py",    # 需 Python 3.11, 云端安装
+
+    # L1 资产生成 (云端GPU)
+    # "hy3dgen>=2.1",        # 需 NVIDIA GPU, 云端
+    "trimesh>=4.4",
+    "plyfile>=1.0",
+
+    # L2 布局生成 (本机API调用)
+    "zhipuai>=2.1",
+    "pydantic>=2.7",
+    "numpy>=1.26",
+
+    # L4 Web 导出 (本机CPU可行)
+    "py3dtiles>=12.0",
+
+    # 横切
+    "loguru>=0.7",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "ASYNC"]

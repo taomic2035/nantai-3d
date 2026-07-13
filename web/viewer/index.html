@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Nantai Village - 无限村庄 3D Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  #canvas-container { width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; top: 12px; left: 12px; padding: 14px 18px;
+    background: rgba(20, 22, 28, 0.85); color: #e0e0e0;
+    border-radius: 8px; font-size: 13px; line-height: 1.6;
+    backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.1);
+    max-width: 320px; z-index: 10;
+  }
+  #hud h1 { font-size: 15px; margin-bottom: 8px; color: #7fd1ff; }
+  #hud .stat { color: #aaa; }
+  #hud .stat b { color: #fff; font-weight: 600; }
+  #hud .legend { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
+  #hud .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #bbb; margin: 2px 0; }
+  #hud .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+  #controls {
+    position: fixed; bottom: 12px; left: 12px; padding: 10px 14px;
+    background: rgba(20, 22, 28, 0.85); color: #aaa;
+    border-radius: 8px; font-size: 12px;
+    backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.1);
+    z-index: 10;
+  }
+  #controls kbd {
+    display: inline-block; padding: 1px 6px; background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 3px;
+    font-family: monospace; color: #fff; margin: 0 2px;
+  }
+  #loading {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #fff; font-size: 18px; text-align: center; z-index: 100;
+  }
+  #loading .spinner {
+    width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.1);
+    border-top: 3px solid #7fd1ff; border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin: 0 auto 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #minimap-wrap {
+    position: fixed; top: 12px; right: 12px; padding: 10px;
+    background: rgba(20, 22, 28, 0.85); color: #aaa;
+    border-radius: 8px; font-size: 11px;
+    backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.1);
+    z-index: 10; display: none;
+  }
+  #minimap-wrap .title { color: #7fd1ff; font-size: 12px; margin-bottom: 6px; text-align: center; }
+  #minimap { width: 180px; height: 180px; border: 1px solid rgba(255,255,255,0.15); display: block; }
+  #minimap-legend { margin-top: 6px; font-size: 10px; line-height: 1.5; }
+  #minimap-legend .d { display: flex; align-items: center; gap: 6px; color: #888; }
+  #minimap-legend .sw { width: 10px; height: 10px; border-radius: 1px; display: inline-block; }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+
+<div id="hud" style="display:none">
+  <h1>Nantai Village (无限世界)</h1>
+  <div class="stat">活跃 chunks: <b id="hud-chunks">0</b> / 缓存上限 16</div>
+  <div class="stat">已淘汰: <b id="hud-evicted">0</b> | 缓存命中: <b id="hud-hits">0</b></div>
+  <div class="stat">调度状态: <b id="hud-loading">空闲</b></div>
+  <div class="stat">相机位置: <b id="hud-camera">(0,0,0)</b></div>
+  <div class="stat">当前 chunk: <b id="hud-current">(0,0)</b></div>
+  <div class="legend">
+    <div class="legend-item"><span class="swatch" style="background:#5a823c"></span>地面/草地</div>
+    <div class="legend-item"><span class="swatch" style="background:#505050"></span>主路 (柏油)</div>
+    <div class="legend-item"><span class="swatch" style="background:#8c6e50"></span>小路 (土路)</div>
+    <div class="legend-item"><span class="swatch" style="background:#aa825a"></span>建筑 (木墙)</div>
+    <div class="legend-item"><span class="swatch" style="background:#8c3228"></span>屋顶 (红瓦)</div>
+    <div class="legend-item"><span class="swatch" style="background:#286e23"></span>植被 (树木)</div>
+    <div class="legend-item"><span class="swatch" style="background:#3c6eb4"></span>水系</div>
+  </div>
+</div>
+
+<div id="minimap-wrap">
+  <div class="title">Mini-map (5x5)</div>
+  <canvas id="minimap" width="180" height="180"></canvas>
+  <div id="minimap-legend">
+    <div class="d"><span class="sw" style="background:#4a9b6f"></span>已加载</div>
+    <div class="d"><span class="sw" style="background:#1a2a22; border:1px solid #2a4030"></span>未加载</div>
+    <div class="d"><span class="sw" style="background:#7fd1ff"></span>视野范围</div>
+    <div class="d"><span class="sw" style="background:#ff5a5a; border-radius:50%"></span>玩家</div>
+  </div>
+</div>
+
+<div id="controls" style="display:none">
+  移动: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> |
+  升降: <kbd>Q</kbd><kbd>E</kbd> |
+  加速: <kbd>Shift</kbd> |
+  边界: <kbd>B</kbd> |
+  旋转: 鼠标拖拽 |
+  俯仰: 右键拖拽
+</div>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div id="loading-text">加载场景...</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

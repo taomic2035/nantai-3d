@@ -1,0 +1,69 @@
+# ============ 素材 (用户输入, 不入库) ============
+input/
+photos/
+
+# ============ 生成产物 (可重新生成, 不入库) ============
+layouts/
+web/data/*.ply
+web/data/manifest.json
+scenes/
+corpus/
+assets/
+verification/output/
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ============ 虚拟环境 ============
+.venv/
+venv/
+env/
+ENV/
+
+# ============ 密钥 / 配置 ============
+.env
+.env.local
+.env.*.local
+*.key
+secrets.json
+
+# ============ IDE / 编辑器 ============
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============ 日志 / 临时 ============
+*.log
+logs/
+tmp/
+*.tmp
+
+# ============ 大文件 / 二进制 ============
+*.ply
+!verification/**/*.ply
+*.bin
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# ============ Node (Web 前端备选) ============
+node_modules/
+package-lock.json
+yarn.lock
