@@ -27,7 +27,10 @@ import {
   createViewerBridge,
   resolveArtifactUrl,
 } from './bridge.mjs';
-import { createSplatLayer } from './splat-layer.mjs';
+import {
+  createSplatLayer,
+  isSupersededLoadResult,
+} from './splat-layer.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
@@ -523,6 +526,7 @@ async function loadReconstructionLayer() {
     manifestUrl: reconManifestUrl,
     visible: reconVisible,
   });
+  if (isSupersededLoadResult(result)) return result;
   viewerCapabilities = createViewerCapabilities(result.mode);
   viewerBridge?.announceCapabilities();
 

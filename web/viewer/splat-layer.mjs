@@ -58,6 +58,20 @@ function sparkState(url) {
   };
 }
 
+function supersededState(url) {
+  return {
+    mode: 'superseded',
+    fidelity: 'unknown',
+    url,
+    reason: 'load superseded by a newer request',
+    superseded: true,
+  };
+}
+
+export function isSupersededLoadResult(result) {
+  return result?.superseded === true;
+}
+
 function withTimeout(promise, timeoutMs) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -116,7 +130,7 @@ export function createSplatLayer({
 
     try {
       const sparkModule = await withTimeout(importSpark(), timeoutMs);
-      if (generation !== loadGeneration) return { ...state };
+      if (generation !== loadGeneration) return supersededState(url);
       if (
         typeof sparkModule?.SparkRenderer !== 'function'
         || typeof sparkModule?.SplatMesh !== 'function'
@@ -141,14 +155,14 @@ export function createSplatLayer({
       await withTimeout(Promise.resolve(pendingMesh.initialized), timeoutMs);
       if (generation !== loadGeneration) {
         disposeObjects(pendingRenderer, pendingMesh);
-        return { ...state };
+        return supersededState(url);
       }
 
       state = sparkState(url);
       return { ...state };
     } catch (error) {
       disposeObjects(pendingRenderer, pendingMesh);
-      if (generation !== loadGeneration) return { ...state };
+      if (generation !== loadGeneration) return supersededState(url);
       const message = error instanceof Error ? error.message : String(error);
       state = fallbackState(`Spark unavailable: ${message}`, url);
       return { ...state };

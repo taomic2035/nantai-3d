@@ -245,7 +245,56 @@ test('a superseded Spark completion cannot overwrite the newest load state', asy
   oldInitialization.resolve();
   const superseded = await oldLoad;
 
-  assert.deepEqual(superseded, newest);
+  assert.equal(superseded.superseded, true);
+  assert.equal(superseded.mode, 'superseded');
   assert.deepEqual(layer.getState(), newest);
   assert.deepEqual(scene.children, []);
+});
+
+test('a stale completion is ignored while the newest Spark load is still pending', async () => {
+  const { createSplatLayer, isSupersededLoadResult } = subject();
+  const scene = fakeScene();
+  const oldInitialization = deferred();
+  const newInitialization = deferred();
+  let importCall = 0;
+  const layer = createSplatLayer({
+    scene,
+    renderer: {},
+    importSpark: async () => {
+      importCall += 1;
+      return fakeSparkModule({
+        initialize: importCall === 1
+          ? oldInitialization.promise
+          : newInitialization.promise,
+      });
+    },
+  });
+
+  const oldLoad = layer.load({
+    manifestUrl: 'https://studio.example/data/recon/recon_manifest.json',
+    manifest: { full_3dgs: 'old-scene.ply' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const newestLoad = layer.load({
+    manifestUrl: 'https://studio.example/data/recon/recon_manifest.json',
+    manifest: { full_3dgs: 'new-scene.ply' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  oldInitialization.resolve();
+  const staleResult = await oldLoad;
+
+  assert.equal(isSupersededLoadResult(staleResult), true);
+  assert.equal(layer.getState().reason, 'Spark loading');
+  assert.deepEqual(
+    scene.children.filter((item) => item.kind === 'splat-mesh')
+      .map((item) => item.options.url),
+    ['https://studio.example/data/recon/new-scene.ply'],
+  );
+
+  newInitialization.resolve();
+  const newestResult = await newestLoad;
+  assert.equal(newestResult.mode, 'spark');
+  assert.equal(isSupersededLoadResult(newestResult), false);
+  assert.equal(layer.getState().mode, 'spark');
 });
