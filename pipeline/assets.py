@@ -529,6 +529,28 @@ class AssetRegistry:
             for asset_id, entry in self.doc.assets.items()
         }
 
+    def verify(self) -> dict[str, str]:
+        """Audit every active registry payload without promoting stale bytes."""
+        problems: dict[str, str] = {}
+        for asset_id, entry in self.doc.assets.items():
+            try:
+                payload = self._contained_payload_path(entry.ply)
+            except ValueError as exc:
+                problems[asset_id] = str(exc)
+                continue
+            if not payload.is_file():
+                problems[asset_id] = f"缺失 {entry.ply} (运行 make assets 重建)"
+                continue
+            if not entry.sha256:
+                problems[asset_id] = f"{entry.ply} 缺少 registry sha256"
+                continue
+            actual_sha = sha256_file(payload)
+            if not hmac.compare_digest(actual_sha, entry.sha256):
+                problems[asset_id] = (
+                    f"{entry.ply} sha256 不匹配 (素材被改动或生成器漂移)"
+                )
+        return problems
+
 
 if __name__ == "__main__":
     # 自验证: 注册 → 解析 → 替换 → 版本递增
