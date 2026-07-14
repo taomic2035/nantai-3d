@@ -185,7 +185,7 @@ def _write_v2_project(root: Path) -> None:
                 "version": 1,
                 "sha256": _sha256(asset),
                 "instances": 3,
-                "point_count": 90,
+                "point_count": 1,
             }
         ]
     }
@@ -572,7 +572,8 @@ class TestProjectSnapshot:
         [
             "zero-instances", "zero-points", "unknown-chunk", "missing-ply",
             "outside-ply", "empty-ply", "non-ply", "renderer-mismatch",
-            "chunk-count-mismatch", "header-only-ply",
+            "chunk-count-mismatch", "header-only-ply", "points-exceed-chunk",
+            "aggregate-points-exceed-chunk",
         ],
     )
     def test_asset_consumption_requires_positive_counts_and_live_chunk(
@@ -610,6 +611,10 @@ class TestProjectSnapshot:
             row["renderer"] = "building"
         elif case == "chunk-count-mismatch":
             world["chunks"][0]["point_count"] = 999
+        elif case == "points-exceed-chunk":
+            row["point_count"] = 90
+        elif case == "aggregate-points-exceed-chunk":
+            world["asset_consumption"].append(dict(row))
         else:
             outside = tmp_path.parent / f"{tmp_path.name}-outside-chunk.ply"
             _write_ply(outside, properties=("x", "y", "z"))

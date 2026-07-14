@@ -672,7 +672,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
     rows = world.get("asset_consumption") if isinstance(world, dict) else []
     if not isinstance(rows, list):
         rows = []
-    valid_chunk_ids: set[str] = set()
+    valid_chunk_point_counts: dict[str, int] = {}
     seen_chunk_ids: set[str] = set()
     duplicate_chunk_ids: set[str] = set()
     chunks = world.get("chunks") if isinstance(world, dict) else []
@@ -701,8 +701,30 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
                 and declared_point_count == live_point_count
             )
             if isinstance(chunk_id, str) and chunk_id and valid_chunk:
-                valid_chunk_ids.add(chunk_id)
-    valid_chunk_ids.difference_update(duplicate_chunk_ids)
+                valid_chunk_point_counts[chunk_id] = live_point_count
+    for chunk_id in duplicate_chunk_ids:
+        valid_chunk_point_counts.pop(chunk_id, None)
+
+    reported_points_by_chunk: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        chunk_id = row.get("chunk_id")
+        point_count = row.get("point_count")
+        if (
+            isinstance(chunk_id, str)
+            and chunk_id in valid_chunk_point_counts
+            and type(point_count) is int
+            and point_count > 0
+        ):
+            reported_points_by_chunk[chunk_id] = (
+                reported_points_by_chunk.get(chunk_id, 0) + point_count
+            )
+    valid_consumption_chunk_ids = {
+        chunk_id
+        for chunk_id, live_point_count in valid_chunk_point_counts.items()
+        if reported_points_by_chunk.get(chunk_id, 0) <= live_point_count
+    }
 
     items: list[dict[str, Any]] = []
     for asset_id in sorted(assets):
@@ -740,7 +762,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             and row.get("version") == version
             and row.get("sha256") == expected_sha
             and row.get("renderer") == entry.get("kind")
-            and row.get("chunk_id") in valid_chunk_ids
+            and row.get("chunk_id") in valid_consumption_chunk_ids
             and type(row.get("instances")) is int
             and row["instances"] > 0
             and type(row.get("point_count")) is int

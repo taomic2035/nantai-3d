@@ -54,7 +54,7 @@
   1. `pipeline/recon_schema.py`、`registration.py`、`gaussian_scene.py`、`reconstruct.py`；
   2. `pipeline/assets.py`、`validate_handoff.py`、`render_chunk_to_ply.py`、HANDOFF-001；
   3. `web/viewer/`、`web/studio/`、`pipeline/studio_server.py`。
-- 当前 fresh gate：Python 230、Viewer 32、Studio 33、`make verify`/Ruff/diff PASS；PLY 语义
+- 当前 fresh gate：Python 232、Viewer 32、Studio 33、`make verify`/Ruff/diff PASS；PLY 语义
   reviewer 已放行 `18dbce0`。
 - 整分支 reviewer 放行后，把 `codex/nantai-takeover` 快进到 main 并推送；先保护
   `/Users/taomic/vibecoding/nantai-3d` 中 Opus 的未提交注释，不直接覆盖。

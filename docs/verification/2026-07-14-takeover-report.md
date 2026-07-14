@@ -10,7 +10,7 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 
 - worktree：`/Users/taomic/vibecoding/nantai-3d-codex-takeover`
 - branch：`codex/nantai-takeover`
-- reviewed code head：`18dbce0`
+- semantic review head：`18dbce0`
 - integrated main baseline：`origin/main@51895e7`
 - Python：3.13.13 editable install
 - Browser：Codex 内嵌浏览器，same-origin local adapter
@@ -20,7 +20,7 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 
 | 命令 | 结果 |
 |---|---|
-| `.venv/bin/python -m pytest tests -q` | PASS，230/230；坐标、COLMAP、3DGS、素材、server、端到端覆盖 |
+| `.venv/bin/python -m pytest tests -q` | PASS，232/232；坐标、COLMAP、3DGS、素材、server、端到端覆盖 |
 | `node --test web/viewer/*.test.mjs` | PASS，32/32；bridge、右手映射、framing、Spark/fallback/race |
 | `node --test web/studio/*.test.mjs` | PASS，33/33；reducer、adapter、ledger、bridge、DOM capability gate |
 | `.venv/bin/python -m ruff check pipeline tests` | PASS |
@@ -56,7 +56,7 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 - HANDOFF-001：11/11 schema v2、meters/local-z-up、正 footprint、实际 SHA、PLY 数值通过。
 - 幂等 SHA：
   - `assets/registry.json`：`8a63aab417e44d05f1e2ec741d5b954b6701596c560959056ac8fdc2b64131bd`
-  - `manifest.json`：`88db449d1995a6c0c59aa09fe93cdc8395abdb3b785bca842ace4672043ebe1a`
+  - `handoff/deliverables/HANDOFF-001/manifest.json`：`88db449d1995a6c0c59aa09fe93cdc8395abdb3b785bca842ace4672043ebe1a`
 - world：217 consumption records；unique assets = building 5 + vegetation 3 + prop 3 = 11。
 - 每条记录包含 renderer、chunk、instances、point_count、version 和实测 payload SHA。
 
@@ -86,6 +86,8 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
   evidence JSON/PLY 路径边界、descriptor/hash 伪证、chunk/asset 消费伪证和 PLY 语义绕过。
 - 最终 PLY reviewer 对 `18dbce0` 明确 PASS：新增恶意载荷/兼容性 12 passed，相关 84 passed，
   Python 230 passed，Ruff/diff clean；未发现 P1/P2。
+- 后续整分支 review 发现 consumption point budget P2；单行及同 chunk 汇总上限回归已转绿，
+  当前 Python 232 passed，真实 world 仍为 11/11 consumed，等待 reviewer 复验。
 - 整分支最终 review 请求见 `review-notes/2026-07-14-nantai-takeover-review-request.md`。
 
 ## 接管 P0 closure
