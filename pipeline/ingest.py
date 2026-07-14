@@ -21,11 +21,11 @@ import argparse
 import shutil
 import time
 from pathlib import Path
+
 from loguru import logger
 
 try:
     import cv2
-    import numpy as np
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
@@ -120,6 +120,10 @@ def extract_video_frames(
         idx += 1
 
     cap.release()
+    if saved == 0:
+        logger.warning(
+            f"  ⚠ {video_path.name} 一帧未保存 (跳过模糊 {skipped_blur} 张)! "
+            f"可尝试 --blur-threshold 0 关闭模糊筛选")
     logger.info(
         f"  → 抽帧完成: 保存 {saved} 张, 跳过模糊 {skipped_blur} 张 → {output_dir}"
     )
@@ -213,7 +217,10 @@ def ingest_all(
         total_video_frames += stats.get("frames", 0)
 
     total_output = len(photos) + total_video_frames
-    logger.info(f"输入处理完成: {len(photos)} 照片 + {total_video_frames} 抽帧 = {total_output} 张图 → {output_dir}")
+    logger.info(
+        f"输入处理完成: {len(photos)} 照片 + {total_video_frames} 抽帧 "
+        f"= {total_output} 张图 → {output_dir}"
+    )
     return {
         "photos": photo_results,
         "videos": video_results,
@@ -233,8 +240,13 @@ def main():
                         help=f"视频抽帧率 (每秒 N 帧, 默认 {DEFAULT_FPS})")
     parser.add_argument("--max-frames", type=int, default=DEFAULT_MAX_FRAMES,
                         help=f"单视频最大抽帧数 (默认 {DEFAULT_MAX_FRAMES})")
-    parser.add_argument("--blur-threshold", type=float, default=DEFAULT_BLUR_THRESHOLD,
-                        help=f"模糊检测阈值 (Laplacian variance, 默认 {DEFAULT_BLUR_THRESHOLD}, 设 0 关闭)")
+    parser.add_argument(
+        "--blur-threshold", type=float, default=DEFAULT_BLUR_THRESHOLD,
+        help=(
+            "模糊检测阈值 (Laplacian variance, 默认 "
+            f"{DEFAULT_BLUR_THRESHOLD}, 设 0 关闭)"
+        ),
+    )
     parser.add_argument("--max-long-edge", type=int, default=DEFAULT_MAX_LONG_EDGE,
                         help=f"长边降采样阈值 (默认 {DEFAULT_MAX_LONG_EDGE})")
     args = parser.parse_args()
@@ -249,7 +261,7 @@ def main():
     print("=" * 60)
 
     t0 = time.time()
-    result = ingest_all(
+    ingest_all(
         input_dir=args.input,
         output_dir=args.output,
         fps=args.fps,
@@ -259,9 +271,9 @@ def main():
     )
 
     print(f"\n总用时: {time.time() - t0:.2f}s")
-    print(f"\n下一步:")
+    print("\n下一步:")
     print(f"  python -m pipeline.utils.exif_scan {args.output} {args.output}/exif_report.csv")
-    print(f"  # 然后 COLMAP / 3DGS 训练 → ply → Web viewer")
+    print("  # 然后 COLMAP / 3DGS 训练 → ply → Web viewer")
 
 
 if __name__ == "__main__":
