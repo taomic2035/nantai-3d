@@ -576,6 +576,136 @@ class TestProgressiveSharpen:
                 base_scene=base_path,
             )
 
+    def test_bare_base_scene_without_provenance_stays_preview_only(
+        self, tmp_path, monkeypatch
+    ):
+        measured_frame = CoordinateFrame(
+            frame_id="shared-world",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.MEASURED,
+            evidence=["survey-control:v1"],
+        )
+        session = CaptureSession(
+            session_id="s0", kind="photo_batch", source="photos", images=[]
+        )
+        registration = RegistrationResult(
+            engine="colmap",
+            pose_frame=measured_frame,
+            alignment_status=AlignmentStatus.UNALIGNED,
+            sessions=[session],
+            poses=[],
+        )
+        monkeypatch.setattr(
+            "pipeline.reconstruct.register", lambda *args, **kwargs: registration
+        )
+        base_path = tmp_path / "uncontracted-base.ply"
+        GaussianScene(
+            [[0, 0, 0]],
+            [[0.4, 0.5, 0.6]],
+            frame_id=measured_frame.frame_id,
+            units=measured_frame.units.value,
+        ).save_ply(base_path, flavor="3dgs")
+        source_path = tmp_path / "measured-new.ply"
+        GaussianScene(
+            [[10, 0, 0]],
+            [[0.8, 0.3, 0.2]],
+            frame_id=measured_frame.frame_id,
+            units=measured_frame.units.value,
+        ).save_ply(source_path, flavor="3dgs")
+
+        manifest = reconstruct(
+            photos_dir=tmp_path / "photos",
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            reg_engine="colmap",
+            splat_map=[SplatInput(
+                session_id="s0",
+                path=str(source_path),
+                source_frame=measured_frame,
+            )],
+            base_scene=base_path,
+            dedup_voxel=0,
+            replace_margin=0,
+        )
+
+        assert manifest["provenance"]["synthetic"] is False
+        assert manifest["provenance"]["geometry_usability"] == "preview-only"
+        base_ancestry = manifest["coordinate_contract"]["ancestry"][0]
+        assert base_ancestry["kind"] == "base-scene"
+        assert base_ancestry["source_frame"]["provenance"] == "unknown"
+
+    def test_branched_output_can_be_reused_as_base_scene(
+        self, photos_dir, tmp_path
+    ):
+        inputs = []
+        expected_paths = []
+        for session_id, frame_id, offset in (
+            ("video_vid_A", "scan-A", 0.0),
+            ("photos_batch_0", "scan-B", 20.0),
+        ):
+            source_frame = _arbitrary_source_frame().model_copy(
+                update={"frame_id": frame_id}
+            )
+            source_path = tmp_path / f"{frame_id}.ply"
+            GaussianScene(
+                [[offset, 0, 0]],
+                [[0.7, 0.3, 0.2]],
+                frame_id=frame_id,
+                units=source_frame.units.value,
+            ).save_ply(source_path, flavor="3dgs")
+            transform = FrameTransform(
+                source_frame=frame_id,
+                target_frame="mock-local",
+                sim3=Sim3(scale=2.0),
+                method="external-sim3",
+                evidence=[f"control:{session_id}"],
+            )
+            inputs.append(SplatInput(
+                session_id=session_id,
+                path=str(source_path),
+                source_frame=source_frame,
+                transform=transform,
+            ))
+            expected_paths.append([transform.transform_id])
+
+        reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "r1",
+            web_dir=tmp_path / "w1",
+            engine="import",
+            reg_engine="mock",
+            splat_map=inputs,
+            dedup_voxel=0,
+        )
+        base_path = tmp_path / "r1" / "scene_full.ply"
+        loaded = GaussianScene.load_ply(base_path)
+        assert loaded.applied_transform_paths == expected_paths
+
+        manifest = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "r2",
+            web_dir=tmp_path / "w2",
+            engine="import",
+            reg_engine="mock",
+            splat_map=inputs,
+            base_scene=base_path,
+            dedup_voxel=0,
+            replace_margin=0,
+        )
+
+        base_ancestry = manifest["coordinate_contract"]["ancestry"][0]
+        assert base_ancestry["kind"] == "base-scene"
+        assert [
+            [step["transform_id"] for step in path]
+            for path in base_ancestry["transform_paths"]
+        ] == expected_paths
+        assert "transform_path" not in base_ancestry
+
     def test_manifest_transform_chain_ids_match_applied_ids_and_ancestry(
         self, photos_dir, tmp_path
     ):

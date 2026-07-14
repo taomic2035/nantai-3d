@@ -156,6 +156,41 @@ def test_frame_metadata_and_transform_history_survive_ply_roundtrip(tmp_path):
     assert loaded.applied_transform_ids == ["align:s0:v1"]
 
 
+def test_branched_transform_paths_and_provenance_survive_ply_roundtrip(tmp_path):
+    provenance_frame = {
+        "frame_id": "world:enu",
+        "handedness": "right",
+        "axes": "enu-z-up",
+        "units": "meters",
+        "metric_status": "metric",
+        "geo_aligned": "aligned",
+        "provenance": "measured",
+        "evidence": ["survey-control:v1"],
+    }
+    scene = GaussianScene(
+        np.array([[1.0, 2.0, 3.0]]),
+        np.array([[0.2, 0.3, 0.4]]),
+        frame_id="world:enu",
+        units="meters",
+        applied_transform_paths=[["align:scan-a:v1"], ["align:scan-b:v1"]],
+        provenance_frames=[provenance_frame],
+    )
+    path = tmp_path / "branched-metadata.ply"
+    scene.save_ply(path, flavor="3dgs")
+
+    loaded = GaussianScene.load_ply(path)
+
+    assert loaded.applied_transform_ids == [
+        "align:scan-a:v1",
+        "align:scan-b:v1",
+    ]
+    assert loaded.applied_transform_paths == [
+        ["align:scan-a:v1"],
+        ["align:scan-b:v1"],
+    ]
+    assert loaded.provenance_frames == [provenance_frame]
+
+
 def test_translation_and_uniform_scale_leave_high_order_sh_unchanged(tmp_path):
     path = tmp_path / "degree3.ply"
     write_degree3_fixture(path)

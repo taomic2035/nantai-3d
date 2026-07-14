@@ -346,6 +346,9 @@ def import_session_splats(
             raise ValueError(f"SplatInput references unknown session: {item.session_id}")
         scene = GaussianScene.load_ply(item.path, require_3dgs=True)
         _apply_splat_transform(scene, item, reg.target_frame)
+        # The caller-supplied SplatInput is the explicit provenance boundary;
+        # uncontracted metadata embedded in arbitrary PLY bytes cannot upgrade it.
+        scene.provenance_frames = [item.source_frame.model_dump(mode="json")]
         logger.info(
             f"导入泼溅: {item.session_id} ← {item.path} "
             f"({len(scene)} 高斯, frame={scene.frame_id})"
@@ -423,18 +426,78 @@ def _validate_scene_history(
         raise ValueError(
             f"{label} transform history has no auditable transform definition: {missing}"
         )
-    if require_composable and transform_ids:
-        current_frame = scene.frame_id
-        for transform_id in reversed(transform_ids):
-            transform = definitions[transform_id]
-            if transform.target_frame != current_frame:
-                raise ValueError(
-                    f"{label} transform history is not composable: "
-                    f"{transform_id} targets {transform.target_frame!r}, "
-                    f"expected target frame {current_frame!r}"
-                )
-            current_frame = transform.source_frame
+    transform_paths = [list(path) for path in scene.applied_transform_paths]
+    path_ids = list(dict.fromkeys(
+        transform_id
+        for path in transform_paths
+        for transform_id in path
+    ))
+    if path_ids != transform_ids:
+        raise ValueError(
+            f"{label} transform path union does not match applied ids: "
+            f"{path_ids} != {transform_ids}"
+        )
+    if require_composable:
+        for path in transform_paths:
+            current_frame = scene.frame_id
+            for transform_id in reversed(path):
+                transform = definitions[transform_id]
+                if transform.target_frame != current_frame:
+                    raise ValueError(
+                        f"{label} transform history is not composable: "
+                        f"{transform_id} targets {transform.target_frame!r}, "
+                        f"expected target frame {current_frame!r}"
+                    )
+                current_frame = transform.source_frame
     return transform_ids
+
+
+def _base_scene_frame_contracts(
+    scene: GaussianScene,
+    target_frame: CoordinateFrame,
+) -> tuple[list[CoordinateFrame], CoordinateFrame]:
+    """Validate embedded provenance or synthesize an explicit unknown boundary.
+
+    Frame id and units in a PLY header only locate geometry; they do not prove
+    whether the points were measured, synthetic, or metrically calibrated.
+    PLY comments are self-asserted and therefore never sufficient to upgrade a
+    base artifact to measured provenance.  Embedded frames remain useful audit
+    context, while the input boundary itself always fails closed as unknown.
+    """
+    frames = [
+        CoordinateFrame.model_validate(raw)
+        for raw in scene.provenance_frames
+    ]
+    target_geometry = (
+        target_frame.frame_id,
+        target_frame.handedness,
+        target_frame.axes,
+        target_frame.units,
+        target_frame.metric_status,
+        target_frame.geo_aligned,
+    )
+    matching_frames = [
+        frame
+        for frame in frames
+        if (
+            frame.frame_id,
+            frame.handedness,
+            frame.axes,
+            frame.units,
+            frame.metric_status,
+            frame.geo_aligned,
+        ) == target_geometry
+    ]
+    raw_unknown = target_frame.model_dump(mode="json")
+    raw_unknown["provenance"] = FrameProvenance.UNKNOWN.value
+    raw_unknown["evidence"] = [
+        "base-scene-self-asserted-ply-provenance-untrusted"
+        if matching_frames
+        else "base-scene-missing-provenance-contract"
+    ]
+    current_frame = CoordinateFrame.model_validate(raw_unknown)
+    frames.append(current_frame)
+    return frames, current_frame
 
 
 # ============ main pipeline ============
@@ -478,6 +541,7 @@ def reconstruct(photos_dir: str | Path = "photos",
 
     # 2. 每会话泼溅
     synthetic_geometry = False
+    base_provenance_frames: list[CoordinateFrame] = []
     ancestry: list[dict] = []
     if engine == "import":
         if not splat_map:
@@ -498,6 +562,9 @@ def reconstruct(photos_dir: str | Path = "photos",
                 "result_frame_id": scene.frame_id,
                 "units": scene.units,
                 "applied_transform_ids": list(scene.applied_transform_ids),
+                "applied_transform_paths": [
+                    list(path) for path in scene.applied_transform_paths
+                ],
             }
             for item, scene in zip(splat_map, scenes, strict=True)
         ]
@@ -524,6 +591,9 @@ def reconstruct(photos_dir: str | Path = "photos",
                 "result_frame_id": s.frame_id,
                 "units": s.units,
                 "applied_transform_ids": list(s.applied_transform_ids),
+                "applied_transform_paths": [
+                    list(path) for path in s.applied_transform_paths
+                ],
             })
     # 3. Merge only after every scene reports the same target frame/units.
     merged = GaussianScene.merge(scenes, dedup_voxel=dedup_voxel)
@@ -531,7 +601,6 @@ def reconstruct(photos_dir: str | Path = "photos",
         merged,
         transform_definitions,
         label="merged scene",
-        require_composable=False,
     )
     logger.info(f"拼接完成: {len(scenes)} 个会话场景 → {len(merged)} 高斯 "
                 f"(dedup_voxel={dedup_voxel} {reg.target_frame.units.value})")
@@ -552,13 +621,19 @@ def reconstruct(photos_dir: str | Path = "photos",
         base_transform_ids = _validate_scene_history(
             base, transform_definitions, label="base scene"
         )
+        base_provenance_frames, base_source_frame = _base_scene_frame_contracts(
+            base, reg.target_frame
+        )
         ancestry.insert(0, {
             "kind": "base-scene",
             "artifact_sha256": _sha256_file(base_path),
-            "source_frame": reg.target_frame.model_dump(mode="json"),
+            "source_frame": base_source_frame.model_dump(mode="json"),
             "result_frame_id": base.frame_id,
             "units": base.units,
             "applied_transform_ids": base_transform_ids,
+            "applied_transform_paths": [
+                list(path) for path in base.applied_transform_paths
+            ],
         })
         before = len(base)
         merged = base.replace_region(merged, margin=replace_margin)
@@ -566,9 +641,21 @@ def reconstruct(photos_dir: str | Path = "photos",
             merged,
             transform_definitions,
             label="replaced scene",
-            require_composable=False,
         )
         logger.info(f"区域替换: 基底 {before} 高斯 + 新重建 → {len(merged)} 高斯")
+
+    provenance_frames = [reg.target_frame, reg.pose_frame]
+    if reg.world_frame is not None:
+        provenance_frames.append(reg.world_frame)
+    provenance_frames.extend(item.source_frame for item in (splat_map or []))
+    provenance_frames.extend(base_provenance_frames)
+    provenance_frames = list({
+        json.dumps(frame.model_dump(mode="json"), sort_keys=True): frame
+        for frame in provenance_frames
+    }.values())
+    merged.provenance_frames = [
+        frame.model_dump(mode="json") for frame in provenance_frames
+    ]
 
     # 5. 导出: 全量 3dgs ply + LOD simple ply + manifest
     audit_full_path = out_dir / "scene_full.ply"
@@ -600,16 +687,30 @@ def reconstruct(photos_dir: str | Path = "photos",
 
     lo, hi = merged.bounds()
     applied_transform_ids = list(merged.applied_transform_ids)
+    applied_transform_paths = [
+        list(path) for path in merged.applied_transform_paths
+    ]
     applied_transforms = [
         transform_definitions[transform_id] for transform_id in applied_transform_ids
     ]
     applied_set = set(applied_transform_ids)
     for ancestor in ancestry:
-        ancestor["applied_transform_ids"] = [
-            transform_id
-            for transform_id in ancestor["applied_transform_ids"]
-            if transform_id in applied_set
+        ancestor["applied_transform_paths"] = [
+            [
+                transform_id
+                for transform_id in path
+                if transform_id in applied_set
+            ]
+            for path in ancestor["applied_transform_paths"]
         ]
+        ancestor["applied_transform_paths"] = [
+            path for path in ancestor["applied_transform_paths"] if path
+        ]
+        ancestor["applied_transform_ids"] = list(dict.fromkeys(
+            transform_id
+            for path in ancestor["applied_transform_paths"]
+            for transform_id in path
+        ))
     ancestry_transform_ids = list(dict.fromkeys(
         transform_id
         for ancestor in ancestry
@@ -637,20 +738,27 @@ def reconstruct(photos_dir: str | Path = "photos",
         for transform_id in catalog_ids
     ]
     for ancestor in ancestry:
-        ancestor["transform_path"] = [
-            transform_record(transform_definitions[transform_id])
-            for transform_id in ancestor["applied_transform_ids"]
+        ancestor["transform_paths"] = [
+            [
+                transform_record(transform_definitions[transform_id])
+                for transform_id in path
+            ]
+            for path in ancestor["applied_transform_paths"]
         ]
+        if len(ancestor["transform_paths"]) <= 1:
+            ancestor["transform_path"] = (
+                ancestor["transform_paths"][0]
+                if ancestor["transform_paths"]
+                else []
+            )
+        else:
+            ancestor.pop("transform_path", None)
 
     metric_evidence = list(reg.target_frame.evidence)
     for transform in applied_transforms:
         metric_evidence.extend(transform_evidence[transform.transform_id])
     metric_evidence = list(dict.fromkeys(metric_evidence))
 
-    provenance_frames = [reg.pose_frame, reg.world_frame]
-    provenance_frames.extend(
-        item.source_frame for item in (splat_map or [])
-    )
     is_synthetic = synthetic_geometry or any(
         frame is not None and frame.provenance is FrameProvenance.SYNTHETIC
         for frame in provenance_frames
@@ -699,6 +807,7 @@ def reconstruct(photos_dir: str | Path = "photos",
             ],
             "transform_catalog": transform_catalog,
             "applied_transform_ids": applied_transform_ids,
+            "applied_transform_paths": applied_transform_paths,
             "ancestry": ancestry,
         },
         "provenance": {

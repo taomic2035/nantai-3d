@@ -75,6 +75,8 @@ class GaussianScene:
         frame_id: str | None = None,
         units: str = "unknown",
         applied_transform_ids: list[str] | tuple[str, ...] | None = None,
+        applied_transform_paths: list[list[str]] | tuple[tuple[str, ...], ...] | None = None,
+        provenance_frames: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     ):
         n = len(xyz)
         self.xyz = np.asarray(xyz, dtype=np.float64).reshape(n, 3)
@@ -140,7 +142,41 @@ class GaussianScene:
         self.rot = rot / norms
         self.frame_id = frame_id
         self.units = units
-        self.applied_transform_ids = list(applied_transform_ids or [])
+        declared_ids = list(applied_transform_ids or [])
+        if len(declared_ids) != len(set(declared_ids)):
+            raise ValueError("applied transform ids must be unique")
+        if applied_transform_paths is None:
+            paths = [declared_ids.copy()] if declared_ids else []
+        else:
+            paths = []
+            for path in applied_transform_paths:
+                normalized = list(path)
+                if any(not isinstance(item, str) or not item for item in normalized):
+                    raise ValueError("applied transform paths require non-empty string ids")
+                if len(normalized) != len(set(normalized)):
+                    raise ValueError("an applied transform path cannot repeat an id")
+                if normalized and normalized not in paths:
+                    paths.append(normalized)
+        path_ids = list(dict.fromkeys(item for path in paths for item in path))
+        if declared_ids and declared_ids != path_ids:
+            raise ValueError(
+                "applied transform ids must equal the ordered union of transform paths"
+            )
+        self.applied_transform_paths = paths
+        self.applied_transform_ids = (
+            path_ids if applied_transform_paths is not None else declared_ids
+        )
+
+        self.provenance_frames: list[dict[str, Any]] = []
+        for frame in provenance_frames or []:
+            if not isinstance(frame, dict):
+                raise ValueError("provenance frames must be JSON objects")
+            try:
+                normalized_frame = json.loads(json.dumps(frame, ensure_ascii=True))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("provenance frames must be JSON serializable") from exc
+            if normalized_frame not in self.provenance_frames:
+                self.provenance_frames.append(normalized_frame)
 
     def __len__(self) -> int:
         return len(self.xyz)
@@ -241,6 +277,8 @@ class GaussianScene:
                 frame_id=metadata.get("frame_id"),
                 units=metadata.get("units", "unknown"),
                 applied_transform_ids=metadata.get("applied_transform_ids", []),
+                applied_transform_paths=metadata.get("applied_transform_paths"),
+                provenance_frames=metadata.get("provenance_frames", []),
             )
 
         if 'r' in names:  # simple 格式 (本项目合成 ply)
@@ -262,6 +300,8 @@ class GaussianScene:
                 frame_id=metadata.get("frame_id"),
                 units=metadata.get("units", "unknown"),
                 applied_transform_ids=metadata.get("applied_transform_ids", []),
+                applied_transform_paths=metadata.get("applied_transform_paths"),
+                provenance_frames=metadata.get("provenance_frames", []),
             )
 
         raise ValueError(f"无法识别的 ply 顶点属性: {names}")
@@ -311,10 +351,12 @@ class GaussianScene:
             raise ValueError(f"未知 flavor: {flavor}")
 
         metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "frame_id": self.frame_id,
             "units": self.units,
             "applied_transform_ids": self.applied_transform_ids,
+            "applied_transform_paths": self.applied_transform_paths,
+            "provenance_frames": self.provenance_frames,
         }
         comment = "nantai_meta=" + json.dumps(
             metadata, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
@@ -398,6 +440,12 @@ class GaussianScene:
         self.frame_id = transform.target_frame
         if target_units is not None:
             self.units = getattr(target_units, "value", target_units)
+        if self.applied_transform_paths:
+            self.applied_transform_paths = [
+                [*path, transform_id] for path in self.applied_transform_paths
+            ]
+        else:
+            self.applied_transform_paths = [[transform_id]]
         self.applied_transform_ids.append(transform_id)
         return self
 
@@ -429,8 +477,18 @@ class GaussianScene:
             if scene.sh_rest.shape[1] != first.sh_rest.shape[1] \
                     or actual_extra != expected_extra:
                 raise ValueError("不能 merge 不兼容的 3DGS 属性 schema")
+        transform_paths: list[list[str]] = []
+        for scene in scenes:
+            for path in scene.applied_transform_paths:
+                if path not in transform_paths:
+                    transform_paths.append(path.copy())
         transform_ids = list(dict.fromkeys(
-            tid for scene in scenes for tid in scene.applied_transform_ids))
+            tid for path in transform_paths for tid in path))
+        provenance_frames: list[dict[str, Any]] = []
+        for scene in scenes:
+            for frame in scene.provenance_frames:
+                if frame not in provenance_frames:
+                    provenance_frames.append(frame.copy())
         merged = cls(
             np.concatenate([s.xyz for s in scenes]),
             np.concatenate([s.rgb for s in scenes]),
@@ -447,6 +505,8 @@ class GaussianScene:
             frame_id=first.frame_id,
             units=first.units,
             applied_transform_ids=transform_ids,
+            applied_transform_paths=transform_paths,
+            provenance_frames=provenance_frames,
         )
         if dedup_voxel > 0:
             merged = merged.deduplicate(dedup_voxel)
@@ -498,6 +558,8 @@ class GaussianScene:
             frame_id=self.frame_id,
             units=self.units,
             applied_transform_ids=self.applied_transform_ids,
+            applied_transform_paths=self.applied_transform_paths,
+            provenance_frames=self.provenance_frames,
         )
 
     # ============ LOD / 可变清晰 ============
