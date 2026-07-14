@@ -10,6 +10,8 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 
 - worktree：`/Users/taomic/vibecoding/nantai-3d-codex-takeover`
 - branch：`codex/nantai-takeover`
+- reviewed code head：`18dbce0`
+- integrated main baseline：`origin/main@51895e7`
 - Python：3.13.13 editable install
 - Browser：Codex 内嵌浏览器，same-origin local adapter
 - 当前机器未使用 COLMAP/GPU；registration auto 正确选择 mock
@@ -18,9 +20,9 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 
 | 命令 | 结果 |
 |---|---|
-| `.venv/bin/python -m pytest tests -q` | PASS，164/164；坐标、COLMAP、3DGS、素材、server、端到端覆盖 |
-| `node --test web/viewer/*.test.mjs` | PASS，30/30；bridge、右手映射、framing、Spark/fallback |
-| `node --test web/studio/*.test.mjs` | PASS，30/30；reducer、adapter、ledger、bridge、DOM capability gate |
+| `.venv/bin/python -m pytest tests -q` | PASS，230/230；坐标、COLMAP、3DGS、素材、server、端到端覆盖 |
+| `node --test web/viewer/*.test.mjs` | PASS，32/32；bridge、右手映射、framing、Spark/fallback/race |
+| `node --test web/studio/*.test.mjs` | PASS，33/33；reducer、adapter、ledger、bridge、DOM capability gate |
 | `.venv/bin/python -m ruff check pipeline tests` | PASS |
 | `git diff --check` | PASS |
 | `make assets` 连跑两次 | PASS 11/11；registry/manifest SHA 不变 |
@@ -46,13 +48,15 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 - LOD：616 / 2,310 / 7,700，明确为 `dc-point-preview`。
 - degree-3 fixture 验证 45 个 `f_rest_*`、normals/extras 与 raw DC round-trip。
 - incompatible frame/schema、重复 transform、高阶 SH 旋转、非米制去重/区域替换均 fail closed。
+- Studio 的可信 PLY 边界拒绝 NaN/Inf、零/非单位四元数、断裂/不完整 SH、scale
+  上溢/下溢及 vertex list/object；v2 full 必须完整 3DGS，chunk/asset 兼容 simple/3DGS。
 
 ### 素材与 world
 
 - HANDOFF-001：11/11 schema v2、meters/local-z-up、正 footprint、实际 SHA、PLY 数值通过。
 - 幂等 SHA：
-  - `assets/registry.json`：`c20e12b46821649e6f7bd80098611d721e346a156c7e29769b1fdbe407c22144`
-  - `manifest.json`：`7df0182fb34238a39b4896e55740c773c4f22e054c8f9ab4bbae3a432159f33d`
+  - `assets/registry.json`：`8a63aab417e44d05f1e2ec741d5b954b6701596c560959056ac8fdc2b64131bd`
+  - `manifest.json`：`88db449d1995a6c0c59aa09fe93cdc8395abdb3b785bca842ace4672043ebe1a`
 - world：217 consumption records；unique assets = building 5 + vegetation 3 + prop 3 = 11。
 - 每条记录包含 renderer、chunk、instances、point_count、version 和实测 payload SHA。
 
@@ -68,12 +72,21 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 
 ### Browser / UX
 
+- URL：`http://127.0.0.1:8771/web/studio/?adapter=local&final=18dbce0`，对应当前 takeover worktree。
 - local adapter：schema v2，`registered=11 / consumed=11 / blocked=0`。
 - Viewer：25 active chunks；Spark 2.1.0 初始化；7,700 splats；artifact/runtime fidelity 均
   `full-3dgs`；synthetic watermark 与 `mock-proxy / preview-proxy` 同时可见。
 - Studio：LOD auto→0 生效；reconstruction layer 可隐藏/恢复；reset control 在 ready 后解锁；
   素材 inspector 显示 11 张卡全部“格式 PASS · 世界已消费”。
 - HTTP：GET `/api/project` 200 + no-store/CSP；POST 405 structured error；路径穿越 403。
+
+### Review trail
+
+- 多轮只读审查关闭了：分支 ancestry 扁平化、unknown provenance 提升、viewer stale generation、
+  evidence JSON/PLY 路径边界、descriptor/hash 伪证、chunk/asset 消费伪证和 PLY 语义绕过。
+- 最终 PLY reviewer 对 `18dbce0` 明确 PASS：新增恶意载荷/兼容性 12 passed，相关 84 passed，
+  Python 230 passed，Ruff/diff clean；未发现 P1/P2。
+- 整分支最终 review 请求见 `review-notes/2026-07-14-nantai-takeover-review-request.md`。
 
 ## 接管 P0 closure
 
@@ -97,3 +110,5 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 - Spark/Three/WASM 当前为固定 CDN 版本；离线时降级。
 - Studio server 有意只读；GLM API 因未配置 key 只验证 schema/mock fallback。
 - world 3.1M points 的终端性能尚需在目标设备测量。
+- canonical PLY 语义验证的单次快照峰值约 144MB；当前首屏可接受，高频并发轮询前应提取
+  零复制共享 validator 或增加请求合并/缓存。
