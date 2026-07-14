@@ -254,6 +254,25 @@ class TestContentAddressedRegistry:
         assert stale.doc.model_dump(mode="json") == before_stale_doc
         assert _disk_snapshot(first.assets_dir) == before_disk
 
+    def test_stale_save_cannot_rollback_a_newer_registry_revision(self, tmp_path):
+        v1 = _write_asset(tmp_path / "tree-v1.ply", 48)
+        v2 = _write_asset(tmp_path / "tree-v2.ply", 49)
+        writer = AssetRegistry(tmp_path / "assets")
+        writer.register("tree", v1)
+        stale = AssetRegistry(tmp_path / "assets")
+        writer.replace("tree", v2, expected_version=1)
+
+        with pytest.raises(ValueError, match="registry changed since load"):
+            stale.save()
+
+        fresh = AssetRegistry(tmp_path / "assets")
+        entry = fresh.doc.assets["tree"]
+        assert entry.version == 2
+        assert entry.ply == "tree_v2.ply"
+        assert entry.sha256 == _sha256(v2)
+        assert [version.version for version in entry.history] == [1]
+        assert (fresh.assets_dir / "tree_v2.ply").is_file()
+
     def test_load_and_instantiate_fail_closed_on_sha_mismatch(self, tmp_path):
         source = _write_asset(tmp_path / "tree.ply", 38)
         replacement = _write_asset(tmp_path / "other.ply", 39)

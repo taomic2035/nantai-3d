@@ -126,16 +126,26 @@ class AssetRegistry:
         self.assets_dir = Path(assets_dir)
         self.registry_path = self.assets_dir / REGISTRY_FILE
         self.lock_path = self.assets_dir / LOCK_FILE
+        self._last_read_revision: str | None = None
         self.doc = self._read_doc()
+        self._loaded_revision = self._last_read_revision
 
     def _read_doc(self) -> RegistryDoc:
         if self.registry_path.exists():
-            doc = RegistryDoc(**json.loads(
-                self.registry_path.read_text(encoding="utf-8")))
+            payload = self.registry_path.read_bytes()
+            doc = RegistryDoc(**json.loads(payload.decode("utf-8")))
+            revision = hashlib.sha256(payload).hexdigest()
         else:
             doc = RegistryDoc()
+            revision = None
         self._validate_doc_paths(doc)
+        self._last_read_revision = revision
         return doc
+
+    def _registry_revision(self) -> str | None:
+        if not self.registry_path.exists():
+            return None
+        return sha256_file(self.registry_path)
 
     def _validate_doc_paths(self, doc: RegistryDoc) -> None:
         for asset_id, entry in doc.assets.items():
@@ -169,7 +179,10 @@ class AssetRegistry:
         candidate = self.doc.model_copy(deep=True)
         self._validate_doc_paths(candidate)
         with self._exclusive_lock():
+            if self._registry_revision() != self._loaded_revision:
+                raise ValueError("registry changed since load; refusing stale save")
             self._write_doc_atomic(candidate)
+            self.doc = candidate
 
     def _write_doc_atomic(self, doc: RegistryDoc) -> None:
         self.assets_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +196,9 @@ class AssetRegistry:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(tmp_name, self.registry_path)
+            self._loaded_revision = hashlib.sha256(
+                payload.encode("utf-8")
+            ).hexdigest()
         finally:
             Path(tmp_name).unlink(missing_ok=True)
 
@@ -299,6 +315,7 @@ class AssetRegistry:
         source, source_sha = self._validate_payload(ply_path)
         with self._exclusive_lock():
             disk_doc = self._read_doc()
+            disk_revision = self._last_read_revision
             if asset_id in disk_doc.assets:
                 entry = disk_doc.assets[asset_id]
                 payload_sha = self._payload_sha256(entry)
@@ -322,6 +339,8 @@ class AssetRegistry:
                     if migrated:
                         disk_doc.schema_version = 2
                         self._write_doc_atomic(disk_doc)
+                    else:
+                        self._loaded_revision = disk_revision
                     self.doc = disk_doc
                     logger.info(
                         f"素材已是最新: {asset_id} v{entry.version} "

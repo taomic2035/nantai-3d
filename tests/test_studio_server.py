@@ -86,6 +86,13 @@ def _write_v2_project(root: Path) -> None:
         "gaussian_count": 1,
         "bounds": {"min": [0, 0, 0], "max": [1, 1, 1]},
         "full_3dgs": "recon/scene_full.ply",
+        "artifacts": {
+            "full_3dgs": {
+                "path": "recon/scene_full.ply",
+                "sha256": _sha256(full),
+                "bytes": full.stat().st_size,
+            }
+        },
         "lod": {"0": "recon_lod0.ply"},
         "sessions": [
             {"session_id": "photos_batch_0", "kind": "photo_batch", "n_images": 1},
@@ -135,7 +142,11 @@ def _write_v2_project(root: Path) -> None:
         },
     }
     (root / "assets/registry.json").write_text(json.dumps(registry), encoding="utf-8")
+    chunk = _write_ply(
+        root / "web/data/chunk_0_0.ply", properties=("x", "y", "z")
+    )
     world_manifest = {
+        "chunks": [{"id": "0_0", "ply_file": chunk.name}],
         "asset_consumption": [
             {
                 "asset_id": "tree",
@@ -143,7 +154,7 @@ def _write_v2_project(root: Path) -> None:
                 "chunk_id": "0_0",
                 "version": 1,
                 "sha256": _sha256(asset),
-                "instance_count": 3,
+                "instances": 3,
                 "point_count": 90,
             }
         ]
@@ -233,6 +244,33 @@ class TestProjectSnapshot:
         assert snapshot["pipeline"]["reconstruct"]["availability"] == "missing"
         assert snapshot["pipeline"]["review"]["trust"] == "untrusted"
 
+    @pytest.mark.parametrize("case", ["missing", "path", "sha256", "bytes"])
+    def test_v2_full_artifact_descriptor_must_match_live_payload(self, tmp_path, case):
+        _write_v2_project(tmp_path)
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        if case == "missing":
+            manifest.pop("artifacts")
+        elif case == "path":
+            manifest["artifacts"]["full_3dgs"]["path"] = "recon/other.ply"
+        elif case == "sha256":
+            manifest["artifacts"]["full_3dgs"]["sha256"] = "0" * 64
+        else:
+            manifest["artifacts"]["full_3dgs"]["bytes"] += 1
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert "artifact" not in snapshot["reconstruction"]
+        assert snapshot["reconstruction"]["synthetic"] is True
+        assert (
+            snapshot["reconstruction"]["evidence_status"]
+            == "invalid-artifact-descriptor"
+        )
+        assert "reconstruction-artifact:invalid-descriptor" in snapshot["diagnostics"]
+        assert snapshot["pipeline"]["reconstruct"]["availability"] == "missing"
+
     def test_v2_manifest_does_not_substitute_an_unrelated_orphan_artifact(self, tmp_path):
         _write_v2_project(tmp_path)
         manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
@@ -244,7 +282,10 @@ class TestProjectSnapshot:
 
         assert (tmp_path / "recon/scene_full.ply").is_file()
         assert "artifact" not in snapshot["reconstruction"]
-        assert snapshot["reconstruction"]["evidence_status"] == "missing-artifact"
+        assert (
+            snapshot["reconstruction"]["evidence_status"]
+            == "invalid-artifact-descriptor"
+        )
 
     def test_incoherent_v2_coordinate_claim_is_reduced_to_unknown(self, tmp_path):
         _write_v2_project(tmp_path)
@@ -314,6 +355,68 @@ class TestProjectSnapshot:
         assert snapshot["assets"]["consumed"] == 0
         assert snapshot["assets"]["blocked"] == 1
         assert snapshot["pipeline"]["assets"]["trust"] == "proxy"
+
+    @pytest.mark.parametrize(
+        "case",
+        ["zero-instances", "zero-points", "unknown-chunk", "missing-ply", "outside-ply"],
+    )
+    def test_asset_consumption_requires_positive_counts_and_live_chunk(
+        self, tmp_path, case
+    ):
+        _write_v2_project(tmp_path)
+        world_path = tmp_path / "web/data/manifest.json"
+        world = json.loads(world_path.read_text(encoding="utf-8"))
+        row = world["asset_consumption"][0]
+
+        if case == "zero-instances":
+            row["instances"] = 0
+        elif case == "zero-points":
+            row["point_count"] = 0
+        elif case == "unknown-chunk":
+            row["chunk_id"] = "missing"
+        elif case == "missing-ply":
+            world["chunks"][0]["ply_file"] = "missing.ply"
+        else:
+            outside = tmp_path.parent / f"{tmp_path.name}-outside-chunk.ply"
+            _write_ply(outside, properties=("x", "y", "z"))
+            world["chunks"][0]["ply_file"] = str(outside)
+        world_path.write_text(json.dumps(world), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["assets"]["consumed"] == 0
+        assert snapshot["assets"]["blocked"] == 1
+        assert snapshot["assets"]["items"][0]["consumed"] is False
+
+    @pytest.mark.parametrize("case", ["parent", "absolute", "dot", "symlink"])
+    def test_asset_payload_must_resolve_strictly_below_assets_root(self, tmp_path, case):
+        _write_v2_project(tmp_path)
+        registry_path = tmp_path / "assets/registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        entry = registry["assets"]["tree"]
+        outside = tmp_path / "recon/scene_full.ply"
+
+        if case == "parent":
+            entry["ply"] = "../recon/scene_full.ply"
+            entry["sha256"] = _sha256(outside)
+        elif case == "absolute":
+            entry["ply"] = str(outside)
+            entry["sha256"] = _sha256(outside)
+        elif case == "dot":
+            entry["ply"] = "./tree_v1.ply"
+        else:
+            alias = tmp_path / "assets/alias.ply"
+            alias.symlink_to(outside)
+            entry["ply"] = alias.name
+            entry["sha256"] = _sha256(outside)
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        item = snapshot["assets"]["items"][0]
+        assert item["validated"] is False
+        assert item["consumed"] is False
+        assert item["reason"] == "payload-path-invalid"
 
 
 class TestHttpContract:
@@ -394,6 +497,20 @@ class TestHttpContract:
         assert traversal_status == symlink_status == 403
         assert json.loads(traversal_payload)["error"]["code"] == "path_forbidden"
         assert json.loads(symlink_payload)["error"]["code"] == "path_forbidden"
+
+    def test_directory_index_symlink_is_rechecked_before_serving(self, tmp_path):
+        _write_v2_project(tmp_path)
+        outside = tmp_path.parent / f"{tmp_path.name}-outside-index.html"
+        outside.write_text("outside", encoding="utf-8")
+        directory = tmp_path / "web/leak"
+        directory.mkdir()
+        directory.joinpath("index.html").symlink_to(outside)
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(server, "GET", "/web/leak/")
+
+        assert status == 403
+        assert json.loads(payload)["error"]["code"] == "path_forbidden"
 
     def test_non_get_methods_return_structured_error_without_starting_jobs(self, tmp_path):
         _write_v2_project(tmp_path)

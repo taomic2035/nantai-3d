@@ -169,6 +169,23 @@ def _artifact(root: Path, path: Path, *, kind: str) -> dict[str, Any]:
     }
 
 
+def _v2_full_artifact_descriptor(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    artifacts = manifest.get("artifacts")
+    descriptor = artifacts.get("full_3dgs") if isinstance(artifacts, dict) else None
+    declared_path = manifest.get("full_3dgs")
+    if not isinstance(descriptor, dict) or not isinstance(declared_path, str):
+        return None
+    sha256 = descriptor.get("sha256")
+    byte_count = descriptor.get("bytes")
+    if descriptor.get("path") != declared_path:
+        return None
+    if not isinstance(sha256, str) or len(sha256) != 64:
+        return None
+    if type(byte_count) is not int or byte_count < 0:
+        return None
+    return descriptor
+
+
 def _scan_sources(root: Path) -> dict[str, Any]:
     input_dir = root / "input"
     files: list[dict[str, Any]] = []
@@ -426,11 +443,27 @@ def _reconstruction_snapshot(
     reconstruction["lod"] = valid_lods
     stitch["lod_counts"] = lod_counts
 
-    if full_path is not None:
-        properties, header_count = _ply_header(full_path)
-        reconstruction["artifact"] = _artifact(
+    descriptor = _v2_full_artifact_descriptor(manifest) if is_v2 and manifest else None
+    descriptor_invalid = is_v2 and descriptor is None
+    measured_artifact: dict[str, Any] | None = None
+    if full_path is not None and not descriptor_invalid:
+        measured_artifact = _artifact(
             root, full_path, kind="3dgs-ply" if is_v2 else "legacy-ply"
         )
+        if is_v2 and descriptor is not None:
+            descriptor_invalid = (
+                descriptor["sha256"] != measured_artifact["sha256"]
+                or descriptor["bytes"] != measured_artifact["bytes"]
+            )
+
+    if descriptor_invalid:
+        reconstruction["declared_synthetic"] = declared_synthetic
+        reconstruction["synthetic"] = True
+        reconstruction["evidence_status"] = "invalid-artifact-descriptor"
+        reconstruction["integrity_error"] = "invalid-descriptor"
+    elif full_path is not None and measured_artifact is not None:
+        properties, header_count = _ply_header(full_path)
+        reconstruction["artifact"] = measured_artifact
         reconstruction["attributes"] = properties
         reconstruction["sh_degree"] = _sh_degree(properties)
         reconstruction["renderer_capabilities"] = ["dc-color"] if properties else []
@@ -471,10 +504,23 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
         assets = {}
     revision = f"sha256:{_sha256_file(registry_path)[:16]}"
 
-    world, _ = _read_json(root / "web/data/manifest.json")
+    world_path = root / "web/data/manifest.json"
+    world, _ = _read_json(world_path)
     rows = world.get("asset_consumption") if isinstance(world, dict) else []
     if not isinstance(rows, list):
         rows = []
+    valid_chunk_ids: set[str] = set()
+    chunks = world.get("chunks") if isinstance(world, dict) else []
+    if isinstance(chunks, list):
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_id = chunk.get("id")
+            chunk_path = _resolve_evidence_path(
+                root, chunk.get("ply_file"), relative_to=world_path.parent
+            )
+            if isinstance(chunk_id, str) and chunk_id and chunk_path is not None:
+                valid_chunk_ids.add(chunk_id)
 
     items: list[dict[str, Any]] = []
     for asset_id in sorted(assets):
@@ -483,14 +529,16 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             continue
         reason: str | None = None
         raw_ply = entry.get("ply")
-        payload = _resolve_evidence_path(
-            root,
-            f"assets/{raw_ply}" if isinstance(raw_ply, str) else None,
-            relative_to=root / "assets",
-        )
+        try:
+            payload = _resolve_asset_payload(root / "assets", raw_ply)
+        except PathAccessError:
+            payload = None
+            reason = "payload-path-invalid"
         expected_sha = entry.get("sha256")
         actual_sha: str | None = None
-        if payload is None:
+        if reason is not None:
+            pass
+        elif payload is None:
             reason = "payload-missing"
         elif not isinstance(expected_sha, str) or len(expected_sha) != 64:
             reason = "registry-sha256-invalid"
@@ -507,6 +555,11 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             and row.get("asset_id") == asset_id
             and row.get("version") == version
             and row.get("sha256") == expected_sha
+            and row.get("chunk_id") in valid_chunk_ids
+            and type(row.get("instances")) is int
+            and row["instances"] > 0
+            and type(row.get("point_count")) is int
+            and row["point_count"] > 0
         ]
         consumed = validated and bool(matching_consumption)
         item: dict[str, Any] = {
@@ -581,6 +634,34 @@ def _load_runs(root: Path) -> dict[str, Any]:
         "items": items,
         "cursor": f"sha256:{_sha256_file(ledger_path)[:16]}",
     }
+
+
+def _resolve_asset_payload(assets_root: Path, raw_path: Any) -> Path | None:
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or "\x00" in raw_path
+        or "\\" in raw_path
+    ):
+        raise PathAccessError("invalid asset payload path")
+    if any(part in {"", ".", ".."} for part in raw_path.split("/")):
+        raise PathAccessError("invalid asset payload path")
+    declared = Path(raw_path)
+    if declared.is_absolute():
+        raise PathAccessError("invalid asset payload path")
+
+    resolved_root = assets_root.resolve(strict=True)
+    try:
+        candidate = (resolved_root / declared).resolve(strict=True)
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError) as exc:
+        raise PathAccessError("invalid asset payload path") from exc
+    if candidate == resolved_root or not _is_below(resolved_root, candidate):
+        raise PathAccessError("asset payload escapes assets root")
+    if not candidate.is_file():
+        return None
+    return candidate
 
 
 def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
@@ -672,6 +753,8 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         snapshot["diagnostics"].append("reconstruction-manifest:legacy-schema")
     if reconstruction["evidence_status"] == "missing-artifact":
         snapshot["diagnostics"].append("reconstruction-artifact:missing")
+    elif reconstruction["evidence_status"] == "invalid-artifact-descriptor":
+        snapshot["diagnostics"].append("reconstruction-artifact:invalid-descriptor")
     return snapshot
 
 
@@ -691,6 +774,15 @@ def resolve_static_path(project_root: str | Path, url_path: str) -> Path:
         raise PathAccessError("path is outside approved static roots")
     if parts[0] not in STATIC_ROOTS:
         raise PathAccessError("path is outside approved static roots")
+    approved_path = root / parts[0]
+    try:
+        approved_root = approved_path.resolve(strict=True)
+    except FileNotFoundError:
+        return root.joinpath(*parts)
+    except (OSError, RuntimeError) as exc:
+        raise PathAccessError("unsafe static root") from exc
+    if not _is_below(root, approved_root):
+        raise PathAccessError("static root escapes project root")
     candidate = root.joinpath(*parts)
     try:
         resolved = candidate.resolve(strict=True)
@@ -704,13 +796,13 @@ def resolve_static_path(project_root: str | Path, url_path: str) -> Path:
             resolved_parent = parent.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise PathAccessError("unsafe static path") from exc
-        if not _is_below(root, resolved_parent):
-            raise PathAccessError("symlink escapes project root") from None
+        if not _is_below(approved_root, resolved_parent):
+            raise PathAccessError("symlink escapes approved static root") from None
         return candidate
     except (OSError, RuntimeError) as exc:
         raise PathAccessError("unsafe static path") from exc
-    if not _is_below(root, resolved):
-        raise PathAccessError("symlink escapes project root")
+    if not _is_below(approved_root, resolved):
+        raise PathAccessError("symlink escapes approved static root")
     return resolved
 
 
@@ -830,10 +922,18 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if target.is_dir():
-            index = target / "index.html"
-            if index.is_file():
-                target = index
-            else:
+            index_path = f"{request_path.rstrip('/')}/index.html"
+            try:
+                target = resolve_static_path(self.project_root, index_path)
+            except PathAccessError:
+                self._error(
+                    HTTPStatus.FORBIDDEN,
+                    "path_forbidden",
+                    "The requested path is outside approved project static roots.",
+                    head_only=head_only,
+                )
+                return
+            if not target.is_file():
                 self._error(
                     HTTPStatus.NOT_FOUND,
                     "static_not_found",
