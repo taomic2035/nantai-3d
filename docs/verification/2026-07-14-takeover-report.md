@@ -6,12 +6,16 @@
 LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studio UX 均有自动测试和运行证据。
 当前样例是 `mock-proxy / synthetic / preview-proxy`，没有宣称为实测场景。
 
+PR [#1](https://github.com/taomic2035/nantai-3d/pull/1) 已于 2026-07-15 CST squash 合入
+`main`，merge commit 为 `e4a2e90e8fcc7d4a475e059aea87594bcab0b9b4`。
+
 ## 验证环境
 
-- worktree：`/Users/taomic/vibecoding/nantai-3d-codex-takeover`
-- branch：`codex/nantai-takeover`
+- 合并后复验 worktree：`/Users/taomic/vibecoding/nantai-3d`
+- branch：`main`
+- takeover review branch：`codex/nantai-takeover`
 - semantic review head：`18dbce0`
-- integrated main baseline：`origin/main@51895e7`
+- integrated main baseline：`origin/main@51895e7`；merge commit：`e4a2e90`
 - Python：3.13.13 editable install
 - Browser：Codex 内嵌浏览器，same-origin local adapter
 - 当前机器未使用 COLMAP/GPU；registration auto 正确选择 mock
@@ -29,6 +33,9 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 | `make world` | PASS；25 chunks，3,129,456 points，11/11 unique assets |
 | `make reconstruct` | PASS；2 sessions / 11 frames / 7,700 synthetic gaussians / 3 LOD |
 | `make verify` | PASS；完整 tests + assets + world + JSON + 3DTiles + GLM schema |
+
+上表已在合并后的 `main@e4a2e90` 再次执行；结果与 takeover 门禁一致。真实 GLM API 仍仅因
+未配置 `ZHIPU_API_KEY` 明确 SKIP。
 
 ## 关键运行证据
 
@@ -89,6 +96,16 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 - 后续整分支 review 发现 consumption point budget P2；`7ab1a2c` 已让单行及同 chunk 汇总
   越界 fail closed。reviewer 复验 Python 232、真实 world 11/11 consumed，明确 PASS，无 P1/P2。
 - 整分支最终 review 请求见 `review-notes/2026-07-14-nantai-takeover-review-request.md`。
+- GitHub Codex reviewer 的首轮与唯一允许重试均在五分钟内没有 eyes、review 或行内意见；按门禁
+  采用上述独立 peer reviewer 的明确 PASS 作为降级证据。
+
+## 合并保护
+
+- Opus 原始 `pipeline/recon_schema.py` 未提交注释已保存为 stash
+  `opus pre-takeover recon_schema honesty comment 2026-07-15`。
+- stash 前后的 binary diff SHA-256 均为
+  `7370b3614671abd8a348598af106dab91b2ca543f7080889b466b292a0d428fb`。
+- 开发分支暂保留，避免 squash 后丢失小步提交历史。
 
 ## 接管 P0 closure
 

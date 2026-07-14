@@ -58,5 +58,10 @@
   reviewer 已放行 `18dbce0`。
 - 整分支 reviewer 已放行 `7ab1a2c`：单行/汇总 consumption point budget 与真实 11/11
   world 均复验通过，无 P1/P2。
-- 下一步把 `codex/nantai-takeover` 通过 PR 合入 main 并推送；先保护
-  `/Users/taomic/vibecoding/nantai-3d` 中 Opus 的未提交注释，不直接覆盖。
+- PR [#1](https://github.com/taomic2035/nantai-3d/pull/1) 已 squash 合入 `main`，merge commit
+  `e4a2e90`；开发分支保留小步提交历史。
+- Opus 的未提交注释已精确保存在 stash
+  `opus pre-takeover recon_schema honesty comment 2026-07-15`；binary diff SHA-256 为
+  `7370b3614671abd8a348598af106dab91b2ca543f7080889b466b292a0d428fb`，恢复前先与当前契约核对。
+- GitHub Codex reviewer 两次触发均未接单，依门禁采用整分支 peer reviewer 的明确 PASS；没有
+  未处理的 P1/P2 或行内意见。
