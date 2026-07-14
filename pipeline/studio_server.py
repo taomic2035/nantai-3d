@@ -28,6 +28,8 @@ from urllib.parse import unquote, urlsplit
 
 from plyfile import PlyData, PlyParseError
 
+from pipeline.gaussian_scene import GaussianScene
+
 SNAPSHOT_SCHEMA_VERSION = 2
 RUN_LEDGER_SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -197,6 +199,8 @@ def _valid_ply_payload(
     path: Path,
     *,
     required_properties: frozenset[str] = XYZ_PROPERTIES,
+    gaussian_semantics: bool = False,
+    require_3dgs: bool = False,
 ) -> tuple[bool, list[str], int | None]:
     properties, vertex_count = _ply_header(path)
     valid = False
@@ -206,13 +210,17 @@ def _valid_ply_payload(
         and required_properties.issubset(properties)
     ):
         try:
-            ply = PlyData.read(str(path), mmap="c")
-            vertex = ply["vertex"].data
-            parsed_properties = set(vertex.dtype.names or ())
-            valid = (
-                len(vertex) == vertex_count
-                and required_properties.issubset(parsed_properties)
-            )
+            if gaussian_semantics:
+                scene = GaussianScene.load_ply(path, require_3dgs=require_3dgs)
+                valid = len(scene) == vertex_count
+            else:
+                ply = PlyData.read(str(path), mmap="c")
+                vertex = ply["vertex"].data
+                parsed_properties = set(vertex.dtype.names or ())
+                valid = (
+                    len(vertex) == vertex_count
+                    and required_properties.issubset(parsed_properties)
+                )
         except (OSError, KeyError, TypeError, ValueError, PlyParseError):
             valid = False
     return valid, properties, vertex_count
@@ -590,7 +598,10 @@ def _reconstruction_snapshot(
     elif full_path is not None and measured_artifact is not None:
         required = CORE_3DGS_PROPERTIES if is_v2 else XYZ_PROPERTIES
         valid_payload, properties, header_count = _valid_ply_payload(
-            full_path, required_properties=required
+            full_path,
+            required_properties=required,
+            gaussian_semantics=is_v2,
+            require_3dgs=is_v2,
         )
         if not valid_payload:
             reconstruction["declared_synthetic"] = declared_synthetic
@@ -678,7 +689,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
                 root, chunk.get("ply_file"), relative_to=world_path.parent
             )
             valid_payload, _, live_point_count = (
-                _valid_ply_payload(chunk_path)
+                _valid_ply_payload(chunk_path, gaussian_semantics=True)
                 if chunk_path is not None
                 else (False, [], None)
             )
@@ -717,7 +728,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             actual_sha = _sha256_file(payload)
             if actual_sha != expected_sha:
                 reason = "payload-sha256-mismatch"
-            elif not _valid_ply_payload(payload)[0]:
+            elif not _valid_ply_payload(payload, gaussian_semantics=True)[0]:
                 reason = "payload-ply-invalid"
         validated = reason is None
         version = entry.get("version")

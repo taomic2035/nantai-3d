@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import json
 import threading
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -39,14 +40,41 @@ CORE_PROPERTIES = (
     "rot_2",
     "rot_3",
 )
+SIMPLE_PROPERTIES = ("x", "y", "z", "r", "g", "b", "scale")
 
 
-def _write_ply(path: Path, *, properties: tuple[str, ...] = CORE_PROPERTIES) -> Path:
+def _write_ply(
+    path: Path,
+    *,
+    properties: tuple[str, ...] = CORE_PROPERTIES,
+    values: dict[str, str | int | float] | None = None,
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    row_values: dict[str, str | int | float] = {
+        "rot_0": 1,
+        "scale": 0.05,
+    }
+    row_values.update(values or {})
     lines = ["ply", "format ascii 1.0", "element vertex 1"]
     lines.extend(f"property float {name}" for name in properties)
-    lines.extend(["end_header", " ".join("0" for _ in properties), ""])
+    lines.extend(
+        [
+            "end_header",
+            " ".join(str(row_values.get(name, 0)) for name in properties),
+            "",
+        ]
+    )
     path.write_text("\n".join(lines), encoding="ascii")
+    return path
+
+
+def _write_ply_with_non_finite_list_extra(path: Path) -> Path:
+    _write_ply(path)
+    lines = path.read_text(encoding="ascii").splitlines()
+    header_end = lines.index("end_header")
+    lines.insert(header_end, "property list uchar float hidden_values")
+    lines[header_end + 2] += " 1 nan"
+    path.write_text("\n".join([*lines, ""]), encoding="ascii")
     return path
 
 
@@ -146,9 +174,7 @@ def _write_v2_project(root: Path) -> None:
         },
     }
     (root / "assets/registry.json").write_text(json.dumps(registry), encoding="utf-8")
-    chunk = _write_ply(
-        root / "web/data/chunk_0_0.ply", properties=("x", "y", "z")
-    )
+    chunk = _write_ply(root / "web/data/chunk_0_0.ply", properties=SIMPLE_PROPERTIES)
     world_manifest = {
         "chunks": [{"id": "0_0", "ply_file": chunk.name, "point_count": 1}],
         "asset_consumption": [
@@ -345,6 +371,83 @@ class TestProjectSnapshot:
         )
         assert snapshot["pipeline"]["reconstruct"]["availability"] == "missing"
 
+    @pytest.mark.parametrize(
+        "case",
+        [
+            "non-finite",
+            "infinite",
+            "zero-quaternion",
+            "non-unit-quaternion",
+            "gapped-sh",
+            "incomplete-sh",
+            "overflow-scale",
+            "underflow-scale",
+        ],
+    )
+    def test_matching_descriptor_cannot_promote_invalid_gaussian_semantics(
+        self, tmp_path, case
+    ):
+        _write_v2_project(tmp_path)
+        full_path = tmp_path / "recon/scene_full.ply"
+        properties = CORE_PROPERTIES
+        values: dict[str, str | int | float] = {}
+        if case == "non-finite":
+            values["x"] = "nan"
+        elif case == "infinite":
+            values["x"] = "inf"
+        elif case == "zero-quaternion":
+            values["rot_0"] = 0
+        elif case == "non-unit-quaternion":
+            values["rot_0"] = 2
+        elif case == "gapped-sh":
+            properties = (*CORE_PROPERTIES, "f_rest_1")
+        elif case == "incomplete-sh":
+            properties = (*CORE_PROPERTIES, "f_rest_0")
+        elif case == "overflow-scale":
+            values["scale_0"] = 1000
+        else:
+            values["scale_0"] = -1000
+        _write_ply(full_path, properties=properties, values=values)
+
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        descriptor = manifest["artifacts"]["full_3dgs"]
+        descriptor["sha256"] = _sha256(full_path)
+        descriptor["bytes"] = full_path.stat().st_size
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            snapshot = build_project_snapshot(tmp_path)
+
+        assert "artifact" not in snapshot["reconstruction"]
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
+        assert (
+            snapshot["reconstruction"]["evidence_status"]
+            == "invalid-artifact-payload"
+        )
+        assert snapshot["pipeline"]["reconstruct"]["availability"] == "missing"
+
+    def test_vertex_list_property_cannot_hide_non_finite_values(self, tmp_path):
+        _write_v2_project(tmp_path)
+        full_path = _write_ply_with_non_finite_list_extra(
+            tmp_path / "recon/scene_full.ply"
+        )
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        descriptor = manifest["artifacts"]["full_3dgs"]
+        descriptor["sha256"] = _sha256(full_path)
+        descriptor["bytes"] = full_path.stat().st_size
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert "artifact" not in snapshot["reconstruction"]
+        assert (
+            snapshot["reconstruction"]["evidence_status"]
+            == "invalid-artifact-payload"
+        )
+
     def test_incoherent_v2_coordinate_claim_is_reduced_to_unknown(self, tmp_path):
         _write_v2_project(tmp_path)
         manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
@@ -519,6 +622,20 @@ class TestProjectSnapshot:
         assert snapshot["assets"]["blocked"] == 1
         assert snapshot["assets"]["items"][0]["consumed"] is False
 
+    def test_non_finite_live_chunk_cannot_supply_asset_consumption(self, tmp_path):
+        _write_v2_project(tmp_path)
+        _write_ply(
+            tmp_path / "web/data/chunk_0_0.ply",
+            properties=SIMPLE_PROPERTIES,
+            values={"x": "nan"},
+        )
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["assets"]["consumed"] == 0
+        assert snapshot["assets"]["blocked"] == 1
+        assert snapshot["assets"]["items"][0]["consumed"] is False
+
     def test_asset_payload_hash_does_not_validate_non_ply_bytes(self, tmp_path):
         _write_v2_project(tmp_path)
         payload = tmp_path / "assets/tree_v1.ply"
@@ -534,6 +651,52 @@ class TestProjectSnapshot:
         assert item["validated"] is False
         assert item["consumed"] is False
         assert item["reason"] == "payload-ply-invalid"
+
+    def test_asset_payload_hash_does_not_validate_non_finite_gaussians(
+        self, tmp_path
+    ):
+        _write_v2_project(tmp_path)
+        payload = _write_ply(
+            tmp_path / "assets/tree_v1.ply",
+            values={"x": "nan"},
+        )
+        registry_path = tmp_path / "assets/registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["assets"]["tree"]["sha256"] = _sha256(payload)
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+        world_path = tmp_path / "web/data/manifest.json"
+        world = json.loads(world_path.read_text(encoding="utf-8"))
+        world["asset_consumption"][0]["sha256"] = _sha256(payload)
+        world_path.write_text(json.dumps(world), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        item = snapshot["assets"]["items"][0]
+        assert item["validated"] is False
+        assert item["consumed"] is False
+        assert item["reason"] == "payload-ply-invalid"
+
+    def test_positive_simple_asset_remains_valid_and_consumed(self, tmp_path):
+        _write_v2_project(tmp_path)
+        payload = _write_ply(
+            tmp_path / "assets/tree_v1.ply",
+            properties=SIMPLE_PROPERTIES,
+        )
+        registry_path = tmp_path / "assets/registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["assets"]["tree"]["sha256"] = _sha256(payload)
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+        world_path = tmp_path / "web/data/manifest.json"
+        world = json.loads(world_path.read_text(encoding="utf-8"))
+        world["asset_consumption"][0]["sha256"] = _sha256(payload)
+        world_path.write_text(json.dumps(world), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        item = snapshot["assets"]["items"][0]
+        assert item["validated"] is True
+        assert item["consumed"] is True
+        assert item.get("reason") is None
 
     def test_assets_root_symlink_is_not_a_trusted_registry_boundary(self, tmp_path):
         _write_v2_project(tmp_path)

@@ -238,6 +238,11 @@ class GaussianScene:
         names = v.dtype.names
         if names is None:
             raise ValueError("PLY vertex 没有属性")
+        if v.dtype.hasobject:
+            raise ValueError(
+                "PLY vertex list/object properties are unsupported; "
+                "simple and 3DGS payloads require scalar properties"
+            )
         for name in names:
             values = np.asarray(v[name])
             if np.issubdtype(values.dtype, np.number) and not np.all(np.isfinite(values)):
@@ -288,9 +293,11 @@ class GaussianScene:
                 )
             sh_rest = (np.stack([v[name] for name in rest_names], axis=1).astype(np.float64)
                        if rest_names else np.zeros((n, 0), dtype=np.float64))
-            opacity = 1.0 / (1.0 + np.exp(-v['opacity'].astype(np.float64)))
-            scale = np.exp(np.stack(
-                [v['scale_0'], v['scale_1'], v['scale_2']], axis=1).astype(np.float64))
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                opacity = 1.0 / (1.0 + np.exp(-v['opacity'].astype(np.float64)))
+                scale = np.exp(np.stack(
+                    [v['scale_0'], v['scale_1'], v['scale_2']], axis=1
+                ).astype(np.float64))
             rot = np.stack([v['rot_0'], v['rot_1'], v['rot_2'], v['rot_3']],
                            axis=1).astype(np.float64)
             quat_norms = np.linalg.norm(rot, axis=1)
