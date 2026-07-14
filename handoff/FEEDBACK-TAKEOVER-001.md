@@ -56,5 +56,7 @@
   3. `web/viewer/`、`web/studio/`、`pipeline/studio_server.py`。
 - 当前 fresh gate：Python 232、Viewer 32、Studio 33、`make verify`/Ruff/diff PASS；PLY 语义
   reviewer 已放行 `18dbce0`。
-- 整分支 reviewer 放行后，把 `codex/nantai-takeover` 快进到 main 并推送；先保护
+- 整分支 reviewer 已放行 `7ab1a2c`：单行/汇总 consumption point budget 与真实 11/11
+  world 均复验通过，无 P1/P2。
+- 下一步把 `codex/nantai-takeover` 通过 PR 合入 main 并推送；先保护
   `/Users/taomic/vibecoding/nantai-3d` 中 Opus 的未提交注释，不直接覆盖。

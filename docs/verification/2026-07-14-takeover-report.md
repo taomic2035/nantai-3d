@@ -72,7 +72,7 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
 
 ### Browser / UX
 
-- URL：`http://127.0.0.1:8771/web/studio/?adapter=local&final=18dbce0`，对应当前 takeover worktree。
+- URL：`http://127.0.0.1:8771/web/studio/?adapter=local&final=7ab1a2c`，对应当前 takeover worktree。
 - local adapter：schema v2，`registered=11 / consumed=11 / blocked=0`。
 - Viewer：25 active chunks；Spark 2.1.0 初始化；7,700 splats；artifact/runtime fidelity 均
   `full-3dgs`；synthetic watermark 与 `mock-proxy / preview-proxy` 同时可见。
@@ -86,8 +86,8 @@ LOD、完整 3DGS 属性、11 个可替换素材、真实 Spark Viewer 与 Studi
   evidence JSON/PLY 路径边界、descriptor/hash 伪证、chunk/asset 消费伪证和 PLY 语义绕过。
 - 最终 PLY reviewer 对 `18dbce0` 明确 PASS：新增恶意载荷/兼容性 12 passed，相关 84 passed，
   Python 230 passed，Ruff/diff clean；未发现 P1/P2。
-- 后续整分支 review 发现 consumption point budget P2；单行及同 chunk 汇总上限回归已转绿，
-  当前 Python 232 passed，真实 world 仍为 11/11 consumed，等待 reviewer 复验。
+- 后续整分支 review 发现 consumption point budget P2；`7ab1a2c` 已让单行及同 chunk 汇总
+  越界 fail closed。reviewer 复验 Python 232、真实 world 11/11 consumed，明确 PASS，无 P1/P2。
 - 整分支最终 review 请求见 `review-notes/2026-07-14-nantai-takeover-review-request.md`。
 
 ## 接管 P0 closure
