@@ -82,30 +82,41 @@ export function createSplatLayer({
   let state = fallbackState('not loaded');
   let sparkRenderer = null;
   let splatMesh = null;
+  let loadGeneration = 0;
 
-  function cleanup() {
-    if (splatMesh) {
-      scene.remove(splatMesh);
-      splatMesh.dispose?.();
-      splatMesh = null;
+  function disposeObjects(rendererToDispose, meshToDispose) {
+    if (meshToDispose) {
+      scene.remove(meshToDispose);
+      meshToDispose.dispose?.();
+      if (splatMesh === meshToDispose) splatMesh = null;
     }
-    if (sparkRenderer) {
-      scene.remove(sparkRenderer);
-      sparkRenderer.dispose?.();
-      sparkRenderer = null;
+    if (rendererToDispose) {
+      scene.remove(rendererToDispose);
+      rendererToDispose.dispose?.();
+      if (sparkRenderer === rendererToDispose) sparkRenderer = null;
     }
   }
 
+  function cleanup() {
+    disposeObjects(sparkRenderer, splatMesh);
+  }
+
   async function load({ manifest, manifestUrl, visible = true }) {
+    const generation = ++loadGeneration;
     cleanup();
     const url = resolveFullSplatUrl(manifestUrl, manifest);
     if (!url) {
       state = fallbackState('full_3dgs artifact missing');
       return { ...state };
     }
+    state = fallbackState('Spark loading', url);
+
+    let pendingRenderer = null;
+    let pendingMesh = null;
 
     try {
       const sparkModule = await withTimeout(importSpark(), timeoutMs);
+      if (generation !== loadGeneration) return { ...state };
       if (
         typeof sparkModule?.SparkRenderer !== 'function'
         || typeof sparkModule?.SplatMesh !== 'function'
@@ -113,24 +124,31 @@ export function createSplatLayer({
         throw new Error('Spark module is missing renderer exports');
       }
 
-      sparkRenderer = new sparkModule.SparkRenderer({ renderer });
-      scene.add(sparkRenderer);
+      pendingRenderer = new sparkModule.SparkRenderer({ renderer });
+      sparkRenderer = pendingRenderer;
+      scene.add(pendingRenderer);
 
-      splatMesh = new sparkModule.SplatMesh({ url });
-      splatMesh.quaternion.set(
+      pendingMesh = new sparkModule.SplatMesh({ url });
+      splatMesh = pendingMesh;
+      pendingMesh.quaternion.set(
         ENU_TO_THREE_QUATERNION.x,
         ENU_TO_THREE_QUATERNION.y,
         ENU_TO_THREE_QUATERNION.z,
         ENU_TO_THREE_QUATERNION.w,
       );
-      splatMesh.visible = visible;
-      scene.add(splatMesh);
-      await withTimeout(Promise.resolve(splatMesh.initialized), timeoutMs);
+      pendingMesh.visible = visible;
+      scene.add(pendingMesh);
+      await withTimeout(Promise.resolve(pendingMesh.initialized), timeoutMs);
+      if (generation !== loadGeneration) {
+        disposeObjects(pendingRenderer, pendingMesh);
+        return { ...state };
+      }
 
       state = sparkState(url);
       return { ...state };
     } catch (error) {
-      cleanup();
+      disposeObjects(pendingRenderer, pendingMesh);
+      if (generation !== loadGeneration) return { ...state };
       const message = error instanceof Error ? error.message : String(error);
       state = fallbackState(`Spark unavailable: ${message}`, url);
       return { ...state };
@@ -142,6 +160,7 @@ export function createSplatLayer({
   }
 
   function dispose() {
+    loadGeneration += 1;
     cleanup();
     state = fallbackState('disposed');
   }

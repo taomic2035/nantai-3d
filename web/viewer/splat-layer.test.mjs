@@ -59,6 +59,16 @@ function fakeSparkModule({ initialize = Promise.resolve() } = {}) {
   return { SparkRenderer, SplatMesh };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test('resolveFullSplatUrl selects full_3dgs relative to the recon manifest', () => {
   const { resolveFullSplatUrl } = subject();
   assert.equal(
@@ -197,4 +207,45 @@ test('a stalled Spark load times out into DC fallback instead of blocking the vi
 
   assert.equal(result.mode, 'dc-point-preview');
   assert.equal(result.reason, 'Spark unavailable: timed out after 5ms');
+});
+
+test('a superseded Spark completion cannot overwrite the newest load state', async () => {
+  const { createSplatLayer } = subject();
+  const scene = fakeScene();
+  const oldInitialization = deferred();
+  let importCall = 0;
+  const layer = createSplatLayer({
+    scene,
+    renderer: {},
+    importSpark: async () => {
+      importCall += 1;
+      return fakeSparkModule({
+        initialize: importCall === 1
+          ? oldInitialization.promise
+          : Promise.reject(new Error('new artifact rejected')),
+      });
+    },
+  });
+
+  const oldLoad = layer.load({
+    manifestUrl: 'https://studio.example/data/recon/recon_manifest.json',
+    manifest: { full_3dgs: 'old-scene.ply' },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scene.children.some((item) => item.options?.url?.endsWith('old-scene.ply')), true);
+
+  const newest = await layer.load({
+    manifestUrl: 'https://studio.example/data/recon/recon_manifest.json',
+    manifest: { full_3dgs: 'new-scene.ply' },
+  });
+  assert.equal(newest.mode, 'dc-point-preview');
+  assert.equal(newest.reason, 'Spark unavailable: new artifact rejected');
+  assert.deepEqual(scene.children, []);
+
+  oldInitialization.resolve();
+  const superseded = await oldLoad;
+
+  assert.deepEqual(superseded, newest);
+  assert.deepEqual(layer.getState(), newest);
+  assert.deepEqual(scene.children, []);
 });
