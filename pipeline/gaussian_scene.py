@@ -40,6 +40,44 @@ SIMPLE_DTYPE = [
 ]
 
 
+def ordered_transform_ids(paths: list[list[str]]) -> list[str]:
+    """Return a stable topological union for one or more ancestry paths.
+
+    First appearance breaks ties between unrelated transforms.  Shared suffixes
+    remain after every parent branch, so ``[A, C]`` plus ``[B, C]`` becomes
+    ``[A, B, C]`` instead of the invalid flattened order ``[A, C, B]``.
+    """
+    first_seen: dict[str, int] = {}
+    outgoing: dict[str, set[str]] = {}
+    indegree: dict[str, int] = {}
+    for path in paths:
+        for transform_id in path:
+            first_seen.setdefault(transform_id, len(first_seen))
+            outgoing.setdefault(transform_id, set())
+            indegree.setdefault(transform_id, 0)
+        for source, target in zip(path, path[1:], strict=False):
+            if target not in outgoing[source]:
+                outgoing[source].add(target)
+                indegree[target] += 1
+
+    ready = sorted(
+        (item for item, degree in indegree.items() if degree == 0),
+        key=first_seen.__getitem__,
+    )
+    ordered: list[str] = []
+    while ready:
+        transform_id = ready.pop(0)
+        ordered.append(transform_id)
+        for target in sorted(outgoing[transform_id], key=first_seen.__getitem__):
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+                ready.sort(key=first_seen.__getitem__)
+    if len(ordered) != len(first_seen):
+        raise ValueError("applied transform paths contain a cross-path cycle")
+    return ordered
+
+
 def _quat_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     """批量四元数乘法 (Hamilton 积), q1: (4,) 或 (N,4), q2: (N,4), 均为 wxyz"""
     q1 = np.atleast_2d(q1)
@@ -157,7 +195,7 @@ class GaussianScene:
                     raise ValueError("an applied transform path cannot repeat an id")
                 if normalized and normalized not in paths:
                     paths.append(normalized)
-        path_ids = list(dict.fromkeys(item for path in paths for item in path))
+        path_ids = ordered_transform_ids(paths)
         if declared_ids and declared_ids != path_ids:
             raise ValueError(
                 "applied transform ids must equal the ordered union of transform paths"
@@ -446,7 +484,9 @@ class GaussianScene:
             ]
         else:
             self.applied_transform_paths = [[transform_id]]
-        self.applied_transform_ids.append(transform_id)
+        self.applied_transform_ids = ordered_transform_ids(
+            self.applied_transform_paths
+        )
         return self
 
     @classmethod
@@ -482,8 +522,7 @@ class GaussianScene:
             for path in scene.applied_transform_paths:
                 if path not in transform_paths:
                     transform_paths.append(path.copy())
-        transform_ids = list(dict.fromkeys(
-            tid for path in transform_paths for tid in path))
+        transform_ids = ordered_transform_ids(transform_paths)
         provenance_frames: list[dict[str, Any]] = []
         for scene in scenes:
             for frame in scene.provenance_frames:

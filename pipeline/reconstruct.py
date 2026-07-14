@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
-from pipeline.gaussian_scene import GaussianScene
+from pipeline.gaussian_scene import GaussianScene, ordered_transform_ids
 from pipeline.recon_schema import (
     AlignmentStatus,
     CaptureSession,
@@ -427,11 +427,7 @@ def _validate_scene_history(
             f"{label} transform history has no auditable transform definition: {missing}"
         )
     transform_paths = [list(path) for path in scene.applied_transform_paths]
-    path_ids = list(dict.fromkeys(
-        transform_id
-        for path in transform_paths
-        for transform_id in path
-    ))
+    path_ids = ordered_transform_ids(transform_paths)
     if path_ids != transform_ids:
         raise ValueError(
             f"{label} transform path union does not match applied ids: "

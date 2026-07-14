@@ -308,6 +308,68 @@ class TestImportEngine:
                 label="adversarial scene",
             )
 
+    def test_global_transform_extends_every_branch_with_topological_union(
+        self, tmp_path
+    ):
+        transform_a = FrameTransform(
+            source_frame="scan-A",
+            target_frame="world",
+            sim3=Sim3(scale=2.0),
+            method="external-sim3",
+        )
+        transform_b = FrameTransform(
+            source_frame="scan-B",
+            target_frame="world",
+            sim3=Sim3(scale=3.0),
+            method="external-sim3",
+        )
+        transform_c = FrameTransform(
+            source_frame="world",
+            target_frame="published-world",
+            sim3=Sim3(t_xyz=[10, 0, 0]),
+            method="external-sim3",
+        )
+        scene = GaussianScene(
+            [[0, 0, 0]],
+            [[1, 0, 0]],
+            frame_id="world",
+            units="meters",
+            applied_transform_ids=[
+                transform_a.transform_id,
+                transform_b.transform_id,
+            ],
+            applied_transform_paths=[
+                [transform_a.transform_id],
+                [transform_b.transform_id],
+            ],
+        )
+
+        scene.apply_frame_transform(transform_c, target_units="meters")
+
+        assert scene.applied_transform_paths == [
+            [transform_a.transform_id, transform_c.transform_id],
+            [transform_b.transform_id, transform_c.transform_id],
+        ]
+        assert scene.applied_transform_ids == [
+            transform_a.transform_id,
+            transform_b.transform_id,
+            transform_c.transform_id,
+        ]
+        _validate_scene_history(
+            scene,
+            {
+                transform_a.transform_id: transform_a,
+                transform_b.transform_id: transform_b,
+                transform_c.transform_id: transform_c,
+            },
+            label="globally transformed branched scene",
+        )
+        output = tmp_path / "globally-transformed.ply"
+        scene.save_ply(output, flavor="3dgs")
+        loaded = GaussianScene.load_ply(output)
+        assert loaded.applied_transform_ids == scene.applied_transform_ids
+        assert loaded.applied_transform_paths == scene.applied_transform_paths
+
     def test_full_artifact_reports_high_order_sh_and_extra_attributes(
         self, photos_dir, tmp_path
     ):
