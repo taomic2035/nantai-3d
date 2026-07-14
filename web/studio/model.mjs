@@ -116,6 +116,10 @@ function hasUnambiguousFramePath(coordinate, diagnostics) {
 function deriveGeometryUsability(snapshot, diagnostics) {
   const coordinate = snapshot.coordinate ?? {};
   const reconstruction = snapshot.reconstruction ?? {};
+  if (reconstruction.geometry_usability !== 'metric-aligned') {
+    diagnostics.push('manifest geometry provenance is not metric-aligned; metric use is blocked');
+    return 'preview-only';
+  }
   const frameAligned = hasUnambiguousFramePath(coordinate, diagnostics);
   const complete = coordinate.world_frame === 'world-enu'
     && coordinate.units === 'meters'

@@ -137,6 +137,7 @@ function reconstructInspector() {
   ${facts([
     ['请求引擎', reconstruction.requested_engine], ['实际引擎', reconstruction.actual_engine],
     ['Synthetic', String(reconstruction.synthetic)], ['Gaussian count', reconstruction.gaussian_count ?? 0],
+    ['Geometry evidence', reconstruction.geometry_usability ?? 'unknown'],
     ['SH degree', reconstruction.sh_degree ?? '未知'], ['Viewer fidelity', snapshot.derived.renderFidelity],
     ['Artifact', reconstruction.artifact?.uri ?? '无'], ['SHA-256', reconstruction.artifact?.sha256 ?? '无'],
   ])}`;

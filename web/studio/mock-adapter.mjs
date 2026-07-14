@@ -28,6 +28,7 @@ function baseSnapshot() {
     },
     reconstruction: {
       requested_engine: 'mock', actual_engine: 'mock-proxy', synthetic: true,
+      geometry_usability: 'preview-proxy',
       artifact: {
         id: 'artifact-recon-mock', kind: '3dgs-ply', uri: '../data/recon/recon_full.ply',
         sha256: '0'.repeat(64), bytes: 0, evidence_status: 'fixture-only',

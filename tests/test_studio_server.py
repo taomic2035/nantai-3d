@@ -112,7 +112,7 @@ def _write_v2_project(root: Path) -> None:
             "requested_registration_engine": "colmap",
             "actual_registration_engine": "colmap",
             "synthetic": False,
-            "geometry_usability": "gaussian-scene",
+            "geometry_usability": "metric-aligned",
             "render_fidelity": "dc-point-preview",
         },
     }
@@ -214,6 +214,7 @@ class TestProjectSnapshot:
         assert reconstruction["requested_engine"] == "import"
         assert reconstruction["actual_engine"] == "imported-3dgs"
         assert reconstruction["synthetic"] is False
+        assert reconstruction["geometry_usability"] == "metric-aligned"
         assert reconstruction["gaussian_count"] == 1
         assert reconstruction["lod"] == [0]
         assert reconstruction["renderer_capabilities"] == ["dc-color"]
@@ -244,6 +245,18 @@ class TestProjectSnapshot:
         assert snapshot["pipeline"]["reconstruct"]["availability"] == "missing"
         assert snapshot["pipeline"]["review"]["trust"] == "untrusted"
 
+    def test_declared_preview_only_geometry_survives_the_snapshot_boundary(self, tmp_path):
+        _write_v2_project(tmp_path)
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["provenance"]["geometry_usability"] = "preview-only"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["reconstruction"]["synthetic"] is False
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
+
     @pytest.mark.parametrize("case", ["missing", "path", "sha256", "bytes"])
     def test_v2_full_artifact_descriptor_must_match_live_payload(self, tmp_path, case):
         _write_v2_project(tmp_path)
@@ -264,6 +277,7 @@ class TestProjectSnapshot:
 
         assert "artifact" not in snapshot["reconstruction"]
         assert snapshot["reconstruction"]["synthetic"] is True
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
         assert (
             snapshot["reconstruction"]["evidence_status"]
             == "invalid-artifact-descriptor"

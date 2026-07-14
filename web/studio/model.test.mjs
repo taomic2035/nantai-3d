@@ -28,6 +28,7 @@ function baseSnapshot() {
       requested_engine: 'import',
       actual_engine: 'import',
       synthetic: false,
+      geometry_usability: 'metric-aligned',
       artifact: { immutable: true, sha256: 'abc', kind: '3dgs-ply' },
       attributes: [
         'x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity',
@@ -58,6 +59,17 @@ test('synthetic output can never become measurable or verified', () => {
   const model = normalizeSnapshot(raw);
   assert.equal(model.derived.geometryUsability, 'preview-only');
   assert.equal(model.derived.trust, 'proxy');
+});
+
+test('declared preview-only provenance cannot be promoted by metric coordinates', () => {
+  const raw = baseSnapshot();
+  raw.reconstruction.geometry_usability = 'preview-only';
+
+  const model = normalizeSnapshot(raw);
+
+  assert.equal(model.derived.geometryUsability, 'preview-only');
+  assert.equal(model.derived.trust, 'proxy');
+  assert.ok(model.derived.diagnostics.some((item) => item.includes('provenance')));
 });
 
 test('an explicit metric transform can align sfm-local into world-enu', () => {

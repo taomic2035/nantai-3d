@@ -360,10 +360,22 @@ def _reconstruction_snapshot(
     requested = provenance.get("requested_reconstruction_engine")
     actual = provenance.get("actual_reconstruction_engine")
     declared_synthetic = provenance.get("synthetic")
+    declared_geometry_usability = provenance.get("geometry_usability")
+    allowed_geometry_usability = {
+        "preview-proxy",
+        "preview-only",
+        "metric-aligned",
+        "metric-unaligned",
+    }
     reconstruction: dict[str, Any] = {
         "requested_engine": requested if isinstance(requested, str) else "unknown",
         "actual_engine": actual if isinstance(actual, str) else "unknown",
         "synthetic": declared_synthetic if isinstance(declared_synthetic, bool) else True,
+        "geometry_usability": (
+            declared_geometry_usability
+            if declared_geometry_usability in allowed_geometry_usability
+            else "preview-only"
+        ),
         "attributes": [],
         "sh_degree": 0,
         "renderer_capabilities": [],
@@ -459,6 +471,7 @@ def _reconstruction_snapshot(
     if descriptor_invalid:
         reconstruction["declared_synthetic"] = declared_synthetic
         reconstruction["synthetic"] = True
+        reconstruction["geometry_usability"] = "preview-only"
         reconstruction["evidence_status"] = "invalid-artifact-descriptor"
         reconstruction["integrity_error"] = "invalid-descriptor"
     elif full_path is not None and measured_artifact is not None:
@@ -480,6 +493,7 @@ def _reconstruction_snapshot(
         # fail-closed reducer.  Preserve the declaration separately for audit.
         reconstruction["declared_synthetic"] = declared_synthetic
         reconstruction["synthetic"] = True
+        reconstruction["geometry_usability"] = "preview-only"
         reconstruction["evidence_status"] = "missing-artifact"
 
     bounds = manifest.get("bounds") if is_v2 and manifest else None

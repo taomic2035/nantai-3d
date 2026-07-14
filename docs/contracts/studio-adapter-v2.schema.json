@@ -52,6 +52,7 @@
         "requested_engine",
         "actual_engine",
         "synthetic",
+        "geometry_usability",
         "attributes",
         "sh_degree",
         "renderer_capabilities",
@@ -62,6 +63,9 @@
         "requested_engine": { "type": "string" },
         "actual_engine": { "type": "string" },
         "synthetic": { "type": "boolean" },
+        "geometry_usability": {
+          "enum": ["preview-proxy", "preview-only", "metric-aligned", "metric-unaligned"]
+        },
         "artifact": { "$ref": "#/$defs/artifact" },
         "attributes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "sh_degree": { "type": "integer", "minimum": 0 },
