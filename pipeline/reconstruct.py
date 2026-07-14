@@ -600,7 +600,7 @@ def reconstruct(photos_dir: str | Path = "photos",
 
     lo, hi = merged.bounds()
     applied_transform_ids = list(merged.applied_transform_ids)
-    unique_transforms = [
+    applied_transforms = [
         transform_definitions[transform_id] for transform_id in applied_transform_ids
     ]
     applied_set = set(applied_transform_ids)
@@ -621,8 +621,29 @@ def reconstruct(photos_dir: str | Path = "photos",
             f"{ancestry_transform_ids} != {applied_transform_ids}"
         )
 
+    def transform_record(transform: FrameTransform) -> dict:
+        return {
+            **transform.model_dump(mode="json"),
+            "evidence": transform_evidence[transform.transform_id],
+        }
+
+    registration_chain = list(reg.transform_chain)
+    catalog_ids = list(dict.fromkeys([
+        *(transform.transform_id for transform in registration_chain),
+        *applied_transform_ids,
+    ]))
+    transform_catalog = [
+        transform_record(transform_definitions[transform_id])
+        for transform_id in catalog_ids
+    ]
+    for ancestor in ancestry:
+        ancestor["transform_path"] = [
+            transform_record(transform_definitions[transform_id])
+            for transform_id in ancestor["applied_transform_ids"]
+        ]
+
     metric_evidence = list(reg.target_frame.evidence)
-    for transform in unique_transforms:
+    for transform in applied_transforms:
         metric_evidence.extend(transform_evidence[transform.transform_id])
     metric_evidence = list(dict.fromkeys(metric_evidence))
 
@@ -674,12 +695,9 @@ def reconstruct(photos_dir: str | Path = "photos",
             "alignment_status": reg.alignment_status.value,
             "metric_evidence": metric_evidence,
             "transform_chain": [
-                {
-                    **transform.model_dump(mode="json"),
-                    "evidence": transform_evidence[transform.transform_id],
-                }
-                for transform in unique_transforms
+                transform_record(transform) for transform in registration_chain
             ],
+            "transform_catalog": transform_catalog,
             "applied_transform_ids": applied_transform_ids,
             "ancestry": ancestry,
         },

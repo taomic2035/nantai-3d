@@ -462,13 +462,82 @@ class TestImportEngine:
         )
         contract = manifest["coordinate_contract"]
 
-        assert [step["transform_id"] for step in contract["transform_chain"]] == [
+        assert contract["transform_chain"] == []
+        assert [step["transform_id"] for step in contract["transform_catalog"]] == [
             transform.transform_id
         ]
         assert contract["applied_transform_ids"] == [transform.transform_id]
         assert contract["ancestry"][0]["applied_transform_ids"] == [
             transform.transform_id
         ]
+        assert [
+            step["transform_id"]
+            for step in contract["ancestry"][0]["transform_path"]
+        ] == [transform.transform_id]
+
+    def test_sibling_import_transforms_are_separate_ancestry_paths(
+        self, photos_dir, tmp_path
+    ):
+        source_a = _arbitrary_source_frame().model_copy(
+            update={"frame_id": "scan-A"}
+        )
+        source_b = _arbitrary_source_frame().model_copy(
+            update={"frame_id": "scan-B"}
+        )
+        inputs = []
+        expected_ids = {}
+        for session_id, source_frame, offset in (
+            ("video_vid_A", source_a, 0.0),
+            ("photos_batch_0", source_b, 20.0),
+        ):
+            path = tmp_path / f"{source_frame.frame_id}.ply"
+            GaussianScene(
+                [[offset, 0, 0]],
+                [[1, 0, 0]],
+                frame_id=source_frame.frame_id,
+                units=source_frame.units.value,
+            ).save_ply(path, flavor="3dgs")
+            transform = FrameTransform(
+                source_frame=source_frame.frame_id,
+                target_frame="mock-local",
+                sim3=Sim3(scale=2.0),
+                method="external-sim3",
+                evidence=[f"control:{session_id}"],
+            )
+            expected_ids[session_id] = transform.transform_id
+            inputs.append(SplatInput(
+                session_id=session_id,
+                path=str(path),
+                source_frame=source_frame,
+                transform=transform,
+            ))
+
+        manifest = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            reg_engine="mock",
+            splat_map=inputs,
+            dedup_voxel=0,
+        )
+        contract = manifest["coordinate_contract"]
+        ancestry = {
+            item["session_id"]: item
+            for item in contract["ancestry"]
+            if item["kind"] == "import-splat"
+        }
+
+        assert contract["transform_chain"] == []
+        assert {
+            item["transform_id"] for item in contract["transform_catalog"]
+        } == set(expected_ids.values())
+        for session_id, transform_id in expected_ids.items():
+            assert ancestry[session_id]["applied_transform_ids"] == [transform_id]
+            assert [
+                step["transform_id"]
+                for step in ancestry[session_id]["transform_path"]
+            ] == [transform_id]
 
 
 class TestProgressiveSharpen:
