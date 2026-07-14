@@ -1,208 +1,186 @@
-# nantai-3d
+# Nantai 3D Studio
 
-**照片/视频驱动的无限 3D 村庄世界生成系统**
+照片与视频驱动的 3D 重建、Gaussian Splat 拼接和可替换村庄素材工作台。
 
-基于有限照片（手机/相机/无人机）或视频作为风格/语料参考，生成可无限扩展的 3D 村庄场景，支持 Web 浏览、漫游探索与交互。
+当前仓库交付的是一条可在本机复现的编排与审计链：混合媒体归一化、联合配准、显式坐标契约、外部 3DGS 导入、拼接/区域增清/LOD、素材版本替换、Web Viewer 与 Studio。没有 COLMAP 或 GPU 时会使用明确标注的 synthetic/proxy 数据，不把演示产物冒充实测重建。
 
----
+## 能力矩阵
 
-## 项目定位
-
-| 维度 | 说明 |
-|---|---|
-| **输入** | 少量（< 30 张）混合来源照片 / 视频（mp4/mov/avi） |
-| **输出** | 可生成无限地图的 3D 场景，支持 Web 浏览 |
-| **用途** | 纯漫游探索 + 交互式游戏 + 训练仿真 |
-| **工作流** | superpower 范式：调研 → 分析 → 设计 → 验证 → 实现 |
-
-## 整体架构（L0–L4 五层管线）
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  L0  照片/视频语料化                                     │
-│      ingest.py (视频抽帧 + 照片归一)                      │
-│      exif_scan.py (元数据扫描 + 设备/GPS/批次报告)        │
-│      ↓                                                   │
-│  L1  3D 资产生成 (云端 GPU)                              │
-│      Hunyuan3D-2.1 / TripoSR / Wonder3D / Trellis        │
-│      SAM2 + GroundingDINO (构件分割)                     │
-│      kohya-ss/sd-scripts (SDXL 风格 LoRA)                │
-│      DUSt3R / MASt3R (几何验证)                          │
-│      ↓                                                   │
-│  L2  布局生成                                            │
-│      glm_client.py (GLM-4.6 LLM 村庄规划师)              │
-│      mock_layout.py (规则化降级方案, 无 API key 也能跑)   │
-│      schema.py (pydantic ChunkLayout 数据契约)          │
-│      GaussianCity (CVPR 2025 生成式扩展)                 │
-│      ↓                                                   │
-│  L3  UE5 PCG 实例化                                      │
-│      UE5.5 PCG Framework + World Partition                │
-│      Nanite + Lumen (高保真渲染)                          │
-│      ↓                                                   │
-│  L4  Web 双前端                                          │
-│      PlayCanvas / Three.js (轻量, 当前实现)              │
-│      UE5 Pixel Streaming (重端, 备选)                     │
-│      py3dtiles 12.x (3DGS → 3DTiles 流式加载)            │
-└──────────────────────────────────────────────────────────┘
-```
-
-## 无限世界机制
-
-| 机制 | 实现 |
-|---|---|
-| 种子化确定性 chunk | `mock_layout.py` 用 `(seed, chunk_x, chunk_y)` 哈希生成，同坐标必生成同布局 |
-| 视野半径调度 | `ChunkScheduler.get_visible_chunks(cx, cy, view_radius)` |
-| LRU 缓存 + 淘汰 | `LRUChunkCache`（Python）/ `CHUNK_CACHE_MAX=16`（Web） |
-| 跨 chunk 边界对齐 | 主路东西贯通，建筑避让道路 |
-| 越界自动扩展 | 玩家走出已生成区域时按需生成新 chunk |
-
-## 目录结构
-
-```
-nantai-3d/
-├── pipeline/              # 核心管线
-│   ├── ingest.py          # L0 统一输入 (视频抽帧 + 照片复制)
-│   ├── glm_client.py       # L2 GLM-4.6 布局生成 (含 mock 降级)
-│   ├── mock_layout.py      # L2 规则化布局生成 (离线可用)
-│   ├── chunk_scheduler.py  # 无限 chunk 调度器
-│   ├── generate_world.py   # 统一 CLI 入口
-│   ├── render_chunk_to_ply.py  # layout → 3DGS ply 渲染
-│   ├── schema.py          # pydantic ChunkLayout 数据契约
-│   └── utils/
-│       └── exif_scan.py   # EXIF + 视频元数据扫描
-├── verification/          # 关键技术验证
-│   ├── verify_3dtiles_conversion.py
-│   └── verify_glm_layout.py
-├── cloud/                 # 云端 GPU 环境
-│   └── setup_autodl.sh    # AutoDL 一键环境
-├── web/                   # Web 前端
-│   └── viewer/            # Three.js 动态 chunk 调度 viewer
-│       ├── index.html
-│       └── main.js
-├── input/                 # 放置原始照片/视频 (git 忽略)
-├── photos/                # 处理后的图片 (git 忽略)
-├── layouts/               # 生成的 chunk 布局 JSON (git 忽略)
-├── pyproject.toml         # 依赖清单
-├── Makefile               # make 命令
-├── .env.example           # 环境变量模板
-└── README.md
-```
+| 能力 | 状态 | 当前边界 |
+|---|---|---|
+| 图片 + 视频输入 | **verified** | 图片复制、视频抽帧、模糊筛选；两者进入同一 session/registration 契约 |
+| 图视频联合配准 | **verified / optional runtime** | COLMAP 可用时读取真实相机模型与注册覆盖率；否则使用确定性 synthetic mock |
+| 统一 3D 坐标 | **verified, fail closed** | 所有 artifact 声明完整 `CoordinateFrame`；跨 frame 只接受显式、内容寻址的 `FrameTransform` |
+| ENU 米制对齐 | **external evidence required** | 裸 COLMAP 结果保持 `sfm-arbitrary / arbitrary / unaligned`；只有外部控制点/GPS Sim3 证据才可升级 |
+| 混合 3DGS 拼接 | **verified** | 导入 artifact 的 frame/units/transform history 一致后才 merge；不一致时拒绝 |
+| 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
+| 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
+| Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 素材；SHA 校验、版本历史、CAS、全类型消费报告 |
+| Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制；本地 adapter 只读，任务仍从 CLI 启动 |
+| GPU 训练真实 3DGS | **external** | 仓库支持标准 PLY 导入，但不内置训练器或训练完成声明 |
 
 ## 快速开始
 
-### 1. 环境准备
+Python 3.11+、Node.js 20+。建议在项目根目录执行：
 
 ```bash
-# Python 3.11+ (本机用 3.13 也能跑编排层)
-pip install -e .
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
 
-# 复制环境变量模板
-cp .env.example .env
-# 填入 ZHIPU_API_KEY (可选, 不填则用 mock 布局)
+# 生成、验收并幂等注册 11 个模拟素材
+make assets PY=.venv/bin/python
+
+# input/ 中可混放 jpg/png 与 mp4/mov/avi
+make ingest PY=.venv/bin/python
+
+# 本机可复现的 synthetic 重建；产物会明确显示 mock-proxy
+make reconstruct PY=.venv/bin/python
+
+# 生成 5×5 村庄与逐素材消费证据
+make world PY=.venv/bin/python
+
+# Studio: http://127.0.0.1:8000/
+make serve PY=.venv/bin/python
 ```
 
-### 2. 输入处理（照片 + 视频）
+完整门禁：
 
 ```bash
-# 放素材到 input/ 目录（照片视频混放）
-#   input/
-#   ├── DSC_0001.jpg
-#   ├── DJI_0002.mp4
-#   └── IMG_0003.mov
-
-# 一键处理 (视频抽帧 + 照片复制 + 模糊筛选)
-python -m pipeline.ingest --input input --output photos --fps 2
-
-# 扫描元数据 (输出设备/GPS/批次报告)
-python -m pipeline.utils.exif_scan input photos/exif_report.csv
+make test PY=.venv/bin/python
+make verify PY=.venv/bin/python
+.venv/bin/python -m ruff check pipeline tests
+git diff --check
 ```
 
-**抽帧参数**
+## 核心工作流
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `--fps` | 2.0 | 每秒抽帧数 |
-| `--max-frames` | 300 | 单视频最大抽帧数 |
-| `--blur-threshold` | 80.0 | 模糊检测阈值（Laplacian variance，设 0 关闭） |
-| `--max-long-edge` | 2560 | 长边降采样阈值 |
-
-### 3. 生成无限世界
+### 1. 混合媒体输入
 
 ```bash
-# 默认 5x5 = 25 chunks
-python -m pipeline.generate_world --size 5 --seed 42
-
-# 10x10 = 100 chunks, 真实 GLM 布局
-python -m pipeline.generate_world --size 10 --use-glm
+.venv/bin/python -m pipeline.ingest \
+  --input input --output photos --fps 2 \
+  --max-frames 300 --blur-threshold 80
 ```
 
-### 4. Web 浏览
+照片和视频帧保留来源/session 信息。视频抽帧不是“视频已重建”的证据；只有 registration 的逐图覆盖率才能说明哪些帧真正注册成功。
+
+### 2. 配准与坐标契约
 
 ```bash
-cd web && python -m http.server 8000
-# 浏览器打开 http://127.0.0.1:8000/viewer/index.html
+# 自动选择 COLMAP；不可用时回退 synthetic mock
+.venv/bin/python -m pipeline.reconstruct \
+  --photos photos --reg-engine auto --engine mock
 ```
 
-**操作键位**
+坐标模型包含：
 
-| 键 | 功能 |
-|---|---|
-| `W A S D` | 移动相机 |
-| `Shift` | 加速 |
-| `Q E` | 升降 |
-| `鼠标拖拽` | 旋转视角 |
-| `B` | 切换 chunk 边界显示 |
+- `CoordinateFrame`：handedness、axes、units、metric status、geo alignment、provenance 与证据。
+- `FrameTransform`：source/target、Sim3、method 与内容寻址 `transform_id`。
+- PLY `nantai_meta`：frame、units、已应用 transform history。
 
-## 当前状态
+Viewer 的世界约定为右手 ENU：`(E, N, U) → Three.js (E, U, -N)`，行列式为 `+1`。裸 COLMAP 的相机与点位仍处于联合 SfM local frame，不会被静默重标为米制 ENU。COLMAP 相机模型和 `images.txt`/`cameras.txt` 的解析遵循其[官方输出格式](https://colmap.github.io/format.html)。
 
-| 层 | 状态 | 说明 |
-|---|---|---|
-| L0 输入处理 | ✅ 已完成 | 照片 + 视频混合输入，cv2 抽帧 + 模糊筛选 |
-| L0 元数据扫描 | ✅ 已完成 | EXIF + 视频元数据，CSV 报告 |
-| L2 布局生成 | ✅ 已完成 | GLM-4.6 + mock 降级，pydantic schema |
-| L2 chunk 调度 | ✅ 已完成 | 种子化确定性 + LRU 缓存 + 边界对齐 |
-| L4 Web viewer | ✅ 已完成 | Three.js 动态 chunk 调度 + mini-map |
-| L0 EXIF → ply | ✅ 已完成 | 合成 ply 验证 |
-| L1 真实 3D 资产 | ⏳ 待云端 GPU | Hunyuan3D-2.1 + SAM2 + GroundingDINO |
-| L2 GLM 真实 API | ⏳ 待 API key | mock 已可用 |
-| L3 UE5 PCG | ⏳ 待 UE5 安装 | PCG Framework + World Partition |
+### 3. 导入真实 3DGS 并混合拼接
 
-## 技术栈
+每个外部 PLY 用 JSON 声明完整 `SplatInput`。如果 source 与 registration target 不同，必须携带显式 `FrameTransform`：
 
-**编排（本机 CPU）**
-- Python 3.11+, pydantic 2.x, loguru, rich
-- opencv-python (视频抽帧 + 模糊检测)
-- exifread (照片元数据)
-- py3dtiles 12.x (3DGS → 3DTiles 流式)
-- trimesh / plyfile (几何处理)
+```json
+{
+  "session_id": "video_drone_orbit",
+  "path": "trained/drone.ply",
+  "source_frame": {
+    "frame_id": "trainer-local",
+    "handedness": "right",
+    "axes": "local-z-up",
+    "units": "meters",
+    "metric_status": "metric",
+    "geo_aligned": "unaligned",
+    "provenance": "measured",
+    "evidence": ["trainer export contract"]
+  },
+  "transform": {
+    "source_frame": "trainer-local",
+    "target_frame": "mock-local",
+    "sim3": {
+      "scale": 1.0,
+      "quat_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "t_xyz": [0.0, 0.0, 0.0]
+    },
+    "method": "external-sim3",
+    "evidence": ["control-point fit"]
+  }
+}
+```
 
-**AI 推理（云端 GPU）**
-- Hunyuan3D-2.1 (照片 → 3D 资产)
-- SAM2 + GroundingDINO (构件分割)
-- kohya-ss/sd-scripts (SDXL 风格 LoRA)
-- DUSt3R / MASt3R (几何验证)
+`transform_id` 可省略，由内容计算；传入错误 ID 会被拒绝。
 
-**LLM 布局**
-- GLM-4.6 (智谱，注册送 1 亿 token)
+```bash
+.venv/bin/python -m pipeline.reconstruct \
+  --photos photos --reg-engine mock --engine import \
+  --splat trained/drone-splat-input.json
+```
 
-**Web 前端**
-- Three.js (动态 chunk 调度 + LRU 缓存)
-- PlayCanvas SuperSplat (备选)
-- UE5 Pixel Streaming (重端备选)
+补拍增清使用旧的全量场景作为 base；frame/units/history 不匹配时不会替换：
 
-**云端 GPU**
-- AutoDL 按秒计费（RTX 3060 12GB ¥1/h 起）
-- 详见 [cloud/setup_autodl.sh](cloud/setup_autodl.sh)
+```bash
+.venv/bin/python -m pipeline.reconstruct \
+  --photos photos --engine mock \
+  --base-scene recon/scene_full.ply
+```
 
-## 参考
+高阶 SH 在平移和统一缩放时保持不变；涉及空间旋转且缺少正确 SH basis rotation 时会阻断，避免静默破坏视角相关颜色。
 
-- **生成式世界模型**：Hunyuan3D-World Voyager、CityDreamer4D、GaussianCity (CVPR 2025)、SceneDreamer
-- **照片到 3D 资产**：Hunyuan3D-2.1、TripoSR、Wonder3D、Trellis
-- **程序化生成**：UE5.5 PCG Framework、World Partition、Nanite、Lumen
-- **3DGS 入门**：3DGS 入门指南、Polycam Gaussian Splats 移动方案
-- **COLMAP**：多视图几何实践
-- **RealityCapture**：全面解析
+### 4. 可替换素材
 
-## License
+```bash
+# generator → manifest/SHA 验收 → registry 注册
+make assets PY=.venv/bin/python
 
-[MIT](LICENSE)
+# 验收任意 handoff；通过后才能注册
+.venv/bin/python -m pipeline.validate_handoff \
+  handoff/deliverables/HANDOFF-001 --register --assets-dir assets
+```
+
+布局只引用稳定 `asset_id`。替换会创建新版本并保留历史；重跑 world 后，只有实际加载且 SHA 匹配的素材才会出现在 `asset_consumption` 证据中。素材本地坐标契约固定为右手、米制、Z-up、地面 `z≈0`。
+
+### 5. Viewer 与 Studio
+
+`make serve` 启动带安全静态白名单的本地服务器，并将 `/` 重定向到 Studio。Studio 自动优先连接 `/api/project`；在普通静态服务器下才进入永久标注的 mock adapter。
+
+- Studio：`/web/studio/`
+- 独立 Viewer：`/web/viewer/`
+- API：`GET /api/project`、`GET /api/runs`
+
+Studio 通过 bridge 读取 Viewer 的实际 runtime capability。只有 Spark 初始化成功后才显示 anisotropic covariance、alpha composite 和 spherical harmonics；否则显示降级预览。实现固定使用 [Spark 2.1.0](https://sparkjs.dev/docs/) 与兼容 Three.js 版本。
+
+## 目录
+
+```text
+pipeline/                 输入、配准、坐标、3DGS、素材、world、Studio server
+tests/                    Python 合约与端到端回归
+web/viewer/               Spark 3DGS + DC fallback + iframe bridge
+web/studio/               reducer/adapter 驱动的工作台 UX
+docs/contracts/           Studio snapshot JSON Schema v2
+docs/superpowers/         UX 规格与接管实施计划
+handoff/                  Handoff / Feedback 与可复现模拟素材
+assets/registry.json      活跃版本、历史与 payload SHA
+verification/             独立技术验证脚本
+```
+
+## 产物与可信度
+
+- `recon/registration.json`：位姿、相机内参、session、frame 与 coverage evidence。
+- `recon/scene_full.ply`：审计用完整 3DGS PLY。
+- `web/data/recon/recon_manifest.json`：artifact、LOD、ancestry、transform chain、requested/actual engine、synthetic 与 fidelity。
+- `web/data/manifest.json`：world bounds、chunk LOD 和 `asset_consumption`。
+- `assets/registry.json`：素材 active/history、版本、SHA 与来源。
+
+可信度从机器字段推导，不从文件名或 engine 名推断：
+
+- `synthetic=true` 或 `actual_engine=mock-proxy` 只表示流程演示。
+- `geometry_usability=preview-proxy` 不可用于测量。
+- `artifact_fidelity=full-3dgs` 描述文件属性；`render_fidelity` 由 Viewer 实际能力决定。
+- “registered” 不等于“consumed”；消费必须有渲染报告和实测 SHA。
+
+接管背景、尚存限制和 Opus 恢复入口见 [handoff/TAKEOVER-2026-07-14.md](handoff/TAKEOVER-2026-07-14.md)。

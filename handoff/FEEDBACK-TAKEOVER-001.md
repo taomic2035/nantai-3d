@@ -1,0 +1,52 @@
+# FEEDBACK-TAKEOVER-001 — 给 Opus 的接管回球
+
+## What
+
+- 建立版本化坐标真相源：`CoordinateFrame`、`FrameTransform`、`SplatInput`、registration v2、
+  PLY `nantai_meta` 与 manifest ancestry/transform chain。
+- 完成图像+视频 session 联合配准；COLMAP 读取 `cameras.txt/images.txt` 的逐图相机模型、
+  distortion 原始参数与注册覆盖率，mock 永久标 synthetic。
+- 完成 3DGS DC/高阶 SH/opacity/anisotropic scale/quaternion/normals/extras 的保真读写，
+  拼接、去重、区域替换、LOD 与 exactly-once 变换历史。
+- HANDOFF-001 交付 11 个确定性村庄 3DGS 素材、manifest v2、SHA 与 contact sheet；registry
+  支持安全 ID、containment、幂等恢复、跨实例 CAS、失败回滚和实际 SHA 消费证据。
+- 默认 5×5 world 真实消费 building 5、vegetation 3、prop 3，共 11/11。
+- Viewer 改为右手 ENU→Three 映射、动态 framing/minimap/chunk/LOD；固定 Spark 2.1.0 渲染
+  完整 3DGS，失败时明确降级 DC point preview。
+- Studio 交付三栏工作台、六步状态、provenance gate、素材卡、job drawer、local/mock adapter、
+  same-origin bridge 与 read-only server；浏览器验证了 Spark、LOD、图层、复位和 11/11 素材。
+
+## Why
+
+接管前最危险的不是缺按钮，而是 engine 名、文件存在与 registry 条目会被误当成真实、米制、
+已消费或完整 3DGS。此次把可信度改成由 artifact 属性、坐标证据、transform history、实际 SHA
+和 renderer runtime capability 联合推导；无法证明时仍允许预览，但 fail closed。
+
+## Tradeoff
+
+- `engine=mock` 只生成流程 proxy；真实训练由外部 gsplat/nerfstudio 等产出标准 PLY 后导入。
+- COLMAP distortion 完整保留在 machine evidence，但当前 `CameraIntrinsics` 仍是 pinhole 消费面。
+- 高阶 SH 平移/统一缩放安全，涉及旋转时阻断，尚未实现 SH basis rotation。
+- Spark/Three 走固定 CDN 版本；离线时是 DC fallback，不是 full splat。
+- local Studio server 只读，避免 UI 伪造任务成功；实际 ingest/reconstruct/world/assets 从 CLI 运行。
+- asset transaction 没有 crash journal；SIGKILL 最坏留下未登记 orphan payload，registry 不会指向
+  半成品。文件锁为 `fcntl`，未覆盖 Windows。
+
+## Open
+
+1. 选一套可公开的真实图+视频数据与控制点，完成 measured mixed reconstruction 基准。
+2. 扩展 distortion-aware projection/training，并把 reprojection error 写入发布 gate。
+3. 决定是否把任务执行白名单与持久 run ledger 接回 Studio；当前 API 有意只读。
+4. 针对目标设备标定 world/vegetation 点预算与 Spark 内存上限。
+5. 如需离线发行，vendoring Spark/Three/WASM，并补离线 E2E。
+
+## Next
+
+- 先运行 `make test PY=.venv/bin/python`，再按
+  `docs/verification/2026-07-14-takeover-report.md` 复核产物证据。
+- Review 路径建议：
+  1. `pipeline/recon_schema.py`、`registration.py`、`gaussian_scene.py`、`reconstruct.py`；
+  2. `pipeline/assets.py`、`validate_handoff.py`、`render_chunk_to_ply.py`、HANDOFF-001；
+  3. `web/viewer/`、`web/studio/`、`pipeline/studio_server.py`。
+- 不要直接覆盖 `/Users/taomic/vibecoding/nantai-3d`；在用户确认后再合并
+  `codex/nantai-takeover`。

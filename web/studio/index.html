@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Nantai 3D Studio</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#stage">跳到 3D 舞台</a>
+  <main class="studio" data-testid="studio-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">南</span>
+        <div>
+          <h1>Nantai 3D Studio</h1>
+          <p id="project-meta">南台村 · 本地项目</p>
+        </div>
+      </div>
+      <div class="top-status" aria-label="项目状态">
+        <span class="badge badge-mock" id="adapter-badge">模拟数据</span>
+        <span class="badge" id="freshness-badge">产物 · current</span>
+      </div>
+      <label class="scenario-control">
+        <span>验收场景</span>
+        <select id="scenario-select" aria-label="切换模拟验收场景"></select>
+      </label>
+      <button class="button button-primary" id="primary-action" type="button">查看验收摘要</button>
+    </header>
+
+    <nav class="pipeline" aria-label="重建流程" data-testid="pipeline-nav">
+      <div class="panel-heading">
+        <span>Pipeline</span>
+        <small>6 个阶段</small>
+      </div>
+      <ol id="pipeline-list"></ol>
+      <section class="pipeline-footnote" aria-label="真实性说明">
+        <span class="signal signal-amber" aria-hidden="true"></span>
+        <p>绿色只代表步骤运行成功；是否可测量由坐标和 provenance 证据单独决定。</p>
+      </section>
+    </nav>
+
+    <section class="stage" id="stage" data-testid="stage" tabindex="-1">
+      <div class="stage-toolbar" aria-label="3D 舞台工具">
+        <div class="segmented" role="group" aria-label="可见图层">
+          <button class="is-active" type="button" aria-pressed="true" data-viewer-command="setLayer" data-layer="world">世界</button>
+          <button class="is-active" type="button" aria-pressed="true" data-viewer-command="setLayer" data-layer="reconstruction">重建</button>
+        </div>
+        <label class="compact-select">LOD
+          <select id="lod-select" data-viewer-command="setLOD" disabled>
+            <option value="auto">自动</option>
+            <option value="0">0 · 远景</option>
+            <option value="1">1 · 中景</option>
+            <option value="2">2 · 全量</option>
+          </select>
+        </label>
+        <span class="toolbar-spacer"></span>
+        <span class="viewer-status" id="viewer-status"><i></i>Viewer 等待握手</span>
+        <button class="button button-quiet" id="reset-camera" type="button"
+                data-viewer-command="resetCamera" disabled>复位相机</button>
+      </div>
+      <div class="viewer-frame-wrap">
+        <iframe
+          id="viewer-frame"
+          title="南台村三维场景预览"
+          src="/web/viewer/index.html?embed=1"
+          data-testid="viewer-frame"
+        ></iframe>
+        <div class="stage-watermark">SIMULATED STATE</div>
+      </div>
+      <div class="provenance-bar" id="provenance-bar" aria-label="产物真实性证据"></div>
+    </section>
+
+    <aside class="inspector" id="inspector" data-testid="inspector" aria-labelledby="inspector-title">
+      <div class="panel-heading inspector-heading">
+        <div>
+          <span id="inspector-kicker">STEP 6</span>
+          <h2 id="inspector-title">验收摘要</h2>
+        </div>
+        <button class="icon-button inspector-close" id="inspector-close" type="button" aria-label="关闭检查器">×</button>
+      </div>
+      <div class="inspector-content" id="inspector-content"></div>
+    </aside>
+
+    <section class="job-drawer" id="job-drawer" data-testid="job-drawer">
+      <button class="drawer-handle" id="drawer-toggle" type="button" aria-expanded="false" aria-controls="job-drawer-content">
+        <span><i class="run-dot"></i><b id="drawer-title">任务记录</b></span>
+        <span id="drawer-summary">1 次运行 · 最近成功</span>
+        <span class="drawer-chevron" aria-hidden="true">⌃</span>
+      </button>
+      <div class="drawer-content" id="job-drawer-content">
+        <div class="run-list" id="run-list" aria-label="运行列表"></div>
+        <div class="event-timeline" id="event-timeline" aria-label="结构化任务事件"></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="sr-live" id="live-region" aria-live="polite"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

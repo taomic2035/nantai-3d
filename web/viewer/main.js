@@ -9,20 +9,55 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+  threeToChunk,
+  threeToWorld,
+  transformPositionsInPlace,
+  worldToThree,
+} from './coordinates.mjs';
+import {
+  computeFraming,
+  computeWorldBounds,
+  selectReconLod,
+  worldToMinimap,
+} from './framing.mjs';
+import {
+  artifactProvenance,
+  createViewerCapabilities,
+  createViewerBridge,
+  resolveArtifactUrl,
+} from './bridge.mjs';
+import { createSplatLayer } from './splat-layer.mjs';
 
 // ============ 配置 ============
-const CHUNK_SIZE_M = 200;
-const CHUNK_VIEW_RADIUS = 1;   // 视野半径 (3x3 = 9 chunk 活跃)
-const CHUNK_CACHE_MAX = 16;    // LRU 上限 (保留略多于视野)
+const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
+const CHUNK_CACHE_MAX = 36;    // LRU 上限 (保留略多于视野)
 
 // ============ 全局状态 ============
 let scene, camera, renderer, controls;
 let manifest = null;
+let worldManifestUrl = new URL('../data/manifest.json', import.meta.url).href;
+let chunkSizeM = null;
+let currentFrame = null;
+let gridHelper = null;
+let axesHelper = null;
 const chunkMeshes = new Map();       // chunk_id → THREE.Points (已加载)
+const chunkLod = new Map();          // chunk_id → 已加载的 LOD 级别
 const chunkBorders = new Map();     // chunk_id → THREE.Line (边界线)
 const lruOrder = [];                // chunk_id 数组, 末尾为最近访问
 const loadingSet = new Set();        // 正在加载中的 chunk_id
 const stats = { loaded: 0, evicted: 0, cachedHits: 0 };
+let qualityOverride = null;          // null=按距离自动, 0/1/2=强制 LOD (键 1/2/3, 0 恢复自动)
+let reconManifest = null;            // 重建预览 artifact (recon_manifest.json, 可选)
+let reconManifestUrl = new URL('../data/recon/recon_manifest.json', import.meta.url).href;
+let reconMesh = null;
+let reconLodLoaded = -1;
+let reconVisible = true;
+let reconLoading = false;
+let worldVisible = true;
+let viewerBridge = null;
+let splatLayer = null;
+let viewerCapabilities = createViewerCapabilities();
 const clock = new THREE.Clock();
 const keys = { w: false, a: false, s: false, d: false, q: false, e: false, shift: false };
 let lastPlayerChunkKey = '';
@@ -82,12 +117,16 @@ function parsePly(buffer) {
   return { positions, colors, sizes, n: nVertices };
 }
 
-async function loadChunkPly(plyFile) {
-  const url = `../data/${plyFile}`;
+async function loadPlyUrl(url, label = url) {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`加载失败 ${plyFile}: ${res.status}`);
+  if (!res.ok) throw new Error(`加载失败 ${label}: ${res.status}`);
   const buf = await res.arrayBuffer();
   return parsePly(buf);
+}
+
+async function loadChunkPly(plyFile) {
+  const url = resolveArtifactUrl(worldManifestUrl, plyFile);
+  return loadPlyUrl(url, plyFile);
 }
 
 function makePointsMesh(parsed) {
@@ -147,10 +186,12 @@ function touchLRU(key) {
 
 function evictLRU(keepKeys) {
   // 从 LRU 头部开始淘汰, 直到 cache 大小 <= MAX 或所有可淘汰项已处理
-  while (lruOrder.length > CHUNK_CACHE_MAX) {
+  let scanned = 0;
+  while (lruOrder.length > CHUNK_CACHE_MAX && scanned < lruOrder.length + CHUNK_CACHE_MAX) {
+    scanned++;
     const victim = lruOrder.shift();
     if (keepKeys.has(victim)) {
-      // 视野内的不淘汰, 重新放回末尾
+      // 视野内的不淘汰, 重新放回末尾 (scanned 上界防止全在视野内时死循环)
       lruOrder.push(victim);
       continue;
     }
@@ -160,6 +201,7 @@ function evictLRU(keepKeys) {
       mesh.geometry.dispose();
       mesh.material.dispose();
       chunkMeshes.delete(victim);
+      chunkLod.delete(victim);
       stats.evicted++;
     }
     // 同时移除边界线
@@ -173,9 +215,22 @@ function evictLRU(keepKeys) {
   }
 }
 
-async function loadChunk(cx, cy) {
+function desiredLod(cx, cy, pcx, pcy) {
+  // 可变清晰: 玩家所在 chunk 全清晰, 越远越粗
+  if (qualityOverride !== null) return qualityOverride;
+  const d = Math.max(Math.abs(cx - pcx), Math.abs(cy - pcy));
+  return d === 0 ? 2 : (d === 1 ? 1 : 0);
+}
+
+function lodFile(entry, lod) {
+  // manifest 无 lod 字段时回退全量 ply (向后兼容旧 manifest)
+  if (entry.lod && entry.lod[String(lod)]) return entry.lod[String(lod)];
+  return entry.ply_file;
+}
+
+async function loadChunk(cx, cy, wantLod = 2) {
   const key = `${cx}_${cy}`;
-  if (chunkMeshes.has(key)) {
+  if (chunkMeshes.has(key) && chunkLod.get(key) === wantLod) {
     stats.cachedHits++;
     touchLRU(key);
     return;
@@ -186,26 +241,33 @@ async function loadChunk(cx, cy) {
 
   loadingSet.add(key);
   try {
-    const parsed = await loadChunkPly(entry.ply_file);
-
-    // 坐标变换: ply (x_world, y_world, z_height) → three.js (x, z, y)
-    for (let j = 0; j < parsed.n; j++) {
-      const tmp = parsed.positions[j * 3 + 1];
-      parsed.positions[j * 3 + 1] = parsed.positions[j * 3 + 2];
-      parsed.positions[j * 3 + 2] = tmp;
-    }
+    const parsed = await loadChunkPly(lodFile(entry, wantLod));
+    transformPositionsInPlace(parsed.positions);
 
     const mesh = makePointsMesh(parsed);
     mesh.name = `chunk_${key}`;
+    mesh.visible = worldVisible;
+
+    // 换级重载: 先摘旧网格再挂新的
+    const old = chunkMeshes.get(key);
+    if (old) {
+      scene.remove(old);
+      old.geometry.dispose();
+      old.material.dispose();
+    }
     scene.add(mesh);
     chunkMeshes.set(key, mesh);
+    chunkLod.set(key, wantLod);
     touchLRU(key);
     stats.loaded++;
 
     // 加入 chunk 边界线 (供 debug 用)
-    const border = makeChunkBorder(cx, cy);
-    scene.add(border);
-    chunkBorders.set(key, border);
+    if (!chunkBorders.has(key)) {
+      const border = makeChunkBorder(cx, cy);
+      border.visible = worldVisible && bordersVisible;
+      scene.add(border);
+      chunkBorders.set(key, border);
+    }
   } catch (e) {
     console.error(`chunk ${key} 加载失败:`, e);
   } finally {
@@ -214,17 +276,16 @@ async function loadChunk(cx, cy) {
 }
 
 function makeChunkBorder(cx, cy) {
-  // 在 Three.js X-Z 平面画 chunk 边界 (200m × 200m)
-  // ply 的 (x_world, y_world) → three.js (x, z)
-  const x0 = cx * CHUNK_SIZE_M;
-  const z0 = cy * CHUNK_SIZE_M;
-  const pts = [
-    new THREE.Vector3(x0, 0.05, z0),
-    new THREE.Vector3(x0 + CHUNK_SIZE_M, 0.05, z0),
-    new THREE.Vector3(x0 + CHUNK_SIZE_M, 0.05, z0 + CHUNK_SIZE_M),
-    new THREE.Vector3(x0, 0.05, z0 + CHUNK_SIZE_M),
-    new THREE.Vector3(x0, 0.05, z0),
+  const east0 = cx * chunkSizeM;
+  const north0 = cy * chunkSizeM;
+  const corners = [
+    [east0, north0, 0.05],
+    [east0 + chunkSizeM, north0, 0.05],
+    [east0 + chunkSizeM, north0 + chunkSizeM, 0.05],
+    [east0, north0 + chunkSizeM, 0.05],
+    [east0, north0, 0.05],
   ];
+  const pts = corners.map((point) => new THREE.Vector3(...worldToThree(point)));
   const geo = new THREE.BufferGeometry().setFromPoints(pts);
   const mat = new THREE.LineBasicMaterial({ color: 0x7fd1ff, transparent: true, opacity: 0.4 });
   const line = new THREE.Line(geo, mat);
@@ -233,9 +294,7 @@ function makeChunkBorder(cx, cy) {
 }
 
 function updateChunks(playerX, playerZ) {
-  // ply 的 y → three.js 的 z, 所以用 camera.position.z 计算 chunk y
-  const cx = Math.floor(playerX / CHUNK_SIZE_M);
-  const cy = Math.floor(playerZ / CHUNK_SIZE_M);
+  const [cx, cy] = threeToChunk([playerX, 0, playerZ], chunkSizeM);
 
   const needed = new Set();
   for (let dx = -CHUNK_VIEW_RADIUS; dx <= CHUNK_VIEW_RADIUS; dx++) {
@@ -246,10 +305,10 @@ function updateChunks(playerX, playerZ) {
     }
   }
 
-  // 异步加载所有 needed
+  // 异步加载所有 needed (按与玩家距离决定清晰度)
   for (const key of needed) {
     const [x, y] = key.split('_').map(Number);
-    loadChunk(x, y);
+    loadChunk(x, y, desiredLod(x, y, cx, cy));
   }
 
   // LRU 淘汰 (保留视野内的)
@@ -258,43 +317,74 @@ function updateChunks(playerX, playerZ) {
   return { cx, cy, needed };
 }
 
+function applyFraming(frame, resetCamera = true) {
+  currentFrame = frame;
+  camera.near = frame.near;
+  camera.far = frame.far;
+  camera.updateProjectionMatrix();
+  scene.fog = new THREE.Fog(0x1a2228, frame.fogNear, frame.fogFar);
+  controls.maxDistance = frame.far * 0.75;
+
+  if (resetCamera) {
+    camera.position.set(...frame.cameraPositionThree);
+    controls.target.set(...frame.targetThree);
+    camera.lookAt(...frame.targetThree);
+    controls.update();
+  }
+
+  if (gridHelper) {
+    scene.remove(gridHelper);
+    gridHelper.geometry.dispose();
+    gridHelper.material.dispose();
+  }
+  gridHelper = new THREE.GridHelper(
+    frame.gridSize,
+    frame.gridDivisions,
+    0x444444,
+    0x2a2a2a,
+  );
+  gridHelper.position.set(...frame.gridCenterThree);
+  gridHelper.material.opacity = 0.25;
+  gridHelper.material.transparent = true;
+  gridHelper.visible = worldVisible;
+  scene.add(gridHelper);
+
+  if (axesHelper) {
+    scene.remove(axesHelper);
+    axesHelper.geometry.dispose();
+    axesHelper.material.dispose();
+  }
+  axesHelper = new THREE.AxesHelper(Math.max(chunkSizeM / 4, 1));
+  axesHelper.visible = worldVisible;
+  scene.add(axesHelper);
+}
+
 // ============ 初始化 ============
 function init() {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1a2228);
-  scene.fog = new THREE.Fog(0x1a2228, 200, 1200);
 
   camera = new THREE.PerspectiveCamera(
-    65, window.innerWidth / window.innerHeight, 0.1, 5000
+    65, window.innerWidth / window.innerHeight, 0.1, 1,
   );
-  camera.position.set(500, 400, -500);  // 俯瞰 5x5 区域中心
-  camera.lookAt(500, 0, 500);
+  camera.position.set(0, 1, 1);
+  camera.lookAt(0, 0, 0);
 
   renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   document.getElementById('canvas-container').appendChild(renderer.domElement);
 
+  splatLayer = createSplatLayer({ scene, renderer });
+
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.target.set(500, 0, 500);
-  controls.maxDistance = 2000;
+  controls.target.set(0, 0, 0);
   controls.minDistance = 2;
 
   const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x404030, 0.6);
   scene.add(hemi);
-
-  // 网格地板 (5x5 = 1000m x 1000m)
-  const gridHelper = new THREE.GridHelper(1000, 50, 0x444444, 0x2a2a2a);
-  gridHelper.position.set(500, 0, 500);
-  gridHelper.material.opacity = 0.25;
-  gridHelper.material.transparent = true;
-  scene.add(gridHelper);
-
-  const axes = new THREE.AxesHelper(80);
-  axes.position.set(0, 0, 0);
-  scene.add(axes);
 
   // mini-map canvas
   const mm = document.getElementById('minimap');
@@ -320,7 +410,18 @@ function onKeyDown(e) {
   // B 键切换 chunk 边界显示
   if (k === 'b') {
     bordersVisible = !bordersVisible;
-    for (const b of chunkBorders.values()) b.visible = bordersVisible;
+    for (const b of chunkBorders.values()) b.visible = worldVisible && bordersVisible;
+  }
+  // 1/2/3 强制画质 (低/中/高), 0 恢复按距离自动
+  if (k === '1') qualityOverride = 0;
+  if (k === '2') qualityOverride = 1;
+  if (k === '3') qualityOverride = 2;
+  if (k === '0') qualityOverride = null;
+  // R 键切换重建预览图层
+  if (k === 'r' && reconManifest) {
+    reconVisible = !reconVisible;
+    if (reconMesh) reconMesh.visible = reconVisible;
+    splatLayer?.setVisible(reconVisible);
   }
 }
 function onKeyUp(e) {
@@ -347,19 +448,147 @@ function updateCamera(dt) {
   if (keys.e) { camera.position.y += speed; controls.target.y += speed; }
 }
 
+// ============ 重建预览图层 (可选, 由 pipeline.reconstruct 生成) ============
+async function loadReconManifest(url = reconManifestUrl) {
+  try {
+    const absoluteUrl = new URL(url, window.location.href).href;
+    const res = await fetch(absoluteUrl);
+    if (!res.ok) return false;
+    reconManifest = await res.json();
+    reconManifestUrl = absoluteUrl;
+    const count = reconManifest.gaussian_count ?? reconManifest.point_count ?? 'unknown';
+    console.log(`重建 artifact: ${count} points, ` +
+                `${viewerCapabilities.renderer.label}, ` +
+                `LOD ${Object.keys(reconManifest.lod ?? {}).join('/')}`);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function updateRecon() {
+  if (!reconManifest || reconLoading) return;
+  if (splatLayer?.getState().mode === 'spark') return;
+  let tier;
+  if (qualityOverride !== null) {
+    tier = qualityOverride;
+  } else if (reconManifest.bounds) {
+    tier = selectReconLod(
+      [camera.position.x, camera.position.y, camera.position.z],
+      reconManifest.bounds,
+    );
+  } else {
+    tier = 2;
+  }
+  if (tier === reconLodLoaded) return;
+  const file = reconManifest.lod[String(tier)];
+  if (!file) return;
+
+  reconLoading = true;
+  try {
+    const plyUrl = resolveArtifactUrl(reconManifestUrl, file);
+    const parsed = await loadPlyUrl(plyUrl, file);
+    transformPositionsInPlace(parsed.positions);
+    const mesh = makePointsMesh(parsed);
+    mesh.name = 'recon_layer';
+    mesh.visible = reconVisible;
+    if (reconMesh) {
+      scene.remove(reconMesh);
+      reconMesh.geometry.dispose();
+      reconMesh.material.dispose();
+    }
+    reconMesh = mesh;
+    scene.add(mesh);
+    reconLodLoaded = tier;
+  } catch (e) {
+    console.error('重建图层加载失败:', e);
+  } finally {
+    reconLoading = false;
+  }
+}
+
+function disposeReconPointPreview() {
+  if (!reconMesh) return;
+  scene.remove(reconMesh);
+  reconMesh.geometry.dispose();
+  reconMesh.material.dispose();
+  reconMesh = null;
+  reconLodLoaded = -1;
+}
+
+async function loadReconstructionLayer() {
+  disposeReconPointPreview();
+  const result = await splatLayer.load({
+    manifest: reconManifest ?? {},
+    manifestUrl: reconManifestUrl,
+    visible: reconVisible,
+  });
+  viewerCapabilities = createViewerCapabilities(result.mode);
+  viewerBridge?.announceCapabilities();
+
+  if (result.mode !== 'spark' && reconManifest) {
+    console.warn(`${result.reason}; 使用 DC point preview`);
+    await updateRecon();
+  }
+  return result;
+}
+
 // ============ HUD 更新 ============
 function updateHUD() {
   const pos = camera.position;
+  const worldPos = threeToWorld([pos.x, pos.y, pos.z]);
   document.getElementById('hud-camera').textContent =
-    `(${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)})`;
+    `(${worldPos[0].toFixed(0)}, ${worldPos[1].toFixed(0)}, ${worldPos[2].toFixed(0)})`;
 
-  // ply 的 y → three.js 的 z, 所以 chunk_y 用 pos.z 计算
-  const cx = Math.floor(pos.x / CHUNK_SIZE_M);
-  const cy = Math.floor(pos.z / CHUNK_SIZE_M);
+  const [cx, cy] = threeToChunk([pos.x, pos.y, pos.z], chunkSizeM);
   document.getElementById('hud-current').textContent = `(${cx},${cy})`;
   document.getElementById('hud-chunks').textContent = chunkMeshes.size;
   document.getElementById('hud-evicted').textContent = stats.evicted;
   document.getElementById('hud-hits').textContent = stats.cachedHits;
+
+  const lodEl = document.getElementById('hud-lod');
+  if (lodEl) {
+    lodEl.textContent = qualityOverride === null
+      ? '自动 (近清远粗)' : `强制 LOD${qualityOverride}`;
+  }
+  const reconEl = document.getElementById('hud-recon');
+  if (reconEl) {
+    const count = reconManifest?.gaussian_count ?? reconManifest?.point_count ?? 'unknown';
+    const splatState = splatLayer?.getState();
+    reconEl.textContent = !reconManifest ? '无'
+      : !reconVisible ? '已隐藏 (R 显示)'
+      : splatState?.mode === 'spark'
+        ? `${count} splats (${viewerCapabilities.renderer.label})`
+      : reconLodLoaded >= 0
+        ? `LOD${reconLodLoaded} (${count} points, ${viewerCapabilities.renderer.label})`
+      : '加载中...';
+  }
+
+  const rendererReason = document.getElementById('hud-renderer-reason');
+  if (rendererReason) {
+    const splatState = splatLayer?.getState();
+    rendererReason.textContent = splatState?.mode === 'spark'
+      ? 'full_3dgs 已由 Spark 初始化'
+      : (splatState?.reason ?? 'DC point preview');
+  }
+
+  const title = document.getElementById('hud-title');
+  if (title) title.textContent = `Nantai Village · ${viewerCapabilities.renderer.label}`;
+
+  const provenance = artifactProvenance(reconManifest ?? {}, viewerCapabilities);
+  const provenanceFields = {
+    'hud-requested-engine': provenance.requested_engine,
+    'hud-actual-engine': provenance.actual_engine,
+    'hud-synthetic': provenance.synthetic,
+    'hud-frame': `${provenance.frame} / ${provenance.units} / ${provenance.handedness}`,
+    'hud-geometry': provenance.geometry_usability,
+    'hud-artifact-fidelity': provenance.artifact_fidelity,
+    'hud-viewer-fidelity': provenance.viewer_fidelity,
+  };
+  for (const [id, value] of Object.entries(provenanceFields)) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = String(value);
+  }
 
   // 加载中状态指示
   const loadEl = document.getElementById('hud-loading');
@@ -377,20 +606,10 @@ function updateHUD() {
 
 // ============ Mini-map ============
 function drawMinimap() {
-  if (!minimapCtx) return;
+  if (!minimapCtx || !manifest?.chunks?.length) return;
   const ctx = minimapCtx;
   const W = ctx.canvas.width, H = ctx.canvas.height;
-
-  // 计算可见 chunk 范围 (manifest 中 x_min/x_max, y_min/y_max)
-  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
-  for (const c of manifest.chunks) {
-    if (c.x < xmin) xmin = c.x;
-    if (c.x > xmax) xmax = c.x;
-    if (c.y < ymin) ymin = c.y;
-    if (c.y > ymax) ymax = c.y;
-  }
-  const cols = xmax - xmin + 1, rows = ymax - ymin + 1;
-  const cw = W / cols, ch = H / rows;
+  const bounds = computeWorldBounds(manifest);
 
   // 背景
   ctx.fillStyle = '#0a0e14';
@@ -398,33 +617,49 @@ function drawMinimap() {
 
   // 画每个 chunk
   for (const c of manifest.chunks) {
-    const px = (c.x - xmin) * cw;
-    // mini-map Y 反向: manifest y 增大 = 北方向 = 屏幕上方
-    const py = H - (c.y + 1 - ymin) * ch;
+    const [left, top] = worldToMinimap(
+      [c.x * chunkSizeM, (c.y + 1) * chunkSizeM],
+      bounds,
+      W,
+      H,
+    );
+    const [right, bottom] = worldToMinimap(
+      [(c.x + 1) * chunkSizeM, c.y * chunkSizeM],
+      bounds,
+      W,
+      H,
+    );
     const isLoaded = chunkMeshes.has(`${c.x}_${c.y}`);
     ctx.fillStyle = isLoaded ? '#4a9b6f' : '#1a2a22';
-    ctx.fillRect(px + 1, py + 1, cw - 2, ch - 2);
+    ctx.fillRect(left + 1, top + 1, right - left - 2, bottom - top - 2);
     ctx.strokeStyle = '#2a4030';
     ctx.lineWidth = 1;
-    ctx.strokeRect(px + 1, py + 1, cw - 2, ch - 2);
+    ctx.strokeRect(left + 1, top + 1, right - left - 2, bottom - top - 2);
   }
 
-  // 玩家位置 (camera.position.x → mini-map x; camera.position.z → mini-map y)
-  // 注意 ply.y → three.js.z, 所以玩家"世界 Y" = camera.z
-  const wx = camera.position.x / CHUNK_SIZE_M;
-  const wy = camera.position.z / CHUNK_SIZE_M;
-  const px = (wx - xmin) * cw;
-  const py = H - (wy - ymin) * ch;
+  const cameraThree = [camera.position.x, camera.position.y, camera.position.z];
+  const [east, north] = threeToWorld(cameraThree);
+  const [px, py] = worldToMinimap([east, north], bounds, W, H);
+  const [cx, cy] = threeToChunk(cameraThree, chunkSizeM);
 
-  // 视野范围 (3x3 方框)
+  // 视野范围，north 增大始终在画布上方。
+  const [viewLeft, viewTop] = worldToMinimap(
+    [(cx - CHUNK_VIEW_RADIUS) * chunkSizeM,
+      (cy + CHUNK_VIEW_RADIUS + 1) * chunkSizeM],
+    bounds,
+    W,
+    H,
+  );
+  const [viewRight, viewBottom] = worldToMinimap(
+    [(cx + CHUNK_VIEW_RADIUS + 1) * chunkSizeM,
+      (cy - CHUNK_VIEW_RADIUS) * chunkSizeM],
+    bounds,
+    W,
+    H,
+  );
   ctx.strokeStyle = '#7fd1ff';
   ctx.lineWidth = 2;
-  ctx.strokeRect(
-    (wx - CHUNK_VIEW_RADIUS - xmin) * cw,
-    H - (wy + CHUNK_VIEW_RADIUS + 1 - ymin) * ch,
-    cw * (2 * CHUNK_VIEW_RADIUS + 1),
-    ch * (2 * CHUNK_VIEW_RADIUS + 1)
-  );
+  ctx.strokeRect(viewLeft, viewTop, viewRight - viewLeft, viewBottom - viewTop);
 
   // 玩家点
   ctx.fillStyle = '#ff5a5a';
@@ -443,15 +678,25 @@ async function main() {
   const loadingText = document.getElementById('loading-text');
   loadingText.textContent = '加载 manifest.json...';
 
-  const res = await fetch('../data/manifest.json');
+  const res = await fetch(worldManifestUrl);
   if (!res.ok) {
     loadingText.textContent = `错误: 无法加载 manifest.json (${res.status})`;
     return;
   }
   manifest = await res.json();
+  if (!manifest.chunks?.length) throw new Error('manifest.json 没有可显示的 chunks');
+  chunkSizeM = manifest.chunk_size_m ?? 200;
   buildChunkIndex();
+  await loadReconManifest();
+  applyFraming(computeFraming(manifest, reconManifest?.bounds));
+  await loadReconstructionLayer();
 
-  loadingText.textContent = '生成 5x5 chunk 索引完成, 启动调度器...';
+  const xCount = new Set(manifest.chunks.map((chunk) => chunk.x)).size;
+  const yCount = new Set(manifest.chunks.map((chunk) => chunk.y)).size;
+  loadingText.textContent =
+    `已索引 ${manifest.chunks.length} chunks (${xCount}×${yCount}), 启动调度器...`;
+  const minimapTitle = document.getElementById('minimap-title');
+  if (minimapTitle) minimapTitle.textContent = `Mini-map (${xCount}×${yCount})`;
 
   // 初始加载相机视野内 chunk
   const initPos = controls.target;
@@ -460,8 +705,7 @@ async function main() {
   // 等待初始加载 (轮询直到视野内所有 chunk 都加载完)
   const waitInit = () => new Promise(resolve => {
     const check = () => {
-      const cx = Math.floor(initPos.x / CHUNK_SIZE_M);
-      const cy = Math.floor(initPos.z / CHUNK_SIZE_M);
+      const [cx, cy] = threeToChunk([initPos.x, initPos.y, initPos.z], chunkSizeM);
       let needed = 0, loaded = 0;
       for (let dx = -CHUNK_VIEW_RADIUS; dx <= CHUNK_VIEW_RADIUS; dx++) {
         for (let dy = -CHUNK_VIEW_RADIUS; dy <= CHUNK_VIEW_RADIUS; dy++) {
@@ -484,6 +728,95 @@ async function main() {
   document.getElementById('controls').style.display = 'block';
   document.getElementById('minimap-wrap').style.display = 'block';
 
+  const readState = () => ({
+    renderer: viewerCapabilities.renderer,
+    capabilities: viewerCapabilities,
+    renderer_status: splatLayer?.getState() ?? null,
+    lod: qualityOverride ?? 'auto',
+    layers: { world: worldVisible, reconstruction: reconVisible },
+    chunk_size_m: chunkSizeM,
+    bounds: currentFrame?.bounds ?? null,
+    artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
+  });
+
+  viewerBridge = createViewerBridge({
+    windowObject: window,
+    capabilities: () => viewerCapabilities,
+    handlers: {
+      getState: () => readState(),
+      setLOD: async ({ lod }) => {
+        const nextLod = lod === 'auto' || lod === null ? null : Number(lod);
+        if (nextLod !== null && ![0, 1, 2].includes(nextLod)) {
+          throw new Error(`不支持的 LOD: ${lod}`);
+        }
+        qualityOverride = nextLod;
+        reconLodLoaded = -1;
+        updateChunks(camera.position.x, camera.position.z);
+        await updateRecon();
+        return readState();
+      },
+      setLayer: ({ layer, visible }) => {
+        const nextVisible = visible !== false;
+        if (layer === 'world') {
+          worldVisible = nextVisible;
+          for (const mesh of chunkMeshes.values()) mesh.visible = worldVisible;
+          for (const border of chunkBorders.values()) {
+            border.visible = worldVisible && bordersVisible;
+          }
+          if (gridHelper) gridHelper.visible = worldVisible;
+          if (axesHelper) axesHelper.visible = worldVisible;
+        } else if (layer === 'reconstruction') {
+          reconVisible = nextVisible;
+          if (reconMesh) reconMesh.visible = reconVisible;
+          splatLayer?.setVisible(reconVisible);
+        } else {
+          throw new Error(`未知图层: ${layer}`);
+        }
+        return readState();
+      },
+      resetCamera: () => {
+        if (currentFrame) applyFraming(currentFrame, true);
+        return readState();
+      },
+      setBounds: ({ bounds }) => {
+        if (!bounds?.min || !bounds?.max) throw new Error('setBounds 需要 min/max');
+        const frame = computeFraming(
+          { chunk_size_m: chunkSizeM, chunks: [] },
+          bounds,
+        );
+        applyFraming(frame, true);
+        return readState();
+      },
+      loadArtifact: async ({ kind = 'recon-manifest', url, manifest: artifact }) => {
+        if (kind !== 'recon-manifest') throw new Error(`不支持的 artifact kind: ${kind}`);
+        if (url) {
+          const absoluteUrl = new URL(url, window.location.href);
+          if (absoluteUrl.origin !== window.location.origin) {
+            throw new Error('artifact URL 必须与 viewer 同源');
+          }
+          if (!await loadReconManifest(absoluteUrl.href)) {
+            throw new Error(`无法加载 artifact: ${absoluteUrl.href}`);
+          }
+        } else if (artifact) {
+          reconManifest = artifact;
+        } else {
+          throw new Error('loadArtifact 需要 url 或 manifest');
+        }
+
+        applyFraming(computeFraming(manifest, reconManifest?.bounds), false);
+        const rendererResult = await loadReconstructionLayer();
+        return {
+          kind,
+          url: reconManifestUrl,
+          provenance: artifactProvenance(reconManifest, viewerCapabilities),
+          renderer: rendererResult,
+          state: readState(),
+        };
+      },
+    },
+  });
+  viewerBridge.start();
+
   animate();
 }
 
@@ -498,6 +831,7 @@ function animate() {
   if (!animate._lastCheck || now - animate._lastCheck > 50) {
     animate._lastCheck = now;
     updateChunks(camera.position.x, camera.position.z);
+    updateRecon();
   }
 
   updateHUD();

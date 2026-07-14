@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Nantai Village - 无限村庄 3D Demo</title>
+<link rel="icon" href="data:,">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { overflow: hidden; background: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -12,12 +13,13 @@
     background: rgba(20, 22, 28, 0.85); color: #e0e0e0;
     border-radius: 8px; font-size: 13px; line-height: 1.6;
     backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.1);
-    max-width: 320px; z-index: 10;
+    max-width: 440px; z-index: 10;
   }
   #hud h1 { font-size: 15px; margin-bottom: 8px; color: #7fd1ff; }
   #hud .stat { color: #aaa; }
   #hud .stat b { color: #fff; font-weight: 600; }
   #hud .legend { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
+  #hud .provenance { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
   #hud .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #bbb; margin: 2px 0; }
   #hud .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
   #controls {
@@ -60,12 +62,22 @@
 <div id="canvas-container"></div>
 
 <div id="hud" style="display:none">
-  <h1>Nantai Village (无限世界)</h1>
-  <div class="stat">活跃 chunks: <b id="hud-chunks">0</b> / 缓存上限 16</div>
+  <h1 id="hud-title">Nantai Village · DC point preview</h1>
+  <div class="stat">活跃 chunks: <b id="hud-chunks">0</b> / 缓存上限 36</div>
   <div class="stat">已淘汰: <b id="hud-evicted">0</b> | 缓存命中: <b id="hud-hits">0</b></div>
   <div class="stat">调度状态: <b id="hud-loading">空闲</b></div>
-  <div class="stat">相机位置: <b id="hud-camera">(0,0,0)</b></div>
+  <div class="stat">相机 ENU (E,N,U): <b id="hud-camera">(0,0,0)</b></div>
   <div class="stat">当前 chunk: <b id="hud-current">(0,0)</b></div>
+  <div class="stat">画质 LOD: <b id="hud-lod">自动</b></div>
+  <div class="stat">重建预览: <b id="hud-recon">无</b></div>
+  <div class="provenance">
+    <div class="stat">requested / actual: <b id="hud-requested-engine">unknown</b> / <b id="hud-actual-engine">unknown</b></div>
+    <div class="stat">synthetic / geometry: <b id="hud-synthetic">unknown</b> / <b id="hud-geometry">unknown</b></div>
+    <div class="stat">frame / units / handedness: <b id="hud-frame">unknown / unknown / unknown</b></div>
+    <div class="stat">artifact fidelity: <b id="hud-artifact-fidelity">unknown</b></div>
+    <div class="stat">viewer fidelity: <b id="hud-viewer-fidelity">dc-point-preview</b></div>
+    <div class="stat">renderer status: <b id="hud-renderer-reason">等待初始化</b></div>
+  </div>
   <div class="legend">
     <div class="legend-item"><span class="swatch" style="background:#5a823c"></span>地面/草地</div>
     <div class="legend-item"><span class="swatch" style="background:#505050"></span>主路 (柏油)</div>
@@ -78,7 +90,7 @@
 </div>
 
 <div id="minimap-wrap">
-  <div class="title">Mini-map (5x5)</div>
+  <div class="title" id="minimap-title">Mini-map</div>
   <canvas id="minimap" width="180" height="180"></canvas>
   <div id="minimap-legend">
     <div class="d"><span class="sw" style="background:#4a9b6f"></span>已加载</div>
@@ -93,8 +105,9 @@
   升降: <kbd>Q</kbd><kbd>E</kbd> |
   加速: <kbd>Shift</kbd> |
   边界: <kbd>B</kbd> |
-  旋转: 鼠标拖拽 |
-  俯仰: 右键拖拽
+  画质: <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / <kbd>0</kbd>自动 |
+  重建层: <kbd>R</kbd> |
+  旋转: 鼠标拖拽
 </div>
 
 <div id="loading">
@@ -105,8 +118,9 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js"
   }
 }
 </script>
