@@ -1,148 +1,324 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "assets": {
     "house_wood_01": {
       "kind": "building",
-      "ply": "house_wood_01_v1.ply",
-      "version": 1,
+      "ply": "house_wood_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         8.0,
         6.0,
         6.5
       ],
-      "history": [],
-      "sha256": "8aaec8a0c836745528cb3a3bbc4f6b5b3e2573c01af20c0c324b3de0d82a62c8"
+      "sha256": "4ab2def43d80885d669f0ab1e8a5a13cf9e9109aa165dea4aa43fcb6619ad3ea",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "house_wood_01_v1.ply",
+          "sha256": "8aaec8a0c836745528cb3a3bbc4f6b5b3e2573c01af20c0c324b3de0d82a62c8",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "house_wood_01_v2.ply",
+          "sha256": "f018d393bfb6992589510708aebbe4ef65fbfcd6075d65b18ce5c3de11b1301e",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "house_wood_02": {
       "kind": "building",
-      "ply": "house_wood_02_v1.ply",
-      "version": 1,
+      "ply": "house_wood_02_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         10.0,
         7.0,
         7.0
       ],
-      "history": [],
-      "sha256": "4ea7db83564532de7a56faab0758f243b597a61eedf10c10dc7d61862ff58b72"
+      "sha256": "879ee0466e46e398fb67c6eb6361814d66b39f33c767fd816e4d02c476c3fb8d",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "house_wood_02_v1.ply",
+          "sha256": "4ea7db83564532de7a56faab0758f243b597a61eedf10c10dc7d61862ff58b72",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "house_wood_02_v2.ply",
+          "sha256": "e6837434c7d8d48bed1ce11c826aadb4903bc652f37e76dbdb0374a810ad52f9",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "house_stone_01": {
       "kind": "building",
-      "ply": "house_stone_01_v1.ply",
-      "version": 1,
+      "ply": "house_stone_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         9.0,
         7.0,
         6.5
       ],
-      "history": [],
-      "sha256": "4687848b8602448430108cdffc7c2c27c85ca47d594a368e317d12e18fa049e3"
+      "sha256": "aa4459fefa57025b53faeb861c1bcce26f3f3d9a7875ede1742cbf0d5ae35d99",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "house_stone_01_v1.ply",
+          "sha256": "4687848b8602448430108cdffc7c2c27c85ca47d594a368e317d12e18fa049e3",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "house_stone_01_v2.ply",
+          "sha256": "b7f9539835da530574c9b35c0a5f885fd452e27f0578bad7da1d42a8cb7f06e9",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "house_thatch_01": {
       "kind": "building",
-      "ply": "house_thatch_01_v1.ply",
-      "version": 1,
+      "ply": "house_thatch_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         7.0,
         6.0,
         6.0
       ],
-      "history": [],
-      "sha256": "aa14a8145d45ac737d5868aad6943789e151faf983c2f3a8aa72030c25990273"
+      "sha256": "e61be58f54db3ca37c7acf4111a7216aa6a9641262ef8a393b81a20d7950ea93",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "house_thatch_01_v1.ply",
+          "sha256": "aa14a8145d45ac737d5868aad6943789e151faf983c2f3a8aa72030c25990273",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "house_thatch_01_v2.ply",
+          "sha256": "9080b73299ce64e54b715bbbd2571ff03eef93010180566a5766d1f2bd52ec24",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "house_barn_01": {
       "kind": "building",
-      "ply": "house_barn_01_v1.ply",
-      "version": 1,
+      "ply": "house_barn_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         12.0,
         8.0,
         8.0
       ],
-      "history": [],
-      "sha256": "1ef5465fc2a9a689a9bfde770c52697e1b6b676e7eb6f1adc520ec4f1c9b152d"
+      "sha256": "2b15dd88384c2337f13bff89c9f4d8d46234e41f140d77d43de05b24ee1226a9",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "house_barn_01_v1.ply",
+          "sha256": "1ef5465fc2a9a689a9bfde770c52697e1b6b676e7eb6f1adc520ec4f1c9b152d",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "house_barn_01_v2.ply",
+          "sha256": "921e541bdf62744f422ab2b683aac9a49d0d0566c12bb39a43bcd1aaff5cdecd",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "tree_pine_01": {
       "kind": "vegetation",
-      "ply": "tree_pine_01_v1.ply",
-      "version": 1,
+      "ply": "tree_pine_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         4.0,
         4.0,
         9.0
       ],
-      "history": [],
-      "sha256": "a04d3e7f0fe10565dcba6c2d048779b758297db2aec4b8cd714edcf04399fa17"
+      "sha256": "f7fd843edc4ffeb160ce80418636cd72e6cca8551c49ebd659381fdd680ee220",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "tree_pine_01_v1.ply",
+          "sha256": "a04d3e7f0fe10565dcba6c2d048779b758297db2aec4b8cd714edcf04399fa17",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "tree_pine_01_v2.ply",
+          "sha256": "1baee63672ec762844a22487e361609e44ebbf68df5d281c585f164eac68f327",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "tree_broadleaf_01": {
       "kind": "vegetation",
-      "ply": "tree_broadleaf_01_v1.ply",
-      "version": 1,
+      "ply": "tree_broadleaf_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         7.0,
         7.0,
         8.0
       ],
-      "history": [],
-      "sha256": "1185bc172a607f2c43e8277d44b863431facfc9937f5bd1b89b6481fac7d2145"
+      "sha256": "d2b229ad0c368f2bd349514856fd46f1418b73352f55f686798ede3b2eb15bed",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "tree_broadleaf_01_v1.ply",
+          "sha256": "1185bc172a607f2c43e8277d44b863431facfc9937f5bd1b89b6481fac7d2145",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "tree_broadleaf_01_v2.ply",
+          "sha256": "db7212e35555ca2d7082ad6ab8c4b09991699dc69e1deb11c20df6f01afe3c7d",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "tree_bamboo_01": {
       "kind": "vegetation",
-      "ply": "tree_bamboo_01_v1.ply",
-      "version": 1,
+      "ply": "tree_bamboo_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         3.0,
         3.0,
         10.0
       ],
-      "history": [],
-      "sha256": "f12b93abdc948a3063ab23d4bc5a3e627d127b1d2f305167daa166d4ac9d9e14"
+      "sha256": "9551ffb515f7e6d255e17f87288c42cc10c44ffae5a8aa090b6569cb6988dd7c",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "tree_bamboo_01_v1.ply",
+          "sha256": "f12b93abdc948a3063ab23d4bc5a3e627d127b1d2f305167daa166d4ac9d9e14",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "tree_bamboo_01_v2.ply",
+          "sha256": "8e4f12a6673321aea49ed5dffd4f402916abcce4a1ccca6ec8bdf0bcdb9830eb",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "stone_wall_01": {
       "kind": "prop",
-      "ply": "stone_wall_01_v1.ply",
-      "version": 1,
+      "ply": "stone_wall_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         4.0,
         0.5,
         1.2
       ],
-      "history": [],
-      "sha256": "4cf1649bc073a353de197508c1129d0c4f181c2949ef13dbd998e468f8d865bf"
+      "sha256": "1f74f80351b57c0b190e6888fb7434a82078c925901b26d370a6a2444c32e648",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "stone_wall_01_v1.ply",
+          "sha256": "4cf1649bc073a353de197508c1129d0c4f181c2949ef13dbd998e468f8d865bf",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "stone_wall_01_v2.ply",
+          "sha256": "2aa48e77f4fa97caaa8df1189de5451627548d33c1dc6c9c634b304c3f85b475",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "stone_lamp_01": {
       "kind": "prop",
-      "ply": "stone_lamp_01_v1.ply",
-      "version": 1,
+      "ply": "stone_lamp_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         0.8,
         0.8,
         2.0
       ],
-      "history": [],
-      "sha256": "038bd54936af3fa9ddaf8516186bf62e47eee9320faaf99116897436baf35de1"
+      "sha256": "3183b3db4c7c9acd9b83001193a0a156abc0a6903aa5c95b0a07e1c97211284d",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "stone_lamp_01_v1.ply",
+          "sha256": "038bd54936af3fa9ddaf8516186bf62e47eee9320faaf99116897436baf35de1",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "stone_lamp_01_v2.ply",
+          "sha256": "36da8102b12351a535b8ba6e58df0bbadb26a1338163c1f720ebafb63a931c7d",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     },
     "fence_wood_01": {
       "kind": "prop",
-      "ply": "fence_wood_01_v1.ply",
-      "version": 1,
+      "ply": "fence_wood_01_v3.ply",
+      "version": 3,
       "origin": "gpt-mock",
       "footprint_m": [
         3.0,
         0.2,
         1.1
       ],
-      "history": [],
-      "sha256": "18598e3925d59b8cdc0e6f8ef0cb5960a043455670615c157f0c41f9853dc22c"
+      "sha256": "026f44603b29bcd752600dd8399c4f59d6e2f7aad4a088d3d7ac80caedc1b56b",
+      "registered_at": "2026-07-14T16:28:28+00:00",
+      "history": [
+        {
+          "version": 1,
+          "ply": "fence_wood_01_v1.ply",
+          "sha256": "18598e3925d59b8cdc0e6f8ef0cb5960a043455670615c157f0c41f9853dc22c",
+          "origin": "gpt-mock",
+          "registered_at": ""
+        },
+        {
+          "version": 2,
+          "ply": "fence_wood_01_v2.ply",
+          "sha256": "119253d7327dbc9bc0dfd977ccc2eb879d93412bca08c57e33ac6f4a5bb22fa3",
+          "origin": "gpt-mock",
+          "registered_at": "2026-07-14T14:19:37+00:00"
+        }
+      ]
     }
   }
 }

@@ -10,9 +10,11 @@ L2 Chunk 调度器 - 无限世界的核心机制
 import json
 from collections import OrderedDict
 from pathlib import Path
+
 from loguru import logger
-from pipeline.schema import ChunkLayout
+
 from pipeline.mock_layout import MockLayoutGenerator
+from pipeline.schema import ChunkLayout
 
 
 class LRUChunkCache:
@@ -165,11 +167,11 @@ if __name__ == "__main__":
         start=(0, 0), end=(1000, 1000), steps=10
     )
 
-    print(f"\n最终统计:")
+    print("\n最终统计:")
     for k, v in result["final_stats"].items():
         print(f"  {k}: {v}")
-    print(f"\n验证点:")
-    print(f"  ✓ 走过 5x5 chunk 区域, 系统按需生成")
-    print(f"  ✓ LRU 缓存自动淘汰远处 chunk")
-    print(f"  ✓ 相同 chunk_id 重复访问时命中缓存")
-    print(f"  ✓ chunk 边界对齐 (主路东西贯通)")
+    print("\n验证点:")
+    print("  ✓ 走过 5x5 chunk 区域, 系统按需生成")
+    print("  ✓ LRU 缓存自动淘汰远处 chunk")
+    print("  ✓ 相同 chunk_id 重复访问时命中缓存")
+    print("  ✓ chunk 边界对齐 (主路东西贯通)")

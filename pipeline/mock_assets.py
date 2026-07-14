@@ -11,20 +11,21 @@
 
 用法:
     python -m pipeline.mock_assets                     # 重建 assets/ 并写 registry.json
-    python -m pipeline.mock_assets --out DIR           # 生成 handoff 交付目录 (*.ply + manifest.json)
+    python -m pipeline.mock_assets --out DIR
+        # 生成 handoff 交付目录 (*.ply + manifest.json)
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
-from pipeline.assets import AssetRegistry, AssetEntry, RegistryDoc, sha256_file
+from pipeline.assets import AssetEntry, AssetRegistry, RegistryDoc, sha256_file
 from pipeline.gaussian_scene import GaussianScene
 
 HANDOFF_ID = "HANDOFF-001"
@@ -39,7 +40,7 @@ class AssetSpec:
     asset_id: str
     kind: str
     footprint_m: tuple[float, float, float]
-    build: Callable[["Builder"], None]
+    build: Callable[[Builder], None]
 
 
 class Builder:
@@ -268,7 +269,13 @@ def house_stone_01(b: Builder) -> None:
             if x > 4.15:
                 continue
             shade = 0.34 + 0.11 * b.rng.random()
-            b.box((x, -3.51, z), (0.68, 0.45, 0.50), 62, (shade, shade * 1.03, shade * 1.04), noise=0.025)
+            b.box(
+                (x, -3.51, z),
+                (0.68, 0.45, 0.50),
+                62,
+                (shade, shade * 1.03, shade * 1.04),
+                noise=0.025,
+            )
     b.box((0, 0, 2.0), (9.0, 7.0, 4.0), 5600, STONE, weathering=0.16)
     b.gable_roof(9.0, 7.0, 3.9, 6.5, 4000, DARK_STONE, scale=(0.04, 0.14))
     _facade_opening(b, 0, -3.76, 1.25, 1.45, 2.5, 500, (0.13, 0.12, 0.10))
@@ -281,7 +288,12 @@ def house_stone_01(b: Builder) -> None:
 def house_thatch_01(b: Builder) -> None:
     b.box((0, 0, 1.85), (7.0, 6.0, 3.7), 5100, (0.61, 0.43, 0.22), weathering=0.17)
     # Three slightly offset layers create a thick, ragged thatch silhouette.
-    for dz, width, depth, count in ((0.0, 7.0, 6.0, 3000), (-0.18, 7.35, 6.25, 1600), (0.14, 6.7, 5.9, 1200)):
+    roof_layers = (
+        (0.0, 7.0, 6.0, 3000),
+        (-0.18, 7.35, 6.25, 1600),
+        (0.14, 6.7, 5.9, 1200),
+    )
+    for dz, width, depth, count in roof_layers:
         b.gable_roof(width, depth, 3.45 + dz, 6.0 + dz, count, (0.65, 0.48, 0.20),
                      eave=0.55, thickness=0.18, scale=(0.055, 0.17), weathering=0.18)
     _facade_opening(b, 0, -3.06, 1.20, 1.25, 2.4, 500, (0.20, 0.105, 0.045))
@@ -312,7 +324,13 @@ def tree_pine_01(b: Builder) -> None:
         b.cone((0, 0), z0, height, radius, n, color, scale=(0.035, 0.13), weathering=0.13)
     # Root flare ensures an obvious grounded silhouette.
     for theta in np.linspace(0, 2 * np.pi, 8, endpoint=False):
-        b.tube((0, 0, 0.18), (0.85 * np.cos(theta), 0.85 * np.sin(theta), 0), 0.09, 75, (0.26, 0.14, 0.06))
+        b.tube(
+            (0, 0, 0.18),
+            (0.85 * np.cos(theta), 0.85 * np.sin(theta), 0),
+            0.09,
+            75,
+            (0.26, 0.14, 0.06),
+        )
 
 
 def tree_broadleaf_01(b: Builder) -> None:
@@ -357,7 +375,7 @@ def tree_bamboo_01(b: Builder) -> None:
 
 def stone_wall_01(b: Builder) -> None:
     rows = [(0.24, 0.48, 8), (0.68, 0.40, 7), (1.04, 0.32, 8)]
-    for row, (z, height, count) in enumerate(rows):
+    for z, height, count in rows:
         widths = b.rng.uniform(0.38, 0.62, count)
         widths *= 4.0 / widths.sum()
         x = -2.0

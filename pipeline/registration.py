@@ -1,16 +1,16 @@
 """
-统一坐标系配准: 把所有输入图像 (照片 + 视频帧) 的相机位姿解算到同一个世界坐标系
+带显式坐标契约的配准: 把照片与视频帧解算到一个有名称、可审计的共同 frame
 
 策略:
 - 会话划分: photos/ 顶层照片按设备分组为 photo_batch 会话;
   photos/<视频名>/ 子目录 (ingest 抽帧输出) 各为一个 video 会话
 - 引擎:
   - colmap: 检测到 colmap 可执行文件时, 全部图像联合 SfM (单一 database + mapper)
-    → 照片与视频帧共享特征匹配, 天然处于同一坐标系
+    → 照片与视频帧共享同一 SfM-local frame，但尺度任意、未地理对齐
   - mock:   无 colmap 时的确定性降级 — 每个会话生成绕锚点的环拍位姿,
-    会话锚点由 EXIF GPS (ENU) 或网格布局决定, 输出 schema 与 colmap 路径完全一致
-- 锚定: 首个含 GPS 的会话锚点作为世界原点 (geo_origin), 其余会话按 ENU 偏移;
-  无 GPS 会话按确定性网格排布, 保证多次运行结果一致
+    会话锚点由 EXIF GPS (ENU) 或网格布局决定，始终标 synthetic provenance
+- GPS: mock 可用首个 GPS 锚点定义 synthetic ENU；COLMAP 仅有 GPS origin 时不会被
+  自动升级为 ENU/米制，必须有显式 Sim3 对齐证据
 
 输出: registration.json (recon_schema.RegistrationResult)
 
@@ -19,20 +19,29 @@
 """
 import argparse
 import hashlib
+import json
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from loguru import logger
 
 from pipeline.recon_schema import (
+    AlignmentStatus,
+    AxisConvention,
     CameraIntrinsics,
     CameraPose,
     CaptureSession,
+    CoordinateFrame,
+    CoordinateUnits,
+    FrameProvenance,
+    GeoAlignment,
     GeoAnchor,
+    Handedness,
+    MetricStatus,
     RegistrationResult,
-    Sim3,
     gps_to_enu,
 )
 
@@ -44,33 +53,129 @@ ORBIT_RADIUS_VIDEO = 25.0     # 视频环拍半径
 ORBIT_RADIUS_PHOTO = 20.0     # 照片环拍半径
 
 
+_COLMAP_CAMERA_PARAM_NAMES = {
+    "SIMPLE_PINHOLE": ("f", "cx", "cy"),
+    "PINHOLE": ("fx", "fy", "cx", "cy"),
+    "SIMPLE_RADIAL": ("f", "cx", "cy", "k"),
+    "RADIAL": ("f", "cx", "cy", "k1", "k2"),
+    "OPENCV": ("fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2"),
+}
+
+
+@dataclass(frozen=True)
+class ColmapCamera:
+    """A validated ``cameras.txt`` record and its pinhole projection subset."""
+
+    camera_id: int
+    model: str
+    width: int
+    height: int
+    params: tuple[float, ...]
+    intrinsics: CameraIntrinsics
+    distortion_parameters: dict[str, float]
+
+    @property
+    def pinhole_intrinsics_lossless(self) -> bool:
+        return not self.distortion_parameters
+
+    def evidence_payload(self) -> dict[str, object]:
+        """Return the original COLMAP calibration in a JSON-serializable form."""
+        return {
+            "camera_id": self.camera_id,
+            "distortion_parameters": self.distortion_parameters,
+            "height": self.height,
+            "model": self.model,
+            "params": list(self.params),
+            "pinhole_intrinsics_lossless": self.pinhole_intrinsics_lossless,
+            "width": self.width,
+        }
+
+
+def parse_colmap_cameras_txt(text: str) -> dict[int, ColmapCamera]:
+    """Parse common COLMAP camera models without inventing a field of view.
+
+    ``CameraIntrinsics`` can represent the pinhole fields only.  Any distortion
+    coefficients remain attached to :class:`ColmapCamera` for machine-auditable
+    evidence in the registration result.
+    """
+    cameras: dict[int, ColmapCamera] = {}
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 5:
+            raise ValueError(f"cameras.txt 第 {line_number} 行格式无效: {raw_line}")
+        camera_id = int(parts[0])
+        model = parts[1].upper()
+        if model not in _COLMAP_CAMERA_PARAM_NAMES:
+            raise ValueError(f"不支持的 COLMAP camera model: {model}")
+        width, height = int(parts[2]), int(parts[3])
+        params = tuple(float(value) for value in parts[4:])
+        param_names = _COLMAP_CAMERA_PARAM_NAMES[model]
+        if len(params) != len(param_names):
+            raise ValueError(
+                f"COLMAP {model} 需要 {len(param_names)} 个参数, 实际 {len(params)}"
+            )
+        if not np.all(np.isfinite(params)):
+            raise ValueError(f"COLMAP CAMERA_ID={camera_id} 参数必须有限")
+        if camera_id in cameras:
+            raise ValueError(f"cameras.txt CAMERA_ID={camera_id} 重复")
+
+        values = dict(zip(param_names, params, strict=True))
+        fx = values.get("fx", values.get("f"))
+        fy = values.get("fy", values.get("f"))
+        intrinsics = CameraIntrinsics(
+            width=width,
+            height=height,
+            fx=fx,
+            fy=fy,
+            cx=values["cx"],
+            cy=values["cy"],
+        )
+        cameras[camera_id] = ColmapCamera(
+            camera_id=camera_id,
+            model=model,
+            width=width,
+            height=height,
+            params=params,
+            intrinsics=intrinsics,
+            distortion_parameters={
+                name: values[name]
+                for name in param_names
+                if name not in {"f", "fx", "fy", "cx", "cy"}
+            },
+        )
+    return cameras
+
+
 # ============ 工具 ============
-def _rotmat_to_quat_wxyz(R: np.ndarray) -> list[float]:
+def _rotmat_to_quat_wxyz(rotation: np.ndarray) -> list[float]:
     """旋转矩阵 → 单位四元数 wxyz (Shepperd 法, 数值稳定)"""
-    tr = np.trace(R)
+    tr = np.trace(rotation)
     if tr > 0:
         s = np.sqrt(tr + 1.0) * 2
         w = 0.25 * s
-        x = (R[2, 1] - R[1, 2]) / s
-        y = (R[0, 2] - R[2, 0]) / s
-        z = (R[1, 0] - R[0, 1]) / s
-    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-        s = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
-        w = (R[2, 1] - R[1, 2]) / s
+        x = (rotation[2, 1] - rotation[1, 2]) / s
+        y = (rotation[0, 2] - rotation[2, 0]) / s
+        z = (rotation[1, 0] - rotation[0, 1]) / s
+    elif rotation[0, 0] > rotation[1, 1] and rotation[0, 0] > rotation[2, 2]:
+        s = np.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]) * 2
+        w = (rotation[2, 1] - rotation[1, 2]) / s
         x = 0.25 * s
-        y = (R[0, 1] + R[1, 0]) / s
-        z = (R[0, 2] + R[2, 0]) / s
-    elif R[1, 1] > R[2, 2]:
-        s = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
-        w = (R[0, 2] - R[2, 0]) / s
-        x = (R[0, 1] + R[1, 0]) / s
+        y = (rotation[0, 1] + rotation[1, 0]) / s
+        z = (rotation[0, 2] + rotation[2, 0]) / s
+    elif rotation[1, 1] > rotation[2, 2]:
+        s = np.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]) * 2
+        w = (rotation[0, 2] - rotation[2, 0]) / s
+        x = (rotation[0, 1] + rotation[1, 0]) / s
         y = 0.25 * s
-        z = (R[1, 2] + R[2, 1]) / s
+        z = (rotation[1, 2] + rotation[2, 1]) / s
     else:
-        s = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
-        w = (R[1, 0] - R[0, 1]) / s
-        x = (R[0, 2] + R[2, 0]) / s
-        y = (R[1, 2] + R[2, 1]) / s
+        s = np.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]) * 2
+        w = (rotation[1, 0] - rotation[0, 1]) / s
+        x = (rotation[0, 2] + rotation[2, 0]) / s
+        y = (rotation[1, 2] + rotation[2, 1]) / s
         z = 0.25 * s
     q = np.array([w, x, y, z])
     return (q / np.linalg.norm(q)).tolist()
@@ -192,7 +297,7 @@ def _session_seed(session: CaptureSession) -> int:
 
 
 def _session_anchor_xy(sessions: list[CaptureSession]) -> dict[str, np.ndarray]:
-    """确定各会话锚点的世界坐标: GPS → ENU, 无 GPS → 确定性网格"""
+    """确定 mock frame 中的会话锚点: GPS → ENU, 无 GPS → 确定性网格。"""
     origin = next((s.geo_anchor for s in sessions if s.geo_anchor), None)
     anchors: dict[str, np.ndarray] = {}
     grid_i = 0
@@ -209,7 +314,7 @@ def _session_anchor_xy(sessions: list[CaptureSession]) -> dict[str, np.ndarray]:
 
 def mock_register(photos_dir: str | Path,
                   sessions: list[CaptureSession] | None = None) -> RegistrationResult:
-    """确定性 mock 配准: 每个会话绕锚点环拍, 输出统一世界坐标系位姿
+    """确定性 mock 配准: 每个会话绕锚点环拍，输出 synthetic metric 位姿。
 
     同一输入必然产生同一输出 (种子取自会话内容 hash), 保证可复现。
     """
@@ -239,34 +344,77 @@ def mock_register(photos_dir: str | Path,
             eye = center + np.array([radius * np.cos(angle),
                                      radius * np.sin(angle), height])
             look_target = center + np.array([0.0, 0.0, 2.0])
-            R = _look_at_c2w(eye, look_target)
+            rotation = _look_at_c2w(eye, look_target)
 
             w, h = _image_size(photos_dir / img)
             poses.append(CameraPose(
                 image=img,
                 session_id=sess.session_id,
-                quat_wxyz=_rotmat_to_quat_wxyz(R),
+                quat_wxyz=_rotmat_to_quat_wxyz(rotation),
                 t_xyz=eye.tolist(),
                 intrinsics=CameraIntrinsics.from_fov(w, h, 60.0),
             ))
 
+    if origin is None:
+        pose_frame = CoordinateFrame(
+            frame_id="mock-local",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.SYNTHETIC,
+            evidence=[
+                "configured-distances-in-meters",
+                "deterministic-synthetic-session-layout",
+            ],
+        )
+    else:
+        pose_frame = CoordinateFrame(
+            frame_id="mock-enu",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.ENU_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.ALIGNED,
+            provenance=FrameProvenance.SYNTHETIC,
+            evidence=[
+                "gps-origin",
+                "configured-distances-in-meters",
+                "deterministic-synthetic-camera-layout",
+            ],
+        )
+
     return RegistrationResult(
+        schema_version=2,
         engine="mock",
+        pose_frame=pose_frame,
+        alignment_status=AlignmentStatus.SYNTHETIC,
         geo_origin=origin,
         sessions=sessions,
         poses=poses,
-        session_to_world={s.session_id: Sim3() for s in sessions},
     )
 
 
 # ============ COLMAP 联合配准 ============
-def parse_colmap_images_txt(text: str) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """解析 COLMAP images.txt → {图像名: (quat_wxyz_c2w, t_xyz_c2w)}
+@dataclass(frozen=True)
+class ColmapImageRecord:
+    """A registered image with its source camera identity preserved."""
+
+    image_id: int
+    camera_id: int
+    name: str
+    quat_wxyz_c2w: np.ndarray
+    t_xyz_c2w: np.ndarray
+
+
+def parse_colmap_image_records(text: str) -> dict[str, ColmapImageRecord]:
+    """Parse ``images.txt`` while retaining each record's ``CAMERA_ID``.
 
     COLMAP 存 world-to-camera (qvec, tvec); 转 c2w: R_c2w = R^T, t_c2w = -R^T t
     """
-    out = {}
-    lines = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+    out: dict[str, ColmapImageRecord] = {}
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
     # images.txt 每图两行: 位姿行 + 2D 点行 (点行可为空, 不能按空行过滤)
     pose_lines = []
     expect_pose = True
@@ -281,23 +429,46 @@ def parse_colmap_images_txt(text: str) -> dict[str, tuple[np.ndarray, np.ndarray
     for line in pose_lines:
         parts = line.split()
         if len(parts) < 10:
-            continue
+            raise ValueError(f"images.txt 位姿行格式无效: {line}")
+        image_id = int(parts[0])
         qw, qx, qy, qz = map(float, parts[1:5])
         tx, ty, tz = map(float, parts[5:8])
-        name = parts[9]
+        camera_id = int(parts[8])
+        name = " ".join(parts[9:])
         # w2c 四元数 → 旋转矩阵
         q = np.array([qw, qx, qy, qz])
-        q = q / np.linalg.norm(q)
+        norm = np.linalg.norm(q)
+        if not np.all(np.isfinite(q)) or not np.isfinite(norm) or norm < 1e-8:
+            raise ValueError(f"images.txt IMAGE_ID={image_id} 四元数无效")
+        q = q / norm
         w, x, y, z = q
-        R_w2c = np.array([
+        rotation_w2c = np.array([
             [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
             [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
             [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
         ])
-        R_c2w = R_w2c.T
-        t_c2w = -R_c2w @ np.array([tx, ty, tz])
-        out[name] = (np.array(_rotmat_to_quat_wxyz(R_c2w)), t_c2w)
+        rotation_c2w = rotation_w2c.T
+        t_c2w = -rotation_c2w @ np.array([tx, ty, tz])
+        if not np.all(np.isfinite(t_c2w)):
+            raise ValueError(f"images.txt IMAGE_ID={image_id} 平移无效")
+        if name in out:
+            raise ValueError(f"images.txt 图像名重复: {name}")
+        out[name] = ColmapImageRecord(
+            image_id=image_id,
+            camera_id=camera_id,
+            name=name,
+            quat_wxyz_c2w=np.array(_rotmat_to_quat_wxyz(rotation_c2w)),
+            t_xyz_c2w=t_c2w,
+        )
     return out
+
+
+def parse_colmap_images_txt(text: str) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Compatibility view of poses parsed from COLMAP ``images.txt``."""
+    return {
+        name: (record.quat_wxyz_c2w, record.t_xyz_c2w)
+        for name, record in parse_colmap_image_records(text).items()
+    }
 
 
 def colmap_available() -> bool:
@@ -306,10 +477,10 @@ def colmap_available() -> bool:
 
 def colmap_register(photos_dir: str | Path, workspace: str | Path,
                     sessions: list[CaptureSession] | None = None) -> RegistrationResult:
-    """COLMAP 联合 SfM: 所有照片 + 视频帧进同一个模型 → 坐标系天然一致
+    """COLMAP 联合 SfM: 所有照片 + 视频帧进入同一个 SfM-local frame。
 
-    要求系统安装 colmap。SfM 尺度不确定, 结果坐标为 SfM 系;
-    若有 GPS 锚点可后续用 Sim3 对齐, 否则按场景归一化。
+    要求系统安装 colmap。SfM 尺度与地理方向均不确定；GPS 锚点仅作为后续
+    显式 Sim3 对齐的候选证据，本函数不会据此猜测米制世界 frame。
     """
     photos_dir = Path(photos_dir)
     workspace = Path(workspace)
@@ -344,29 +515,103 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
     run(["model_converter", "--input_path", str(sparse / "0"),
          "--output_path", str(sparse / "0"), "--output_type", "TXT"])
 
-    images_txt = (sparse / "0" / "images.txt").read_text()
-    name_to_pose = parse_colmap_images_txt(images_txt)
+    model_dir = sparse / "0"
+    images_txt = (model_dir / "images.txt").read_text(encoding="utf-8")
+    cameras_txt = (model_dir / "cameras.txt").read_text(encoding="utf-8")
+    image_records = parse_colmap_image_records(images_txt)
+    cameras = parse_colmap_cameras_txt(cameras_txt)
 
     img_to_session = {img: s.session_id for s in sessions for img in s.images}
     poses = []
-    for name, (quat, t) in sorted(name_to_pose.items()):
+    used_camera_ids: set[int] = set()
+    for name, record in sorted(image_records.items()):
         if name not in img_to_session:
             continue
-        w, h = _image_size(photos_dir / name)
+        camera = cameras.get(record.camera_id)
+        if camera is None:
+            raise ValueError(
+                f"COLMAP 图像 {name} 引用 CAMERA_ID={record.camera_id}, "
+                "但 cameras.txt 中不存在该相机"
+            )
+        used_camera_ids.add(record.camera_id)
         poses.append(CameraPose(
             image=name, session_id=img_to_session[name],
-            quat_wxyz=quat.tolist(), t_xyz=t.tolist(),
-            intrinsics=CameraIntrinsics.from_fov(w, h, 60.0),
+            quat_wxyz=record.quat_wxyz_c2w.tolist(),
+            t_xyz=record.t_xyz_c2w.tolist(),
+            intrinsics=camera.intrinsics.model_copy(deep=True),
+            camera_id=camera.camera_id,
+            camera_model=camera.model,
+            camera_params=camera.params,
         ))
     logger.info(f"COLMAP 配准: {len(poses)}/{n_images} 张图注册成功 (联合模型, 坐标系一致)")
 
+    registered_images = {pose.image for pose in poses}
+    all_input_images = sorted(img_to_session)
+    coverage = {
+        "complete": len(registered_images) == n_images,
+        "registered_images": len(registered_images),
+        "sessions": {
+            session.session_id: {
+                "registered": sum(image in registered_images for image in session.images),
+                "total": len(session.images),
+                "unregistered_images": sorted(
+                    image for image in session.images if image not in registered_images
+                ),
+            }
+            for session in sessions
+        },
+        "total_input_images": n_images,
+        "unregistered_images": [
+            image for image in all_input_images if image not in registered_images
+        ],
+    }
+    if not coverage["complete"]:
+        logger.warning(
+            f"COLMAP 仅完成部分配准: {len(registered_images)}/{n_images}; "
+            "完整覆盖证据已写入 registration.json"
+        )
+
     origin = next((s.geo_anchor for s in sessions if s.geo_anchor), None)
+    camera_evidence = [
+        "colmap.camera.v1="
+        + json.dumps(
+            cameras[camera_id].evidence_payload(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for camera_id in sorted(used_camera_ids)
+    ]
+    coverage_evidence = "colmap.registration.coverage.v1=" + json.dumps(
+        coverage,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    pose_frame = CoordinateFrame(
+        frame_id="sfm-local",
+        handedness=Handedness.RIGHT,
+        axes=AxisConvention.SFM_ARBITRARY,
+        units=CoordinateUnits.ARBITRARY,
+        metric_status=MetricStatus.ARBITRARY,
+        geo_aligned=GeoAlignment.UNALIGNED,
+        provenance=FrameProvenance.SFM,
+        evidence=[
+            "colmap-joint-model",
+            "colmap-intrinsics-source:cameras.txt",
+            "no-sim3-alignment-evidence",
+            coverage_evidence,
+            *camera_evidence,
+        ],
+    )
     return RegistrationResult(
+        schema_version=2,
         engine="colmap",
+        pose_frame=pose_frame,
+        alignment_status=AlignmentStatus.UNALIGNED,
         geo_origin=origin,
         sessions=sessions,
         poses=poses,
-        session_to_world={s.session_id: Sim3() for s in sessions},
     )
 
 

@@ -1,8 +1,11 @@
 """统一坐标系配准: 会话划分 / mock 确定性 / 坐标一致性 / COLMAP 解析"""
 import json
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+import pipeline.registration as registration_module
 from pipeline.recon_schema import GeoAnchor, RegistrationResult, gps_to_enu
 from pipeline.registration import (
     group_sessions,
@@ -39,7 +42,7 @@ class TestMockRegistration:
     def test_deterministic(self, photos_dir):
         r1 = mock_register(photos_dir)
         r2 = mock_register(photos_dir)
-        for p1, p2 in zip(r1.poses, r2.poses):
+        for p1, p2 in zip(r1.poses, r2.poses, strict=True):
             assert p1.image == p2.image
             assert np.allclose(p1.t_xyz, p2.t_xyz)
             assert np.allclose(p1.quat_wxyz, p2.quat_wxyz)
@@ -66,8 +69,8 @@ class TestMockRegistration:
         """OpenCV 约定下 +Z 是视线方向, 应大致指向会话锚点"""
         reg = mock_register(photos_dir)
         for p in reg.poses[:4]:
-            R = p.rotation_matrix()
-            forward = R[:, 2]  # c2w 第三列 = 世界系中的视线方向
+            rotation = p.rotation_matrix()
+            forward = rotation[:, 2]  # c2w 第三列 = 世界系中的视线方向
             eye = np.array(p.t_xyz)
             sess_poses = np.array([q.t_xyz for q in reg.poses
                                    if q.session_id == p.session_id])
@@ -96,6 +99,51 @@ def _quat_to_mat(q):
 
 
 class TestColmapParser:
+    def test_common_camera_models_preserve_calibrated_intrinsics(self):
+        cameras = registration_module.parse_colmap_cameras_txt("\n".join([
+            "# CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]",
+            "1 SIMPLE_PINHOLE 1000 800 700 500 400",
+            "2 PINHOLE 1000 800 710 720 501 399",
+            "3 SIMPLE_RADIAL 640 480 500 320 240 -0.01",
+            "4 RADIAL 640 480 501 321 241 -0.01 0.001",
+            "5 OPENCV 1920 1080 1500 1490 960 540 -0.1 0.01 0.001 -0.002",
+        ]))
+
+        assert cameras[1].intrinsics.model_dump() == {
+            "width": 1000, "height": 800,
+            "fx": 700.0, "fy": 700.0, "cx": 500.0, "cy": 400.0,
+        }
+        assert cameras[2].intrinsics.model_dump() == {
+            "width": 1000, "height": 800,
+            "fx": 710.0, "fy": 720.0, "cx": 501.0, "cy": 399.0,
+        }
+        assert cameras[3].distortion_parameters == {"k": -0.01}
+        assert cameras[4].distortion_parameters == {"k1": -0.01, "k2": 0.001}
+        assert cameras[5].distortion_parameters == {
+            "k1": -0.1, "k2": 0.01, "p1": 0.001, "p2": -0.002,
+        }
+
+    def test_images_parser_retains_camera_id(self):
+        txt = "\n".join([
+            "1 1 0 0 0 1 2 3 7 folder/image one.jpg",
+            "",
+        ])
+        records = registration_module.parse_colmap_image_records(txt)
+        assert records["folder/image one.jpg"].camera_id == 7
+        assert np.allclose(records["folder/image one.jpg"].t_xyz_c2w, [-1, -2, -3])
+
+    def test_unknown_camera_model_fails_closed(self):
+        with pytest.raises(ValueError, match="不支持的 COLMAP camera model.*MYSTERY"):
+            registration_module.parse_colmap_cameras_txt(
+                "1 MYSTERY 640 480 500 320 240"
+            )
+
+    def test_malformed_camera_parameter_count_fails_closed(self):
+        with pytest.raises(ValueError, match="OPENCV.*需要 8 个参数.*实际 7"):
+            registration_module.parse_colmap_cameras_txt(
+                "1 OPENCV 640 480 500 500 320 240 0.1 0.01 0.001"
+            )
+
     def test_w2c_to_c2w_conversion(self):
         # 恒等旋转 + tvec (1,2,3): c2w 平移应为 (-1,-2,-3)
         txt = "\n".join([
@@ -118,9 +166,144 @@ class TestColmapParser:
         txt = f"1 {qw} 0 0 {qz} 0 0 0 1 img.jpg\n\n"
         out = parse_colmap_images_txt(txt)
         quat, _ = out["img.jpg"]
-        R_c2w = _quat_to_mat(quat)
-        v = R_c2w @ np.array([1.0, 0, 0])
+        rotation_c2w = _quat_to_mat(quat)
+        v = rotation_c2w @ np.array([1.0, 0, 0])
         assert np.allclose(v, [0, -1, 0], atol=1e-9)
+
+
+def _write_colmap_model(workspace, cameras: str, images: str):
+    model = workspace / "sparse" / "0"
+    model.mkdir(parents=True)
+    (model / "cameras.txt").write_text(cameras, encoding="utf-8")
+    (model / "images.txt").write_text(images, encoding="utf-8")
+
+
+def _stub_colmap_commands(monkeypatch):
+    monkeypatch.setattr(
+        registration_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=""),
+    )
+
+
+class TestColmapRegistrationEvidence:
+    def test_multi_camera_intrinsics_and_partial_coverage_are_auditable(
+        self, photos_dir, tmp_path, monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        _write_colmap_model(
+            workspace,
+            cameras="\n".join([
+                "1 PINHOLE 1000 800 710 720 501 399",
+                "2 SIMPLE_RADIAL 640 480 500 320 240 -0.01",
+            ]),
+            images="\n".join([
+                "1 1 0 0 0 0 0 0 1 IMG_000.jpg",
+                "",
+                "2 1 0 0 0 1 2 3 2 vid_A/vid_A_frame_000000.jpg",
+                "",
+            ]),
+        )
+        _stub_colmap_commands(monkeypatch)
+
+        result = registration_module.colmap_register(photos_dir, workspace)
+        poses = {pose.image: pose for pose in result.poses}
+        assert poses["IMG_000.jpg"].intrinsics.model_dump() == {
+            "width": 1000, "height": 800,
+            "fx": 710.0, "fy": 720.0, "cx": 501.0, "cy": 399.0,
+        }
+        assert poses["vid_A/vid_A_frame_000000.jpg"].intrinsics.model_dump() == {
+            "width": 640, "height": 480,
+            "fx": 500.0, "fy": 500.0, "cx": 320.0, "cy": 240.0,
+        }
+
+        coverage_entry = next(
+            item for item in result.pose_frame.evidence
+            if item.startswith("colmap.registration.coverage.v1=")
+        )
+        coverage = json.loads(coverage_entry.split("=", 1)[1])
+        assert coverage["registered_images"] == 2
+        assert coverage["total_input_images"] == 12
+        assert coverage["complete"] is False
+        assert coverage["sessions"]["photos_batch_0"]["registered"] == 1
+        assert coverage["sessions"]["photos_batch_0"]["total"] == 4
+        assert coverage["sessions"]["video_vid_A"]["registered"] == 1
+        assert coverage["sessions"]["video_vid_A"]["total"] == 8
+        assert "IMG_001.jpg" in coverage["unregistered_images"]
+
+        camera_entries = [
+            json.loads(item.split("=", 1)[1])
+            for item in result.pose_frame.evidence
+            if item.startswith("colmap.camera.v1=")
+        ]
+        assert camera_entries == [
+            {
+                "camera_id": 1,
+                "distortion_parameters": {},
+                "height": 800,
+                "model": "PINHOLE",
+                "params": [710.0, 720.0, 501.0, 399.0],
+                "pinhole_intrinsics_lossless": True,
+                "width": 1000,
+            },
+            {
+                "camera_id": 2,
+                "distortion_parameters": {"k": -0.01},
+                "height": 480,
+                "model": "SIMPLE_RADIAL",
+                "params": [500.0, 320.0, 240.0, -0.01],
+                "pinhole_intrinsics_lossless": False,
+                "width": 640,
+            },
+        ]
+
+    def test_registered_image_with_missing_camera_fails_closed(
+        self, photos_dir, tmp_path, monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        _write_colmap_model(
+            workspace,
+            cameras="1 PINHOLE 1000 800 710 720 501 399\n",
+            images="1 1 0 0 0 0 0 0 99 IMG_000.jpg\n\n",
+        )
+        _stub_colmap_commands(monkeypatch)
+
+        with pytest.raises(ValueError, match="IMG_000.jpg.*CAMERA_ID=99.*cameras.txt"):
+            registration_module.colmap_register(photos_dir, workspace)
+
+    def test_per_image_camera_calibration_survives_json_roundtrip(
+        self, photos_dir, tmp_path, monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        _write_colmap_model(
+            workspace,
+            cameras="\n".join([
+                "1 SIMPLE_RADIAL 640 480 500 320 240 -0.1",
+                "2 SIMPLE_RADIAL 640 480 500 320 240 0.2",
+            ]),
+            images="\n".join([
+                "1 1 0 0 0 0 0 0 1 IMG_000.jpg",
+                "",
+                "2 1 0 0 0 1 2 3 2 vid_A/vid_A_frame_000000.jpg",
+                "",
+            ]),
+        )
+        _stub_colmap_commands(monkeypatch)
+
+        result = registration_module.colmap_register(photos_dir, workspace)
+        restored = RegistrationResult.model_validate_json(result.model_dump_json())
+        poses = {pose.image: pose for pose in restored.poses}
+
+        assert poses["IMG_000.jpg"].camera_id == 1
+        assert poses["IMG_000.jpg"].camera_model == "SIMPLE_RADIAL"
+        assert poses["IMG_000.jpg"].camera_params == (
+            500.0, 320.0, 240.0, -0.1,
+        )
+        assert poses["vid_A/vid_A_frame_000000.jpg"].camera_id == 2
+        assert poses["vid_A/vid_A_frame_000000.jpg"].camera_model == "SIMPLE_RADIAL"
+        assert poses["vid_A/vid_A_frame_000000.jpg"].camera_params == (
+            500.0, 320.0, 240.0, 0.2,
+        )
 
 
 class TestGpsEnu:

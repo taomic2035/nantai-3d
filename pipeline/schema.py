@@ -81,7 +81,6 @@ class ChunkLayout(BaseModel):
 
 if __name__ == "__main__":
     # 自验证
-    import json
 
     sample = {
         "chunk_id": {"x": 0, "y": 0},
@@ -101,11 +100,18 @@ if __name__ == "__main__":
             {"id": "b1", "asset_id": "house_wood_01", "pos": [50, 60], "rot_z": 180.0, "scale": 1.0}
         ],
         "vegetation": [
-            {"id": "v1", "type": "tree_cluster", "center": [120, 30], "radius": 15.0, "density": 0.6, "asset_ids": ["tree_01"]}
+            {
+                "id": "v1",
+                "type": "tree_cluster",
+                "center": [120, 30],
+                "radius": 15.0,
+                "density": 0.6,
+                "asset_ids": ["tree_01"],
+            }
         ],
     }
     layout = ChunkLayout(**sample)
-    print(f"[OK] schema 验证通过")
+    print("[OK] schema 验证通过")
     print(f"  chunk: {layout.chunk_id}")
     print(f"  建筑: {len(layout.buildings)} 栋")
     print(f"  道路: {len(layout.roads)} 条")

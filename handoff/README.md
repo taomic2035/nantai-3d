@@ -1,5 +1,8 @@
 # handoff/ — Claude ↔ GPT 协作协议
 
+> 2026-07-14：Opus 暂停期间由 Codex 在隔离分支临时接管。当前状态、边界与恢复入口见
+> [`TAKEOVER-2026-07-14.md`](TAKEOVER-2026-07-14.md)。原主工作区保持为 Opus 现场。
+
 本目录承载两个 AI 之间的**交办 (handoff) / 回执 (feedback)** 双向协作闭环。
 
 ## 角色分工
@@ -45,4 +48,5 @@ Claude 运行自动验收:
 
 | Handoff | 主题 | 状态 |
 |---|---|---|
-| [HANDOFF-001](HANDOFF-001-mock-assets.md) | 村庄素材库模拟生成 (11 个 3DGS 素材) | ⚠️ 验收/注册 11/11；building/prop 路径可用；**可移植分发已修 (P0#8: 生成器迁入 `pipeline/mock_assets.py` + sha256, `make assets` 重建)**；vegetation registry 实例化待修（见 FEEDBACK-ARCH-P0-002.md） |
+| [HANDOFF-001](HANDOFF-001-mock-assets.md) | 村庄素材库模拟生成 (11 个 3DGS 素材) | ✅ schema v2 验收/注册/默认 world 消费均 11/11；fresh-checkout 可由 generator 恢复 |
+| [TAKEOVER-001](FEEDBACK-TAKEOVER-001.md) | 坐标、混合重建、3DGS、素材、Viewer 与 Studio 接管 | ✅ 本地门禁通过，等待 Opus review；外部 GPU/实测数据边界已列明 |

@@ -12,11 +12,9 @@ corpus/
 recon/
 verification/output/
 
-# 素材库可移植性 (见 pipeline/mock_assets.py):
-#   registry.json 入库 (小、可审阅, 含 sha256), ply 由全局 *.ply 规则忽略。
-#   fresh clone 用 `make assets` 从 tracked 确定性生成器还原 assets/*.ply 并自校验。
-# GPT 交付目录整体不入库 (生成逻辑已迁入 pipeline/mock_assets.py 作为真相源)。
-handoff/deliverables/
+# 素材注册表与可复现交付元数据入库；生成的 PLY 由下方全局 *.ply 忽略。
+# handoff/deliverables 中保留 generator / manifest / contact sheet，fresh clone 可 make assets。
+assets/.registry.lock
 
 # ============ Python ============
 __pycache__/

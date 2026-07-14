@@ -2,11 +2,12 @@
 验证项: L4 3DGS → 3DTiles 转换可行性
 目标: 证明本机(CPU, 无NVIDIA GPU)能完成转换, 为 Web 流式加载奠基
 """
-import numpy as np
-from plyfile import PlyData, PlyElement
-from pathlib import Path
 import json
+from pathlib import Path
+
+import numpy as np
 import trimesh
+from plyfile import PlyData, PlyElement
 
 OUT_DIR = Path(__file__).parent / "output" / "3dtiles_test"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,7 +50,8 @@ def create_synthetic_gaussian_ply(path: Path, n_points: int = 50000):
 
     el = PlyElement.describe(data, 'vertex')
     PlyData([el], byte_order='<').write(str(path))
-    print(f"[OK] 合成 3DGS ply 已生成: {path} ({n_points} 个高斯, {path.stat().st_size/1024:.1f} KB)")
+    size_kib = path.stat().st_size / 1024
+    print(f"[OK] 合成 3DGS ply 已生成: {path} ({n_points} 个高斯, {size_kib:.1f} KB)")
 
 
 def test_ply_loading(path: Path):
@@ -74,6 +76,7 @@ def test_trimesh_operations(points):
     for lod, ratio in enumerate([1.0, 0.5, 0.25]):
         n = int(len(pts) * ratio)
         sampled = cloud.vertices[np.random.choice(len(pts), n, replace=False)]
+        assert len(sampled) == n
         print(f"     LOD{lod}: {n} 点 ({ratio*100:.0f}%)")
     return bbox
 
@@ -81,10 +84,8 @@ def test_trimesh_operations(points):
 def test_py3dtiles_import():
     """验证 py3dtiles 库可用"""
     try:
-        from py3dtiles.tileset.tileset import TileSet
-        from py3dtiles.tileset.tile import Tile
-        from py3dtiles.tileset.bounding_volume_box import BoundingVolumeBox
         import py3dtiles
+
         print("[OK] py3dtiles 导入成功")
         print(f"     版本: {py3dtiles.__version__}")
         return True
@@ -95,9 +96,9 @@ def test_py3dtiles_import():
 
 def test_tileset_generation(bbox, out_path: Path):
     """生成一个最小 3DTiles tileset.json (验证格式)"""
-    from py3dtiles.tileset.tileset import TileSet
-    from py3dtiles.tileset.tile import Tile
     from py3dtiles.tileset.bounding_volume_box import BoundingVolumeBox
+    from py3dtiles.tileset.tile import Tile
+    from py3dtiles.tileset.tileset import TileSet
 
     # 构造包围盒 (xyz 中心 + 半尺寸)
     center = (bbox[0] + bbox[1]) / 2

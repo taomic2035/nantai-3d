@@ -6,12 +6,22 @@ import pytest
 
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.recon_schema import (
+    AlignmentStatus,
+    AxisConvention,
     CameraIntrinsics,
     CameraPose,
     CaptureSession,
+    CoordinateFrame,
+    CoordinateUnits,
+    FrameProvenance,
+    FrameTransform,
+    GeoAlignment,
     GeoAnchor,
+    Handedness,
+    MetricStatus,
     RegistrationResult,
     Sim3,
+    SplatInput,
 )
 from pipeline.registration import _session_anchor_xy, group_sessions, mock_register
 
@@ -49,7 +59,7 @@ class TestGpsAnchoring:
 
 
 class TestNonIdentitySim3Import:
-    def test_import_applies_session_to_world(self, tmp_path):
+    def test_import_applies_explicit_frame_transform(self, tmp_path):
         from pipeline.reconstruct import import_session_splats
 
         rng = np.random.default_rng(4)
@@ -65,10 +75,39 @@ class TestNonIdentitySim3Import:
                           quat_wxyz=[1, 0, 0, 0], t_xyz=[0, 0, 10],
                           intrinsics=CameraIntrinsics.from_fov(640, 480))
         sim3 = Sim3(scale=2.0, t_xyz=[100, -50, 0])
-        reg = RegistrationResult(engine="mock", sessions=[sess], poses=[pose],
-                                 session_to_world={"s0": sim3})
+        target = CoordinateFrame(
+            frame_id="mock-local",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.SYNTHETIC,
+            evidence=["test synthetic metric frame"],
+        )
+        reg = RegistrationResult(
+            schema_version=2,
+            engine="mock",
+            pose_frame=target,
+            alignment_status=AlignmentStatus.SYNTHETIC,
+            sessions=[sess],
+            poses=[pose],
+        )
+        transform = FrameTransform(
+            source_frame="session-s0-local",
+            target_frame=target.frame_id,
+            sim3=sim3,
+            method="external-sim3",
+            evidence=["test control points"],
+        )
+        splat = SplatInput(
+            session_id="s0",
+            path=str(ply),
+            frame_id="session-s0-local",
+            transform=transform,
+        )
 
-        scenes = import_session_splats({"s0": str(ply)}, reg)
+        scenes = import_session_splats([splat], reg)
         assert len(scenes) == 1
         assert np.allclose(scenes[0].xyz, local_xyz * 2 + [100, -50, 0], atol=1e-3)
 

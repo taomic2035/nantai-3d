@@ -4,7 +4,7 @@
 """
 import numpy as np
 
-from pipeline.assets import AssetRegistry, sha256_file
+from pipeline.assets import sha256_file
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.mock_assets import SPECS, build_scene, seed_registry
 

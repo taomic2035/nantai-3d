@@ -1,4 +1,5 @@
 """素材注册表 (可替换) + GPT 交付物验收闭环"""
+import hashlib
 import json
 
 import numpy as np
@@ -7,6 +8,10 @@ import pytest
 from pipeline.assets import AssetRegistry
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.validate_handoff import validate
+
+
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 @pytest.fixture
@@ -38,7 +43,7 @@ class TestAssetRegistry:
         reg.replace("h", asset_ply, origin="real")
         e = reg.doc.assets["h"]
         assert e.version == 2
-        assert e.history == ["h_v1.ply"]
+        assert [item.ply for item in e.history] == ["h_v1.ply"]
         assert e.origin == "real"
         # 持久化后重新加载仍是 v2
         reg2 = AssetRegistry(tmp_path / "assets")
@@ -167,8 +172,52 @@ class TestHandoffValidation:
     def test_register_after_pass(self, tmp_path):
         d = tmp_path / "deliv"
         _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}])
+        manifest_path = d / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["schema_version"] = 2
+        manifest["coordinate_system"] = {
+            "units": "meters",
+            "axes": "local-z-up",
+        }
+        manifest["generator"] = {"name": "test", "version": "1"}
+        manifest["items"][0]["sha256"] = _sha256(d / "a1.ply")
+        manifest_path.write_text(json.dumps(manifest))
         r = validate(d, feedback_dir=tmp_path / "fb",
                      do_register=True, assets_dir=tmp_path / "assets")
         assert r["registered"] == ["a1"]
         reg = AssetRegistry(tmp_path / "assets")
         assert reg.doc.assets["a1"].origin == "gpt-mock"
+
+    def test_v2_manifest_requires_sha_for_every_item(self, tmp_path):
+        d = tmp_path / "deliv"
+        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}])
+        manifest = json.loads((d / "manifest.json").read_text())
+        manifest["schema_version"] = 2
+        manifest["coordinate_system"] = {
+            "units": "meters",
+            "axes": "local-z-up",
+        }
+        manifest["generator"] = {"name": "test", "version": "1"}
+        (d / "manifest.json").write_text(json.dumps(manifest))
+
+        result = validate(d, feedback_dir=tmp_path / "fb")
+
+        assert not result["all_pass"]
+        assert result["fatal"] and "sha256" in result["fatal"]
+
+    def test_validation_preserves_manual_feedback_tail(self, tmp_path):
+        d = tmp_path / "deliv"
+        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}])
+        feedback_dir = tmp_path / "fb"
+        feedback_dir.mkdir()
+        feedback = feedback_dir / "FEEDBACK-HANDOFF-T.md"
+        feedback.write_text(
+            "# stale generated content\n\n## 人工备注\n\n- keep this handoff evidence\n"
+        )
+
+        validate(d, feedback_dir=feedback_dir)
+
+        refreshed = feedback.read_text()
+        assert "验收结果: ✅ 全部通过" in refreshed
+        assert refreshed.count("## 人工备注") == 1
+        assert "keep this handoff evidence" in refreshed

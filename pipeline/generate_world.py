@@ -23,11 +23,11 @@ import argparse
 import asyncio
 import time
 from pathlib import Path
+
 from loguru import logger
 
 from pipeline.mock_layout import MockLayoutGenerator
 from pipeline.render_chunk_to_ply import render_chunkset
-from pipeline.schema import ChunkLayout
 
 
 def generate_layouts_mock(size: int, seed: int, out_dir: Path) -> dict:
@@ -59,7 +59,7 @@ def generate_layouts_mock(size: int, seed: int, out_dir: Path) -> dict:
 async def generate_layouts_glm(size: int, seed: int, out_dir: Path) -> dict:
     """用 GLM-4.6 异步生成 N×N 个 layout"""
     from pipeline.glm_client import GLMLayoutGenerator
-    out_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
     gen = GLMLayoutGenerator()
 
     assets = [
@@ -113,7 +113,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print(f"Nantai 世界生成器")
+    print("Nantai 世界生成器")
     print(f"  size: {args.size}x{args.size} = {args.size * args.size} chunks")
     print(f"  seed: {args.seed}")
     print(f"  generator: {'GLM-4.6' if args.use_glm else 'Mock'}")
@@ -153,9 +153,9 @@ def main():
     else:
         print(f"\n总用时: {t1-t0:.2f}s")
 
-    print(f"\n下一步:")
-    print(f"  cd web && python -m http.server 8000")
-    print(f"  浏览器打开: http://127.0.0.1:8000/viewer/index.html")
+    print("\n下一步:")
+    print("  make serve")
+    print("  浏览器打开: http://127.0.0.1:8000/web/studio/")
 
 
 if __name__ == "__main__":

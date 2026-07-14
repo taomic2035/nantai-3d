@@ -25,17 +25,32 @@ handoff/deliverables/HANDOFF-001/
 
 ```json
 {
+  "schema_version": 2,
   "handoff_id": "HANDOFF-001",
+  "coordinate_system": {
+    "units": "meters",
+    "axes": "local-z-up"
+  },
+  "generator": {
+    "name": "your-generator-name",
+    "version": "1.0.0",
+    "script_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
   "items": [
     {
       "asset_id": "house_wood_01",
       "kind": "building",
       "ply": "house_wood_01.ply",
-      "footprint_m": [8.0, 6.0, 6.5]
+      "footprint_m": [8.0, 6.0, 6.5],
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     }
   ]
 }
 ```
+
+schema v2 只有在 manifest 明确声明 `meters / local-z-up`、每项带三维正数
+`footprint_m` 与实际 payload SHA-256 时才允许 `--register`。`asset_id` 仅允许
+小写字母、数字、下划线与连字符，且不可重复；schema v1 仅可验收，不可注册。
 
 ## 坐标与格式约定 (必须遵守)
 
@@ -86,7 +101,8 @@ handoff/deliverables/HANDOFF-001/
 python -m pipeline.validate_handoff handoff/deliverables/HANDOFF-001
 ```
 
-检查项: manifest schema / ply 可解析 / 数量区间 / 地面 z≈0 (±1m) /
+检查项: manifest schema / asset_id 与路径安全 / SHA-256 / 明确坐标约定 /
+所有数值有限、scale 为正、四元数有效 / ply 可解析 / 数量区间 / 地面 z≈0 (±1m) /
 实际尺寸与 footprint_m 偏差 ≤ ±50% / 颜色 std ≥ 0.01 / 尺寸中位数区间 /
 平均不透明度 ≥ 0.05。
 

@@ -11,9 +11,8 @@
 获取 key: https://open.bigmodel.cn/usercenter/apikeys
 新用户有免费额度 (GLM-4.6 约 2000万 tokens)
 """
-import os
 import json
-import sys
+import os
 from pathlib import Path
 
 # 加载 .env (可选)
@@ -25,6 +24,7 @@ except ImportError:
 
 # ---------- pydantic schema (强校验) ----------
 from pydantic import BaseModel, Field, ValidationError
+
 
 class Building(BaseModel):
     id: str
@@ -82,7 +82,10 @@ Schema:
   },
   "roads": [{"id":"r1","type":"main","width":4.0,"points":[[0,100],[200,105]]}],
   "buildings": [{"id":"b1","asset_id":"house_wood_01","pos":[50,60],"rot_z":180.0,"scale":1.0}],
-  "vegetation": [{"id":"v1","type":"tree_cluster","center":[120,30],"radius":15.0,"density":0.6,"asset_ids":["tree_01"]}],
+  "vegetation": [{
+    "id":"v1", "type":"tree_cluster", "center":[120,30],
+    "radius":15.0, "density":0.6, "asset_ids":["tree_01"]
+  }],
   "water": [],
   "props": []
 }"""
@@ -108,9 +111,18 @@ def test_schema_validation():
             "elevation_range": [50, 180],
             "material_zones": [{"type": "grass", "polygon": [[0,0],[200,0]]}]
         },
-        "roads": [{"id":"r1","type":"main","width":4.0,"points":[[0,100],[200,105]]}],
-        "buildings": [{"id":"b1","asset_id":"house_wood_01","pos":[50,60],"rot_z":180.0,"scale":1.0}],
-        "vegetation": [{"id":"v1","type":"tree_cluster","center":[120,30],"radius":15.0,"density":0.6,"asset_ids":["tree_01"]}]
+        "roads": [
+            {"id": "r1", "type": "main", "width": 4.0,
+             "points": [[0, 100], [200, 105]]},
+        ],
+        "buildings": [
+            {"id": "b1", "asset_id": "house_wood_01", "pos": [50, 60],
+             "rot_z": 180.0, "scale": 1.0},
+        ],
+        "vegetation": [
+            {"id": "v1", "type": "tree_cluster", "center": [120, 30],
+             "radius": 15.0, "density": 0.6, "asset_ids": ["tree_01"]},
+        ],
     }
     layout = ChunkLayout(**sample)
     print(f"[OK] schema 验证通过, 建筑数: {len(layout.buildings)}")
@@ -148,7 +160,12 @@ def test_glm_call():
             model="glm-4.6",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": USER_PROMPT_TEMPLATE.format(assets=json.dumps(assets, ensure_ascii=False))}
+                {
+                    "role": "user",
+                    "content": USER_PROMPT_TEMPLATE.format(
+                        assets=json.dumps(assets, ensure_ascii=False)
+                    ),
+                },
             ],
             response_format={"type": "json_object"},
             temperature=0.7,
@@ -157,15 +174,19 @@ def test_glm_call():
         content = response.choices[0].message.content
         print(f"[OK] API 响应长度: {len(content)} 字符")
         print(f"     模型: {response.model}")
-        print(f"     tokens: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}")
+        print(
+            "     tokens: "
+            f"prompt={response.usage.prompt_tokens}, "
+            f"completion={response.usage.completion_tokens}"
+        )
 
         # JSON 解析
         layout_data = json.loads(content)
-        print(f"[OK] JSON 解析成功")
+        print("[OK] JSON 解析成功")
 
         # pydantic 校验
         layout = ChunkLayout(**layout_data)
-        print(f"[OK] pydantic schema 校验通过")
+        print("[OK] pydantic schema 校验通过")
         print(f"     建筑数: {len(layout.buildings)}")
         print(f"     道路数: {len(layout.roads)}")
         print(f"     植被数: {len(layout.vegetation)}")
@@ -193,7 +214,7 @@ def main():
     print("=" * 60)
     print("验证项: L2-LLM GLM-4.6 结构化布局生成")
     print("=" * 60)
-    ok1 = test_schema_validation()
+    test_schema_validation()
     ok2 = test_glm_call()
 
     print("\n" + "=" * 60)

@@ -8,13 +8,19 @@ L2 Mock 布局生成器
 - 边界对齐 (相邻 chunk 道路接续)
 - 真实村庄结构模拟 (建筑/道路/植被/水系)
 """
-import json
-import math
 import random
 from pathlib import Path
-from loguru import logger
-from pipeline.schema import ChunkLayout, Building, Road, VegetationCluster, WaterFeature
 
+from loguru import logger
+
+from pipeline.schema import (
+    Building,
+    ChunkLayout,
+    Prop,
+    Road,
+    VegetationCluster,
+    WaterFeature,
+)
 
 # 预置资产清单 (真实项目中从 L1 registry.json 读取)
 DEFAULT_ASSETS = {
@@ -61,7 +67,10 @@ class MockLayoutGenerator:
         # 4. 水系: 偶尔有溪流
         water = self._generate_water(chunk_x, chunk_y, rng)
 
-        # 5. 地形高度图引用
+        # 5. 道具: 默认素材链中的三类 prop 都必须可见、可替换、可审计
+        props = self._generate_props(chunk_x, chunk_y, rng)
+
+        # 6. 地形高度图引用
         terrain = {
             "heightmap": f"chunk_{chunk_x}_{chunk_y}_terrain.png",
             "elevation_range": [50, 180],
@@ -80,11 +89,12 @@ class MockLayoutGenerator:
             buildings=buildings,
             vegetation=vegetation,
             water=water,
-            props=[],
+            props=props,
         )
         logger.debug(
             f"chunk ({chunk_x},{chunk_y}): "
-            f"{len(buildings)}栋建筑, {len(roads)}条道路, {len(vegetation)}簇植被"
+            f"{len(buildings)}栋建筑, {len(roads)}条道路, "
+            f"{len(vegetation)}簇植被, {len(props)}个道具"
         )
         return layout
 
@@ -179,6 +189,27 @@ class MockLayoutGenerator:
             points=[[0, 30 + (cy * 5) % 40], [100, 35 + (cy * 5) % 40], [200, 40 + (cy * 5) % 40]],
         )]
 
+    def _generate_props(
+        self, cx: int, cy: int, rng: random.Random
+    ) -> list[Prop]:
+        """沿主路生成可替换道具；道路带与建筑带分离，避免明显穿模。"""
+        asset_ids = self.assets.get("props", [])
+        if not asset_ids:
+            return []
+
+        step = 140 / max(1, len(asset_ids) - 1)
+        props = []
+        for index, asset_id in enumerate(asset_ids):
+            x = 30 + index * step + rng.uniform(-3, 3)
+            y = (91 if index % 2 == 0 else 109) + rng.uniform(-2, 2)
+            props.append(Prop(
+                id=f"prop_{cx}_{cy}_{index}",
+                asset_id=asset_id,
+                pos=[round(x, 1), round(y, 1)],
+                rot_z=round(rng.uniform(0, 360), 1),
+            ))
+        return props
+
 
 def generate_chunkset(
     world_seed: int = 42, size: int = 3, output_dir: str | Path = "layouts"
@@ -205,6 +236,9 @@ if __name__ == "__main__":
     # 生成 3x3 = 9 个 chunk 演示
     layouts = generate_chunkset(world_seed=42, size=3, output_dir="layouts")
     print(f"\n生成 {len(layouts)} 个 chunk:")
-    for l in layouts:
-        print(f"  chunk ({l.chunk_id.x},{l.chunk_id.y}): "
-              f"{len(l.buildings)}栋建筑, {len(l.roads)}条道路, {len(l.vegetation)}簇植被")
+    for layout in layouts:
+        print(
+            f"  chunk ({layout.chunk_id.x},{layout.chunk_id.y}): "
+            f"{len(layout.buildings)}栋建筑, {len(layout.roads)}条道路, "
+            f"{len(layout.vegetation)}簇植被"
+        )

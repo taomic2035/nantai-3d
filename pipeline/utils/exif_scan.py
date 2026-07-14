@@ -6,10 +6,11 @@ L0 工具: EXIF / 元数据扫描
 用法:
     python -m pipeline.utils.exif_scan <目录> [输出.csv]
 """
-import sys
 import csv
-from pathlib import Path
+import sys
 from collections import Counter
+from pathlib import Path
+
 from loguru import logger
 
 try:
@@ -145,17 +146,20 @@ def scan_all(src_dir: str | Path, output: str | Path | None = None) -> dict:
 
     # 控制台打印
     print(f"\n{'=' * 50}")
-    print(f"总数: {summary['total']} (照片 {summary['photo_count']} + 视频 {summary['video_count']})")
-    print(f"\n=== 设备分布 ===")
+    print(
+        f"总数: {summary['total']} "
+        f"(照片 {summary['photo_count']} + 视频 {summary['video_count']})"
+    )
+    print("\n=== 设备分布 ===")
     for k, v in summary["devices"].items():
         print(f"  {v:3d}  {k}")
-    print(f"\n=== GPS 覆盖 ===")
+    print("\n=== GPS 覆盖 ===")
     print(f"  {summary['gps_coverage']} 张带 GPS")
-    print(f"\n=== 拍摄批次 ===")
+    print("\n=== 拍摄批次 ===")
     for d, c in summary["shoot_days"].items():
         print(f"  {d}: {c} 张")
     if videos:
-        print(f"\n=== 视频统计 ===")
+        print("\n=== 视频统计 ===")
         print(f"  总时长: {video_total_duration:.1f}s ({video_total_duration/60:.1f} 分钟)")
         print(f"  总大小: {video_total_size_mb:.1f} MB")
     print(f"{'=' * 50}\n")

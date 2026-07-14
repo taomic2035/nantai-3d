@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nantai.local/contracts/studio-adapter-v2.schema.json",
+  "title": "Nantai Studio ProjectSnapshot v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project",
+    "adapter",
+    "sources",
+    "coordinate",
+    "reconstruction",
+    "assets",
+    "pipeline"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "project": {
+      "type": "object",
+      "required": ["id", "name", "updated_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "storage": { "type": "string" }
+      }
+    },
+    "adapter": {
+      "type": "object",
+      "required": ["kind", "connected"],
+      "properties": {
+        "kind": { "enum": ["local", "mock", "unknown"] },
+        "connected": { "type": "boolean" }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "required": ["images", "videos", "frames"],
+      "properties": {
+        "images": { "type": "integer", "minimum": 0 },
+        "videos": { "type": "integer", "minimum": 0 },
+        "frames": { "type": "integer", "minimum": 0 },
+        "rejected": { "type": ["integer", "null"], "minimum": 0 },
+        "files": { "type": "array", "items": { "type": "object" } },
+        "duplicate_detection": { "type": "string" }
+      }
+    },
+    "coordinate": { "$ref": "#/$defs/coordinate" },
+    "reconstruction": {
+      "type": "object",
+      "required": [
+        "requested_engine",
+        "actual_engine",
+        "synthetic",
+        "geometry_usability",
+        "attributes",
+        "sh_degree",
+        "renderer_capabilities",
+        "gaussian_count",
+        "lod"
+      ],
+      "properties": {
+        "requested_engine": { "type": "string" },
+        "actual_engine": { "type": "string" },
+        "synthetic": { "type": "boolean" },
+        "geometry_usability": {
+          "enum": ["preview-proxy", "preview-only", "metric-aligned", "metric-unaligned"]
+        },
+        "artifact": { "$ref": "#/$defs/artifact" },
+        "attributes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "sh_degree": { "type": "integer", "minimum": 0 },
+        "renderer_capabilities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "dc-color",
+              "anisotropic-covariance",
+              "alpha-composite",
+              "spherical-harmonics"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "gaussian_count": { "type": "integer", "minimum": 0 },
+        "lod": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "uniqueItems": true },
+        "evidence_status": { "type": "string" }
+      }
+    },
+    "stitch": { "type": "object" },
+    "assets": {
+      "type": "object",
+      "required": ["registered", "consumed", "blocked", "items"],
+      "properties": {
+        "registered": { "type": "integer", "minimum": 0 },
+        "consumed": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "registry_revision": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "kind", "version", "validated", "consumed"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "kind": { "type": "string" },
+              "version": { "type": "integer", "minimum": 0 },
+              "validated": { "type": "boolean" },
+              "consumed": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "required": ["sources", "align", "reconstruct", "stitch", "assets", "review"],
+      "properties": {
+        "sources": { "$ref": "#/$defs/step" },
+        "align": { "$ref": "#/$defs/step" },
+        "reconstruct": { "$ref": "#/$defs/step" },
+        "stitch": { "$ref": "#/$defs/step" },
+        "assets": { "$ref": "#/$defs/step" },
+        "review": { "$ref": "#/$defs/step" }
+      }
+    },
+    "active_run": {
+      "type": ["object", "null"],
+      "properties": {
+        "id": { "type": "string" },
+        "status": { "enum": ["queued", "running", "succeeded", "failed", "canceled"] }
+      }
+    },
+    "diagnostics": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "coordinate": {
+      "type": "object",
+      "required": [
+        "source_frame",
+        "world_frame",
+        "source_provenance",
+        "world_provenance",
+        "contributor_provenance",
+        "units",
+        "handedness",
+        "up_axis",
+        "transform_chain",
+        "metric_evidence"
+      ],
+      "properties": {
+        "source_frame": { "type": "string" },
+        "world_frame": { "type": "string" },
+        "source_provenance": { "$ref": "#/$defs/frameProvenance" },
+        "world_provenance": { "$ref": "#/$defs/frameProvenance" },
+        "contributor_provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/frameProvenance" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "units": { "enum": ["meters", "arbitrary", "unknown"] },
+        "handedness": { "enum": ["right", "left", "unknown"] },
+        "up_axis": { "enum": ["z", "unknown"] },
+        "transform_chain": { "type": "array", "items": { "$ref": "#/$defs/transform" } },
+        "metric_evidence": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "registered_images": { "type": "integer", "minimum": 0 },
+        "total_images": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "frameProvenance": {
+      "enum": ["measured", "synthetic", "sfm", "unknown"]
+    },
+    "transform": {
+      "type": "object",
+      "required": ["source_frame", "target_frame"],
+      "properties": {
+        "id": { "type": "string" },
+        "transform_id": { "type": "string" },
+        "source_frame": { "type": "string" },
+        "target_frame": { "type": "string" }
+      },
+      "anyOf": [{ "required": ["id"] }, { "required": ["transform_id"] }]
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["id", "kind", "uri", "sha256", "bytes", "created_at", "immutable"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "immutable": { "type": "boolean" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["availability", "execution", "freshness", "preview", "trust"],
+      "properties": {
+        "availability": { "enum": ["missing", "ready"] },
+        "execution": { "enum": ["idle", "queued", "running", "succeeded", "failed", "canceled"] },
+        "freshness": { "enum": ["current", "stale"] },
+        "preview": { "enum": ["unloaded", "loading", "ready", "degraded"] },
+        "trust": { "enum": ["verified", "proxy", "untrusted"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}
