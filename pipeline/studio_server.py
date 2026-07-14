@@ -34,7 +34,13 @@ MAX_PLY_HEADER_BYTES = 1024 * 1024
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 STATIC_ROOTS = {"assets", "handoff", "recon", "web"}
+EVIDENCE_ROOTS = {"recon", "web"}
 ALLOWED_RUN_STATUSES = {"queued", "running", "succeeded", "failed", "canceled"}
+XYZ_PROPERTIES = frozenset({"x", "y", "z"})
+CORE_3DGS_PROPERTIES = frozenset({
+    "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
+    "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+})
 
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
@@ -86,6 +92,18 @@ def _is_below(root: Path, candidate: Path) -> bool:
     return True
 
 
+def _is_real_project_subtree(root: Path, subtree: Path) -> bool:
+    """Accept a project evidence root only when its root entry is not a symlink."""
+    root = root.resolve()
+    if subtree.is_symlink():
+        return False
+    try:
+        resolved = subtree.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return resolved == subtree and _is_below(root, resolved) and resolved.is_dir()
+
+
 def _resolve_evidence_path(root: Path, raw_path: Any, *, relative_to: Path) -> Path | None:
     if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
         return None
@@ -100,11 +118,21 @@ def _resolve_evidence_path(root: Path, raw_path: Any, *, relative_to: Path) -> P
         candidates = [root / declared, relative_to / declared]
     root = root.resolve()
     for candidate in candidates:
+        lexical = candidate.absolute()
         try:
-            resolved = candidate.resolve(strict=True)
+            relative = lexical.relative_to(root)
+        except ValueError:
+            continue
+        if not relative.parts or relative.parts[0] not in EVIDENCE_ROOTS:
+            continue
+        approved_root = root / relative.parts[0]
+        if not _is_real_project_subtree(root, approved_root):
+            continue
+        try:
+            resolved = lexical.resolve(strict=True)
         except (OSError, RuntimeError):
             continue
-        if _is_below(root, resolved) and resolved.is_file():
+        if _is_below(approved_root, resolved) and resolved.is_file():
             return resolved
     return None
 
@@ -141,6 +169,20 @@ def _ply_header(path: Path) -> tuple[list[str], int | None]:
     except OSError:
         return [], None
     return [], None
+
+
+def _valid_ply_payload(
+    path: Path,
+    *,
+    required_properties: frozenset[str] = XYZ_PROPERTIES,
+) -> tuple[bool, list[str], int | None]:
+    properties, vertex_count = _ply_header(path)
+    valid = (
+        isinstance(vertex_count, int)
+        and vertex_count > 0
+        and required_properties.issubset(properties)
+    )
+    return valid, properties, vertex_count
 
 
 def _sh_degree(properties: list[str]) -> int:
@@ -474,9 +516,11 @@ def _reconstruction_snapshot(
             )
             if lod_path is None:
                 continue
-            _, vertex_count = _ply_header(lod_path)
+            valid_lod, _, vertex_count = _valid_ply_payload(lod_path)
+            if not valid_lod:
+                continue
             valid_lods.append(level)
-            lod_counts.append(vertex_count or 0)
+            lod_counts.append(vertex_count)
     reconstruction["lod"] = valid_lods
     stitch["lod_counts"] = lod_counts
 
@@ -500,19 +544,29 @@ def _reconstruction_snapshot(
         reconstruction["evidence_status"] = "invalid-artifact-descriptor"
         reconstruction["integrity_error"] = "invalid-descriptor"
     elif full_path is not None and measured_artifact is not None:
-        properties, header_count = _ply_header(full_path)
-        reconstruction["artifact"] = measured_artifact
-        reconstruction["attributes"] = properties
-        reconstruction["sh_degree"] = _sh_degree(properties)
-        reconstruction["renderer_capabilities"] = ["dc-color"] if properties else []
-        if reconstruction["gaussian_count"] == 0 and header_count is not None:
-            reconstruction["gaussian_count"] = header_count
-        if is_v2:
-            reconstruction["evidence_status"] = "v2-artifact-present"
-        elif manifest:
-            reconstruction["evidence_status"] = "legacy-manifest"
+        required = CORE_3DGS_PROPERTIES if is_v2 else XYZ_PROPERTIES
+        valid_payload, properties, header_count = _valid_ply_payload(
+            full_path, required_properties=required
+        )
+        if not valid_payload:
+            reconstruction["declared_synthetic"] = declared_synthetic
+            reconstruction["synthetic"] = True
+            reconstruction["geometry_usability"] = "preview-only"
+            reconstruction["evidence_status"] = "invalid-artifact-payload"
+            reconstruction["integrity_error"] = "invalid-ply"
         else:
-            reconstruction["evidence_status"] = "orphan-artifact"
+            reconstruction["artifact"] = measured_artifact
+            reconstruction["attributes"] = properties
+            reconstruction["sh_degree"] = _sh_degree(properties)
+            reconstruction["renderer_capabilities"] = ["dc-color"]
+            if reconstruction["gaussian_count"] == 0:
+                reconstruction["gaussian_count"] = header_count
+            if is_v2:
+                reconstruction["evidence_status"] = "v2-artifact-present"
+            elif manifest:
+                reconstruction["evidence_status"] = "legacy-manifest"
+            else:
+                reconstruction["evidence_status"] = "orphan-artifact"
     else:
         # Missing bytes invalidate a non-synthetic declaration for Studio's
         # fail-closed reducer.  Preserve the declaration separately for audit.
@@ -528,16 +582,20 @@ def _reconstruction_snapshot(
 
 
 def _asset_snapshot(root: Path) -> dict[str, Any]:
-    registry_path = root / "assets/registry.json"
+    empty_snapshot = {
+        "registered": 0,
+        "consumed": 0,
+        "blocked": 0,
+        "registry_revision": "missing-or-invalid",
+        "items": [],
+    }
+    assets_root = root / "assets"
+    if not _is_real_project_subtree(root, assets_root):
+        return empty_snapshot
+    registry_path = assets_root / "registry.json"
     registry, error = _read_json(registry_path)
     if error is not None or not registry or registry.get("schema_version") != 2:
-        return {
-            "registered": 0,
-            "consumed": 0,
-            "blocked": 0,
-            "registry_revision": "missing-or-invalid",
-            "items": [],
-        }
+        return empty_snapshot
     assets = registry.get("assets")
     if not isinstance(assets, dict):
         assets = {}
@@ -558,7 +616,19 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             chunk_path = _resolve_evidence_path(
                 root, chunk.get("ply_file"), relative_to=world_path.parent
             )
-            if isinstance(chunk_id, str) and chunk_id and chunk_path is not None:
+            valid_payload, _, live_point_count = (
+                _valid_ply_payload(chunk_path)
+                if chunk_path is not None
+                else (False, [], None)
+            )
+            declared_point_count = chunk.get("point_count")
+            valid_chunk = (
+                valid_payload
+                and type(declared_point_count) is int
+                and declared_point_count > 0
+                and declared_point_count == live_point_count
+            )
+            if isinstance(chunk_id, str) and chunk_id and valid_chunk:
                 valid_chunk_ids.add(chunk_id)
 
     items: list[dict[str, Any]] = []
@@ -569,7 +639,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
         reason: str | None = None
         raw_ply = entry.get("ply")
         try:
-            payload = _resolve_asset_payload(root / "assets", raw_ply)
+            payload = _resolve_asset_payload(assets_root, raw_ply)
         except PathAccessError:
             payload = None
             reason = "payload-path-invalid"
@@ -585,6 +655,8 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             actual_sha = _sha256_file(payload)
             if actual_sha != expected_sha:
                 reason = "payload-sha256-mismatch"
+            elif not _valid_ply_payload(payload)[0]:
+                reason = "payload-ply-invalid"
         validated = reason is None
         version = entry.get("version")
         matching_consumption = [
@@ -594,6 +666,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             and row.get("asset_id") == asset_id
             and row.get("version") == version
             and row.get("sha256") == expected_sha
+            and row.get("renderer") == entry.get("kind")
             and row.get("chunk_id") in valid_chunk_ids
             and type(row.get("instances")) is int
             and row["instances"] > 0
@@ -689,7 +762,11 @@ def _resolve_asset_payload(assets_root: Path, raw_path: Any) -> Path | None:
     if declared.is_absolute():
         raise PathAccessError("invalid asset payload path")
 
+    if assets_root.is_symlink():
+        raise PathAccessError("asset root must not be a symlink")
     resolved_root = assets_root.resolve(strict=True)
+    if resolved_root != assets_root:
+        raise PathAccessError("asset root must be a real project subtree")
     try:
         candidate = (resolved_root / declared).resolve(strict=True)
     except FileNotFoundError:
@@ -709,8 +786,12 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
     root = Path(project_root).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(root)
-    manifest_path = root / "web/data/recon/recon_manifest.json"
-    manifest, manifest_error = _read_json(manifest_path)
+    web_root = root / "web"
+    manifest_path = web_root / "data/recon/recon_manifest.json"
+    if _is_real_project_subtree(root, web_root):
+        manifest, manifest_error = _read_json(manifest_path)
+    else:
+        manifest, manifest_error = None, "unsafe-root"
     sources = _scan_sources(root)
     coordinate = _coordinate_snapshot(root, manifest)
     reconstruction, stitch = _reconstruction_snapshot(root, manifest, manifest_path)
@@ -735,6 +816,9 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
     runs = _load_runs(root)
 
     artifact_present = isinstance(reconstruction.get("artifact"), dict)
+    metric_geometry = reconstruction["geometry_usability"] in {
+        "metric-aligned", "metric-unaligned"
+    }
     v2_coordinate = bool(
         manifest
         and manifest.get("schema_version") == 2
@@ -751,7 +835,8 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
             trust=(
                 "untrusted" if not coordinate_provenance_trusted
                 else "proxy" if reconstruction["synthetic"]
-                else "verified"
+                else "verified" if metric_geometry
+                else "untrusted"
             ),
         ),
         "reconstruct": _step(available=artifact_present, trust="proxy"),
@@ -817,6 +902,8 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         snapshot["diagnostics"].append("reconstruction-artifact:missing")
     elif reconstruction["evidence_status"] == "invalid-artifact-descriptor":
         snapshot["diagnostics"].append("reconstruction-artifact:invalid-descriptor")
+    elif reconstruction["evidence_status"] == "invalid-artifact-payload":
+        snapshot["diagnostics"].append("reconstruction-artifact:invalid-ply")
     return snapshot
 
 
@@ -837,13 +924,15 @@ def resolve_static_path(project_root: str | Path, url_path: str) -> Path:
     if parts[0] not in STATIC_ROOTS:
         raise PathAccessError("path is outside approved static roots")
     approved_path = root / parts[0]
+    if approved_path.is_symlink():
+        raise PathAccessError("approved static root must not be a symlink")
     try:
         approved_root = approved_path.resolve(strict=True)
     except FileNotFoundError:
         return root.joinpath(*parts)
     except (OSError, RuntimeError) as exc:
         raise PathAccessError("unsafe static root") from exc
-    if not _is_below(root, approved_root):
+    if approved_root != approved_path or not _is_below(root, approved_root):
         raise PathAccessError("static root escapes project root")
     candidate = root.joinpath(*parts)
     try:

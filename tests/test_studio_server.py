@@ -150,7 +150,7 @@ def _write_v2_project(root: Path) -> None:
         root / "web/data/chunk_0_0.ply", properties=("x", "y", "z")
     )
     world_manifest = {
-        "chunks": [{"id": "0_0", "ply_file": chunk.name}],
+        "chunks": [{"id": "0_0", "ply_file": chunk.name, "point_count": 1}],
         "asset_consumption": [
             {
                 "asset_id": "tree",
@@ -308,6 +308,30 @@ class TestProjectSnapshot:
             == "invalid-artifact-descriptor"
         )
 
+    @pytest.mark.parametrize("payload", [b"", b"not a ply"])
+    def test_matching_descriptor_cannot_promote_a_non_ply_artifact(
+        self, tmp_path, payload
+    ):
+        _write_v2_project(tmp_path)
+        full_path = tmp_path / "recon/scene_full.ply"
+        full_path.write_bytes(payload)
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        descriptor = manifest["artifacts"]["full_3dgs"]
+        descriptor["sha256"] = _sha256(full_path)
+        descriptor["bytes"] = full_path.stat().st_size
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert "artifact" not in snapshot["reconstruction"]
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
+        assert (
+            snapshot["reconstruction"]["evidence_status"]
+            == "invalid-artifact-payload"
+        )
+        assert snapshot["pipeline"]["reconstruct"]["availability"] == "missing"
+
     def test_incoherent_v2_coordinate_claim_is_reduced_to_unknown(self, tmp_path):
         _write_v2_project(tmp_path)
         manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
@@ -415,9 +439,25 @@ class TestProjectSnapshot:
         assert snapshot["assets"]["blocked"] == 1
         assert snapshot["pipeline"]["assets"]["trust"] == "proxy"
 
+    def test_preview_only_geometry_cannot_make_alignment_verified(self, tmp_path):
+        _write_v2_project(tmp_path)
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["provenance"]["geometry_usability"] = "preview-only"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["reconstruction"]["synthetic"] is False
+        assert snapshot["pipeline"]["align"]["trust"] == "untrusted"
+
     @pytest.mark.parametrize(
         "case",
-        ["zero-instances", "zero-points", "unknown-chunk", "missing-ply", "outside-ply"],
+        [
+            "zero-instances", "zero-points", "unknown-chunk", "missing-ply",
+            "outside-ply", "empty-ply", "non-ply", "renderer-mismatch",
+            "chunk-count-mismatch",
+        ],
     )
     def test_asset_consumption_requires_positive_counts_and_live_chunk(
         self, tmp_path, case
@@ -435,6 +475,19 @@ class TestProjectSnapshot:
             row["chunk_id"] = "missing"
         elif case == "missing-ply":
             world["chunks"][0]["ply_file"] = "missing.ply"
+        elif case == "empty-ply":
+            chunk_path = tmp_path / "web/data/chunk_0_0.ply"
+            chunk_path.write_text(
+                "ply\nformat ascii 1.0\nelement vertex 0\n"
+                "property float x\nproperty float y\nproperty float z\nend_header\n",
+                encoding="ascii",
+            )
+        elif case == "non-ply":
+            (tmp_path / "web/data/chunk_0_0.ply").write_bytes(b"not a ply")
+        elif case == "renderer-mismatch":
+            row["renderer"] = "building"
+        elif case == "chunk-count-mismatch":
+            world["chunks"][0]["point_count"] = 999
         else:
             outside = tmp_path.parent / f"{tmp_path.name}-outside-chunk.ply"
             _write_ply(outside, properties=("x", "y", "z"))
@@ -446,6 +499,34 @@ class TestProjectSnapshot:
         assert snapshot["assets"]["consumed"] == 0
         assert snapshot["assets"]["blocked"] == 1
         assert snapshot["assets"]["items"][0]["consumed"] is False
+
+    def test_asset_payload_hash_does_not_validate_non_ply_bytes(self, tmp_path):
+        _write_v2_project(tmp_path)
+        payload = tmp_path / "assets/tree_v1.ply"
+        payload.write_bytes(b"not a ply")
+        registry_path = tmp_path / "assets/registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["assets"]["tree"]["sha256"] = _sha256(payload)
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        item = snapshot["assets"]["items"][0]
+        assert item["validated"] is False
+        assert item["consumed"] is False
+        assert item["reason"] == "payload-ply-invalid"
+
+    def test_assets_root_symlink_is_not_a_trusted_registry_boundary(self, tmp_path):
+        _write_v2_project(tmp_path)
+        outside = tmp_path.parent / f"{tmp_path.name}-external-assets"
+        (tmp_path / "assets").rename(outside)
+        (tmp_path / "assets").symlink_to(outside, target_is_directory=True)
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["assets"]["registered"] == 0
+        assert snapshot["assets"]["registry_revision"] == "missing-or-invalid"
+        assert snapshot["pipeline"]["assets"]["trust"] == "untrusted"
 
     @pytest.mark.parametrize("case", ["parent", "absolute", "dot", "symlink"])
     def test_asset_payload_must_resolve_strictly_below_assets_root(self, tmp_path, case):
@@ -556,6 +637,20 @@ class TestHttpContract:
         assert traversal_status == symlink_status == 403
         assert json.loads(traversal_payload)["error"]["code"] == "path_forbidden"
         assert json.loads(symlink_payload)["error"]["code"] == "path_forbidden"
+
+    def test_approved_static_root_itself_cannot_be_a_symlink(self, tmp_path):
+        (tmp_path / "input").mkdir()
+        (tmp_path / "input/secret.txt").write_text("secret", encoding="utf-8")
+        (tmp_path / "web").symlink_to(tmp_path, target_is_directory=True)
+
+        with pytest.raises(PathAccessError):
+            resolve_static_path(tmp_path, "/web/input/secret.txt")
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(server, "GET", "/web/input/secret.txt")
+
+        assert status == 403
+        assert json.loads(payload)["error"]["code"] == "path_forbidden"
 
     def test_directory_index_symlink_is_rechecked_before_serving(self, tmp_path):
         _write_v2_project(tmp_path)
