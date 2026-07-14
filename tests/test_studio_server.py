@@ -308,7 +308,20 @@ class TestProjectSnapshot:
             == "invalid-artifact-descriptor"
         )
 
-    @pytest.mark.parametrize("payload", [b"", b"not a ply"])
+    @pytest.mark.parametrize("payload", [
+        b"",
+        b"not a ply",
+        (
+            b"ply\nformat ascii 1.0\nelement vertex 1\n"
+            b"property float x\nproperty float y\nproperty float z\n"
+            b"property float f_dc_0\nproperty float f_dc_1\n"
+            b"property float f_dc_2\nproperty float opacity\n"
+            b"property float scale_0\nproperty float scale_1\n"
+            b"property float scale_2\nproperty float rot_0\n"
+            b"property float rot_1\nproperty float rot_2\n"
+            b"property float rot_3\nend_header\n"
+        ),
+    ])
     def test_matching_descriptor_cannot_promote_a_non_ply_artifact(
         self, tmp_path, payload
     ):
@@ -456,7 +469,7 @@ class TestProjectSnapshot:
         [
             "zero-instances", "zero-points", "unknown-chunk", "missing-ply",
             "outside-ply", "empty-ply", "non-ply", "renderer-mismatch",
-            "chunk-count-mismatch",
+            "chunk-count-mismatch", "header-only-ply",
         ],
     )
     def test_asset_consumption_requires_positive_counts_and_live_chunk(
@@ -484,6 +497,12 @@ class TestProjectSnapshot:
             )
         elif case == "non-ply":
             (tmp_path / "web/data/chunk_0_0.ply").write_bytes(b"not a ply")
+        elif case == "header-only-ply":
+            (tmp_path / "web/data/chunk_0_0.ply").write_text(
+                "ply\nformat ascii 1.0\nelement vertex 1\n"
+                "property float x\nproperty float y\nproperty float z\nend_header\n",
+                encoding="ascii",
+            )
         elif case == "renderer-mismatch":
             row["renderer"] = "building"
         elif case == "chunk-count-mismatch":
@@ -527,6 +546,51 @@ class TestProjectSnapshot:
         assert snapshot["assets"]["registered"] == 0
         assert snapshot["assets"]["registry_revision"] == "missing-or-invalid"
         assert snapshot["pipeline"]["assets"]["trust"] == "untrusted"
+
+    @pytest.mark.parametrize("evidence", ["recon-manifest", "world-manifest", "registry"])
+    def test_evidence_json_symlinks_are_not_trusted(self, tmp_path, evidence):
+        _write_v2_project(tmp_path)
+        paths = {
+            "recon-manifest": tmp_path / "web/data/recon/recon_manifest.json",
+            "world-manifest": tmp_path / "web/data/manifest.json",
+            "registry": tmp_path / "assets/registry.json",
+        }
+        evidence_path = paths[evidence]
+        outside = tmp_path.parent / f"{tmp_path.name}-{evidence}.json"
+        evidence_path.rename(outside)
+        evidence_path.symlink_to(outside)
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        if evidence == "recon-manifest":
+            assert "artifact" not in snapshot["reconstruction"]
+            assert snapshot["pipeline"]["align"]["trust"] == "untrusted"
+        elif evidence == "world-manifest":
+            assert snapshot["assets"]["consumed"] == 0
+            assert snapshot["pipeline"]["assets"]["trust"] != "verified"
+        else:
+            assert snapshot["assets"]["registered"] == 0
+            assert snapshot["pipeline"]["assets"]["trust"] == "untrusted"
+
+    def test_duplicate_chunk_ids_cannot_supply_consumption_evidence(self, tmp_path):
+        _write_v2_project(tmp_path)
+        world_path = tmp_path / "web/data/manifest.json"
+        world = json.loads(world_path.read_text(encoding="utf-8"))
+        duplicate_path = _write_ply(
+            tmp_path / "web/data/chunk_duplicate.ply",
+            properties=("x", "y", "z"),
+        )
+        world["chunks"].append({
+            "id": "0_0",
+            "ply_file": duplicate_path.name,
+            "point_count": 1,
+        })
+        world_path.write_text(json.dumps(world), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["assets"]["consumed"] == 0
+        assert snapshot["pipeline"]["assets"]["trust"] != "verified"
 
     @pytest.mark.parametrize("case", ["parent", "absolute", "dot", "symlink"])
     def test_asset_payload_must_resolve_strictly_below_assets_root(self, tmp_path, case):

@@ -26,6 +26,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from plyfile import PlyData, PlyParseError
+
 SNAPSHOT_SCHEMA_VERSION = 2
 RUN_LEDGER_SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -104,6 +106,26 @@ def _is_real_project_subtree(root: Path, subtree: Path) -> bool:
     return resolved == subtree and _is_below(root, resolved) and resolved.is_dir()
 
 
+def _resolve_real_evidence_file(
+    root: Path,
+    path: Path,
+    *,
+    approved_root: str,
+) -> Path | None:
+    """Resolve one evidence file without following its own or parent symlinks."""
+    root = root.resolve()
+    boundary = root / approved_root
+    if not _is_real_project_subtree(root, boundary) or path.is_symlink():
+        return None
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if resolved != path or not _is_below(boundary, resolved) or not resolved.is_file():
+        return None
+    return resolved
+
+
 def _resolve_evidence_path(root: Path, raw_path: Any, *, relative_to: Path) -> Path | None:
     if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
         return None
@@ -177,11 +199,22 @@ def _valid_ply_payload(
     required_properties: frozenset[str] = XYZ_PROPERTIES,
 ) -> tuple[bool, list[str], int | None]:
     properties, vertex_count = _ply_header(path)
-    valid = (
+    valid = False
+    if (
         isinstance(vertex_count, int)
         and vertex_count > 0
         and required_properties.issubset(properties)
-    )
+    ):
+        try:
+            ply = PlyData.read(str(path), mmap="c")
+            vertex = ply["vertex"].data
+            parsed_properties = set(vertex.dtype.names or ())
+            valid = (
+                len(vertex) == vertex_count
+                and required_properties.issubset(parsed_properties)
+            )
+        except (OSError, KeyError, TypeError, ValueError, PlyParseError):
+            valid = False
     return valid, properties, vertex_count
 
 
@@ -290,7 +323,14 @@ def _unknown_coordinate() -> dict[str, Any]:
 
 
 def _registration_counts(root: Path, sessions: Any) -> tuple[int, int]:
-    registration, error = _read_json(root / "recon/registration.json")
+    registration_path = _resolve_real_evidence_file(
+        root, root / "recon/registration.json", approved_root="recon"
+    )
+    registration, error = (
+        _read_json(registration_path)
+        if registration_path is not None
+        else (None, "unsafe-or-missing")
+    )
     if error is None and registration and registration.get("schema_version") == 2:
         poses = registration.get("poses")
         registered = len(poses) if isinstance(poses, list) else 0
@@ -417,7 +457,11 @@ def _frame_claim_is_coherent(frame: dict[str, Any]) -> bool:
 
 
 def _reconstruction_snapshot(
-    root: Path, manifest: dict[str, Any] | None, manifest_path: Path
+    root: Path,
+    manifest: dict[str, Any] | None,
+    manifest_path: Path,
+    *,
+    allow_orphan: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     is_v2 = bool(manifest and manifest.get("schema_version") == 2)
     provenance = manifest.get("provenance") if is_v2 and manifest else None
@@ -465,7 +509,7 @@ def _reconstruction_snapshot(
             manifest.get("full_3dgs"),
             relative_to=manifest_path.parent,
         )
-    if full_path is None and not is_v2:
+    if full_path is None and not is_v2 and allow_orphan:
         orphan = root / "recon/scene_full.ply"
         try:
             resolved_orphan = orphan.resolve(strict=True)
@@ -592,7 +636,11 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
     assets_root = root / "assets"
     if not _is_real_project_subtree(root, assets_root):
         return empty_snapshot
-    registry_path = assets_root / "registry.json"
+    registry_path = _resolve_real_evidence_file(
+        root, assets_root / "registry.json", approved_root="assets"
+    )
+    if registry_path is None:
+        return empty_snapshot
     registry, error = _read_json(registry_path)
     if error is not None or not registry or registry.get("schema_version") != 2:
         return empty_snapshot
@@ -602,17 +650,30 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
     revision = f"sha256:{_sha256_file(registry_path)[:16]}"
 
     world_path = root / "web/data/manifest.json"
-    world, _ = _read_json(world_path)
+    resolved_world_path = _resolve_real_evidence_file(
+        root, world_path, approved_root="web"
+    )
+    world, _ = (
+        _read_json(resolved_world_path)
+        if resolved_world_path is not None
+        else (None, "unsafe-or-missing")
+    )
     rows = world.get("asset_consumption") if isinstance(world, dict) else []
     if not isinstance(rows, list):
         rows = []
     valid_chunk_ids: set[str] = set()
+    seen_chunk_ids: set[str] = set()
+    duplicate_chunk_ids: set[str] = set()
     chunks = world.get("chunks") if isinstance(world, dict) else []
     if isinstance(chunks, list):
         for chunk in chunks:
             if not isinstance(chunk, dict):
                 continue
             chunk_id = chunk.get("id")
+            if isinstance(chunk_id, str) and chunk_id:
+                if chunk_id in seen_chunk_ids:
+                    duplicate_chunk_ids.add(chunk_id)
+                seen_chunk_ids.add(chunk_id)
             chunk_path = _resolve_evidence_path(
                 root, chunk.get("ply_file"), relative_to=world_path.parent
             )
@@ -630,6 +691,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
             )
             if isinstance(chunk_id, str) and chunk_id and valid_chunk:
                 valid_chunk_ids.add(chunk_id)
+    valid_chunk_ids.difference_update(duplicate_chunk_ids)
 
     items: list[dict[str, Any]] = []
     for asset_id in sorted(assets):
@@ -788,13 +850,25 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         raise NotADirectoryError(root)
     web_root = root / "web"
     manifest_path = web_root / "data/recon/recon_manifest.json"
-    if _is_real_project_subtree(root, web_root):
-        manifest, manifest_error = _read_json(manifest_path)
+    resolved_manifest_path = _resolve_real_evidence_file(
+        root, manifest_path, approved_root="web"
+    )
+    if resolved_manifest_path is not None:
+        manifest, manifest_error = _read_json(resolved_manifest_path)
     else:
-        manifest, manifest_error = None, "unsafe-root"
+        manifest, manifest_error = (
+            None,
+            "unsafe-path" if manifest_path.exists() or manifest_path.is_symlink()
+            else "missing",
+        )
     sources = _scan_sources(root)
     coordinate = _coordinate_snapshot(root, manifest)
-    reconstruction, stitch = _reconstruction_snapshot(root, manifest, manifest_path)
+    reconstruction, stitch = _reconstruction_snapshot(
+        root,
+        manifest,
+        manifest_path,
+        allow_orphan=manifest_error == "missing",
+    )
     coordinate_provenance_trusted = (
         coordinate["source_provenance"] in {"measured", "sfm"}
         and coordinate["world_provenance"] == "measured"
