@@ -6,10 +6,15 @@ photos/
 layouts/
 web/data/*.ply
 web/data/manifest.json
+web/data/recon/
 scenes/
 corpus/
-assets/
+recon/
 verification/output/
+
+# 素材注册表与可复现交付元数据入库；生成的 PLY 由下方全局 *.ply 忽略。
+# handoff/deliverables 中保留 generator / manifest / contact sheet，fresh clone 可 make assets。
+assets/.registry.lock
 
 # ============ Python ============
 __pycache__/

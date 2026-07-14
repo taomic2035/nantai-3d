@@ -4,12 +4,12 @@ L2 布局生成器 - GLM-4.6 客户端 (带 mock 降级)
 
 无 ZHIPU_API_KEY 时自动降级为 MockLayoutGenerator, 保证管线可在离线环境跑通。
 """
-import os
 import json
-from pathlib import Path
-from loguru import logger
-from pipeline.schema import ChunkLayout
+import os
 
+from loguru import logger
+
+from pipeline.schema import ChunkLayout
 
 SYSTEM_PROMPT = """你是一位中国南方山村的村庄规划师。生成一个 200m×200m 区域的布局JSON。
 
@@ -34,7 +34,10 @@ Schema:
   },
   "roads": [{"id":"string","type":"main|trail","width":float,"points":[[x,y],...]}],
   "buildings": [{"id":"string","asset_id":"string","pos":[x,y],"rot_z":float,"scale":float}],
-  "vegetation": [{"id":"string","type":"tree_cluster","center":[x,y],"radius":float,"density":float,"asset_ids":["string"]}],
+  "vegetation": [{
+    "id":"string", "type":"tree_cluster", "center":[x,y],
+    "radius":float, "density":float, "asset_ids":["string"]
+  }],
   "water": [{"id":"string","type":"stream|pond","width":float,"points":[[x,y],...]}],
   "props": [{"id":"string","asset_id":"string","pos":[x,y],"rot_z":float}]
 }"""
