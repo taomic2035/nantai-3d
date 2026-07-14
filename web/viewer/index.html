@@ -61,11 +61,13 @@
 
 <div id="hud" style="display:none">
   <h1>Nantai Village (无限世界)</h1>
-  <div class="stat">活跃 chunks: <b id="hud-chunks">0</b> / 缓存上限 16</div>
+  <div class="stat">活跃 chunks: <b id="hud-chunks">0</b> / 缓存上限 36</div>
   <div class="stat">已淘汰: <b id="hud-evicted">0</b> | 缓存命中: <b id="hud-hits">0</b></div>
   <div class="stat">调度状态: <b id="hud-loading">空闲</b></div>
   <div class="stat">相机位置: <b id="hud-camera">(0,0,0)</b></div>
   <div class="stat">当前 chunk: <b id="hud-current">(0,0)</b></div>
+  <div class="stat">画质 LOD: <b id="hud-lod">自动</b></div>
+  <div class="stat">重建图层: <b id="hud-recon">无</b></div>
   <div class="legend">
     <div class="legend-item"><span class="swatch" style="background:#5a823c"></span>地面/草地</div>
     <div class="legend-item"><span class="swatch" style="background:#505050"></span>主路 (柏油)</div>
@@ -93,8 +95,9 @@
   升降: <kbd>Q</kbd><kbd>E</kbd> |
   加速: <kbd>Shift</kbd> |
   边界: <kbd>B</kbd> |
-  旋转: 鼠标拖拽 |
-  俯仰: 右键拖拽
+  画质: <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> / <kbd>0</kbd>自动 |
+  重建层: <kbd>R</kbd> |
+  旋转: 鼠标拖拽
 </div>
 
 <div id="loading">

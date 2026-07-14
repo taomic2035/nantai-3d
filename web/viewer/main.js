@@ -12,17 +12,24 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ============ 配置 ============
 const CHUNK_SIZE_M = 200;
-const CHUNK_VIEW_RADIUS = 1;   // 视野半径 (3x3 = 9 chunk 活跃)
-const CHUNK_CACHE_MAX = 16;    // LRU 上限 (保留略多于视野)
+const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (5x5 = 25 chunk 活跃, 远处用低清 LOD)
+const CHUNK_CACHE_MAX = 36;    // LRU 上限 (保留略多于视野)
 
 // ============ 全局状态 ============
 let scene, camera, renderer, controls;
 let manifest = null;
 const chunkMeshes = new Map();       // chunk_id → THREE.Points (已加载)
+const chunkLod = new Map();          // chunk_id → 已加载的 LOD 级别
 const chunkBorders = new Map();     // chunk_id → THREE.Line (边界线)
 const lruOrder = [];                // chunk_id 数组, 末尾为最近访问
 const loadingSet = new Set();        // 正在加载中的 chunk_id
 const stats = { loaded: 0, evicted: 0, cachedHits: 0 };
+let qualityOverride = null;          // null=按距离自动, 0/1/2=强制 LOD (键 1/2/3, 0 恢复自动)
+let reconManifest = null;            // 真实重建图层 (recon_manifest.json, 可选)
+let reconMesh = null;
+let reconLodLoaded = -1;
+let reconVisible = true;
+let reconLoading = false;
 const clock = new THREE.Clock();
 const keys = { w: false, a: false, s: false, d: false, q: false, e: false, shift: false };
 let lastPlayerChunkKey = '';
@@ -147,10 +154,12 @@ function touchLRU(key) {
 
 function evictLRU(keepKeys) {
   // 从 LRU 头部开始淘汰, 直到 cache 大小 <= MAX 或所有可淘汰项已处理
-  while (lruOrder.length > CHUNK_CACHE_MAX) {
+  let scanned = 0;
+  while (lruOrder.length > CHUNK_CACHE_MAX && scanned < lruOrder.length + CHUNK_CACHE_MAX) {
+    scanned++;
     const victim = lruOrder.shift();
     if (keepKeys.has(victim)) {
-      // 视野内的不淘汰, 重新放回末尾
+      // 视野内的不淘汰, 重新放回末尾 (scanned 上界防止全在视野内时死循环)
       lruOrder.push(victim);
       continue;
     }
@@ -160,6 +169,7 @@ function evictLRU(keepKeys) {
       mesh.geometry.dispose();
       mesh.material.dispose();
       chunkMeshes.delete(victim);
+      chunkLod.delete(victim);
       stats.evicted++;
     }
     // 同时移除边界线
@@ -173,9 +183,31 @@ function evictLRU(keepKeys) {
   }
 }
 
-async function loadChunk(cx, cy) {
+function swapYZ(parsed) {
+  // 坐标变换: ply (x_world, y_world, z_height) → three.js (x, z, y)
+  for (let j = 0; j < parsed.n; j++) {
+    const tmp = parsed.positions[j * 3 + 1];
+    parsed.positions[j * 3 + 1] = parsed.positions[j * 3 + 2];
+    parsed.positions[j * 3 + 2] = tmp;
+  }
+}
+
+function desiredLod(cx, cy, pcx, pcy) {
+  // 可变清晰: 玩家所在 chunk 全清晰, 越远越粗
+  if (qualityOverride !== null) return qualityOverride;
+  const d = Math.max(Math.abs(cx - pcx), Math.abs(cy - pcy));
+  return d === 0 ? 2 : (d === 1 ? 1 : 0);
+}
+
+function lodFile(entry, lod) {
+  // manifest 无 lod 字段时回退全量 ply (向后兼容旧 manifest)
+  if (entry.lod && entry.lod[String(lod)]) return entry.lod[String(lod)];
+  return entry.ply_file;
+}
+
+async function loadChunk(cx, cy, wantLod = 2) {
   const key = `${cx}_${cy}`;
-  if (chunkMeshes.has(key)) {
+  if (chunkMeshes.has(key) && chunkLod.get(key) === wantLod) {
     stats.cachedHits++;
     touchLRU(key);
     return;
@@ -186,26 +218,32 @@ async function loadChunk(cx, cy) {
 
   loadingSet.add(key);
   try {
-    const parsed = await loadChunkPly(entry.ply_file);
-
-    // 坐标变换: ply (x_world, y_world, z_height) → three.js (x, z, y)
-    for (let j = 0; j < parsed.n; j++) {
-      const tmp = parsed.positions[j * 3 + 1];
-      parsed.positions[j * 3 + 1] = parsed.positions[j * 3 + 2];
-      parsed.positions[j * 3 + 2] = tmp;
-    }
+    const parsed = await loadChunkPly(lodFile(entry, wantLod));
+    swapYZ(parsed);
 
     const mesh = makePointsMesh(parsed);
     mesh.name = `chunk_${key}`;
+
+    // 换级重载: 先摘旧网格再挂新的
+    const old = chunkMeshes.get(key);
+    if (old) {
+      scene.remove(old);
+      old.geometry.dispose();
+      old.material.dispose();
+    }
     scene.add(mesh);
     chunkMeshes.set(key, mesh);
+    chunkLod.set(key, wantLod);
     touchLRU(key);
     stats.loaded++;
 
     // 加入 chunk 边界线 (供 debug 用)
-    const border = makeChunkBorder(cx, cy);
-    scene.add(border);
-    chunkBorders.set(key, border);
+    if (!chunkBorders.has(key)) {
+      const border = makeChunkBorder(cx, cy);
+      border.visible = bordersVisible;
+      scene.add(border);
+      chunkBorders.set(key, border);
+    }
   } catch (e) {
     console.error(`chunk ${key} 加载失败:`, e);
   } finally {
@@ -246,10 +284,10 @@ function updateChunks(playerX, playerZ) {
     }
   }
 
-  // 异步加载所有 needed
+  // 异步加载所有 needed (按与玩家距离决定清晰度)
   for (const key of needed) {
     const [x, y] = key.split('_').map(Number);
-    loadChunk(x, y);
+    loadChunk(x, y, desiredLod(x, y, cx, cy));
   }
 
   // LRU 淘汰 (保留视野内的)
@@ -322,6 +360,16 @@ function onKeyDown(e) {
     bordersVisible = !bordersVisible;
     for (const b of chunkBorders.values()) b.visible = bordersVisible;
   }
+  // 1/2/3 强制画质 (低/中/高), 0 恢复按距离自动
+  if (k === '1') qualityOverride = 0;
+  if (k === '2') qualityOverride = 1;
+  if (k === '3') qualityOverride = 2;
+  if (k === '0') qualityOverride = null;
+  // R 键切换真实重建图层
+  if (k === 'r' && reconMesh) {
+    reconVisible = !reconVisible;
+    reconMesh.visible = reconVisible;
+  }
 }
 function onKeyUp(e) {
   const k = e.key.toLowerCase();
@@ -347,6 +395,57 @@ function updateCamera(dt) {
   if (keys.e) { camera.position.y += speed; controls.target.y += speed; }
 }
 
+// ============ 真实重建图层 (可选, 由 pipeline.reconstruct 生成) ============
+async function loadReconManifest() {
+  try {
+    const res = await fetch('../data/recon/recon_manifest.json');
+    if (!res.ok) return;
+    reconManifest = await res.json();
+    console.log(`重建图层: ${reconManifest.gaussian_count} 高斯, ` +
+                `LOD ${Object.keys(reconManifest.lod).join('/')}`);
+  } catch (e) { /* 无重建图层, 静默跳过 */ }
+}
+
+async function updateRecon() {
+  if (!reconManifest || reconLoading) return;
+  let tier;
+  if (qualityOverride !== null) {
+    tier = qualityOverride;
+  } else {
+    // 按相机到重建区中心的水平距离选清晰度 (近清远粗)
+    const b = reconManifest.bounds;
+    const cxw = (b.min[0] + b.max[0]) / 2;
+    const cyw = (b.min[1] + b.max[1]) / 2;
+    // ply 世界 y → three.js z
+    const dist = Math.hypot(camera.position.x - cxw, camera.position.z - cyw);
+    tier = dist < 150 ? 2 : (dist < 400 ? 1 : 0);
+  }
+  if (tier === reconLodLoaded) return;
+  const file = reconManifest.lod[String(tier)];
+  if (!file) return;
+
+  reconLoading = true;
+  try {
+    const parsed = await loadChunkPly(`recon/${file}`);
+    swapYZ(parsed);
+    const mesh = makePointsMesh(parsed);
+    mesh.name = 'recon_layer';
+    mesh.visible = reconVisible;
+    if (reconMesh) {
+      scene.remove(reconMesh);
+      reconMesh.geometry.dispose();
+      reconMesh.material.dispose();
+    }
+    reconMesh = mesh;
+    scene.add(mesh);
+    reconLodLoaded = tier;
+  } catch (e) {
+    console.error('重建图层加载失败:', e);
+  } finally {
+    reconLoading = false;
+  }
+}
+
 // ============ HUD 更新 ============
 function updateHUD() {
   const pos = camera.position;
@@ -360,6 +459,19 @@ function updateHUD() {
   document.getElementById('hud-chunks').textContent = chunkMeshes.size;
   document.getElementById('hud-evicted').textContent = stats.evicted;
   document.getElementById('hud-hits').textContent = stats.cachedHits;
+
+  const lodEl = document.getElementById('hud-lod');
+  if (lodEl) {
+    lodEl.textContent = qualityOverride === null
+      ? '自动 (近清远粗)' : `强制 LOD${qualityOverride}`;
+  }
+  const reconEl = document.getElementById('hud-recon');
+  if (reconEl) {
+    reconEl.textContent = !reconManifest ? '无'
+      : !reconVisible ? '已隐藏 (R 显示)'
+      : reconLodLoaded >= 0 ? `LOD${reconLodLoaded} (${reconManifest.gaussian_count} 高斯)`
+      : '加载中...';
+  }
 
   // 加载中状态指示
   const loadEl = document.getElementById('hud-loading');
@@ -450,6 +562,7 @@ async function main() {
   }
   manifest = await res.json();
   buildChunkIndex();
+  await loadReconManifest();  // 真实重建图层 (可选)
 
   loadingText.textContent = '生成 5x5 chunk 索引完成, 启动调度器...';
 
@@ -498,6 +611,7 @@ function animate() {
   if (!animate._lastCheck || now - animate._lastCheck > 50) {
     animate._lastCheck = now;
     updateChunks(camera.position.x, camera.position.z);
+    updateRecon();
   }
 
   updateHUD();

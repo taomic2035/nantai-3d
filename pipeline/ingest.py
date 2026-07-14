@@ -120,6 +120,10 @@ def extract_video_frames(
         idx += 1
 
     cap.release()
+    if saved == 0:
+        logger.warning(
+            f"  ⚠ {video_path.name} 一帧未保存 (跳过模糊 {skipped_blur} 张)! "
+            f"可尝试 --blur-threshold 0 关闭模糊筛选")
     logger.info(
         f"  → 抽帧完成: 保存 {saved} 张, 跳过模糊 {skipped_blur} 张 → {output_dir}"
     )

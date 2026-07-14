@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "assets": {
+    "house_wood_01": {
+      "kind": "building",
+      "ply": "house_wood_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        8.0,
+        6.0,
+        6.5
+      ],
+      "history": [],
+      "sha256": "8aaec8a0c836745528cb3a3bbc4f6b5b3e2573c01af20c0c324b3de0d82a62c8"
+    },
+    "house_wood_02": {
+      "kind": "building",
+      "ply": "house_wood_02_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        10.0,
+        7.0,
+        7.0
+      ],
+      "history": [],
+      "sha256": "4ea7db83564532de7a56faab0758f243b597a61eedf10c10dc7d61862ff58b72"
+    },
+    "house_stone_01": {
+      "kind": "building",
+      "ply": "house_stone_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        9.0,
+        7.0,
+        6.5
+      ],
+      "history": [],
+      "sha256": "4687848b8602448430108cdffc7c2c27c85ca47d594a368e317d12e18fa049e3"
+    },
+    "house_thatch_01": {
+      "kind": "building",
+      "ply": "house_thatch_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        7.0,
+        6.0,
+        6.0
+      ],
+      "history": [],
+      "sha256": "aa14a8145d45ac737d5868aad6943789e151faf983c2f3a8aa72030c25990273"
+    },
+    "house_barn_01": {
+      "kind": "building",
+      "ply": "house_barn_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        12.0,
+        8.0,
+        8.0
+      ],
+      "history": [],
+      "sha256": "1ef5465fc2a9a689a9bfde770c52697e1b6b676e7eb6f1adc520ec4f1c9b152d"
+    },
+    "tree_pine_01": {
+      "kind": "vegetation",
+      "ply": "tree_pine_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        4.0,
+        4.0,
+        9.0
+      ],
+      "history": [],
+      "sha256": "a04d3e7f0fe10565dcba6c2d048779b758297db2aec4b8cd714edcf04399fa17"
+    },
+    "tree_broadleaf_01": {
+      "kind": "vegetation",
+      "ply": "tree_broadleaf_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        7.0,
+        7.0,
+        8.0
+      ],
+      "history": [],
+      "sha256": "1185bc172a607f2c43e8277d44b863431facfc9937f5bd1b89b6481fac7d2145"
+    },
+    "tree_bamboo_01": {
+      "kind": "vegetation",
+      "ply": "tree_bamboo_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        3.0,
+        3.0,
+        10.0
+      ],
+      "history": [],
+      "sha256": "f12b93abdc948a3063ab23d4bc5a3e627d127b1d2f305167daa166d4ac9d9e14"
+    },
+    "stone_wall_01": {
+      "kind": "prop",
+      "ply": "stone_wall_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        4.0,
+        0.5,
+        1.2
+      ],
+      "history": [],
+      "sha256": "4cf1649bc073a353de197508c1129d0c4f181c2949ef13dbd998e468f8d865bf"
+    },
+    "stone_lamp_01": {
+      "kind": "prop",
+      "ply": "stone_lamp_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        0.8,
+        0.8,
+        2.0
+      ],
+      "history": [],
+      "sha256": "038bd54936af3fa9ddaf8516186bf62e47eee9320faaf99116897436baf35de1"
+    },
+    "fence_wood_01": {
+      "kind": "prop",
+      "ply": "fence_wood_01_v1.ply",
+      "version": 1,
+      "origin": "gpt-mock",
+      "footprint_m": [
+        3.0,
+        0.2,
+        1.1
+      ],
+      "history": [],
+      "sha256": "18598e3925d59b8cdc0e6f8ef0cb5960a043455670615c157f0c41f9853dc22c"
+    }
+  }
+}

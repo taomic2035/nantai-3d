@@ -6,10 +6,17 @@ photos/
 layouts/
 web/data/*.ply
 web/data/manifest.json
+web/data/recon/
 scenes/
 corpus/
-assets/
+recon/
 verification/output/
+
+# 素材库可移植性 (见 pipeline/mock_assets.py):
+#   registry.json 入库 (小、可审阅, 含 sha256), ply 由全局 *.ply 规则忽略。
+#   fresh clone 用 `make assets` 从 tracked 确定性生成器还原 assets/*.ply 并自校验。
+# GPT 交付目录整体不入库 (生成逻辑已迁入 pipeline/mock_assets.py 作为真相源)。
+handoff/deliverables/
 
 # ============ Python ============
 __pycache__/
