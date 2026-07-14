@@ -16,6 +16,9 @@ function baseSnapshot() {
     coordinate: {
       source_frame: 'world-enu',
       world_frame: 'world-enu',
+      source_provenance: 'measured',
+      world_provenance: 'measured',
+      contributor_provenance: ['measured'],
       units: 'meters',
       handedness: 'right',
       up_axis: 'z',
@@ -72,9 +75,33 @@ test('declared preview-only provenance cannot be promoted by metric coordinates'
   assert.ok(model.derived.diagnostics.some((item) => item.includes('provenance')));
 });
 
+test('unknown frame provenance blocks measurable geometry and trust', () => {
+  const raw = baseSnapshot();
+  raw.coordinate.source_provenance = 'unknown';
+  raw.coordinate.world_provenance = 'unknown';
+
+  const model = normalizeSnapshot(raw);
+
+  assert.equal(model.derived.geometryUsability, 'preview-only');
+  assert.equal(model.derived.trust, 'untrusted');
+  assert.ok(model.derived.diagnostics.some((item) => item.includes('frame provenance')));
+});
+
+test('unknown geometry contributor blocks a forged metric summary', () => {
+  const raw = baseSnapshot();
+  raw.coordinate.contributor_provenance = ['unknown'];
+
+  const model = normalizeSnapshot(raw);
+
+  assert.equal(model.derived.geometryUsability, 'preview-only');
+  assert.equal(model.derived.trust, 'untrusted');
+  assert.ok(model.derived.diagnostics.some((item) => item.includes('contributor')));
+});
+
 test('an explicit metric transform can align sfm-local into world-enu', () => {
   const raw = baseSnapshot();
   raw.coordinate.source_frame = 'sfm-local';
+  raw.coordinate.source_provenance = 'sfm';
   raw.coordinate.transform_chain = [{
     id: 'sim3-control-v1', source_frame: 'sfm-local', target_frame: 'world-enu',
   }];

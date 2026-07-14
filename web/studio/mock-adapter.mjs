@@ -23,6 +23,8 @@ function baseSnapshot() {
     },
     coordinate: {
       source_frame: 'world-enu', world_frame: 'world-enu', units: 'meters',
+      source_provenance: 'synthetic', world_provenance: 'synthetic',
+      contributor_provenance: ['synthetic'],
       handedness: 'right', up_axis: 'z', transform_chain: [],
       metric_evidence: ['synthetic-layout-v1'], registered_images: 13, total_images: 13,
     },
@@ -71,6 +73,8 @@ function scenario(name) {
   if (name === 'align-warning') {
     Object.assign(snapshot.coordinate, {
       source_frame: 'sfm-local', world_frame: 'world-enu', units: 'arbitrary',
+      source_provenance: 'unknown', world_provenance: 'unknown',
+      contributor_provenance: ['unknown'],
       up_axis: 'unknown', transform_chain: [], metric_evidence: [],
     });
     snapshot.pipeline.align.trust = 'untrusted';

@@ -105,6 +105,10 @@ def _write_v2_project(root: Path) -> None:
             "metric_evidence": ["survey-control-point-01"],
             "transform_chain": [],
             "applied_transform_ids": [],
+            "ancestry": [{
+                "kind": "import-splat",
+                "source_frame": _frame("capture-enu", provenance="measured"),
+            }],
         },
         "provenance": {
             "requested_reconstruction_engine": "import",
@@ -202,6 +206,9 @@ class TestProjectSnapshot:
         assert snapshot["coordinate"] == {
             "source_frame": "capture-enu",
             "world_frame": "world-enu",
+            "source_provenance": "measured",
+            "world_provenance": "measured",
+            "contributor_provenance": ["measured"],
             "units": "meters",
             "handedness": "right",
             "up_axis": "z",
@@ -315,6 +322,44 @@ class TestProjectSnapshot:
         assert snapshot["coordinate"]["world_frame"] == "unknown"
         assert snapshot["coordinate"]["units"] == "unknown"
         assert snapshot["coordinate"]["metric_evidence"] == []
+        assert snapshot["pipeline"]["align"]["trust"] == "untrusted"
+
+    def test_unknown_frame_provenance_cannot_be_promoted_by_manifest_label(
+        self, tmp_path
+    ):
+        _write_v2_project(tmp_path)
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["coordinate_contract"]["pose_frame"]["provenance"] = "unknown"
+        manifest["coordinate_contract"]["target_frame"]["provenance"] = "unknown"
+        manifest["provenance"]["geometry_usability"] = "metric-aligned"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["coordinate"]["source_provenance"] == "unknown"
+        assert snapshot["coordinate"]["world_provenance"] == "unknown"
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
+        assert snapshot["pipeline"]["align"]["trust"] == "untrusted"
+
+    def test_unknown_contributor_provenance_blocks_forged_metric_label(
+        self, tmp_path
+    ):
+        _write_v2_project(tmp_path)
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["coordinate_contract"]["ancestry"][0]["source_frame"][
+            "provenance"
+        ] = "unknown"
+        manifest["provenance"]["geometry_usability"] = "metric-aligned"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["coordinate"]["source_provenance"] == "measured"
+        assert snapshot["coordinate"]["world_provenance"] == "measured"
+        assert snapshot["coordinate"]["contributor_provenance"] == ["unknown"]
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
         assert snapshot["pipeline"]["align"]["trust"] == "untrusted"
 
     def test_legacy_manifest_is_visible_but_never_promoted_to_metric_or_real(self, tmp_path):

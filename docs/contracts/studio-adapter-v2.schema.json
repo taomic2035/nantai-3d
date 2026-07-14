@@ -138,6 +138,9 @@
       "required": [
         "source_frame",
         "world_frame",
+        "source_provenance",
+        "world_provenance",
+        "contributor_provenance",
         "units",
         "handedness",
         "up_axis",
@@ -147,6 +150,14 @@
       "properties": {
         "source_frame": { "type": "string" },
         "world_frame": { "type": "string" },
+        "source_provenance": { "$ref": "#/$defs/frameProvenance" },
+        "world_provenance": { "$ref": "#/$defs/frameProvenance" },
+        "contributor_provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/frameProvenance" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
         "units": { "enum": ["meters", "arbitrary", "unknown"] },
         "handedness": { "enum": ["right", "left", "unknown"] },
         "up_axis": { "enum": ["z", "unknown"] },
@@ -155,6 +166,9 @@
         "registered_images": { "type": "integer", "minimum": 0 },
         "total_images": { "type": "integer", "minimum": 0 }
       }
+    },
+    "frameProvenance": {
+      "enum": ["measured", "synthetic", "sfm", "unknown"]
     },
     "transform": {
       "type": "object",

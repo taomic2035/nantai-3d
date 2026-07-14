@@ -234,6 +234,9 @@ def _unknown_coordinate() -> dict[str, Any]:
     return {
         "source_frame": "unknown",
         "world_frame": "unknown",
+        "source_provenance": "unknown",
+        "world_provenance": "unknown",
+        "contributor_provenance": ["unknown"],
         "units": "unknown",
         "handedness": "unknown",
         "up_axis": "unknown",
@@ -286,15 +289,37 @@ def _coordinate_snapshot(root: Path, manifest: dict[str, Any] | None) -> dict[st
     axes = target_frame.get("axes")
     source_id = pose_frame.get("frame_id")
     target_id = target_frame.get("frame_id")
+    source_provenance = pose_frame.get("provenance")
+    world_provenance = target_frame.get("provenance")
     units = target_frame.get("units")
     handedness = target_frame.get("handedness")
     transform_chain = contract.get("transform_chain")
     metric_evidence = contract.get("metric_evidence")
+    ancestry = contract.get("ancestry")
+    contributor_provenance: list[str] = []
+    if isinstance(ancestry, list):
+        for ancestor in ancestry:
+            source_frame = (
+                ancestor.get("source_frame") if isinstance(ancestor, dict) else None
+            )
+            provenance = (
+                source_frame.get("provenance")
+                if isinstance(source_frame, dict)
+                and _frame_claim_is_coherent(source_frame)
+                else "unknown"
+            )
+            if provenance not in contributor_provenance:
+                contributor_provenance.append(provenance)
+    if not contributor_provenance:
+        contributor_provenance = ["unknown"]
     registered, total = _registration_counts(root, manifest.get("sessions"))
     coordinate.update(
         {
             "source_frame": source_id if isinstance(source_id, str) and source_id else "unknown",
             "world_frame": target_id if isinstance(target_id, str) and target_id else "unknown",
+            "source_provenance": source_provenance,
+            "world_provenance": world_provenance,
+            "contributor_provenance": contributor_provenance,
             "units": units if units in {"meters", "arbitrary", "unknown"} else "unknown",
             "handedness": (
                 handedness if handedness in {"right", "left", "unknown"} else "unknown"
@@ -689,6 +714,23 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
     sources = _scan_sources(root)
     coordinate = _coordinate_snapshot(root, manifest)
     reconstruction, stitch = _reconstruction_snapshot(root, manifest, manifest_path)
+    coordinate_provenance_trusted = (
+        coordinate["source_provenance"] in {"measured", "sfm"}
+        and coordinate["world_provenance"] == "measured"
+        and all(
+            provenance in {"measured", "sfm"}
+            for provenance in coordinate["contributor_provenance"]
+        )
+    )
+    if (
+        not coordinate_provenance_trusted
+        and reconstruction["geometry_usability"]
+        in {"metric-aligned", "metric-unaligned"}
+    ):
+        reconstruction["declared_geometry_usability"] = reconstruction[
+            "geometry_usability"
+        ]
+        reconstruction["geometry_usability"] = "preview-only"
     assets = _asset_snapshot(root)
     runs = _load_runs(root)
 
@@ -706,7 +748,11 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         "sources": _step(available=bool(sources["images"] + sources["videos"]), trust="untrusted"),
         "align": _step(
             available=v2_coordinate,
-            trust="proxy" if reconstruction["synthetic"] else "verified",
+            trust=(
+                "untrusted" if not coordinate_provenance_trusted
+                else "proxy" if reconstruction["synthetic"]
+                else "verified"
+            ),
         ),
         "reconstruct": _step(available=artifact_present, trust="proxy"),
         "stitch": _step(
@@ -765,6 +811,8 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         snapshot["diagnostics"].append(f"reconstruction-manifest:{manifest_error}")
     elif manifest and manifest.get("schema_version") != 2:
         snapshot["diagnostics"].append("reconstruction-manifest:legacy-schema")
+    if not coordinate_provenance_trusted:
+        snapshot["diagnostics"].append("coordinate-provenance:untrusted")
     if reconstruction["evidence_status"] == "missing-artifact":
         snapshot["diagnostics"].append("reconstruction-artifact:missing")
     elif reconstruction["evidence_status"] == "invalid-artifact-descriptor":

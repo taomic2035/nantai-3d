@@ -113,6 +113,22 @@ function hasUnambiguousFramePath(coordinate, diagnostics) {
   return true;
 }
 
+function hasTrustedFrameProvenance(coordinate, diagnostics = null) {
+  const contributors = Array.isArray(coordinate.contributor_provenance)
+    ? coordinate.contributor_provenance : [];
+  const framesTrusted = ['measured', 'sfm'].includes(coordinate.source_provenance)
+    && coordinate.world_provenance === 'measured';
+  const contributorsTrusted = contributors.length > 0
+    && contributors.every((item) => ['measured', 'sfm'].includes(item));
+  const trusted = framesTrusted && contributorsTrusted;
+  if (!trusted && diagnostics) {
+    diagnostics.push(
+      'coordinate frame provenance or contributor provenance is unknown or synthetic; metric use is blocked',
+    );
+  }
+  return trusted;
+}
+
 function deriveGeometryUsability(snapshot, diagnostics) {
   const coordinate = snapshot.coordinate ?? {};
   const reconstruction = snapshot.reconstruction ?? {};
@@ -120,6 +136,7 @@ function deriveGeometryUsability(snapshot, diagnostics) {
     diagnostics.push('manifest geometry provenance is not metric-aligned; metric use is blocked');
     return 'preview-only';
   }
+  if (!hasTrustedFrameProvenance(coordinate, diagnostics)) return 'preview-only';
   const frameAligned = hasUnambiguousFramePath(coordinate, diagnostics);
   const complete = coordinate.world_frame === 'world-enu'
     && coordinate.units === 'meters'
@@ -142,6 +159,7 @@ function deriveGeometryUsability(snapshot, diagnostics) {
 function deriveTrust(snapshot, geometryUsability, renderFidelity, diagnostics) {
   const reconstruction = snapshot.reconstruction ?? {};
   if (reconstruction.synthetic || snapshot.adapter?.kind === 'mock') return 'proxy';
+  if (!hasTrustedFrameProvenance(snapshot.coordinate ?? {})) return 'untrusted';
   const artifact = reconstruction.artifact ?? {};
   if (geometryUsability === 'measurable'
       && renderFidelity.startsWith('gaussian-splat')
