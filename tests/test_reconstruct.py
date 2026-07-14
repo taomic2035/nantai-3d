@@ -8,7 +8,9 @@ import pytest
 
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.recon_schema import (
+    AlignmentStatus,
     AxisConvention,
+    CaptureSession,
     CoordinateFrame,
     CoordinateUnits,
     FrameProvenance,
@@ -16,10 +18,11 @@ from pipeline.recon_schema import (
     GeoAlignment,
     Handedness,
     MetricStatus,
+    RegistrationResult,
     Sim3,
     SplatInput,
 )
-from pipeline.reconstruct import reconstruct
+from pipeline.reconstruct import _validate_scene_history, reconstruct
 
 
 def _mock_source_frame() -> CoordinateFrame:
@@ -171,6 +174,139 @@ class TestImportEngine:
                         )],
                         dedup_voxel=0.0)
         assert m["gaussian_count"] == 800
+
+    def test_import_rejects_simple_point_ply_as_full_3dgs(self, photos_dir, tmp_path):
+        source = tmp_path / "simple.ply"
+        GaussianScene(
+            [[0, 0, 0]],
+            [[1, 0, 0]],
+            frame_id="mock-local",
+            units="meters",
+        ).save_ply(source, flavor="simple")
+
+        with pytest.raises(ValueError, match="full 3DGS|simple PLY|3DGS import"):
+            reconstruct(
+                photos_dir=photos_dir,
+                out_dir=tmp_path / "recon",
+                web_dir=tmp_path / "web",
+                engine="import",
+                reg_engine="mock",
+                splat_map=[SplatInput(
+                    session_id="video_vid_A",
+                    path=str(source),
+                    source_frame=_mock_source_frame(),
+                )],
+                dedup_voxel=0,
+            )
+
+    @pytest.mark.parametrize(
+        ("source_provenance", "expected_synthetic", "expected_usability"),
+        [
+            (FrameProvenance.SYNTHETIC, True, "preview-proxy"),
+            (FrameProvenance.UNKNOWN, False, "preview-only"),
+        ],
+    )
+    def test_import_manifest_fails_closed_for_untrusted_source_provenance(
+        self,
+        tmp_path,
+        monkeypatch,
+        source_provenance,
+        expected_synthetic,
+        expected_usability,
+    ):
+        source_frame = CoordinateFrame(
+            frame_id="shared-world",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=source_provenance,
+            evidence=["source-provenance-evidence"],
+        )
+        target_frame = CoordinateFrame(
+            frame_id="shared-world",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.MEASURED,
+            evidence=["survey-control"],
+        )
+        session = CaptureSession(
+            session_id="s0", kind="photo_batch", source="photos", images=[]
+        )
+        registration = RegistrationResult(
+            engine="colmap",
+            pose_frame=target_frame,
+            alignment_status=AlignmentStatus.UNALIGNED,
+            sessions=[session],
+            poses=[],
+        )
+        monkeypatch.setattr("pipeline.reconstruct.register", lambda *args, **kwargs: registration)
+        source = tmp_path / f"{source_provenance.value}.ply"
+        GaussianScene(
+            [[0, 0, 0]],
+            [[1, 0, 0]],
+            frame_id=source_frame.frame_id,
+            units=source_frame.units.value,
+        ).save_ply(source, flavor="3dgs")
+
+        manifest = reconstruct(
+            photos_dir=tmp_path / "photos",
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            reg_engine="colmap",
+            splat_map=[SplatInput(
+                session_id="s0",
+                path=str(source),
+                source_frame=source_frame,
+            )],
+            dedup_voxel=0,
+        )
+
+        assert manifest["provenance"]["synthetic"] is expected_synthetic
+        assert manifest["provenance"]["geometry_usability"] == expected_usability
+        assert (
+            manifest["coordinate_contract"]["ancestry"][0]["source_frame"]["provenance"]
+            == source_provenance.value
+        )
+
+    def test_scene_history_rejects_non_composable_sibling_transform(self):
+        transform_a = FrameTransform(
+            source_frame="scan-A",
+            target_frame="world",
+            sim3=Sim3(scale=2.0),
+            method="external-sim3",
+        )
+        transform_b = FrameTransform(
+            source_frame="scan-B",
+            target_frame="world",
+            sim3=Sim3(scale=3.0),
+            method="external-sim3",
+        )
+        scene = GaussianScene(
+            [[0, 0, 0]],
+            [[1, 0, 0]],
+            frame_id="world",
+            units="meters",
+            applied_transform_ids=[
+                transform_b.transform_id,
+                transform_a.transform_id,
+            ],
+        )
+
+        with pytest.raises(ValueError, match="history.*(composable|continuous|target frame)"):
+            _validate_scene_history(
+                scene,
+                {
+                    transform_a.transform_id: transform_a,
+                    transform_b.transform_id: transform_b,
+                },
+                label="adversarial scene",
+            )
 
     def test_full_artifact_reports_high_order_sh_and_extra_attributes(
         self, photos_dir, tmp_path

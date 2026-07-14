@@ -12,7 +12,7 @@ import pytest
 from plyfile import PlyData, PlyElement
 
 from pipeline.gaussian_scene import GaussianScene
-from pipeline.recon_schema import Sim3
+from pipeline.recon_schema import FrameTransform, Sim3
 
 
 def _degree3_dtype() -> list[tuple[str, str]]:
@@ -68,6 +68,37 @@ def test_degree3_roundtrip_preserves_raw_sh_normals_and_extra_fields(tmp_path):
     for name in expected.dtype.names:
         assert name in actual.dtype.names
         assert np.allclose(actual[name], expected[name], atol=1e-6), name
+
+
+def test_incomplete_3dgs_property_groups_fail_closed(tmp_path):
+    src = tmp_path / "dc-only.ply"
+    arr = np.zeros(1, dtype=[
+        ("x", "f4"), ("y", "f4"), ("z", "f4"),
+        ("f_dc_0", "f4"), ("f_dc_1", "f4"), ("f_dc_2", "f4"),
+    ])
+    PlyData([PlyElement.describe(arr, "vertex")], byte_order="<").write(src)
+
+    with pytest.raises(ValueError, match="3DGS.*(缺少|missing|required).*(opacity|scale|rot)"):
+        GaussianScene.load_ply(src)
+
+
+def test_non_contiguous_sh_indices_fail_closed(tmp_path):
+    src = tmp_path / "gapped-sh.ply"
+    rest_indices = [*range(8), 9]
+    names = ["x", "y", "z", "nx", "ny", "nz"]
+    names += [f"f_dc_{index}" for index in range(3)]
+    names += [f"f_rest_{index}" for index in rest_indices]
+    names += ["opacity"]
+    names += [f"scale_{index}" for index in range(3)]
+    names += [f"rot_{index}" for index in range(4)]
+    arr = np.zeros(1, dtype=[(name, "f4") for name in names])
+    arr["rot_0"] = 1.0
+    for index in rest_indices:
+        arr[f"f_rest_{index}"] = index
+    PlyData([PlyElement.describe(arr, "vertex")], byte_order="<").write(src)
+
+    with pytest.raises(ValueError, match="f_rest.*(连续|contiguous)"):
+        GaussianScene.load_ply(src)
 
 
 def test_subsets_and_lod_keep_all_gaussian_attributes(tmp_path):
@@ -149,3 +180,44 @@ def test_rotation_with_high_order_sh_fails_closed_without_mutation(tmp_path):
 
     assert np.array_equal(scene.xyz, xyz_before)
     assert np.array_equal(scene.sh_rest, sh_before)
+
+
+@pytest.mark.parametrize(
+    ("coordinate", "transform_scale"),
+    [(2.0e38, 2.0), (1.0e308, 2.0), (1.0e-46, 1.0)],
+)
+def test_frame_transform_rejects_unserializable_results_atomically(
+    coordinate, transform_scale
+):
+    scene = GaussianScene(
+        [[coordinate, 0.0, 0.0]],
+        [[0.2, 0.3, 0.4]],
+        frame_id="source",
+        units="arbitrary",
+    )
+    transform = FrameTransform(
+        source_frame="source",
+        target_frame="target",
+        sim3=Sim3(scale=transform_scale),
+        method="external-sim3",
+    )
+    before = {
+        "xyz": scene.xyz.copy(),
+        "scale": scene.scale.copy(),
+        "normals": scene.normals.copy(),
+        "rot": scene.rot.copy(),
+        "frame_id": scene.frame_id,
+        "units": scene.units,
+        "history": list(scene.applied_transform_ids),
+    }
+
+    with pytest.raises(ValueError, match="finite|float32|representable"):
+        scene.apply_frame_transform(transform, target_units="meters")
+
+    assert np.array_equal(scene.xyz, before["xyz"])
+    assert np.array_equal(scene.scale, before["scale"])
+    assert np.array_equal(scene.normals, before["normals"])
+    assert np.array_equal(scene.rot, before["rot"])
+    assert scene.frame_id == before["frame_id"]
+    assert scene.units == before["units"]
+    assert scene.applied_transform_ids == before["history"]

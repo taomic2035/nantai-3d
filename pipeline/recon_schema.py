@@ -162,6 +162,12 @@ class CameraPose(BaseModel):
     quat_wxyz: list[float] = Field(min_length=4, max_length=4)
     t_xyz: list[float] = Field(min_length=3, max_length=3)
     intrinsics: CameraIntrinsics
+    # COLMAP calibration identity is optional for legacy/mock poses, but when
+    # present it must remain lossless enough to recover the per-image camera
+    # model, including distortion parameters encoded in ``camera_params``.
+    camera_id: int | None = Field(default=None, gt=0)
+    camera_model: str | None = Field(default=None, min_length=1)
+    camera_params: tuple[float, ...] | None = None
 
     @field_validator("quat_wxyz")
     @classmethod
@@ -181,6 +187,29 @@ class CameraPose(BaseModel):
         if not np.all(np.isfinite(t)):
             raise ValueError("translation values must be finite")
         return t.tolist()
+
+    @field_validator("camera_params")
+    @classmethod
+    def _finite_camera_params(
+        cls, values: tuple[float, ...] | None
+    ) -> tuple[float, ...] | None:
+        if values is None:
+            return None
+        params = np.asarray(values, dtype=np.float64)
+        if params.ndim != 1 or len(params) == 0 or not np.all(np.isfinite(params)):
+            raise ValueError("camera_params must be a non-empty finite sequence")
+        return tuple(params.tolist())
+
+    @model_validator(mode="after")
+    def _complete_camera_calibration(self) -> CameraPose:
+        calibration = (self.camera_id, self.camera_model, self.camera_params)
+        if any(value is not None for value in calibration) and not all(
+            value is not None for value in calibration
+        ):
+            raise ValueError(
+                "camera_id, camera_model, and camera_params must be provided together"
+            )
+        return self
 
     def rotation_matrix(self) -> np.ndarray:
         return _quat_to_rotation_matrix(self.quat_wxyz)

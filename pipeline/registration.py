@@ -539,6 +539,9 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
             quat_wxyz=record.quat_wxyz_c2w.tolist(),
             t_xyz=record.t_xyz_c2w.tolist(),
             intrinsics=camera.intrinsics.model_copy(deep=True),
+            camera_id=camera.camera_id,
+            camera_model=camera.model,
+            camera_params=camera.params,
         ))
     logger.info(f"COLMAP 配准: {len(poses)}/{n_images} 张图注册成功 (联合模型, 坐标系一致)")
 

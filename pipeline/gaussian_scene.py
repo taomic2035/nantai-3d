@@ -152,7 +152,12 @@ class GaussianScene:
 
     # ============ IO ============
     @classmethod
-    def load_ply(cls, path: str | Path) -> "GaussianScene":
+    def load_ply(
+        cls,
+        path: str | Path,
+        *,
+        require_3dgs: bool = False,
+    ) -> "GaussianScene":
         """加载 ply, 自动识别 simple / 3dgs 格式"""
         ply = PlyData.read(str(path))
         v = ply['vertex'].data
@@ -179,34 +184,46 @@ class GaussianScene:
                    if all(name in names for name in ("nx", "ny", "nz"))
                    else np.zeros((n, 3), dtype=np.float64))
 
-        if 'f_dc_0' in names:  # 标准 3DGS 格式
+        name_set = set(names)
+        has_3dgs_coefficients = any(
+            name.startswith(("f_dc_", "f_rest_")) for name in names
+        )
+        if has_3dgs_coefficients:  # 标准 3DGS 格式
+            required = {
+                "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
+                "scale_0", "scale_1", "scale_2",
+                "rot_0", "rot_1", "rot_2", "rot_3",
+            }
+            missing = sorted(required - name_set)
+            if missing:
+                raise ValueError(
+                    "3DGS PLY 缺少 required properties: " + ", ".join(missing)
+                )
             f_dc = np.stack([v['f_dc_0'], v['f_dc_1'], v['f_dc_2']], axis=1).astype(np.float64)
             rgb = np.clip(f_dc * SH_C0 + 0.5, 0, 1)
             rest_names = sorted(
                 (name for name in names if name.startswith("f_rest_")),
                 key=lambda name: int(name.rsplit("_", 1)[1]),
             )
+            expected_rest_names = [
+                f"f_rest_{index}" for index in range(len(rest_names))
+            ]
+            if rest_names != expected_rest_names:
+                raise ValueError(
+                    "f_rest properties must use contiguous indices starting at zero"
+                )
             sh_rest = (np.stack([v[name] for name in rest_names], axis=1).astype(np.float64)
                        if rest_names else np.zeros((n, 0), dtype=np.float64))
-            if 'opacity' in names:
-                opacity = 1.0 / (1.0 + np.exp(-v['opacity'].astype(np.float64)))
-            else:
-                opacity = np.ones(n)
-            if 'scale_0' in names:
-                scale = np.exp(np.stack(
-                    [v['scale_0'], v['scale_1'], v['scale_2']], axis=1).astype(np.float64))
-            else:
-                scale = np.full((n, 3), 0.05)
-            if 'rot_0' in names:
-                rot = np.stack([v['rot_0'], v['rot_1'], v['rot_2'], v['rot_3']],
-                               axis=1).astype(np.float64)
-                quat_norms = np.linalg.norm(rot, axis=1)
-                if np.any(quat_norms < 1e-12):
-                    raise ValueError("四元数 quaternion norm must be non-zero")
-                if not np.allclose(quat_norms, 1.0, rtol=1e-3, atol=1e-4):
-                    raise ValueError("四元数 quaternion must be unit length")
-            else:
-                rot = None
+            opacity = 1.0 / (1.0 + np.exp(-v['opacity'].astype(np.float64)))
+            scale = np.exp(np.stack(
+                [v['scale_0'], v['scale_1'], v['scale_2']], axis=1).astype(np.float64))
+            rot = np.stack([v['rot_0'], v['rot_1'], v['rot_2'], v['rot_3']],
+                           axis=1).astype(np.float64)
+            quat_norms = np.linalg.norm(rot, axis=1)
+            if np.any(quat_norms < 1e-12):
+                raise ValueError("四元数 quaternion norm must be non-zero")
+            if not np.allclose(quat_norms, 1.0, rtol=1e-3, atol=1e-4):
+                raise ValueError("四元数 quaternion must be unit length")
             known = {
                 "x", "y", "z", "nx", "ny", "nz",
                 "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
@@ -227,6 +244,10 @@ class GaussianScene:
             )
 
         if 'r' in names:  # simple 格式 (本项目合成 ply)
+            if require_3dgs:
+                raise ValueError(
+                    "3DGS import requires a full 3DGS PLY; simple PLY is preview-only"
+                )
             rgb = np.stack([v['r'], v['g'], v['b']], axis=1).astype(np.float64) / 255.0
             scale = (v['scale'].astype(np.float64) if 'scale' in names
                      else np.full(n, 0.05))
@@ -317,17 +338,46 @@ class GaussianScene:
             raise ValueError(
                 "rotation 会改变高阶 SH 球谐基；当前版本未实现可靠 SH rotation，已阻断")
 
+    @staticmethod
+    def _require_float32_representable(label: str, values: np.ndarray) -> None:
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"transformed {label} values must be finite")
+        float32 = np.finfo(np.float32)
+        magnitude = np.abs(values)
+        overflows = magnitude > float32.max
+        underflows = (magnitude > 0) & (magnitude < float32.smallest_subnormal)
+        if np.any(overflows | underflows):
+            raise ValueError(
+                f"transformed {label} values must be representable as float32"
+            )
+
     def _apply_sim3(self, sim3: Sim3) -> None:
         rotation = sim3.rotation_matrix()
-        self.xyz = sim3.scale * (self.xyz @ rotation.T) + np.array(sim3.t_xyz)
-        self.scale = self.scale * sim3.scale
-        self.normals = self.normals @ rotation.T
-        q = np.array(sim3.quat_wxyz, dtype=np.float64)
-        q = q / np.linalg.norm(q)
-        self.rot = _quat_multiply(q, self.rot)
-        norms = np.linalg.norm(self.rot, axis=1, keepdims=True)
+        with np.errstate(over="ignore", invalid="ignore"):
+            xyz = sim3.scale * (self.xyz @ rotation.T) + np.array(sim3.t_xyz)
+            scale = self.scale * sim3.scale
+            normals = self.normals @ rotation.T
+            q = np.array(sim3.quat_wxyz, dtype=np.float64)
+            q = q / np.linalg.norm(q)
+            rot = _quat_multiply(q, self.rot)
+        norms = np.linalg.norm(rot, axis=1, keepdims=True)
         norms[norms < 1e-12] = 1.0
-        self.rot = self.rot / norms
+        rot = rot / norms
+
+        for label, values in (
+            ("xyz", xyz),
+            ("scale", scale),
+            ("normals", normals),
+            ("quaternion", rot),
+        ):
+            self._require_float32_representable(label, values)
+
+        # Commit only after every derived array passes validation.  This keeps
+        # geometry and frame/history metadata unchanged on arithmetic failure.
+        self.xyz = xyz
+        self.scale = scale
+        self.normals = normals
+        self.rot = rot
 
     def apply_frame_transform(
         self,

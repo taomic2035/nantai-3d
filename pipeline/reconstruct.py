@@ -64,6 +64,7 @@ def _derive_geometry_usability(
     metric_evidence: list[str],
     *,
     synthetic: bool,
+    provenance_known: bool = True,
 ) -> str:
     """Classify geometry only from the coordinate evidence contract.
 
@@ -73,6 +74,8 @@ def _derive_geometry_usability(
     """
     if synthetic:
         return "preview-proxy"
+    if not provenance_known:
+        return "preview-only"
     if not (
         target_frame.units is CoordinateUnits.METERS
         and target_frame.metric_status is MetricStatus.METRIC
@@ -341,7 +344,7 @@ def import_session_splats(
     for item in splat_inputs:
         if item.session_id not in known_sessions:
             raise ValueError(f"SplatInput references unknown session: {item.session_id}")
-        scene = GaussianScene.load_ply(item.path)
+        scene = GaussianScene.load_ply(item.path, require_3dgs=True)
         _apply_splat_transform(scene, item, reg.target_frame)
         logger.info(
             f"导入泼溅: {item.session_id} ← {item.path} "
@@ -410,6 +413,7 @@ def _validate_scene_history(
     definitions: dict[str, FrameTransform],
     *,
     label: str,
+    require_composable: bool = True,
 ) -> list[str]:
     transform_ids = list(scene.applied_transform_ids)
     if len(transform_ids) != len(set(transform_ids)):
@@ -419,6 +423,17 @@ def _validate_scene_history(
         raise ValueError(
             f"{label} transform history has no auditable transform definition: {missing}"
         )
+    if require_composable and transform_ids:
+        current_frame = scene.frame_id
+        for transform_id in reversed(transform_ids):
+            transform = definitions[transform_id]
+            if transform.target_frame != current_frame:
+                raise ValueError(
+                    f"{label} transform history is not composable: "
+                    f"{transform_id} targets {transform.target_frame!r}, "
+                    f"expected target frame {current_frame!r}"
+                )
+            current_frame = transform.source_frame
     return transform_ids
 
 
@@ -468,6 +483,12 @@ def reconstruct(photos_dir: str | Path = "photos",
         if not splat_map:
             raise ValueError("engine=import 需要 --splat SplatInput JSON 契约")
         scenes = import_session_splats(splat_map, reg)
+        for item, scene in zip(splat_map, scenes, strict=True):
+            _validate_scene_history(
+                scene,
+                transform_definitions,
+                label=f"imported scene {item.session_id!r}",
+            )
         ancestry = [
             {
                 "kind": "import-splat",
@@ -488,6 +509,11 @@ def reconstruct(photos_dir: str | Path = "photos",
         scenes = []
         for sess in reg.sessions:
             s = synth_session_splat(sess, reg, photos_dir)
+            _validate_scene_history(
+                s,
+                transform_definitions,
+                label=f"synthetic scene {sess.session_id!r}",
+            )
             logger.info(f"mock 泼溅: {sess.session_id} ({sess.kind}, "
                         f"{len(sess.images)} 图) → {len(s)} 高斯")
             scenes.append(s)
@@ -501,7 +527,12 @@ def reconstruct(photos_dir: str | Path = "photos",
             })
     # 3. Merge only after every scene reports the same target frame/units.
     merged = GaussianScene.merge(scenes, dedup_voxel=dedup_voxel)
-    _validate_scene_history(merged, transform_definitions, label="merged scene")
+    _validate_scene_history(
+        merged,
+        transform_definitions,
+        label="merged scene",
+        require_composable=False,
+    )
     logger.info(f"拼接完成: {len(scenes)} 个会话场景 → {len(merged)} 高斯 "
                 f"(dedup_voxel={dedup_voxel} {reg.target_frame.units.value})")
 
@@ -531,7 +562,12 @@ def reconstruct(photos_dir: str | Path = "photos",
         })
         before = len(base)
         merged = base.replace_region(merged, margin=replace_margin)
-        _validate_scene_history(merged, transform_definitions, label="replaced scene")
+        _validate_scene_history(
+            merged,
+            transform_definitions,
+            label="replaced scene",
+            require_composable=False,
+        )
         logger.info(f"区域替换: 基底 {before} 高斯 + 新重建 → {len(merged)} 高斯")
 
     # 5. 导出: 全量 3dgs ply + LOD simple ply + manifest
@@ -590,15 +626,25 @@ def reconstruct(photos_dir: str | Path = "photos",
         metric_evidence.extend(transform_evidence[transform.transform_id])
     metric_evidence = list(dict.fromkeys(metric_evidence))
 
+    provenance_frames = [reg.pose_frame, reg.world_frame]
+    provenance_frames.extend(
+        item.source_frame for item in (splat_map or [])
+    )
     is_synthetic = synthetic_geometry or any(
         frame is not None and frame.provenance is FrameProvenance.SYNTHETIC
-        for frame in (reg.pose_frame, reg.world_frame)
+        for frame in provenance_frames
+    )
+    provenance_known = all(
+        frame.provenance is not FrameProvenance.UNKNOWN
+        for frame in provenance_frames
+        if frame is not None
     )
     geometry_usability = _derive_geometry_usability(
         reg.target_frame,
         reg.alignment_status,
         metric_evidence,
         synthetic=is_synthetic,
+        provenance_known=provenance_known,
     )
     manifest = {
         "schema_version": 2,

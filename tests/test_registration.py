@@ -271,6 +271,40 @@ class TestColmapRegistrationEvidence:
         with pytest.raises(ValueError, match="IMG_000.jpg.*CAMERA_ID=99.*cameras.txt"):
             registration_module.colmap_register(photos_dir, workspace)
 
+    def test_per_image_camera_calibration_survives_json_roundtrip(
+        self, photos_dir, tmp_path, monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        _write_colmap_model(
+            workspace,
+            cameras="\n".join([
+                "1 SIMPLE_RADIAL 640 480 500 320 240 -0.1",
+                "2 SIMPLE_RADIAL 640 480 500 320 240 0.2",
+            ]),
+            images="\n".join([
+                "1 1 0 0 0 0 0 0 1 IMG_000.jpg",
+                "",
+                "2 1 0 0 0 1 2 3 2 vid_A/vid_A_frame_000000.jpg",
+                "",
+            ]),
+        )
+        _stub_colmap_commands(monkeypatch)
+
+        result = registration_module.colmap_register(photos_dir, workspace)
+        restored = RegistrationResult.model_validate_json(result.model_dump_json())
+        poses = {pose.image: pose for pose in restored.poses}
+
+        assert poses["IMG_000.jpg"].camera_id == 1
+        assert poses["IMG_000.jpg"].camera_model == "SIMPLE_RADIAL"
+        assert poses["IMG_000.jpg"].camera_params == (
+            500.0, 320.0, 240.0, -0.1,
+        )
+        assert poses["vid_A/vid_A_frame_000000.jpg"].camera_id == 2
+        assert poses["vid_A/vid_A_frame_000000.jpg"].camera_model == "SIMPLE_RADIAL"
+        assert poses["vid_A/vid_A_frame_000000.jpg"].camera_params == (
+            500.0, 320.0, 240.0, 0.2,
+        )
+
 
 class TestGpsEnu:
     def test_north_offset(self):
