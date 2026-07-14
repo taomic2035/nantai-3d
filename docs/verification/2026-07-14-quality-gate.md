@@ -1,9 +1,9 @@
 # Quality Gate Report — Nantai 3D takeover
 
-Spec：`docs/superpowers/specs/2026-07-14-nantai-3d-studio-ux-design.md`  
-Plan：`docs/superpowers/plans/2026-07-14-nantai-3d-takeover.md`  
+Spec：`docs/superpowers/specs/2026-07-14-nantai-3d-studio-ux-design.md`
+Plan：`docs/superpowers/plans/2026-07-14-nantai-3d-takeover.md`
 原始需求：本任务用户原话（图片+视频、统一坐标、混合重建、拼接/可变清晰、Gaussian
-Splat、素材替换、UX、模拟素材、Opus handoff）  
+Splat、素材替换、UX、模拟素材、Opus handoff）
 检查时间：2026-07-14 23:20 CST
 
 ## 愿景覆盖

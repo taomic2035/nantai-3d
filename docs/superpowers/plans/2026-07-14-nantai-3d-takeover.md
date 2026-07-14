@@ -6,8 +6,8 @@
 坐标、图视频混合重建、拼接与区域增清、真实 Gaussian Splat 展示、可替换素材、Studio UX”
 从可演示原型推进到诚实、可测试、可复现的一条本地链路。
 
-**工作区：** `/Users/taomic/vibecoding/nantai-3d-codex-takeover`  
-**分支：** `codex/nantai-takeover`  
+**工作区：** `/Users/taomic/vibecoding/nantai-3d-codex-takeover`
+**分支：** `codex/nantai-takeover`
 **基线：** Python 3.13 editable install 成功；2026-07-14 基线 `58 passed`。原始
 `/Users/taomic/vibecoding/nantai-3d` 保持未修改，继续作为 Opus 现场。
 

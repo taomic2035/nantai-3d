@@ -1,7 +1,7 @@
 # Nantai 3D Studio UX 设计
 
-日期：2026-07-14  
-状态：批准基线（用户授权 Codex 暂时接管全项目推进）  
+日期：2026-07-14
+状态：批准基线（用户授权 Codex 暂时接管全项目推进）
 实现边界：`web/studio/`、`web/viewer/` 的消息桥与真实性展示、`pipeline/studio_server.py`；
 重建算法仍通过版本化 artifact contract 接入，Studio 不直接导入算法内部对象。
 
