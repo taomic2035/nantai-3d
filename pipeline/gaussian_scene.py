@@ -17,6 +17,7 @@
 - scale: (N,3) float64, 线性米 (3dgs ply 中的 log 域在 IO 时转换)
 - rot: (N,4) float64, 单位四元数 wxyz
 """
+import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,7 +26,7 @@ import numpy as np
 from loguru import logger
 from plyfile import PlyData, PlyElement
 
-from pipeline.recon_schema import Sim3
+from pipeline.recon_schema import Sim3, _canonical_float
 
 if TYPE_CHECKING:
     from pipeline.recon_schema import FrameTransform
@@ -410,14 +411,59 @@ class GaussianScene:
 
     # ============ 几何操作 ============
     def transform(self, sim3: Sim3) -> "GaussianScene":
-        """应用未命名的低阶相似变换。
+        """应用一次未命名(匿名)的相似变换 —— 仅供无坐标契约的本地素材实例化。
 
         该入口保留给每次都从磁盘新加载的素材实例化；重建 frame 对齐必须使用
-        :meth:`apply_frame_transform`，由 transform id 保证 exactly-once。
+        :meth:`apply_frame_transform`，由 content-addressed transform id 保证
+        exactly-once 且可审计。
+
+        与 ``apply_frame_transform`` 不同，这里没有对应的可审计 ``FrameTransform``
+        定义，变换本身无法被审计。但它仍真实改动几何，绝不能对 provenance 校验隐身：
+        变换成功后会在 transform 历史中追加一个以 ``anon-`` 为前缀、内容寻址到该
+        ``Sim3`` 的匿名条目，使得 :func:`reconstruct._validate_scene_history` 因找不到
+        对应可审计定义而 fail-closed —— 从而无法再"凭空/按约定(空历史)"通过校验。
         """
         self._validate_safe_rotation(sim3)
         self._apply_sim3(sim3)
+        # Record only after the mutation commits, so a failed transform leaves
+        # both geometry and history untouched (fail-closed atomicity).
+        self._record_anonymous_transform(sim3)
         return self
+
+    def _anonymous_transform_id(self, sim3: Sim3) -> str:
+        """内容寻址的匿名 transform id；``anon-`` 前缀标记其不可审计。
+
+        哈希方式与 :meth:`FrameTransform._derived_id` 对齐(canonical float +
+        rotation matrix)，但刻意不含 source/target frame，且前缀 ``anon-`` 而非
+        ``xf-``：它绝不会与真正可审计的 transform id 冲突，也绝不会被误认为已审计。
+        末尾的序号保证同一场景上重复应用(哪怕 Sim3 相同)得到互异 id，不破坏历史唯一性。
+        """
+        rotation = sim3.rotation_matrix()
+        payload = {
+            "scale": _canonical_float(sim3.scale),
+            "rotation_matrix_xyz": [
+                [_canonical_float(value) for value in row] for row in rotation
+            ],
+            "t_xyz": [_canonical_float(value) for value in sim3.t_xyz],
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=True).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()[:20]
+        seq = sum(1 for tid in self.applied_transform_ids
+                  if tid.startswith("anon-"))
+        return f"anon-{digest}-{seq}"
+
+    def _record_anonymous_transform(self, sim3: Sim3) -> None:
+        anon_id = self._anonymous_transform_id(sim3)
+        if self.applied_transform_paths:
+            self.applied_transform_paths = [
+                [*path, anon_id] for path in self.applied_transform_paths
+            ]
+        else:
+            self.applied_transform_paths = [[anon_id]]
+        self.applied_transform_ids = ordered_transform_ids(
+            self.applied_transform_paths
+        )
 
     def _validate_safe_rotation(self, sim3: Sim3) -> None:
         rotation = sim3.rotation_matrix()

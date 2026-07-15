@@ -57,6 +57,46 @@ class TestTransform:
         small_scene.transform(Sim3(scale=3.0))
         assert np.allclose(small_scene.scale, orig * 3)
 
+    def test_transform_records_anonymous_history(self, small_scene):
+        # An untracked transform must leave an honest trace in the history so it
+        # cannot masquerade as a never-moved scene.
+        assert small_scene.applied_transform_ids == []
+        small_scene.transform(Sim3(scale=2.0, t_xyz=[3, 0, 0]))
+        ids = small_scene.applied_transform_ids
+        assert len(ids) == 1
+        assert ids[0].startswith("anon-")
+        # id/path union stay consistent so PLY metadata still roundtrips.
+        assert small_scene.applied_transform_paths == [[ids[0]]]
+
+    def test_anonymous_history_fails_closed_validation(self, small_scene):
+        # The anon entry has no auditable FrameTransform definition, so the
+        # provenance gate now rejects the moved scene instead of passing an
+        # empty history "by convention".
+        from pipeline.reconstruct import _validate_scene_history
+        small_scene.transform(Sim3(scale=2.0))
+        with pytest.raises(ValueError, match="auditable transform definition"):
+            _validate_scene_history(small_scene, {}, label="asset")
+
+    def test_repeated_transform_records_distinct_history(self, small_scene):
+        # Reapplying even an identical Sim3 must not collide into a duplicate id.
+        small_scene.transform(Sim3(scale=2.0))
+        small_scene.transform(Sim3(scale=2.0))
+        ids = small_scene.applied_transform_ids
+        assert len(ids) == len(set(ids)) == 2
+        assert all(tid.startswith("anon-") for tid in ids)
+
+    def test_failed_transform_leaves_history_untouched(self):
+        # High-order SH rotation fails closed; history must stay empty too.
+        from pipeline.gaussian_scene import GaussianScene
+        sh_rest = np.arange(24, dtype=np.float64).reshape(1, 24)
+        s = GaussianScene([[1.0, 0, 0]], [[0.5, 0.5, 0.5]], sh_rest=sh_rest)
+        assert s.sh_degree > 0
+        half = np.pi / 4
+        with pytest.raises(ValueError, match="SH|球谐|rotation"):
+            s.transform(Sim3(quat_wxyz=[np.cos(half), 0, 0, np.sin(half)]))
+        assert s.applied_transform_ids == []
+        assert s.applied_transform_paths == []
+
 
 class TestMergeAndStitch:
     def test_merge_concatenates(self, small_scene):
