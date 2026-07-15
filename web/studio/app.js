@@ -14,6 +14,11 @@ import {
 import { selectStudioAdapter } from './adapter-factory.mjs';
 import { SCENARIO_NAMES } from './mock-adapter.mjs';
 import { StudioViewerBridge } from './viewer-bridge.mjs';
+import { JobController } from './job-controller.mjs';
+import {
+  ingestConfirmationModel,
+  validateIngestParameters,
+} from './job-forms.mjs';
 
 const VIEW_META = {
   sources: '图片 + 视频',
@@ -51,6 +56,7 @@ let rawSnapshot;
 let liveViewerCapabilities = null;
 let selectedStep = 'review';
 let selectedRunId = null;
+let jobController = null;
 
 const byId = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? '未知')
@@ -237,6 +243,16 @@ function renderInspector() {
     stitch: stitchInspector, assets: assetsInspector, review: reviewInspector,
   };
   byId('inspector-content').innerHTML = renderers[selectedStep]();
+  if (selectedStep === 'sources' && !byId('rescan-sources')) {
+    const ingest = commandCapability(serviceCapabilities, 'ingest');
+    const actions = document.createElement('div');
+    actions.className = 'inline-actions';
+    actions.innerHTML = `<button class="button" type="button" id="rescan-sources"
+      ${ingest.enabled ? '' : 'disabled'}>处理输入素材</button>
+      <span class="action-reason">${escapeHtml(ingest.enabled ? '' : ingest.reason)}</span>`;
+    byId('inspector-content').append(actions);
+  }
+  byId('rescan-sources')?.addEventListener('click', openIngestConfirmation);
   byId('validate-assets')?.addEventListener('click', async () => {
     const validation = commandCapability(serviceCapabilities, 'validate-assets');
     if (!validation.enabled) return;
@@ -323,6 +339,10 @@ function renderJobs(runs) {
 }
 
 async function refreshJobs() {
+  if (jobController) {
+    await jobController.pollOnce({ reschedule: false });
+    return;
+  }
   const { items } = await adapter.listRuns();
   renderJobs(items);
 }
@@ -332,7 +352,7 @@ function announce(message) {
   requestAnimationFrame(() => { byId('live-region').textContent = message; });
 }
 
-async function loadScenario({ focusError = false } = {}) {
+async function loadScenario({ focusError = false, refreshRuns = true } = {}) {
   rawSnapshot = await adapter.loadProject();
   const evidenced = structuredClone(rawSnapshot);
   if (liveViewerCapabilities && evidenced.reconstruction) {
@@ -345,7 +365,7 @@ async function loadScenario({ focusError = false } = {}) {
   renderPipeline();
   renderInspector();
   renderProvenance();
-  await refreshJobs();
+  if (refreshRuns) await refreshJobs();
   if (focusError) {
     byId('inspector-content').querySelector('[data-error-summary="true"]')?.focus();
   }
@@ -413,14 +433,74 @@ function setupPrimaryAction() {
     }
     if (intent.submitCommand) {
       try {
-        await adapter.startJob(intent.submitCommand, {
-          engine: adapter.kind === 'mock' ? 'mock' : 'auto',
-        });
+        if (intent.submitCommand === 'ingest') openIngestConfirmation();
         await loadScenario();
       } catch (error) {
         announce(`无法启动重建：${error.message}`);
       }
     }
+  });
+}
+
+function openIngestConfirmation() {
+  const capability = commandCapability(serviceCapabilities, 'ingest');
+  if (!capability.enabled || adapter.kind !== 'local') return;
+  const model = ingestConfirmationModel({
+    inputPath: displayInputPath(snapshot.project?.storage),
+  });
+  byId('ingest-input-path').textContent = model.inputPath;
+  byId('ingest-staging-path').textContent = model.stagingPath;
+  byId('ingest-impact').textContent = model.impact;
+  byId('ingest-cancel-notice').textContent = model.cancelNotice;
+  Object.entries(model.parameters).forEach(([key, value]) => {
+    byId(`ingest-${key}`).value = value;
+  });
+  byId('ingest-dialog').showModal();
+  requestAnimationFrame(() => byId('ingest-fps').focus());
+}
+
+function setupIngestDialog() {
+  const dialog = byId('ingest-dialog');
+  byId('ingest-dialog-cancel').addEventListener('click', () => dialog.close());
+  byId('ingest-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submit = byId('ingest-submit');
+    submit.disabled = true;
+    try {
+      const parameters = validateIngestParameters({
+        fps: Number(byId('ingest-fps').value),
+        max_frames: Number(byId('ingest-max_frames').value),
+        blur_threshold: Number(byId('ingest-blur_threshold').value),
+        max_long_edge: Number(byId('ingest-max_long_edge').value),
+      });
+      const result = await adapter.startJob('ingest', parameters);
+      selectedStep = 'sources';
+      selectedRunId = result.run.id;
+      dialog.close();
+      setDrawerOpen(true);
+      await jobController.pollOnce({ reschedule: false });
+      announce('真实本地素材处理已提交；此里程碑不支持中途取消。');
+    } catch (error) {
+      announce(`无法提交素材处理：${error.message}`);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+function setupB1PrimaryAction() {
+  byId('primary-action').addEventListener('click', () => {
+    const action = derivePrimaryAction(snapshot, serviceCapabilities);
+    if (!action.enabled) return;
+    const intent = primaryNavigation(action);
+    if (intent.step) selectStep(intent.step);
+    if (intent.openDrawer) setDrawerOpen(true, { focus: intent.focus === 'drawer' });
+    if (intent.focus === 'source-empty') {
+      requestAnimationFrame(() => {
+        byId('inspector-content').querySelector('[data-source-empty-state]')?.focus();
+      });
+    }
+    if (intent.submitCommand === 'ingest') openIngestConfirmation();
   });
 }
 
@@ -492,6 +572,16 @@ document.addEventListener('keydown', (event) => {
 
 setupScenarioControl();
 setupDrawer();
-setupPrimaryAction();
+setupB1PrimaryAction();
+setupIngestDialog();
 setupViewerBridge();
+jobController = new JobController({
+  adapter,
+  onUpdate: (runs) => renderJobs(runs),
+  onTerminal: async () => {
+    await loadScenario({ refreshRuns: false });
+    byId('viewer-frame').contentWindow?.location.reload();
+  },
+});
 await loadScenario();
+jobController.start();

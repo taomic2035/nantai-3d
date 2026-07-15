@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
+import ipaddress
 import json
 import mimetypes
+import re
+import secrets
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,10 +34,17 @@ from urllib.parse import unquote, urlsplit
 from plyfile import PlyData, PlyParseError
 
 from pipeline.gaussian_scene import GaussianScene
+from pipeline.studio_jobs import JobContractError, JobService, WriterBusyError
+from pipeline.studio_ledger import (
+    ActiveRunConflictError,
+    RequestConflictError,
+    RunRecord,
+)
 
 SNAPSHOT_SCHEMA_VERSION = 2
 RUN_LEDGER_SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_JOB_BODY_BYTES = 64 * 1024
 MAX_PLY_HEADER_BYTES = 1024 * 1024
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"}
@@ -61,12 +72,12 @@ CONTENT_SECURITY_POLICY = (
 )
 
 
-def read_only_capabilities() -> dict[str, Any]:
+def read_only_capabilities(reason: str = READ_ONLY_REASON) -> dict[str, Any]:
     """Return a fresh capability document; method presence never implies writes."""
     return {
         "schema_version": 1,
         "mode": "read-only",
-        "reason": READ_ONLY_REASON,
+        "reason": reason,
         "request_token": None,
         "single_writer": True,
         "commands": {
@@ -74,10 +85,63 @@ def read_only_capabilities() -> dict[str, Any]:
                 "enabled": False,
                 "cancel": False,
                 "retry": False,
-                "reason": READ_ONLY_REASON,
+                "reason": reason,
             }
             for command in STUDIO_COMMAND_IDS
         },
+    }
+
+
+def read_write_capabilities(token: str) -> dict[str, Any]:
+    disabled = "This command is outside Studio Milestone B1."
+    ready = "Verified local ingest write path is ready."
+    return {
+        "schema_version": 1,
+        "mode": "read-write",
+        "reason": ready,
+        "request_token": token,
+        "single_writer": True,
+        "commands": {
+            command: {
+                "enabled": command == "ingest",
+                "cancel": False,
+                "retry": False,
+                "reason": None if command == "ingest" else disabled,
+            }
+            for command in STUDIO_COMMAND_IDS
+        },
+    }
+
+
+def _run_payload(run: RunRecord) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "command": run.command,
+        "status": run.status,
+        "phase": run.phase,
+        "parameters": run.parameters,
+        "created_at": run.created_utc,
+        "updated_at": run.updated_utc,
+        "error_code": run.error_code,
+        "error_message": run.error_message,
+        "artifact_ids": list(run.artifact_ids),
+        "cancel_available": False,
+        "retry_available": False,
+        "adapter_kind": "local",
+    }
+
+
+def _event_payload(event) -> dict[str, Any]:
+    return {
+        "cursor": event.cursor,
+        "run_id": event.run_id,
+        "seq": event.seq,
+        "phase": event.phase,
+        "progress": event.progress,
+        "level": event.level,
+        "code": event.code,
+        "message": event.message,
+        "created_at": event.created_utc,
     }
 
 
@@ -1155,6 +1219,18 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
     sys_version = ""
     project_root: Path
 
+    def _canonical_request(self) -> bool:
+        if not getattr(self.server, "write_enabled", False):
+            return True
+        if self.headers.get("Host") != self.server.canonical_host:
+            self._error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_host",
+                "The request Host does not match the bound loopback service.",
+            )
+            return False
+        return True
+
     def _security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1202,18 +1278,40 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
+    def _discard_request_body(self, content_length: int) -> None:
+        """Consume a rejected authenticated body without buffering it in memory."""
+
+        remaining = content_length
+        while remaining:
+            chunk = self.rfile.read(min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _serve(self, *, head_only: bool) -> None:
+        if not self._canonical_request():
+            return
         request_path = urlsplit(self.path).path
         if request_path == "/api/capabilities":
             self._send_json(
                 HTTPStatus.OK,
-                read_only_capabilities(),
+                self.server.capabilities,
                 head_only=head_only,
             )
             return
         if request_path == "/api/project":
             try:
                 snapshot = build_project_snapshot(self.project_root)
+                if getattr(self.server, "write_enabled", False):
+                    active = next((
+                        run for run in self.server.job_service.ledger.list_runs()
+                        if run.status in {"queued", "running"}
+                    ), None)
+                    snapshot["active_run"] = None if active is None else {
+                        "id": active.id,
+                        "command": active.command,
+                        "status": active.status,
+                    }
             except (OSError, ValueError):
                 self._error(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -1224,8 +1322,66 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(HTTPStatus.OK, snapshot, head_only=head_only)
             return
+        if request_path.startswith("/api/runs/") and getattr(
+            self.server, "write_enabled", False,
+        ):
+            run_id = unquote(request_path.removeprefix("/api/runs/"))
+            if not run_id or "/" in run_id:
+                self._error(HTTPStatus.NOT_FOUND, "run_not_found", "Run not found.")
+                return
+            try:
+                run = self.server.job_service.ledger.get_run(run_id)
+            except KeyError:
+                self._error(HTTPStatus.NOT_FOUND, "run_not_found", "Run not found.")
+                return
+            events = [
+                _event_payload(event)
+                for event in self.server.job_service.ledger.list_events()
+                if event.run_id == run_id
+            ]
+            self._send_json(
+                HTTPStatus.OK,
+                {"schema_version": 1, "run": _run_payload(run), "events": events},
+                head_only=head_only,
+            )
+            return
         if request_path == "/api/runs":
-            self._send_json(HTTPStatus.OK, _load_runs(self.project_root), head_only=head_only)
+            if getattr(self.server, "write_enabled", False):
+                try:
+                    query = urlsplit(self.path).query
+                    if not query:
+                        cursor = 0
+                    elif re.fullmatch(r"cursor=\d+", query):
+                        cursor = int(query.split("=", 1)[1])
+                    else:
+                        raise ValueError
+                    events = self.server.job_service.ledger.list_events(cursor=cursor)
+                except ValueError:
+                    self._error(
+                        HTTPStatus.BAD_REQUEST,
+                        "invalid_cursor",
+                        "The event cursor is invalid.",
+                    )
+                    return
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "schema_version": 1,
+                        "items": [
+                            _run_payload(run)
+                            for run in self.server.job_service.ledger.list_runs()
+                        ],
+                        "events": [_event_payload(event) for event in events],
+                        "cursor": events[-1].cursor if events else cursor,
+                    },
+                    head_only=head_only,
+                )
+            else:
+                self._send_json(
+                    HTTPStatus.OK,
+                    _load_runs(self.project_root),
+                    head_only=head_only,
+                )
             return
         if request_path.startswith("/api/"):
             self._error(
@@ -1324,7 +1480,104 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802
-        self._method_not_allowed()
+        if not getattr(self.server, "write_enabled", False):
+            self._method_not_allowed()
+            return
+        if not self._canonical_request():
+            return
+        if urlsplit(self.path).path != "/api/jobs":
+            self._error(
+                HTTPStatus.NOT_FOUND,
+                "api_not_found",
+                "Unknown Studio API endpoint.",
+            )
+            return
+        if self.headers.get("Origin") != self.server.canonical_origin:
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "invalid_origin",
+                "The write request Origin is not the bound Studio origin.",
+            )
+            return
+        token = self.headers.get("X-Nantai-Token", "")
+        if not hmac.compare_digest(token, self.server.request_token):
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "invalid_token",
+                "The write capability token is invalid.",
+            )
+            return
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
+        if content_type.lower() != "application/json":
+            self._error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_content_type",
+                "Write requests require application/json.",
+            )
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            content_length = -1
+        if content_length < 0:
+            self._error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_content_length",
+                "A valid Content-Length is required.",
+            )
+            return
+        if content_length > MAX_JOB_BODY_BYTES:
+            self._discard_request_body(content_length)
+            self._error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                "body_too_large",
+                "The job request body is too large.",
+            )
+            return
+        request_id = self.headers.get("X-Request-ID", "")
+        try:
+            value = json.loads(self.rfile.read(content_length))
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"command", "parameters"}
+                or not isinstance(value["command"], str)
+                or not isinstance(value["parameters"], dict)
+            ):
+                raise ValueError
+            result = self.server.job_service.submit(
+                command=value["command"],
+                parameters=value["parameters"],
+                request_id=request_id,
+            )
+        except (json.JSONDecodeError, UnicodeError, ValueError, JobContractError):
+            self._error(
+                HTTPStatus.BAD_REQUEST,
+                "invalid_request",
+                "The job request is invalid.",
+            )
+            return
+        except RequestConflictError:
+            self._error(
+                HTTPStatus.CONFLICT,
+                "request_conflict",
+                "The request ID was already used for a different job.",
+            )
+            return
+        except (ActiveRunConflictError, WriterBusyError):
+            self._error(
+                HTTPStatus.CONFLICT,
+                "writer_busy",
+                "Another project writer is active.",
+            )
+            return
+        self._send_json(
+            HTTPStatus.ACCEPTED if result.created else HTTPStatus.OK,
+            {
+                "schema_version": 1,
+                "created": result.created,
+                "run": _run_payload(result.run),
+            },
+        )
 
     def do_PUT(self) -> None:  # noqa: N802
         self._method_not_allowed()
@@ -1341,6 +1594,7 @@ def make_server(
     *,
     host: str = "127.0.0.1",
     port: int = 8765,
+    enable_jobs: bool = False,
 ) -> ThreadingHTTPServer:
     """Create a configured server without starting its event loop."""
 
@@ -1353,6 +1607,37 @@ def make_server(
 
     server = ThreadingHTTPServer((host, port), ProjectRequestHandler)
     server.daemon_threads = True
+    server.write_enabled = False
+    server.job_service = None
+    server.request_token = None
+    server.capabilities = read_only_capabilities()
+    bound_host, bound_port = server.server_address[:2]
+    server.canonical_host = f"{bound_host}:{bound_port}"
+    server.canonical_origin = f"http://{server.canonical_host}"
+    if enable_jobs:
+        try:
+            address = ipaddress.ip_address(bound_host)
+            if not address.is_loopback:
+                raise JobContractError(
+                    "Write mode requires a numeric loopback bind address.",
+                )
+            service = JobService(root)
+            service.initialize()
+            readiness = service.durability.self_test()
+            if not readiness.ready:
+                raise JobContractError(readiness.reason)
+            recovery = service.recover_startup()
+            if not recovery.ready:
+                raise JobContractError(recovery.reason)
+        except Exception as exc:
+            reason = f"Studio jobs remain read-only: {exc}"
+            server.capabilities = read_only_capabilities(reason)
+        else:
+            token = secrets.token_urlsafe(32)
+            server.job_service = service
+            server.request_token = token
+            server.write_enabled = True
+            server.capabilities = read_write_capabilities(token)
     return server
 
 
@@ -1363,17 +1648,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=".", help="project root (default: current directory)")
     parser.add_argument("--host", default="127.0.0.1", help="bind host")
     parser.add_argument("--port", type=int, default=8765, help="bind port")
+    parser.add_argument(
+        "--enable-jobs",
+        action="store_true",
+        help="enable the B1 ingest job path when startup safety checks pass",
+    )
     args = parser.parse_args(argv)
-    server = make_server(args.root, host=args.host, port=args.port)
+    server = make_server(
+        args.root,
+        host=args.host,
+        port=args.port,
+        enable_jobs=args.enable_jobs,
+    )
     host, port = server.server_address[:2]
     print(f"Nantai 3D Studio: http://{host}:{port}/web/studio/")
-    print("Read-only adapter: GET /api/project and GET /api/runs")
+    if server.write_enabled:
+        print("B1 ingest jobs enabled on the bound loopback origin.")
+    else:
+        print(f"Read-only adapter: {server.capabilities['reason']}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        if server.job_service is not None:
+            server.job_service.shutdown()
     return 0
 
 

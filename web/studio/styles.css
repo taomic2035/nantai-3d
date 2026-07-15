@@ -214,6 +214,35 @@ select {
 .empty-events { color: var(--dim); font-size: 11px; }
 .sr-live { position: fixed; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
+.job-dialog {
+  width: min(640px, calc(100vw - 32px));
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 96%, black);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 24px;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 55%);
+}
+.job-dialog::backdrop { background: rgb(3 7 12 / 76%); backdrop-filter: blur(8px); }
+.job-dialog h2 { margin: 4px 0 18px; }
+.job-dialog code { color: var(--cyan); overflow-wrap: anywhere; }
+.ingest-fields {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin: 20px 0;
+}
+.ingest-fields label { display: grid; gap: 7px; color: var(--muted); font-size: 13px; }
+.ingest-fields input {
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+}
+.dialog-warning { color: var(--amber); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+
 @media (max-width: 1099px) {
   .studio { grid-template-columns: 208px minmax(0, 1fr); }
   .inspector {
@@ -236,6 +265,7 @@ select {
   .step-button { grid-template-columns: 1fr; justify-items: center; }
   .stage-toolbar .viewer-status { display: none; }
   .drawer-handle { grid-template-columns: 140px 1fr auto; }
+  .ingest-fields { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

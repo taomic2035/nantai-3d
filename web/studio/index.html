@@ -102,6 +102,27 @@
     </section>
   </main>
 
+  <dialog class="job-dialog" id="ingest-dialog" aria-labelledby="ingest-dialog-title">
+    <form method="dialog" id="ingest-form">
+      <p class="eyebrow">REAL LOCAL JOB · INGEST</p>
+      <h2 id="ingest-dialog-title">确认处理输入素材</h2>
+      <p>固定输入：<code id="ingest-input-path"></code></p>
+      <p>隔离 staging：<code id="ingest-staging-path"></code></p>
+      <div class="ingest-fields">
+        <label>视频抽帧 FPS<input id="ingest-fps" type="number" min="0.01" max="30" step="0.01" required></label>
+        <label>最大帧数<input id="ingest-max_frames" type="number" min="1" max="10000" step="1" required></label>
+        <label>模糊阈值<input id="ingest-blur_threshold" type="number" min="0" step="0.1" required></label>
+        <label>最长边<input id="ingest-max_long_edge" type="number" min="256" max="16384" step="1" required></label>
+      </div>
+      <p id="ingest-impact"></p>
+      <p class="dialog-warning" id="ingest-cancel-notice"></p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" id="ingest-dialog-cancel" type="button">返回检查</button>
+        <button class="button button-primary" id="ingest-submit" type="submit">确认并开始真实处理</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="sr-live" id="live-region" aria-live="polite"></div>
   <script type="module" src="./app.js"></script>
 </body>

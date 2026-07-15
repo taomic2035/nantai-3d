@@ -107,7 +107,7 @@ test('capability discovery failures degrade to read-only without blocking projec
   }
 });
 
-test('Milestone A local adapter rejects a server claim of read-write mode', async () => {
+test('B1 local adapter accepts a valid server write lease', async () => {
   const adapter = new LocalStudioAdapter({
     fetchImpl: async () => response({
       schema_version: 1,
@@ -124,6 +124,88 @@ test('Milestone A local adapter rejects a server claim of read-write mode', asyn
   });
 
   const capabilities = await adapter.loadCapabilities();
-  assert.equal(capabilities.mode, 'read-only');
-  assert.equal(capabilities.request_token, null);
+  assert.equal(capabilities.mode, 'read-write');
+  assert.equal(capabilities.request_token, 't'.repeat(43));
+});
+
+test('local adapter attaches only the latest token and a fresh request ID to writes', async () => {
+  const requests = [];
+  let requestNumber = 0;
+  const adapter = new LocalStudioAdapter({
+    baseUrl: 'http://127.0.0.1:8765',
+    requestIdFactory: () => `request-browser-${++requestNumber}`,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      if (url.endsWith('/api/capabilities')) {
+        return response({
+          schema_version: 1,
+          mode: 'read-write',
+          reason: null,
+          request_token: 'a'.repeat(43),
+          single_writer: true,
+          commands: Object.fromEntries(
+            ['ingest', 'reconstruct', 'world', 'validate-assets'].map((command) => [
+              command,
+              {
+                enabled: command === 'ingest', cancel: false, retry: false,
+                reason: command === 'ingest' ? null : 'Later milestone.',
+              },
+            ]),
+          ),
+        });
+      }
+      return response({ created: true, run: { id: 'run-1' } }, { status: 202 });
+    },
+  });
+
+  await adapter.loadCapabilities();
+  await adapter.startJob('ingest', { fps: 2 });
+  await adapter.startJob('ingest', { fps: 3 });
+
+  const writes = requests.filter(({ url }) => url.endsWith('/api/jobs'));
+  assert.deepEqual(
+    writes.map(({ init }) => init.headers['x-request-id']),
+    ['request-browser-1', 'request-browser-2'],
+  );
+  assert.ok(writes.every(({ init }) => init.headers['x-nantai-token'] === 'a'.repeat(43)));
+});
+
+test('capability refresh failure drops stale write authorization', async () => {
+  let fail = false;
+  const adapter = new LocalStudioAdapter({
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/capabilities') && !fail) {
+        return response({
+          schema_version: 1, mode: 'read-write', reason: null,
+          request_token: 'a'.repeat(43), single_writer: true,
+          commands: Object.fromEntries(
+            ['ingest', 'reconstruct', 'world', 'validate-assets'].map((command) => [
+              command, { enabled: command === 'ingest', cancel: false, retry: false },
+            ]),
+          ),
+        });
+      }
+      throw new Error('offline');
+    },
+  });
+  assert.equal((await adapter.loadCapabilities()).mode, 'read-write');
+  fail = true;
+  assert.equal((await adapter.loadCapabilities()).mode, 'read-only');
+  await assert.rejects(() => adapter.startJob('ingest', {}), /authorization/);
+});
+
+test('local adapter forwards cursor and supports run detail reads', async () => {
+  const requested = [];
+  const adapter = new LocalStudioAdapter({
+    fetchImpl: async (url) => {
+      requested.push(url);
+      return response(url.includes('/api/runs/run-1')
+        ? { run: { id: 'run-1' }, events: [] }
+        : { items: [], events: [], cursor: 12 });
+    },
+  });
+
+  await adapter.listRuns(7);
+  await adapter.loadRun('run-1');
+  assert.deepEqual(requested, ['/api/runs?cursor=7', '/api/runs/run-1']);
 });
