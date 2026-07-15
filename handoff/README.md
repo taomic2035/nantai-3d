@@ -48,5 +48,6 @@ Claude 运行自动验收:
 
 | Handoff | 主题 | 状态 |
 |---|---|---|
-| [HANDOFF-001](HANDOFF-001-mock-assets.md) | 村庄素材库模拟生成 (11 个 3DGS 素材) | ✅ schema v2 验收/注册/默认 world 消费均 11/11；fresh-checkout 可由 generator 恢复 |
+| [HANDOFF-001](HANDOFF-001-mock-assets.md) | 村庄素材库模拟生成 (11 个 3DGS 素材) | ✅ schema v2 验收/注册/默认 world 消费均 11/11；fresh-checkout 可由 generator 恢复 (仅同平台) |
+| [HANDOFF-002](HANDOFF-002-cross-platform-reproducibility.md) | 素材字节跨平台可复现 (量化/重生成 + 重 baseline) | ⏳ 待 GPT 交付：2/11 素材 (stone_wall_01, fence_wood_01) mac↔Windows 字节漂移，fresh `make assets` 在非 mac 平台降级为 8/11 |
 | [TAKEOVER-001](FEEDBACK-TAKEOVER-001.md) | 坐标、混合重建、3DGS、素材、Viewer 与 Studio 接管 | ✅ 本地门禁通过，等待 Opus review；外部 GPU/实测数据边界已列明 |
