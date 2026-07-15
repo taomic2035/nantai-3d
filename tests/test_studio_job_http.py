@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 from contextlib import contextmanager
 from http import HTTPStatus
@@ -64,6 +65,27 @@ def _authorization(server, *, token=None, origin=None, host=None):
         "X-Nantai-Token": token or server.request_token,
         "X-Request-ID": "request-http-001",
     }
+
+
+def _headers_only_post(server, *, host: str, content_length: int) -> bytes:
+    headers = _authorization(server, host=host)
+    request = "\r\n".join([
+        "POST /api/jobs HTTP/1.1",
+        *(f"{name}: {value}" for name, value in headers.items()),
+        f"Content-Length: {content_length}",
+        "Connection: close",
+        "",
+        "",
+    ]).encode("ascii")
+    with socket.create_connection(server.server_address, timeout=2) as connection:
+        connection.settimeout(2)
+        connection.sendall(request)
+        chunks = []
+        while True:
+            chunk = connection.recv(4096)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
 
 
 def test_enabled_server_advertises_only_ingest_with_startup_scoped_token(tmp_path):
@@ -135,12 +157,39 @@ def test_write_request_rejects_rebinding_cross_origin_and_bad_auth(
             server,
             "POST",
             "/api/jobs",
-            body={"command": "ingest", "parameters": {}},
+            body={"command": "ingest", "parameters": {"padding": "x" * 60_000}},
             headers=headers,
         )
 
     assert status in {HTTPStatus.BAD_REQUEST, HTTPStatus.FORBIDDEN}
     assert payload["error"]["code"] == code
+
+
+def test_early_rejection_does_not_wait_forever_for_a_declared_body(tmp_path):
+    with _running_server(_project(tmp_path)) as server:
+        response = _headers_only_post(
+            server,
+            host="evil.example",
+            content_length=64 * 1024,
+        )
+
+    assert response.startswith(b"HTTP/1.0 400")
+    assert b'"code":"invalid_host"' in response
+    assert server.job_service.ledger.list_runs() == []
+
+
+def test_oversized_rejection_does_not_drain_an_unbounded_declaration(tmp_path):
+    with _running_server(_project(tmp_path)) as server:
+        host = _authorization(server)["Host"]
+        response = _headers_only_post(
+            server,
+            host=host,
+            content_length=10**12,
+        )
+
+    assert response.startswith(b"HTTP/1.0 413")
+    assert b'"code":"body_too_large"' in response
+    assert server.job_service.ledger.list_runs() == []
 
 
 def test_write_request_rejects_unknown_fields_and_oversized_body(tmp_path):

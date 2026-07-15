@@ -24,6 +24,7 @@ import json
 import mimetypes
 import re
 import secrets
+import time
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,6 +46,8 @@ SNAPSHOT_SCHEMA_VERSION = 2
 RUN_LEDGER_SCHEMA_VERSION = 1
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_JOB_BODY_BYTES = 64 * 1024
+MAX_REJECTED_BODY_DRAIN_BYTES = 2 * 1024 * 1024
+REJECTED_BODY_DRAIN_TIMEOUT_S = 0.5
 MAX_PLY_HEADER_BYTES = 1024 * 1024
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"}
@@ -1219,10 +1222,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
     sys_version = ""
     project_root: Path
 
-    def _canonical_request(self) -> bool:
+    def _canonical_request(self, *, discard_bounded_body: bool = False) -> bool:
         if not getattr(self.server, "write_enabled", False):
             return True
         if self.headers.get("Host") != self.server.canonical_host:
+            if discard_bounded_body:
+                self._discard_bounded_request_body()
             self._error(
                 HTTPStatus.BAD_REQUEST,
                 "invalid_host",
@@ -1278,15 +1283,52 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
-    def _discard_request_body(self, content_length: int) -> None:
-        """Consume a rejected authenticated body without buffering it in memory."""
+    def _discard_request_body(self, content_length: int, *, byte_budget: int) -> bool:
+        """Consume a rejected body within strict byte and wall-clock budgets."""
 
-        remaining = content_length
-        while remaining:
-            chunk = self.rfile.read(min(remaining, 64 * 1024))
-            if not chunk:
-                break
-            remaining -= len(chunk)
+        remaining = min(content_length, byte_budget)
+        complete = content_length <= byte_budget
+        deadline = time.monotonic() + REJECTED_BODY_DRAIN_TIMEOUT_S
+        previous_timeout = self.connection.gettimeout()
+        try:
+            while remaining:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    complete = False
+                    break
+                self.connection.settimeout(timeout)
+                try:
+                    chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                except (TimeoutError, OSError):
+                    complete = False
+                    break
+                if not chunk:
+                    complete = False
+                    break
+                remaining -= len(chunk)
+        finally:
+            self.connection.settimeout(previous_timeout)
+        if remaining or not complete:
+            self.close_connection = True
+            return False
+        return True
+
+    def _discard_bounded_request_body(self) -> None:
+        """Drain a declared in-contract body before an early POST rejection."""
+
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return
+        if 0 <= content_length <= MAX_JOB_BODY_BYTES:
+            self._discard_request_body(
+                content_length,
+                byte_budget=MAX_JOB_BODY_BYTES,
+            )
+
+    def _reject_post(self, status: int, code: str, message: str) -> None:
+        self._discard_bounded_request_body()
+        self._error(status, code, message)
 
     def _serve(self, *, head_only: bool) -> None:
         if not self._canonical_request():
@@ -1483,17 +1525,17 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if not getattr(self.server, "write_enabled", False):
             self._method_not_allowed()
             return
-        if not self._canonical_request():
+        if not self._canonical_request(discard_bounded_body=True):
             return
         if urlsplit(self.path).path != "/api/jobs":
-            self._error(
+            self._reject_post(
                 HTTPStatus.NOT_FOUND,
                 "api_not_found",
                 "Unknown Studio API endpoint.",
             )
             return
         if self.headers.get("Origin") != self.server.canonical_origin:
-            self._error(
+            self._reject_post(
                 HTTPStatus.FORBIDDEN,
                 "invalid_origin",
                 "The write request Origin is not the bound Studio origin.",
@@ -1501,7 +1543,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
         token = self.headers.get("X-Nantai-Token", "")
         if not hmac.compare_digest(token, self.server.request_token):
-            self._error(
+            self._reject_post(
                 HTTPStatus.FORBIDDEN,
                 "invalid_token",
                 "The write capability token is invalid.",
@@ -1509,7 +1551,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
         if content_type.lower() != "application/json":
-            self._error(
+            self._reject_post(
                 HTTPStatus.BAD_REQUEST,
                 "invalid_content_type",
                 "Write requests require application/json.",
@@ -1527,7 +1569,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if content_length > MAX_JOB_BODY_BYTES:
-            self._discard_request_body(content_length)
+            self._discard_request_body(
+                content_length,
+                byte_budget=MAX_REJECTED_BODY_DRAIN_BYTES,
+            )
             self._error(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 "body_too_large",
