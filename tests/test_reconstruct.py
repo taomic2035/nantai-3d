@@ -115,6 +115,16 @@ class TestMockPipeline:
             assert preview["sh_degree"] is None
             assert preview["attributes"] == ["x", "y", "z", "r", "g", "b", "scale"]
 
+    def test_manifest_is_lf_byte_reproducible(self, photos_dir, tmp_path):
+        # The manifest is the coordinate/provenance trust root; it must be
+        # byte-identical across OSes (no Windows CRLF) so its digest is stable.
+        web_dir = tmp_path / "web"
+        reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
+                    web_dir=web_dir, engine="mock", reg_engine="mock")
+        raw = (web_dir / "recon_manifest.json").read_bytes()
+        assert b"\r\n" not in raw
+        assert raw.endswith(b"\n")
+
     def test_deterministic_across_runs(self, photos_dir, tmp_path):
         m1 = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "r1",
                          web_dir=tmp_path / "w1", engine="mock",

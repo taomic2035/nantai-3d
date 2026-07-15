@@ -825,8 +825,12 @@ def reconstruct(photos_dir: str | Path = "photos",
         },
     }
     manifest_path = web_dir / "recon_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
-                             encoding="utf-8")
+    # newline="\n": recon_manifest.json is the coordinate/provenance trust root;
+    # writing LF (not Windows CRLF) keeps it byte-reproducible across OSes, so its
+    # digest is stable for the CI cross-platform check and any future signing.
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8", newline="\n")
     logger.info(f"重建完成: {len(merged)} 高斯 | LOD {list(lod_files)} | "
                 f"manifest → {manifest_path}")
     return manifest
