@@ -216,6 +216,71 @@ class TestImportEngine:
                         dedup_voxel=0.0)
         assert m["gaussian_count"] == 800
 
+    def test_import_into_aligned_world_is_metric_aligned(self, photos_dir, tmp_path):
+        # The full measured path: a NON-synthetic sfm registration aligned to
+        # world-enu, then a real external 3DGS imported through a Sim3 into that
+        # ENU world. Real geometry + a measured (sfm, not mock) registration in a
+        # metric geo-aligned frame with alignment evidence => the manifest reports
+        # geometry_usability=metric-aligned, the first measurement-grade class.
+        # (A mock registration would correctly taint this back to preview-proxy.)
+        from pipeline.alignment import align_registration
+        from pipeline.recon_schema import (
+            CameraIntrinsics,
+            CameraPose,
+            ControlPoint,
+            GeoAnchor,
+            TransformMethod,
+        )
+
+        centres = {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
+                   "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
+        session = CaptureSession(session_id="s0", kind="photo_batch",
+                                 source="photos", images=list(centres))
+        reg = RegistrationResult(
+            schema_version=2, engine="colmap",
+            pose_frame=_arbitrary_source_frame(), world_frame=None,
+            alignment_status=AlignmentStatus.UNALIGNED, sessions=[session],
+            poses=[CameraPose(image=img, session_id="s0", quat_wxyz=[1, 0, 0, 0],
+                              t_xyz=list(xyz),
+                              intrinsics=CameraIntrinsics.from_fov(640, 480))
+                   for img, xyz in centres.items()])
+        origin = GeoAnchor(lat=26.0, lon=119.0, alt=50.0)
+        aligned = align_registration(
+            reg,
+            [ControlPoint(label=img, image=img, enu_xyz=xyz)
+             for img, xyz in centres.items()],
+            geo_origin=origin, max_rms_m=2.0,
+        )
+
+        rng = np.random.default_rng(11)
+        ext = GaussianScene(rng.uniform(0, 10, (600, 3)), rng.uniform(0, 1, (600, 3)))
+        ext_ply = tmp_path / "trained.ply"
+        ext.save_ply(ext_ply, flavor="3dgs")
+        trainer_frame = CoordinateFrame(
+            frame_id="trainer-local", handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP, units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC, geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.MEASURED, evidence=["trainer export contract"])
+        transform = FrameTransform(
+            source_frame="trainer-local", target_frame="world-enu",
+            sim3=Sim3(scale=1.0, quat_wxyz=[1.0, 0.0, 0.0, 0.0],
+                      t_xyz=[0.0, 0.0, 0.0]),
+            method=TransformMethod.EXTERNAL_SIM3, evidence=["control-point fit"])
+
+        m = reconstruct(
+            photos_dir=photos_dir, out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web", engine="import", registration=aligned,
+            splat_map=[SplatInput(session_id=reg.sessions[0].session_id,
+                                  path=str(ext_ply), source_frame=trainer_frame,
+                                  transform=transform)],
+            dedup_voxel=0.0)
+
+        contract = m["coordinate_contract"]
+        assert contract["target_frame"]["frame_id"] == "world-enu"
+        assert contract["alignment_status"] == "aligned"
+        assert m["provenance"]["synthetic"] is False
+        assert m["provenance"]["geometry_usability"] == "metric-aligned"
+
     def test_import_rejects_simple_point_ply_as_full_3dgs(self, photos_dir, tmp_path):
         source = tmp_path / "simple.ply"
         GaussianScene(
