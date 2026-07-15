@@ -70,6 +70,7 @@ $env:Path = 'D:\vibecoding\nantai\third\colmap;' + $env:Path ; colmap -h   # 验
 ### 5a. 云 GPU（推荐 / 质量路）✅
 
 用 **nerfstudio `ns-train splatfacto`**（gsplat 后端）。免费档 = Colab T4；稳定档 = AutoDL RTX 3060 12GB+。
+把 `cloud/train_3dgs_nerfstudio.sh` 上传到云机一键跑（内含下列步骤 + 排错提示）：`bash train_3dgs_nerfstudio.sh <图片目录|视频>`。手动等价命令：
 
 ```bash
 # 云机上（Colab 官方 notebook 会自动装；AutoDL 按 cloud/setup_autodl.sh 装 torch2.x+cu118 + nerfstudio）
