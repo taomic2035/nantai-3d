@@ -45,6 +45,21 @@ Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 
 
 ---
 
+## 最简：一键本机重建 ✅（已实测）
+
+拍好图后，一条命令跑完 COLMAP→Brush→导入（无需手动分步）。已在本机合成场景实测通过：
+
+```powershell
+.venv\Scripts\python scripts\reconstruct_local.py <你的图片目录> --steps 3000 --max-res 1024
+# 完成后:  .venv\Scripts\python make.py serve   # http://127.0.0.1:8000/web/studio/  360° 漫游
+```
+
+- 自动找 `third/` 下的 COLMAP/Brush，探测选项组，全 CPU/集显，无需 CUDA。
+- `--steps` 越大质量越好越慢（集显上 2000 步 ~5.5 分钟）；`--max-res` 控显存。
+- 想理解每一步或单独调，看下面 §4–§6 的分步版。
+
+---
+
 ## 4. 步骤 A · COLMAP 相机位姿（本机 CPU）✅
 
 **已下到 `third/colmap/`。** 加入 PATH 后本仓库会自动调用（我已把仓库默认改为 **CPU SIFT**，无 N 卡也可靠；有卡想提速加 `--colmap-gpu`）：
@@ -145,5 +160,6 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
 - `pipeline/registration.py`：COLMAP SIFT **默认走 CPU**（`use_gpu=False`），无 N 卡/headless 可靠；`reconstruct --colmap-gpu` 可显式开 GPU 提速。
 - `scripts/normalize_ply_quats.py`：训练器 PLY 的四元数归一化预处理（加载器 fail-closed 拒绝非单位四元数，Studio 复用同一语义校验，故不改门、提供预处理）。
 - `scripts/prepare_import.py`：一键生成导入契约（registration.json + splat-input.json），消除手写易错步骤；生成诚实的 sfm-local frame。
+- `scripts/reconstruct_local.py`：**一键本机重建**——串起 COLMAP→Brush→normalize→prepare_import→import。已在本机合成场景实测端到端跑通。
 - `pipeline/recon_schema.py`：RegistrationResult.engine 增 `"external"`（外部声明的导入配准，比冒充 colmap/mock 诚实）。
 - `third/`（gitignored）下载物 + `third/README.md`（下载清单/URL）+ 本手册。整条本机导入链有端到端认证测试（`test_full_local_import_flow_via_scripts`）。
