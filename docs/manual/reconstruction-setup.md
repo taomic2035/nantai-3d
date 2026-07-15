@@ -150,8 +150,9 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
 
 ## 真实风险清单（不藏）
 
-- 本机训练不了高质量 3DGS（无 CUDA）；Brush 试验档**未在本机实测跑通**，非平凡场景大概率 OOM/超时。
-- COLMAP CPU 对 ~300 图可能 2–5+ 小时；视频要抽帧/挑帧，别全帧喂。
+- 本机 Brush **已实测跑通**（Intel UHD 770，中小场景，见 §5b）；但集显共享内存，**图多/高分辨率/大步数仍可能 OOM 或驱动超时**，高质量天花板仍在云 GPU。
+- COLMAP CPU 计时看匹配器：**无序照片走 exhaustive（O(n²)），~300 图可能 2–5+ 小时**；**视频/有序连拍走 sequential（只配相邻帧），同样帧数快一个数量级**（脚本已自动选，见一键段）。
+- **长视频的帧密度权衡**：`--max-frames 300` 从 20 分钟里只抽 ~300 帧≈每 4 秒一帧，漫游可能太稀疏→空洞。要么拍更短/更聚焦的视频，要么调大 `--max-frames`（COLMAP 更慢），要么大场景直接上云 GPU。**宁可多段短视频分别重建，也别一条 20 分钟长视频稀疏抽帧。**
 - Colab 免费档会断线清空——导出后立即下载。
 - AutoDL 是国内云，计费与 GitHub/HuggingFace 权重拉取可能需要相应网络配置。
 - COLMAP 选项组命名跨版本不同（`--FeatureExtraction.use_gpu` vs 旧 `--SiftExtraction.use_gpu`）——仓库现**自动探测**已装 build 的命名，两者都适配（本机实测 4.1.0 nocuda 通过）。
@@ -163,6 +164,6 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
 - `pipeline/registration.py`：COLMAP SIFT **默认走 CPU**（`use_gpu=False`），无 N 卡/headless 可靠；`reconstruct --colmap-gpu` 可显式开 GPU 提速。
 - `scripts/normalize_ply_quats.py`：训练器 PLY 的四元数归一化预处理（加载器 fail-closed 拒绝非单位四元数，Studio 复用同一语义校验，故不改门、提供预处理）。
 - `scripts/prepare_import.py`：一键生成导入契约（registration.json + splat-input.json），消除手写易错步骤；生成诚实的 sfm-local frame。
-- `scripts/reconstruct_local.py`：**一键本机重建**——串起 COLMAP→Brush→normalize→prepare_import→import。已在本机合成场景实测端到端跑通。
+- `scripts/reconstruct_local.py`：**一键本机重建**——串起 COLMAP→Brush→normalize→prepare_import→import。**图片目录与视频文件两种输入均已本机实测端到端跑通**（视频自动抽帧，时序帧走 sequential 匹配）。
 - `pipeline/recon_schema.py`：RegistrationResult.engine 增 `"external"`（外部声明的导入配准，比冒充 colmap/mock 诚实）。
 - `third/`（gitignored）下载物 + `third/README.md`（下载清单/URL）+ 本手册。整条本机导入链有端到端认证测试（`test_full_local_import_flow_via_scripts`）。
