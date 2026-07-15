@@ -476,11 +476,17 @@ def colmap_available() -> bool:
 
 
 def colmap_register(photos_dir: str | Path, workspace: str | Path,
-                    sessions: list[CaptureSession] | None = None) -> RegistrationResult:
+                    sessions: list[CaptureSession] | None = None,
+                    use_gpu: bool = False) -> RegistrationResult:
     """COLMAP 联合 SfM: 所有照片 + 视频帧进入同一个 SfM-local frame。
 
     要求系统安装 colmap。SfM 尺度与地理方向均不确定；GPS 锚点仅作为后续
     显式 Sim3 对齐的候选证据，本函数不会据此猜测米制世界 frame。
+
+    ``use_gpu`` 默认 False：SIFT 走 CPU，在任意机器上可靠（尤其无 NVIDIA/CUDA
+    或 headless 时——GPU SIFT 走 OpenGL，集显/后台易失败）。有可用 GPU 时可
+    显式开启以提速。仅稀疏 SfM（本函数唯一用到的阶段）是 CPU 可行的；dense/MVS
+    需 CUDA，本函数从不调用。
     """
     photos_dir = Path(photos_dir)
     workspace = Path(workspace)
@@ -498,13 +504,16 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
                 f"colmap {args[0]} 失败 (exit {proc.returncode}):\n"
                 f"{proc.stderr[-2000:] if proc.stderr else proc.stdout[-2000:]}")
 
+    gpu_flag = "1" if use_gpu else "0"
     run(["feature_extractor", "--database_path", str(db),
          "--image_path", str(photos_dir),
-         "--ImageReader.camera_model", "SIMPLE_RADIAL"])
+         "--ImageReader.camera_model", "SIMPLE_RADIAL",
+         "--SiftExtraction.use_gpu", gpu_flag])
     # 图少时穷举匹配最稳; 图多时顺序匹配利用视频帧时间连续性
     n_images = sum(len(s.images) for s in sessions)
     matcher = "exhaustive_matcher" if n_images <= 400 else "sequential_matcher"
-    run([matcher, "--database_path", str(db)])
+    run([matcher, "--database_path", str(db),
+         "--SiftMatching.use_gpu", gpu_flag])
     run(["mapper", "--database_path", str(db),
          "--image_path", str(photos_dir), "--output_path", str(sparse)])
     if not (sparse / "0").exists():
@@ -618,14 +627,15 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
 # ============ 统一入口 ============
 def register(photos_dir: str | Path, out_json: str | Path | None = None,
              engine: str = "auto",
-             workspace: str | Path = "recon/colmap_ws") -> RegistrationResult:
-    """配准入口: engine = auto | colmap | mock"""
+             workspace: str | Path = "recon/colmap_ws",
+             colmap_use_gpu: bool = False) -> RegistrationResult:
+    """配准入口: engine = auto | colmap | mock (colmap_use_gpu 默认 CPU, 可靠优先)"""
     if engine == "auto":
         engine = "colmap" if colmap_available() else "mock"
         logger.info(f"配准引擎自动选择: {engine}")
 
     if engine == "colmap":
-        result = colmap_register(photos_dir, workspace)
+        result = colmap_register(photos_dir, workspace, use_gpu=colmap_use_gpu)
     elif engine == "mock":
         result = mock_register(photos_dir)
     else:

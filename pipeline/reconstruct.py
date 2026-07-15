@@ -506,7 +506,8 @@ def reconstruct(photos_dir: str | Path = "photos",
                 base_scene: str | Path | None = None,
                 dedup_voxel: float = 0.10,
                 replace_margin: float = 2.0,
-                registration: RegistrationResult | None = None) -> dict:
+                registration: RegistrationResult | None = None,
+                colmap_use_gpu: bool = False) -> dict:
     """端到端重建, 返回 manifest dict"""
     photos_dir = Path(photos_dir)
     out_dir = Path(out_dir)
@@ -532,7 +533,8 @@ def reconstruct(photos_dir: str | Path = "photos",
         (out_dir / "registration.json").write_text(
             reg.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
     else:
-        reg = register(photos_dir, out_dir / "registration.json", engine=reg_engine)
+        reg = register(photos_dir, out_dir / "registration.json", engine=reg_engine,
+                       colmap_use_gpu=colmap_use_gpu)
     dedup_voxel = _validate_spatial_parameter(
         "dedup_voxel", dedup_voxel, reg.target_frame
     )
@@ -911,6 +913,8 @@ def main():
     parser.add_argument("--registration", default=None, metavar="ALIGNED.json",
                         help=("预对齐 registration.json (如 pipeline.alignment 产出的 "
                               "world-enu ALIGNED 结果)；提供时跳过重新配准"))
+    parser.add_argument("--colmap-gpu", action="store_true",
+                        help=("COLMAP SIFT 用 GPU (默认 CPU，无 NVIDIA/headless 更可靠)"))
     args = parser.parse_args()
 
     registration = None
@@ -924,6 +928,7 @@ def main():
         splat_map=_parse_splat_args(args.splat) or None,
         base_scene=args.base_scene, dedup_voxel=args.dedup_voxel,
         replace_margin=args.replace_margin, registration=registration,
+        colmap_use_gpu=args.colmap_gpu,
     )
     print(f"\n重建完成: {manifest['gaussian_count']} 高斯")
     print(f"  LOD: {manifest['lod']}")
