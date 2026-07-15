@@ -17,9 +17,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-from pipeline.recon_schema import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.recon_schema import (  # noqa: E402
     AlignmentStatus,
     AxisConvention,
     CaptureSession,
