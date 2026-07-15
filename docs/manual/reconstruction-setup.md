@@ -13,7 +13,7 @@
 | 步骤 | 做什么 | 本机(Intel UHD 770, 无 CUDA) |
 |---|---|---|
 | **A. 相机位姿 (SfM)** | COLMAP 求每张图的相机位姿 | ✅ CPU 可跑（我已把仓库默认改成 CPU）|
-| **B. 3DGS 训练** | 从图+位姿优化出高斯泼溅 `.ply`（真正的"重建大脑"）| ❌ 主流训练器要 CUDA → **主路径=云 GPU**；本机 Brush 仅试验档 |
+| **B. 3DGS 训练** | 从图+位姿优化出高斯泼溅 `.ply`（真正的"重建大脑"）| ✅ **本机 Brush 实测可跑**（Intel 集显, 中小场景）；大场景/高质量仍首选云 GPU（gsplat 等要 CUDA）|
 | C. 导入+对齐+漫游 | 本仓库 `reconstruct --engine import` + `alignment` + Viewer | ✅ 已就绪 |
 
 **"完美"做不到**（任何技术都不行）：3DGS 对天空/玻璃/水面/无纹理面有空洞和漂浮物；只能漫游你**拍到过**的体积；移动物体会糊。合理预期是"好但有瑕疵"。
@@ -21,14 +21,14 @@
 ## 1. 本机现实（已确认 2026-07-15）
 
 Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 NVIDIA、无 CUDA）**。
-→ **位姿(A)本机可跑；训练(B)必须上云 GPU。**
+→ **实测：位姿(A)本机 COLMAP CPU 可跑（30 图 ~46 秒）；训练(B)本机 Brush 也能跑（中小场景）——全本机闭环已跑通**。大场景/高质量仍首选云 GPU。
 
 ## 2. 已为你准备好的（`third/`，我下载的）
 
 | 工具 | 用途 | 位置 | 能否本机跑 |
 |---|---|---|---|
 | **COLMAP 4.1.0 no-CUDA** | 相机位姿 (SfM) | `third/colmap/` | ✅ CPU |
-| **Brush v0.3.0** | 无 CUDA 的 3DGS 训练器（wgpu/Vulkan）| `third/brush/` | ⚠️ Intel 集显可启动但**慢/显存~1-2GB/可能 OOM**，仅小场景试验 |
+| **Brush v0.3.0** | 无 CUDA 的 3DGS 训练器（wgpu/Vulkan）| `third/brush/` | ✅ **实测在 Intel UHD 770 上能训练**（见 §5b）；大场景/高质量受显存与速度限制 |
 
 > `third/` 内容不入库（`.gitignore`），需要时重下即可。
 
@@ -87,9 +87,18 @@ ns-export gaussian-splat \
 - 输出是标准 INRIA-3DGS PLY，本仓库直接认（`f_dc_*`/`f_rest_*`/`opacity`/`scale_*`/`rot_*`）。
 - ⚠️ nerfstudio 历史上 `ns-export` 有颜色/opacity 小 quirk，且四元数可能未归一化 → §6 的 Step 0 归一化**必做**。
 
-### 5b. 本机 Brush（试验档，⚠️ 不建议做正式结果）
+### 5b. 本机 Brush（✅ 已实测在 Intel UHD 770 上跑通）
 
-`third/brush/` 里的 Brush 在 Intel 集显上**能启动**（wgpu/Vulkan，无需 CUDA），但：**共享显存约 1–2GB、比 N 卡慢 10–50 倍、非小场景很可能 OOM 或驱动超时（TDR）**，且**在这台机器上尚未实测跑通**。仅用于打通流程/极小物体。用前：更新 Intel 显卡驱动；`third\brush\brush_app.exe --help` 确认确切文件名与参数；导出**普通 `.ply`**（不要 `.compressed.ply`，加载器不认）。
+**实测结果（2026-07-15，本机 Intel UHD 770）**：Brush 在集显上**成功训练并导出标准 3DGS `.ply`**——一个 30 图合成场景，200 步、max-res 512，约 **13 秒**产出 6.9MB `.ply`（29389 高斯），且**四元数已是单位、无需归一化**，直接被本仓库导入（`geometry_usability=preview-only, synthetic=False`）。所以**本机确实能做 3DGS 训练，不是只能上云**。
+
+用法（COLMAP 数据集布局 `<root>/images/` + `<root>/sparse/0/`）：
+```powershell
+third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 1024 `
+  --export-every 2000 --export-path trained --export-name scene.ply
+#   --with-viewer 可开训练可视化窗口; 导出普通 .ply(非 .compressed.ply, 加载器不认)
+```
+
+**诚实的限制（仍成立）**：集显共享系统内存，**图多/分辨率高/步数大时会显著变慢，超大场景可能 OOM 或驱动超时**；`--total-steps` 越大质量越好但越慢（200 步只是打通流程的欠训练结果，真实质量需数千步）。**用 `--max-resolution` 与 `--max-frames` 控制规模**。质量/速度的天花板仍在云 GPU，但"本机能不能行"的答案是：**能，中小场景可用。**
 
 ## 6. 步骤 C · 导入本仓库 → 漫游 ✅（契约已就绪）
 
@@ -123,7 +132,7 @@ ns-export gaussian-splat \
 - COLMAP CPU 对 ~300 图可能 2–5+ 小时；视频要抽帧/挑帧，别全帧喂。
 - Colab 免费档会断线清空——导出后立即下载。
 - AutoDL 是国内云，计费与 GitHub/HuggingFace 权重拉取可能需要相应网络配置。
-- COLMAP 4.x 选项组重命名：本仓库用 `--SiftExtraction.use_gpu`（4.1.0）；若换 4.2.dev 版报未知选项，改 `--FeatureExtraction.use_gpu`。
+- COLMAP 选项组命名跨版本不同（`--FeatureExtraction.use_gpu` vs 旧 `--SiftExtraction.use_gpu`）——仓库现**自动探测**已装 build 的命名，两者都适配（本机实测 4.1.0 nocuda 通过）。
 - `third/` 大文件自动下载依赖 GitHub 可达；不可达时你手动下（URL 见 `third/README.md`）。
 - 结果只覆盖拍到的体积；反光/透明/天空/动体是已知弱项。
 

@@ -18,6 +18,7 @@
     python -m pipeline.registration --photos photos --out recon/registration.json
 """
 import argparse
+import functools
 import hashlib
 import json
 import shutil
@@ -475,6 +476,26 @@ def colmap_available() -> bool:
     return shutil.which("colmap") is not None
 
 
+@functools.lru_cache(maxsize=1)
+def _colmap_sift_group() -> str:
+    """COLMAP use_gpu 选项组前缀：'Feature'(现行) 或 'Sift'(旧版)。
+
+    COLMAP 把 ``--SiftExtraction/--SiftMatching`` 改名为
+    ``--FeatureExtraction/--FeatureMatching``；不同 build 命名不同（实测 4.1.0
+    的 nocuda 版已是 Feature*）。探测已安装 build 的帮助文本，两种命名都适配，
+    避免 'unrecognised option' 直接失败。
+    """
+    try:
+        out = subprocess.run(["colmap", "feature_extractor", "-h"],
+                             capture_output=True, text=True, timeout=30)
+        text = (out.stdout or "") + (out.stderr or "")
+        if "SiftExtraction.use_gpu" in text and "FeatureExtraction.use_gpu" not in text:
+            return "Sift"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "Feature"
+
+
 def colmap_register(photos_dir: str | Path, workspace: str | Path,
                     sessions: list[CaptureSession] | None = None,
                     use_gpu: bool = False) -> RegistrationResult:
@@ -504,16 +525,17 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
                 f"colmap {args[0]} 失败 (exit {proc.returncode}):\n"
                 f"{proc.stderr[-2000:] if proc.stderr else proc.stdout[-2000:]}")
 
+    grp = _colmap_sift_group()  # 'Feature'(现行) / 'Sift'(旧版) — 两种 COLMAP 命名都适配
     gpu_flag = "1" if use_gpu else "0"
     run(["feature_extractor", "--database_path", str(db),
          "--image_path", str(photos_dir),
          "--ImageReader.camera_model", "SIMPLE_RADIAL",
-         "--SiftExtraction.use_gpu", gpu_flag])
+         f"--{grp}Extraction.use_gpu", gpu_flag])
     # 图少时穷举匹配最稳; 图多时顺序匹配利用视频帧时间连续性
     n_images = sum(len(s.images) for s in sessions)
     matcher = "exhaustive_matcher" if n_images <= 400 else "sequential_matcher"
     run([matcher, "--database_path", str(db),
-         "--SiftMatching.use_gpu", gpu_flag])
+         f"--{grp}Matching.use_gpu", gpu_flag])
     run(["mapper", "--database_path", str(db),
          "--image_path", str(photos_dir), "--output_path", str(sparse)])
     if not (sparse / "0").exists():
