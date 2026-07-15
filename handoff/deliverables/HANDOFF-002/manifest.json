@@ -1,0 +1,138 @@
+{
+  "schema_version": 2,
+  "handoff_id": "HANDOFF-002",
+  "coordinate_system": {
+    "units": "meters",
+    "axes": "local-z-up"
+  },
+  "generator": {
+    "name": "nantai-handoff-002-canonical-proxies",
+    "version": "2.0.0",
+    "script_sha256": "17257f52c4677b4fd357cd497ce625204a5b566d16007d04bf086c53bd482790",
+    "source_handoff": "HANDOFF-001",
+    "canonical_decimals": 6
+  },
+  "items": [
+    {
+      "asset_id": "house_wood_01",
+      "kind": "building",
+      "ply": "house_wood_01.ply",
+      "footprint_m": [
+        8.0,
+        6.0,
+        6.5
+      ],
+      "sha256": "15f46fdb6ad74ad23ba73ee2a560e50b449c532122f0ed9106b77f26f9784426"
+    },
+    {
+      "asset_id": "house_wood_02",
+      "kind": "building",
+      "ply": "house_wood_02.ply",
+      "footprint_m": [
+        10.0,
+        7.0,
+        7.0
+      ],
+      "sha256": "a06ed23a8d4404da0dc4047c7b831e710a306db2cd7e50851f8991f027a90235"
+    },
+    {
+      "asset_id": "house_stone_01",
+      "kind": "building",
+      "ply": "house_stone_01.ply",
+      "footprint_m": [
+        9.0,
+        7.0,
+        6.5
+      ],
+      "sha256": "da08b641eb2aa39fe256e9862822743a2c4d3d492c224003617fa7a9c332e33a"
+    },
+    {
+      "asset_id": "house_thatch_01",
+      "kind": "building",
+      "ply": "house_thatch_01.ply",
+      "footprint_m": [
+        7.0,
+        6.0,
+        6.0
+      ],
+      "sha256": "8bd28976ab7ef626fff313877ee142e3065d2e8bea713d2883d1b9583b1d69bb"
+    },
+    {
+      "asset_id": "house_barn_01",
+      "kind": "building",
+      "ply": "house_barn_01.ply",
+      "footprint_m": [
+        12.0,
+        8.0,
+        8.0
+      ],
+      "sha256": "60cc88b9097031753302b02c9b9f473cfddd013e3add2df2249074f833ed138d"
+    },
+    {
+      "asset_id": "tree_pine_01",
+      "kind": "vegetation",
+      "ply": "tree_pine_01.ply",
+      "footprint_m": [
+        4.0,
+        4.0,
+        9.0
+      ],
+      "sha256": "b7e1142a5f9f4ce6b9f6991b603e8431664e36a57e9fd4f6d6e602ec2812848d"
+    },
+    {
+      "asset_id": "tree_broadleaf_01",
+      "kind": "vegetation",
+      "ply": "tree_broadleaf_01.ply",
+      "footprint_m": [
+        7.0,
+        7.0,
+        8.0
+      ],
+      "sha256": "d18fc7621aacaf410ff7ac71575dc2e7bc55de3a5f0a4a3310becd9a1fc659ea"
+    },
+    {
+      "asset_id": "tree_bamboo_01",
+      "kind": "vegetation",
+      "ply": "tree_bamboo_01.ply",
+      "footprint_m": [
+        3.0,
+        3.0,
+        10.0
+      ],
+      "sha256": "db7e3bab04d612c8d426f297324bf7eb5501e8e2f2b524bbbf59157ccd2a3e3a"
+    },
+    {
+      "asset_id": "stone_wall_01",
+      "kind": "prop",
+      "ply": "stone_wall_01.ply",
+      "footprint_m": [
+        4.0,
+        0.5,
+        1.2
+      ],
+      "sha256": "8e4f18bc62102767a814efa450407cf7c18ab9cf470413186348cbd8b9ea1fc8"
+    },
+    {
+      "asset_id": "stone_lamp_01",
+      "kind": "prop",
+      "ply": "stone_lamp_01.ply",
+      "footprint_m": [
+        0.8,
+        0.8,
+        2.0
+      ],
+      "sha256": "58b8aaeede81104017d52b18be4f88b8d6d993a31b4f48b4fcc5dbd8526598d1"
+    },
+    {
+      "asset_id": "fence_wood_01",
+      "kind": "prop",
+      "ply": "fence_wood_01.ply",
+      "footprint_m": [
+        3.0,
+        0.2,
+        1.1
+      ],
+      "sha256": "c3d7f8e57f861277261b41024eeec82b437828eb3415995f00a251a62d85c147"
+    }
+  ]
+}
