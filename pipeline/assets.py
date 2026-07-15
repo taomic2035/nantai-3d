@@ -10,7 +10,7 @@
 - 局部坐标系: Z 向上, 米制, XY 原点在素材水平中心, 地面 z=0
 - 加载时默认 normalize 兜底 (重心归零 + 落地), 容忍不完全规范的交付物
 """
-import fcntl
+import errno
 import hashlib
 import hmac
 import json
@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -30,6 +31,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.recon_schema import Sim3
+
+try:  # POSIX advisory file locking; unavailable on Windows.
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - Windows path uses msvcrt below
+    fcntl = None
+    import msvcrt
 
 DEFAULT_ASSETS_DIR = "assets"
 REGISTRY_FILE = "registry.json"
@@ -119,6 +126,43 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+# Windows msvcrt raises EACCES/EDEADLOCK when a byte range is already held.
+_WIN_LOCK_CONTENTION = (errno.EACCES, errno.EDEADLOCK)
+
+
+def _lock_registry_file(stream) -> None:
+    """Acquire an exclusive cross-process lock on an open lock file, blocking.
+
+    POSIX uses advisory ``flock`` over the whole descriptor. Windows has no
+    ``fcntl``; ``msvcrt.locking`` instead takes a *mandatory* byte-range lock
+    starting at the current file position, so we pin the range to ``[0, 1)``
+    and spin on non-blocking attempts to emulate a blocking ``flock`` — keeping
+    the same "serialize registry read/check/write across processes and
+    instances" contract on both platforms.
+    """
+    if fcntl is not None:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        return
+    stream.seek(0)
+    while True:
+        try:
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in _WIN_LOCK_CONTENTION:
+                raise
+            time.sleep(0.05)
+
+
+def _unlock_registry_file(stream) -> None:
+    """Release the lock acquired by :func:`_lock_registry_file`."""
+    if fcntl is not None:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        return
+    stream.seek(0)
+    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 class AssetRegistry:
     """素材注册表 (目录 + registry.json)"""
 
@@ -169,11 +213,11 @@ class AssetRegistry:
         """Serialize registry read/check/write across processes and instances."""
         self.assets_dir.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+b") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            _lock_registry_file(stream)
             try:
                 yield
             finally:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                _unlock_registry_file(stream)
 
     def save(self) -> None:
         candidate = self.doc.model_copy(deep=True)
@@ -191,7 +235,11 @@ class AssetRegistry:
             prefix=f".{REGISTRY_FILE}.", suffix=".tmp", dir=self.assets_dir
         )
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            # newline="" suppresses Windows \n->\r\n translation so the bytes on
+            # disk equal `payload`; otherwise sha256_file(registry) would differ
+            # from the in-memory revision hash and every save() would fail the
+            # stale-revision guard. Also keeps registry.json byte-reproducible.
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -227,7 +275,9 @@ class AssetRegistry:
                     "素材源文件在复制期间发生变化: "
                     f"expected {expected_sha256}, staged {staged_sha}"
                 )
-            with tmp_path.open("rb") as stream:
+            # Open read-write (not "rb"): Windows os.fsync/FlushFileBuffers
+            # rejects a read-only handle with EBADF, while POSIX tolerates it.
+            with tmp_path.open("r+b") as stream:
                 os.fsync(stream.fileno())
             return tmp_path
         except Exception:

@@ -1,0 +1,29 @@
+# 统一行尾为 LF，避免跨平台（尤其 Windows core.autocrlf=true）导致的问题：
+# - handoff 生成脚本的自哈希 (script_sha256) 在 LF/CRLF checkout 间漂移
+# - Web viewer 二进制 PLY 解析器假设 'end_header\n' 单 LF 头
+# - 服务出去的 .js/.mjs/.html 字节随平台变化
+# 仓库内文本一律按 LF 存储与检出。
+* text=auto eol=lf
+
+# 显式以 LF 存储的脚本/源码/契约（在 Windows 上也必须是 LF 才能被 bash/解析器正确读取）
+*.sh   text eol=lf
+*.py   text eol=lf
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+Makefile text eol=lf
+
+# 二进制：绝不做行尾/文本转换，保证字节级 SHA 稳定
+*.ply  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.bin  binary
+*.pth  binary
+*.ckpt binary
+*.safetensors binary
+*.onnx binary

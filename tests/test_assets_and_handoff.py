@@ -125,7 +125,7 @@ class TestHandoffValidation:
                                {"asset_id": "a2", "ply": "a2.ply"}])
         r = validate(d, feedback_dir=tmp_path / "fb")
         assert r["all_pass"] and r["n_pass"] == 2
-        fb = (tmp_path / "fb" / "FEEDBACK-HANDOFF-T.md").read_text()
+        fb = (tmp_path / "fb" / "FEEDBACK-HANDOFF-T.md").read_text(encoding="utf-8")
         assert "全部通过" in fb
 
     def test_missing_ply_fails(self, tmp_path):
@@ -212,12 +212,13 @@ class TestHandoffValidation:
         feedback_dir.mkdir()
         feedback = feedback_dir / "FEEDBACK-HANDOFF-T.md"
         feedback.write_text(
-            "# stale generated content\n\n## 人工备注\n\n- keep this handoff evidence\n"
+            "# stale generated content\n\n## 人工备注\n\n- keep this handoff evidence\n",
+            encoding="utf-8",
         )
 
         validate(d, feedback_dir=feedback_dir)
 
-        refreshed = feedback.read_text()
+        refreshed = feedback.read_text(encoding="utf-8")
         assert "验收结果: ✅ 全部通过" in refreshed
         assert refreshed.count("## 人工备注") == 1
         assert "keep this handoff evidence" in refreshed

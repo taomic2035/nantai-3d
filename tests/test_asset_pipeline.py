@@ -420,7 +420,9 @@ class TestPortableDeliverable:
         deliverable = tmp_path / "deliverable"
         deliverable.mkdir()
         payload = _write_asset(deliverable / "tree.ply", 44)
-        ply = PlyData.read(str(payload))
+        # mmap=False: the default memory-map keeps tree.ply open, and Windows
+        # refuses to reopen a mapped file for writing (EINVAL) on the rewrite below.
+        ply = PlyData.read(str(payload), mmap=False)
         vertex = ply["vertex"].data
         if field == "xyz":
             vertex["x"][0] = np.nan

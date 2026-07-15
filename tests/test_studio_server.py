@@ -24,6 +24,22 @@ from pipeline.studio_server import (
     resolve_static_path,
 )
 
+
+def _symlink_or_skip(link: Path, target, *, target_is_directory: bool = False) -> None:
+    """Create a symlink for a symlink-escape test, or skip if the OS forbids it.
+
+    Stock Windows raises OSError (WinError 1314) from os.symlink without
+    Developer Mode / admin rights. The defenses under test (strict resolve +
+    containment + is_symlink rechecks) are platform-agnostic and stay covered on
+    POSIX CI, so skipping the setup here avoids a false failure without silently
+    dropping the guarantee. Only the code paths that truly need a symlink skip;
+    sibling parametrizations (traversal, absolute, dot, ...) still run.
+    """
+    try:
+        Path(link).symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        pytest.skip(f"symlink creation not permitted on this host: {exc}")
+
 CORE_PROPERTIES = (
     "x",
     "y",
@@ -707,7 +723,7 @@ class TestProjectSnapshot:
         _write_v2_project(tmp_path)
         outside = tmp_path.parent / f"{tmp_path.name}-external-assets"
         (tmp_path / "assets").rename(outside)
-        (tmp_path / "assets").symlink_to(outside, target_is_directory=True)
+        _symlink_or_skip(tmp_path / "assets", outside, target_is_directory=True)
 
         snapshot = build_project_snapshot(tmp_path)
 
@@ -726,7 +742,7 @@ class TestProjectSnapshot:
         evidence_path = paths[evidence]
         outside = tmp_path.parent / f"{tmp_path.name}-{evidence}.json"
         evidence_path.rename(outside)
-        evidence_path.symlink_to(outside)
+        _symlink_or_skip(evidence_path, outside)
 
         snapshot = build_project_snapshot(tmp_path)
 
@@ -778,7 +794,7 @@ class TestProjectSnapshot:
             entry["ply"] = "./tree_v1.ply"
         else:
             alias = tmp_path / "assets/alias.ply"
-            alias.symlink_to(outside)
+            _symlink_or_skip(alias, outside)
             entry["ply"] = alias.name
             entry["sha256"] = _sha256(outside)
         registry_path.write_text(json.dumps(registry), encoding="utf-8")
@@ -853,7 +869,7 @@ class TestHttpContract:
         _write_v2_project(tmp_path)
         outside = tmp_path.parent / "outside-secret.txt"
         outside.write_text("secret", encoding="utf-8")
-        (tmp_path / "web/escape.txt").symlink_to(outside)
+        _symlink_or_skip(tmp_path / "web/escape.txt", outside)
 
         with pytest.raises(PathAccessError):
             resolve_static_path(tmp_path, "/%2e%2e/outside-secret.txt")
@@ -873,7 +889,7 @@ class TestHttpContract:
     def test_approved_static_root_itself_cannot_be_a_symlink(self, tmp_path):
         (tmp_path / "input").mkdir()
         (tmp_path / "input/secret.txt").write_text("secret", encoding="utf-8")
-        (tmp_path / "web").symlink_to(tmp_path, target_is_directory=True)
+        _symlink_or_skip(tmp_path / "web", tmp_path, target_is_directory=True)
 
         with pytest.raises(PathAccessError):
             resolve_static_path(tmp_path, "/web/input/secret.txt")
@@ -890,7 +906,7 @@ class TestHttpContract:
         outside.write_text("outside", encoding="utf-8")
         directory = tmp_path / "web/leak"
         directory.mkdir()
-        directory.joinpath("index.html").symlink_to(outside)
+        _symlink_or_skip(directory / "index.html", outside)
 
         with _running_server(tmp_path) as server:
             status, _, payload = _request(server, "GET", "/web/leak/")
