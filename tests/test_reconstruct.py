@@ -125,6 +125,37 @@ class TestMockPipeline:
         assert b"\r\n" not in raw
         assert raw.endswith(b"\n")
 
+    def test_consumes_pre_aligned_registration(self, photos_dir, tmp_path):
+        # An aligned world-enu registration (from pipeline.alignment) flows
+        # through reconstruct instead of recomputing sfm-local, so the manifest's
+        # coordinate contract reports the measured metric ENU world.
+        from pipeline.alignment import align_registration
+        from pipeline.recon_schema import ControlPoint, GeoAnchor
+        from pipeline.registration import register
+
+        reg = register(photos_dir, tmp_path / "reg.json", engine="mock")
+        origin = GeoAnchor(lat=26.0, lon=119.0, alt=50.0)
+        control_points = [
+            ControlPoint(label=p.image, image=p.image,
+                         enu_xyz=tuple(float(v) for v in p.t_xyz))
+            for p in reg.poses
+        ]
+        aligned = align_registration(reg, control_points, geo_origin=origin,
+                                     max_rms_m=2.0)
+        assert aligned.alignment_status is AlignmentStatus.ALIGNED
+
+        manifest = reconstruct(
+            photos_dir=photos_dir, out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web", engine="mock", registration=aligned,
+        )
+        contract = manifest["coordinate_contract"]
+        assert contract["target_frame"]["frame_id"] == "world-enu"
+        assert contract["target_frame"]["geo_aligned"] == "aligned"
+        assert contract["alignment_status"] == "aligned"
+        # registration.json persisted from the supplied reg, LF (byte-reproducible).
+        raw = (tmp_path / "recon" / "registration.json").read_bytes()
+        assert b"\r\n" not in raw
+
     def test_deterministic_across_runs(self, photos_dir, tmp_path):
         m1 = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "r1",
                          web_dir=tmp_path / "w1", engine="mock",

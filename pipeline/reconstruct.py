@@ -505,7 +505,8 @@ def reconstruct(photos_dir: str | Path = "photos",
                 splat_map: list[SplatInput] | None = None,
                 base_scene: str | Path | None = None,
                 dedup_voxel: float = 0.10,
-                replace_margin: float = 2.0) -> dict:
+                replace_margin: float = 2.0,
+                registration: RegistrationResult | None = None) -> dict:
     """端到端重建, 返回 manifest dict"""
     photos_dir = Path(photos_dir)
     out_dir = Path(out_dir)
@@ -523,7 +524,15 @@ def reconstruct(photos_dir: str | Path = "photos",
         raise ValueError("engine=mock cannot consume splat_map; use engine=import")
 
     # 1. Registration -> one explicit target-frame contract
-    reg = register(photos_dir, out_dir / "registration.json", engine=reg_engine)
+    if registration is not None:
+        # Consume a caller-supplied registration (e.g. a metric-aligned world-enu
+        # result from pipeline.alignment) instead of recomputing sfm-local; the
+        # caller owns its provenance/alignment evidence. Persisted LF for record.
+        reg = registration
+        (out_dir / "registration.json").write_text(
+            reg.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
+    else:
+        reg = register(photos_dir, out_dir / "registration.json", engine=reg_engine)
     dedup_voxel = _validate_spatial_parameter(
         "dedup_voxel", dedup_voxel, reg.target_frame
     )
@@ -893,14 +902,22 @@ def main():
                         help="拼接去重体素 (米制 target frame；非米制仅允许 0)")
     parser.add_argument("--replace-margin", type=float, default=2.0,
                         help="区域替换外扩边距 (米制 target frame；非米制仅允许 0)")
+    parser.add_argument("--registration", default=None, metavar="ALIGNED.json",
+                        help=("预对齐 registration.json (如 pipeline.alignment 产出的 "
+                              "world-enu ALIGNED 结果)；提供时跳过重新配准"))
     args = parser.parse_args()
+
+    registration = None
+    if args.registration:
+        registration = RegistrationResult.model_validate_json(
+            Path(args.registration).read_text(encoding="utf-8"))
 
     manifest = reconstruct(
         photos_dir=args.photos, out_dir=args.out, web_dir=args.web,
         engine=args.engine, reg_engine=args.reg_engine,
         splat_map=_parse_splat_args(args.splat) or None,
         base_scene=args.base_scene, dedup_voxel=args.dedup_voxel,
-        replace_margin=args.replace_margin,
+        replace_margin=args.replace_margin, registration=registration,
     )
     print(f"\n重建完成: {manifest['gaussian_count']} 高斯")
     print(f"  LOD: {manifest['lod']}")
