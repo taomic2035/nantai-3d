@@ -89,7 +89,11 @@ ns-export gaussian-splat \
 
 ### 5b. 本机 Brush（✅ 已实测在 Intel UHD 770 上跑通）
 
-**实测结果（2026-07-15，本机 Intel UHD 770）**：Brush 在集显上**成功训练并导出标准 3DGS `.ply`**——一个 30 图合成场景，200 步、max-res 512，约 **13 秒**产出 6.9MB `.ply`（29389 高斯），且**四元数已是单位、无需归一化**，直接被本仓库导入（`geometry_usability=preview-only, synthetic=False`）。所以**本机确实能做 3DGS 训练，不是只能上云**。
+**实测结果（2026-07-15，本机 Intel UHD 770，30 图合成场景）**：Brush 在集显上**成功训练并导出标准 3DGS `.ply`**，**未 OOM、未崩**：
+- 200 步 / max-res 512 → 约 **13 秒**，6.9MB ply（29389 高斯）；
+- 2000 步 / max-res 1024 → 约 **5.5 分钟**，9.0MB ply。
+
+四元数已是单位、无需归一化，直接被本仓库导入（`geometry_usability=preview-only, synthetic=False`）。**本机确实能做 3DGS 训练，不是只能上云。** 外推：真实质量（数千~上万步）约数十分钟一场景——慢但可用。
 
 用法（COLMAP 数据集布局 `<root>/images/` + `<root>/sparse/0/`）：
 ```powershell
