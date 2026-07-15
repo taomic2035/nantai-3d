@@ -1,0 +1,619 @@
+{
+  "catalog_id": "synthetic-mountain-village-visual-slots-v1",
+  "schema_version": 1,
+  "slots": [
+    {
+      "canary_critical": true,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: small hillside establishing view.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: small hillside establishing view. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-establishing-small-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: expanded whole-village establishing view.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: expanded whole-village establishing view. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-establishing-expanded-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: ground-level creekside entrance and bridge route.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: ground-level creekside entrance and bridge route. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-creekside-entrance-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: linked central stone courtyard from its south gate.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: linked central stone courtyard from its south gate. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-central-courtyard-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: upper-cluster switchback path looking downhill.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: upper-cluster switchback path looking downhill. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-upper-switchback-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: reverse elevated overview from the northeast slope.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: reverse elevated overview from the northeast slope. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-opposite-slope-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: community hall square and three branching lanes.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: community hall square and three branching lanes. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-community-hall-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: orchard terrace facing the central roofscape.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: orchard terrace facing the central roofscape. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-orchard-terrace-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: narrow bamboo-edge lane between hillside homes.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: narrow bamboo-edge lane between hillside homes. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-bamboo-lane-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: irrigation pond edge with terraces and homes beyond.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: irrigation pond edge with terraces and homes beyond. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-irrigation-pond-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: lower bridge side view connecting creekside homes.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: lower bridge side view connecting creekside homes. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-lower-bridge-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: upper stone bridge and converging footpaths.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: upper stone bridge and converging footpaths. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-upper-bridge-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: southern ground route through farm plots.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: southern ground route through farm plots. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-south-ground-route-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: eastern ground route beside retaining walls.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: eastern ground route beside retaining walls. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-east-ground-route-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: field-edge route with layered village facades.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: field-edge route with layered village facades. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-field-edge-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "key-view",
+      "intended_use": "Replaceable key-view source for synthetic-village scene design: mid-slope roofline view across all three clusters.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: mid-slope roofline view across all three clusters. Frame a deep-focus documentary photograph with realistic perspective, clear near, middle and far layers, and visible routes useful for multiview matching. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "key-view-roofline-crossing-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: layered ochre rammed-earth wall.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: layered ochre rammed-earth wall. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-rammed-earth-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: aged pale lime-plaster wall.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: aged pale lime-plaster wall. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-pale-plaster-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: weathered dark-gray clay roof tiles.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: weathered dark-gray clay roof tiles. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-gray-roof-tile-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: irregular local fieldstone masonry.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: irregular local fieldstone masonry. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-fieldstone-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: dark structural timber beams.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: dark structural timber beams. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-dark-timber-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: weathered timber boards and joinery.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: weathered timber boards and joinery. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-weathered-timber-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: slightly wet courtyard stone paving.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: slightly wet courtyard stone paving. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-wet-stone-paving-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: dry-laid terrace retaining wall.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: dry-laid terrace retaining wall. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-dry-stone-wall-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: handmade muted clay brick infill.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: handmade muted clay brick infill. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-clay-brick-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: moss-flecked shaded stone.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: moss-flecked shaded stone. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-moss-stone-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: compacted earthen footpath.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: compacted earthen footpath. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-packed-earth-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: cultivated dark terrace soil.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: cultivated dark terrace soil. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-terrace-soil-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: shallow rice-paddy water and mud.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: shallow rice-paddy water and mud. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-rice-paddy-water-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: mixed leafy vegetable crop surface.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: mixed leafy vegetable crop surface. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-vegetable-leaf-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: mature green bamboo stems.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: mature green bamboo stems. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-bamboo-stem-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: dense bamboo foliage.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: dense bamboo foliage. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-bamboo-leaf-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: humid broadleaf tree bark.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: humid broadleaf tree bark. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-broadleaf-bark-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: subtropical broadleaf canopy.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: subtropical broadleaf canopy. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-broadleaf-canopy-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: aged fruit-tree bark.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: aged fruit-tree bark. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-orchard-bark-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: fruit-tree leaves and small branches.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: fruit-tree leaves and small branches. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-orchard-leaf-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: rounded shallow-creek stones.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: rounded shallow-creek stones. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-creek-rock-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: clear shallow moving creek water.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: clear shallow moving creek water. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-shallow-water-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: restrained aged farm-tool metal.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: restrained aged farm-tool metal. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-aged-metal-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "material",
+      "intended_use": "Replaceable material source for synthetic-village scene design: tight woven-bamboo surface.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: tight woven-bamboo surface. Frame an orthographic-looking square material study with even scale, sharp microtexture, diffuse illumination and enough uninterrupted surface for tiling. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "material-woven-bamboo-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: traditional timber door and threshold assembly.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: traditional timber door and threshold assembly. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-timber-door-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: simple timber lattice window assembly.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: simple timber lattice window assembly. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-timber-window-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: layered tile eave with timber support.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: layered tile eave with timber support. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-tile-eave-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: weathered clay-tile roof ridge junction.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: weathered clay-tile roof ridge junction. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-roof-ridge-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: irregular exterior stone stair flight.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: irregular exterior stone stair flight. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-stone-stair-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: courtyard drainage channel and outlet.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: courtyard drainage channel and outlet. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-drainage-channel-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: fieldstone retaining-wall corner.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: fieldstone retaining-wall corner. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-retaining-corner-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: modest timber balcony joinery.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: modest timber balcony joinery. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-timber-balcony-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: layered historic plaster repair patches.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: layered historic plaster repair patches. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-plaster-repair-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: close rammed-earth lift layers.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: close rammed-earth lift layers. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-rammed-layer-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: stone courtyard paving joint network.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: stone courtyard paving joint network. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-courtyard-joint-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "detail",
+      "intended_use": "Replaceable detail source for synthetic-village scene design: low stone bridge parapet and coping.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: low stone bridge parapet and coping. Frame a close documentary construction study that shows assembly, edge profiles, fastening logic, weathering and neighboring materials at believable scale. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "detail-bridge-parapet-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: complete modest stone footbridge environment.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: complete modest stone footbridge environment. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-stone-bridge-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: rocky creek bend with natural banks.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: rocky creek bend with natural banks. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-creek-bend-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: small irrigation pond and earthen edge.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: small irrigation pond and earthen edge. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-irrigation-pond-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: stepped mixed-crop terrace field.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: stepped mixed-crop terrace field. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-terrace-field-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: fruit-tree orchard on a gentle slope.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: fruit-tree orchard on a gentle slope. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-orchard-slope-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: dense bamboo grove edge and understory.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: dense bamboo grove edge and understory. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-bamboo-grove-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: rounded subtropical forest mountain.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: rounded subtropical forest mountain. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-forest-mountain-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "environment",
+      "intended_use": "Replaceable environment source for synthetic-village scene design: bright neutral overcast mountain sky.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: bright neutral overcast mountain sky. Frame a wide environmental study that shows terrain connection, vegetation edges, drainage, walkable scale and sufficient surrounding context for scene placement. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "environment-overcast-sky-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": true,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: plain glazed water storage jar.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: plain glazed water storage jar. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-water-jar-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: orderly split firewood stack.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: orderly split firewood stack. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-firewood-stack-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: hand-woven agricultural bamboo basket.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: hand-woven agricultural bamboo basket. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-bamboo-basket-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: simple weathered wooden work bench.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: simple weathered wooden work bench. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-wooden-bench-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: small grouping of manual farming tools.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: small grouping of manual farming tools. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-farming-tools-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: restrained timber grain drying rack.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: restrained timber grain drying rack. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-grain-rack-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: shallow carved stone water trough.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: shallow carved stone water trough. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-stone-trough-01",
+      "synthetic": true
+    },
+    {
+      "canary_critical": false,
+      "category": "prop",
+      "intended_use": "Replaceable prop source for synthetic-village scene design: small traditional two-wheel handcart.",
+      "prompt": "Create a photorealistic natural asset for a fictional subtropical mountain village with no real-world identity. The required subject is: small traditional two-wheel handcart. Frame one complete rural object at human scale with all sides legible, neutral grounding, crisp edges and material wear suitable for later 3D interpretation. The village language uses weathered dark-gray clay roof tiles, pale lime plaster, ochre rammed earth, dark timber and irregular local fieldstone among humid terraces, bamboo, orchards and a shallow creek. Use soft bright overcast daylight just after light rain, neutral documentary color, deep focus and physically plausible scale. Keep the result generic and replaceable. Exclude people as the main subject, vehicles, modern resorts, highways, fantasy architecture, real landmarks, signs, readable text, logos, watermarks, collages and borders.",
+      "replacement_contract": "Replace this slot through a new content-addressed visual-source revision; consumers may depend only on the slot contract, never on exact pixels.",
+      "slot_id": "prop-handcart-01",
+      "synthetic": true
+    }
+  ],
+  "synthetic": true
+}

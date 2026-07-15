@@ -1,0 +1,48 @@
+{
+  "canary": {
+    "camera_count": 24,
+    "height": 576,
+    "profile_id": "canary-24",
+    "test_count": 2,
+    "train_count": 18,
+    "validation_count": 4,
+    "width": 1024
+  },
+  "coordinate_system": "right-handed-z-up-meters",
+  "elements": {
+    "bridge_count": 2,
+    "buildings_default": 70,
+    "buildings_max": 80,
+    "buildings_min": 60,
+    "cluster_count": 3,
+    "spatial_columns": 4,
+    "spatial_rows": 3
+  },
+  "full": {
+    "camera_count": 180,
+    "height": 1152,
+    "profile_id": "full-180",
+    "test_count": 12,
+    "train_count": 144,
+    "validation_count": 24,
+    "width": 2048
+  },
+  "prohibited_claims": [
+    "measured real-world geometry",
+    "authoritative structure-from-motion evidence",
+    "real-scene fidelity",
+    "3D Gaussian Splatting quality"
+  ],
+  "recipe_id": "synthetic-mountain-village-v1",
+  "replacement_contract": "Replace the complete recipe through an immutable resource revision; consumers must not depend on a real village identity, exact pixels, or generated file count.",
+  "scene": {
+    "depth_m": 500.0,
+    "relief_m": 120.0,
+    "width_m": 700.0
+  },
+  "schema_version": 1,
+  "seed": 20260715,
+  "synthetic": true,
+  "verification_level": "L2",
+  "visual_slots_path": "assets/default-resources/synthetic-mountain-village-visual-slots-v1.json"
+}
