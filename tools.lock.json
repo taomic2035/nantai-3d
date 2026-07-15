@@ -1,0 +1,18 @@
+{
+  "blender": {
+    "archive_root": "blender-4.5.11-windows-x64",
+    "archive_sha256": "e11d3a8e4d4249be5a7db4a9325c1f670037d4233467c3b0bda181001efe44d3",
+    "archive_type": "zip",
+    "channel": "LTS",
+    "download_url": "https://download.blender.org/release/Blender4.5/blender-4.5.11-windows-x64.zip",
+    "executable": "blender.exe",
+    "install_dir": "third/blender",
+    "platform": "windows-x64",
+    "runtime_build_hash": "4db51e9d1e1e",
+    "runtime_build_timestamp": "2026-06-23 01:33:52",
+    "tool_id": "blender",
+    "version": "4.5.11",
+    "version_output_prefix": "Blender 4.5.11 LTS"
+  },
+  "schema_version": 1
+}
