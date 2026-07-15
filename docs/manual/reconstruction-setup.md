@@ -50,11 +50,13 @@ Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 
 拍好图后，一条命令跑完 COLMAP→Brush→导入（无需手动分步）。已在本机合成场景实测通过：
 
 ```powershell
-.venv\Scripts\python scripts\reconstruct_local.py <你的图片目录> --steps 3000 --max-res 1024
+# 输入可以是图片目录, 或直接一个视频文件 (自动抽帧)
+.venv\Scripts\python scripts\reconstruct_local.py <图片目录或视频.mp4> --steps 3000 --max-res 1024
 # 完成后:  .venv\Scripts\python make.py serve   # http://127.0.0.1:8000/web/studio/  360° 漫游
 ```
 
 - 自动找 `third/` 下的 COLMAP/Brush，探测选项组，全 CPU/集显，无需 CUDA。
+- **视频输入**自动抽帧（`--fps`/`--max-frames`，20 分钟视频建议 `--max-frames 300` 左右，别全帧喂 COLMAP）。
 - `--steps` 越大质量越好越慢（集显上 2000 步 ~5.5 分钟）；`--max-res` 控显存。
 - 想理解每一步或单独调，看下面 §4–§6 的分步版。
 

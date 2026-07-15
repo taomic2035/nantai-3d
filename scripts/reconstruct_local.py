@@ -66,14 +66,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--steps", type=int, default=3000,
                     help="Brush 训练步数 (越多越好越慢; 默认 3000)")
     ap.add_argument("--max-res", type=int, default=1024, help="训练最大分辨率")
+    ap.add_argument("--fps", type=float, default=2.0, help="视频抽帧帧率 (仅视频输入)")
+    ap.add_argument("--max-frames", type=int, default=300,
+                    help="视频抽帧上限 (仅视频输入; COLMAP CPU 建议 ≤300)")
     ap.add_argument("--colmap-gpu", action="store_true",
                     help="COLMAP SIFT 用 GPU (默认 CPU, 无 N 卡/headless 更可靠)")
     ap.add_argument("--web", type=Path, default=ROOT / "web" / "data" / "recon",
                     help="viewer 数据输出 (默认 web/data/recon)")
     args = ap.parse_args(argv)
-
-    if not args.photos.is_dir() or not any(args.photos.iterdir()):
-        raise SystemExit(f"图片目录为空或不存在: {args.photos}")
 
     colmap = _find("colmap", ROOT / "third/colmap/bin/colmap.exe",
                    ROOT / "third/colmap/colmap.exe")
@@ -81,6 +81,22 @@ def main(argv: list[str] | None = None) -> int:
     py = sys.executable
     ws = args.work
     ws.mkdir(parents=True, exist_ok=True)
+
+    # 输入可以是图片目录, 或单个视频文件 (自动抽帧)。
+    from pipeline.ingest import is_video
+    photos = args.photos
+    if photos.is_file() and is_video(photos):
+        print(f"\n=== 0/4 视频抽帧 (fps={args.fps}, 上限 {args.max_frames}) ===")
+        vin = ws / "video_in"
+        vin.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(photos, vin / photos.name)
+        frames = ws / "frames"
+        run([py, "-m", "pipeline.ingest", "--input", str(vin), "--output", str(frames),
+             "--fps", str(args.fps), "--max-frames", str(args.max_frames)])
+        photos = frames
+    elif not photos.is_dir() or not any(photos.iterdir()):
+        raise SystemExit(f"输入需为非空图片目录或视频文件: {photos}")
+    args.photos = photos  # 后续步骤统一用抽帧后的目录
     db = ws / "colmap.db"
     sparse = ws / "sparse"
     clog = ws / "colmap.log"
