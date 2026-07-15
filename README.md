@@ -44,6 +44,21 @@ make world PY=.venv/bin/python
 make serve PY=.venv/bin/python
 ```
 
+> **Windows / 无 GNU make 的环境**：用跨平台任务运行器 `make.py` 替代 `make`（同名 target），
+> venv 解释器为 `.venv\Scripts\python`。它强制 UTF-8 输出，规避 CJK/emoji 在管道下的编码错误：
+>
+> ```powershell
+> .venv\Scripts\python -m pip install -e ".[dev]"
+> .venv\Scripts\python make.py assets   # 生成+验收+注册 11 素材
+> .venv\Scripts\python make.py world     # 5×5 村庄
+> .venv\Scripts\python make.py serve     # Studio
+> .venv\Scripts\python make.py test lint  # 门禁
+> ```
+>
+> 素材字节跨平台可复现（HANDOFF-002：写盘前量化到 1e-6 网格）；registration.json /
+> recon_manifest.json 均以 LF 写出，保证信任根跨 OS 字节一致。CI 矩阵 (ubuntu+windows ×
+> py3.11/3.13) 强制 `make.py test/lint` 与素材跨平台字节一致。
+
 完整门禁：
 
 ```bash
@@ -80,6 +95,24 @@ git diff --check
 - PLY `nantai_meta`：frame、units、已应用 transform history。
 
 Viewer 的世界约定为右手 ENU：`(E, N, U) → Three.js (E, U, -N)`，行列式为 `+1`。裸 COLMAP 的相机与点位仍处于联合 SfM local frame，不会被静默重标为米制 ENU。COLMAP 相机模型和 `images.txt`/`cameras.txt` 的解析遵循其[官方输出格式](https://colmap.github.io/format.html)。
+
+**从 sfm-local 升级到米制 ENU（`pipeline.alignment`）**：裸 COLMAP 停在 arbitrary sfm-local。只有提供控制点或 GPS 锚点（计数 ≥3，且源点需张成 3D → 实际 ≥4 非共面），用闭式 Umeyama 拟合 SfM→ENU Sim3（强制 det=+1，绝不产出反射），且非退化、scale>0、RMS 残差 ≤ 阈值时，才升级为 `world-enu`（MEASURED / metric / ALIGNED）：
+
+```bash
+# 配准得到 sfm-local registration.json 后，用控制点/GPS 拟合 Sim3；
+# 退化(共线/共面)、高残差或缺 geo origin 均 fail-closed，registration 保持 sfm-local/UNALIGNED
+.venv/bin/python -m pipeline.alignment \
+  --registration recon/registration.json \
+  --control-points control_points.json \
+  --max-rms 2.0 --out recon/registration_aligned.json
+
+# 用对齐后的 registration 驱动导入重建 → manifest 报告 metric-aligned ENU world
+.venv/bin/python -m pipeline.reconstruct \
+  --photos photos --engine import --splat trained/drone.json \
+  --registration recon/registration_aligned.json
+```
+
+拟合的每点残差、退化裕度（源点奇异值）、阈值与门禁结果记入 `Sim3AlignmentEvidence`（`sim3.alignment.v1=<json>` 证据串），写在 `world_frame` 与 `pose_to_world` 上，可机器复核。这是把管线从 provenance-honest-mock 推进到 measured 的关键步骤；唯一外部依赖是真实的 COLMAP + GPU 训练 3DGS 产物。
 
 ### 3. 导入真实 3DGS 并混合拼接
 
