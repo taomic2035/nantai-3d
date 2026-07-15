@@ -25,7 +25,7 @@
 - Modify: `pipeline/ingest_manifest.py`
 - Modify: `tests/test_ingest_manifest.py`
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
 
 Add parameterized tests proving rejection of schema versions other than literal `1`, non-finite or out-of-range parameters, absolute/backslash/empty/`.`/`..` paths, malformed or uppercase SHA-256, non-positive byte counts, negative frame indices, contradictory photo/video fields, duplicate source/output paths, inconsistent output totals, non-canonical session IDs, and naive timestamps.
 
@@ -41,13 +41,13 @@ def test_source_paths_are_portable_relative_posix(path):
         successful_photo(source_path=path)
 ```
 
-- [ ] **Step 2: Run the schema tests and verify RED**
+- [x] **Step 2: Run the schema tests and verify RED**
 
 Run: `python -m pytest -q tests/test_ingest_manifest.py -k "reject or portable or contradictory or total or session"`
 
 Expected: failures showing the prototype accepts invalid schema, paths, hashes, parameters, or combinations.
 
-- [ ] **Step 3: Implement strict immutable models**
+- [x] **Step 3: Implement strict immutable models**
 
 Use `Literal[1]`, `ConfigDict(extra="forbid", frozen=True)`, finite numeric bounds, lowercase 64-hex SHA validation, timezone-aware ISO timestamps, and a portable relative-POSIX path validator. Replace `GeoAnchor` with a local evidence type so missing altitude remains unknown.
 
@@ -71,7 +71,7 @@ class IngestManifest(BaseModel):
 
 The manifest model validator must enforce unique sources and outputs, exact total count, kind-specific field combinations, photo output hash/size equality with its source, and `session_id == derive_session_id(params, sources)`.
 
-- [ ] **Step 4: Run schema tests and verify GREEN**
+- [x] **Step 4: Run schema tests and verify GREEN**
 
 Run: `python -m pytest -q tests/test_ingest_manifest.py -k "schema or reject or portable or contradictory or total or session"`
 
@@ -83,7 +83,7 @@ Expected: all selected tests pass.
 - Modify: `pipeline/ingest_manifest.py`
 - Modify: `tests/test_ingest_manifest.py`
 
-- [ ] **Step 1: Write failing disk-verifier tests**
+- [x] **Step 1: Write failing disk-verifier tests**
 
 Build one valid staged tree, then independently mutate it to cover: missing manifest, oversized/invalid JSON, symlink in the stage, missing output, extra undeclared output, output size/hash mismatch, source size/hash mismatch, and a source added/removed after manifest creation.
 
@@ -94,13 +94,13 @@ def test_verify_rejects_extra_undeclared_file(valid_stage):
         verify_ingest_artifact(valid_stage.output, input_dir=valid_stage.input)
 ```
 
-- [ ] **Step 2: Run verifier tests and verify RED**
+- [x] **Step 2: Run verifier tests and verify RED**
 
 Run: `python -m pytest -q tests/test_ingest_manifest.py -k "verify"`
 
 Expected: import/attribute failures because `verify_ingest_artifact` does not exist.
 
-- [ ] **Step 3: Implement verifier with exact file-set equality**
+- [x] **Step 3: Implement verifier with exact file-set equality**
 
 ```python
 def verify_ingest_artifact(stage_dir: str | Path, *, input_dir: str | Path) -> IngestManifest:
@@ -117,7 +117,7 @@ def verify_ingest_artifact(stage_dir: str | Path, *, input_dir: str | Path) -> I
 
 Reject symlinks at any level, non-regular files, manifest JSON larger than 4 MiB, and any disk/manifest mismatch. Return the validated model only after every check succeeds.
 
-- [ ] **Step 4: Run verifier tests and verify GREEN**
+- [x] **Step 4: Run verifier tests and verify GREEN**
 
 Run: `python -m pytest -q tests/test_ingest_manifest.py -k "verify"`
 
@@ -130,7 +130,7 @@ Expected: all verifier tests pass.
 - Modify: `tests/test_ingest_manifest.py`
 - Test: `tests/test_reconstruct.py::TestVideoIngest::test_video_frames_extracted`
 
-- [ ] **Step 1: Write failing execution tests**
+- [x] **Step 1: Write failing execution tests**
 
 Cover a non-empty output directory, nested duplicate basenames, two videos with the same stem but different suffixes, mocked `cv2.imwrite=False`, an unreadable/open-failed video, and a source changed or added while ingest runs.
 
@@ -149,13 +149,13 @@ def test_imwrite_false_aborts_without_manifest(monkeypatch, video_input, tmp_pat
     assert not (tmp_path / "stage" / MANIFEST_FILENAME).exists()
 ```
 
-- [ ] **Step 2: Run execution tests and verify RED**
+- [x] **Step 2: Run execution tests and verify RED**
 
 Run: `python -m pytest -q tests/test_ingest_manifest.py -k "fresh or deterministic or imwrite or changed or added or open_failed"`
 
 Expected: failures because existing ingest merges outputs, ignores write failure, and fingerprints after processing.
 
-- [ ] **Step 3: Implement stable source snapshots and deterministic paths**
+- [x] **Step 3: Implement stable source snapshots and deterministic paths**
 
 Capture the complete candidate source map `{relative_path: (size, sha256)}` before processing and compare it with a fresh scan after processing. Abort on any add/remove/change. Use source-relative photo paths and `<source-name-with-suffix>.frames/frame_XXXXXX.jpg` for videos. Require output to be absent or an empty real directory.
 
@@ -171,11 +171,11 @@ if after != before:
 
 Check `cv2.imwrite(...) is True`, require at least one output per accepted video, propagate open/decode/write failures as `IngestError`, and never write a success manifest after any source failure. Photo copies must be rehashed and match the captured source fingerprint.
 
-- [ ] **Step 4: Build and verify before writing the manifest**
+- [x] **Step 4: Build and verify before writing the manifest**
 
 Construct strict records from pre-processing fingerprints and measured outputs, derive the full 64-hex session ID, atomically write the manifest through a sibling temporary file, then call `verify_ingest_artifact(output_dir, input_dir=input_dir)`. Delete the temporary file on failure; a failed run may leave staging payload but never a valid success manifest.
 
-- [ ] **Step 5: Run ingest integration tests and verify GREEN**
+- [x] **Step 5: Run ingest integration tests and verify GREEN**
 
 Run:
 
@@ -191,11 +191,11 @@ Expected: all tests pass.
 **Files:**
 - Create: `docs/verification/2026-07-15-studio-milestone-b0.md`
 
-- [ ] **Step 1: Ask the Opus architecture role to review the B0 diff**
+- [x] **Step 1: Ask the Opus architecture role to review the B0 diff**
 
 Review only Critical/Important issues around provenance truth, path containment, symlink handling, input races, deterministic mapping, and verifier completeness. Do not merge alignment or job-kernel scope.
 
-- [ ] **Step 2: Run fresh repository gates**
+- [x] **Step 2: Run fresh repository gates**
 
 Run:
 
@@ -208,11 +208,11 @@ git diff --check
 
 Expected: all tests pass; the eight capability-based Windows symlink skips remain explicitly reported rather than treated as POSIX evidence.
 
-- [ ] **Step 3: Record verification and remaining boundary**
+- [x] **Step 3: Record verification and remaining boundary**
 
 Document test counts, supported/unsupported filesystem evidence, and that B0 creates no HTTP write route, subprocess job service, or formal publication. State that B1 may consume `verify_ingest_artifact` but may not weaken it.
 
-- [ ] **Step 4: Stage only B0 files and commit**
+- [x] **Step 4: Stage only B0 files and commit**
 
 Verify the exact staged file list, then commit on `main` with:
 

@@ -813,5 +813,5 @@ class TestVideoIngest:
         result = ingest_all(src, out, fps=4, blur_threshold=0)
         assert result["total_output"] >= 5
         assert (out / "photo.jpg").exists()
-        frames = list((out / "clip").glob("*.jpg"))
+        frames = list((out / "clip.mp4.frames").glob("*.jpg"))
         assert len(frames) >= 4  # 2s * 4fps ≈ 8 帧
