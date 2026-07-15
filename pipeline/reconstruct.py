@@ -837,8 +837,14 @@ def reconstruct(photos_dir: str | Path = "photos",
     # newline="\n": recon_manifest.json is the coordinate/provenance trust root;
     # writing LF (not Windows CRLF) keeps it byte-reproducible across OSes, so its
     # digest is stable for the CI cross-platform check and any future signing.
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+    payload = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    manifest_path.write_text(payload, encoding="utf-8", newline="\n")
+    # Sidecar digest (sha256sum-compatible) turns the byte-reproducible manifest
+    # into a verifiable/signable integrity root, complementing the per-artifact
+    # SHA-256 it already carries. It attests the manifest itself is intact.
+    manifest_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    (web_dir / "recon_manifest.sha256").write_text(
+        f"{manifest_digest}  recon_manifest.json\n",
         encoding="utf-8", newline="\n")
     logger.info(f"重建完成: {len(merged)} 高斯 | LOD {list(lod_files)} | "
                 f"manifest → {manifest_path}")

@@ -124,6 +124,11 @@ class TestMockPipeline:
         raw = (web_dir / "recon_manifest.json").read_bytes()
         assert b"\r\n" not in raw
         assert raw.endswith(b"\n")
+        # Sidecar digest attests the manifest bytes (sha256sum-compatible format).
+        digest, name = (web_dir / "recon_manifest.sha256").read_text(
+            encoding="utf-8").split()
+        assert name == "recon_manifest.json"
+        assert digest == hashlib.sha256(raw).hexdigest()
 
     def test_consumes_pre_aligned_registration(self, photos_dir, tmp_path):
         # An aligned world-enu registration (from pipeline.alignment) flows
