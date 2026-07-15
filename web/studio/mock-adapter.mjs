@@ -1,4 +1,7 @@
 import { RunLedger } from './ledger.mjs';
+import { normalizeCapabilities, readOnlyCapabilities } from './capabilities.mjs';
+
+const MOCK_READ_ONLY_REASON = 'Mock scenarios never authorize project writes.';
 
 const CORE_ATTRIBUTES = [
   'x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity',
@@ -64,13 +67,35 @@ function baseSnapshot() {
       assets: { availability: 'ready', execution: 'succeeded', freshness: 'current', preview: 'ready', trust: 'proxy' },
       review: { availability: 'ready', execution: 'idle', freshness: 'current', preview: 'ready', trust: 'proxy' },
     },
-    active_run: { id: 'run-mock-001', status: 'succeeded' },
+    active_run: { id: 'run-mock-001', command: 'reconstruct', status: 'succeeded' },
   };
 }
 
 function scenario(name) {
   const snapshot = baseSnapshot();
-  if (name === 'align-warning') {
+  if (name === 'empty') {
+    Object.assign(snapshot.sources, {
+      images: 0, videos: 0, frames: 0, rejected: 0, files: [],
+    });
+    snapshot.reconstruction.artifact = null;
+    snapshot.reconstruction.gaussian_count = 0;
+    snapshot.active_run = null;
+    snapshot.pipeline.sources.execution = 'idle';
+    for (const key of ['align', 'reconstruct']) {
+      snapshot.pipeline[key] = {
+        availability: 'missing', execution: 'idle', freshness: 'stale',
+        preview: 'unloaded', trust: 'untrusted',
+      };
+    }
+  } else if (name === 'missing-reconstruction') {
+    snapshot.reconstruction.artifact = null;
+    snapshot.reconstruction.gaussian_count = 0;
+    snapshot.active_run = null;
+    snapshot.pipeline.reconstruct = {
+      availability: 'ready', execution: 'idle', freshness: 'stale',
+      preview: 'unloaded', trust: 'untrusted',
+    };
+  } else if (name === 'align-warning') {
     Object.assign(snapshot.coordinate, {
       source_frame: 'sfm-local', world_frame: 'world-enu', units: 'arbitrary',
       source_provenance: 'unknown', world_provenance: 'unknown',
@@ -80,12 +105,14 @@ function scenario(name) {
     snapshot.pipeline.align.trust = 'untrusted';
     snapshot.pipeline.review.trust = 'untrusted';
   } else if (name === 'running') {
-    snapshot.active_run = { id: 'run-mock-running', status: 'running' };
+    snapshot.active_run = {
+      id: 'run-mock-running', command: 'reconstruct', status: 'running',
+    };
     snapshot.pipeline.reconstruct.execution = 'running';
     snapshot.pipeline.reconstruct.preview = 'loading';
     snapshot.pipeline.reconstruct.freshness = 'stale';
   } else if (name === 'failed') {
-    snapshot.active_run = { id: 'run-mock-failed', status: 'failed' };
+    snapshot.active_run = { id: 'run-mock-failed', command: 'ingest', status: 'failed' };
     snapshot.pipeline.sources.execution = 'failed';
     snapshot.pipeline.sources.freshness = 'stale';
     snapshot.pipeline.sources.preview = 'degraded';
@@ -108,9 +135,39 @@ function scenario(name) {
 }
 
 export const SCENARIO_NAMES = Object.freeze([
-  'ready-proxy', 'align-warning', 'running', 'failed',
+  'ready-proxy', 'empty', 'missing-reconstruction', 'align-warning', 'running', 'failed',
   'assets-partial', 'contract-complete-simulated',
 ]);
+
+function scenarioRun(name) {
+  if (name === 'running') {
+    return {
+      id: 'run-mock-running', command: 'reconstruct', status: 'running', retry_of: null,
+      input_summary: { images: 5, videos: 1 }, parameters: { engine: 'mock' },
+      adapter_kind: 'mock', started_at: '2026-07-14T04:10:00.000Z', finished_at: null,
+      artifact_ids: [], last_event_id: 'evt-reconstruct', events: [
+        { id: 'evt-ingest', seq: 1, phase: 'ingest', progress: 0.15, message: '读取混合输入' },
+        { id: 'evt-reconstruct', seq: 2, phase: 'reconstruct', progress: 0.55, message: '生成 synthetic proxy' },
+      ],
+    };
+  }
+  if (name === 'failed') {
+    return {
+      id: 'run-mock-failed', command: 'ingest', status: 'failed', retry_of: null,
+      input_summary: { images: 5, videos: 1 }, parameters: {},
+      adapter_kind: 'mock', started_at: '2026-07-14T04:20:00.000Z',
+      finished_at: '2026-07-14T04:20:02.000Z', artifact_ids: [],
+      last_event_id: 'evt-failed', events: [
+        { id: 'evt-ingest', seq: 1, phase: 'ingest', progress: 0.2, message: '读取混合输入' },
+        {
+          id: 'evt-failed', seq: 2, phase: 'failed', progress: 0.2,
+          message: 'broken_clip.mp4: 0 frames decoded', code: 'video_decode_empty',
+        },
+      ],
+    };
+  }
+  return null;
+}
 
 export class MockStudioAdapter {
   constructor({ storage = globalThis.localStorage } = {}) {
@@ -140,7 +197,20 @@ export class MockStudioAdapter {
   }
 
   async loadProject() { return scenario(this.scenarioName); }
-  async listRuns() { return { items: this.ledger.listRuns(), cursor: 'mock-local' }; }
+  async loadCapabilities() {
+    return normalizeCapabilities(readOnlyCapabilities(MOCK_READ_ONLY_REASON), {
+      allowWrite: false,
+      fallbackReason: MOCK_READ_ONLY_REASON,
+    });
+  }
+  async listRuns() {
+    const fixture = scenarioRun(this.scenarioName);
+    const stored = this.ledger.listRuns();
+    return {
+      items: fixture ? [fixture, ...stored.filter((run) => run.id !== fixture.id)] : stored,
+      cursor: fixture ? `mock-${this.scenarioName}` : 'mock-local',
+    };
+  }
   subscribe(_cursor, listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   #emit(event) { for (const listener of this.listeners) listener(event); }
 

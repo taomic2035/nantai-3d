@@ -1,24 +1,40 @@
 import {
-  derivePrimaryAction,
   normalizeSnapshot,
   normalizeStepState,
   viewerCapabilityTokens,
 } from './model.mjs';
+import { commandCapability } from './capabilities.mjs';
+import {
+  STUDIO_DAG,
+  derivePrimaryAction,
+  displayInputPath,
+  preferredRunId,
+  primaryNavigation,
+} from './job-actions.mjs';
 import { selectStudioAdapter } from './adapter-factory.mjs';
 import { SCENARIO_NAMES } from './mock-adapter.mjs';
 import { StudioViewerBridge } from './viewer-bridge.mjs';
 
-const STEP_DEFS = [
-  { key: 'sources', name: '输入 Sources', meta: '图片 + 视频' },
-  { key: 'align', name: '配准 Align', meta: 'frame + scale' },
-  { key: 'reconstruct', name: '重建 Reconstruct', meta: '3DGS artifact' },
-  { key: 'stitch', name: '拼接与清晰度', meta: 'merge + LOD' },
-  { key: 'assets', name: '素材 Assets', meta: 'validate + consume' },
-  { key: 'review', name: '验收 Review', meta: 'evidence + export' },
-];
+const VIEW_META = {
+  sources: '图片 + 视频',
+  align: 'Reconstruct evidence',
+  reconstruct: '3DGS artifact',
+  assets: 'validate + consume',
+  compose: 'layout + world chunks',
+  review: 'evidence join + export',
+};
+const STEP_DEFS = STUDIO_DAG.views.map((view) => ({
+  key: view.stateKey,
+  viewId: view.id,
+  name: view.label,
+  meta: VIEW_META[view.id],
+  branch: view.branch,
+}));
 
 const SCENARIO_LABELS = {
   'ready-proxy': '正常 · proxy',
+  empty: '空项目 · 只读',
+  'missing-reconstruction': '待重建 · 只读',
   'align-warning': '坐标阻断',
   running: '任务运行中',
   failed: '输入失败',
@@ -29,6 +45,7 @@ const SCENARIO_LABELS = {
 const adapterSelection = await selectStudioAdapter();
 const adapter = adapterSelection.adapter;
 const adapterFallbackReason = adapterSelection.fallbackReason;
+const serviceCapabilities = await adapter.loadCapabilities();
 let snapshot;
 let rawSnapshot;
 let liveViewerCapabilities = null;
@@ -62,7 +79,7 @@ function statusFor(state) {
 function renderPipeline() {
   const list = byId('pipeline-list');
   list.replaceChildren();
-  STEP_DEFS.forEach((definition, index) => {
+  STEP_DEFS.forEach((definition) => {
     const normalized = normalizeStepState(snapshot.pipeline?.[definition.key]).state;
     const [status, tone] = statusFor(normalized);
     const li = document.createElement('li');
@@ -74,7 +91,7 @@ function renderPipeline() {
     button.dataset.testid = `pipeline-step-${definition.key}`;
     if (definition.key === selectedStep) button.setAttribute('aria-current', 'step');
     button.innerHTML = `
-      <span class="step-number">${String(index + 1).padStart(2, '0')}</span>
+      <span class="step-number step-branch">${escapeHtml(definition.branch.slice(0, 1))}</span>
       <span class="step-copy"><span class="step-name">${definition.name}</span><span class="step-meta">${definition.meta}</span></span>
       <span class="step-status status-${tone}">${status}</span>`;
     button.addEventListener('click', () => selectStep(definition.key, button));
@@ -91,6 +108,18 @@ function summaryCard(title, body, tone = '') {
 function sourceInspector() {
   const sources = snapshot.sources ?? {};
   const failed = (sources.files ?? []).filter((item) => item.status === 'failed');
+  const sourceCount = (sources.images ?? 0) + (sources.videos ?? 0);
+  if (sourceCount === 0) {
+    const ingest = commandCapability(serviceCapabilities, 'ingest');
+    const inputPath = displayInputPath(snapshot.project?.storage);
+    return `<section class="summary-card is-warning" tabindex="-1" data-source-empty-state>
+      <h3>输入目录还没有可处理的媒体</h3>
+      <p>将图片或视频放入 ${escapeHtml(inputPath)}。支持 JPG、PNG、WebP、HEIC、TIFF、MP4、MOV、AVI、MKV 与 WebM。</p>
+    </section>
+    <div class="inline-actions"><button class="button" type="button" id="rescan-sources"
+      ${ingest.enabled ? '' : 'disabled'}>重新扫描</button></div>
+    <span class="action-reason">${escapeHtml(ingest.enabled ? '' : ingest.reason)}</span>`;
+  }
   return `${summaryCard(
     failed.length ? `${failed.length} 个输入需要处理` : '混合输入可进入配准',
     failed.length ? failed.map((item) => `${item.name}: ${item.reason}`).join('；')
@@ -156,6 +185,7 @@ function stitchInspector() {
 
 function assetsInspector() {
   const assets = snapshot.assets ?? {};
+  const validation = commandCapability(serviceCapabilities, 'validate-assets');
   const cards = (assets.items ?? []).map((item) => `<article class="asset-card">
     <b title="${escapeHtml(item.id)}">${escapeHtml(item.id)}</b>
     <span>${escapeHtml(item.kind)} · v${escapeHtml(item.version)}</span>
@@ -171,7 +201,11 @@ function assetsInspector() {
   <p class="eyebrow">HANDOFF-001</p>
   <div class="asset-grid">${cards}</div>
   <img class="contact-sheet" src="/handoff/deliverables/HANDOFF-001/previews/contact-sheet.png" alt="HANDOFF-001 十一个模拟高斯素材接触表">
-  <div class="inline-actions"><button class="button" type="button" id="validate-assets">验证 11 个素材</button></div>`;
+  <div class="inline-actions"><button class="button" type="button" id="validate-assets"
+    ${validation.enabled ? '' : 'disabled'} aria-describedby="validate-assets-reason">验证 11 个素材</button></div>
+  <span class="action-reason" id="validate-assets-reason">${escapeHtml(
+    validation.enabled ? '' : validation.reason,
+  )}</span>`;
 }
 
 function reviewInspector() {
@@ -196,7 +230,7 @@ function reviewInspector() {
 
 function renderInspector() {
   const definition = STEP_DEFS.find((item) => item.key === selectedStep);
-  byId('inspector-kicker').textContent = `STEP ${STEP_DEFS.indexOf(definition) + 1}`;
+  byId('inspector-kicker').textContent = `VIEW · ${definition.branch.toUpperCase()}`;
   byId('inspector-title').textContent = definition.name;
   const renderers = {
     sources: sourceInspector, align: alignInspector, reconstruct: reconstructInspector,
@@ -204,6 +238,8 @@ function renderInspector() {
   };
   byId('inspector-content').innerHTML = renderers[selectedStep]();
   byId('validate-assets')?.addEventListener('click', async () => {
+    const validation = commandCapability(serviceCapabilities, 'validate-assets');
+    if (!validation.enabled) return;
     try {
       const report = await adapter.validateAssetCandidate({ asset_id: 'HANDOFF-001' });
       announce(`素材验证 ${report.passed ? '通过' : '失败'}`);
@@ -244,22 +280,28 @@ function renderTopbar() {
   adapterBadge.classList.toggle('badge-local', snapshot.adapter.kind === 'local');
   adapterBadge.title = adapterFallbackReason ?? '已连接项目真值源';
   byId('freshness-badge').textContent = `产物 · ${snapshot.pipeline?.review?.freshness ?? 'unknown'}`;
+  const modeLabel = serviceCapabilities.mode === 'read-write' ? '可写' : '只读';
+  byId('capability-summary').textContent = `服务模式 · ${modeLabel} · ${serviceCapabilities.reason}`;
+  byId('capability-summary').title = serviceCapabilities.reason;
   const watermark = document.querySelector('.stage-watermark');
   if (watermark) {
     const simulated = snapshot.adapter.kind === 'mock' || snapshot.reconstruction?.synthetic === true;
     watermark.hidden = !simulated;
     watermark.textContent = snapshot.adapter.kind === 'mock' ? 'SIMULATED STATE' : 'SYNTHETIC ARTIFACT';
   }
-  const action = derivePrimaryAction(snapshot);
+  const action = derivePrimaryAction(snapshot, serviceCapabilities);
   const button = byId('primary-action');
   button.dataset.action = action.id;
   button.textContent = action.label;
+  button.disabled = !action.enabled;
+  button.title = action.enabled ? '' : action.reason;
+  byId('primary-action-reason').textContent = action.enabled ? '' : action.reason;
 }
 
 function renderJobs(runs) {
   const list = byId('run-list');
   list.replaceChildren();
-  if (!selectedRunId || !runs.some((run) => run.id === selectedRunId)) selectedRunId = runs[0]?.id ?? null;
+  selectedRunId = preferredRunId(runs, selectedRunId, snapshot.active_run?.id);
   runs.forEach((run) => {
     const button = document.createElement('button');
     button.type = 'button';
@@ -336,36 +378,48 @@ function setupScenarioControl() {
   });
 }
 
+function setDrawerOpen(open, { focus = false } = {}) {
+  const drawer = byId('job-drawer');
+  const toggle = byId('drawer-toggle');
+  drawer.classList.toggle('is-open', open);
+  toggle.setAttribute('aria-expanded', String(open));
+  byId('drawer-title').textContent = open ? '任务记录 · 已展开' : '任务记录';
+  if (focus) requestAnimationFrame(() => toggle.focus());
+}
+
 function setupDrawer() {
   const drawer = byId('job-drawer');
   const toggle = byId('drawer-toggle');
   toggle.addEventListener('click', () => {
-    const open = drawer.classList.toggle('is-open');
-    toggle.setAttribute('aria-expanded', String(open));
-    byId('drawer-title').textContent = open ? '任务记录 · 已展开' : '任务记录';
+    setDrawerOpen(!drawer.classList.contains('is-open'));
   });
 }
 
 function setupPrimaryAction() {
-  byId('primary-action').addEventListener('click', async (event) => {
-    const action = event.currentTarget.dataset.action;
-    if (action === 'inspect-failure') {
-      selectStep('sources');
-      byId('job-drawer').classList.add('is-open');
-      byId('drawer-toggle').setAttribute('aria-expanded', 'true');
-    } else if (action === 'reconstruct') {
+  byId('primary-action').addEventListener('click', async () => {
+    const action = derivePrimaryAction(snapshot, serviceCapabilities);
+    if (!action.enabled) return;
+    const intent = primaryNavigation(action);
+    if (action.id === 'reconnect') {
+      announce('当前 adapter 无自动重连能力；请确认本地 Studio 服务仍在运行。');
+      return;
+    }
+    if (intent.step) selectStep(intent.step);
+    if (intent.openDrawer) setDrawerOpen(true, { focus: intent.focus === 'drawer' });
+    if (intent.focus === 'source-empty') {
+      requestAnimationFrame(() => {
+        byId('inspector-content').querySelector('[data-source-empty-state]')?.focus();
+      });
+    }
+    if (intent.submitCommand) {
       try {
-        await adapter.startJob('reconstruct', {
+        await adapter.startJob(intent.submitCommand, {
           engine: adapter.kind === 'mock' ? 'mock' : 'auto',
         });
         await loadScenario();
       } catch (error) {
         announce(`无法启动重建：${error.message}`);
       }
-    } else if (action === 'reconnect') {
-      announce('模拟 adapter 无需重连；真实模式将调用本地服务。');
-    } else {
-      selectStep('review');
     }
   });
 }

@@ -3,6 +3,8 @@ const CORE_SPLAT_ATTRIBUTES = [
   'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3',
 ];
 
+export { derivePrimaryAction } from './job-actions.mjs';
+
 const VALID = {
   availability: new Set(['missing', 'ready']),
   execution: new Set(['idle', 'queued', 'running', 'succeeded', 'failed', 'canceled']),
@@ -189,23 +191,6 @@ export function normalizeSnapshot(raw = {}) {
   const trust = deriveTrust(snapshot, geometryUsability, renderFidelity, diagnostics);
   snapshot.derived = { renderFidelity, geometryUsability, trust, diagnostics };
   return snapshot;
-}
-
-export function derivePrimaryAction(snapshot) {
-  if (!snapshot.adapter?.connected) {
-    return { id: 'reconnect', label: '重新连接本地管线' };
-  }
-  if (snapshot.active_run?.status === 'failed') {
-    return { id: 'inspect-failure', label: '查看失败原因' };
-  }
-  const sources = snapshot.sources ?? {};
-  if ((sources.images ?? 0) + (sources.videos ?? 0) === 0) {
-    return { id: 'inspect-sources', label: '开始检查输入' };
-  }
-  if (!snapshot.reconstruction?.artifact) {
-    return { id: 'reconstruct', label: '开始混合重建' };
-  }
-  return { id: 'review', label: '查看验收摘要' };
 }
 
 export const MODEL_ENUMS = Object.freeze({

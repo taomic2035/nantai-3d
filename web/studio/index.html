@@ -22,18 +22,23 @@
       <div class="top-status" aria-label="项目状态">
         <span class="badge badge-mock" id="adapter-badge">模拟数据</span>
         <span class="badge" id="freshness-badge">产物 · current</span>
+        <span class="capability-summary" id="capability-summary">服务模式 · 检查中</span>
       </div>
       <label class="scenario-control">
         <span>验收场景</span>
         <select id="scenario-select" aria-label="切换模拟验收场景"></select>
       </label>
-      <button class="button button-primary" id="primary-action" type="button">查看验收摘要</button>
+      <div class="primary-action-group">
+        <button class="button button-primary" id="primary-action" type="button"
+                aria-describedby="primary-action-reason">查看验收摘要</button>
+        <span class="action-reason" id="primary-action-reason" aria-live="polite"></span>
+      </div>
     </header>
 
-    <nav class="pipeline" aria-label="重建流程" data-testid="pipeline-nav">
+    <nav class="pipeline" aria-label="工作视图依赖图" data-testid="pipeline-nav">
       <div class="panel-heading">
-        <span>Pipeline</span>
-        <small>6 个阶段</small>
+        <span>Views · DAG</span>
+        <small>2 条产物支线</small>
       </div>
       <ol id="pipeline-list"></ol>
       <section class="pipeline-footnote" aria-label="真实性说明">

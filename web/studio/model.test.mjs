@@ -42,7 +42,13 @@ function baseSnapshot() {
       gaussian_count: 1000,
       lod: [0, 1, 2],
     },
-    assets: { registered: 11, consumed: 8, blocked: 3 },
+    assets: { registered: 11, consumed: 11, blocked: 0 },
+    pipeline: Object.fromEntries(
+      ['sources', 'reconstruct', 'assets', 'stitch'].map((key) => [key, {
+        availability: 'ready', execution: 'succeeded', freshness: 'current',
+        preview: 'ready', trust: 'proxy',
+      }]),
+    ),
   };
 }
 
@@ -194,9 +200,15 @@ test('illegal five-axis step combinations are normalized to fail closed', () => 
 });
 
 test('exactly one global primary action is derived', () => {
+  const empty = baseSnapshot();
+  empty.sources = { images: 0, videos: 0 };
+  const running = baseSnapshot();
+  running.active_run = { status: 'running', command: 'reconstruct' };
   const cases = [
     [{ ...baseSnapshot(), adapter: { kind: 'local', connected: false } }, 'reconnect'],
     [{ ...baseSnapshot(), active_run: { status: 'failed' } }, 'inspect-failure'],
+    [running, 'view-progress'],
+    [empty, 'inspect-sources'],
     [baseSnapshot(), 'review'],
   ];
   for (const [snapshot, expected] of cases) {

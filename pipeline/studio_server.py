@@ -9,6 +9,7 @@ API contract:
 
 * ``GET /api/project`` -> Studio ``ProjectSnapshot`` schema version 2.
 * ``GET /api/runs`` -> ``{"items": [...], "cursor": "..."}``.
+* ``GET /api/capabilities`` -> explicit fail-closed operation capabilities.
 * ``GET``/``HEAD`` below approved static roots -> project-relative files.
 * every mutating method -> structured HTTP 405; no job is started.
 """
@@ -40,6 +41,8 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 STATIC_ROOTS = {"assets", "handoff", "recon", "web"}
 EVIDENCE_ROOTS = {"recon", "web"}
 ALLOWED_RUN_STATUSES = {"queued", "running", "succeeded", "failed", "canceled"}
+STUDIO_COMMAND_IDS = ("ingest", "reconstruct", "world", "validate-assets")
+READ_ONLY_REASON = "Job execution is not enabled in this Studio milestone."
 XYZ_PROPERTIES = frozenset({"x", "y", "z"})
 CORE_3DGS_PROPERTIES = frozenset({
     "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
@@ -56,6 +59,26 @@ CONTENT_SECURITY_POLICY = (
     "worker-src 'self' blob:; frame-src 'self'; "
     "object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
 )
+
+
+def read_only_capabilities() -> dict[str, Any]:
+    """Return a fresh capability document; method presence never implies writes."""
+    return {
+        "schema_version": 1,
+        "mode": "read-only",
+        "reason": READ_ONLY_REASON,
+        "request_token": None,
+        "single_writer": True,
+        "commands": {
+            command: {
+                "enabled": False,
+                "cancel": False,
+                "retry": False,
+                "reason": READ_ONLY_REASON,
+            }
+            for command in STUDIO_COMMAND_IDS
+        },
+    }
 
 
 class PathAccessError(ValueError):
@@ -792,6 +815,43 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
     }
 
 
+def _world_composition_available(root: Path) -> bool:
+    """Accept Compose evidence only when every declared world chunk is live and valid."""
+
+    world_path = root / "web/data/manifest.json"
+    resolved_world_path = _resolve_real_evidence_file(
+        root, world_path, approved_root="web"
+    )
+    if resolved_world_path is None:
+        return False
+    world, error = _read_json(resolved_world_path)
+    chunks = world.get("chunks") if error is None and isinstance(world, dict) else None
+    if not isinstance(chunks, list) or not chunks:
+        return False
+    seen_ids: set[str] = set()
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            return False
+        chunk_id = chunk.get("id")
+        point_count = chunk.get("point_count")
+        if not isinstance(chunk_id, str) or not chunk_id or chunk_id in seen_ids:
+            return False
+        if type(point_count) is not int or point_count <= 0:
+            return False
+        seen_ids.add(chunk_id)
+        chunk_path = _resolve_evidence_path(
+            root, chunk.get("ply_file"), relative_to=world_path.parent
+        )
+        valid_payload, _, live_point_count = (
+            _valid_ply_payload(chunk_path, gaussian_semantics=True)
+            if chunk_path is not None
+            else (False, [], None)
+        )
+        if not valid_payload or live_point_count != point_count:
+            return False
+    return True
+
+
 def _step(
     *,
     available: bool,
@@ -835,6 +895,8 @@ def _load_runs(root: Path) -> dict[str, Any]:
             if item.get("status") not in ALLOWED_RUN_STATUSES:
                 continue
             if item.get("adapter_kind") != "local":
+                continue
+            if item.get("command") not in STUDIO_COMMAND_IDS:
                 continue
             items.append(item)
     return {
@@ -920,6 +982,7 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         ]
         reconstruction["geometry_usability"] = "preview-only"
     assets = _asset_snapshot(root)
+    world_composition_available = _world_composition_available(root)
     runs = _load_runs(root)
 
     artifact_present = isinstance(reconstruction.get("artifact"), dict)
@@ -948,7 +1011,7 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         ),
         "reconstruct": _step(available=artifact_present, trust="proxy"),
         "stitch": _step(
-            available=artifact_present and bool(stitch["sessions"] or reconstruction["lod"]),
+            available=world_composition_available,
             trust="proxy",
         ),
         "assets": _step(
@@ -993,7 +1056,11 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         "assets": assets,
         "pipeline": pipeline,
         "active_run": (
-            {"id": runs["items"][-1]["id"], "status": runs["items"][-1]["status"]}
+            {
+                "id": runs["items"][-1]["id"],
+                "command": runs["items"][-1]["command"],
+                "status": runs["items"][-1]["status"],
+            }
             if runs["items"]
             else None
         ),
@@ -1137,6 +1204,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
     def _serve(self, *, head_only: bool) -> None:
         request_path = urlsplit(self.path).path
+        if request_path == "/api/capabilities":
+            self._send_json(
+                HTTPStatus.OK,
+                read_only_capabilities(),
+                head_only=head_only,
+            )
+            return
         if request_path == "/api/project":
             try:
                 snapshot = build_project_snapshot(self.project_root)

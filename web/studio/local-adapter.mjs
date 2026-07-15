@@ -1,3 +1,8 @@
+import { normalizeCapabilities, readOnlyCapabilities } from './capabilities.mjs';
+
+const CAPABILITY_FAILURE_REASON = 'Capability discovery failed; Studio remains read-only.';
+const MILESTONE_A_REASON = 'Milestone A never authorizes project writes.';
+
 /** Read-only-first adapter for the local Nantai Studio HTTP service. */
 export class LocalStudioAdapter {
   constructor({
@@ -47,6 +52,18 @@ export class LocalStudioAdapter {
       throw new Error('local project must use schema_version 2');
     }
     return snapshot;
+  }
+
+  async loadCapabilities() {
+    try {
+      const capabilities = await this.#request('/api/capabilities');
+      return normalizeCapabilities(capabilities, {
+        allowWrite: false,
+        fallbackReason: MILESTONE_A_REASON,
+      });
+    } catch {
+      return readOnlyCapabilities(CAPABILITY_FAILURE_REASON);
+    }
   }
 
   async listRuns() {

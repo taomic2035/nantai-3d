@@ -60,3 +60,70 @@ test('local adapter validates the run collection envelope', async () => {
   });
   await assert.rejects(() => bad.listRuns(), /items array/);
 });
+
+test('local adapter loads explicit capabilities instead of inferring from methods', async () => {
+  const requested = [];
+  const adapter = new LocalStudioAdapter({
+    baseUrl: 'http://127.0.0.1:8000',
+    fetchImpl: async (url) => {
+      requested.push(url);
+      return response({
+        schema_version: 1,
+        mode: 'read-only',
+        reason: 'Jobs unavailable.',
+        request_token: null,
+        single_writer: true,
+        commands: Object.fromEntries(
+          ['ingest', 'reconstruct', 'world', 'validate-assets'].map((command) => [
+            command,
+            { enabled: false, cancel: false, retry: false, reason: 'Jobs unavailable.' },
+          ]),
+        ),
+      });
+    },
+  });
+
+  const capabilities = await adapter.loadCapabilities();
+  assert.equal(capabilities.mode, 'read-only');
+  assert.equal(capabilities.commands.reconstruct.enabled, false);
+  assert.deepEqual(requested, ['http://127.0.0.1:8000/api/capabilities']);
+});
+
+test('capability discovery failures degrade to read-only without blocking project reads', async () => {
+  for (const capabilityResponse of [
+    response({ error: { message: 'missing' } }, { ok: false, status: 404 }),
+    response(null),
+  ]) {
+    const adapter = new LocalStudioAdapter({
+      fetchImpl: async (url) => (
+        url.endsWith('/api/project')
+          ? response({ schema_version: 2, adapter: { kind: 'local', connected: true } })
+          : capabilityResponse
+      ),
+    });
+
+    assert.equal((await adapter.loadCapabilities()).mode, 'read-only');
+    assert.equal((await adapter.loadProject()).schema_version, 2);
+  }
+});
+
+test('Milestone A local adapter rejects a server claim of read-write mode', async () => {
+  const adapter = new LocalStudioAdapter({
+    fetchImpl: async () => response({
+      schema_version: 1,
+      mode: 'read-write',
+      reason: 'Available.',
+      request_token: 't'.repeat(43),
+      single_writer: true,
+      commands: Object.fromEntries(
+        ['ingest', 'reconstruct', 'world', 'validate-assets'].map((command) => [
+          command, { enabled: true, cancel: true, retry: true, reason: 'Available.' },
+        ]),
+      ),
+    }),
+  });
+
+  const capabilities = await adapter.loadCapabilities();
+  assert.equal(capabilities.mode, 'read-only');
+  assert.equal(capabilities.request_token, null);
+});
