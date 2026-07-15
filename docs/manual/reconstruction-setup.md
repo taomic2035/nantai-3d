@@ -97,16 +97,16 @@ ns-export gaussian-splat \
 # Step 0（若训练器输出非单位四元数）：归一化 rot_0..3——加载器 fail-closed 拒绝非单位四元数
 .venv\Scripts\python scripts\normalize_ply_quats.py trained\point_cloud.ply
 
-# Step 1：写 recon/registration.json（sfm-local 契约；poses 可为空，import 不读位姿）
-# Step 2：写 recon/splat-input.json（session_id 对上；source_frame 与 registration 的 6 个 frame 字段逐字一致）
-#   —— 两个模板见 docs/real-data-workflow.md；或用 COLMAP 步骤已生成的 recon/registration.json
+# Step 1（一键生成导入契约 registration.json + splat-input.json，并打印导入命令）
+.venv\Scripts\python scripts\prepare_import.py trained\point_cloud.ply
+#   —— 生成的是诚实的 sfm-local（arbitrary/unaligned）契约；要 metric 见下方与 real-data-workflow.md
 
-# Step 3：导入（--dedup-voxel 0 必须：非米制 frame 拒绝 0.10 默认）
+# Step 2：导入（prepare_import 打印的命令；--dedup-voxel 0 必须：非米制 frame 拒绝 0.10 默认）
 .venv\Scripts\python -m pipeline.reconstruct --engine import `
   --registration recon\registration.json --splat recon\splat-input.json `
   --dedup-voxel 0 --replace-margin 0 --photos photos
 
-# Step 4：查看，360° 漫游
+# Step 3：查看，360° 漫游
 .venv\Scripts\python make.py serve   # http://127.0.0.1:8000/web/studio/
 ```
 
@@ -129,4 +129,6 @@ ns-export gaussian-splat \
 
 - `pipeline/registration.py`：COLMAP SIFT **默认走 CPU**（`use_gpu=False`），无 N 卡/headless 可靠；`reconstruct --colmap-gpu` 可显式开 GPU 提速。
 - `scripts/normalize_ply_quats.py`：训练器 PLY 的四元数归一化预处理（加载器 fail-closed 拒绝非单位四元数，Studio 复用同一语义校验，故不改门、提供预处理）。
-- `third/`（gitignored）下载物 + `third/README.md`（下载清单/URL）+ 本手册。
+- `scripts/prepare_import.py`：一键生成导入契约（registration.json + splat-input.json），消除手写易错步骤；生成诚实的 sfm-local frame。
+- `pipeline/recon_schema.py`：RegistrationResult.engine 增 `"external"`（外部声明的导入配准，比冒充 colmap/mock 诚实）。
+- `third/`（gitignored）下载物 + `third/README.md`（下载清单/URL）+ 本手册。整条本机导入链有端到端认证测试（`test_full_local_import_flow_via_scripts`）。

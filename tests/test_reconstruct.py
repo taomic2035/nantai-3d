@@ -286,6 +286,49 @@ class TestImportEngine:
         assert m["provenance"]["synthetic"] is False
         assert m["provenance"]["geometry_usability"] == "metric-aligned"
 
+    def test_full_local_import_flow_via_scripts(self, tmp_path):
+        # Certifies the user's local step-C exactly as the manual documents it:
+        # a trainer-style .ply with NON-unit quats -> scripts/normalize_ply_quats.py
+        # -> scripts/prepare_import.py -> reconstruct --engine import. Real geometry
+        # in an arbitrary sfm-local frame => honest preview-only (not synthetic, not
+        # faked-metric). Drives the actual script CLIs (catches CLI/packaging bugs).
+        import subprocess
+        import sys
+
+        from plyfile import PlyData
+
+        root = Path(__file__).resolve().parent.parent
+        rng = np.random.default_rng(21)
+        ext = GaussianScene(rng.uniform(0, 5, (300, 3)), rng.uniform(0, 1, (300, 3)))
+        ply = tmp_path / "trained.ply"
+        ext.save_ply(ply, flavor="3dgs")
+        # Simulate a trainer that exported un-normalized quaternions.
+        pd = PlyData.read(str(ply), mmap=False)
+        for r in ("rot_0", "rot_1", "rot_2", "rot_3"):
+            pd["vertex"].data[r] = pd["vertex"].data[r] * 2.0
+        PlyData([pd["vertex"]], text=False, byte_order="<").write(str(ply))
+
+        def run(*args):
+            proc = subprocess.run([sys.executable, *args], cwd=root,
+                                  capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr
+            return proc
+
+        run("scripts/normalize_ply_quats.py", str(ply))
+        run("scripts/prepare_import.py", str(ply), "--out-dir", str(tmp_path / "recon"))
+
+        reg = RegistrationResult.model_validate_json(
+            (tmp_path / "recon" / "registration.json").read_text(encoding="utf-8"))
+        splat = SplatInput.model_validate_json(
+            (tmp_path / "recon" / "splat-input.json").read_text(encoding="utf-8"))
+        manifest = reconstruct(
+            photos_dir=tmp_path, out_dir=tmp_path / "out", web_dir=tmp_path / "web",
+            engine="import", registration=reg, splat_map=[splat], dedup_voxel=0)
+
+        assert manifest["gaussian_count"] == 300
+        assert manifest["provenance"]["synthetic"] is False
+        assert manifest["provenance"]["geometry_usability"] == "preview-only"
+
     def test_import_rejects_simple_point_ply_as_full_3dgs(self, photos_dir, tmp_path):
         source = tmp_path / "simple.ply"
         GaussianScene(

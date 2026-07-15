@@ -605,7 +605,7 @@ class RegistrationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=2, ge=1)
-    engine: Literal["colmap", "mock"]
+    engine: Literal["colmap", "mock", "external"]
     pose_frame: CoordinateFrame
     world_frame: CoordinateFrame | None = None
     alignment_status: AlignmentStatus
