@@ -318,19 +318,32 @@ def main(argv: list[str] | None = None) -> int:
                         help="relative degeneracy floor for the source span")
     parser.add_argument("--out", required=True,
                         help="output path for the aligned registration.json")
+    parser.add_argument("--geo-origin", default=None, metavar="LAT,LON,ALT",
+                        help="ENU tangent origin lat,lon,alt; supplies/overrides "
+                             "registration.geo_origin (required if neither has one)")
     args = parser.parse_args(argv)
 
     reg = RegistrationResult.model_validate_json(
         Path(args.registration).read_text(encoding="utf-8")
     )
+    geo_origin = None
+    if args.geo_origin:
+        try:
+            lat, lon, alt = (float(v) for v in args.geo_origin.split(","))
+        except ValueError as exc:
+            raise AlignmentError("--geo-origin must be LAT,LON,ALT") from exc
+        geo_origin = GeoAnchor(lat=lat, lon=lon, alt=alt)
     control_points = load_control_points_json(args.control_points)
     aligned = align_registration(
         reg,
         control_points,
+        geo_origin=geo_origin,
         max_rms_m=args.max_rms,
         min_span_ratio=args.min_span_ratio,
     )
-    Path(args.out).write_text(aligned.model_dump_json(indent=2), encoding="utf-8")
+    # LF: registration.json is a trust root; keep it byte-reproducible across OSes.
+    Path(args.out).write_text(aligned.model_dump_json(indent=2) + "\n",
+                              encoding="utf-8", newline="\n")
     print(f"[OK] aligned registration written to {args.out}")
     return 0
 

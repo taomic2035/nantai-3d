@@ -49,14 +49,18 @@
 .venv/bin/python -m pipeline.alignment \
   --registration recon/registration.json \
   --control-points control_points.json \
+  --geo-origin 26.0801,119.2967,12.5 \
   --max-rms 2.0 --out recon/registration_aligned.json
 ```
+
+**geo origin 必填**：world-enu 是相对某个 ENU 切平面原点定义的，即使控制点全用 `enu_xyz`
+（那些坐标本就相对该原点），也必须提供 geo origin。用 `--geo-origin lat,lon,alt` 提供，
+或让 `registration.json` 自带 `geo_origin`（COLMAP 从 EXIF GPS 读到时）；两者都没有则 fail-closed。
 
 **fail-closed 门**（任一不满足 → 保持 sfm-local/UNALIGNED，绝不升级为米制）：
 计数 ≥3；源点非退化（共线/共面被拒）；Umeyama 拟合强制 det=+1（不产反射）；`scale>0`；
 `rms_residual ≤ --max-rms`。拟合残差/退化裕度/门禁结果记入 `sim3.alignment.v1=<json>` 证据串，
-挂在 `world_frame` 与 `pose_to_world` 上，可机器复核。缺 geo origin 时用 `--registration` 里的 `geo_origin`，
-或在控制点全用 `enu_xyz` 时不需要 GPS。
+挂在 `world_frame` 与 `pose_to_world` 上，可机器复核。输出的 `registration_aligned.json` 以 LF 写出。
 
 ## 步骤 3 · 导入真实 3DGS → measured 世界
 

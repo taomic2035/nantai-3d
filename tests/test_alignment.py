@@ -379,3 +379,39 @@ class TestBuildControlPoints:
             _ORIGIN,
         )
         assert np.allclose(resolved[0][1], gps_to_enu(anchor, _ORIGIN))
+
+
+class TestAlignmentCLI:
+    def test_cli_needs_geo_origin_and_writes_lf_aligned(self, tmp_path):
+        # Exercises the actual `python -m pipeline.alignment` entrypoint (surveyed
+        # enu_xyz control points, no GPS): --geo-origin must supply the ENU tangent
+        # origin, and the written registration.json is LF (byte-reproducible root).
+        import json
+
+        from pipeline.alignment import main as align_main
+
+        centres = {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
+                   "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
+        reg = _registration_with_camera_centres(centres)  # no geo_origin
+        reg_path = tmp_path / "reg.json"
+        reg_path.write_text(reg.model_dump_json(), encoding="utf-8")
+        cp_path = tmp_path / "cps.json"
+        cp_path.write_text(json.dumps(
+            [{"label": img, "image": img, "enu_xyz": list(xyz)}
+             for img, xyz in centres.items()]), encoding="utf-8")
+        out_path = tmp_path / "aligned.json"
+
+        # Without --geo-origin (and no reg.geo_origin) the fit fails closed.
+        with pytest.raises(AlignmentError, match="geo origin"):
+            align_main(["--registration", str(reg_path),
+                        "--control-points", str(cp_path), "--out", str(out_path)])
+
+        rc = align_main(["--registration", str(reg_path),
+                         "--control-points", str(cp_path),
+                         "--geo-origin", "26.0,119.0,50.0", "--out", str(out_path)])
+        assert rc == 0
+        raw = out_path.read_bytes()
+        assert b"\r\n" not in raw
+        result = RegistrationResult.model_validate_json(raw.decode("utf-8"))
+        assert result.alignment_status is AlignmentStatus.ALIGNED
+        assert result.target_frame.frame_id == "world-enu"
