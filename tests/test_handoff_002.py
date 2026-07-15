@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = (
     ROOT / "handoff" / "deliverables" / "HANDOFF-002" / "scripts" / "generate.py"
