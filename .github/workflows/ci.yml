@@ -42,7 +42,12 @@ jobs:
           node-version: "20"
 
       - name: Install (editable + dev extras)
+        if: runner.os != 'Windows'
         run: python -m pip install -e ".[dev]"
+
+      - name: Install (editable + dev and Windows Studio extras)
+        if: runner.os == 'Windows'
+        run: python -m pip install -e ".[dev,windows-jobs]"
 
       - name: Test (pytest + node --test)
         # symlink-dependent tests self-skip when the runner lacks the

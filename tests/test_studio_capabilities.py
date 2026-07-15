@@ -11,7 +11,6 @@ from pathlib import Path
 
 from pipeline.studio_server import build_project_snapshot, make_server
 
-
 READ_ONLY_REASON = "Job execution is not enabled in this Studio milestone."
 COMMAND_IDS = ("ingest", "reconstruct", "world", "validate-assets")
 
@@ -99,8 +98,18 @@ def test_active_run_preserves_only_a_known_command(tmp_path):
         json.dumps({
             "schema_version": 1,
             "items": [
-                {"id": "run-world", "command": "world", "status": "running", "adapter_kind": "local"},
-                {"id": "run-unknown", "command": "shell", "status": "failed", "adapter_kind": "local"},
+                {
+                    "id": "run-world",
+                    "command": "world",
+                    "status": "running",
+                    "adapter_kind": "local",
+                },
+                {
+                    "id": "run-unknown",
+                    "command": "shell",
+                    "status": "failed",
+                    "adapter_kind": "local",
+                },
             ],
         }),
         encoding="utf-8",
@@ -116,7 +125,12 @@ def test_active_run_preserves_only_a_known_command(tmp_path):
         json.dumps({
             "schema_version": 1,
             "items": [
-                {"id": "run-unknown", "command": "shell", "status": "failed", "adapter_kind": "local"},
+                {
+                    "id": "run-unknown",
+                    "command": "shell",
+                    "status": "failed",
+                    "adapter_kind": "local",
+                },
             ],
         }),
         encoding="utf-8",

@@ -276,6 +276,7 @@ def test_committed_recovery_rejects_target_bytes_changed_after_commit(tmp_path):
         )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_successive_commits_recover_only_the_latest_target_owner(tmp_path):
     root, first_snapshot, first_invocation, ledger = _setup_publishable_run(tmp_path)
     writer = ProjectFileLock(root / ".nantai-studio/writer.lock", role="writer")

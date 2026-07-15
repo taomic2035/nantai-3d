@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 import threading
 from contextlib import contextmanager
@@ -88,6 +89,7 @@ def _headers_only_post(server, *, host: str, content_length: int) -> bytes:
             chunks.append(chunk)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_enabled_server_advertises_only_ingest_with_startup_scoped_token(tmp_path):
     with _running_server(_project(tmp_path)) as server:
         status, headers, payload = _request(server, "GET", "/api/capabilities")
@@ -103,6 +105,7 @@ def test_enabled_server_advertises_only_ingest_with_startup_scoped_token(tmp_pat
     assert payload["commands"]["reconstruct"]["enabled"] is False
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_post_ingest_and_poll_ledger_backed_run_to_success(tmp_path):
     root = _project(tmp_path)
     with _running_server(root) as server:
@@ -147,6 +150,7 @@ def test_post_ingest_and_poll_ledger_backed_run_to_success(tmp_path):
         ("Content-Type", "text/plain", "invalid_content_type"),
     ],
 )
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_write_request_rejects_rebinding_cross_origin_and_bad_auth(
     tmp_path, header, value, code,
 ):
@@ -165,6 +169,7 @@ def test_write_request_rejects_rebinding_cross_origin_and_bad_auth(
     assert payload["error"]["code"] == code
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_early_rejection_does_not_wait_forever_for_a_declared_body(tmp_path):
     with _running_server(_project(tmp_path)) as server:
         response = _headers_only_post(
@@ -178,6 +183,7 @@ def test_early_rejection_does_not_wait_forever_for_a_declared_body(tmp_path):
     assert server.job_service.ledger.list_runs() == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_oversized_rejection_does_not_drain_an_unbounded_declaration(tmp_path):
     with _running_server(_project(tmp_path)) as server:
         host = _authorization(server)["Host"]
@@ -192,6 +198,7 @@ def test_oversized_rejection_does_not_drain_an_unbounded_declaration(tmp_path):
     assert server.job_service.ledger.list_runs() == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_write_request_rejects_unknown_fields_and_oversized_body(tmp_path):
     with _running_server(_project(tmp_path)) as server:
         status, _, payload = _request(
@@ -216,6 +223,7 @@ def test_write_request_rejects_unknown_fields_and_oversized_body(tmp_path):
     assert huge_payload["error"]["code"] == "body_too_large"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_write_mode_project_and_runs_ignore_legacy_json_ledger(tmp_path):
     root = _project(tmp_path)
     state = root / ".nantai-studio"
@@ -253,6 +261,7 @@ def test_requested_jobs_degrade_to_read_only_when_durability_probe_fails(
     assert "probe failed" in capabilities["reason"]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="B1 write capability is Windows/NTFS only")
 def test_requested_jobs_degrade_to_read_only_while_writer_is_live(tmp_path):
     root = _project(tmp_path)
     (root / ".nantai-studio").mkdir()
