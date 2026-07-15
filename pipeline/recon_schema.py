@@ -75,6 +75,7 @@ class TransformMethod(StrEnum):
     GPS_ANCHOR = "gps-anchor"
     SYNTHETIC_LAYOUT = "synthetic-layout"
     EXTERNAL_SIM3 = "external-sim3"
+    CONTROL_POINTS = "control-points"
     UNKNOWN = "unknown"
 
 
@@ -498,6 +499,94 @@ class GeoAnchor(BaseModel):
         if not np.isfinite(value):
             raise ValueError("GPS coordinates must be finite")
         return value
+
+
+class ControlPoint(BaseModel):
+    """One SfM<->ENU correspondence used to fit a Sim3 alignment.
+
+    The source side is either an explicit ``source_xyz`` in the registration's
+    ``pose_frame`` or an ``image`` name resolved to that pose's camera centre
+    (``CameraPose.t_xyz``).  The target side is either an explicit ``enu_xyz`` in
+    metres or a ``geo`` anchor reduced through ``gps_to_enu`` against a shared
+    ``geo_origin``.  Exactly one of each side must be supplied; every supplied
+    coordinate must be finite.  Nothing here promotes a frame to metres -- it is
+    only evidence handed to the fitter, which stays fail-closed on its own gates.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    label: str = Field(min_length=1)
+    source_xyz: tuple[float, float, float] | None = None
+    image: str | None = None
+    enu_xyz: tuple[float, float, float] | None = None
+    geo: GeoAnchor | None = None
+
+    @field_validator("source_xyz", "enu_xyz")
+    @classmethod
+    def _finite_triple(
+        cls, value: tuple[float, float, float] | None
+    ) -> tuple[float, float, float] | None:
+        if value is None:
+            return None
+        coords = np.asarray(value, dtype=np.float64)
+        if coords.shape != (3,) or not np.all(np.isfinite(coords)):
+            raise ValueError("control-point coordinates must be finite (x, y, z)")
+        return tuple(coords.tolist())
+
+    @model_validator(mode="after")
+    def _exactly_one_per_side(self) -> ControlPoint:
+        if (self.source_xyz is None) == (self.image is None):
+            raise ValueError(
+                "control point requires exactly one source: source_xyz or image"
+            )
+        if (self.enu_xyz is None) == (self.geo is None):
+            raise ValueError(
+                "control point requires exactly one target: enu_xyz or geo"
+            )
+        return self
+
+
+class Sim3AlignmentEvidence(BaseModel):
+    """Machine-readable record of a Umeyama SfM->ENU Sim3 fit and its gates.
+
+    Serialised onto ``FrameTransform.evidence`` and the measured world frame's
+    ``evidence`` via the ``sim3.alignment.v1=<json>`` convention so any consumer
+    can re-derive residuals, degeneracy margins, and whether the fit passed the
+    RMS gate.  ``passed`` records the gate outcome; it never grants metric status
+    on its own -- the aligning code refuses to emit a world frame when it is
+    False.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    method: Literal["umeyama-sim3"]
+    n_control_points: int = Field(ge=0)
+    scale: float
+    rms_residual_m: float = Field(ge=0)
+    max_residual_m: float = Field(ge=0)
+    per_point_residual_m: tuple[float, ...]
+    source_singular_values: tuple[float, float, float]
+    min_span_ratio: float
+    max_rms_threshold_m: float
+    geo_origin: dict[str, float]
+    control_point_labels: tuple[str, ...]
+    passed: bool
+
+    def to_evidence(self) -> str:
+        payload = json.dumps(
+            self.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return f"sim3.alignment.v1={payload}"
+
+    @classmethod
+    def parse(cls, evidence: str) -> Sim3AlignmentEvidence:
+        prefix = "sim3.alignment.v1="
+        if not evidence.startswith(prefix):
+            raise ValueError("not a sim3.alignment.v1 evidence string")
+        return cls.model_validate_json(evidence.split("=", 1)[1])
 
 
 class CaptureSession(BaseModel):
