@@ -214,7 +214,7 @@ class TestRegistrationFrameClaims:
         workspace = tmp_path / "colmap"
         session = _session(anchor=GeoAnchor(lat=26.0, lon=119.0, alt=50.0))
 
-        def fake_run(args, capture_output, text):
+        def fake_run(args, capture_output, text, timeout=None, **kwargs):
             command = args[1]
             if command == "mapper":
                 (workspace / "sparse" / "0").mkdir(parents=True)
