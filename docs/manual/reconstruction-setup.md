@@ -73,7 +73,8 @@ $env:Path = 'D:\vibecoding\nantai\third\colmap;' + $env:Path ; colmap -h   # 验
 把 `cloud/train_3dgs_nerfstudio.sh` 上传到云机一键跑（内含下列步骤 + 排错提示）：`bash train_3dgs_nerfstudio.sh <图片目录|视频>`。手动等价命令：
 
 ```bash
-# 云机上（Colab 官方 notebook 会自动装；AutoDL 按 cloud/setup_autodl.sh 装 torch2.x+cu118 + nerfstudio）
+# 云机上（Colab 官方 notebook 会自动装 nerfstudio；AutoDL 选 PyTorch2.x+CUDA11.8 镜像后 pip install nerfstudio，
+#   或直接用上面的 cloud/train_3dgs_nerfstudio.sh 一键装+跑。注意: cloud/setup_autodl.sh 是旧素材生成愿景, 不装 nerfstudio）
 ns-process-data images --data ./my_images --output-dir ./processed   # 视频用 'video --data my.mp4'
 ns-train splatfacto --data ./processed                                # 普通版 ~6GB 显存, 适合免费 T4
 ns-export gaussian-splat \
