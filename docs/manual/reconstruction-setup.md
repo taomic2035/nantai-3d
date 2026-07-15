@@ -57,6 +57,7 @@ Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 
 
 - 自动找 `third/` 下的 COLMAP/Brush，探测选项组，全 CPU/集显，无需 CUDA。
 - **视频输入**自动抽帧（`--fps`/`--max-frames`，20 分钟视频建议 `--max-frames 300` 左右，别全帧喂 COLMAP）。
+- **匹配器自动选**：视频（时序连续帧）→ `sequential_matcher`（只配相邻帧，CPU 上远快于全配对，真实几百帧才跑得动）；无序照片 ≤400 张 → `exhaustive_matcher`。航拍/环绕**连拍照片**若按拍摄顺序命名，加 `--sequential` 同样走快路径。
 - `--steps` 越大质量越好越慢（集显上 2000 步 ~5.5 分钟）；`--max-res` 控显存。
 - 想理解每一步或单独调，看下面 §4–§6 的分步版。
 

@@ -69,6 +69,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fps", type=float, default=2.0, help="视频抽帧帧率 (仅视频输入)")
     ap.add_argument("--max-frames", type=int, default=300,
                     help="视频抽帧上限 (仅视频输入; COLMAP CPU 建议 ≤300)")
+    ap.add_argument("--sequential", action="store_true",
+                    help="图片按拍摄顺序命名(航拍/环绕连拍)时用 sequential_matcher; "
+                         "视频输入自动开启")
     ap.add_argument("--colmap-gpu", action="store_true",
                     help="COLMAP SIFT 用 GPU (默认 CPU, 无 N 卡/headless 更可靠)")
     ap.add_argument("--web", type=Path, default=ROOT / "web" / "data" / "recon",
@@ -85,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     # 输入可以是图片目录, 或单个视频文件 (自动抽帧)。
     from pipeline.ingest import is_video
     photos = args.photos
+    ordered = args.sequential  # 视频帧时序连续 -> sequential_matcher
     if photos.is_file() and is_video(photos):
         print(f"\n=== 0/4 视频抽帧 (fps={args.fps}, 上限 {args.max_frames}) ===")
         vin = ws / "video_in"
@@ -94,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         run([py, "-m", "pipeline.ingest", "--input", str(vin), "--output", str(frames),
              "--fps", str(args.fps), "--max-frames", str(args.max_frames)])
         photos = frames
+        ordered = True  # 抽帧 frame_000000.jpg… 字典序即时序
     elif not photos.is_dir() or not any(photos.iterdir()):
         raise SystemExit(f"输入需为非空图片目录或视频文件: {photos}")
     args.photos = photos  # 后续步骤统一用抽帧后的目录
@@ -109,8 +114,12 @@ def main(argv: list[str] | None = None) -> int:
          "--image_path", str(args.photos), "--ImageReader.camera_model",
          "SIMPLE_RADIAL", f"--{grp}Extraction.use_gpu", gpu], log=clog)
     # COLMAP 数据集布局: Brush 要 <root>/images/ + <root>/sparse/0/
-    n = sum(1 for _ in args.photos.rglob("*") if _.is_file())
-    matcher = "exhaustive_matcher" if n <= 400 else "sequential_matcher"
+    # 时序连续帧(视频/--sequential): 只配相邻帧, CPU 上远快于 O(n²) 全配对;
+    # 无序照片: ≤400 用 exhaustive, 更多退化到 sequential(仍需按拍摄顺序命名)。
+    n = sum(1 for p in args.photos.rglob("*") if p.is_file() and p.suffix.lower()
+            in {".jpg", ".jpeg", ".png"})
+    matcher = "sequential_matcher" if (ordered or n > 400) else "exhaustive_matcher"
+    print(f"    匹配器: {matcher} ({'时序连续' if ordered else '无序'}, {n} 图)")
     run([colmap, matcher, "--database_path", str(db),
          f"--{grp}Matching.use_gpu", gpu], log=clog)
     sparse.mkdir(exist_ok=True)
