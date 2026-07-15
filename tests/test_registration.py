@@ -83,7 +83,10 @@ class TestMockRegistration:
     def test_register_writes_json(self, photos_dir, tmp_path):
         out = tmp_path / "reg.json"
         register(photos_dir, out, engine="mock")
-        data = json.loads(out.read_text())
+        raw = out.read_bytes()
+        # Trust root must be byte-reproducible across OSes (LF, no Windows CRLF).
+        assert b"\r\n" not in raw
+        data = json.loads(raw.decode("utf-8"))
         parsed = RegistrationResult(**data)
         assert parsed.engine == "mock"
         assert len(parsed.poses) == 12

@@ -634,7 +634,11 @@ def register(photos_dir: str | Path, out_json: str | Path | None = None,
     if out_json:
         out_json = Path(out_json)
         out_json.parent.mkdir(parents=True, exist_ok=True)
-        out_json.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        # LF (not Windows CRLF): registration.json is a coordinate trust root;
+        # byte-reproducibility keeps its digest stable across OSes. Consumers
+        # read it via json.loads, so line endings are semantically neutral.
+        out_json.write_text(result.model_dump_json(indent=2) + "\n",
+                            encoding="utf-8", newline="\n")
         logger.info(f"配准结果已写入: {out_json} ({len(result.poses)} 个位姿)")
     return result
 
