@@ -2,7 +2,7 @@
 
 PY ?= python
 PROJECT_ROOT := $(shell pwd)
-ASSET_DELIVERABLE := handoff/deliverables/HANDOFF-001
+ASSET_DELIVERABLE := handoff/deliverables/HANDOFF-002
 
 help:
 	@echo "无限村庄世界生成系统 - 命令清单"

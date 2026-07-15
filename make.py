@@ -25,7 +25,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PY = sys.executable
-ASSET_DELIVERABLE = "handoff/deliverables/HANDOFF-001"
+# HANDOFF-002 is the cross-platform-reproducible (quantized) asset baseline;
+# HANDOFF-001 stays as history (its bytes are not reproducible off macOS).
+ASSET_DELIVERABLE = "handoff/deliverables/HANDOFF-002"
 
 # UTF-8-safe environment for every child process.
 ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
