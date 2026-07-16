@@ -224,9 +224,10 @@ def generate_chunkset(
         for cy in range(size):
             layout = gen.generate_chunk(cx, cy)
             layouts.append(layout)
-            # 保存 JSON
+            # 保存 JSON (newline="\n": layout 跨平台字节可复现)
             f = out / f"chunk_{cx}_{cy}.json"
-            f.write_text(layout.model_dump_json(indent=2), encoding="utf-8")
+            f.write_text(layout.model_dump_json(indent=2),
+                         encoding="utf-8", newline="\n")
 
     logger.info(f"已生成 {len(layouts)} 个 chunk 布局 → {out}")
     return layouts

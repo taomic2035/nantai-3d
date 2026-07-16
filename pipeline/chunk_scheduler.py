@@ -101,7 +101,9 @@ class ChunkScheduler:
         if self.layouts_dir:
             f = self.layouts_dir / f"chunk_{chunk_x}_{chunk_y}.json"
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(layout.model_dump_json(indent=2), encoding="utf-8")
+            # newline="\n": layout 缓存跨平台/跨进程字节可复现 (render-on-demand 一致性)
+            f.write_text(layout.model_dump_json(indent=2),
+                         encoding="utf-8", newline="\n")
 
         return layout
 

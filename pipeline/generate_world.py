@@ -56,7 +56,8 @@ def generate_layouts_mock(
         for cy in range(lo, hi):
             layout = gen.generate_chunk(cx, cy)
             f = out_dir / f"chunk_{cx}_{cy}.json"
-            f.write_text(layout.model_dump_json(indent=2), encoding="utf-8")
+            f.write_text(layout.model_dump_json(indent=2),
+                         encoding="utf-8", newline="\n")
             n_buildings += len(layout.buildings)
             n_roads += len(layout.roads)
             n_veg += len(layout.vegetation)
@@ -98,7 +99,8 @@ async def generate_layouts_glm(
                 climate=climate, assets=assets,
             )
             f = out_dir / f"chunk_{cx}_{cy}.json"
-            f.write_text(layout.model_dump_json(indent=2), encoding="utf-8")
+            f.write_text(layout.model_dump_json(indent=2),
+                         encoding="utf-8", newline="\n")
             n_buildings += len(layout.buildings)
             n_roads += len(layout.roads)
             n_veg += len(layout.vegetation)

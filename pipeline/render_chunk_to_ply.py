@@ -632,7 +632,10 @@ def render_chunkset(
         "world_seed": next(iter(world_seeds)) if len(world_seeds) == 1 else None,
     }
     manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    # newline="\n": 与 trust root (recon_manifest/registration) 惯例统一, 让 world
+    # manifest 跨平台字节可复现 (Windows write_text 默认会把 \n 转 \r\n)。
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8", newline="\n")
     logger.info(f"manifest.json 已生成: {manifest_path} ({total_pts} 点总计)")
     return manifest
 

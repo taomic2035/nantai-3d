@@ -156,6 +156,20 @@ def test_grid_range_centered_vs_origin():
     assert _grid_range(1, center=True) == (0, 1)
 
 
+def test_manifest_and_layout_written_lf_not_crlf(tmp_path):
+    """world manifest 与 layout JSON 须 LF 字节可复现(跨平台一致), 与 trust root
+    (registration.json/recon_manifest.json 已强制 LF)惯例统一。Windows write_text
+    默认把 \\n 转 \\r\\n → 跨平台字节分歧, 会破坏 render-on-demand 的 layout 缓存一致性。"""
+    layouts = tmp_path / "layouts"
+    generate_layouts_mock(1, 42, layouts)   # 生产路径写 layout JSON
+    render_chunkset(
+        layouts_dir=layouts, output_dir=tmp_path / "web",
+        chunk_range=(0, 1, 0, 1), assets_dir=None, lod_levels={0: 0.1},
+    )
+    assert b"\r\n" not in (tmp_path / "web" / "manifest.json").read_bytes()
+    assert b"\r\n" not in (layouts / "chunk_0_0.json").read_bytes()
+
+
 def test_centered_bake_includes_negative_chunks(tmp_path):
     """中心化烘焙 + 负索引渲染修复 → manifest 含负坐标 chunk 且渲染成功。"""
     lo, hi = _grid_range(3, center=True)  # (-1, 2)
