@@ -17,6 +17,10 @@
 *.toml text eol=lf
 Makefile text eol=lf
 
+# Vendored JavaScript is byte-for-byte locked to upstream sha256. Preserve upstream whitespace;
+# project-owned Viewer/Studio sources still use the repository's normal whitespace checks.
+web/viewer/vendor/**/*.js text eol=lf -whitespace
+
 # 二进制：绝不做行尾/文本转换，保证字节级 SHA 稳定
 *.ply  binary
 *.png  binary

@@ -118,12 +118,14 @@
   <div id="loading-text">加载场景...</div>
 </div>
 
+<!-- 离线发行: 依赖已 vendored 到 ./vendor (three 0.180.0 + Spark 2.1.0, Spark 的 wasm/worker
+     以 data:/blob 内联)。无网络也能跑 full 3DGS。更新版本见 vendor/VENDOR.md + make vendor。 -->
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js"
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/addons/",
+    "@sparkjsdev/spark": "./vendor/spark/spark.module.js"
   }
 }
 </script>

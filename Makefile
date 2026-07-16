@@ -1,4 +1,4 @@
-.PHONY: help setup test ingest reconstruct world assets verify validate-handoff serve env clean
+.PHONY: help setup test ingest reconstruct world assets verify verify-vendor vendor validate-handoff serve env clean
 
 PY ?= python
 PROJECT_ROOT := $(shell pwd)
@@ -16,6 +16,8 @@ help:
 	@echo "  make validate-handoff  验收 GPT 交付物 (DELIV=交付目录)"
 	@echo "  make serve             启动 Studio + 本地只读 adapter (http://127.0.0.1:8000/)"
 	@echo "  make verify            运行关键验证"
+	@echo "  make vendor            重新下载 viewer 的 vendored 前端依赖 (three+Spark, 需网络)"
+	@echo "  make verify-vendor     校验离线闭合: importmap 无 CDN + 模块图本地闭合 + sha256 (无需网络)"
 	@echo "  make env               创建云端GPU任务环境(在AutoDL上执行)"
 	@echo "  make clean             清理生成产物 (不动 assets/ 素材注册表)"
 
@@ -48,8 +50,17 @@ validate-handoff:
 serve:
 	$(PY) -m pipeline.studio_server --host 127.0.0.1 --port 8000
 
+# 离线发行: 重新下载 viewer 的 vendored 前端依赖 (three + Spark, 需网络)
+vendor:
+	bash web/viewer/vendor/fetch-vendor.sh
+
+# 校验离线闭合 (importmap 无 CDN + 模块图本地闭合 + sha256), 无需网络
+verify-vendor:
+	node --test web/viewer/vendor.test.mjs
+
 verify:
 	$(MAKE) test PY=$(PY)
+	$(MAKE) verify-vendor
 	$(MAKE) assets PY=$(PY)
 	$(MAKE) world PY=$(PY)
 	$(PY) -m json.tool docs/contracts/studio-adapter-v2.schema.json >/dev/null
