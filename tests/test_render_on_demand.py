@@ -214,6 +214,30 @@ def test_manifest_and_layout_written_lf_not_crlf(tmp_path):
     assert b"\r\n" not in (layouts / "chunk_0_0.json").read_bytes()
 
 
+def test_render_single_chunk_with_registry_is_deterministic_and_pure(tmp_path):
+    """HANDOFF-003 §4 锁定: render-on-demand 端点若服务真实素材 (registry≠None), 须
+    (a) 跨调用字节确定 (内容寻址缓存前提), (b) 真消费素材 (与合成代理字节不同),
+    (c) 纯读无副作用 (绝不动 registry.json trust root)。此前只在 scratchpad 临测,
+    现落库为回归, 保护 codex 即将在此内核上建的端点。"""
+    from pipeline.assets import AssetRegistry
+    from pipeline.mock_assets import seed_registry
+
+    assets_dir = tmp_path / "assets"
+    seed_registry(assets_dir)
+    registry_path = assets_dir / "registry.json"
+    before = registry_path.read_bytes()
+
+    a = render_single_chunk(1, 2, world_seed=42, registry=AssetRegistry(assets_dir))
+    b = render_single_chunk(1, 2, world_seed=42, registry=AssetRegistry(assets_dir))
+    proxy = render_single_chunk(1, 2, world_seed=42, registry=None)
+
+    assert a[:3] == b"ply"
+    assert a == b, "真实素材路径须字节确定 (内容寻址缓存前提)"
+    assert a != proxy, "registry≠None 须真消费素材, 与合成代理字节不同"
+    assert registry_path.read_bytes() == before, \
+        "渲染须纯读: 绝不写 registry.json trust root (无副作用)"
+
+
 @pytest.mark.parametrize("bad", [1.5, math.nan, math.inf, -math.inf, "3", None])
 def test_render_single_chunk_rejects_non_integer_coords(bad):
     """内核对非整数/NaN/inf 坐标须 fail-closed 给出清晰 ValueError, 而非在
