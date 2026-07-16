@@ -48,7 +48,11 @@ ply_bytes: bytes = render_single_chunk(chunk_x, chunk_y, world_seed=42, registry
   与 codex 保护的 job/write kernel(studio_jobs.py/studio_ledger.py)结构上不相交。
 - world_seed 来源: 从 project 配置 / manifest 读一个恒定值(见下 manifest 契约), 保证服务端
   按需渲染的几何与预烘的种子区一致。
-- 缓存: 建议 `Cache-Control` 长期可缓存 + 未来可加 ETag=sha256(ply)(内容寻址, 因字节确定)。
+- 缓存: 建议 `Cache-Control` 长期可缓存 + ETag=sha256(ply)(内容寻址, 因字节确定)。
+  **缓存键约束(对抗性实测得出, 见下 §4)**: 合成路径(registry=None)键 = `(world_seed, x, y)` 足矣;
+  但**真实素材路径(registry≠None)键必须并入所消费素材的 version/sha** —— 素材 `replace()` 升版后
+  同一 (world_seed,x,y) 会产出不同字节, 仅按坐标缓存会返回陈旧结果。跨异构 worker(mac↔win)共享
+  缓存前须先解 HANDOFF-002(跨平台 float 漂移); 同平台/numpy 构建内 4 进程实测逐字节一致。
 - 契约冲突提示: 这会让 studio_server「渲染」, 与其 docstring(:1-6)只读声明冲突——请你(文件 owner)
   连同 docstring 一起更新, 明确「按需合成渲染是无副作用的只读派生, 不改任何 trust root」。
 - 测试模板: `tests/test_studio_server.py:213-233`(_running_server/_request)+ `TestHttpContract`。
@@ -82,6 +86,25 @@ viewer 要能区分「越界 → 请求」与「真无内容」, 并正确框定
   `coordinates.mjs:22 threeToChunk` 已能产出任意/负 (cx,cy)。gate 在 flag 后, 静态 5×5 不受影响。
 - `framing.mjs:31-32`: 有了 manifest `bounds`/per-chunk `aabb` 后, 用真实 z_range 替代硬编码 0。
 - 防 404 spam: on-demand 分支只在 `grid.on_demand && url_template` 存在时启用。
+
+## §4 render_single_chunk 支持真实素材(registry≠None)—— 已对抗性实测确定, 待你 sign-off
+
+`render_single_chunk(cx, cy, world_seed, registry=...)` 的 `registry` 参数已就位。是否让按需端点
+实例化【真实/GPT 素材】(而非默认 registry=None 的合成代理)是设计决策(HANDOFF-002 时代标注需 sign-off)。
+我已对抗性实测提供技术事实供你决定:
+
+- **字节确定**: `instantiate` 全链路无熵(无 np.random/random/time), 几何来自磁盘字节的 float64
+  确定性算术; 植被随机项由 hashlib 稳定种子驱动(不受进程级 np.random / 内置 hash 随机盐影响)。
+  同平台 4 进程(默认随机 + 多个 PYTHONHASHSEED)渲染同一含建筑+植被+道具的 chunk, arr 与完整 ply
+  sha256 逐字节相等。真实素材确被消费(registry vs None 字节数 2.3MB vs 0.19MB, 差异真实)。
+- **纯读无写副作用**: 渲染前后 `assets/registry.json` 的 size/mtime/sha256 三元组不变;
+  `_record_asset_consumption` 只向调用方传入的内存 list append(不落盘/不写 registry/不取 `.registry.lock`);
+  而 render_single_chunk 默认不传 consumption → 连内存 append 都不发生。GET 端点用 registry **不碰 trust root**。
+- **前提**: 见上 §1 缓存键约束(键须锚定素材 sha, 非仅坐标); 跨异构平台共享缓存须先解 HANDOFF-002。
+
+结论: 这是我(Opus lane)可放行的扩展, 无需改 `_record_asset_consumption`(codex/audit 保护区)语义。
+你若决定端点服务真实素材, 传 `registry=AssetRegistry(assets_dir)` 即可; 我可据你的缓存键设计补一个
+`chunk_content_key(...)` helper(并入所消费素材 sha)——说一声。
 
 ## 验证 / 复现
 
