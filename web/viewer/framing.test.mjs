@@ -29,6 +29,33 @@ test('computeWorldBounds supports negative, non-square, non-200m chunk manifests
   });
 });
 
+test('computeWorldBounds prefers the manifest three-dimensional bounds', () => {
+  const { computeWorldBounds } = subject();
+  const manifest = {
+    chunk_size_m: 50,
+    chunks: [{ x: 0, y: 0 }],
+    bounds: { min: [-4, -5, -6], max: [54, 55, 26] },
+  };
+
+  assert.deepEqual(computeWorldBounds(manifest), manifest.bounds);
+});
+
+test('computeWorldBounds unions per-chunk AABBs when global bounds are absent', () => {
+  const { computeWorldBounds } = subject();
+  const manifest = {
+    chunk_size_m: 50,
+    chunks: [
+      { x: -1, y: 0, aabb: { min: [-49, 2, -3], max: [-1, 48, 12] } },
+      { x: 0, y: 0, aabb: { min: [1, 1, -1], max: [49, 49, 31] } },
+    ],
+  };
+
+  assert.deepEqual(computeWorldBounds(manifest), {
+    min: [-50, 0, -3],
+    max: [50, 50, 31],
+  });
+});
+
 test('computeFraming centers a single chunk without origin assumptions', () => {
   const { computeFraming } = subject();
   const frame = computeFraming({

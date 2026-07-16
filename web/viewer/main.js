@@ -39,6 +39,10 @@ import {
   parseEnuText,
   yawPitchFromDirectionThree,
 } from './camera-pose.mjs';
+import {
+  resolveWorldChunkSource,
+  worldChunkAvailable,
+} from './world-chunks.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
@@ -57,6 +61,7 @@ const chunkLod = new Map();          // chunk_id → 已加载的 LOD 级别
 const chunkBorders = new Map();     // chunk_id → THREE.Line (边界线)
 const lruOrder = [];                // chunk_id 数组, 末尾为最近访问
 const loadingSet = new Set();        // 正在加载中的 chunk_id
+const failedChunkRetryAt = new Map(); // 请求失败后的有界重试，避免 404/5xx spam
 const stats = { loaded: 0, evicted: 0, cachedHits: 0 };
 let qualityOverride = null;          // null=按距离自动, 0/1/2=强制 LOD (键 1/2/3, 0 恢复自动)
 let reconManifest = null;            // 重建预览 artifact (recon_manifest.json, 可选)
@@ -236,12 +241,6 @@ function desiredLod(cx, cy, pcx, pcy) {
   return d === 0 ? 2 : (d === 1 ? 1 : 0);
 }
 
-function lodFile(entry, lod) {
-  // manifest 无 lod 字段时回退全量 ply (向后兼容旧 manifest)
-  if (entry.lod && entry.lod[String(lod)]) return entry.lod[String(lod)];
-  return entry.ply_file;
-}
-
 async function loadChunk(cx, cy, wantLod = 2) {
   const key = `${cx}_${cy}`;
   if (chunkMeshes.has(key) && chunkLod.get(key) === wantLod) {
@@ -250,12 +249,14 @@ async function loadChunk(cx, cy, wantLod = 2) {
     return;
   }
   if (loadingSet.has(key)) return;
+  if ((failedChunkRetryAt.get(key) ?? 0) > Date.now()) return;
   const entry = chunkIndex.get(key);
-  if (!entry) return;  // 越界
+  const source = resolveWorldChunkSource(manifest, entry, cx, cy, wantLod);
+  if (!source) return;
 
   loadingSet.add(key);
   try {
-    const parsed = await loadChunkPly(lodFile(entry, wantLod));
+    const parsed = await loadChunkPly(source.path);
     transformPositionsInPlace(parsed.positions);
 
     const mesh = makePointsMesh(parsed);
@@ -272,6 +273,7 @@ async function loadChunk(cx, cy, wantLod = 2) {
     scene.add(mesh);
     chunkMeshes.set(key, mesh);
     chunkLod.set(key, wantLod);
+    failedChunkRetryAt.delete(key);
     touchLRU(key);
     stats.loaded++;
 
@@ -283,6 +285,7 @@ async function loadChunk(cx, cy, wantLod = 2) {
       chunkBorders.set(key, border);
     }
   } catch (e) {
+    failedChunkRetryAt.set(key, Date.now() + 5000);
     console.error(`chunk ${key} 加载失败:`, e);
   } finally {
     loadingSet.delete(key);
@@ -315,7 +318,7 @@ function updateChunks(playerX, playerZ) {
     for (let dy = -CHUNK_VIEW_RADIUS; dy <= CHUNK_VIEW_RADIUS; dy++) {
       const x = cx + dx, y = cy + dy;
       const key = `${x}_${y}`;
-      if (chunkIndex.has(key)) needed.add(key);
+      if (worldChunkAvailable(manifest, chunkIndex.has(key))) needed.add(key);
     }
   }
 
@@ -844,10 +847,14 @@ async function main() {
 
   const xCount = new Set(manifest.chunks.map((chunk) => chunk.x)).size;
   const yCount = new Set(manifest.chunks.map((chunk) => chunk.y)).size;
+  const onDemand = worldChunkAvailable(manifest, false);
   loadingText.textContent =
-    `已索引 ${manifest.chunks.length} chunks (${xCount}×${yCount}), 启动调度器...`;
+    `已索引 ${manifest.chunks.length} chunks (${xCount}×${yCount})`
+    + `${onDemand ? '，按需无限扩展已启用' : ''}，启动调度器...`;
   const minimapTitle = document.getElementById('minimap-title');
-  if (minimapTitle) minimapTitle.textContent = `Mini-map (${xCount}×${yCount})`;
+  if (minimapTitle) {
+    minimapTitle.textContent = `Mini-map (${xCount}×${yCount}${onDemand ? ' + on-demand' : ''})`;
+  }
 
   // 初始加载相机视野内 chunk
   const initPos = controls.target;
@@ -861,7 +868,7 @@ async function main() {
       for (let dx = -CHUNK_VIEW_RADIUS; dx <= CHUNK_VIEW_RADIUS; dx++) {
         for (let dy = -CHUNK_VIEW_RADIUS; dy <= CHUNK_VIEW_RADIUS; dy++) {
           const key = `${cx+dx}_${cy+dy}`;
-          if (chunkIndex.has(key)) {
+          if (worldChunkAvailable(manifest, chunkIndex.has(key))) {
             needed++;
             if (chunkMeshes.has(key)) loaded++;
           }

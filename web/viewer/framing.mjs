@@ -7,7 +7,16 @@ function isBounds(value) {
     && value.min.length >= 3
     && Array.isArray(value.max)
     && value.max.length >= 3
+    && value.min.slice(0, 3).every(Number.isFinite)
+    && value.max.slice(0, 3).every(Number.isFinite)
+    && value.min.slice(0, 3).every((item, index) => item <= value.max[index])
   );
+}
+
+function copyBounds(value) {
+  return isBounds(value)
+    ? { min: value.min.slice(0, 3), max: value.max.slice(0, 3) }
+    : null;
 }
 
 function unionBounds(left, right) {
@@ -24,13 +33,30 @@ export function computeWorldBounds(manifest) {
   const chunks = manifest?.chunks ?? [];
   if (chunks.length === 0) throw new Error('manifest has no chunks');
 
-  const chunkSize = manifest.chunk_size_m ?? 200;
+  const declaredBounds = copyBounds(manifest?.bounds);
+  if (declaredBounds) return declaredBounds;
+
+  const chunkSize = Number.isFinite(manifest.chunk_size_m) && manifest.chunk_size_m > 0
+    ? manifest.chunk_size_m
+    : 200;
   const xs = chunks.map((chunk) => chunk.x);
   const ys = chunks.map((chunk) => chunk.y);
-  return {
-    min: [Math.min(...xs) * chunkSize, Math.min(...ys) * chunkSize, 0],
-    max: [(Math.max(...xs) + 1) * chunkSize, (Math.max(...ys) + 1) * chunkSize, 0],
+  if (![...xs, ...ys].every(Number.isFinite)) {
+    throw new Error('manifest has invalid chunk coordinates');
+  }
+  const chunkBounds = chunks.map((chunk) => copyBounds(chunk.aabb)).filter(Boolean);
+  const minZ = chunkBounds.length > 0
+    ? Math.min(...chunkBounds.map((bounds) => bounds.min[2]))
+    : 0;
+  const maxZ = chunkBounds.length > 0
+    ? Math.max(...chunkBounds.map((bounds) => bounds.max[2]))
+    : 0;
+  let bounds = {
+    min: [Math.min(...xs) * chunkSize, Math.min(...ys) * chunkSize, minZ],
+    max: [(Math.max(...xs) + 1) * chunkSize, (Math.max(...ys) + 1) * chunkSize, maxZ],
   };
+  for (const aabb of chunkBounds) bounds = unionBounds(bounds, aabb);
+  return bounds;
 }
 
 /** Derive camera, clipping, fog, grid and target values from artifact bounds. */
@@ -38,7 +64,7 @@ export function computeFraming(manifest, reconBounds = null, fovDegrees = 65) {
   const chunks = manifest?.chunks ?? [];
   const chunkSize = manifest?.chunk_size_m ?? 200;
   const chunkBounds = chunks.length > 0 ? computeWorldBounds(manifest) : null;
-  const validReconBounds = isBounds(reconBounds) ? reconBounds : null;
+  const validReconBounds = copyBounds(reconBounds);
   const bounds = unionBounds(chunkBounds, validReconBounds);
   if (!bounds) throw new Error('cannot frame an empty world');
 
