@@ -45,6 +45,10 @@ ply_bytes: bytes = render_single_chunk(chunk_x, chunk_y, world_seed=42, registry
   `render_single_chunk(cx, cy, world_seed, lod=lod)`, 以 `application/octet-stream`
   (:1201-1215 已映射 .ply)流式返回。**stream-only, 严禁落盘**(勿写 web/data、勿经
   ChunkScheduler 的 layouts_dir 持久化)——否则踩 job kernel 的单写者锁。
+- **URL 段必须在路由层 coerce 成 int**(fail-closed 审计 contract-boundary 项, 已加固):
+  内核现在对非整数/NaN/inf 坐标**硬拒绝**并抛清晰 `ValueError`(commit `0cf7ffe`,
+  接受 python int 与 numpy 整数, 拒绝浮点/字符串)。路由须先 `int(seg)`(失败→400),
+  别把原始 URL 字符串直接喂内核(那样会 500 而非干净的 400)。负号要在正则/解析里放行。
 - **LOD(端点刚需, 省带宽)**: `render_single_chunk` 已支持 `lod` 参数 —— 0=远景(8%点)、
   1=中景(30%)、2 或缺省=全量; viewer 按相机距离选级(对应现有静态网格的 lod0/1/2 文件)。
   端点应把 `?lod=` 透传给内核; 子集选择用 stable argsort, 跨进程/平台字节确定(已测)。
