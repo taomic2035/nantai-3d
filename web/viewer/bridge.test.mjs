@@ -66,6 +66,8 @@ test('start announces same-origin ready with honest DC point capabilities', () =
   assert.deepEqual(VIEWER_CAPABILITIES.three_dgs_properties.consumed, []);
   assert.ok(VIEWER_CAPABILITIES.commands.includes('resetCamera'));
   assert.ok(VIEWER_CAPABILITIES.commands.includes('setBounds'));
+  assert.ok(VIEWER_CAPABILITIES.commands.includes('setWeather'));
+  assert.ok(VIEWER_CAPABILITIES.commands.includes('setZoom'));
 });
 
 test('capability factory only claims Gaussian rendering for an active Spark layer', () => {
@@ -170,6 +172,43 @@ test('loadArtifact responds with artifactLoaded and the same request_id', async 
   assert.equal(fake.sent[0].message.type, 'artifactLoaded');
   assert.equal(fake.sent[0].message.request_id, 'load-3');
   assert.equal(fake.sent[0].message.payload.result.loaded, true);
+});
+
+test('environment commands route payloads and return stateChanged', async () => {
+  const { createViewerBridge } = subject();
+  const fake = fakeWindow();
+  const calls = [];
+  const bridge = createViewerBridge({
+    windowObject: fake.windowObject,
+    handlers: {
+      setWeather: ({ weather }) => {
+        calls.push(['weather', weather]);
+        return { environment: { weather, zoom: 1 } };
+      },
+      setZoom: ({ zoom }) => {
+        calls.push(['zoom', zoom]);
+        return { environment: { weather: 'clear', zoom } };
+      },
+    },
+  });
+
+  await bridge.handleMessage({
+    origin: fake.windowObject.location.origin,
+    source: fake.parent,
+    data: command('setWeather', 'weather-1', { weather: 'snow' }),
+  });
+  await bridge.handleMessage({
+    origin: fake.windowObject.location.origin,
+    source: fake.parent,
+    data: command('setZoom', 'zoom-1', { zoom: 2.5 }),
+  });
+
+  assert.deepEqual(calls, [['weather', 'snow'], ['zoom', 2.5]]);
+  assert.deepEqual(fake.sent.map(({ message }) => message.type), [
+    'stateChanged', 'stateChanged',
+  ]);
+  assert.equal(fake.sent[0].message.request_id, 'weather-1');
+  assert.equal(fake.sent[1].message.request_id, 'zoom-1');
 });
 
 test('unsupported commands return a correlated error', async () => {
@@ -325,6 +364,26 @@ test('artifactProvenance reports the fidelity of the artifact actually being ren
   );
   assert.equal(fallback.artifact_fidelity, 'dc-point-preview');
   assert.equal(fallback.viewer_fidelity, 'dc-point-preview');
+});
+
+test('runtime environment fields never alter artifact provenance', () => {
+  const { artifactProvenance } = subject();
+  const manifest = {
+    actual_engine: 'imported-3dgs',
+    synthetic: false,
+    environment: { weather: 'rain', zoom: 3, effect_source: 'viewer-runtime' },
+  };
+  assert.deepEqual(artifactProvenance(manifest), {
+    requested_engine: 'unknown',
+    actual_engine: 'imported-3dgs',
+    synthetic: false,
+    frame: 'unknown',
+    units: 'unknown',
+    handedness: 'unknown',
+    geometry_usability: 'unknown',
+    artifact_fidelity: 'unknown',
+    viewer_fidelity: 'dc-point-preview',
+  });
 });
 
 test('resolveArtifactUrl resolves LOD files beside their manifest', () => {
