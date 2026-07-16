@@ -43,6 +43,15 @@ import {
   resolveWorldChunkSource,
   worldChunkAvailable,
 } from './world-chunks.mjs';
+import {
+  DEFAULT_WEATHER,
+  DEFAULT_ZOOM,
+  ZOOM_STEP,
+  createPrecipitationPositions,
+  getWeatherPreset,
+  normalizeWeather,
+  normalizeZoom,
+} from './environment.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
@@ -81,6 +90,15 @@ const freeLook = { yaw: 0, pitch: 0 };
 let orbitDistance = 10;              // 进入 free 模式时记录的相机→target 距离
 let lastPlayerChunkKey = '';
 let minimapCtx = null;
+const environmentState = {
+  weather: DEFAULT_WEATHER,
+  zoom: DEFAULT_ZOOM,
+  effect_source: 'viewer-runtime',
+  precipitation_status: 'ready',
+};
+let hemisphereLight = null;
+let precipitationPoints = null;
+let precipitationEffect = null;
 
 // ============ PLY Loader ============
 function parsePly(buffer) {
@@ -334,12 +352,172 @@ function updateChunks(playerX, playerZ) {
   return { cx, cy, needed };
 }
 
+// ============ Viewer 运行时环境 (不进入 artifact provenance) ============
+function createPrecipitationRuntime() {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    'position',
+    new THREE.BufferAttribute(new Float32Array(1200 * 3), 3),
+  );
+  geometry.setDrawRange(0, 0);
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(0xffffff) },
+      uOpacity: { value: 0 },
+      uPointSize: { value: 1 },
+      uRain: { value: 0 },
+    },
+    vertexShader: `
+      uniform float uPointSize;
+      void main() {
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        gl_PointSize = uPointSize;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uRain;
+      void main() {
+        vec2 point = gl_PointCoord - vec2(0.5);
+        float alpha;
+        if (uRain > 0.5) {
+          if (abs(point.x) > 0.09 || abs(point.y) > 0.48) discard;
+          alpha = 1.0 - abs(point.y) * 0.8;
+        } else {
+          float distanceToCenter = length(point);
+          if (distanceToCenter > 0.5) discard;
+          alpha = smoothstep(0.5, 0.16, distanceToCenter);
+        }
+        gl_FragColor = vec4(uColor, uOpacity * alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+  });
+  precipitationPoints = new THREE.Points(geometry, material);
+  precipitationPoints.name = 'viewer_runtime_precipitation';
+  precipitationPoints.frustumCulled = false;
+  precipitationPoints.visible = false;
+  scene.add(precipitationPoints);
+}
+
+function syncEnvironmentUI() {
+  const preset = getWeatherPreset(environmentState.weather);
+  const zoomText = `${environmentState.zoom.toFixed(1)}×`;
+  document.getElementById('weather-control').value = environmentState.weather;
+  document.getElementById('zoom-control').value = String(environmentState.zoom);
+  document.getElementById('zoom-value').textContent = zoomText;
+  document.getElementById('hud-weather').textContent = preset.label;
+  document.getElementById('hud-zoom').textContent = zoomText;
+  document.getElementById('environment-status').textContent =
+    environmentState.precipitation_status === 'degraded'
+      ? '降水粒子已降级 · 背景/雾/光照仍生效'
+      : 'Viewer 实时效果 · 不改变重建来源';
+}
+
+function configurePrecipitation(effect) {
+  precipitationEffect = null;
+  environmentState.precipitation_status = 'ready';
+  if (!precipitationPoints) {
+    if (effect) environmentState.precipitation_status = 'degraded';
+    return;
+  }
+
+  const geometry = precipitationPoints.geometry;
+  const positions = geometry.getAttribute('position');
+  geometry.setDrawRange(0, 0);
+  precipitationPoints.visible = false;
+  if (!effect) return;
+
+  try {
+    const layout = createPrecipitationPositions(environmentState.weather);
+    positions.array.fill(0);
+    positions.array.set(layout);
+    positions.needsUpdate = true;
+    geometry.setDrawRange(0, effect.count);
+    precipitationPoints.material.uniforms.uColor.value.setHex(effect.color);
+    precipitationPoints.material.uniforms.uOpacity.value = effect.opacity;
+    precipitationPoints.material.uniforms.uPointSize.value =
+      effect.pointSize * Math.min(window.devicePixelRatio, 2);
+    precipitationPoints.material.uniforms.uRain.value = effect.kind === 'rain' ? 1 : 0;
+    precipitationPoints.visible = true;
+    precipitationEffect = effect;
+  } catch (error) {
+    environmentState.precipitation_status = 'degraded';
+    console.warn('降水粒子效果降级:', error);
+  }
+}
+
+function updatePrecipitation(dt) {
+  if (!precipitationPoints?.visible || !precipitationEffect) return;
+  precipitationPoints.position.copy(camera.position);
+  const positions = precipitationPoints.geometry.getAttribute('position');
+  const [width, height] = precipitationEffect.volume;
+  const halfWidth = width / 2;
+  for (let index = 0; index < precipitationEffect.count; index += 1) {
+    const offset = index * 3;
+    positions.array[offset + 1] -= precipitationEffect.fallSpeed * dt;
+    if (positions.array[offset + 1] < 0) positions.array[offset + 1] += height;
+    positions.array[offset] += (
+      Math.sin((index + 1) * 0.37) * precipitationEffect.drift * dt
+    );
+    if (positions.array[offset] > halfWidth) positions.array[offset] -= width;
+    if (positions.array[offset] < -halfWidth) positions.array[offset] += width;
+  }
+  positions.needsUpdate = true;
+}
+
+function applyZoom(value) {
+  environmentState.zoom = normalizeZoom(value);
+  camera.zoom = environmentState.zoom;
+  camera.updateProjectionMatrix();
+  syncEnvironmentUI();
+  return environmentState.zoom;
+}
+
+function applyWeather(value) {
+  environmentState.weather = normalizeWeather(value);
+  const preset = getWeatherPreset(environmentState.weather);
+  scene.background.setHex(preset.background);
+  const fogNear = (currentFrame?.fogNear ?? 50) * preset.fog.nearScale;
+  const fogFar = Math.max(
+    fogNear + 1,
+    (currentFrame?.fogFar ?? 500) * preset.fog.farScale,
+  );
+  scene.fog = new THREE.Fog(preset.fog.color, fogNear, fogFar);
+  hemisphereLight.color.setHex(preset.light.sky);
+  hemisphereLight.groundColor.setHex(preset.light.ground);
+  hemisphereLight.intensity = preset.light.intensity;
+  configurePrecipitation(preset.precipitation);
+  syncEnvironmentUI();
+  return environmentState.weather;
+}
+
+function setupEnvironmentControls() {
+  document.getElementById('weather-control').addEventListener('change', (event) => {
+    applyWeather(event.target.value);
+  });
+  document.getElementById('zoom-control').addEventListener('input', (event) => {
+    applyZoom(Number(event.target.value));
+  });
+  document.getElementById('zoom-reset').addEventListener('click', () => {
+    applyZoom(DEFAULT_ZOOM);
+  });
+  renderer.domElement.addEventListener('wheel', (event) => {
+    if (cameraMode !== 'free') return;
+    event.preventDefault();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    applyZoom(environmentState.zoom + direction * ZOOM_STEP);
+  }, { passive: false });
+}
+
 function applyFraming(frame, resetCamera = true) {
   currentFrame = frame;
   camera.near = frame.near;
   camera.far = frame.far;
   camera.updateProjectionMatrix();
-  scene.fog = new THREE.Fog(0x1a2228, frame.fogNear, frame.fogFar);
   controls.maxDistance = frame.far * 0.75;
 
   if (resetCamera) {
@@ -374,6 +552,7 @@ function applyFraming(frame, resetCamera = true) {
   axesHelper = new THREE.AxesHelper(Math.max(chunkSizeM / 4, 1));
   axesHelper.visible = worldVisible;
   scene.add(axesHelper);
+  applyWeather(environmentState.weather);
 }
 
 // ============ 初始化 ============
@@ -401,8 +580,17 @@ function init() {
   controls.minDistance = 0.5;
   setupFreeLookPointer();
 
-  const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x404030, 0.6);
-  scene.add(hemi);
+  hemisphereLight = new THREE.HemisphereLight(0xbfd4ff, 0x404030, 0.6);
+  scene.add(hemisphereLight);
+  try {
+    createPrecipitationRuntime();
+  } catch (error) {
+    environmentState.precipitation_status = 'degraded';
+    console.warn('降水粒子初始化失败:', error);
+  }
+  setupEnvironmentControls();
+  applyWeather(DEFAULT_WEATHER);
+  applyZoom(DEFAULT_ZOOM);
 
   // mini-map canvas
   const mm = document.getElementById('minimap');
@@ -422,6 +610,7 @@ function onResize() {
 let bordersVisible = true;
 
 function onKeyDown(e) {
+  if (['INPUT', 'SELECT', 'BUTTON'].includes(e.target?.tagName)) return;
   const k = e.key.toLowerCase();
   if (k in keys) keys[k] = true;
   if (e.key === 'Shift') keys.shift = true;
@@ -885,6 +1074,7 @@ async function main() {
   document.getElementById('hud').style.display = 'block';
   document.getElementById('controls').style.display = 'block';
   document.getElementById('minimap-wrap').style.display = 'block';
+  document.getElementById('environment-controls').style.display = 'block';
 
   const readState = () => {
     const [east, north, up] = threeToWorld([
@@ -900,6 +1090,7 @@ async function main() {
       bounds: currentFrame?.bounds ?? null,
       artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
       camera: { position: { east, north, up }, mode: cameraMode },
+      environment: { ...environmentState },
     };
   };
 
@@ -911,6 +1102,14 @@ async function main() {
       setCameraPose: (payload) => {
         const { positionThree, lookAtThree } = normalizeCameraPose(payload);
         moveCameraTo(positionThree, lookAtThree);
+        return readState();
+      },
+      setWeather: ({ weather }) => {
+        applyWeather(weather);
+        return readState();
+      },
+      setZoom: ({ zoom }) => {
+        applyZoom(zoom);
         return readState();
       },
       setLOD: async ({ lod }) => {
@@ -945,6 +1144,7 @@ async function main() {
       },
       resetCamera: () => {
         if (currentFrame) applyFraming(currentFrame, true);
+        applyZoom(DEFAULT_ZOOM);
         return readState();
       },
       setBounds: ({ bounds }) => {
@@ -994,6 +1194,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.1);
   updateCamera(dt);
   if (cameraMode === 'orbit') controls.update();
+  updatePrecipitation(dt);
 
   // 每 50ms 调度一次 chunk (避免每帧都触发)
   const now = performance.now();
