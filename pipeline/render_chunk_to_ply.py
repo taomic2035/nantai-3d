@@ -496,11 +496,28 @@ def render_chunk_to_ply(layout: ChunkLayout, out_path: Path, registry=None) -> i
     return n
 
 
+# LOD 采样比例: lod 0=远景 8%, 1=中景 30%; lod 2/None=全量 100%。
+# viewer 按相机距离选级 (远粗近清); render-on-demand 端点据此省带宽。
+DEFAULT_LOD_FRACTIONS = {0: 0.08, 1: 0.30}
+
+
+def _lod_subset(arr: np.ndarray, frac: float) -> np.ndarray:
+    """按 scale (重要性代理) 降序取 frac 比例子集。
+
+    kind="stable": 相等 scale 的相对顺序在 numpy 实现/平台间一致, 保证 LOD 子集
+    跨进程/平台字节可复现 (默认 quicksort 对等值元素顺序不定 → 跨版本可能漂移)。
+    """
+    k = max(1, int(len(arr) * frac))
+    order = np.argsort(-arr['scale'], kind="stable")
+    return arr[np.sort(order[:k])]
+
+
 def render_single_chunk(
     chunk_x: int,
     chunk_y: int,
     world_seed: int = 42,
     registry=None,
+    lod: int | None = None,
 ) -> bytes:
     """按需渲染单个 chunk → ply 字节 (纯内存, 不落盘)。
 
@@ -508,11 +525,14 @@ def render_single_chunk(
     MockLayoutGenerator 完全确定, 渲染确定性由本模块的 per-chunk 本地 RNG 保证,
     ply 无时间戳/无熵 —— 故相同入参跨进程字节一致, 可安全用于内容寻址缓存与
     多实例服务器。任意 (含负) 坐标均可; registry=None 走合成代理 (不触溯源写路径)。
+    lod: 0/1 返回 DEFAULT_LOD_FRACTIONS 子集 (远/中景省带宽), 2 或 None 返回全量。
     """
     from pipeline.mock_layout import MockLayoutGenerator
 
     layout = MockLayoutGenerator(world_seed).generate_chunk(chunk_x, chunk_y)
     arr = build_chunk_array(layout, registry=registry)
+    if lod is not None and lod in DEFAULT_LOD_FRACTIONS:
+        arr = _lod_subset(arr, DEFAULT_LOD_FRACTIONS[lod])
     buf = BytesIO()
     PlyData([PlyElement.describe(arr, 'vertex')], byte_order='<').write(buf)
     return buf.getvalue()
@@ -580,10 +600,8 @@ def render_chunkset(
             # 低清 LOD: 按 scale (simple 格式的重要性代理) 降序取子集
             lod_files = {2: ply_path.name}
             if lod_levels:
-                order = np.argsort(-arr['scale'])
                 for level, frac in sorted(lod_levels.items()):
-                    k = max(1, int(n * frac))
-                    sub = arr[np.sort(order[:k])]
+                    sub = _lod_subset(arr, frac)
                     lod_name = f"chunk_{cx}_{cy}_lod{level}.ply"
                     PlyData([PlyElement.describe(sub, 'vertex')],
                             byte_order='<').write(str(output_dir / lod_name))

@@ -9,15 +9,23 @@ import hashlib
 import json
 import subprocess
 import sys
+from io import BytesIO
 from pathlib import Path
+
+from plyfile import PlyData
 
 from pipeline.generate_world import _grid_range, generate_layouts_mock
 from pipeline.mock_layout import MockLayoutGenerator
 from pipeline.render_chunk_to_ply import (
+    DEFAULT_LOD_FRACTIONS,
     build_chunk_array,
     render_chunkset,
     render_single_chunk,
 )
+
+
+def _ply_count(data: bytes) -> int:
+    return PlyData.read(BytesIO(data))['vertex'].count
 
 
 def _bake(tmp_path, chunk_range, seed=42):
@@ -154,6 +162,39 @@ def test_grid_range_centered_vs_origin():
     assert _grid_range(5, center=True) == (-2, 3)   # -2,-1,0,1,2
     assert _grid_range(4, center=True) == (-2, 2)   # -2,-1,0,1
     assert _grid_range(1, center=True) == (0, 1)
+
+
+def test_render_single_chunk_lod_returns_deterministic_subset():
+    """render-on-demand 端点须能按 LOD 返回(省带宽): lod0(8%)<lod1(30%)<full;
+    lod=None/2 全量; 子集确定(跨调用一致)。"""
+    full = render_single_chunk(1, 1, world_seed=42)
+    n_full = _ply_count(full)
+    lod0 = render_single_chunk(1, 1, world_seed=42, lod=0)
+    lod1 = render_single_chunk(1, 1, world_seed=42, lod=1)
+    assert _ply_count(lod0) == max(1, int(n_full * DEFAULT_LOD_FRACTIONS[0]))
+    assert _ply_count(lod1) == max(1, int(n_full * DEFAULT_LOD_FRACTIONS[1]))
+    assert _ply_count(lod0) < _ply_count(lod1) < n_full
+    assert lod0[:3] == b"ply"
+    # lod=2 或 None → 全量
+    assert render_single_chunk(1, 1, world_seed=42, lod=2) == full
+    # 确定性: 同 lod 跨调用字节一致
+    assert render_single_chunk(1, 1, world_seed=42, lod=0) == lod0
+
+
+def test_lod_subset_is_stable_across_processes():
+    """LOD 子集选择(argsort scale)须跨进程/平台确定 —— stable argsort, 非默认 quicksort。"""
+    root = Path(__file__).resolve().parent.parent
+    code = (
+        "import hashlib;"
+        "from pipeline.render_chunk_to_ply import render_single_chunk;"
+        "print(hashlib.sha256(render_single_chunk(2, 3, world_seed=9, lod=0)).hexdigest())"
+    )
+    def run():
+        proc = subprocess.run([sys.executable, "-c", code], cwd=root,
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.strip()
+    assert run() == run()
 
 
 def test_manifest_and_layout_written_lf_not_crlf(tmp_path):

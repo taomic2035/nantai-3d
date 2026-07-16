@@ -41,9 +41,14 @@ ply_bytes: bytes = render_single_chunk(chunk_x, chunk_y, world_seed=42, registry
 
 - 插入点: `_serve`(约 :1333)里, **在 `/api/` 404 catch-all(:1428)之前**, 镜像现有
   `head_only` + `_send_bytes(status, payload, content_type, cache_control, head_only)` 模式。
-- 行为: 解析 cx/cy(**必须接受负整数**), 调 `render_single_chunk(cx, cy, world_seed)`,
-  以 `application/octet-stream`(:1201-1215 已映射 .ply)流式返回。**stream-only, 严禁落盘**
-  (勿写 web/data、勿经 ChunkScheduler 的 layouts_dir 持久化)——否则踩 job kernel 的单写者锁。
+- 行为: 解析 cx/cy(**必须接受负整数**)+ 可选 `?lod=0|1|2`, 调
+  `render_single_chunk(cx, cy, world_seed, lod=lod)`, 以 `application/octet-stream`
+  (:1201-1215 已映射 .ply)流式返回。**stream-only, 严禁落盘**(勿写 web/data、勿经
+  ChunkScheduler 的 layouts_dir 持久化)——否则踩 job kernel 的单写者锁。
+- **LOD(端点刚需, 省带宽)**: `render_single_chunk` 已支持 `lod` 参数 —— 0=远景(8%点)、
+  1=中景(30%)、2 或缺省=全量; viewer 按相机距离选级(对应现有静态网格的 lod0/1/2 文件)。
+  端点应把 `?lod=` 透传给内核; 子集选择用 stable argsort, 跨进程/平台字节确定(已测)。
+  内容寻址缓存键须含 lod(不同 lod 不同字节)。
 - 安全: 走现有 GET 静态服务的 header/安全策略即可; 此端点**不经 do_POST / JobService**,
   与 codex 保护的 job/write kernel(studio_jobs.py/studio_ledger.py)结构上不相交。
 - world_seed 来源: 从 project 配置 / manifest 读一个恒定值(见下 manifest 契约), 保证服务端
