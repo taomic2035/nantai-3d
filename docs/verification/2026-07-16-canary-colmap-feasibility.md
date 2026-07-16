@@ -57,8 +57,49 @@
 python -c "import sqlite3; db=sqlite3.connect(r'<...>\recon-ws\colmap.db'); ..."
 ```
 
+## 对照实验：GT 相机直训路线 —— 全链路打通（同日补充）
+
+COLMAP 路线证死后，实测了绕过 SfM 的路线：**canary GT 相机 + GT 深度 → 直接训练 3DGS**。
+新脚本 `scripts/canary_gt_to_colmap.py`（消费 codex 的
+`nantai.synthetic-village.camera-metadata.v1` 契约）把 24 个 GT 相机转成 COLMAP 文本模型
+（3 组 FOV 内参去重、w2c 四元数），并用 GT 深度反投影出 **49,308** 个带色初始化点
+（stride 16）。三道 fail-closed 自校验全过：
+
+| 校验 | 结果 |
+|---|---|
+| c2w 旋转刚性 (正交 + det=+1) | 24/24 通过 |
+| 四元数往返复原旋转矩阵 | 24/24 通过 (atol 1e-6) |
+| 跨相机深度一致性 (A 反投影 → B 投影 vs B 的 GT 深度) | 中位相对误差 **0.0008–0.0011** |
+| 转换确定性 (两次独立运行) | sparse/0 三文件逐字节一致 |
+
+深度一致性 ≈0.1% 同时证明了 **codex 的相机元数据契约精确且互洽**
+（measured_c2w_opencv + 欧氏距离深度编码 + 像素中心偏移 [0.5,0.5]），可放心消费。
+
+下游全链路（本机 Intel iGPU，无 CUDA）：Brush 2000 步 (~3 分钟) → trained.ply
+**68,432 高斯、四元数全单位**（normalize 报 0 个需修）→ prepare_import 契约 →
+`pipeline.reconstruct --engine import` 成功：68,432 高斯 + LOD 0/1/2 + manifest。
+尺度合理性：高斯 5–95 分位包围盒 x∈[-202,180] y∈[-121,141] z∈[40,100] m，
+恰好括住三个聚落中心 creekside(-180,-90) / central(0,0) / upper(170,115) ——
+**米制世界系数值在整条链路中原样保留**（尽管契约按 sfm-local/preview-only 申报，见下）。
+
+### 两条路线对照（phase-2 决策依据）
+
+| | COLMAP-on-renders | GT 相机直训 |
+|---|---|---|
+| 白模阶段 | **0% 注册，死路** | **全链路通** |
+| 依赖纹理 | 是（SIFT） | 否 |
+| 贴图后 | 需重测（本文档流程可复用） | 不变 |
+| 证明什么 | 「按真实照片流程彩排」 | 合成数据的 3DGS 生产路径 |
+| 尺度 | sfm-local 任意尺度 | 数值即米制（申报仍 preview-only） |
+
+诚实边界：GT 路线产物目前走 prepare_import 默认契约 = `sfm-local` 非米制申报
+（preview-only），尽管数值就是米制 Blender 世界。要 MEASURED 米制申报需走
+`pipeline.alignment` 控制点路线（合成场景可从场景计划生成完美控制点）——
+留待 phase-2 按需决定，勿默默提升信任等级。
+
 ## 边界声明
 
 本实验只证明「**当前无纹理渲染** + CPU SIFT + 穷举匹配」注册失败及其量化原因；
 不预言贴图后的结果，不评价 canary 本身（canary 的 L2 目标——确定性生成、六层输出、
-标定相机——与本实验无关且均已达成）。
+标定相机——与本实验无关且均已达成）。GT 路线实验全部只读 canary、输出在会话
+scratchpad，未写 `.nantai-studio/`、未触碰任何 trust root。
