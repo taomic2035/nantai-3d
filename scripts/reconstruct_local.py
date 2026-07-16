@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +45,42 @@ def _colmap_group(colmap: str) -> str:
     except (OSError, subprocess.SubprocessError):
         pass
     return "Feature"
+
+
+def _count_registered_images(model_dir: Path) -> int:
+    """已注册影像数：读 images.bin 头 8 字节 (COLMAP 存 uint64 num_reg_images)，
+    退化读 images.txt 的 '# Number of images:' 注释。拿不到返回 0。"""
+    b = model_dir / "images.bin"
+    if b.is_file():
+        head = b.read_bytes()[:8]
+        if len(head) == 8:
+            return struct.unpack("<Q", head)[0]
+    t = model_dir / "images.txt"
+    if t.is_file():
+        for line in t.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("# Number of images:"):
+                return int(line.split(":", 2)[1].split(",")[0].strip())
+    return 0
+
+
+def _select_best_colmap_model(sparse_dir: Path) -> tuple[int, int]:
+    """真实照片有覆盖缺口时 COLMAP 会产出多个不连通子模型 (sparse/0,1,…)。选注册影像
+    最多的那个，必要时挪到 sparse/0 供 Brush 使用。返回 (最佳注册数, 子模型数)。"""
+    models = sorted(p for p in sparse_dir.glob("*")
+                    if p.is_dir() and ((p / "images.bin").is_file()
+                                       or (p / "images.txt").is_file()))
+    if not models:
+        raise SystemExit("COLMAP 未产出任何模型 (sparse/* 为空)：重叠不足？多拍/绕拍。")
+    best = max(models, key=_count_registered_images)
+    best_n = _count_registered_images(best)
+    if best.name != "0":
+        zero, stash = sparse_dir / "0", sparse_dir / "_notbest_0"
+        if zero.exists():
+            if stash.exists():
+                shutil.rmtree(stash)
+            zero.rename(stash)
+        best.rename(zero)
+    return best_n, len(models)
 
 
 def run(cmd: list[str], *, log: Path | None = None) -> None:
@@ -125,8 +162,13 @@ def main(argv: list[str] | None = None) -> int:
     sparse.mkdir(exist_ok=True)
     run([colmap, "mapper", "--database_path", str(db),
          "--image_path", str(args.photos), "--output_path", str(sparse)], log=clog)
-    if not (sparse / "0").is_dir():
-        raise SystemExit("COLMAP 未产出模型 (sparse/0 不存在)：重叠不足？多拍/绕拍。")
+    best_n, n_models = _select_best_colmap_model(sparse)
+    frac = best_n / n if n else 0.0
+    split = "" if n_models == 1 else f"，COLMAP 分裂成 {n_models} 个子模型(用最大的)"
+    print(f"    COLMAP 注册 {best_n}/{n} 张 ({frac:.0%}){split}")
+    if frac < 0.6:
+        print(f"    ⚠ 注册率偏低 ({frac:.0%})：重叠不足会导致大量空洞/漂浮。"
+              "建议加拍过渡角度、放慢绕拍、避开纯无纹理/反光面。")
     images_dir = ws / "images"
     if not images_dir.exists():
         shutil.copytree(args.photos, images_dir)
