@@ -1,15 +1,18 @@
 """Read-only local adapter and static server for Nantai 3D Studio.
 
 This module reports evidence already present below a project root.  It never
-starts ingest, registration, reconstruction, rendering, or asset mutation.
-Legacy and incomplete files remain visible as untrusted proxy evidence instead
-of being upgraded from an engine name or a human-readable convention string.
+starts ingest, registration, reconstruction, or asset mutation.  Its optional
+world-chunk endpoint derives deterministic synthetic PLY bytes in memory and
+does not write a project artifact or trust root.  Legacy and incomplete files
+remain visible as untrusted proxy evidence instead of being upgraded from an
+engine name or a human-readable convention string.
 
 API contract:
 
 * ``GET /api/project`` -> Studio ``ProjectSnapshot`` schema version 2.
 * ``GET /api/runs`` -> ``{"items": [...], "cursor": "..."}``.
 * ``GET /api/capabilities`` -> explicit fail-closed operation capabilities.
+* ``GET /api/world/chunk/{x}/{y}.ply`` -> opt-in, side-effect-free world chunk.
 * ``GET``/``HEAD`` below approved static roots -> project-relative files.
 * every mutating method -> structured HTTP 405; no job is started.
 """
@@ -35,6 +38,7 @@ from urllib.parse import unquote, urlsplit
 from plyfile import PlyData, PlyParseError
 
 from pipeline.gaussian_scene import GaussianScene
+from pipeline.render_chunk_to_ply import render_single_chunk
 from pipeline.studio_jobs import JobContractError, JobService, WriterBusyError
 from pipeline.studio_ledger import (
     ActiveRunConflictError,
@@ -1215,6 +1219,31 @@ def _content_type(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
+def _on_demand_world_seed(root: Path) -> int | None:
+    """Return the manifest seed only for an explicit, valid on-demand opt-in."""
+
+    manifest_path = root / "web/data/manifest.json"
+    resolved = _resolve_real_evidence_file(
+        root,
+        manifest_path,
+        approved_root="web",
+    )
+    if resolved is None:
+        return None
+    manifest, error = _read_json(resolved)
+    if error is not None or not isinstance(manifest, dict):
+        return None
+    grid = manifest.get("grid")
+    if not isinstance(grid, dict) or grid.get("on_demand") is not True:
+        return None
+    if grid.get("url_template") != "/api/world/chunk/{x}/{y}.ply":
+        return None
+    world_seed = grid.get("world_seed")
+    if type(world_seed) is not int:
+        return None
+    return world_seed
+
+
 class StudioRequestHandler(BaseHTTPRequestHandler):
     """HTTP handler configured with a project root by :func:`make_server`."""
 
@@ -1272,6 +1301,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             cache_control="no-store",
             head_only=head_only,
         )
+
+    def _send_not_modified(self, etag: str, *, cache_control: str) -> None:
+        self.send_response(HTTPStatus.NOT_MODIFIED)
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("ETag", etag)
+        self._security_headers()
+        self.end_headers()
 
     def _error(self, status: int, code: str, message: str, *, head_only: bool = False) -> None:
         self._send_json(
@@ -1424,6 +1460,84 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     _load_runs(self.project_root),
                     head_only=head_only,
                 )
+            return
+        if request_path.startswith("/api/world/chunk/"):
+            match = re.fullmatch(
+                r"/api/world/chunk/([^/]+)/([^/]+)\.ply",
+                request_path,
+            )
+            query = urlsplit(self.path).query
+            if match is None or (query and re.fullmatch(r"lod=[012]", query) is None):
+                self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_world_chunk_request",
+                    "World chunk coordinates must be integers and lod must be 0, 1, or 2.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                chunk_x, chunk_y = (int(unquote(segment)) for segment in match.groups())
+            except ValueError:
+                self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_world_chunk_request",
+                    "World chunk coordinates must be integers and lod must be 0, 1, or 2.",
+                    head_only=head_only,
+                )
+                return
+            world_seed = _on_demand_world_seed(self.project_root)
+            if world_seed is None:
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "world_on_demand_unavailable",
+                    "The world manifest does not opt in to deterministic on-demand chunks.",
+                    head_only=head_only,
+                )
+                return
+            lod = int(query.removeprefix("lod=")) if query else None
+            try:
+                payload = render_single_chunk(
+                    chunk_x,
+                    chunk_y,
+                    world_seed=world_seed,
+                    registry=None,
+                    lod=lod,
+                )
+            except ValueError:
+                self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_world_chunk_request",
+                    "The requested world chunk cannot be rendered from valid coordinates.",
+                    head_only=head_only,
+                )
+                return
+            except (ArithmeticError, OSError, RuntimeError):
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "world_chunk_render_failed",
+                    "The world chunk could not be derived safely.",
+                    head_only=head_only,
+                )
+                return
+            digest = hashlib.sha256(payload).hexdigest()
+            etag = f'"sha256:{digest}"'
+            cache_control = "public, max-age=0, must-revalidate"
+            request_etags = {
+                candidate.strip()
+                for candidate in self.headers.get("If-None-Match", "").split(",")
+                if candidate.strip()
+            }
+            if "*" in request_etags or etag in request_etags:
+                self._send_not_modified(etag, cache_control=cache_control)
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                payload,
+                content_type="application/octet-stream",
+                cache_control=cache_control,
+                head_only=head_only,
+                extra_headers={"ETag": etag},
+            )
             return
         if request_path.startswith("/api/"):
             self._error(

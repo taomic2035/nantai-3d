@@ -223,9 +223,15 @@ def _running_server(root: Path):
         thread.join(timeout=2)
 
 
-def _request(server, method: str, path: str, body: bytes | None = None):
+def _request(
+    server,
+    method: str,
+    path: str,
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+):
     connection = http.client.HTTPConnection(*server.server_address, timeout=3)
-    connection.request(method, path, body=body)
+    connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     payload = response.read()
     headers = {name.lower(): value for name, value in response.getheaders()}
@@ -808,6 +814,106 @@ class TestProjectSnapshot:
 
 
 class TestHttpContract:
+    @staticmethod
+    def _enable_on_demand_world(root: Path, *, world_seed: int = 42) -> None:
+        manifest_path = root / "web/data/manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["grid"] = {
+            "on_demand": True,
+            "url_template": "/api/world/chunk/{x}/{y}.ply",
+            "world_seed": world_seed,
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_on_demand_world_chunk_is_deterministic_lod_cacheable_and_stream_only(
+        self, tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        self._enable_on_demand_world(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, headers, payload = _request(
+                server, "GET", "/api/world/chunk/2/-3.ply?lod=0",
+            )
+            repeat_status, repeat_headers, repeat_payload = _request(
+                server, "GET", "/api/world/chunk/2/-3.ply?lod=0",
+            )
+            lod1_status, lod1_headers, lod1_payload = _request(
+                server, "GET", "/api/world/chunk/2/-3.ply?lod=1",
+            )
+            cached_status, cached_headers, cached_payload = _request(
+                server,
+                "GET",
+                "/api/world/chunk/2/-3.ply?lod=0",
+                headers={"If-None-Match": headers["etag"]},
+            )
+            head_status, head_headers, head_payload = _request(
+                server, "HEAD", "/api/world/chunk/2/-3.ply?lod=0",
+            )
+
+        assert status == repeat_status == lod1_status == head_status == 200
+        assert cached_status == 304
+        assert payload.startswith(b"ply\n")
+        assert repeat_payload == payload
+        assert len(payload) < len(lod1_payload)
+        assert headers["content-type"] == "application/octet-stream"
+        assert headers["cache-control"] == "public, max-age=0, must-revalidate"
+        assert headers["etag"] == repeat_headers["etag"] == head_headers["etag"]
+        assert headers["etag"] != lod1_headers["etag"]
+        assert headers["content-length"] == head_headers["content-length"] == str(len(payload))
+        assert cached_headers["etag"] == headers["etag"]
+        assert cached_payload == head_payload == b""
+        assert not (tmp_path / "web/data/chunk_2_-3.ply").exists()
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/world/chunk/not-an-int/1.ply",
+            "/api/world/chunk/1/1.5.ply",
+            "/api/world/chunk/1/2.ply?lod=3",
+            "/api/world/chunk/1/2.ply?lod=0&lod=1",
+            "/api/world/chunk/1/2.ply?unexpected=1",
+        ],
+    )
+    def test_on_demand_world_chunk_rejects_invalid_coordinates_and_query(
+        self, tmp_path, path,
+    ):
+        _write_v2_project(tmp_path)
+        self._enable_on_demand_world(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(server, "GET", path)
+
+        assert status == 400
+        assert json.loads(payload)["error"]["code"] == "invalid_world_chunk_request"
+
+    @pytest.mark.parametrize(
+        "grid",
+        [
+            None,
+            {"on_demand": False, "world_seed": 42},
+            {"on_demand": True, "world_seed": None},
+            {"on_demand": True, "world_seed": True},
+        ],
+    )
+    def test_on_demand_world_chunk_fails_closed_without_valid_manifest_opt_in(
+        self, tmp_path, grid,
+    ):
+        _write_v2_project(tmp_path)
+        manifest_path = tmp_path / "web/data/manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if grid is not None:
+            manifest["grid"] = grid
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server, "GET", "/api/world/chunk/0/0.ply?lod=2",
+            )
+
+        assert status == 409
+        assert json.loads(payload)["error"]["code"] == "world_on_demand_unavailable"
+
     def test_api_project_and_runs_have_json_and_security_headers(self, tmp_path):
         _write_v2_project(tmp_path)
         ledger_dir = tmp_path / ".nantai-studio"
