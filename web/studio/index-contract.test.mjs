@@ -24,6 +24,17 @@ test('app loads capabilities and executes primary navigation intent', () => {
   assert.match(app, /\[data-source-empty-state\]/);
 });
 
+test('coordinate jump is a capability-gated viewer control wired to setCameraPose', () => {
+  assert.match(html, /id="coord-east"[^>]*type="number"/);
+  assert.match(html, /id="coord-north"[^>]*type="number"/);
+  assert.match(html, /id="coord-up"[^>]*type="number"/);
+  assert.match(html, /id="coord-jump-btn"[^>]*data-viewer-command="setCameraPose"/);
+  // number inputs stay out of the统一 disabled sweep so only the button is gated.
+  assert.doesNotMatch(html, /id="coord-(?:east|north|up)"[^>]*data-viewer-command/);
+  assert.match(app, /bridge\.command\('setCameraPose',\s*\{\s*position:\s*\{\s*east,\s*north,\s*up\s*\}\s*\}\)/);
+  assert.match(app, /announce\('坐标必须是有限数字'\)/);
+});
+
 test('B1 ingest uses an explicit confirmation without command or path fields', () => {
   assert.match(html, /id="ingest-dialog"/);
   assert.match(html, /id="ingest-cancel-notice"/);

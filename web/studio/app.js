@@ -542,6 +542,27 @@ function setupViewerBridge() {
   byId('reset-camera').addEventListener('click', () => {
     bridge.command('resetCamera').catch((error) => announce(error.message));
   });
+  const jumpToCoordinates = () => {
+    if (byId('coord-jump-btn').disabled) return;
+    const east = parseFloat(byId('coord-east').value);
+    const north = parseFloat(byId('coord-north').value);
+    const up = parseFloat(byId('coord-up').value);
+    if (![east, north, up].every(Number.isFinite)) {
+      announce('坐标必须是有限数字');
+      return;
+    }
+    bridge.command('setCameraPose', { position: { east, north, up } })
+      .catch((error) => announce(error.message));
+  };
+  byId('coord-jump-btn').addEventListener('click', jumpToCoordinates);
+  ['coord-east', 'coord-north', 'coord-up'].forEach((id) => {
+    byId(id).addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        jumpToCoordinates();
+      }
+    });
+  });
   byId('lod-select').addEventListener('change', (event) => {
     const value = event.target.value;
     bridge.command('setLOD', { lod: value === 'auto' ? null : Number(value) })

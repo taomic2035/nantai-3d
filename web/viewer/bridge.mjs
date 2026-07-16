@@ -12,6 +12,7 @@ const BASE_CAPABILITIES = Object.freeze({
     'resetCamera',
     'setBounds',
     'getState',
+    'setCameraPose',
   ]),
 });
 

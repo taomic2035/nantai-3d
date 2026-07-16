@@ -31,6 +31,14 @@ import {
   createSplatLayer,
   isSupersededLoadResult,
 } from './splat-layer.mjs';
+import {
+  clampPitch,
+  directionFromYawPitchThree,
+  flyDisplacementThree,
+  normalizeCameraPose,
+  parseEnuText,
+  yawPitchFromDirectionThree,
+} from './camera-pose.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
@@ -63,6 +71,9 @@ let splatLayer = null;
 let viewerCapabilities = createViewerCapabilities();
 const clock = new THREE.Clock();
 const keys = { w: false, a: false, s: false, d: false, q: false, e: false, shift: false };
+let cameraMode = 'orbit';            // 'orbit' | 'free'
+const freeLook = { yaw: 0, pitch: 0 };
+let orbitDistance = 10;              // 进入 free 模式时记录的相机→target 距离
 let lastPlayerChunkKey = '';
 let minimapCtx = null;
 
@@ -384,7 +395,8 @@ function init() {
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.target.set(0, 0, 0);
-  controls.minDistance = 2;
+  controls.minDistance = 0.5;
+  setupFreeLookPointer();
 
   const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x404030, 0.6);
   scene.add(hemi);
@@ -426,6 +438,14 @@ function onKeyDown(e) {
     if (reconMesh) reconMesh.visible = reconVisible;
     splatLayer?.setVisible(reconVisible);
   }
+  // F 键切换 自由/环绕 视角 (忽略长按重复与修饰键组合)
+  if (k === 'f' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    toggleCameraMode();
+  }
+  // G 键传送到指定 ENU 坐标
+  if (k === 'g' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    teleportPrompt();
+  }
 }
 function onKeyUp(e) {
   const k = e.key.toLowerCase();
@@ -433,9 +453,131 @@ function onKeyUp(e) {
   if (e.key === 'Shift') keys.shift = false;
 }
 
+// ============ 自由视角 (free) ============
+// free 模式下按 freeLook 的 yaw/pitch 重新对准相机 (lookAt = position + 视线方向)。
+function applyFreeLook() {
+  const [dx, dy, dz] = directionFromYawPitchThree(freeLook.yaw, freeLook.pitch);
+  camera.lookAt(camera.position.x + dx, camera.position.y + dy, camera.position.z + dz);
+}
+
+// F 键: orbit ↔ free 切换 (切换瞬间保持视线连续)。
+function toggleCameraMode() {
+  if (cameraMode === 'orbit') {
+    orbitDistance = camera.position.distanceTo(controls.target);
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    const { yaw, pitch } = yawPitchFromDirectionThree([dir.x, dir.y, dir.z]);
+    freeLook.yaw = yaw;
+    freeLook.pitch = clampPitch(pitch);
+    cameraMode = 'free';
+    controls.enabled = false;
+  } else {
+    // free → orbit: 把 target 放到相机前方，保持当前朝向
+    const dir = directionFromYawPitchThree(freeLook.yaw, freeLook.pitch);
+    const dist = Math.min(orbitDistance, 50);
+    controls.target.set(
+      camera.position.x + dir[0] * dist,
+      camera.position.y + dir[1] * dist,
+      camera.position.z + dir[2] * dist,
+    );
+    cameraMode = 'orbit';
+    controls.enabled = true;
+    controls.update();
+  }
+}
+
+// free 模式鼠标环顾: 主键拖拽改变 yaw/pitch。orbit 模式下直接 return，
+// 与 OrbitControls (enabled=false 时不消费事件) 互不冲突。
+function setupFreeLookPointer() {
+  const el = renderer.domElement;
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  el.addEventListener('pointerdown', (event) => {
+    if (cameraMode !== 'free' || event.button !== 0) return;
+    dragging = true;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    el.setPointerCapture(event.pointerId);
+  });
+  el.addEventListener('pointermove', (event) => {
+    if (cameraMode !== 'free' || !dragging) return;
+    const dx = event.clientX - lastX;
+    const dy = event.clientY - lastY;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    freeLook.yaw -= dx * 0.0032;
+    freeLook.pitch = clampPitch(freeLook.pitch - dy * 0.0032);
+    applyFreeLook();
+  });
+  const endDrag = (event) => {
+    if (!dragging) return;
+    dragging = false;
+    if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
+  };
+  el.addEventListener('pointerup', endDrag);
+  el.addEventListener('pointercancel', endDrag);
+}
+
+// 传送 / 姿态设置的共用内部实现 (setCameraPose 与 G 键复用)。
+function moveCameraTo(positionThree, lookAtThree = null) {
+  const previous = camera.position.clone();
+  camera.position.set(...positionThree);
+  const delta = camera.position.clone().sub(previous);
+
+  if (lookAtThree) {
+    if (cameraMode === 'free') {
+      const { yaw, pitch } = yawPitchFromDirectionThree([
+        lookAtThree[0] - positionThree[0],
+        lookAtThree[1] - positionThree[1],
+        lookAtThree[2] - positionThree[2],
+      ]);
+      freeLook.yaw = yaw;
+      freeLook.pitch = clampPitch(pitch);
+      applyFreeLook();
+    } else {
+      controls.target.set(...lookAtThree);
+      camera.lookAt(...lookAtThree);
+      controls.update();
+    }
+  } else if (cameraMode === 'free') {
+    // 保持 yaw/pitch，位移后重新对准
+    applyFreeLook();
+  } else {
+    // orbit: target 平移相同增量，保持朝向
+    controls.target.add(delta);
+    controls.update();
+  }
+  // 传送后立即拉取新位置的 chunk
+  updateChunks(camera.position.x, camera.position.z);
+}
+
+// G 键: 输入 ENU 坐标传送 (无 look_at 分支，保持当前朝向)。
+function teleportPrompt() {
+  const input = window.prompt('传送到 E,N,U (米):');
+  if (input === null) return;  // 用户取消
+  try {
+    const { east, north, up } = parseEnuText(input);
+    moveCameraTo(worldToThree([east, north, up]), null);
+  } catch (error) {
+    console.warn('传送失败:', error.message);
+  }
+}
+
 // ============ 相机控制 (WASD) ============
 function updateCamera(dt) {
   const speed = (keys.shift ? 250 : 80) * dt;
+
+  if (cameraMode === 'free') {
+    // 6-DOF 飞行: 只移动相机本身，朝向由 freeLook 决定
+    const [dx, dy, dz] = flyDisplacementThree(freeLook.yaw, freeLook.pitch, keys, speed);
+    camera.position.x += dx;
+    camera.position.y += dy;
+    camera.position.z += dz;
+    applyFreeLook();
+    return;
+  }
+
   const forward = new THREE.Vector3();
   camera.getWorldDirection(forward);
   forward.y = 0;
@@ -543,6 +685,11 @@ function updateHUD() {
   const worldPos = threeToWorld([pos.x, pos.y, pos.z]);
   document.getElementById('hud-camera').textContent =
     `(${worldPos[0].toFixed(0)}, ${worldPos[1].toFixed(0)}, ${worldPos[2].toFixed(0)})`;
+
+  const modeEl = document.getElementById('hud-mode');
+  if (modeEl) {
+    modeEl.textContent = cameraMode === 'free' ? '自由 (F 切换)' : '环绕 (F 切换)';
+  }
 
   const [cx, cy] = threeToChunk([pos.x, pos.y, pos.z], chunkSizeM);
   document.getElementById('hud-current').textContent = `(${cx},${cy})`;
@@ -732,22 +879,33 @@ async function main() {
   document.getElementById('controls').style.display = 'block';
   document.getElementById('minimap-wrap').style.display = 'block';
 
-  const readState = () => ({
-    renderer: viewerCapabilities.renderer,
-    capabilities: viewerCapabilities,
-    renderer_status: splatLayer?.getState() ?? null,
-    lod: qualityOverride ?? 'auto',
-    layers: { world: worldVisible, reconstruction: reconVisible },
-    chunk_size_m: chunkSizeM,
-    bounds: currentFrame?.bounds ?? null,
-    artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
-  });
+  const readState = () => {
+    const [east, north, up] = threeToWorld([
+      camera.position.x, camera.position.y, camera.position.z,
+    ]);
+    return {
+      renderer: viewerCapabilities.renderer,
+      capabilities: viewerCapabilities,
+      renderer_status: splatLayer?.getState() ?? null,
+      lod: qualityOverride ?? 'auto',
+      layers: { world: worldVisible, reconstruction: reconVisible },
+      chunk_size_m: chunkSizeM,
+      bounds: currentFrame?.bounds ?? null,
+      artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
+      camera: { position: { east, north, up }, mode: cameraMode },
+    };
+  };
 
   viewerBridge = createViewerBridge({
     windowObject: window,
     capabilities: () => viewerCapabilities,
     handlers: {
       getState: () => readState(),
+      setCameraPose: (payload) => {
+        const { positionThree, lookAtThree } = normalizeCameraPose(payload);
+        moveCameraTo(positionThree, lookAtThree);
+        return readState();
+      },
       setLOD: async ({ lod }) => {
         const nextLod = lod === 'auto' || lod === null ? null : Number(lod);
         if (nextLod !== null && ![0, 1, 2].includes(nextLod)) {
@@ -828,7 +986,7 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.1);
   updateCamera(dt);
-  controls.update();
+  if (cameraMode === 'orbit') controls.update();
 
   // 每 50ms 调度一次 chunk (避免每帧都触发)
   const now = performance.now();

@@ -63,6 +63,16 @@
         </label>
         <span class="toolbar-spacer"></span>
         <span class="viewer-status" id="viewer-status"><i></i>Viewer 等待握手</span>
+        <div class="coord-jump" role="group" aria-label="坐标跳转">
+          <input class="coord-input" id="coord-east" type="number" step="any"
+                 inputmode="decimal" placeholder="E" aria-label="东 米">
+          <input class="coord-input" id="coord-north" type="number" step="any"
+                 inputmode="decimal" placeholder="N" aria-label="北 米">
+          <input class="coord-input" id="coord-up" type="number" step="any"
+                 inputmode="decimal" placeholder="U" aria-label="高 米">
+          <button class="button button-quiet" id="coord-jump-btn" type="button"
+                  data-viewer-command="setCameraPose" disabled>跳转</button>
+        </div>
         <button class="button button-quiet" id="reset-camera" type="button"
                 data-viewer-command="resetCamera" disabled>复位相机</button>
       </div>
