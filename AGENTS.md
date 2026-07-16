@@ -27,7 +27,7 @@
 - **"完美"不可达**：3DGS 对天空/玻璃/水面/无纹理面有空洞与漂浮物；只能漫游拍到的体积。
 - 端到端安装/使用手册（COLMAP + 云 GPU 训练 + 导入本仓库）：见 **`docs/manual/reconstruction-setup.md`**（Opus 编写中；用户配合云 GPU 账号/注册）。
 
-## Render-on-demand 无限世界（2026-07-16，管线内核就绪，集成层待 Codex）
+## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 
 「无限村庄任意坐标漫游」的**管线内核已完整并对抗性验证 CLEAN**（Opus lane）：
 - `pipeline.render_chunk_to_ply.render_single_chunk(cx, cy, world_seed=42, registry=None, lod=None)`
@@ -37,11 +37,15 @@
   `bounds`、per-chunk `aabb`、`baked_extent`（均 additive、LF 字节可复现）。
 - `python -m pipeline.generate_world --center` 支持以原点为中心烘焙（含负象限）。
 
-**待 Codex（其 lane，规格见 `handoff/HANDOFF-CODEX-003`）**：
-1. HTTP 端点 `GET /api/world/chunk/{cx}/{cy}.ply?lod=N`（`studio_server.py`，stream-only 调内核，
-   缓存键须含 lod + 真实素材 sha；注意其 docstring 的 never-renders 契约需一并更新）。
-2. viewer 消费（`web/viewer/main.js` 的 OOB gate 在 `grid.on_demand` 真时改按 url_template 请求）。
-这两步一落，「无限村庄任意坐标漫游」闭环。缓存跨异构平台共享前须先解 HANDOFF-002（跨平台 float）。
+**Codex 集成已完成**：
+1. HTTP 端点支持负坐标、LOD 0/1/2、ETag/304、HEAD、结构化失败与 stream-only 无落盘。
+2. Viewer 预烘焙优先，越界时经严格同源模板按需请求，并消费真实三维 bounds。
+3. 预烘焙 manifest 保持 `on_demand:false`；Studio server 仅在合法 seed/template 与端点实际
+   可用时无落盘投影为 true，普通静态服务不会虚假宣称按需能力。
+
+详细回执见 `handoff/FEEDBACK-HANDOFF-CODEX-003.md`。当前按需端点使用确定性合成代理
+(`registry=None`)；真实可替换素材的跨 worker 缓存须先有 asset version/SHA 内容键，且跨异构
+平台共享前仍须解 HANDOFF-002。
 
 ## 关键文档
 
@@ -49,6 +53,7 @@
 - `docs/manual/reconstruction-setup.md` — 真实重建端到端手册（本机/云 GPU）。
 - `docs/real-data-workflow.md` — 已就绪的对齐/导入契约（control_points.json、SplatInput、metric-aligned 判定）。
 - `handoff/HANDOFF-CODEX-003-render-on-demand-infinite-world.md` — render-on-demand 集成规格（内核 API + 端点 + 缓存约束）。
+- `handoff/FEEDBACK-HANDOFF-CODEX-003.md` — Codex 集成回执（运行时开闸决策 + 真实素材未决项）。
 - `docs/verification/2026-07-16-pipeline-reproducibility-audit.md` — pipeline 可复现性审计（随机源/字节/平台三维度）。
 - `docs/verification/2026-07-16-failclosed-audit-and-fixes.md` — fail-closed/provenance 审计 + 四项 TDD 修复（含 1 项 medium fail-open：矛盾对齐证据不再被提升为 metric）。
 - `handoff/` — Claude↔GPT 素材交办/回执（HANDOFF-00x）。

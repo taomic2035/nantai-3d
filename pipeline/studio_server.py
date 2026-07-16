@@ -1219,8 +1219,8 @@ def _content_type(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
-def _on_demand_world_seed(root: Path) -> int | None:
-    """Return the manifest seed only for an explicit, valid on-demand opt-in."""
+def _on_demand_world_manifest(root: Path) -> dict[str, Any] | None:
+    """Read a valid grid contract that this runtime can safely activate."""
 
     manifest_path = root / "web/data/manifest.json"
     resolved = _resolve_real_evidence_file(
@@ -1234,14 +1234,14 @@ def _on_demand_world_seed(root: Path) -> int | None:
     if error is not None or not isinstance(manifest, dict):
         return None
     grid = manifest.get("grid")
-    if not isinstance(grid, dict) or grid.get("on_demand") is not True:
+    if not isinstance(grid, dict) or type(grid.get("on_demand")) is not bool:
         return None
     if grid.get("url_template") != "/api/world/chunk/{x}/{y}.ply":
         return None
     world_seed = grid.get("world_seed")
     if type(world_seed) is not int:
         return None
-    return world_seed
+    return manifest
 
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
@@ -1485,8 +1485,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
                 return
-            world_seed = _on_demand_world_seed(self.project_root)
-            if world_seed is None:
+            world_manifest = _on_demand_world_manifest(self.project_root)
+            if world_manifest is None:
                 self._error(
                     HTTPStatus.CONFLICT,
                     "world_on_demand_unavailable",
@@ -1494,6 +1494,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
                 return
+            world_seed = world_manifest["grid"]["world_seed"]
             lod = int(query.removeprefix("lod=")) if query else None
             try:
                 payload = render_single_chunk(
@@ -1555,6 +1556,20 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._security_headers()
             self.end_headers()
             return
+        if request_path == "/web/data/manifest.json":
+            world_manifest = _on_demand_world_manifest(self.project_root)
+            if world_manifest is not None:
+                runtime_manifest = dict(world_manifest)
+                runtime_manifest["grid"] = {
+                    **world_manifest["grid"],
+                    "on_demand": True,
+                }
+                self._send_json(
+                    HTTPStatus.OK,
+                    runtime_manifest,
+                    head_only=head_only,
+                )
+                return
         try:
             target = resolve_static_path(self.project_root, request_path)
         except PathAccessError:

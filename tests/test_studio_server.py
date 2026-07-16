@@ -865,6 +865,34 @@ class TestHttpContract:
         assert cached_payload == head_payload == b""
         assert not (tmp_path / "web/data/chunk_2_-3.ply").exists()
 
+    def test_studio_runtime_enables_valid_world_grid_without_rewriting_manifest(
+        self, tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        manifest_path = tmp_path / "web/data/manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["grid"] = {
+            "on_demand": False,
+            "url_template": "/api/world/chunk/{x}/{y}.ply",
+            "world_seed": 42,
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with _running_server(tmp_path) as server:
+            status, headers, payload = _request(server, "GET", "/web/data/manifest.json")
+            chunk_status, _, chunk_payload = _request(
+                server, "GET", "/api/world/chunk/-1/0.ply?lod=0",
+            )
+
+        runtime_manifest = json.loads(payload)
+        persisted_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert status == chunk_status == 200
+        assert headers["content-type"] == "application/json; charset=utf-8"
+        assert headers["cache-control"] == "no-store"
+        assert runtime_manifest["grid"]["on_demand"] is True
+        assert persisted_manifest["grid"]["on_demand"] is False
+        assert chunk_payload.startswith(b"ply\n")
+
     @pytest.mark.parametrize(
         "path",
         [
@@ -891,7 +919,8 @@ class TestHttpContract:
         "grid",
         [
             None,
-            {"on_demand": False, "world_seed": 42},
+            {"world_seed": 42},
+            {"on_demand": "false", "world_seed": 42},
             {"on_demand": True, "world_seed": None},
             {"on_demand": True, "world_seed": True},
         ],
