@@ -527,7 +527,18 @@ def render_single_chunk(
     多实例服务器。任意 (含负) 坐标均可; registry=None 走合成代理 (不触溯源写路径)。
     lod: 0/1 返回 DEFAULT_LOD_FRACTIONS 子集 (远/中景省带宽), 2 或 None 返回全量。
     """
+    import numbers
+
     from pipeline.mock_layout import MockLayoutGenerator
+
+    # fail-closed 类型闸: 非整数/NaN/inf 坐标给出清晰 ValueError, 而非在布局 RNG
+    # 深处抛未分类 TypeError。coerce numpy 整数到 python int (路由/调度层常产出
+    # numpy 整数, 且 random.Random 只认原生 int)。
+    if not (isinstance(chunk_x, numbers.Integral)
+            and isinstance(chunk_y, numbers.Integral)):
+        raise ValueError(
+            f"chunk coordinates must be integers, got ({chunk_x!r}, {chunk_y!r})")
+    chunk_x, chunk_y = int(chunk_x), int(chunk_y)
 
     layout = MockLayoutGenerator(world_seed).generate_chunk(chunk_x, chunk_y)
     arr = build_chunk_array(layout, registry=registry)

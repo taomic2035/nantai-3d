@@ -7,11 +7,14 @@
 """
 import hashlib
 import json
+import math
 import subprocess
 import sys
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
+import pytest
 from plyfile import PlyData
 
 from pipeline.generate_world import _grid_range, generate_layouts_mock
@@ -209,6 +212,25 @@ def test_manifest_and_layout_written_lf_not_crlf(tmp_path):
     )
     assert b"\r\n" not in (tmp_path / "web" / "manifest.json").read_bytes()
     assert b"\r\n" not in (layouts / "chunk_0_0.json").read_bytes()
+
+
+@pytest.mark.parametrize("bad", [1.5, math.nan, math.inf, -math.inf, "3", None])
+def test_render_single_chunk_rejects_non_integer_coords(bad):
+    """内核对非整数/NaN/inf 坐标须 fail-closed 给出清晰 ValueError, 而非在
+    MockLayoutGenerator 深处抛未分类 TypeError。codex 未来的 /api/world/chunk
+    路由把 URL 段传进来前, 这是最后一道类型闸。"""
+    with pytest.raises(ValueError, match="integer"):
+        render_single_chunk(bad, 0, world_seed=42)
+    with pytest.raises(ValueError, match="integer"):
+        render_single_chunk(0, bad, world_seed=42)
+
+
+def test_render_single_chunk_accepts_numpy_integers():
+    """np.int64 等 numpy 整数应被接受 (coerce 到 int), 与 python int 字节一致 ——
+    路由/调度层常产出 numpy 整数, 不该误伤。"""
+    a = render_single_chunk(np.int64(3), np.int64(1), world_seed=42)
+    b = render_single_chunk(3, 1, world_seed=42)
+    assert a == b
 
 
 def test_centered_bake_includes_negative_chunks(tmp_path):
