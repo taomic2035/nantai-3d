@@ -658,15 +658,65 @@ def render_chunkset(
     return manifest
 
 
-if __name__ == "__main__":
+def _cli(argv: list[str] | None = None) -> int:
+    """命令行入口: 默认全量烘焙; --single 驱动 render-on-demand 内核 (调试/移交)。
+
+    --single 存在时不落 web/data 数据契约, 只把单块 ply 字节写到 --out ——
+    与 HTTP 端点将来调用的同一内核, 字节逐位一致 (内容寻址可复核)。
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m pipeline.render_chunk_to_ply",
+        description="L4 Chunk Layout → 合成 3DGS ply 渲染器 (全量烘焙 / 按需单块)",
+    )
+    parser.add_argument(
+        "--single", nargs=2, type=int, metavar=("CX", "CY"),
+        help="render-on-demand 内核: 只渲染单个 (含负) chunk 坐标, 写 ply 到 --out",
+    )
+    parser.add_argument(
+        "--lod", type=int, choices=sorted(DEFAULT_LOD_FRACTIONS), default=None,
+        help=f"仅 --single: LOD 分级 {dict(DEFAULT_LOD_FRACTIONS)}, 缺省=全量",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="world_seed (默认 42, 须与预烘种子区一致)",
+    )
+    parser.add_argument("--out", type=Path, default=None, help="仅 --single: 输出 ply 路径")
+    parser.add_argument("--layouts-dir", default="layouts", help="全量烘焙: layout JSON 目录")
+    parser.add_argument("--output-dir", default="web/data", help="全量烘焙: 输出目录")
+    parser.add_argument(
+        "--range", nargs=4, type=int, default=(0, 3, 0, 3),
+        metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
+        help="全量烘焙: chunk 半开区间 (默认 0 3 0 3 = 3x3)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.single is not None:
+        cx, cy = args.single
+        data = render_single_chunk(cx, cy, world_seed=args.seed, lod=args.lod)
+        suffix = f"_lod{args.lod}" if args.lod is not None else ""
+        out = args.out or Path(f"chunk_{cx}_{cy}{suffix}.ply")
+        out.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        pts = PlyData.read(BytesIO(data))["vertex"].count
+        print(f"render_single_chunk({cx},{cy}, seed={args.seed}, lod={args.lod}) "
+              f"→ {out} ({len(data)} 字节, {pts} 点)")
+        print(f"  sha256={digest}  (相同入参跨进程/平台字节一致 → 可内容寻址缓存)")
+        return 0
+
     print("=" * 60)
-    print("L4 Chunk Layout → 3DGS ply 渲染器")
+    print("L4 Chunk Layout → 3DGS ply 渲染器 (全量烘焙)")
     print("=" * 60)
     manifest = render_chunkset(
-        layouts_dir="layouts",
-        output_dir="web/data",
-        chunk_range=(0, 3, 0, 3),  # 3x3 = 9 chunks
+        layouts_dir=args.layouts_dir,
+        output_dir=args.output_dir,
+        chunk_range=tuple(args.range),
     )
     print(f"\n生成 {manifest['total_chunks']} 个 ply, 共 {manifest['total_points']} 个高斯点")
     for c in manifest["chunks"]:
         print(f"  chunk ({c['x']},{c['y']}): {c['point_count']} pts, offset={c['world_offset']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

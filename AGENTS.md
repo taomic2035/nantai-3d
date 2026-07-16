@@ -27,10 +27,28 @@
 - **"完美"不可达**：3DGS 对天空/玻璃/水面/无纹理面有空洞与漂浮物；只能漫游拍到的体积。
 - 端到端安装/使用手册（COLMAP + 云 GPU 训练 + 导入本仓库）：见 **`docs/manual/reconstruction-setup.md`**（Opus 编写中；用户配合云 GPU 账号/注册）。
 
+## Render-on-demand 无限世界（2026-07-16，管线内核就绪，集成层待 Codex）
+
+「无限村庄任意坐标漫游」的**管线内核已完整并对抗性验证 CLEAN**（Opus lane）：
+- `pipeline.render_chunk_to_ply.render_single_chunk(cx, cy, world_seed=42, registry=None, lod=None)`
+  → ply 字节（纯内存零落盘、任意含负坐标、确定性、**跨进程字节一致**可内容寻址缓存、
+  LOD 0/1/2 分级省带宽、registry 真实素材路径亦已验证字节确定且纯读无副作用）。
+- world manifest 已带无限网格元数据：`grid{on_demand:false, url_template, world_seed}`、全局
+  `bounds`、per-chunk `aabb`、`baked_extent`（均 additive、LF 字节可复现）。
+- `python -m pipeline.generate_world --center` 支持以原点为中心烘焙（含负象限）。
+
+**待 Codex（其 lane，规格见 `handoff/HANDOFF-CODEX-003`）**：
+1. HTTP 端点 `GET /api/world/chunk/{cx}/{cy}.ply?lod=N`（`studio_server.py`，stream-only 调内核，
+   缓存键须含 lod + 真实素材 sha；注意其 docstring 的 never-renders 契约需一并更新）。
+2. viewer 消费（`web/viewer/main.js` 的 OOB gate 在 `grid.on_demand` 真时改按 url_template 请求）。
+这两步一落，「无限村庄任意坐标漫游」闭环。缓存跨异构平台共享前须先解 HANDOFF-002（跨平台 float）。
+
 ## 关键文档
 
 - `README.md` — 能力矩阵、快速开始、核心工作流。
 - `docs/manual/reconstruction-setup.md` — 真实重建端到端手册（本机/云 GPU）。
 - `docs/real-data-workflow.md` — 已就绪的对齐/导入契约（control_points.json、SplatInput、metric-aligned 判定）。
+- `handoff/HANDOFF-CODEX-003-render-on-demand-infinite-world.md` — render-on-demand 集成规格（内核 API + 端点 + 缓存约束）。
+- `docs/verification/2026-07-16-pipeline-reproducibility-audit.md` — pipeline 可复现性审计（随机源/字节/平台三维度）。
 - `handoff/` — Claude↔GPT 素材交办/回执（HANDOFF-00x）。
 - CI：`.github/workflows/ci.yml`（ubuntu+windows × py3.11/3.13 + 素材跨平台可复现门）。
