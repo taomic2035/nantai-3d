@@ -30,16 +30,30 @@ from pipeline.mock_layout import MockLayoutGenerator
 from pipeline.render_chunk_to_ply import render_chunkset
 
 
-def generate_layouts_mock(size: int, seed: int, out_dir: Path) -> dict:
-    """用 MockLayoutGenerator 生成 N×N 个 layout"""
+def _grid_range(size: int, center: bool = False) -> tuple[int, int]:
+    """网格索引半开区间 [lo, hi)。center 时以原点为中心 (含负象限), 否则从 0 起。
+
+    center: size=5 -> (-2, 3) 即 -2,-1,0,1,2; size=4 -> (-2, 2) 即 -2,-1,0,1。
+    """
+    if not center:
+        return (0, size)
+    lo = -(size // 2)
+    return (lo, lo + size)
+
+
+def generate_layouts_mock(
+    size: int, seed: int, out_dir: Path, center: bool = False
+) -> dict:
+    """用 MockLayoutGenerator 生成 N×N 个 layout (center 时以原点为中心, 含负象限)"""
     out_dir.mkdir(parents=True, exist_ok=True)
     gen = MockLayoutGenerator(world_seed=seed)
     n_buildings = 0
     n_roads = 0
     n_veg = 0
     n_water = 0
-    for cx in range(size):
-        for cy in range(size):
+    lo, hi = _grid_range(size, center)
+    for cx in range(lo, hi):
+        for cy in range(lo, hi):
             layout = gen.generate_chunk(cx, cy)
             f = out_dir / f"chunk_{cx}_{cy}.json"
             f.write_text(layout.model_dump_json(indent=2), encoding="utf-8")
@@ -56,8 +70,10 @@ def generate_layouts_mock(size: int, seed: int, out_dir: Path) -> dict:
     }
 
 
-async def generate_layouts_glm(size: int, seed: int, out_dir: Path) -> dict:
-    """用 GLM-4.6 异步生成 N×N 个 layout"""
+async def generate_layouts_glm(
+    size: int, seed: int, out_dir: Path, center: bool = False
+) -> dict:
+    """用 GLM-4.6 异步生成 N×N 个 layout (center 时以原点为中心, 含负象限)"""
     from pipeline.glm_client import GLMLayoutGenerator
     await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
     gen = GLMLayoutGenerator()
@@ -74,8 +90,9 @@ async def generate_layouts_glm(size: int, seed: int, out_dir: Path) -> dict:
     n_veg = 0
     n_water = 0
 
-    for cx in range(size):
-        for cy in range(size):
+    lo, hi = _grid_range(size, center)
+    for cx in range(lo, hi):
+        for cy in range(lo, hi):
             layout = await gen.generate_chunk(
                 cx, cy, world_seed=seed,
                 climate=climate, assets=assets,
@@ -108,6 +125,8 @@ def main():
                         help="使用 GLM-4.6 (默认用 mock, 不需要 API key)")
     parser.add_argument("--no-ply", action="store_true",
                         help="跳过 ply 渲染, 只生成 layouts")
+    parser.add_argument("--center", action="store_true",
+                        help="以原点为中心生成 (含负象限 chunk), 而非从 (0,0) 起")
     parser.add_argument("--layouts-dir", default="layouts", help="layouts 输出目录")
     parser.add_argument("--web-data-dir", default="web/data", help="ply 输出目录")
     args = parser.parse_args()
@@ -125,9 +144,10 @@ def main():
 
     # 阶段 1: 生成 layouts
     if args.use_glm:
-        stats = asyncio.run(generate_layouts_glm(args.size, args.seed, layouts_dir))
+        stats = asyncio.run(
+            generate_layouts_glm(args.size, args.seed, layouts_dir, center=args.center))
     else:
-        stats = generate_layouts_mock(args.size, args.seed, layouts_dir)
+        stats = generate_layouts_mock(args.size, args.seed, layouts_dir, center=args.center)
 
     t1 = time.time()
     logger.info(
@@ -139,10 +159,11 @@ def main():
 
     # 阶段 2: 渲染 ply
     if not args.no_ply:
+        lo, hi = _grid_range(args.size, args.center)
         manifest = render_chunkset(
             layouts_dir=layouts_dir,
             output_dir=args.web_data_dir,
-            chunk_range=(0, args.size, 0, args.size),
+            chunk_range=(lo, hi, lo, hi),
         )
         t2 = time.time()
         logger.info(

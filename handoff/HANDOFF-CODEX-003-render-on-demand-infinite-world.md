@@ -65,10 +65,15 @@ viewer 要能区分「越界 → 请求」与「真无内容」, 并正确框定
 - **勿引入 nested `grid.chunk_size_m`**: viewer 读 flat `manifest.chunk_size_m`(main.js:839,
   framing.mjs:27), 两个源会被 `?? 200` 静默掩盖 mismatch。保持单一 flat key。
 
-写入方: manifest 由 `render_chunkset`(render_chunk_to_ply.py:517,550-575, 我 lane)生成。
-**请你确认想要的字段形状**, 我来补 render_chunkset 的写入(per-chunk aabb 在 :533 处 arr 在手,
-是廉价加法)+ generate_world 的中心化/负索引烘焙(`--center` flag, generate_world.py:41-42,145)。
-不想让我先写死是因为字段一旦定, 你的 viewer 消费与我的写入要一次对齐, 避免二次改契约。
+写入方(**我 lane, 已做好基线, commit 见下**): `render_chunkset` 现已写出上述字段(实测):
+```json
+"grid": {"on_demand": false, "url_template": "/api/world/chunk/{x}/{y}.ply", "world_seed": 42},
+"bounds": {"min": [x,y,z], "max": [x,y,z]},        // 全局 AABB, z 为真实建筑高度跨度(非 0)
+"baked_extent": {"x_min": -1, "x_max": 1, "y_min": -1, "y_max": 1},  // 已烘焙索引闭区间
+// 每个 chunk 项新增: "aabb": {"min": [x,y,z], "max": [x,y,z]}
+```
+`generate_world --center` 已支持以原点为中心烘焙(含负象限, 实测 3×3 → -1..1)。
+这是**基线**——字段形状你若要调整(键名/嵌套)直接说, 我改; 但已可直接消费。
 
 ### 3. viewer 消费(web/viewer/*, 你 lane)
 
@@ -93,4 +98,7 @@ viewer 要能区分「越界 → 请求」与「真无内容」, 并正确框定
   ruff 干净, asset/layout 回归 37 绿。
 - **没碰**: studio_server.py、web/viewer/*、web/studio/*、studio_jobs/ledger、`_record_asset_consumption`
   溯源逻辑 —— 你的 lane / 审计保护区。
-- **待你确认后我再做**: manifest 字段写入(render_chunkset)+ generate_world 负索引烘焙——字段形状由你定。
+- **也已做好(我 lane, 基线可调)**: manifest 无限网格元数据写入(render_chunkset)+ generate_world
+  `--center` 负象限烘焙。字段形状见 §2, 你要改直接说。
+- **仍需你做**: §1 HTTP 端点 + §3 viewer 消费(把 `main.js:253 if(!entry) return` 在
+  `grid.on_demand` 为真时改为按 url_template 请求)。这两步一落, "无限村庄任意坐标漫游"闭环。

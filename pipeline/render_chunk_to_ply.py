@@ -548,6 +548,9 @@ def render_chunkset(
     x_min, x_max, y_min, y_max = chunk_range
     manifest = {"chunks": [], "chunk_size_m": 200, "asset_consumption": []}
     total_pts = 0
+    bmin = [float("inf")] * 3       # 全局 AABB (含真实 z 跨度)
+    bmax = [float("-inf")] * 3
+    world_seeds: set[int] = set()
 
     for cx in range(x_min, x_max):
         for cy in range(y_min, y_max):
@@ -557,12 +560,19 @@ def render_chunkset(
                 continue
 
             layout = ChunkLayout(**json.loads(layout_file.read_text(encoding="utf-8")))
+            world_seeds.add(layout.world_seed)
             arr = build_chunk_array(
                 layout,
                 registry=registry,
                 consumption=manifest["asset_consumption"],
             )
             n = len(arr)
+            # per-chunk AABB (原生 float, 供 viewer 精确框定/垂直裁剪, 无需下载 ply)
+            aabb_min = [float(arr['x'].min()), float(arr['y'].min()), float(arr['z'].min())]
+            aabb_max = [float(arr['x'].max()), float(arr['y'].max()), float(arr['z'].max())]
+            for i in range(3):
+                bmin[i] = min(bmin[i], aabb_min[i])
+                bmax[i] = max(bmax[i], aabb_max[i])
             ply_path = output_dir / f"chunk_{cx}_{cy}.ply"
             PlyData([PlyElement.describe(arr, 'vertex')],
                     byte_order='<').write(str(ply_path))
@@ -587,6 +597,7 @@ def render_chunkset(
                 "ply_file": ply_path.name,
                 "lod": {str(k): v for k, v in sorted(lod_files.items())},
                 "point_count": n,
+                "aabb": {"min": aabb_min, "max": aabb_max},
                 "building_count": len(layout.buildings),
                 "road_count": len(layout.roads),
                 "vegetation_count": len(layout.vegetation),
@@ -605,6 +616,21 @@ def render_chunkset(
     manifest["asset_consumption"].sort(
         key=lambda row: (row["chunk_id"], row["renderer"], row["asset_id"])
     )
+    # 无限网格元数据: 让 viewer 区分'越界→按需请求'与'真无内容', 用真实 z_range 取景。
+    # on_demand 默认 false -> 保持现有静态网格行为不变, 服务端点上线后置 true 才开闸。
+    # 单一 world_seed 才写 (混种子 -> None, 诚实, 服务端不应据此重渲不一致几何)。
+    if manifest["chunks"]:
+        manifest["bounds"] = {"min": bmin, "max": bmax}
+        xs = [c["x"] for c in manifest["chunks"]]
+        ys = [c["y"] for c in manifest["chunks"]]
+        manifest["baked_extent"] = {
+            "x_min": min(xs), "x_max": max(xs), "y_min": min(ys), "y_max": max(ys),
+        }
+    manifest["grid"] = {
+        "on_demand": False,
+        "url_template": "/api/world/chunk/{x}/{y}.ply",
+        "world_seed": next(iter(world_seeds)) if len(world_seeds) == 1 else None,
+    }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     logger.info(f"manifest.json 已生成: {manifest_path} ({total_pts} 点总计)")
