@@ -499,7 +499,7 @@ def _colmap_sift_group() -> str:
 def colmap_register(photos_dir: str | Path, workspace: str | Path,
                     sessions: list[CaptureSession] | None = None,
                     use_gpu: bool = False,
-                    stage_timeout_s: float | None = 3600.0) -> RegistrationResult:
+                    stage_timeout_s: float | None = 21600.0) -> RegistrationResult:
     """COLMAP 联合 SfM: 所有照片 + 视频帧进入同一个 SfM-local frame。
 
     要求系统安装 colmap。SfM 尺度与地理方向均不确定；GPS 锚点仅作为后续
@@ -510,11 +510,13 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
     显式开启以提速。仅稀疏 SfM（本函数唯一用到的阶段）是 CPU 可行的；dense/MVS
     需 CUDA，本函数从不调用。
 
-    ``stage_timeout_s`` 默认 3600（每阶段 1 小时，对文档化的开发/canary 小场景
-    极宽松）：给 feature_extractor / matcher / mapper / model_converter 每个子进程
-    加上界，避免 colmap 卡死（headless/集显 OpenGL SIFT 停滞、matcher 病态输入、
-    I/O 挂起）时管线永久 hang 且不抛错。超时按 fail-closed 抛 ``RuntimeError``
-    （与非零返回码同构）。大规模云端跑可调大；``None`` 显式关闭上界（不推荐）。
+    ``stage_timeout_s`` 默认 21600（每阶段 6 小时）：纯粹是**卡死 backstop**——墙钟
+    超时无法区分"卡死"与"慢但在推进"（COLMAP 输出被 capture 缓冲，这里看不到进度），
+    故默认必须远超任何文档化的合法 CPU 耗时（手册 §4：无序 ~300 图 exhaustive 匹配
+    2–5+ 小时），只在真正"无限卡住"（headless/集显 OpenGL SIFT 停滞、matcher 病态
+    输入、I/O 挂起）时才触发，绝不误杀慢但在推进的合法重建。超时按 fail-closed 抛
+    ``RuntimeError``（与非零返回码同构）。超大 CPU 数据集若合法超 6h/阶段可调大
+    （但已超文档化范围，宜改用云 GPU / sequential 匹配）；``None`` 显式关闭上界（不推荐）。
     """
     photos_dir = Path(photos_dir)
     workspace = Path(workspace)

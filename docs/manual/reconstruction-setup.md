@@ -152,6 +152,7 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
 
 - 本机 Brush **已实测跑通**（Intel UHD 770，中小场景，见 §5b）；但集显共享内存，**图多/高分辨率/大步数仍可能 OOM 或驱动超时**，高质量天花板仍在云 GPU。
 - COLMAP CPU 计时看匹配器：**无序照片走 exhaustive（O(n²)），~300 图可能 2–5+ 小时**；**视频/有序连拍走 sequential（只配相邻帧），同样帧数快一个数量级**（脚本已自动选，见一键段）。
+- **COLMAP 卡死 backstop**：每阶段（feature/match/map/convert）子进程有 **6 小时** 墙钟上界（`colmap_register(stage_timeout_s=...)` 默认 21600s）。这只防**真正卡死**（headless/集显 OpenGL SIFT 停滞、病态输入、I/O 挂起）时管线无限 hang——6h 远超上面的合法 2–5h，不会误杀慢但在推进的重建。超大 CPU 数据集若合法超 6h/阶段可调大（但已超本手册范围，宜改用云 GPU / sequential）。超时按 fail-closed 抛 `RuntimeError`。
 - **长视频的帧密度权衡**：`--max-frames 300` 从 20 分钟里只抽 ~300 帧≈每 4 秒一帧，漫游可能太稀疏→空洞。要么拍更短/更聚焦的视频，要么调大 `--max-frames`（COLMAP 更慢），要么大场景直接上云 GPU。**宁可多段短视频分别重建，也别一条 20 分钟长视频稀疏抽帧。**
 - Colab 免费档会断线清空——导出后立即下载。
 - AutoDL 是国内云，计费与 GitHub/HuggingFace 权重拉取可能需要相应网络配置。
