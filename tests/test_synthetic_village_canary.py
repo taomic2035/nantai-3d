@@ -6,6 +6,7 @@ import shutil
 import struct
 import subprocess
 import uuid
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -700,6 +701,977 @@ def _private_work_root() -> Path:
     return ROOT / ".nantai-studio/synthetic-village/hybrid-v3/work/tests" / uuid.uuid4().hex
 
 
+def _canonical_test_json(payload: object) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _flat_png(*, channels: int, bit_depth: int, value: int = 0) -> bytes:
+    width, height = 1024, 576
+    sample = value.to_bytes(bit_depth // 8, "big")
+    row = sample * channels * width
+    raw = b"".join(b"\0" + row for _ in range(height))
+    color_type = 2 if channels == 3 else 0
+    header = struct.pack(">IIBBBBB", width, height, bit_depth, color_type, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(raw, 1))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _private_render_fixture() -> tuple[Path, Path, BuildRequest]:
+    container = _private_work_root()
+    container.mkdir(parents=True)
+    request = build_canary_request(
+        repo_root=ROOT,
+        scene_plan=build_scene_plan(),
+        camera_plan=build_camera_plan(),
+        visual_pack_root=VISUAL_PACK_ROOT,
+    )
+    build_directory = container / request.build_id
+    build_directory.mkdir()
+    report = _valid_report(request, build_directory)
+    (build_directory / "build-report.json").write_bytes(canonical_build_report_bytes(report))
+    return container, build_directory, request
+
+
+def _write_fake_frame(
+    argv: list[str],
+    *,
+    payload_tag: bytes = b"frame",
+    incomplete: bool = False,
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    import pipeline.synthetic_village.canary as canary
+
+    request_path = Path(argv[argv.index("--request") + 1])
+    staging = Path(argv[argv.index("--staging") + 1])
+    request = json.loads(request_path.read_text("utf-8"))
+    camera = request["camera"]
+    camera_id = camera["camera_id"]
+    assert not staging.exists()
+    staging.mkdir()
+    rgb = _flat_png(channels=3, bit_depth=8, value=31)
+    instance = _flat_png(channels=1, bit_depth=16, value=0)
+    semantic = _flat_png(channels=1, bit_depth=8, value=0)
+    camera_payload = {
+        "schema_version": "nantai.synthetic-village.camera-metadata.v1",
+        "build_id": request["build_id"],
+        "render_id": request["render_id"],
+        "synthetic": True,
+        "verification_level": "L2",
+        "blender_executable_sha256": request["blender_executable_sha256"],
+        "camera_id": camera_id,
+        "category": camera["category"],
+        "split": camera["split"],
+        "image_width_px": 1024,
+        "image_height_px": 576,
+        "coordinate_system": "opencv-c2w-right-down-forward-meters",
+        "pixel_origin": "top-left",
+        "pixel_center_offset": [0.5, 0.5],
+        "depth_encoding": "euclidean-camera-center-range-m",
+        "depth_units": "m",
+        "depth_invalid_value_m": 0.0,
+        "normal_encoding": "world-space-unit-vector",
+        "normal_axes": "blender-right-handed-z-up",
+        "normal_background_xyz": [0.0, 0.0, 0.0],
+        "clip_start_m": 0.1,
+        "clip_end_m": 1200.0,
+        "depth_channel_layout": "V-float32-zip",
+        "normal_channel_layout": "X,Y,Z-float32-zip",
+        "instance_pixel_type": "uint16-grayscale-png",
+        "semantic_pixel_type": "uint8-grayscale-png",
+        "settings_sha256": hashlib.sha256(
+            _canonical_test_json(request["settings"]),
+        ).hexdigest(),
+        "intrinsics": camera["intrinsics"],
+        "requested_c2w_opencv": camera["c2w_opencv"],
+        "requested_c2w_blender": camera["c2w_blender"],
+        "measured_c2w_opencv": canary._blender_c2w_to_opencv(
+            request["measured_c2w_blender"],
+        ),
+        "measured_c2w_blender": request["measured_c2w_blender"],
+        "object_registry_sha256": request["object_registry_sha256"],
+        "semantic_registry": request["semantic_registry"],
+    }
+    payloads = {
+        f"rgb/{camera_id}.png": rgb + payload_tag,
+        f"depth/{camera_id}.exr": b"\x76\x2f\x31\x01depth-" + payload_tag,
+        f"normal/{camera_id}.exr": b"\x76\x2f\x31\x01normal-" + payload_tag,
+        f"instance/{camera_id}.png": instance,
+        f"semantic/{camera_id}.png": semantic,
+        f"cameras/{camera_id}.json": _canonical_test_json(camera_payload),
+    }
+    selected = list(payloads.items())[:1] if incomplete else list(payloads.items())
+    artifacts = []
+    kind_by_directory = {
+        "rgb": "rgb",
+        "depth": "depth",
+        "normal": "normal",
+        "instance": "instance-mask",
+        "semantic": "semantic-mask",
+        "cameras": "camera-metadata",
+    }
+    for portable_path, payload in selected:
+        path = staging / Path(portable_path)
+        path.parent.mkdir()
+        path.write_bytes(payload)
+        artifacts.append(
+            {
+                "kind": kind_by_directory[portable_path.split("/", 1)[0]],
+                "path": portable_path,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        )
+    if not incomplete:
+        report = {
+            "schema_version": "nantai.synthetic-village.render-frame-report.v1",
+            "build_id": request["build_id"],
+            "render_id": request["render_id"],
+            "synthetic": True,
+            "verification_level": "L2",
+            "fidelity": "simplified-pbr-not-render-parity",
+            "blender_executable_sha256": request["blender_executable_sha256"],
+            "camera_id": camera_id,
+            "image_width_px": 1024,
+            "image_height_px": 576,
+            "depth_encoding": "euclidean-camera-center-range-m",
+            "normal_encoding": "world-space-unit-vector",
+            "depth_channel_layout": "V-float32-zip",
+            "normal_channel_layout": "X,Y,Z-float32-zip",
+            "instance_pixel_type": "uint16-grayscale-png",
+            "semantic_pixel_type": "uint8-grayscale-png",
+            "settings_sha256": hashlib.sha256(
+                _canonical_test_json(request["settings"]),
+            ).hexdigest(),
+            "artifacts": artifacts,
+            "statistics": {
+                "depth_min_m": 1.0,
+                "depth_max_m": 100.0,
+                "depth_background_pixels": 0,
+                "depth_max_range_error_m": 0.0001,
+                "normal_max_unit_error": 0.0001,
+                "instance_ids": [0],
+                "semantic_ids": [0],
+            },
+            "validation": {
+                "dimensions_match": True,
+                "depth_finite_nonnegative": True,
+                "depth_camera_range_consistent": True,
+                "normal_finite_unit_world_space": True,
+                "instance_ids_registered": True,
+                "semantic_ids_registered": True,
+                "camera_metadata_matches": True,
+            },
+        }
+        report["content_sha256"] = hashlib.sha256(_canonical_test_json(report)).hexdigest()
+        (staging / "frame-report.json").write_bytes(_canonical_test_json(report))
+    stdout = kwargs["stdout"]
+    stderr = kwargs["stderr"]
+    stdout.write(b"render stdout\n")
+    stderr.write(b"render stderr\n")
+    return subprocess.CompletedProcess(argv, 0)
+
+
+def test_axial_z_conversion_produces_euclidean_off_axis_camera_range() -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    center = canary._axial_depth_to_euclidean_range_m(
+        5.0,
+        u_px=511.5,
+        v_px=287.5,
+        fx=512.0,
+        fy=512.0,
+        cx=512.0,
+        cy=288.0,
+    )
+    corner = canary._axial_depth_to_euclidean_range_m(
+        5.0,
+        u_px=0.5,
+        v_px=0.5,
+        fx=512.0,
+        fy=512.0,
+        cx=512.0,
+        cy=288.0,
+    )
+
+    assert center == pytest.approx(5.000004768369308)
+    assert corner == pytest.approx(7.604860944711831)
+    assert corner > center
+
+
+def test_render_settings_pin_zero_rgb_dither() -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    settings = canary.RenderSettings()
+
+    assert settings.dither_intensity == 0.0
+    assert settings.model_dump(mode="json")["dither_intensity"] == 0.0
+
+
+def test_render_settings_pin_single_rgb_render_thread() -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    settings = canary.RenderSettings()
+
+    assert settings.rgb_render_threads == 1
+    assert settings.model_dump(mode="json")["rgb_render_threads"] == 1
+
+
+def test_render_rejects_explicit_empty_camera_selection_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, _request = _private_render_fixture()
+    calls = 0
+
+    def forbidden(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Blender must not run for an empty camera selection")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    try:
+        with pytest.raises(CanaryBuildError, match="camera IDs"):
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=build_directory,
+                camera_ids=(),
+            )
+        assert calls == 0
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        (),
+        [],
+        "camera-outer-001",
+        ("camera-outer-001", []),
+        (1,),
+        ("camera-outer-001", "camera-outer-001"),
+        ("not-a-camera",),
+    ],
+)
+def test_render_camera_selection_rejects_non_tuple_and_invalid_entries(
+    selection: object,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    with pytest.raises(CanaryBuildError, match="camera IDs"):
+        canary._normalize_render_camera_ids(selection)
+
+
+def test_render_camera_selection_none_and_tuple_use_canonical_order() -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    assert canary._normalize_render_camera_ids(None) == canary.RENDER_CAMERA_IDS
+    selected = (
+        canary.RENDER_CAMERA_IDS[7],
+        canary.RENDER_CAMERA_IDS[0],
+        canary.RENDER_CAMERA_IDS[3],
+    )
+    assert canary._normalize_render_camera_ids(selected) == (
+        canary.RENDER_CAMERA_IDS[0],
+        canary.RENDER_CAMERA_IDS[3],
+        canary.RENDER_CAMERA_IDS[7],
+    )
+
+
+def test_render_quarantine_rejects_redirected_layer_without_moving_external_file(
+    tmp_path: Path,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    render_root = tmp_path / "renders"
+    external = tmp_path / "external"
+    render_root.mkdir()
+    external.mkdir()
+    layer = render_root / "rgb"
+    try:
+        layer.symlink_to(external, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory links are unavailable: {exc}")
+    camera_id = "camera-outer-001"
+    external_file = external / f"{camera_id}.png"
+    external_file.write_bytes(b"external-evidence")
+
+    with pytest.raises(CanaryBuildError, match="redirected|layer"):
+        canary._quarantine_frame_outputs(render_root, camera_id)
+
+    assert external_file.read_bytes() == b"external-evidence"
+    assert not (render_root / ".q").exists()
+
+
+def test_render_quarantine_preflights_linklike_layer_before_any_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    render_root = tmp_path / "renders"
+    layer = render_root / "rgb"
+    layer.mkdir(parents=True)
+    camera_id = "camera-outer-001"
+    evidence = layer / f"{camera_id}.png"
+    evidence.write_bytes(b"evidence")
+    original_is_linklike = canary._is_linklike
+    moves = 0
+
+    def simulated_link(path: Path) -> bool:
+        return Path(path) == layer or original_is_linklike(path)
+
+    def forbidden_move(source: Path, destination: Path) -> None:
+        nonlocal moves
+        moves += 1
+        raise AssertionError("preflight must reject before moving")
+
+    monkeypatch.setattr(canary, "_is_linklike", simulated_link)
+    monkeypatch.setattr(canary, "_move_directory_noreplace", forbidden_move)
+
+    with pytest.raises(CanaryBuildError, match="symlink|junction|redirected"):
+        canary._quarantine_frame_outputs(render_root, camera_id)
+
+    assert evidence.read_bytes() == b"evidence"
+    assert moves == 0
+    assert not (render_root / ".q").exists()
+
+
+def test_directory_creation_rejects_linklike_managed_root_before_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    managed_root = tmp_path / "managed"
+    managed_root.mkdir()
+    target = managed_root / "new"
+    original_is_linklike = canary._is_linklike
+    monkeypatch.setattr(
+        canary,
+        "_is_linklike",
+        lambda path: Path(path) == managed_root or original_is_linklike(path),
+    )
+
+    with pytest.raises(CanaryBuildError, match="symlink|junction|redirected"):
+        canary._ensure_real_directory_tree(target, repo_root=managed_root)
+
+    assert not target.exists()
+
+
+def test_owned_cleanup_requires_real_root_and_exact_expected_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    exact = work_root / ".rs-exact"
+    prefix_decoy = work_root / ".rs-exact-extra"
+    exact.mkdir()
+    prefix_decoy.mkdir()
+
+    canary._cleanup_owned_directory(
+        prefix_decoy,
+        work_root=work_root,
+        expected_name=exact.name,
+    )
+    assert prefix_decoy.is_dir()
+
+    original_is_linklike = canary._is_linklike
+    monkeypatch.setattr(
+        canary,
+        "_is_linklike",
+        lambda path: Path(path) == work_root or original_is_linklike(path),
+    )
+    canary._cleanup_owned_directory(
+        exact,
+        work_root=work_root,
+        expected_name=exact.name,
+    )
+    assert exact.is_dir()
+
+    monkeypatch.setattr(canary, "_is_linklike", original_is_linklike)
+    canary._cleanup_owned_directory(
+        exact,
+        work_root=work_root,
+        expected_name=exact.name,
+    )
+    assert not exact.exists()
+    assert prefix_decoy.is_dir()
+
+
+def test_render_quarantine_preserves_already_moved_evidence_on_mid_move_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    render_root = tmp_path / "renders"
+    camera_id = "camera-outer-001"
+    payloads = {"rgb": b"rgb-evidence", "depth": b"depth-evidence"}
+    for layer, payload in payloads.items():
+        path = render_root / layer / f"{camera_id}.{'png' if layer == 'rgb' else 'exr'}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    original_move = canary._move_directory_noreplace
+    calls = 0
+
+    def fail_second(source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise CanaryBuildError("injected quarantine move failure")
+        original_move(source, destination)
+
+    monkeypatch.setattr(canary, "_move_directory_noreplace", fail_second)
+    with pytest.raises(CanaryBuildError, match="injected"):
+        canary._quarantine_frame_outputs(render_root, camera_id)
+
+    evidence = {path.read_bytes() for path in render_root.rglob(f"{camera_id}.*") if path.is_file()}
+    assert evidence == set(payloads.values())
+
+
+def test_render_quarantine_failure_is_recorded_as_failed_prepare_without_blender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    monkeypatch.setattr(subprocess, "run", _write_fake_frame)
+    try:
+        result = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+        (result.render_root / f"rgb/{camera_id}.png").write_bytes(b"tampered")
+        blender_calls = 0
+        observed_states: list[str] = []
+        original_write = canary._write_render_journal
+
+        def quarantine_failure(*args, **kwargs):
+            raise CanaryBuildError("injected quarantine failure")
+
+        def forbidden_blender(*args, **kwargs):
+            nonlocal blender_calls
+            blender_calls += 1
+            raise AssertionError("Blender must not run after quarantine failure")
+
+        def observe_journal(path, journal):
+            observed_states.append(journal.frames[0].state)
+            return original_write(path, journal)
+
+        monkeypatch.setattr(canary, "_quarantine_frame_outputs", quarantine_failure)
+        monkeypatch.setattr(canary, "_write_render_journal", observe_journal)
+        monkeypatch.setattr(subprocess, "run", forbidden_blender)
+        with pytest.raises(CanaryBuildError, match="quarantine"):
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=build_directory,
+                camera_ids=(camera_id,),
+            )
+        failed = canary.load_render_journal(result.journal_path).frames[0]
+        assert failed.state == "failed"
+        assert failed.error.stage == "prepare"
+        assert blender_calls == 0
+        assert observed_states == ["failed"]
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_blender_to_opencv_matrix_conversion_preserves_pose_and_flips_axes() -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    blender = (
+        (1.0, 2.0, 3.0, 4.0),
+        (5.0, 6.0, 7.0, 8.0),
+        (9.0, 10.0, 11.0, 12.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+    assert canary._blender_c2w_to_opencv(blender) == (
+        (1.0, -2.0, -3.0, 4.0),
+        (5.0, -6.0, -7.0, 8.0),
+        (9.0, -10.0, -11.0, 12.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+
+
+def test_formal_camera_registry_contains_measured_nonzero_pose_delta() -> None:
+    formal = (
+        ROOT
+        / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
+        / "344e643c81753e986d8945ca2b4a8713f26efedc755ab2055bd4235b1c656d1b"
+    )
+    if not (formal / "build-report.json").is_file():
+        pytest.skip("formal Task 7 report is unavailable")
+    report = load_build_report(formal / "build-report.json")
+
+    assert any(
+        camera.requested_c2w_blender != camera.measured_c2w_blender
+        for camera in report.camera_registry
+    )
+
+
+def test_render_timeout_cleans_runtime_owned_sibling_work_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+
+    def timeout(argv, **kwargs):
+        request_path = Path(argv[argv.index("--request") + 1])
+        staging = Path(argv[argv.index("--staging") + 1])
+        render_request = json.loads(request_path.read_text("utf-8"))
+        runtime_work = staging.with_name(
+            f".{staging.name}.tmp-{render_request['render_id'][:12]}",
+        )
+        runtime_work.mkdir()
+        (runtime_work / "partial.exr").write_bytes(b"partial")
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    try:
+        with pytest.raises(CanaryBuildError, match="timeout"):
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=build_directory,
+                camera_ids=(camera_id,),
+                timeout_seconds=1,
+            )
+        assert not list(build_directory.parent.glob("..rs-*.tmp-*"))
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_timeout_rechecks_request_snapshot_and_integrity_error_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+
+    def mutate_then_timeout(argv, **kwargs):
+        request_path = Path(argv[argv.index("--request") + 1])
+        request_path.write_bytes(request_path.read_bytes() + b" ")
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(subprocess, "run", mutate_then_timeout)
+    try:
+        with pytest.raises(CanaryBuildError, match="canary input changed") as raised:
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=build_directory,
+                camera_ids=(camera_id,),
+                timeout_seconds=1,
+            )
+        assert "timeout" not in str(raised.value).lower()
+        journal = canary.load_render_journal(build_directory / "renders/render-journal.json")
+        assert journal.frames[0].state == "failed"
+        assert journal.frames[0].error.stage == "invoke"
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_rejects_frame_report_with_wrong_settings_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+
+    def tampered(argv, **kwargs):
+        completed = _write_fake_frame(argv, **kwargs)
+        staging = Path(argv[argv.index("--staging") + 1])
+        report_path = staging / "frame-report.json"
+        report = json.loads(report_path.read_text("utf-8"))
+        report["settings_sha256"] = "0" * 64
+        report.pop("content_sha256")
+        report["content_sha256"] = hashlib.sha256(_canonical_test_json(report)).hexdigest()
+        report_path.write_bytes(_canonical_test_json(report))
+        return completed
+
+    monkeypatch.setattr(subprocess, "run", tampered)
+    try:
+        with pytest.raises(CanaryBuildError, match="settings"):
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=build_directory,
+                camera_ids=(camera_id,),
+            )
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_records_blender_executable_digest_in_request_and_journal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    captured = {}
+
+    def capture(argv, **kwargs):
+        request_path = Path(argv[argv.index("--request") + 1])
+        captured.update(json.loads(request_path.read_text("utf-8")))
+        return _write_fake_frame(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture)
+    try:
+        result = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+        expected = request.tool_identity.executable_sha256
+        journal = canary.load_render_journal(result.journal_path)
+        assert captured["blender_executable_sha256"] == expected
+        assert journal.blender_executable_sha256 == expected
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_journal_retries_one_windows_sharing_violation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    monkeypatch.setattr(subprocess, "run", _write_fake_frame)
+    try:
+        result = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+        journal = canary.load_render_journal(result.journal_path)
+        original_replace = canary.os.replace
+        calls = 0
+
+        def flaky(source, destination):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError(5, "sharing violation")
+            return original_replace(source, destination)
+
+        monkeypatch.setattr(canary.os, "replace", flaky)
+        monkeypatch.setattr(canary, "_is_retryable_windows_replace_error", lambda _exc: True)
+        monkeypatch.setattr(canary.time, "sleep", lambda _seconds: None)
+        canary._write_render_journal(result.journal_path, journal)
+        assert calls == 2
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_journal_sharing_violation_retry_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    monkeypatch.setattr(subprocess, "run", _write_fake_frame)
+    try:
+        result = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+        journal = canary.load_render_journal(result.journal_path)
+        calls = 0
+
+        def always_denied(source, destination):
+            nonlocal calls
+            calls += 1
+            raise PermissionError(5, "sharing violation")
+
+        monkeypatch.setattr(canary.os, "replace", always_denied)
+        monkeypatch.setattr(canary, "_is_retryable_windows_replace_error", lambda _exc: True)
+        monkeypatch.setattr(canary.time, "sleep", lambda _seconds: None)
+        with pytest.raises(CanaryBuildError, match="durably update"):
+            canary._write_render_journal(result.journal_path, journal)
+        assert calls == canary.JOURNAL_REPLACE_ATTEMPTS
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_journal_temporary_cleanup_never_masks_durability_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    monkeypatch.setattr(subprocess, "run", _write_fake_frame)
+    try:
+        result = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+        journal = canary.load_render_journal(result.journal_path)
+        original_unlink = canary.Path.unlink
+
+        def replace_failure(*_args, **_kwargs):
+            raise OSError("primary replace failure")
+
+        def cleanup_failure(path, *args, **kwargs):
+            if Path(path).name.startswith(".render-journal-"):
+                raise OSError("secondary cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(canary.os, "replace", replace_failure)
+        monkeypatch.setattr(canary.Path, "unlink", cleanup_failure)
+        with pytest.raises(CanaryBuildError, match="primary replace failure"):
+            canary._write_render_journal(result.journal_path, journal)
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_journal_transitions_planned_rendering_verified_and_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    states: list[str] = []
+    original_write = canary._write_render_journal
+
+    def observe(path, journal):
+        states.append(journal.frames[0].state)
+        return original_write(path, journal)
+
+    monkeypatch.setattr(canary, "_write_render_journal", observe)
+    monkeypatch.setattr(subprocess, "run", _write_fake_frame)
+    try:
+        canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+            timeout_seconds=123,
+        )
+        assert states[:3] == ["planned", "rendering", "verified"]
+
+        second_container, second_build, second_request = _private_render_fixture()
+        second_camera = second_request.camera_plan.cameras[0].camera_id
+
+        def fail(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 17)
+
+        states.clear()
+        monkeypatch.setattr(subprocess, "run", fail)
+        with pytest.raises(CanaryBuildError, match="render failed"):
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=second_build,
+                camera_ids=(second_camera,),
+            )
+        assert states[:3] == ["planned", "rendering", "failed"]
+        failed = canary.load_render_journal(second_build / "renders/render-journal.json")
+        assert failed.frames[0].error.stage == "invoke"
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+        if "second_container" in locals():
+            shutil.rmtree(second_container, ignore_errors=True)
+
+
+def test_render_verified_reuse_skips_blender_and_preserves_six_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    calls = 0
+
+    def render(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _write_fake_frame(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", render)
+    try:
+        first = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+        second = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+
+        assert calls == 1
+        assert first.rendered_count == 1
+        assert second.reused_count == 1
+        journal = canary.load_render_journal(first.journal_path)
+        assert journal.frames[0].state == "verified"
+        assert len(journal.frames[0].artifacts) == 6
+        assert (
+            journal.journal_sha256
+            == hashlib.sha256(
+                canary.canonical_render_journal_bytes(journal, exclude_sha256=True),
+            ).hexdigest()
+        )
+        raw = first.journal_path.read_bytes()
+        assert raw == canary.canonical_render_journal_bytes(journal)
+        assert b".nantai-studio" not in raw and str(Path.home()).encode() not in raw
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_camera_metadata_records_exact_pixel_and_channel_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    monkeypatch.setattr(subprocess, "run", _write_fake_frame)
+    try:
+        result = canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+        metadata = json.loads(
+            (result.render_root / f"cameras/{camera_id}.json").read_text("utf-8"),
+        )
+
+        assert metadata["pixel_origin"] == "top-left"
+        assert metadata["pixel_center_offset"] == [0.5, 0.5]
+        assert metadata["depth_units"] == "m"
+        assert metadata["depth_invalid_value_m"] == 0.0
+        assert metadata["normal_axes"] == "blender-right-handed-z-up"
+        assert metadata["normal_background_xyz"] == [0.0, 0.0, 0.0]
+        assert metadata["clip_start_m"] == 0.1
+        assert metadata["clip_end_m"] == 1200.0
+        assert metadata["depth_channel_layout"] == "V-float32-zip"
+        assert metadata["normal_channel_layout"] == "X,Y,Z-float32-zip"
+        assert metadata["instance_pixel_type"] == "uint16-grayscale-png"
+        assert metadata["semantic_pixel_type"] == "uint8-grayscale-png"
+        assert (
+            metadata["settings_sha256"]
+            == hashlib.sha256(
+                canary._canonical_json_bytes(canary.RenderSettings().model_dump(mode="json"))
+            ).hexdigest()
+        )
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+@pytest.mark.parametrize("mode", ["partial", "hash-mismatch"])
+def test_render_partial_and_hash_mismatch_are_quarantined_before_rerender(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    render_root = build_directory / "renders"
+    calls = 0
+
+    def render(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _write_fake_frame(argv, payload_tag=f"frame-{calls}".encode(), **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", render)
+    try:
+        if mode == "hash-mismatch":
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=build_directory,
+                camera_ids=(camera_id,),
+            )
+            (render_root / f"rgb/{camera_id}.png").write_bytes(b"tampered")
+        else:
+            (render_root / "rgb").mkdir(parents=True)
+            (render_root / f"rgb/{camera_id}.png").write_bytes(b"partial")
+
+        canary.run_canary_render(
+            repo_root=ROOT,
+            build_directory=build_directory,
+            camera_ids=(camera_id,),
+        )
+
+        assert calls == (2 if mode == "hash-mismatch" else 1)
+        quarantined = list((render_root / ".q").rglob(f"{camera_id}.png"))
+        assert quarantined
+        expected = b"tampered" if mode == "hash-mismatch" else b"partial"
+        assert any(path.read_bytes() == expected for path in quarantined)
+        assert canary.load_render_journal(render_root / "render-journal.json").frames[0].state == (
+            "verified"
+        )
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_incomplete_temporary_output_never_publishes_verified_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    container, build_directory, request = _private_render_fixture()
+    camera_id = request.camera_plan.cameras[0].camera_id
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: _write_fake_frame(argv, incomplete=True, **kwargs),
+    )
+    try:
+        with pytest.raises(CanaryBuildError, match="frame report|incomplete"):
+            canary.run_canary_render(
+                repo_root=ROOT,
+                build_directory=build_directory,
+                camera_ids=(camera_id,),
+            )
+        render_root = build_directory / "renders"
+        assert not any(
+            (render_root / path).exists()
+            for path in (
+                f"rgb/{camera_id}.png",
+                f"depth/{camera_id}.exr",
+                f"normal/{camera_id}.exr",
+                f"instance/{camera_id}.png",
+                f"semantic/{camera_id}.png",
+                f"cameras/{camera_id}.json",
+            )
+        )
+        failed = canary.load_render_journal(render_root / "render-journal.json")
+        assert failed.frames[0].state == "failed"
+        assert failed.frames[0].artifacts == ()
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
 def _successful_fake_subprocess(calls: list[tuple[list[str], dict[str, object]]]):
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -904,4 +1876,63 @@ def test_build_canary_cli_uses_private_defaults_and_prints_verified_result(
         "final_directory": "D:\\private\\canary\\build-id",
         "preview_count": 4,
         "verification_level": "L2",
+    }
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_camera_ids"),
+    [
+        (["render-canary", "--timeout-seconds", "456"], None),
+        (
+            [
+                "render-canary",
+                "--camera",
+                "camera-outer-001",
+                "--camera",
+                "camera-bridge-004",
+                "--timeout-seconds",
+                "456",
+            ],
+            ("camera-outer-001", "camera-bridge-004"),
+        ),
+    ],
+)
+def test_render_canary_cli_uses_private_defaults_and_prints_resume_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    expected_camera_ids: tuple[str, ...] | None,
+) -> None:
+    from scripts import synthetic_village as cli
+
+    calls = []
+
+    def fake_run(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            render_id="3" * 64,
+            render_root=Path("D:/private/canary/build-id/renders"),
+            journal_path=Path("D:/private/canary/build-id/renders/render-journal.json"),
+            rendered_count=2,
+            reused_count=22,
+        )
+
+    monkeypatch.setattr(cli, "_run_canary_render", lambda: fake_run, raising=False)
+
+    assert cli.main(arguments) == 0
+
+    assert calls == [
+        {
+            "repo_root": cli.ROOT,
+            "camera_ids": expected_camera_ids,
+            "timeout_seconds": 456,
+        },
+    ]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "journal_path": "D:\\private\\canary\\build-id\\renders\\render-journal.json",
+        "render_id": "3" * 64,
+        "render_root": "D:\\private\\canary\\build-id\\renders",
+        "rendered_count": 2,
+        "reused_count": 22,
     }

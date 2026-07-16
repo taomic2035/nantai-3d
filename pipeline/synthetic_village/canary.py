@@ -10,9 +10,11 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,7 @@ from pipeline.studio_jobs import (
 )
 from pipeline.synthetic_village.camera_plan import (
     CameraPlan,
+    CameraPose,
     Matrix4,
     build_camera_plan,
     canonical_camera_plan_bytes,
@@ -64,6 +67,14 @@ from pipeline.synthetic_village.visual_sources import (
 ROOT = Path(__file__).resolve().parents[2]
 BUILD_REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v1"
 BUILD_REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v1"
+RENDER_REQUEST_SCHEMA = "nantai.synthetic-village.render-frame-request.v1"
+RENDER_FRAME_REPORT_SCHEMA = "nantai.synthetic-village.render-frame-report.v1"
+RENDER_JOURNAL_SCHEMA = "nantai.synthetic-village.render-journal.v1"
+CAMERA_METADATA_SCHEMA = "nantai.synthetic-village.camera-metadata.v1"
+DEPTH_ENCODING = "euclidean-camera-center-range-m"
+NORMAL_ENCODING = "world-space-unit-vector"
+JOURNAL_REPLACE_ATTEMPTS = 3
+WINDOWS_SHARING_VIOLATIONS = frozenset({5, 32, 33})
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 EvidenceId = Annotated[
@@ -205,6 +216,15 @@ MAX_BUILD_REPORT_BYTES = 16 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024 * 1024
 MAX_PROCESS_LOG_BYTES = 1024 * 1024
 DEFAULT_BUILD_TIMEOUT_SECONDS = 30 * 60
+DEFAULT_RENDER_TIMEOUT_SECONDS = 15 * 60
+MAX_RENDER_METADATA_BYTES = 16 * 1024 * 1024
+
+RENDER_CAMERA_IDS = tuple(
+    [*(f"camera-outer-{index:03d}" for index in range(1, 9))]
+    + [*(f"camera-ground-{index:03d}" for index in range(1, 9))]
+    + [*(f"camera-courtyard-{index:03d}" for index in range(1, 5))]
+    + [*(f"camera-bridge-{index:03d}" for index in range(1, 5))]
+)
 
 
 class CanaryBuildError(RuntimeError):
@@ -680,6 +700,265 @@ class BuildReport(FrozenModel):
         return self
 
 
+class RenderSettings(FrozenModel):
+    engine: Literal["BLENDER_EEVEE_NEXT"] = "BLENDER_EEVEE_NEXT"
+    data_engine: Literal["CYCLES"] = "CYCLES"
+    image_width_px: Literal[1024] = 1024
+    image_height_px: Literal[576] = 576
+    render_samples: Literal[64] = 64
+    rgb_render_threads: Literal[1] = 1
+    data_render_samples: Literal[1] = 1
+    deterministic_seed: Literal[20260715] = 20260715
+    view_transform: Literal["AgX"] = "AgX"
+    look: Literal["AgX - Medium High Contrast"] = "AgX - Medium High Contrast"
+    exposure: Literal[0.0] = 0.0
+    gamma: Literal[1.0] = 1.0
+    dither_intensity: Literal[0.0] = 0.0
+    depth_of_field: Literal["disabled-deep-focus"] = "disabled-deep-focus"
+    motion_blur: Literal[False] = False
+    depth_encoding: Literal["euclidean-camera-center-range-m"] = DEPTH_ENCODING
+    normal_encoding: Literal["world-space-unit-vector"] = NORMAL_ENCODING
+    instance_encoding: Literal["uint16-png-direct-id"] = "uint16-png-direct-id"
+    semantic_encoding: Literal["uint8-png-direct-id"] = "uint8-png-direct-id"
+    depth_channel_layout: Literal["V-float32-zip"] = "V-float32-zip"
+    normal_channel_layout: Literal["X,Y,Z-float32-zip"] = "X,Y,Z-float32-zip"
+    instance_pixel_type: Literal["uint16-grayscale-png"] = "uint16-grayscale-png"
+    semantic_pixel_type: Literal["uint8-grayscale-png"] = "uint8-grayscale-png"
+
+
+class RenderFrameRequest(FrozenModel):
+    schema_version: Literal["nantai.synthetic-village.render-frame-request.v1"] = (
+        RENDER_REQUEST_SCHEMA
+    )
+    render_id: Sha256
+    build_id: Sha256
+    synthetic: Literal[True] = True
+    verification_level: Literal["L2"] = "L2"
+    fidelity: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
+    blender_executable_sha256: Sha256
+    renderer_script_sha256: Sha256
+    blend_sha256: Sha256
+    build_report_sha256: Sha256
+    object_registry_sha256: Sha256
+    settings: RenderSettings
+    camera: CameraPose
+    measured_c2w_blender: Matrix4
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(min_length=3, max_length=3)
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+
+    @model_validator(mode="after")
+    def _validate_render_request(self) -> RenderFrameRequest:
+        if self.camera.camera_id not in RENDER_CAMERA_IDS:
+            raise ValueError("render request camera is not canonical")
+        if tuple(item.instance_id for item in self.object_registry) != tuple(range(1, 127)):
+            raise ValueError("render request instance registry is not stable v1")
+        if self.semantic_registry != _semantic_registry():
+            raise ValueError("render request semantic registry is not stable v1")
+        expected_registry_sha = hashlib.sha256(
+            _canonical_json_bytes(
+                [item.model_dump(mode="json") for item in self.object_registry],
+            ),
+        ).hexdigest()
+        if self.object_registry_sha256 != expected_registry_sha:
+            raise ValueError("render request object registry digest is invalid")
+        return self
+
+
+RenderArtifactKind = Literal[
+    "rgb",
+    "depth",
+    "normal",
+    "instance-mask",
+    "semantic-mask",
+    "camera-metadata",
+]
+
+
+class RenderArtifactRecord(FrozenModel):
+    kind: RenderArtifactKind
+    path: str = Field(
+        pattern=(
+            r"^(?:rgb|depth|normal|instance|semantic|cameras)/"
+            r"camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}\."
+            r"(?:png|exr|json)$"
+        ),
+    )
+    sha256: Sha256
+    size_bytes: int = Field(gt=0, le=MAX_ARTIFACT_BYTES)
+
+
+class RenderStatistics(FrozenModel):
+    depth_min_m: float = Field(ge=0.0, le=1200.0, allow_inf_nan=False)
+    depth_max_m: float = Field(gt=0.0, le=2000.0, allow_inf_nan=False)
+    depth_background_pixels: int = Field(ge=0, le=1024 * 576)
+    depth_max_range_error_m: float = Field(ge=0.0, le=0.01, allow_inf_nan=False)
+    normal_max_unit_error: float = Field(ge=0.0, le=0.001, allow_inf_nan=False)
+    instance_ids: tuple[int, ...] = Field(min_length=1)
+    semantic_ids: tuple[int, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_ids(self) -> RenderStatistics:
+        if self.instance_ids != tuple(sorted(set(self.instance_ids))) or any(
+            value < 0 or value > 126 for value in self.instance_ids
+        ):
+            raise ValueError("observed instance IDs must be unique stable IDs from 0 through 126")
+        if self.semantic_ids != tuple(sorted(set(self.semantic_ids))) or any(
+            value < 0 or value > 13 for value in self.semantic_ids
+        ):
+            raise ValueError("observed semantic IDs must be unique stable IDs from 0 through 13")
+        if self.depth_max_m < self.depth_min_m:
+            raise ValueError("depth statistics are inverted")
+        return self
+
+
+class RenderValidation(FrozenModel):
+    dimensions_match: Literal[True]
+    depth_finite_nonnegative: Literal[True]
+    depth_camera_range_consistent: Literal[True]
+    normal_finite_unit_world_space: Literal[True]
+    instance_ids_registered: Literal[True]
+    semantic_ids_registered: Literal[True]
+    camera_metadata_matches: Literal[True]
+
+
+class RenderFrameReport(FrozenModel):
+    schema_version: Literal["nantai.synthetic-village.render-frame-report.v1"] = (
+        RENDER_FRAME_REPORT_SCHEMA
+    )
+    build_id: Sha256
+    render_id: Sha256
+    content_sha256: Sha256
+    synthetic: Literal[True] = True
+    verification_level: Literal["L2"] = "L2"
+    fidelity: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
+    blender_executable_sha256: Sha256
+    camera_id: str = Field(pattern=r"^camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}$")
+    image_width_px: Literal[1024]
+    image_height_px: Literal[576]
+    depth_encoding: Literal["euclidean-camera-center-range-m"]
+    normal_encoding: Literal["world-space-unit-vector"]
+    depth_channel_layout: Literal["V-float32-zip"]
+    normal_channel_layout: Literal["X,Y,Z-float32-zip"]
+    instance_pixel_type: Literal["uint16-grayscale-png"]
+    semantic_pixel_type: Literal["uint8-grayscale-png"]
+    settings_sha256: Sha256
+    artifacts: tuple[RenderArtifactRecord, ...] = Field(min_length=6, max_length=6)
+    statistics: RenderStatistics
+    validation: RenderValidation
+
+    @model_validator(mode="after")
+    def _validate_artifact_contract(self) -> RenderFrameReport:
+        if tuple((item.kind, item.path) for item in self.artifacts) != tuple(
+            _expected_render_artifacts(self.camera_id)
+        ):
+            raise ValueError("render frame artifacts are not the exact six-file contract")
+        return self
+
+
+class CameraFrameMetadata(FrozenModel):
+    schema_version: Literal["nantai.synthetic-village.camera-metadata.v1"] = CAMERA_METADATA_SCHEMA
+    build_id: Sha256
+    render_id: Sha256
+    synthetic: Literal[True]
+    verification_level: Literal["L2"]
+    blender_executable_sha256: Sha256
+    camera_id: str = Field(pattern=r"^camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}$")
+    category: Literal["outer", "ground", "courtyard", "bridge"]
+    split: Literal["train", "val", "test"]
+    image_width_px: Literal[1024]
+    image_height_px: Literal[576]
+    coordinate_system: Literal["opencv-c2w-right-down-forward-meters"]
+    pixel_origin: Literal["top-left"]
+    pixel_center_offset: tuple[Literal[0.5], Literal[0.5]]
+    depth_encoding: Literal["euclidean-camera-center-range-m"]
+    depth_units: Literal["m"]
+    depth_invalid_value_m: Literal[0.0]
+    normal_encoding: Literal["world-space-unit-vector"]
+    normal_axes: Literal["blender-right-handed-z-up"]
+    normal_background_xyz: tuple[Literal[0.0], Literal[0.0], Literal[0.0]]
+    clip_start_m: Literal[0.1]
+    clip_end_m: Literal[1200.0]
+    depth_channel_layout: Literal["V-float32-zip"]
+    normal_channel_layout: Literal["X,Y,Z-float32-zip"]
+    instance_pixel_type: Literal["uint16-grayscale-png"]
+    semantic_pixel_type: Literal["uint8-grayscale-png"]
+    settings_sha256: Sha256
+    intrinsics: dict[str, int | float]
+    requested_c2w_opencv: Matrix4
+    requested_c2w_blender: Matrix4
+    measured_c2w_opencv: Matrix4
+    measured_c2w_blender: Matrix4
+    object_registry_sha256: Sha256
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+
+
+class RenderFailure(FrozenModel):
+    stage: Literal["prepare", "invoke", "validate", "publish"]
+    message: str = Field(min_length=1, max_length=512)
+
+
+class RenderFrameRecord(FrozenModel):
+    camera_id: str = Field(pattern=r"^camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}$")
+    state: Literal["planned", "rendering", "verified", "failed"]
+    artifacts: tuple[RenderArtifactRecord, ...] = Field(default=(), max_length=6)
+    runtime_report_sha256: Sha256 | None = None
+    statistics: RenderStatistics | None = None
+    error: RenderFailure | None = None
+
+    @model_validator(mode="after")
+    def _validate_state_payload(self) -> RenderFrameRecord:
+        if self.state == "verified":
+            if (
+                len(self.artifacts) != 6
+                or self.runtime_report_sha256 is None
+                or self.statistics is None
+            ):
+                raise ValueError("verified frame requires six artifacts and runtime evidence")
+            if self.error is not None:
+                raise ValueError("verified frame cannot retain a failure")
+        elif self.state == "failed":
+            if (
+                self.artifacts
+                or self.runtime_report_sha256 is not None
+                or self.statistics is not None
+            ):
+                raise ValueError("failed frame cannot publish verified artifacts")
+            if self.error is None:
+                raise ValueError("failed frame requires an explicit stage and error")
+        elif (
+            self.artifacts
+            or self.runtime_report_sha256 is not None
+            or self.statistics is not None
+            or self.error is not None
+        ):
+            raise ValueError("planned/rendering frame cannot claim output evidence")
+        return self
+
+
+class RenderJournal(FrozenModel):
+    schema_version: Literal["nantai.synthetic-village.render-journal.v1"] = RENDER_JOURNAL_SCHEMA
+    render_id: Sha256
+    journal_sha256: Sha256
+    build_id: Sha256
+    synthetic: Literal[True] = True
+    verification_level: Literal["L2"] = "L2"
+    fidelity: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
+    blender_executable_sha256: Sha256
+    renderer_script_sha256: Sha256
+    blend_sha256: Sha256
+    build_report_sha256: Sha256
+    object_registry_sha256: Sha256
+    settings: RenderSettings
+    frames: tuple[RenderFrameRecord, ...] = Field(min_length=24, max_length=24)
+
+    @model_validator(mode="after")
+    def _validate_frame_order(self) -> RenderJournal:
+        if tuple(item.camera_id for item in self.frames) != RENDER_CAMERA_IDS:
+            raise ValueError("render journal camera registry is not stable v1")
+        return self
+
+
 def _canonical_json_bytes(payload: object) -> bytes:
     text = json.dumps(
         payload,
@@ -702,6 +981,74 @@ def canonical_build_request_bytes(
 
 def canonical_build_report_bytes(report: BuildReport) -> bytes:
     return _canonical_json_bytes(report.model_dump(mode="json", by_alias=True))
+
+
+def canonical_render_request_bytes(request: RenderFrameRequest) -> bytes:
+    return _canonical_json_bytes(request.model_dump(mode="json"))
+
+
+def canonical_render_frame_report_bytes(
+    report: RenderFrameReport,
+    *,
+    exclude_sha256: bool = False,
+) -> bytes:
+    exclude = {"content_sha256"} if exclude_sha256 else None
+    return _canonical_json_bytes(report.model_dump(mode="json", exclude=exclude))
+
+
+def canonical_camera_metadata_bytes(metadata: CameraFrameMetadata) -> bytes:
+    return _canonical_json_bytes(metadata.model_dump(mode="json"))
+
+
+def canonical_render_journal_bytes(
+    journal: RenderJournal,
+    *,
+    exclude_sha256: bool = False,
+) -> bytes:
+    exclude = {"journal_sha256"} if exclude_sha256 else None
+    return _canonical_json_bytes(journal.model_dump(mode="json", exclude=exclude))
+
+
+def _expected_render_artifacts(camera_id: str) -> tuple[tuple[str, str], ...]:
+    return (
+        ("rgb", f"rgb/{camera_id}.png"),
+        ("depth", f"depth/{camera_id}.exr"),
+        ("normal", f"normal/{camera_id}.exr"),
+        ("instance-mask", f"instance/{camera_id}.png"),
+        ("semantic-mask", f"semantic/{camera_id}.png"),
+        ("camera-metadata", f"cameras/{camera_id}.json"),
+    )
+
+
+def _axial_depth_to_euclidean_range_m(
+    axial_depth_m: float,
+    *,
+    u_px: float,
+    v_px: float,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+) -> float:
+    """Convert Blender's linear forward-axis Z pass to camera-center range."""
+
+    values = (axial_depth_m, u_px, v_px, fx, fy, cx, cy)
+    if not all(math.isfinite(value) for value in values) or axial_depth_m < 0 or fx <= 0 or fy <= 0:
+        raise CanaryBuildError("depth conversion inputs must be finite with positive focal lengths")
+    x = (u_px - cx) / fx
+    y = (v_px - cy) / fy
+    return axial_depth_m * math.sqrt(1.0 + x * x + y * y)
+
+
+def _blender_c2w_to_opencv(matrix: Matrix4) -> Matrix4:
+    converted = []
+    for row in matrix:
+        converted_row = []
+        for column, component in enumerate(row):
+            value = -component if column in {1, 2} else component
+            converted_row.append(0.0 if value == 0.0 else value)
+        converted.append(tuple(converted_row))
+    return tuple(converted)  # type: ignore[return-value]
 
 
 def _sha256_file(path: Path) -> str:
@@ -1206,6 +1553,10 @@ def _flush_directory(path: Path) -> None:
 
 def _ensure_real_directory_tree(target: Path, *, repo_root: Path) -> Path:
     target = Path(target).absolute()
+    repo_root = _require_real_directory(
+        Path(repo_root).absolute(),
+        label="managed root",
+    )
     try:
         relative = target.relative_to(repo_root)
     except ValueError as exc:
@@ -1487,20 +1838,27 @@ def _move_directory_noreplace(source: Path, destination: Path) -> None:
         raise CanaryBuildError(f"cannot publish verified canary: {exc}") from exc
 
 
-def _cleanup_owned_directory(path: Path, *, work_root: Path, prefix: str) -> None:
-    if not path.exists() and not _is_linklike(path):
-        return
-    if (
-        path.parent != work_root
-        or not path.name.startswith(prefix)
-        or _is_linklike(path)
-        or not path.is_dir()
-    ):
-        return
+def _cleanup_owned_directory(
+    path: Path,
+    *,
+    work_root: Path,
+    expected_name: str,
+) -> None:
     try:
-        shutil.rmtree(path)
-        _flush_directory(work_root)
-    except OSError:
+        real_work_root = _require_real_directory(work_root, label="cleanup work root")
+        candidate = Path(path).absolute()
+        if (
+            not expected_name
+            or Path(expected_name).name != expected_name
+            or not _same_path(candidate, real_work_root / expected_name)
+            or not candidate.exists()
+            or _is_linklike(candidate)
+            or not candidate.is_dir()
+        ):
+            return
+        shutil.rmtree(candidate)
+        _flush_directory(real_work_root)
+    except (CanaryBuildError, OSError, RuntimeError):
         return
 
 
@@ -1598,11 +1956,748 @@ def run_canary_build(
             _cleanup_owned_directory(
                 staging,
                 work_root=active_work_root,
-                prefix=".staging-",
+                expected_name=staging.name,
             )
         if invocation_root is not None:
             _cleanup_owned_directory(
                 invocation_root,
                 work_root=active_work_root,
-                prefix=".invocation-",
+                expected_name=invocation_root.name,
             )
+
+
+def _read_stable_metadata(path: Path, *, label: str) -> bytes:
+    path = Path(path).absolute()
+    parent = _require_real_directory(path.parent, label=f"{label} directory")
+    if path.parent != parent or _is_linklike(path) or not path.is_file():
+        raise CanaryBuildError(f"{label} is missing or redirected")
+    before = path.stat()
+    if before.st_size <= 0 or before.st_size > MAX_RENDER_METADATA_BYTES:
+        raise CanaryBuildError(f"{label} size is invalid")
+    with path.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if _stat_signature(before) != _stat_signature(opened):
+            raise CanaryBuildError(f"{label} changed before bounded read")
+        raw = stream.read(MAX_RENDER_METADATA_BYTES + 1)
+        after_open = os.fstat(stream.fileno())
+    after = path.stat()
+    if (
+        len(raw) != before.st_size
+        or len(raw) > MAX_RENDER_METADATA_BYTES
+        or _stat_signature(opened) != _stat_signature(after_open)
+        or _stat_signature(before) != _stat_signature(after)
+    ):
+        raise CanaryBuildError(f"{label} changed during bounded read")
+    return raw
+
+
+def load_render_journal(path: Path) -> RenderJournal:
+    try:
+        raw = _read_stable_metadata(path, label="render journal")
+        parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+        if _contains_private_path(parsed):
+            raise CanaryBuildError("render journal contains a private path or username")
+        journal = RenderJournal.model_validate_json(raw)
+        if raw != canonical_render_journal_bytes(journal):
+            raise CanaryBuildError("render journal must be canonical JSON")
+        digest = hashlib.sha256(
+            canonical_render_journal_bytes(journal, exclude_sha256=True),
+        ).hexdigest()
+        if journal.journal_sha256 != digest:
+            raise CanaryBuildError("render journal SHA-256 is invalid")
+        return journal
+    except CanaryBuildError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
+        raise CanaryBuildError(f"render journal validation failed: {exc}") from exc
+
+
+def _load_frame_report(path: Path) -> RenderFrameReport:
+    try:
+        raw = _read_stable_metadata(path, label="render frame report")
+        parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+        if _contains_private_path(parsed):
+            raise CanaryBuildError("render frame report contains a private path or username")
+        report = RenderFrameReport.model_validate_json(raw)
+        if raw != canonical_render_frame_report_bytes(report):
+            raise CanaryBuildError("render frame report must be canonical JSON")
+        expected = hashlib.sha256(
+            canonical_render_frame_report_bytes(report, exclude_sha256=True),
+        ).hexdigest()
+        if report.content_sha256 != expected:
+            raise CanaryBuildError("render frame report SHA-256 is invalid")
+        return report
+    except CanaryBuildError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
+        raise CanaryBuildError(f"render frame report validation failed: {exc}") from exc
+
+
+def _load_camera_metadata(path: Path) -> CameraFrameMetadata:
+    try:
+        raw = _read_stable_metadata(path, label="camera metadata")
+        json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+        metadata = CameraFrameMetadata.model_validate_json(raw)
+        if raw != canonical_camera_metadata_bytes(metadata):
+            raise CanaryBuildError("camera metadata must be canonical JSON")
+        return metadata
+    except CanaryBuildError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
+        raise CanaryBuildError(f"camera metadata validation failed: {exc}") from exc
+
+
+def _seal_render_journal(journal: RenderJournal) -> RenderJournal:
+    digest = hashlib.sha256(
+        canonical_render_journal_bytes(journal, exclude_sha256=True),
+    ).hexdigest()
+    return journal.model_copy(update={"journal_sha256": digest})
+
+
+def _is_retryable_windows_replace_error(exc: OSError) -> bool:
+    """Return whether *exc* is a bounded Windows sharing/access collision."""
+
+    error_code = getattr(exc, "winerror", None)
+    if error_code is None and os.name == "nt":
+        error_code = exc.errno
+    return os.name == "nt" and error_code in WINDOWS_SHARING_VIOLATIONS
+
+
+def _write_render_journal(path: Path, journal: RenderJournal) -> None:
+    parent = _require_real_directory(path.parent, label="render root")
+    if path.parent != parent or _is_linklike(path):
+        raise CanaryBuildError("render journal path is redirected")
+    sealed = _seal_render_journal(journal)
+    temporary = parent / f".render-journal-{uuid.uuid4().hex}.tmp"
+    try:
+        _write_new_file(temporary, canonical_render_journal_bytes(sealed))
+        for attempt in range(1, JOURNAL_REPLACE_ATTEMPTS + 1):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                if (
+                    not _is_retryable_windows_replace_error(exc)
+                    or attempt == JOURNAL_REPLACE_ATTEMPTS
+                ):
+                    raise
+                time.sleep(0.025 * attempt)
+        _flush_file(path)
+        _flush_directory(parent)
+    except OSError as exc:
+        raise CanaryBuildError(f"cannot durably update render journal: {exc}") from exc
+    finally:
+        try:
+            if temporary.exists() and not _is_linklike(temporary):
+                temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _replace_frame_record(
+    journal: RenderJournal,
+    camera_id: str,
+    record: RenderFrameRecord,
+) -> RenderJournal:
+    return _seal_render_journal(
+        journal.model_copy(
+            update={
+                "frames": tuple(
+                    record if item.camera_id == camera_id else item for item in journal.frames
+                ),
+            },
+        ),
+    )
+
+
+def _render_artifact_paths(render_root: Path, camera_id: str) -> tuple[Path, ...]:
+    return tuple(render_root / Path(path) for _, path in _expected_render_artifacts(camera_id))
+
+
+def _preflight_render_artifact_paths(render_root: Path, camera_id: str) -> tuple[Path, ...]:
+    render_root = _require_real_directory(render_root, label="render root")
+    paths = _render_artifact_paths(render_root, camera_id)
+    for layer in {path.parent for path in paths}:
+        if layer.parent != render_root:
+            raise CanaryBuildError("render artifact layer is not a direct child of render root")
+        if not layer.exists() and not _is_linklike(layer):
+            continue
+        validated = _require_real_directory(layer, label="render artifact layer")
+        if validated != layer or validated.parent != render_root:
+            raise CanaryBuildError("render artifact layer is redirected")
+    return paths
+
+
+def _frame_has_any_output(render_root: Path, camera_id: str) -> bool:
+    return any(
+        path.exists() or _is_linklike(path)
+        for path in _preflight_render_artifact_paths(render_root, camera_id)
+    )
+
+
+def _quarantine_frame_outputs(render_root: Path, camera_id: str) -> None:
+    paths = _preflight_render_artifact_paths(render_root, camera_id)
+    sources = []
+    for source in paths:
+        if not source.exists() and not _is_linklike(source):
+            continue
+        if _is_linklike(source) or not source.is_file():
+            raise CanaryBuildError("render output is redirected or irregular")
+        sources.append(source)
+    if not sources:
+        return
+    quarantine_root = _ensure_real_directory_tree(
+        render_root / ".q",
+        repo_root=render_root,
+    )
+    nonce = uuid.uuid4().hex[:12]
+    staging = quarantine_root / f".q-{nonce}"
+    destination = quarantine_root / f"{camera_id}-{nonce}"
+    staging.mkdir(exist_ok=False)
+    _flush_directory(quarantine_root)
+    try:
+        for source in sources:
+            layer = staging / source.parent.name
+            layer.mkdir(exist_ok=False)
+            _flush_directory(staging)
+            _move_directory_noreplace(source, layer / source.name)
+        _flush_directory(staging)
+        _move_directory_noreplace(staging, destination)
+    except Exception:
+        if staging.exists() and not _is_linklike(staging):
+            try:
+                _flush_directory(staging)
+            except Exception:
+                pass
+        raise
+
+
+def _png_contract(path: Path, *, kind: str) -> None:
+    with path.open("rb") as stream:
+        header = stream.read(33)
+    if len(header) < 33 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        raise CanaryBuildError(f"rendered {kind} output is not a PNG")
+    width, height, bit_depth, color_type = struct.unpack(">IIBB", header[16:26])
+    expected = {
+        "rgb": (8, 2),
+        "instance-mask": (16, 0),
+        "semantic-mask": (8, 0),
+    }[kind]
+    if (width, height) != (1024, 576) or (bit_depth, color_type) != expected:
+        raise CanaryBuildError(f"rendered {kind} PNG contract is invalid")
+
+
+def _validate_frame_artifact_file(path: Path, *, kind: str) -> tuple[str, int]:
+    digest, size = _sha256_stable_artifact(path)
+    if kind in {"rgb", "instance-mask", "semantic-mask"}:
+        _png_contract(path, kind=kind)
+    elif kind in {"depth", "normal"}:
+        with path.open("rb") as stream:
+            if stream.read(4) != b"\x76\x2f\x31\x01":
+                raise CanaryBuildError(f"rendered {kind} output is not OpenEXR")
+    return digest, size
+
+
+def _validate_camera_metadata(
+    metadata: CameraFrameMetadata,
+    request: RenderFrameRequest,
+) -> None:
+    camera = request.camera
+    if (
+        metadata.build_id != request.build_id
+        or metadata.render_id != request.render_id
+        or metadata.blender_executable_sha256 != request.blender_executable_sha256
+        or metadata.camera_id != camera.camera_id
+        or metadata.category != camera.category
+        or metadata.split != camera.split
+        or metadata.intrinsics != camera.intrinsics.model_dump(mode="json")
+        or metadata.requested_c2w_opencv != camera.c2w_opencv
+        or metadata.requested_c2w_blender != camera.c2w_blender
+        or metadata.measured_c2w_blender != request.measured_c2w_blender
+        or metadata.measured_c2w_opencv != _blender_c2w_to_opencv(request.measured_c2w_blender)
+        or metadata.object_registry_sha256 != request.object_registry_sha256
+        or metadata.semantic_registry != request.semantic_registry
+        or metadata.settings_sha256
+        != hashlib.sha256(
+            _canonical_json_bytes(request.settings.model_dump(mode="json")),
+        ).hexdigest()
+    ):
+        raise CanaryBuildError("camera metadata does not match the immutable render request")
+
+
+def _validate_frame_staging(
+    staging: Path,
+    request: RenderFrameRequest,
+) -> tuple[RenderFrameReport, str]:
+    staging = _require_real_directory(staging, label="render frame staging")
+    report_path = staging / "frame-report.json"
+    if not report_path.is_file() or _is_linklike(report_path):
+        raise CanaryBuildError("render completed without a trusted frame report")
+    report = _load_frame_report(report_path)
+    if (
+        report.build_id != request.build_id
+        or report.render_id != request.render_id
+        or report.camera_id != request.camera.camera_id
+        or report.blender_executable_sha256 != request.blender_executable_sha256
+    ):
+        raise CanaryBuildError("render frame report does not match its immutable request")
+    expected_settings_sha256 = hashlib.sha256(
+        _canonical_json_bytes(request.settings.model_dump(mode="json")),
+    ).hexdigest()
+    if report.settings_sha256 != expected_settings_sha256:
+        raise CanaryBuildError("render frame report settings fingerprint is invalid")
+    expected_entries = {
+        "frame-report.json",
+        *(path.split("/", 1)[0] for _, path in _expected_render_artifacts(report.camera_id)),
+    }
+    if {path.name for path in staging.iterdir()} != expected_entries:
+        raise CanaryBuildError("render frame staging is incomplete or contains unregistered output")
+    for artifact, (kind, portable_path) in zip(
+        report.artifacts,
+        _expected_render_artifacts(report.camera_id),
+        strict=True,
+    ):
+        path = staging / Path(portable_path)
+        if path.parent.parent != staging or _is_linklike(path.parent):
+            raise CanaryBuildError("render artifact path is redirected")
+        digest, size = _validate_frame_artifact_file(path, kind=kind)
+        if artifact.sha256 != digest or artifact.size_bytes != size:
+            raise CanaryBuildError("render frame artifact digest or size mismatch")
+    camera_path = staging / f"cameras/{report.camera_id}.json"
+    _validate_camera_metadata(_load_camera_metadata(camera_path), request)
+    return report, _sha256_file(report_path)
+
+
+def _verify_published_frame(
+    render_root: Path,
+    frame: RenderFrameRecord,
+) -> None:
+    if frame.state != "verified" or len(frame.artifacts) != 6:
+        raise CanaryBuildError("render journal frame is not verified")
+    paths = _preflight_render_artifact_paths(render_root, frame.camera_id)
+    for artifact, (kind, portable_path), path in zip(
+        frame.artifacts,
+        _expected_render_artifacts(frame.camera_id),
+        paths,
+        strict=True,
+    ):
+        if artifact.kind != kind or artifact.path != portable_path:
+            raise CanaryBuildError("render journal artifact contract is invalid")
+        digest, size = _validate_frame_artifact_file(path, kind=kind)
+        if digest != artifact.sha256 or size != artifact.size_bytes:
+            raise CanaryBuildError("verified render frame hash mismatch")
+
+
+def _durably_flush_frame_staging(staging: Path) -> None:
+    for path in sorted(staging.rglob("*"), key=lambda item: str(item)):
+        if _is_linklike(path):
+            raise CanaryBuildError("render frame staging contains a redirected entry")
+        if path.is_file():
+            _flush_file(path)
+    for path in sorted(
+        (item for item in staging.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        _flush_directory(path)
+    _flush_directory(staging)
+
+
+def _publish_frame(staging: Path, render_root: Path, report: RenderFrameReport) -> None:
+    for artifact in report.artifacts:
+        source = staging / Path(artifact.path)
+        destination = render_root / Path(artifact.path)
+        _ensure_real_directory_tree(destination.parent, repo_root=render_root)
+        if destination.exists() or _is_linklike(destination):
+            raise CanaryBuildError("render frame destination must start absent")
+        _move_directory_noreplace(source, destination)
+        _flush_file(destination)
+        _flush_directory(destination.parent)
+    _flush_directory(render_root)
+
+
+def _sanitize_render_error(exc: BaseException) -> str:
+    message = re.sub(r"[A-Za-z]:[\\/][^\r\n]*", "<private-path>", str(exc)).strip()
+    message = message.replace(".nantai-studio", "<private>")
+    return (message or type(exc).__name__)[:512]
+
+
+def _run_blender_render_process(
+    *,
+    repo_root: Path,
+    executable: Path,
+    blend_path: Path,
+    request_path: Path,
+    staging: Path,
+    invocation_root: Path,
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    argv = [
+        str(executable),
+        "--background",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--python-exit-code",
+        "17",
+        str(blend_path),
+        "--python",
+        "scripts/blender/render_synthetic_village.py",
+        "--",
+        "--request",
+        str(request_path),
+        "--staging",
+        str(staging),
+    ]
+    environment = _minimum_blender_environment(invocation_root)
+    try:
+        timeout_error = None
+        with _BoundedPipeCapture("stdout") as stdout, _BoundedPipeCapture("stderr") as stderr:
+            try:
+                completed = subprocess.run(
+                    argv,
+                    check=False,
+                    shell=False,
+                    cwd=str(repo_root),
+                    env=environment,
+                    timeout=timeout_seconds,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout.writer,
+                    stderr=stderr.writer,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timeout_error = exc
+                completed = None
+        if timeout_error is not None:
+            raise CanaryBuildError(
+                f"Blender render exceeded the {timeout_seconds}-second timeout",
+            ) from timeout_error
+        if completed is None:
+            raise CanaryBuildError("Blender render did not return a completion status")
+        return completed.returncode, stdout.text(), stderr.text()
+    except CanaryBuildError:
+        raise
+    except OSError as exc:
+        raise CanaryBuildError(f"cannot launch verified Blender renderer: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class CanaryRenderResult:
+    render_root: Path
+    journal_path: Path
+    render_id: str
+    rendered_count: int
+    reused_count: int
+    stdout: str
+    stderr: str
+
+
+def _render_id_payload(
+    *,
+    report: BuildReport,
+    blender_executable_sha256: str,
+    renderer_script_sha256: str,
+    blend_sha256: str,
+    build_report_sha256: str,
+    object_registry_sha256: str,
+    settings: RenderSettings,
+) -> dict[str, object]:
+    return {
+        "schema_version": RENDER_JOURNAL_SCHEMA,
+        "build_id": report.build_id,
+        "blender_executable_sha256": blender_executable_sha256,
+        "renderer_script_sha256": renderer_script_sha256,
+        "blend_sha256": blend_sha256,
+        "build_report_sha256": build_report_sha256,
+        "object_registry_sha256": object_registry_sha256,
+        "settings": settings,
+        "camera_ids": RENDER_CAMERA_IDS,
+        "camera_plan_sha256": report.source_hashes.camera_plan_sha256,
+    }
+
+
+def _normalize_render_camera_ids(camera_ids: object) -> tuple[str, ...]:
+    if camera_ids is None:
+        return RENDER_CAMERA_IDS
+    if (
+        type(camera_ids) is not tuple
+        or not camera_ids
+        or any(type(item) is not str for item in camera_ids)
+        or len(set(camera_ids)) != len(camera_ids)
+        or any(item not in RENDER_CAMERA_IDS for item in camera_ids)
+    ):
+        raise CanaryBuildError("selected render camera IDs must be a unique canonical tuple")
+    selected = set(camera_ids)
+    return tuple(item for item in RENDER_CAMERA_IDS if item in selected)
+
+
+def run_canary_render(
+    *,
+    repo_root: Path = ROOT,
+    build_directory: Path | None = None,
+    camera_ids: tuple[str, ...] | None = None,
+    timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+) -> CanaryRenderResult:
+    """Resume, verify, and fail-closed publish the strict six-layer canary frames."""
+
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or not 1 <= timeout_seconds <= 24 * 60 * 60
+    ):
+        raise CanaryBuildError("render timeout must be an integer from 1 to 86400 seconds")
+    selected_ids = _normalize_render_camera_ids(camera_ids)
+    repo_root = _require_real_directory(Path(repo_root).absolute(), label="repository root")
+    scene = build_scene_plan()
+    build_request = build_canary_request(
+        repo_root=repo_root,
+        scene_plan=scene,
+        camera_plan=build_camera_plan(scene),
+        visual_pack_root=repo_root / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources",
+    )
+    selected_build = (
+        Path(build_directory).absolute()
+        if build_directory is not None
+        else repo_root
+        / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
+        / build_request.build_id
+    )
+    selected_build = _require_real_directory(selected_build, label="canary build directory")
+    private_root = repo_root / ".nantai-studio"
+    try:
+        selected_build.relative_to(private_root)
+    except ValueError as exc:
+        raise CanaryBuildError("canary build directory must remain private") from exc
+    if selected_build.name != build_request.build_id:
+        raise CanaryBuildError("canary build directory name does not match the canonical build ID")
+    report_path = selected_build / "build-report.json"
+    report = load_build_report(report_path)
+    verify_build_report(report, request=build_request, staging=selected_build)
+
+    renderer_script = repo_root / "scripts/blender/render_synthetic_village.py"
+    blender_executable = repo_root / "third/blender/blender.exe"
+    blender_executable_snapshot = _snapshot_regular_file(blender_executable)
+    if blender_executable_snapshot.sha256 != report.tool_identity.executable_sha256:
+        raise CanaryBuildError("Blender executable digest does not match verified tool evidence")
+    renderer_snapshot = _snapshot_regular_file(renderer_script)
+    report_snapshot = _snapshot_regular_file(report_path)
+    blend_record = next(item for item in report.artifacts if item.name == "village-canary.blend")
+    blend_path = selected_build / blend_record.name
+    blend_snapshot = _snapshot_regular_file(blend_path)
+    if blend_snapshot.sha256 != blend_record.sha256:
+        raise CanaryBuildError("formal canary blend input hash does not match its build report")
+    build_snapshots = tuple(
+        _snapshot_regular_file(selected_build / item.name) for item in report.artifacts
+    )
+    immutable_snapshots = (
+        blender_executable_snapshot,
+        renderer_snapshot,
+        report_snapshot,
+        *build_snapshots,
+    )
+    object_registry_sha256 = hashlib.sha256(
+        _canonical_json_bytes(
+            [item.model_dump(mode="json") for item in report.object_registry],
+        ),
+    ).hexdigest()
+    settings = RenderSettings()
+    render_id = hashlib.sha256(
+        _canonical_json_bytes(
+            _render_id_payload(
+                report=report,
+                blender_executable_sha256=blender_executable_snapshot.sha256,
+                renderer_script_sha256=renderer_snapshot.sha256,
+                blend_sha256=blend_snapshot.sha256,
+                build_report_sha256=report_snapshot.sha256,
+                object_registry_sha256=object_registry_sha256,
+                settings=settings,
+            ),
+        ),
+    ).hexdigest()
+    render_root = _ensure_real_directory_tree(selected_build / "renders", repo_root=repo_root)
+    journal_path = render_root / "render-journal.json"
+    rendered_count = 0
+    reused_count = 0
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    with ProjectFileLock(render_root / ".canary-render.lock", role="writer"):
+        if journal_path.exists() or _is_linklike(journal_path):
+            journal = load_render_journal(journal_path)
+            immutable = (
+                journal.render_id,
+                journal.build_id,
+                journal.blender_executable_sha256,
+                journal.renderer_script_sha256,
+                journal.blend_sha256,
+                journal.build_report_sha256,
+                journal.object_registry_sha256,
+                journal.settings,
+            )
+            expected = (
+                render_id,
+                report.build_id,
+                blender_executable_snapshot.sha256,
+                renderer_snapshot.sha256,
+                blend_snapshot.sha256,
+                report_snapshot.sha256,
+                object_registry_sha256,
+                settings,
+            )
+            if immutable != expected:
+                raise CanaryBuildError(
+                    "existing render journal belongs to different immutable inputs",
+                )
+        else:
+            journal = _seal_render_journal(
+                RenderJournal(
+                    render_id=render_id,
+                    journal_sha256="0" * 64,
+                    build_id=report.build_id,
+                    blender_executable_sha256=blender_executable_snapshot.sha256,
+                    renderer_script_sha256=renderer_snapshot.sha256,
+                    blend_sha256=blend_snapshot.sha256,
+                    build_report_sha256=report_snapshot.sha256,
+                    object_registry_sha256=object_registry_sha256,
+                    settings=settings,
+                    frames=tuple(
+                        RenderFrameRecord(camera_id=camera_id, state="planned")
+                        for camera_id in RENDER_CAMERA_IDS
+                    ),
+                ),
+            )
+            _write_render_journal(journal_path, journal)
+
+        cameras = {item.camera_id: item for item in build_request.camera_plan.cameras}
+        measured = {item.camera_id: item.measured_c2w_blender for item in report.camera_registry}
+        for camera_id in selected_ids:
+            stage: Literal["prepare", "invoke", "validate", "publish"] = "prepare"
+            nonce = uuid.uuid4().hex[:12]
+            temporary_root = selected_build.parent
+            invocation_root = temporary_root / f".ri-{nonce}"
+            staging = temporary_root / f".rs-{nonce}"
+            runtime_work = staging.with_name(f".{staging.name}.tmp-{render_id[:12]}")
+            try:
+                frame = next(item for item in journal.frames if item.camera_id == camera_id)
+                if frame.state == "verified":
+                    try:
+                        _verify_published_frame(render_root, frame)
+                        reused_count += 1
+                        continue
+                    except CanaryBuildError:
+                        _quarantine_frame_outputs(render_root, camera_id)
+                        frame = RenderFrameRecord(camera_id=camera_id, state="rendering")
+                        journal = _replace_frame_record(journal, camera_id, frame)
+                        _write_render_journal(journal_path, journal)
+                else:
+                    has_output = _frame_has_any_output(render_root, camera_id)
+                    if has_output:
+                        _quarantine_frame_outputs(render_root, camera_id)
+                    frame = RenderFrameRecord(camera_id=camera_id, state="rendering")
+                    journal = _replace_frame_record(journal, camera_id, frame)
+                    _write_render_journal(journal_path, journal)
+
+                invocation_root.mkdir(exist_ok=False)
+                _flush_directory(temporary_root)
+                request = RenderFrameRequest(
+                    render_id=render_id,
+                    build_id=report.build_id,
+                    blender_executable_sha256=blender_executable_snapshot.sha256,
+                    renderer_script_sha256=renderer_snapshot.sha256,
+                    blend_sha256=blend_snapshot.sha256,
+                    build_report_sha256=report_snapshot.sha256,
+                    object_registry_sha256=object_registry_sha256,
+                    settings=settings,
+                    camera=cameras[camera_id],
+                    measured_c2w_blender=measured[camera_id],
+                    object_registry=report.object_registry,
+                    auxiliary_registry=report.auxiliary_registry,
+                    semantic_registry=report.semantic_registry,
+                )
+                request_path = invocation_root / "render-request.json"
+                _write_new_file(request_path, canonical_render_request_bytes(request))
+                request_snapshot = _snapshot_regular_file(request_path)
+                stage = "invoke"
+                try:
+                    returncode, stdout, stderr = _run_blender_render_process(
+                        repo_root=repo_root,
+                        executable=blender_executable_snapshot.path,
+                        blend_path=blend_path,
+                        request_path=request_path,
+                        staging=staging,
+                        invocation_root=invocation_root,
+                        timeout_seconds=timeout_seconds,
+                    )
+                finally:
+                    _verify_snapshots_unchanged((*immutable_snapshots, request_snapshot))
+                stdout_parts.append(stdout)
+                stderr_parts.append(stderr)
+                if returncode != 0:
+                    runtime_error = next(
+                        (
+                            line.strip()
+                            for line in reversed((stdout + "\n" + stderr).splitlines())
+                            if line.strip().startswith("NANTAI_RENDER_ERROR ")
+                        ),
+                        "",
+                    )
+                    suffix = (
+                        f": {_sanitize_render_error(RuntimeError(runtime_error))}"
+                        if runtime_error
+                        else ""
+                    )
+                    raise CanaryBuildError(
+                        f"Blender render failed with exit code {returncode}{suffix}",
+                    )
+                stage = "validate"
+                frame_report, report_sha256 = _validate_frame_staging(staging, request)
+                _durably_flush_frame_staging(staging)
+                stage = "publish"
+                _publish_frame(staging, render_root, frame_report)
+                verified = RenderFrameRecord(
+                    camera_id=camera_id,
+                    state="verified",
+                    artifacts=frame_report.artifacts,
+                    runtime_report_sha256=report_sha256,
+                    statistics=frame_report.statistics,
+                )
+                _verify_published_frame(render_root, verified)
+                _verify_snapshots_unchanged(immutable_snapshots)
+                journal = _replace_frame_record(journal, camera_id, verified)
+                _write_render_journal(journal_path, journal)
+                rendered_count += 1
+            except Exception as exc:
+                error = exc if isinstance(exc, CanaryBuildError) else CanaryBuildError(str(exc))
+                failed = RenderFrameRecord(
+                    camera_id=camera_id,
+                    state="failed",
+                    error=RenderFailure(stage=stage, message=_sanitize_render_error(error)),
+                )
+                journal = _replace_frame_record(journal, camera_id, failed)
+                _write_render_journal(journal_path, journal)
+                if error is exc:
+                    raise
+                raise error from exc
+            finally:
+                _cleanup_owned_directory(
+                    runtime_work,
+                    work_root=temporary_root,
+                    expected_name=runtime_work.name,
+                )
+                _cleanup_owned_directory(
+                    staging,
+                    work_root=temporary_root,
+                    expected_name=staging.name,
+                )
+                _cleanup_owned_directory(
+                    invocation_root,
+                    work_root=temporary_root,
+                    expected_name=invocation_root.name,
+                )
+    return CanaryRenderResult(
+        render_root=render_root,
+        journal_path=journal_path,
+        render_id=render_id,
+        rendered_count=rendered_count,
+        reused_count=reused_count,
+        stdout="".join(stdout_parts),
+        stderr="".join(stderr_parts),
+    )

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import struct
 import subprocess
+import uuid
+import zlib
 from pathlib import Path
 
 import pytest
@@ -10,6 +15,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BLENDER = ROOT / "third" / "blender" / "blender.exe"
 BUILDER = ROOT / "scripts" / "blender" / "build_synthetic_village.py"
+RENDERER = ROOT / "scripts" / "blender" / "render_synthetic_village.py"
+FORMAL_BLEND = (
+    ROOT
+    / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
+    / "344e643c81753e986d8945ca2b4a8713f26efedc755ab2055bd4235b1c656d1b"
+    / "village-canary.blend"
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -45,6 +57,601 @@ def _run_builder(
         errors="replace",
         timeout=timeout,
     )
+
+
+def _run_renderer(
+    blend_path: Path,
+    *runtime_args: str,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            str(BLENDER),
+            "--background",
+            "--factory-startup",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "17",
+            str(blend_path),
+            "--python",
+            str(RENDERER),
+            "--",
+            *runtime_args,
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def _run_renderer_probe(
+    tmp_path: Path,
+    source: str,
+    *,
+    blend_path: Path | None = None,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess[str]:
+    probe_path = tmp_path / "renderer-probe.py"
+    probe_path.write_text(source, encoding="utf-8")
+    command = [
+        str(BLENDER),
+        "--background",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--python-exit-code",
+        "17",
+    ]
+    if blend_path is not None:
+        command.append(str(blend_path))
+    command.extend(("--python", str(probe_path)))
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def _probe_prelude() -> str:
+    return (
+        f"import runpy\nns = runpy.run_path({str(RENDERER)!r}, run_name='nantai_renderer_probe')\n"
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _decode_canonical_png(path: Path) -> tuple[int, int, int, int, bytes]:
+    raw = path.read_bytes()
+    assert raw.startswith(b"\x89PNG\r\n\x1a\n")
+    offset = 8
+    chunks: list[tuple[bytes, bytes]] = []
+    while offset < len(raw):
+        length = struct.unpack_from(">I", raw, offset)[0]
+        kind = raw[offset + 4 : offset + 8]
+        payload = raw[offset + 8 : offset + 8 + length]
+        stored_crc = struct.unpack_from(">I", raw, offset + 8 + length)[0]
+        assert stored_crc == zlib.crc32(kind + payload) & 0xFFFFFFFF
+        chunks.append((kind, payload))
+        offset += 12 + length
+    assert offset == len(raw)
+    assert [kind for kind, _payload in chunks] == [b"IHDR", b"IDAT", b"IEND"]
+    width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
+        ">IIBBBBB",
+        chunks[0][1],
+    )
+    assert (compression, filtering, interlace) == (0, 0, 0)
+    channels = {0: 1, 2: 3}[color_type]
+    row_bytes = width * channels * (bit_depth // 8)
+    rows = zlib.decompress(chunks[1][1])
+    assert len(rows) == height * (row_bytes + 1)
+    pixels = bytearray()
+    for row in range(height):
+        start = row * (row_bytes + 1)
+        assert rows[start] == 0
+        pixels.extend(rows[start + 1 : start + 1 + row_bytes])
+    return width, height, bit_depth, color_type, bytes(pixels)
+
+
+def _formal_render_request():
+    import pipeline.synthetic_village.canary as canary
+    from pipeline.synthetic_village.camera_plan import build_camera_plan
+    from pipeline.synthetic_village.scene_plan import build_scene_plan
+
+    build_directory = FORMAL_BLEND.parent
+    report_path = build_directory / "build-report.json"
+    scene = build_scene_plan()
+    build_request = canary.build_canary_request(
+        repo_root=ROOT,
+        scene_plan=scene,
+        camera_plan=build_camera_plan(scene),
+        visual_pack_root=ROOT / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources",
+    )
+    report = canary.load_build_report(report_path)
+    canary.verify_build_report(report, request=build_request, staging=build_directory)
+    camera = build_request.camera_plan.cameras[0]
+    measured = next(
+        row.measured_c2w_blender
+        for row in report.camera_registry
+        if row.camera_id == camera.camera_id
+    )
+    executable_sha256 = _sha256(BLENDER)
+    renderer_sha256 = _sha256(RENDERER)
+    blend_sha256 = _sha256(FORMAL_BLEND)
+    report_sha256 = _sha256(report_path)
+    registry_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(  # noqa: SLF001 - contract-level integration test
+            [row.model_dump(mode="json") for row in report.object_registry],
+        ),
+    ).hexdigest()
+    settings = canary.RenderSettings()
+    render_id = hashlib.sha256(
+        canary._canonical_json_bytes(  # noqa: SLF001 - mirrors the production host
+            canary._render_id_payload(  # noqa: SLF001
+                report=report,
+                blender_executable_sha256=executable_sha256,
+                renderer_script_sha256=renderer_sha256,
+                blend_sha256=blend_sha256,
+                build_report_sha256=report_sha256,
+                object_registry_sha256=registry_sha256,
+                settings=settings,
+            ),
+        ),
+    ).hexdigest()
+    return canary.RenderFrameRequest(
+        render_id=render_id,
+        build_id=report.build_id,
+        blender_executable_sha256=executable_sha256,
+        renderer_script_sha256=renderer_sha256,
+        blend_sha256=blend_sha256,
+        build_report_sha256=report_sha256,
+        object_registry_sha256=registry_sha256,
+        settings=settings,
+        camera=camera,
+        measured_c2w_blender=measured,
+        object_registry=report.object_registry,
+        auxiliary_registry=report.auxiliary_registry,
+        semantic_registry=report.semantic_registry,
+    )
+
+
+def _read_exr_attributes(path: Path) -> dict[str, tuple[str, bytes]]:
+    raw = path.read_bytes()
+    assert raw[:4] == b"\x76\x2f\x31\x01"
+    offset = 8
+    attributes: dict[str, tuple[str, bytes]] = {}
+    while True:
+        name_end = raw.index(b"\0", offset)
+        if name_end == offset:
+            break
+        name = raw[offset:name_end].decode("ascii")
+        offset = name_end + 1
+        type_end = raw.index(b"\0", offset)
+        attribute_type = raw[offset:type_end].decode("ascii")
+        offset = type_end + 1
+        size = struct.unpack_from("<I", raw, offset)[0]
+        offset += 4
+        value = raw[offset : offset + size]
+        assert len(value) == size
+        offset += size
+        attributes[name] = (attribute_type, value)
+    return attributes
+
+
+def test_runtime_redecodes_written_masks_and_rejects_bad_crc(tmp_path: Path) -> None:
+    output = tmp_path / "mask.png"
+    result = _run_renderer_probe(
+        tmp_path,
+        _probe_prelude()
+        + "g = ns['_write_grayscale_png'].__globals__\n"
+        + "g['WIDTH'] = 2\n"
+        + "g['HEIGHT'] = 2\n"
+        + "g['PIXELS'] = 4\n"
+        + f"path = __import__('pathlib').Path({str(output)!r})\n"
+        + "values = [0, 1, 255, 65535]\n"
+        + "decoded = ns['_write_grayscale_png'](path, values, 16)\n"
+        + "assert decoded == values\n"
+        + "raw = bytearray(path.read_bytes())\n"
+        + "idat = raw.index(b'IDAT')\n"
+        + "length = int.from_bytes(raw[idat - 4:idat], 'big')\n"
+        + "raw[idat + 4 + length] ^= 1\n"
+        + "path.write_bytes(raw)\n"
+        + "try:\n"
+        + "    ns['_decode_canonical_png'](path, 16, 0, 1, 'instance mask')\n"
+        + "except ns['RuntimeRenderError'] as exc:\n"
+        + "    assert 'CRC' in str(exc)\n"
+        + "else:\n"
+        + "    raise AssertionError('corrupt PNG CRC was accepted')\n"
+        + "print('NANTAI_MASK_REDECODE_OK', flush=True)\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_MASK_REDECODE_OK" in result.stdout
+
+
+def test_runtime_writes_canonical_rgb_and_exr_metadata(tmp_path: Path) -> None:
+    rgb = tmp_path / "rgb.png"
+    exr = tmp_path / "depth.exr"
+    result = _run_renderer_probe(
+        tmp_path,
+        _probe_prelude()
+        + "g = ns['_write_float_exr'].__globals__\n"
+        + "g['WIDTH'] = 2\n"
+        + "g['HEIGHT'] = 2\n"
+        + "g['PIXELS'] = 4\n"
+        + f"rgb = __import__('pathlib').Path({str(rgb)!r})\n"
+        + f"exr = __import__('pathlib').Path({str(exr)!r})\n"
+        + "pixels = bytes(range(12))\n"
+        + "decoded = ns['_write_rgb_png'](rgb, pixels)\n"
+        + "assert decoded == pixels\n"
+        + "raw = rgb.read_bytes()\n"
+        + "assert b'Date' not in raw and b'C:\\\\Users\\\\' not in raw\n"
+        + "values = __import__('array').array('f', [1.0, 2.0, 3.0, 4.0])\n"
+        + "decoded_exr = ns['_write_float_exr'](exr, values, ('V',), 'depth')\n"
+        + "assert list(decoded_exr) == [1.0, 2.0, 3.0, 4.0]\n"
+        + "image_input = ns['oiio'].ImageInput.open(str(exr))\n"
+        + "assert image_input is not None\n"
+        + "try:\n"
+        + "    date_time = image_input.spec().get_string_attribute('DateTime')\n"
+        + "    assert date_time == '1970:01:01 00:00:00'\n"
+        + "finally:\n"
+        + "    image_input.close()\n"
+        + "print('NANTAI_CANONICAL_METADATA_OK', flush=True)\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_CANONICAL_METADATA_OK" in result.stdout
+
+
+def test_runtime_registry_requires_exact_renderable_coverage(tmp_path: Path) -> None:
+    if not FORMAL_BLEND.is_file():
+        pytest.skip("formal Task 7 canary blend is unavailable")
+    report_path = FORMAL_BLEND.with_name("build-report.json")
+    result = _run_renderer_probe(
+        tmp_path,
+        _probe_prelude()
+        + "import json\n"
+        + f"report_path = __import__('pathlib').Path({str(report_path)!r})\n"
+        + "report = json.loads(report_path.read_text('utf-8'))\n"
+        + "registry = report['object_registry']\n"
+        + "auxiliary = report['auxiliary_registry']\n"
+        + "ns['_validate_object_registry_contract'](registry)\n"
+        + "duplicate = [dict(row) for row in registry]\n"
+        + "duplicate[1]['object_id'] = duplicate[0]['object_id']\n"
+        + "try:\n"
+        + "    ns['_validate_object_registry_contract'](duplicate)\n"
+        + "except ns['RuntimeRenderError']:\n"
+        + "    pass\n"
+        + "else:\n"
+        + "    raise AssertionError('duplicate stable ID was accepted')\n"
+        + "ns['_validate_registry_mesh_coverage'](registry, auxiliary)\n"
+        + "stable_id = registry[0]['object_id']\n"
+        + "targets = [\n"
+        + "    obj for obj in ns['bpy'].data.objects\n"
+        + "    if obj.type == 'MESH' and obj.get('nv_stable_id') == stable_id\n"
+        + "]\n"
+        + "assert targets\n"
+        + "for obj in targets:\n"
+        + "    obj.hide_render = True\n"
+        + "try:\n"
+        + "    ns['_validate_registry_mesh_coverage'](registry, auxiliary)\n"
+        + "except ns['RuntimeRenderError']:\n"
+        + "    pass\n"
+        + "else:\n"
+        + "    raise AssertionError('missing renderable registry coverage was accepted')\n"
+        + "for obj in targets:\n"
+        + "    obj.hide_render = False\n"
+        + "targets[0]['nv_instance_id'] = 126\n"
+        + "try:\n"
+        + "    ns['_validate_registry_mesh_coverage'](registry, auxiliary)\n"
+        + "except ns['RuntimeRenderError']:\n"
+        + "    pass\n"
+        + "else:\n"
+        + "    raise AssertionError('mesh registry tag mismatch was accepted')\n"
+        + "print('NANTAI_REGISTRY_COVERAGE_OK', flush=True)\n",
+        blend_path=FORMAL_BLEND,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_REGISTRY_COVERAGE_OK" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "target['nv_root_id'] = 'wrong-root'",
+        "target['nv_material_id'] = int(target['nv_material_id']) + 1",
+        "target['nv_variant_id'] = 'wrong-variant'",
+        "target.parent = None",
+        "target.hide_render = True",
+        "target.hide_set(True)",
+        (
+            "stack = [bpy.context.view_layer.layer_collection]\n"
+            "while stack:\n"
+            "    layer = stack.pop()\n"
+            "    if layer.collection in target.users_collection:\n"
+            "        layer.exclude = True\n"
+            "        break\n"
+            "    stack.extend(layer.children)\n"
+            "else:\n"
+            "    raise AssertionError('target layer collection not found')"
+        ),
+        (
+            "mesh = bpy.data.meshes.new('nv__unexpected-aux-mesh')\n"
+            "extra = bpy.data.objects.new('nv__unexpected-aux', mesh)\n"
+            "bpy.context.scene.collection.objects.link(extra)\n"
+            "extra['nv_auxiliary'] = True"
+        ),
+        (
+            "mesh = bpy.data.meshes.new('nv__unclassified-mesh')\n"
+            "extra = bpy.data.objects.new('nv__unclassified', mesh)\n"
+            "bpy.context.scene.collection.objects.link(extra)"
+        ),
+        "bpy.data.objects['nv__aux-terrain']['nv_semantic_id'] = 13",
+        "bpy.data.objects['nv__aux-terrain']['nv_stable_id'] = 'wrong-aux-id'",
+        "bpy.data.objects['nv__aux-terrain'].name = 'wrong-aux-name'",
+        "bpy.data.objects['nv__aux-terrain'].hide_render = True",
+        "bpy.data.worlds['World']['nv_auxiliary_id'] = 'wrong-world'",
+        "bpy.data.objects['nv__camera-outer-001'].data.lens += 1.0",
+        "bpy.data.objects['nv__camera-outer-001'].data.type = 'ORTHO'",
+        "bpy.data.objects['nv__camera-outer-001'].data.sensor_fit = 'VERTICAL'",
+        "bpy.data.objects['nv__camera-outer-001'].data.sensor_width = 35.0",
+        "bpy.data.objects['nv__camera-outer-001'].data.shift_x = 0.1",
+        "bpy.data.objects['nv__camera-outer-001'].data.shift_y = 0.1",
+        "bpy.data.objects['nv__camera-outer-001'].data.clip_start = 0.2",
+        "bpy.data.objects['nv__camera-outer-001'].data.clip_end = 1100.0",
+        "bpy.data.objects['nv__camera-outer-001'].data.dof.use_dof = True",
+    ],
+    ids=(
+        "root-id",
+        "material-id",
+        "variant-id",
+        "parent",
+        "hide-render",
+        "hide-get",
+        "collection-exclude",
+        "extra-auxiliary",
+        "unclassified",
+        "auxiliary-semantic",
+        "auxiliary-id",
+        "auxiliary-name",
+        "auxiliary-hidden",
+        "world-id",
+        "camera-lens",
+        "camera-type",
+        "camera-sensor-fit",
+        "camera-sensor-width",
+        "camera-shift-x",
+        "camera-shift-y",
+        "camera-clip-start",
+        "camera-clip-end",
+        "camera-dof",
+    ),
+)
+def test_runtime_rejects_scene_contract_tampering_before_staging(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    if not FORMAL_BLEND.is_file():
+        pytest.skip("formal Task 7 canary blend is unavailable")
+    import pipeline.synthetic_village.canary as canary
+
+    request = _formal_render_request()
+    request_path = tmp_path / "render-request.json"
+    request_path.write_bytes(canary.canonical_render_request_bytes(request))
+    staging = tmp_path / "staging"
+    indented_mutation = "\n".join(f"    {line}" for line in mutation.splitlines())
+    result = _run_renderer_probe(
+        tmp_path,
+        _probe_prelude()
+        + "import json\n"
+        + "bpy = ns['bpy']\n"
+        + f"request_path = __import__('pathlib').Path({str(request_path)!r})\n"
+        + f"staging = __import__('pathlib').Path({str(staging)!r})\n"
+        + "request = json.loads(request_path.read_text('utf-8'))\n"
+        + "target = next(\n"
+        + "    obj for obj in bpy.data.objects\n"
+        + "    if obj.type == 'MESH' and not obj.get('nv_auxiliary', False)\n"
+        + ")\n"
+        + "def mutate():\n"
+        + indented_mutation
+        + "\nmutate()\n"
+        + "try:\n"
+        + "    ns['_validate_scene_and_prepare_indices'](request)\n"
+        + "except ns['RuntimeRenderError']:\n"
+        + "    assert not staging.exists()\n"
+        + "else:\n"
+        + "    staging.mkdir()\n"
+        + "    raise AssertionError('tampered scene contract was accepted')\n"
+        + "print('NANTAI_SCENE_TAMPER_REJECTED', flush=True)\n",
+        blend_path=FORMAL_BLEND,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_SCENE_TAMPER_REJECTED" in result.stdout
+
+
+def test_runtime_derives_measured_opencv_pose(tmp_path: Path) -> None:
+    result = _run_renderer_probe(
+        tmp_path,
+        _probe_prelude()
+        + "matrix = [\n"
+        + "    [1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0],\n"
+        + "    [9.0, 10.0, 11.0, 12.0], [0.0, 0.0, 0.0, 1.0],\n"
+        + "]\n"
+        + "expected = [\n"
+        + "    [1.0, -2.0, -3.0, 4.0], [5.0, -6.0, -7.0, 8.0],\n"
+        + "    [9.0, -10.0, -11.0, 12.0], [0.0, 0.0, 0.0, 1.0],\n"
+        + "]\n"
+        + "assert ns['_blender_c2w_to_opencv'](matrix) == expected\n"
+        + "print('NANTAI_MEASURED_POSE_OK', flush=True)\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_MEASURED_POSE_OK" in result.stdout
+
+
+@pytest.mark.skipif(
+    not RUN_END_TO_END,
+    reason="set NANTAI_RUN_BLENDER_RUNTIME_TESTS=1 for the real Blender render",
+)
+def test_runtime_renders_one_formal_camera_with_repeatable_private_outputs() -> None:
+    if not FORMAL_BLEND.is_file():
+        pytest.skip("formal Task 7 canary blend is unavailable")
+    import pipeline.synthetic_village.canary as canary
+
+    request = _formal_render_request()
+    ignored_root = ROOT / ".nantai-studio/synthetic-village/hybrid-v3/runtime-tests"
+    ignored_root.mkdir(parents=True, exist_ok=True)
+    container = ignored_root / uuid.uuid4().hex
+    container.mkdir()
+    try:
+        isolated_blend = container / "village-canary.blend"
+        shutil.copy2(FORMAL_BLEND, isolated_blend)
+        request_path = container / "render-request.json"
+        request_path.write_bytes(canary.canonical_render_request_bytes(request))
+        staging_paths = (container / "run-a", container / "run-b")
+        for staging in staging_paths:
+            result = _run_renderer(
+                isolated_blend,
+                "--request",
+                str(request_path),
+                "--staging",
+                str(staging),
+                timeout=600,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "NANTAI_RENDER_OK" in result.stdout
+            assert not staging.with_name(
+                f".{staging.name}.tmp-{request.render_id[:12]}",
+            ).exists()
+
+        camera_id = request.camera.camera_id
+        relative_outputs = (
+            f"rgb/{camera_id}.png",
+            f"depth/{camera_id}.exr",
+            f"normal/{camera_id}.exr",
+            f"instance/{camera_id}.png",
+            f"semantic/{camera_id}.png",
+            f"cameras/{camera_id}.json",
+        )
+        for staging in staging_paths:
+            assert {
+                path.relative_to(staging).as_posix()
+                for path in staging.rglob("*")
+                if path.is_file()
+            } == {*relative_outputs, "frame-report.json"}
+            report = json.loads((staging / "frame-report.json").read_text("utf-8"))
+            assert report["blender_executable_sha256"] == request.blender_executable_sha256
+            assert (
+                report["settings_sha256"]
+                == hashlib.sha256(
+                    canary._canonical_json_bytes(request.settings.model_dump(mode="json")),  # noqa: SLF001
+                ).hexdigest()
+            )
+            assert len(report["artifacts"]) == 6
+            for artifact in report["artifacts"]:
+                artifact_path = staging / Path(artifact["path"])
+                assert _sha256(artifact_path) == artifact["sha256"]
+                assert artifact_path.stat().st_size == artifact["size_bytes"]
+
+            rgb_contract = _decode_canonical_png(staging / relative_outputs[0])
+            instance_contract = _decode_canonical_png(staging / relative_outputs[3])
+            semantic_contract = _decode_canonical_png(staging / relative_outputs[4])
+            assert rgb_contract[:4] == (1024, 576, 8, 2)
+            assert instance_contract[:4] == (1024, 576, 16, 0)
+            assert semantic_contract[:4] == (1024, 576, 8, 0)
+
+            for relative in relative_outputs[1:3]:
+                attributes = _read_exr_attributes(staging / relative)
+                assert attributes["capDate"][1].rstrip(b"\0") == b"1970:01:01 00:00:00"
+                metadata_blob = b"\n".join(
+                    name.encode("ascii") + b"=" + value
+                    for name, (_kind, value) in attributes.items()
+                ).lower()
+                assert b".nantai-studio" not in metadata_blob
+                assert b"/users/" not in metadata_blob
+                assert b"\\users\\" not in metadata_blob
+                assert b"appdata" not in metadata_blob
+                assert b"/tmp/" not in metadata_blob
+                assert b"\\temp\\" not in metadata_blob
+
+            camera_metadata = json.loads((staging / relative_outputs[5]).read_text("utf-8"))
+            assert camera_metadata["blender_executable_sha256"] == (
+                request.blender_executable_sha256
+            )
+            assert (
+                camera_metadata["requested_c2w_opencv"]
+                == request.camera.model_dump(
+                    mode="json",
+                )["c2w_opencv"]
+            )
+            assert (
+                camera_metadata["requested_c2w_blender"]
+                == request.camera.model_dump(
+                    mode="json",
+                )["c2w_blender"]
+            )
+            assert camera_metadata["measured_c2w_blender"] == [
+                list(row) for row in request.measured_c2w_blender
+            ]
+            assert camera_metadata["measured_c2w_opencv"] == [
+                list(row)
+                for row in canary._blender_c2w_to_opencv(request.measured_c2w_blender)  # noqa: SLF001
+            ]
+            assert (
+                max(
+                    abs(
+                        camera_metadata["requested_c2w_blender"][row][column]
+                        - camera_metadata["measured_c2w_blender"][row][column]
+                    )
+                    for row in range(4)
+                    for column in range(4)
+                )
+                > 0.0
+            )
+
+        first, second = staging_paths
+        for relative in relative_outputs[1:]:
+            assert (first / relative).read_bytes() == (second / relative).read_bytes()
+        first_rgb = _decode_canonical_png(first / relative_outputs[0])[4]
+        second_rgb = _decode_canonical_png(second / relative_outputs[0])[4]
+        assert len(first_rgb) == len(second_rgb) == 1024 * 576 * 3
+        maximum_rgb_delta = max(
+            abs(left - right) for left, right in zip(first_rgb, second_rgb, strict=True)
+        )
+        assert maximum_rgb_delta <= 1
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_render_runtime_rejects_missing_request_before_staging(tmp_path: Path) -> None:
+    if not FORMAL_BLEND.is_file():
+        pytest.skip("formal Task 7 canary blend is unavailable")
+    result = _run_renderer(
+        FORMAL_BLEND,
+        "--request",
+        str(tmp_path / "missing.json"),
+        "--staging",
+        str(tmp_path / "staging"),
+    )
+
+    assert result.returncode == 17
+    assert "NANTAI_RENDER_ERROR request file does not exist" in (result.stdout + result.stderr)
+    assert not (tmp_path / "staging").exists()
 
 
 def test_runtime_rejects_missing_request_with_stable_error(tmp_path: Path) -> None:

@@ -29,6 +29,24 @@ def _run_canary_build():
     return run_canary_build
 
 
+def _run_canary_render():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.canary import run_canary_render
+
+    return run_canary_render
+
+
+def _canonical_camera_id(value: str) -> str:
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.canary import RENDER_CAMERA_IDS
+
+    if value not in RENDER_CAMERA_IDS:
+        raise argparse.ArgumentTypeError(f"unknown canonical camera ID: {value}")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -44,6 +62,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Build, verify, and privately publish the Blender foundation canary.",
     )
     build_canary.add_argument("--timeout-seconds", type=int, default=30 * 60)
+    render_canary = commands.add_parser(
+        "render-canary",
+        help="Resume, verify, and privately publish the six-layer canary frames.",
+    )
+    render_canary.add_argument("--camera", action="append", type=_canonical_camera_id)
+    render_canary.add_argument("--timeout-seconds", type=int, default=15 * 60)
     return parser
 
 
@@ -74,6 +98,26 @@ def main(argv: list[str] | None = None) -> int:
                     "final_directory": str(result.final_directory),
                     "preview_count": len(report.preview_registry),
                     "verification_level": report.verification_level,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "render-canary":
+        result = _run_canary_render()(
+            repo_root=ROOT,
+            camera_ids=tuple(args.camera) if args.camera else None,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(
+            json.dumps(
+                {
+                    "journal_path": str(result.journal_path),
+                    "render_id": result.render_id,
+                    "render_root": str(result.render_root),
+                    "rendered_count": result.rendered_count,
+                    "reused_count": result.reused_count,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
