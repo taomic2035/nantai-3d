@@ -28,11 +28,13 @@ from pipeline.recon_schema import (
     MetricStatus,
     RegistrationResult,
     Sim3,
+    Sim3AlignmentEvidence,
     SplatInput,
     TransformMethod,
 )
 from pipeline.reconstruct import (
     _apply_splat_transform,
+    _derive_geometry_usability,
     _parse_splat_args,
     import_session_splats,
     reconstruct,
@@ -680,6 +682,95 @@ class TestManifestCoordinateProvenance:
         assert target["metric_status"] == "arbitrary"
         assert manifest["coordinate_contract"]["alignment_status"] == "unaligned"
         assert "world-meter" not in str(manifest).lower()
+
+
+def _sim3_alignment_evidence(*, passed: bool) -> Sim3AlignmentEvidence:
+    """Build a well-formed sim3.alignment.v1 record with a chosen gate outcome.
+
+    An honest producer (alignment.py) never emits a metric world frame when the
+    gate fails; a passed=False record here models a tampered / foreign
+    registration.json whose in-hand evidence contradicts its metric claim.
+    """
+    rms = 0.01 if passed else 999.0
+    return Sim3AlignmentEvidence(
+        method="umeyama-sim3",
+        n_control_points=5,
+        scale=1.0,
+        rms_residual_m=rms,
+        max_residual_m=rms,
+        per_point_residual_m=(rms, rms, rms, rms, rms),
+        source_singular_values=(10.0, 8.0, 5.0),
+        min_span_ratio=0.5,
+        max_rms_threshold_m=2.0,
+        geo_origin={"lat": 26.0, "lon": 119.0, "alt": 50.0},
+        control_point_labels=("cp0", "cp1", "cp2", "cp3", "cp4"),
+        passed=passed,
+    )
+
+
+def _aligned_metric_world_frame(evidence: tuple[str, ...]) -> CoordinateFrame:
+    """An ENU-aligned measured metric frame, mirroring alignment.align_registration."""
+    return CoordinateFrame(
+        frame_id="world-enu",
+        handedness=Handedness.RIGHT,
+        axes=AxisConvention.ENU_Z_UP,
+        units=CoordinateUnits.METERS,
+        metric_status=MetricStatus.METRIC,
+        geo_aligned=GeoAlignment.ALIGNED,
+        provenance=FrameProvenance.MEASURED,
+        evidence=evidence,
+    )
+
+
+class TestMetricEvidenceGate:
+    """Contradictory in-hand alignment evidence must beat the metric claim.
+
+    metric_evidence is not opaque: a sim3.alignment.v1 record self-reports whether
+    the RMS gate passed.  If a frame claims metric/aligned but carries evidence
+    with passed=False (or unparseable sim3 evidence), the consumer must fail closed
+    to preview-only rather than trust the enum.
+    """
+
+    def test_failed_alignment_evidence_is_not_metric_promoted(self):
+        evidence_str = _sim3_alignment_evidence(passed=False).to_evidence()
+        frame = _aligned_metric_world_frame(
+            ("sfm-to-enu-sim3-alignment", "geo-origin:26.0,119.0,50.0", evidence_str)
+        )
+        usability = _derive_geometry_usability(
+            frame,
+            AlignmentStatus.ALIGNED,
+            list(frame.evidence),
+            synthetic=False,
+            provenance_known=True,
+        )
+        assert usability == "preview-only"
+
+    def test_passing_alignment_evidence_still_metric_promotes(self):
+        evidence_str = _sim3_alignment_evidence(passed=True).to_evidence()
+        frame = _aligned_metric_world_frame(
+            ("sfm-to-enu-sim3-alignment", "geo-origin:26.0,119.0,50.0", evidence_str)
+        )
+        usability = _derive_geometry_usability(
+            frame,
+            AlignmentStatus.ALIGNED,
+            list(frame.evidence),
+            synthetic=False,
+            provenance_known=True,
+        )
+        assert usability == "metric-aligned"
+
+    def test_unparseable_sim3_evidence_fails_closed(self):
+        frame = _aligned_metric_world_frame(
+            ("sfm-to-enu-sim3-alignment", "sim3.alignment.v1=not-valid-json")
+        )
+        usability = _derive_geometry_usability(
+            frame,
+            AlignmentStatus.ALIGNED,
+            list(frame.evidence),
+            synthetic=False,
+            provenance_known=True,
+        )
+        assert usability == "preview-only"
 
 
 class TestLegacyV1Migration:

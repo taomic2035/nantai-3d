@@ -30,6 +30,7 @@ from pathlib import Path
 
 import numpy as np
 from loguru import logger
+from pydantic import ValidationError
 
 from pipeline.gaussian_scene import GaussianScene, ordered_transform_ids
 from pipeline.recon_schema import (
@@ -42,6 +43,7 @@ from pipeline.recon_schema import (
     GeoAlignment,
     MetricStatus,
     RegistrationResult,
+    Sim3AlignmentEvidence,
     SplatInput,
 )
 from pipeline.registration import register
@@ -56,6 +58,31 @@ FULL_3DGS_BASE_ATTRIBUTES = [
     "rot_0", "rot_1", "rot_2", "rot_3",
 ]
 SIMPLE_PREVIEW_ATTRIBUTES = ["x", "y", "z", "r", "g", "b", "scale"]
+
+
+_SIM3_EVIDENCE_PREFIX = "sim3.alignment.v1="
+
+
+def _alignment_evidence_consistent(metric_evidence: list[str]) -> bool:
+    """Fail closed if any in-hand sim3 alignment evidence contradicts the metric claim.
+
+    metric_evidence is not opaque: a ``sim3.alignment.v1=`` record self-reports the
+    RMS gate outcome.  An honest producer never emits a metric frame when the gate
+    fails, so any embedded record that fails to parse or carries ``passed=False``
+    means the artifact is tampered/foreign -- the contradictory evidence in hand
+    must beat the enum, not be ignored.  Absence of such records is fine (metric
+    status may rest on other evidence, e.g. survey scale bars).
+    """
+    for item in metric_evidence:
+        if not item.startswith(_SIM3_EVIDENCE_PREFIX):
+            continue
+        try:
+            evidence = Sim3AlignmentEvidence.parse(item)
+        except (ValueError, ValidationError):
+            return False
+        if not evidence.passed:
+            return False
+    return True
 
 
 def _derive_geometry_usability(
@@ -80,6 +107,7 @@ def _derive_geometry_usability(
         target_frame.units is CoordinateUnits.METERS
         and target_frame.metric_status is MetricStatus.METRIC
         and metric_evidence
+        and _alignment_evidence_consistent(metric_evidence)
     ):
         return "preview-only"
     if (
