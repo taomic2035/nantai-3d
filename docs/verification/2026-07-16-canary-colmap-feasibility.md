@@ -97,6 +97,18 @@ COLMAP 路线证死后，实测了绕过 SfM 的路线：**canary GT 相机 + GT
 `pipeline.alignment` 控制点路线（合成场景可从场景计划生成完美控制点）——
 留待 phase-2 按需决定，勿默默提升信任等级。
 
+### 顺带修复：导入路径的 synthetic 错标（在真实 viewer 里发现）
+
+把导入产物部署进 Studio viewer 实机验证时发现面板显示 `synthetic: false`——
+canary 衍生的 3DGS 被错标为非合成。根因：操作者明知来源合成，但 `prepare_import`
+硬编码 `FrameProvenance.SFM`，没有申报通道；而 `reconstruct.py` 的分类逻辑本就支持
+从 frame provenance 推导 synthetic（且已有参数化测试覆盖）。修复（TDD，先红后绿）：
+`prepare_import.py --synthetic` → frame `synthetic-local` + `FrameProvenance.SYNTHETIC`
++ 证据标签，刻意不改 units/metric_status（申报合成是纯降级声明，不得夹带米制提升）。
+以 `--synthetic` 重导入后 Studio 实机确认：`synthetic/geometry: true / preview-proxy`、
+黄色 SYNTHETIC ARTIFACT 徽章点亮、viewer 按其代理策略降级渲染保真——
+codex 的 Studio 对合成产物的一等 UI 处理首次被导入路径真实触发，工作正常。
+
 ## 边界声明
 
 本实验只证明「**当前无纹理渲染** + CPU SIFT + 穷举匹配」注册失败及其量化原因；

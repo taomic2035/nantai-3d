@@ -329,6 +329,42 @@ class TestImportEngine:
         assert manifest["provenance"]["synthetic"] is False
         assert manifest["provenance"]["geometry_usability"] == "preview-only"
 
+    def test_prepare_import_synthetic_flag_declares_source_honestly(self, tmp_path):
+        # An operator importing a 3DGS trained on SYNTHETIC imagery (e.g. the
+        # canary's Blender renders via GT cameras) must be able to declare that
+        # at the contract boundary. --synthetic sets FrameProvenance.SYNTHETIC on
+        # the shared frame, which the import path already classifies fail-closed:
+        # synthetic=True + preview-proxy (a downgrade — never a trust upgrade).
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parent.parent
+        rng = np.random.default_rng(7)
+        ply = tmp_path / "synthetic_trained.ply"
+        GaussianScene(
+            rng.uniform(0, 5, (60, 3)), rng.uniform(0, 1, (60, 3))
+        ).save_ply(ply, flavor="3dgs")
+
+        proc = subprocess.run(
+            [sys.executable, "scripts/prepare_import.py", str(ply),
+             "--out-dir", str(tmp_path / "recon"), "--synthetic"],
+            cwd=root, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+        reg = RegistrationResult.model_validate_json(
+            (tmp_path / "recon" / "registration.json").read_text(encoding="utf-8"))
+        splat = SplatInput.model_validate_json(
+            (tmp_path / "recon" / "splat-input.json").read_text(encoding="utf-8"))
+        assert splat.source_frame.provenance is FrameProvenance.SYNTHETIC
+        # Declaring synthetic must not smuggle in a metric upgrade.
+        assert splat.source_frame.metric_status is MetricStatus.ARBITRARY
+
+        manifest = reconstruct(
+            photos_dir=tmp_path, out_dir=tmp_path / "out", web_dir=tmp_path / "web",
+            engine="import", registration=reg, splat_map=[splat], dedup_voxel=0)
+        assert manifest["provenance"]["synthetic"] is True
+        assert manifest["provenance"]["geometry_usability"] == "preview-proxy"
+
     def test_import_rejects_simple_point_ply_as_full_3dgs(self, photos_dir, tmp_path):
         source = tmp_path / "simple.ply"
         GaussianScene(

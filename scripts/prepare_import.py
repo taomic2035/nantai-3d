@@ -10,8 +10,12 @@
 结果是 `preview-only`——诚实：没有控制点就不冒充米制。要 metric-aligned，先用
 `pipeline.alignment` 加控制点/GPS，见 docs/real-data-workflow.md。
 
+来源是合成影像（如 canary Blender 渲染 + GT 相机训练的 3DGS）时加 `--synthetic`：
+frame provenance 申报为 SYNTHETIC，导入分类自动降为 synthetic=true + preview-proxy
+（只降不升——申报合成永远不会提升信任等级，不申报则错标为非合成）。
+
 用法:
-    python scripts/prepare_import.py trained/point_cloud.ply
+    python scripts/prepare_import.py trained/point_cloud.ply [--synthetic]
     # 生成 recon/registration.json + recon/splat-input.json, 并打印导入命令
 """
 from __future__ import annotations
@@ -39,17 +43,22 @@ from pipeline.recon_schema import (  # noqa: E402
 )
 
 
-def _sfm_local_frame() -> CoordinateFrame:
-    """外部训练产物的默认坐标契约：任意尺度、无地理对齐（诚实，不假装米制）。"""
+def _local_frame(synthetic: bool) -> CoordinateFrame:
+    """外部训练产物的默认坐标契约：任意尺度、无地理对齐（诚实，不假装米制）。
+
+    synthetic=True 只改申报的来源 provenance（SYNTHETIC + 证据标签），刻意不改
+    units/metric_status —— 申报合成是降级声明，不得顺带夹带任何米制提升。
+    """
     return CoordinateFrame(
-        frame_id="sfm-local",
+        frame_id="synthetic-local" if synthetic else "sfm-local",
         handedness=Handedness.RIGHT,
         axes=AxisConvention.SFM_ARBITRARY,
         units=CoordinateUnits.ARBITRARY,
         metric_status=MetricStatus.ARBITRARY,
         geo_aligned=GeoAlignment.UNALIGNED,
-        provenance=FrameProvenance.SFM,
-        evidence=["external-3dgs-import"],
+        provenance=FrameProvenance.SYNTHETIC if synthetic else FrameProvenance.SFM,
+        evidence=["external-3dgs-import", "synthetic-source-declared"]
+        if synthetic else ["external-3dgs-import"],
     )
 
 
@@ -58,8 +67,9 @@ def _write_lf(path: Path, text: str) -> None:
     path.write_text(text + "\n", encoding="utf-8", newline="\n")
 
 
-def prepare(ply: Path, out_dir: Path, session_id: str) -> tuple[Path, Path]:
-    frame = _sfm_local_frame()
+def prepare(ply: Path, out_dir: Path, session_id: str,
+            synthetic: bool = False) -> tuple[Path, Path]:
+    frame = _local_frame(synthetic)
     reg = RegistrationResult(
         schema_version=2,
         engine="external",  # honest: not colmap/mock — an external-declared import
@@ -91,10 +101,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="契约输出目录 (默认 recon/)")
     ap.add_argument("--session-id", default="external_3dgs",
                     help="会话 id (registration 与 splat 必须一致; 默认 external_3dgs)")
+    ap.add_argument("--synthetic", action="store_true",
+                    help="来源为合成影像时如实申报 (provenance=SYNTHETIC -> "
+                         "synthetic=true + preview-proxy, 只降不升)")
     args = ap.parse_args(argv)
     if not args.ply.is_file():
         raise SystemExit(f"文件不存在: {args.ply}")
-    reg_path, splat_path = prepare(args.ply, args.out_dir, args.session_id)
+    reg_path, splat_path = prepare(args.ply, args.out_dir, args.session_id,
+                                   synthetic=args.synthetic)
     print(f"[OK] 已生成:\n  {reg_path}\n  {splat_path}\n")
     print("下一步导入 (非米制 frame 必须 --dedup-voxel 0):")
     print(f"  python -m pipeline.reconstruct --engine import "
