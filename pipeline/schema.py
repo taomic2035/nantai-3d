@@ -11,9 +11,11 @@ class ChunkID(BaseModel):
 
 
 class GeoOrigin(BaseModel):
-    lat: float
-    lon: float
-    alt: float
+    # 与坐标信任根 recon_schema.GeoAnchor 对齐: 拒绝越界/非有限 GPS, 避免越界地理
+    # 原点被静默接受 (GeoOrigin 从外部 layout JSON 加载, 非仅内部产出)。
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lon: float = Field(ge=-180, le=180, allow_inf_nan=False)
+    alt: float = Field(allow_inf_nan=False)
 
 
 class MaterialZone(BaseModel):
