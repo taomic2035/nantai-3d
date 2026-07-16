@@ -54,3 +54,13 @@ test('precipitation layouts are deterministic and hard capped', () => {
   assert.equal(WEATHER_PRESETS.rain.precipitation.count <= 1200, true);
   assert.equal(WEATHER_PRESETS.snow.precipitation.count <= 800, true);
 });
+
+test('precipitation volume surrounds the camera instead of hiding above it', () => {
+  const positions = createPrecipitationPositions('rain');
+  const heights = [];
+  for (let index = 1; index < positions.length; index += 3) {
+    heights.push(positions[index]);
+  }
+  assert.ok(Math.min(...heights) < 0);
+  assert.ok(Math.max(...heights) > 0);
+});

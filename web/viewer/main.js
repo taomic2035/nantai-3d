@@ -456,10 +456,11 @@ function updatePrecipitation(dt) {
   const positions = precipitationPoints.geometry.getAttribute('position');
   const [width, height] = precipitationEffect.volume;
   const halfWidth = width / 2;
+  const halfHeight = height / 2;
   for (let index = 0; index < precipitationEffect.count; index += 1) {
     const offset = index * 3;
     positions.array[offset + 1] -= precipitationEffect.fallSpeed * dt;
-    if (positions.array[offset + 1] < 0) positions.array[offset + 1] += height;
+    if (positions.array[offset + 1] < -halfHeight) positions.array[offset + 1] += height;
     positions.array[offset] += (
       Math.sin((index + 1) * 0.37) * precipitationEffect.drift * dt
     );
@@ -569,6 +570,8 @@ function init() {
   renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.domElement.tabIndex = 0;
+  renderer.domElement.setAttribute('aria-label', '3D 场景画布');
   document.getElementById('canvas-container').appendChild(renderer.domElement);
 
   splatLayer = createSplatLayer({ scene, renderer });

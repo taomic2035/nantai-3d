@@ -111,7 +111,7 @@ export function createPrecipitationPositions(value = DEFAULT_WEATHER) {
   for (let index = 0; index < effect.count; index += 1) {
     const offset = index * 3;
     positions[offset] = (deterministicUnit(index, 0) - 0.5) * width;
-    positions[offset + 1] = deterministicUnit(index, 1) * height;
+    positions[offset + 1] = (deterministicUnit(index, 1) - 0.5) * height;
     positions[offset + 2] = (deterministicUnit(index, 2) - 0.5) * depth;
   }
   return positions;

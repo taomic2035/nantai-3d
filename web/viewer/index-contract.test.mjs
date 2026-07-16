@@ -38,6 +38,8 @@ test('viewer runtime wires environment state without mutating provenance', () =>
   assert.match(main, /setZoom:\s*\(\{\s*zoom\s*\}\)\s*=>/);
   assert.match(main, /camera\.zoom\s*=\s*environmentState\.zoom/);
   assert.match(main, /updatePrecipitation\(dt\)/);
+  assert.match(main, /renderer\.domElement\.tabIndex\s*=\s*0/);
+  assert.match(main, /renderer\.domElement\.setAttribute\('aria-label',\s*'3D 场景画布'\)/);
   assert.doesNotMatch(main, /reconManifest\.environment\s*=/);
   assert.doesNotMatch(main, /manifest\.environment\s*=/);
 });
