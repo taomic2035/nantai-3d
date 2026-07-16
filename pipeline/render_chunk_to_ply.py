@@ -12,6 +12,7 @@ L4 Layout → 合成 3DGS ply 渲染器
 """
 import hashlib
 import json
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -103,7 +104,10 @@ COLOR_WATER = (60, 110, 180)     # 蓝色
 
 def _emit_ground(x_offset: int, y_offset: int, n: int = 4000) -> np.ndarray:
     """地面基础层 (草色稀疏点)"""
-    rng = np.random.default_rng(x_offset * 31 + y_offset * 7 + 1)
+    # 掩码为非负种子: 负象限 chunk 的 world_offset 为负会让原算术种子变负,
+    # numpy SeedSequence 拒绝负数 -> 崩溃。掩码与 mock_layout._rng 惯例一致,
+    # 且非负 offset (现有网格 ≤ 800, 值 ≪ 2^32) 掩码后不变 -> 字节零回归。
+    rng = np.random.default_rng((x_offset * 31 + y_offset * 7 + 1) & 0xFFFFFFFF)
     pts = np.zeros(n, dtype=[
         ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
         ('r', 'u1'), ('g', 'u1'), ('b', 'u1'),
@@ -119,6 +123,9 @@ def _emit_ground(x_offset: int, y_offset: int, n: int = 4000) -> np.ndarray:
 
 def _emit_road(road, x_offset: int, y_offset: int) -> np.ndarray:
     """道路: 沿 points 连线生成平铺高斯"""
+    # 噪声/scale 用 road.id 派生的本地确定性 RNG (不用进程级全局 np.random,
+    # 否则同一 chunk 跨渲染发散、并发服务器互相污染)。
+    noise = np.random.default_rng(_stable_seed("road-noise:" + road.id))
     pts_list = []
     w = road.width
     color = COLOR_ROAD_MAIN if road.type == "main" else COLOR_ROAD_TRAIL
@@ -149,9 +156,9 @@ def _emit_road(road, x_offset: int, y_offset: int) -> np.ndarray:
         ])
         pts['x'] = x_offset + pos[:, 0]
         pts['y'] = y_offset + pos[:, 1]
-        pts['z'] = np.random.uniform(0.05, 0.2, n)
+        pts['z'] = noise.uniform(0.05, 0.2, n)
         pts['r'], pts['g'], pts['b'] = color
-        pts['scale'] = np.random.uniform(0.8, 1.5, n)
+        pts['scale'] = noise.uniform(0.8, 1.5, n)
         pts_list.append(pts)
     if not pts_list:
         return np.zeros(0, dtype=SIMPLE_DTYPE)
@@ -185,6 +192,9 @@ def _emit_building(
                 point_count=len(arr),
             )
             return arr
+    # 合成盒子路径: 扰动/scale 用 b.id 派生的本地确定性 RNG (替代进程级全局
+    # np.random, 保证跨渲染字节可复现 + 并发服务器不互相污染)。
+    noise = np.random.default_rng(_stable_seed("bldg-noise:" + b.id))
     rot = np.radians(b.rot_z)
     s = b.scale
     w = 8.0 * s   # 默认 8m 宽
@@ -220,7 +230,7 @@ def _emit_building(
         u = t.uniform(0, 1, n_wall // 4)
         pts = p0[None] + u[:, None] * (p1 - p0)[None]
         # 加点扰动
-        pts += np.random.normal(0, 0.05, pts.shape)
+        pts += noise.normal(0, 0.05, pts.shape)
         walls.append(pts)
     wall_pts_xyz = np.concatenate(walls)
 
@@ -231,7 +241,7 @@ def _emit_building(
     wall_arr['y'] = wall_pts_xyz[:, 1]
     wall_arr['z'] = wall_pts_xyz[:, 2]
     wall_arr['r'], wall_arr['g'], wall_arr['b'] = COLOR_BUILDING_WALL
-    wall_arr['scale'] = np.random.uniform(0.4, 0.8, len(wall_pts_xyz))
+    wall_arr['scale'] = noise.uniform(0.4, 0.8, len(wall_pts_xyz))
 
     # 屋顶: 在屋顶 4 角范围内生成倾斜面
     roof_top = np.array(corners[4:8])
@@ -242,14 +252,14 @@ def _emit_building(
     roof_pts = (1 - u[:, None]) * roof_top[0][None] + \
                u[:, None] * roof_top[1][None]
     roof_pts = roof_pts + v[:, None] * (roof_top[3][None] - roof_top[0][None])
-    roof_pts += np.random.normal(0, 0.1, roof_pts.shape)
+    roof_pts += noise.normal(0, 0.1, roof_pts.shape)
 
     roof_arr = np.zeros(n_roof, dtype=wall_dtype)
     roof_arr['x'] = roof_pts[:, 0]
     roof_arr['y'] = roof_pts[:, 1]
     roof_arr['z'] = roof_pts[:, 2]
     roof_arr['r'], roof_arr['g'], roof_arr['b'] = COLOR_BUILDING_ROOF
-    roof_arr['scale'] = np.random.uniform(0.5, 1.0, n_roof)
+    roof_arr['scale'] = noise.uniform(0.5, 1.0, n_roof)
 
     return np.concatenate([wall_arr, roof_arr])
 
@@ -484,6 +494,28 @@ def render_chunk_to_ply(layout: ChunkLayout, out_path: Path, registry=None) -> i
     el = PlyElement.describe(all_pts, 'vertex')
     PlyData([el], byte_order='<').write(str(out_path))
     return n
+
+
+def render_single_chunk(
+    chunk_x: int,
+    chunk_y: int,
+    world_seed: int = 42,
+    registry=None,
+) -> bytes:
+    """按需渲染单个 chunk → ply 字节 (纯内存, 不落盘)。
+
+    render-on-demand 无限世界的内核: 布局由 (world_seed, chunk_x, chunk_y) 经
+    MockLayoutGenerator 完全确定, 渲染确定性由本模块的 per-chunk 本地 RNG 保证,
+    ply 无时间戳/无熵 —— 故相同入参跨进程字节一致, 可安全用于内容寻址缓存与
+    多实例服务器。任意 (含负) 坐标均可; registry=None 走合成代理 (不触溯源写路径)。
+    """
+    from pipeline.mock_layout import MockLayoutGenerator
+
+    layout = MockLayoutGenerator(world_seed).generate_chunk(chunk_x, chunk_y)
+    arr = build_chunk_array(layout, registry=registry)
+    buf = BytesIO()
+    PlyData([PlyElement.describe(arr, 'vertex')], byte_order='<').write(buf)
+    return buf.getvalue()
 
 
 def render_chunkset(
