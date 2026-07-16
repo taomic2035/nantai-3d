@@ -538,6 +538,7 @@ function setupViewerBridge() {
     },
   });
   bridge.start();
+  frame.src = frame.dataset.src;
 
   byId('reset-camera').addEventListener('click', () => {
     bridge.command('resetCamera').catch((error) => announce(error.message));

@@ -35,6 +35,15 @@ test('coordinate jump is a capability-gated viewer control wired to setCameraPos
   assert.match(app, /announce\('坐标必须是有限数字'\)/);
 });
 
+test('viewer iframe loads only after the bridge listener starts', () => {
+  assert.match(
+    html,
+    /id="viewer-frame"[^>]*data-src="\/web\/viewer\/index\.html\?embed=1"/s,
+  );
+  assert.doesNotMatch(html, /id="viewer-frame"[^>]*\ssrc=/s);
+  assert.match(app, /bridge\.start\(\);\s*frame\.src\s*=\s*frame\.dataset\.src;/);
+});
+
 test('B1 ingest uses an explicit confirmation without command or path fields', () => {
   assert.match(html, /id="ingest-dialog"/);
   assert.match(html, /id="ingest-cancel-notice"/);
