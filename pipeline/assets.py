@@ -127,7 +127,8 @@ def _now_iso() -> str:
 
 
 # Windows msvcrt raises EACCES/EDEADLOCK when a byte range is already held.
-_WIN_LOCK_CONTENTION = (errno.EACCES, errno.EDEADLOCK)
+# EDEADLOCK is an optional alias; Darwin exposes only the portable EDEADLK.
+_WIN_LOCK_CONTENTION = (errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK))
 
 
 def _lock_registry_file(stream) -> None:
