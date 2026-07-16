@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from pipeline.synthetic_village import tool_lock
 from pipeline.synthetic_village.camera_plan import build_camera_plan
 from pipeline.synthetic_village.canary import (
     ARTIFACT_REQUESTS,
@@ -50,6 +51,119 @@ from pipeline.synthetic_village.visual_sources import (
 
 ROOT = Path(__file__).resolve().parents[1]
 VISUAL_PACK_ROOT = ROOT / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _hermetic_canary_inputs(tmp_path_factory: pytest.TempPathFactory):
+    """Keep unit tests independent of private Release data and installed Blender."""
+
+    global ROOT, VISUAL_PACK_ROOT
+
+    source_root = ROOT
+    fixture_root = tmp_path_factory.mktemp("canary-repo")
+    for relative_path in (
+        Path("assets/default-resources/synthetic-mountain-village-v1.json"),
+        Path("assets/default-resources/synthetic-mountain-village-visual-slots-v1.json"),
+        Path("scripts/blender/build_synthetic_village.py"),
+        Path("scripts/blender/render_synthetic_village.py"),
+        Path("tools.lock.json"),
+    ):
+        destination = fixture_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_root / relative_path, destination)
+
+    visual_pack_root = (
+        fixture_root / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources"
+    )
+    object_root = visual_pack_root / "objects"
+    object_root.mkdir(parents=True)
+    expanded_payload = _flat_png(channels=3, bit_depth=8, value=127)
+    expanded_sha256 = hashlib.sha256(expanded_payload).hexdigest()
+    small_payload = _flat_png(channels=3, bit_depth=8, value=63)
+    small_sha256 = hashlib.sha256(small_payload).hexdigest()
+    (object_root / f"{expanded_sha256}.png").write_bytes(expanded_payload)
+    (object_root / f"{small_sha256}.png").write_bytes(small_payload)
+    visual_manifest = VisualSourceManifest(
+        pack_id="synthetic-mountain-village-hybrid-v3",
+        records=(
+            VisualSourceRecord(
+                slot_id="key-view-establishing-expanded-01",
+                category="key-view",
+                object_path=f"objects/{expanded_sha256}.png",
+                sha256=expanded_sha256,
+                bytes=len(expanded_payload),
+                width=1024,
+                height=576,
+                prompt=(
+                    "A deterministic synthetic expanded establishing view for the hermetic "
+                    "canary request fixture."
+                ),
+                source_pack_id="canary-unit-fixture",
+                source_manifest_sha256="1" * 64,
+                generator_interface="pytest-generated-png",
+                actual_model_id="deterministic-test-fixture",
+            ),
+            VisualSourceRecord(
+                slot_id="key-view-establishing-small-01",
+                category="key-view",
+                object_path=f"objects/{small_sha256}.png",
+                sha256=small_sha256,
+                bytes=len(small_payload),
+                width=1024,
+                height=576,
+                prompt=(
+                    "A deterministic synthetic small establishing view for the hermetic "
+                    "canary request fixture."
+                ),
+                source_pack_id="canary-unit-fixture",
+                source_manifest_sha256="2" * 64,
+                generator_interface="pytest-generated-png",
+                actual_model_id="deterministic-test-fixture",
+            ),
+        ),
+    )
+    (visual_pack_root / "visual-sources.json").write_bytes(
+        canonical_manifest_bytes(visual_manifest),
+    )
+
+    lock = tool_lock.load_tool_lock(fixture_root / "tools.lock.json").blender
+    install_root = fixture_root / lock.install_dir
+    install_root.mkdir(parents=True)
+    executable_payload = b"hermetic blender executable fixture\n"
+    (install_root / lock.executable).write_bytes(executable_payload)
+    runtime_output = (
+        f"{lock.version_output_prefix} (hash {lock.runtime_build_hash} "
+        f"built {lock.runtime_build_timestamp})\n{lock.version_output_prefix}"
+    )
+    receipt = tool_lock.ToolInstallReceipt(
+        tool_id="blender",
+        version=lock.version,
+        platform="windows-x64",
+        archive_sha256=lock.archive_sha256,
+        executable=lock.executable,
+        executable_sha256=hashlib.sha256(executable_payload).hexdigest(),
+        runtime_output=runtime_output,
+    )
+    (install_root / tool_lock.RECEIPT_NAME).write_bytes(
+        tool_lock._canonical_model_bytes(receipt),
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        tool_lock,
+        "run_blender_version",
+        lambda _tool, _install_root: runtime_output,
+    )
+    ROOT = fixture_root
+    VISUAL_PACK_ROOT = visual_pack_root
+    try:
+        yield
+    finally:
+        ROOT = source_root
+        VISUAL_PACK_ROOT = (
+            source_root / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources"
+        )
+        monkeypatch.undo()
 
 
 def test_build_request_is_frozen_complete_and_content_addressed() -> None:
@@ -113,9 +227,8 @@ def test_request_records_each_visual_slot_as_reference_or_placeholder() -> None:
 
     by_id = {entry.slot_id: entry for entry in request.visual_slot_registry}
     assert by_id["key-view-establishing-expanded-01"].usage_mode == ("design-reference-only")
-    assert by_id["key-view-establishing-expanded-01"].source_sha256 == (
-        "75e9dda41978e9ff9ce04da7269d52a40d6d2e40961559e337f9c9fc76d7dcbf"
-    )
+    manifest = load_visual_source_manifest(VISUAL_PACK_ROOT / "visual-sources.json")
+    assert by_id["key-view-establishing-expanded-01"].source_sha256 == manifest.records[0].sha256
     assert by_id["material-rammed-earth-01"].usage_mode == ("procedural-placeholder-v1")
     assert by_id["material-rammed-earth-01"].source_sha256 is None
     assert by_id["material-rammed-earth-01"].build_status == "instantiated"
@@ -1873,7 +1986,7 @@ def test_build_canary_cli_uses_private_defaults_and_prints_verified_result(
         "artifact_count": 6,
         "build_id": "2" * 64,
         "camera_count": 24,
-        "final_directory": "D:\\private\\canary\\build-id",
+        "final_directory": str(Path("D:/private/canary/build-id")),
         "preview_count": 4,
         "verification_level": "L2",
     }
@@ -1930,9 +2043,9 @@ def test_render_canary_cli_uses_private_defaults_and_prints_resume_counts(
     ]
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
-        "journal_path": "D:\\private\\canary\\build-id\\renders\\render-journal.json",
+        "journal_path": str(Path("D:/private/canary/build-id/renders/render-journal.json")),
         "render_id": "3" * 64,
-        "render_root": "D:\\private\\canary\\build-id\\renders",
+        "render_root": str(Path("D:/private/canary/build-id/renders")),
         "rendered_count": 2,
         "reused_count": 22,
     }
