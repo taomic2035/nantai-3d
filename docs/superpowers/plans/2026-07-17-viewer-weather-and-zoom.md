@@ -43,7 +43,7 @@
 - Consumes: 无；模块不得导入 DOM 或 Three.js。
 - Produces: `WEATHER_IDS`, `WEATHER_PRESETS`, `DEFAULT_WEATHER`, `DEFAULT_ZOOM`, `ZOOM_MIN`, `ZOOM_MAX`, `ZOOM_STEP`, `normalizeWeather(value)`, `normalizeZoom(value)`, `getWeatherPreset(value)`, `createPrecipitationPositions(value)`。
 
-- [ ] **Step 1: Write the failing environment contract tests**
+- [x] **Step 1: Write the failing environment contract tests**
 
 Create `web/viewer/environment.test.mjs`:
 
@@ -106,7 +106,7 @@ test('precipitation layouts are deterministic and hard capped', () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -116,7 +116,7 @@ node --test web/viewer/environment.test.mjs
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `environment.mjs`.
 
-- [ ] **Step 3: Implement the pure environment module**
+- [x] **Step 3: Implement the pure environment module**
 
 Create `web/viewer/environment.mjs` with these exact data shapes and rules:
 
@@ -223,7 +223,7 @@ export function createPrecipitationPositions(value = DEFAULT_WEATHER) {
 }
 ```
 
-- [ ] **Step 4: Run focused and Viewer tests and verify GREEN**
+- [x] **Step 4: Run focused and Viewer tests and verify GREEN**
 
 Run:
 
@@ -234,7 +234,7 @@ node --test web/viewer/*.test.mjs
 
 Expected: both commands PASS; the Viewer suite count increases by four tests.
 
-- [ ] **Step 5: Commit and push the pure contract**
+- [x] **Step 5: Commit and push the pure contract**
 
 ```bash
 git add web/viewer/environment.mjs web/viewer/environment.test.mjs
@@ -255,7 +255,7 @@ Commit must include the exact trailer `Co-Authored-By: Codex GPT-5.6 Sol <norepl
 - Consumes: existing `createViewerBridge({ windowObject, handlers, capabilities })` generic routing.
 - Produces: capabilities advertise `setWeather` and `setZoom`; supplied handlers receive unchanged payloads and return `stateChanged`.
 
-- [ ] **Step 1: Add failing capability, routing, and isolation tests**
+- [x] **Step 1: Add failing capability, routing, and isolation tests**
 
 Extend the first capability test:
 
@@ -325,7 +325,7 @@ test('runtime environment fields never alter artifact provenance', () => {
 });
 ```
 
-- [ ] **Step 2: Run bridge tests and verify RED**
+- [x] **Step 2: Run bridge tests and verify RED**
 
 Run:
 
@@ -335,7 +335,7 @@ node --test web/viewer/bridge.test.mjs
 
 Expected: capability assertions fail and routed commands return `unsupported-command`.
 
-- [ ] **Step 3: Add the commands to the existing capability whitelist**
+- [x] **Step 3: Add the commands to the existing capability whitelist**
 
 In `BASE_CAPABILITIES.commands`, add exactly:
 
@@ -346,7 +346,7 @@ In `BASE_CAPABILITIES.commands`, add exactly:
 
 Do not add command-specific routing; the existing generic handler lookup remains the single path.
 
-- [ ] **Step 4: Run bridge and all Viewer tests and verify GREEN**
+- [x] **Step 4: Run bridge and all Viewer tests and verify GREEN**
 
 ```bash
 node --test web/viewer/bridge.test.mjs
@@ -355,7 +355,7 @@ node --test web/viewer/*.test.mjs
 
 Expected: both PASS and all existing cross-origin, request id and provenance tests remain green.
 
-- [ ] **Step 5: Commit and push the bridge contract**
+- [x] **Step 5: Commit and push the bridge contract**
 
 ```bash
 git add web/viewer/bridge.mjs web/viewer/bridge.test.mjs
@@ -376,7 +376,7 @@ Commit must include the exact trailer.
 - Consumes: stable ids used by Task 4.
 - Produces: `weather-control`, `zoom-control`, `zoom-value`, `zoom-reset`, `environment-status`, `hud-weather`, `hud-zoom`, `environment-controls`.
 
-- [ ] **Step 1: Write the failing HTML contract test**
+- [x] **Step 1: Write the failing HTML contract test**
 
 Create `web/viewer/index-contract.test.mjs`:
 
@@ -409,7 +409,7 @@ test('environment status and HUD values are visible but separate from provenance
 });
 ```
 
-- [ ] **Step 2: Run the HTML contract and verify RED**
+- [x] **Step 2: Run the HTML contract and verify RED**
 
 ```bash
 node --test web/viewer/index-contract.test.mjs
@@ -417,7 +417,7 @@ node --test web/viewer/index-contract.test.mjs
 
 Expected: FAIL because the environment controls and HUD ids do not exist.
 
-- [ ] **Step 3: Add responsive styles and accessible markup**
+- [x] **Step 3: Add responsive styles and accessible markup**
 
 Add a bottom-right card with this exact semantic structure:
 
@@ -473,7 +473,7 @@ Use this CSS:
 }
 ```
 
-- [ ] **Step 4: Run HTML and all Viewer tests and verify GREEN**
+- [x] **Step 4: Run HTML and all Viewer tests and verify GREEN**
 
 ```bash
 node --test web/viewer/index-contract.test.mjs
@@ -482,7 +482,7 @@ node --test web/viewer/*.test.mjs
 
 Expected: PASS; vendor import-map closure remains green.
 
-- [ ] **Step 5: Commit and push the visible controls**
+- [x] **Step 5: Commit and push the visible controls**
 
 ```bash
 git add web/viewer/index.html web/viewer/index-contract.test.mjs
@@ -503,7 +503,7 @@ Commit must include the exact trailer.
 - Consumes: all exports from Task 1 and DOM ids from Task 3.
 - Produces: `environment` in `getState`; working `setWeather({weather})`, `setZoom({zoom})`; camera-local precipitation and free-mode wheel zoom.
 
-- [ ] **Step 1: Add failing source-wiring contracts**
+- [x] **Step 1: Add failing source-wiring contracts**
 
 Read `main.js` beside `index.html` in `index-contract.test.mjs` and add:
 
@@ -522,7 +522,7 @@ test('viewer runtime wires environment state without mutating provenance', () =>
 });
 ```
 
-- [ ] **Step 2: Run the contract and verify RED**
+- [x] **Step 2: Run the contract and verify RED**
 
 ```bash
 node --test web/viewer/index-contract.test.mjs
@@ -530,7 +530,7 @@ node --test web/viewer/index-contract.test.mjs
 
 Expected: FAIL because `main.js` does not import or wire the environment module.
 
-- [ ] **Step 3: Add state, light, reusable precipitation, and application functions**
+- [x] **Step 3: Add state, light, reusable precipitation, and application functions**
 
 Import the Task 1 exports. Add one state object:
 
@@ -692,7 +692,7 @@ function updatePrecipitation(dt) {
 
 These functions allocate no geometry, material, or `THREE.Points` during animation. Particle configuration errors only degrade precipitation; the already-applied background, fog, and light remain active.
 
-- [ ] **Step 4: Wire controls, free-mode wheel, framing, state, bridge, and animation**
+- [x] **Step 4: Wire controls, free-mode wheel, framing, state, bridge, and animation**
 
 Add `setupEnvironmentControls()` that:
 
@@ -739,7 +739,7 @@ setZoom: ({ zoom }) => {
 
 Call `updatePrecipitation(dt)` once per animation frame before `renderer.render`. Reveal `environment-controls` with the other Viewer panels after initial loading.
 
-- [ ] **Step 5: Run focused and complete local gates**
+- [x] **Step 5: Run focused and complete local gates**
 
 ```bash
 node --test web/viewer/index-contract.test.mjs web/viewer/environment.test.mjs web/viewer/bridge.test.mjs
@@ -750,7 +750,7 @@ git diff --check
 
 Expected: every command PASS; no change to Python, Studio, coordinate, infinite-world, Spark or provenance tests.
 
-- [ ] **Step 6: Commit and push the runtime**
+- [x] **Step 6: Commit and push the runtime**
 
 ```bash
 git add web/viewer/main.js web/viewer/index-contract.test.mjs
@@ -770,31 +770,31 @@ Commit must include the exact trailer.
 - Consumes: live Viewer at `http://127.0.0.1:8767/web/viewer/` or a freshly started `python -m pipeline.studio_server` port.
 - Produces: current-run evidence for every explicit goal requirement and regression boundary.
 
-- [ ] **Step 1: Verify the server and load a fresh Viewer tab**
+- [x] **Step 1: Verify the server and load a fresh Viewer tab**
 
 Run `curl -fsS http://127.0.0.1:8767/web/viewer/ >/dev/null`; if it fails, start `.venv/bin/python -m pipeline.studio_server --host 127.0.0.1 --port 8767`. Open a fresh in-app Browser tab and bind it to the localhost app.
 
 Expected: loading overlay clears, HUD/mini-map/environment controls appear, and console has no uncaught exception.
 
-- [ ] **Step 2: Exercise all six weather states**
+- [x] **Step 2: Exercise all six weather states**
 
 Select `晴→阴→雨→雪→雾→夜→晴` and capture state/screenshot evidence.
 
 Expected: background, fog and illumination visibly change every time; rain has streak particles; snow has soft particles; particles stop outside rain/snow; chunk count does not jump merely from switching weather.
 
-- [ ] **Step 3: Exercise both zoom modes and reset**
+- [x] **Step 3: Exercise both zoom modes and reset**
 
 Use the slider at `0.5×`, `1.0×`, `3.0×`; press `F`, use free-mode wheel in both directions; press `F` back and use orbit wheel; press `1×` and invoke `resetCamera` through the bridge.
 
 Expected: slider/bridge work in both modes; free wheel changes HUD optical zoom; orbit wheel still changes camera-target distance; reset restores `1.0×`.
 
-- [ ] **Step 4: Exercise full goal regressions**
+- [x] **Step 4: Exercise full goal regressions**
 
 Drag through a full orbit, switch to free look, use `WASDQE`, invoke `G` with a far positive and negative ENU coordinate, and observe on-demand chunks/mini-map/LOD.
 
 Expected: 360° view, arbitrary ENU movement, infinite on-demand loading, variable LOD and Spark/DC reconstruction layer remain operational under every environment state.
 
-- [ ] **Step 5: Audit runtime truth and final repository state**
+- [x] **Step 5: Audit runtime truth and final repository state**
 
 Use the bridge `getState` and inspect the HUD.
 
