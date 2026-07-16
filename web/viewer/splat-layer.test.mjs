@@ -69,8 +69,15 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-test('resolveFullSplatUrl selects full_3dgs relative to the recon manifest', () => {
+test('resolveFullSplatUrl supports legacy project-root and current manifest-relative paths', () => {
   const { resolveFullSplatUrl } = subject();
+  assert.equal(
+    resolveFullSplatUrl(
+      'https://studio.example/web/data/recon/recon_manifest.json',
+      { schema_version: 1, full_3dgs: 'recon/scene_full.ply' },
+    ),
+    'https://studio.example/recon/scene_full.ply',
+  );
   assert.equal(
     resolveFullSplatUrl(
       'https://studio.example/data/recon/recon_manifest.json',
@@ -82,6 +89,20 @@ test('resolveFullSplatUrl selects full_3dgs relative to the recon manifest', () 
     resolveFullSplatUrl('https://studio.example/recon.json', { lod: {} }),
     null,
   );
+  for (const full_3dgs of [
+    'https://example.com/scene.ply',
+    '/recon/scene.ply',
+    '../scene.ply',
+    'recon/%2e%2e/scene.ply',
+  ]) {
+    assert.equal(
+      resolveFullSplatUrl(
+        'https://studio.example/web/data/recon/recon_manifest.json',
+        { schema_version: 1, full_3dgs },
+      ),
+      null,
+    );
+  }
 });
 
 test('ENU_TO_THREE_QUATERNION rotates (E,N,U) to (E,U,-N)', () => {

@@ -11,6 +11,8 @@
   纯内存渲染、LOD、SHA-256 ETag、`If-None-Match` 304、无落盘与结构化失败。
 - `93819ab` 在 Viewer 实现“预烘焙优先，越界按需”：严格同源模板、负坐标、
   近中远 LOD、5 秒失败退避，并消费 top-level / per-chunk 真实三维 bounds。
+- Viewer 对重建产物保留显式版本语义：旧 schema v1 的 `recon/scene_full.ply` 按项目根
+  静态路径解析，v2 `recon_full.ply` 仍按 manifest 相对解析，并拒绝外部 URL / 路径穿越。
 - Studio server 对合法的静态 `grid{on_demand:false,url_template,world_seed}` 做无落盘运行时投影：
   只在端点真实可用时向 Viewer 返回 `on_demand:true`；原 manifest 字节保持 false。
 - 浏览器实测在预烘焙 5×5 之外的 `(7,-2)` 载入 36 个活跃 chunk；服务端日志证明

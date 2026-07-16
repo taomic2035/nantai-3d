@@ -37,6 +37,24 @@ export function rotateVectorByQuaternion([x, y, z], quaternion) {
 export function resolveFullSplatUrl(manifestUrl, manifest = {}) {
   const artifact = manifest.full_3dgs;
   if (typeof artifact !== 'string' || artifact.length === 0) return null;
+  if (artifact.startsWith('/') || artifact.includes('\\') || /[?#]/.test(artifact)) {
+    return null;
+  }
+  const parts = artifact.split('/');
+  try {
+    if (parts.some((part) => {
+      const decoded = decodeURIComponent(part);
+      return !decoded || decoded === '.' || decoded === '..' || /[\\/]/.test(decoded);
+    })) return null;
+  } catch {
+    return null;
+  }
+  // Legacy schema v1 wrote full_3dgs under the project-root recon/ static root,
+  // while current v2 writes recon_full.ply beside the manifest. Keep the
+  // distinction explicit; LOD artifacts remain manifest-relative.
+  if (manifest.schema_version === 1 && parts[0] === 'recon') {
+    return new URL(`/${artifact}`, manifestUrl).href;
+  }
   return new URL(artifact, manifestUrl).href;
 }
 
