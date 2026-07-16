@@ -4,6 +4,15 @@
 > 日期：2026-07-15
 > 触发：用户「CI 修好了，确认一下」→ 我在推 held 批次前做全量验证时发现。
 
+> ## ✅ 已解决（2026-07-16，CI 实证）
+> 批次推上 origin 后，CI 矩阵在**干净 Windows runner** 上跑过：
+> `test_studio_crash_recovery.py` 与 `test_studio_writer_lock.py` **均未出现在失败列表** →
+> **在 CI 通过**（run 29463949300：windows py3.11 = 28 failed / 587 passed，失败全部是
+> 另一个文件 `test_synthetic_village_canary.py`，无 crash_recovery/writer_lock）。
+> 印证本文诊断：本机 32 个失败是**这台开发机的 venv python trampoline PID 间接**，非代码 bug。
+> **本条关闭。** 下方「建议：helper 测试改用真 PID」仍是可选的健壮性改进（让 Opus 本地也能跑绿），
+> 不阻塞、不紧急。当前 CI 红另有其因，见 **HANDOFF-CODEX-002**。
+
 ## TL;DR
 
 1. **你的 CI 修复（`90e1941`）确认有效** ✅ —— 我本地按 CI 的 Windows 步骤装了
