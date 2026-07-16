@@ -1,5 +1,6 @@
 """统一坐标系配准: 会话划分 / mock 确定性 / 坐标一致性 / COLMAP 解析"""
 import json
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -307,6 +308,51 @@ class TestColmapRegistrationEvidence:
         assert poses["vid_A/vid_A_frame_000000.jpg"].camera_params == (
             500.0, 320.0, 240.0, 0.2,
         )
+
+
+class TestColmapSubprocessTimeout:
+    """colmap 子进程须有界: 卡死 (headless/集显 OpenGL SIFT 停滞、matcher 病态
+    输入、I/O 挂起) 不能让整条管线永久 hang 且不抛错。超时 → RuntimeError (fail-closed,
+    与 returncode!=0 分支同构), 而非无信号阻塞或原样上抛 TimeoutExpired。"""
+
+    def test_stage_hang_raises_runtimeerror_not_indefinite_block(
+        self, photos_dir, tmp_path, monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+
+        def fake_run(args, capture_output=True, text=True, timeout=None, **kwargs):
+            if "-h" in args:  # sift 命名探测: 放行, 返回帮助文本
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout or 1)
+
+        monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
+        with pytest.raises(RuntimeError, match="超时|timeout|timed out"):
+            registration_module.colmap_register(photos_dir, workspace)
+
+    def test_heavy_stages_pass_bounded_timeout_by_default(
+        self, photos_dir, tmp_path, monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        _write_colmap_model(
+            workspace,
+            cameras="1 PINHOLE 1000 800 710 720 501 399\n",
+            images="1 1 0 0 0 0 0 0 1 IMG_000.jpg\n\n",
+        )
+        seen = []
+
+        def fake_run(args, capture_output=True, text=True, timeout=None, **kwargs):
+            if "-h" not in args:  # 只记重活阶段, 跳过 sift 探测
+                seen.append((args[1], timeout))
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
+        registration_module.colmap_register(photos_dir, workspace)
+
+        stages = {name for name, _ in seen}
+        assert {"feature_extractor", "exhaustive_matcher", "mapper"} <= stages
+        assert seen, "重活阶段应被调用"
+        assert all(t is not None and t > 0 for _, t in seen), \
+            "每个重活阶段都须带有界 (非 None) 超时"
 
 
 class TestGpsEnu:

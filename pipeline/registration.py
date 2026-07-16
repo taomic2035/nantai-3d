@@ -498,7 +498,8 @@ def _colmap_sift_group() -> str:
 
 def colmap_register(photos_dir: str | Path, workspace: str | Path,
                     sessions: list[CaptureSession] | None = None,
-                    use_gpu: bool = False) -> RegistrationResult:
+                    use_gpu: bool = False,
+                    stage_timeout_s: float | None = 3600.0) -> RegistrationResult:
     """COLMAP 联合 SfM: 所有照片 + 视频帧进入同一个 SfM-local frame。
 
     要求系统安装 colmap。SfM 尺度与地理方向均不确定；GPS 锚点仅作为后续
@@ -508,6 +509,12 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
     或 headless 时——GPU SIFT 走 OpenGL，集显/后台易失败）。有可用 GPU 时可
     显式开启以提速。仅稀疏 SfM（本函数唯一用到的阶段）是 CPU 可行的；dense/MVS
     需 CUDA，本函数从不调用。
+
+    ``stage_timeout_s`` 默认 3600（每阶段 1 小时，对文档化的开发/canary 小场景
+    极宽松）：给 feature_extractor / matcher / mapper / model_converter 每个子进程
+    加上界，避免 colmap 卡死（headless/集显 OpenGL SIFT 停滞、matcher 病态输入、
+    I/O 挂起）时管线永久 hang 且不抛错。超时按 fail-closed 抛 ``RuntimeError``
+    （与非零返回码同构）。大规模云端跑可调大；``None`` 显式关闭上界（不推荐）。
     """
     photos_dir = Path(photos_dir)
     workspace = Path(workspace)
@@ -519,7 +526,14 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
 
     def run(args: list[str]):
         logger.info(f"colmap {' '.join(args[:2])} ...")
-        proc = subprocess.run(["colmap", *args], capture_output=True, text=True)
+        try:
+            proc = subprocess.run(["colmap", *args], capture_output=True,
+                                  text=True, timeout=stage_timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"colmap {args[0]} 超时 (>{stage_timeout_s}s): 子进程无进展 "
+                f"(headless/集显 OpenGL SIFT 停滞、matcher 病态输入或 I/O 挂起)。"
+                f"排查后可加大 stage_timeout_s 或改用 --engine mock") from exc
         if proc.returncode != 0:
             raise RuntimeError(
                 f"colmap {args[0]} 失败 (exit {proc.returncode}):\n"
