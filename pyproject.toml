@@ -27,6 +27,7 @@ dependencies = [
 
     # 横切
     "loguru>=0.7",
+    "psutil>=5.9",
     "rich>=13.7",
     "python-dotenv>=1.0",
 ]

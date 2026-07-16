@@ -24,6 +24,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+import psutil
+
 from pipeline.ingest_manifest import (
     PHOTO_SOURCE_SUFFIXES,
     VIDEO_SOURCE_SUFFIXES,
@@ -326,7 +328,12 @@ def _process_start_identity(pid: int, *, handle=None) -> str:
         fields = stat_path.read_text(encoding="ascii").split()
         return f"proc-start:{fields[21]}"
     except (OSError, IndexError):
-        return f"pid:{pid}:identity-unavailable"
+        try:
+            return f"psutil-start:{psutil.Process(pid).create_time():.9f}"
+        except psutil.NoSuchProcess:
+            return f"pid:{pid}:identity-unavailable"
+        except (OSError, psutil.AccessDenied) as exc:
+            raise ProcessExecutionError("process identity cannot be inspected") from exc
 
 
 def is_same_process_alive(pid: int, start_identity: str) -> bool:
