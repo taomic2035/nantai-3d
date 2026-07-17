@@ -92,6 +92,61 @@ class TestPartition:
         assert manifest["source"]["units"] == "meters"
         json.dumps(manifest)
 
+    def test_manifest_declares_core_bounds_so_bounds_cannot_mislead_framing(self, tmp_path):
+        """真实 3DGS 必带漂浮物: 少数高斯被优化到场景外几百米。实测一个 Brush 实训重建
+        (67878 高斯): Z 向 90% 分位只有 52.6m, 而真实 bounds 是 720m —— 被噪声撑大 13 倍。
+        viewer 若按 bounds 取景, 相机会停在几百米外对着空气。
+
+        故 manifest 须【另报】一个 core_bounds 供取景。铁律: bounds 仍是全量真相 (绝不
+        缩水), core_bounds 是【附加】信息, 不是替代品。
+        """
+        rng = np.random.default_rng(11)
+        core = np.column_stack([rng.uniform(-30, 30, 2000), rng.uniform(-30, 30, 2000),
+                                rng.uniform(0, 8, 2000)])
+        floaters = np.array([[400.0, 300.0, 250.0], [-380.0, -290.0, -240.0]])
+        xyz = np.vstack([core, floaters])
+        scene = GaussianScene(xyz, np.full((len(xyz), 3), 0.5),
+                              np.full(len(xyz), 0.8), np.full((len(xyz), 3), 0.1))
+        manifest = partition_scene_to_chunks(scene, tmp_path, chunk_size_m=50.0)
+
+        # bounds 仍是【全量真相】: 漂浮物也在内, 绝不因为难看就砍掉
+        assert np.isclose(manifest["bounds"]["max"][2], 250.0, atol=1e-3)
+        assert np.isclose(manifest["bounds"]["min"][2], -240.0, atol=1e-3)
+
+        cb = manifest["core_bounds"]
+        core_size = np.array(cb["max"]) - np.array(cb["min"])
+        full_size = (np.array(manifest["bounds"]["max"])
+                     - np.array(manifest["bounds"]["min"]))
+        assert np.all(core_size < full_size / 5), \
+            "core_bounds 须真的收紧到主体几何, 否则对取景毫无用处"
+        assert core_size[2] < 20.0, "Z 向漂浮物须被排除在 core_bounds 外"
+
+    def test_core_bounds_coverage_is_measured_not_assumed(self, tmp_path):
+        """core_bounds 报的覆盖率必须是【实测数】(真去数盒内有几个点), 不是从分位数
+        推算的假设。逐轴取分位盒后, 三轴联合覆盖【严格小于】单轴分位 —— 拿 0.995 当
+        联合覆盖率报出去就是过度声称。本项目宁可报实测事实, 不报"应该是多少"。
+        """
+        scene = _scene(n=1000, span=200.0, seed=17)
+        manifest = partition_scene_to_chunks(scene, tmp_path, chunk_size_m=50.0)
+        cb = manifest["core_bounds"]
+
+        lo, hi = np.array(cb["min"]), np.array(cb["max"])
+        actual = int(np.sum(np.all((scene.xyz >= lo) & (scene.xyz <= hi), axis=1)))
+        assert cb["contains_points"] == actual, "报的是实测点数, 不是推算"
+        assert np.isclose(cb["contains_fraction"], actual / len(scene))
+        assert "axis_percentile" in cb, "造盒判据须自述, 消费者不用猜 core 是怎么来的"
+        json.dumps(manifest)
+
+    def test_degenerate_scene_core_bounds_does_not_crash_or_lie(self, tmp_path):
+        """所有点重合 / 点数极少时, 分位数退化 —— core_bounds 须仍是有效盒且不谎报覆盖。"""
+        xyz = np.tile([5.0, 5.0, 1.0], (4, 1))
+        scene = GaussianScene(xyz, np.full((4, 3), 0.5), np.full(4, 0.8),
+                              np.full((4, 3), 0.1))
+        manifest = partition_scene_to_chunks(scene, tmp_path, chunk_size_m=50.0)
+        cb = manifest["core_bounds"]
+        assert cb["contains_points"] == 4 and cb["contains_fraction"] == 1.0
+        assert np.all(np.array(cb["max"]) >= np.array(cb["min"]))
+
     def test_manifest_declares_lod_fractions_not_just_filenames(self, tmp_path):
         """manifest 须声明各 LOD 的【比例】而非只给文件名 —— 否则消费者不知道 lod0 是
         8% 还是别的密度, 无法据此按距离正确选级 (早先审计标记的同类潜在缺口)。"""
