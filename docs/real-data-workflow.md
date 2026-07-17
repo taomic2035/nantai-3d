@@ -58,10 +58,19 @@
 或让 `registration.json` 自带 `geo_origin`（COLMAP 从 EXIF GPS 读到时）；两者都没有则 fail-closed。
 
 > 💡 **GPS 标记采集（无人机/手机）免手工写控制点**：若每张图都带 EXIF GPS，相机位置本身
-> 就是控制点。用 `pipeline.alignment.control_points_from_geo_anchors(reg, {image: GeoAnchor})`
-> 把逐图 GPS 一键配对成控制点（`GpsObservation` 平凡转 `GeoAnchor(lat, lon, alt=altitude_m or 0.0)`），
-> 直接喂 `align_registration`——免逐图手写 `control_points.json`。拟合门（≥3 点/退化/RMS）仍权威，
-> 证据不足照样 fail-closed。（当前为 Python API；`--from-gps` CLI 直连待后续。）
+> 就是控制点。直接用 `--from-gps` 指向 ingest manifest，一键 turnkey 对齐（免写 `control_points.json`）：
+>
+> ```bash
+> .venv/bin/python -m pipeline.alignment \
+>   --registration recon/registration.json \
+>   --from-gps ingest/manifest.json \
+>   --geo-origin 26.0801,119.2967,12.5 --out recon/registration_aligned.json
+> ```
+>
+> 只有【既注册又带 EXIF GPS】的图成为控制点（视频帧无 EXIF GPS 自动排除）；图名以 manifest
+> 的 `output_path` 匹配 `pose.image`，不匹配者静默排除。拟合门（≥3 点/退化/RMS）仍权威，
+> 匹配不足即 fail-closed 并给出清晰错误。Python API 亦可：
+> `pipeline.alignment.control_points_from_geo_anchors(reg, {image: GeoAnchor})`。
 
 **fail-closed 门**（任一不满足 → 保持 sfm-local/UNALIGNED，绝不升级为米制）：
 计数 ≥3；源点非退化（共线/共面被拒）；Umeyama 拟合强制 det=+1（不产反射）；`scale>0`；

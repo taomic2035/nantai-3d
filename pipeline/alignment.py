@@ -327,14 +327,50 @@ def load_control_points_json(path: str | Path) -> list[ControlPoint]:
     return [ControlPoint.model_validate(item) for item in raw]
 
 
+def load_control_points_from_ingest_gps(
+    manifest_path: str | Path,
+    reg: RegistrationResult,
+) -> list[ControlPoint]:
+    """Turnkey GPS 对齐: 从 ingest manifest 的逐图 EXIF GPS 构造对齐控制点。
+
+    只有【既注册 (在 ``reg.poses``) 又有 GPS】的图成为控制点 (照片带 GPS; 视频帧无
+    EXIF GPS 故天然排除)。图名以 manifest 的 ``output_path`` 匹配 registration 的
+    ``pose.image``; 不匹配者静默排除 (无对应即无证据)。控制点 <3 时 align_registration
+    的门会 fail-closed 并给出清晰错误。``GpsObservation`` 无高度时 alt 记 0。
+    """
+    from pipeline.ingest_manifest import IngestManifest
+
+    manifest = IngestManifest.model_validate_json(
+        Path(manifest_path).read_text(encoding="utf-8"))
+    anchors: dict[str, GeoAnchor] = {}
+    for src in manifest.sources:
+        if src.gps is None:
+            continue
+        anchor = GeoAnchor(lat=src.gps.lat, lon=src.gps.lon,
+                           alt=src.gps.altitude_m if src.gps.altitude_m is not None else 0.0)
+        for out in src.outputs:
+            anchors[str(out.output_path)] = anchor
+    control_points = control_points_from_geo_anchors(reg, anchors)
+    if not control_points:
+        raise AlignmentError(
+            "--from-gps 未找到【既注册又带 EXIF GPS】的图: 确认照片含 GPS 且已被配准, "
+            "或改用 --control-points 手工提供")
+    return control_points
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Fit an SfM->ENU Sim3 and write an aligned registration.json"
     )
     parser.add_argument("--registration", required=True,
                         help="path to a RegistrationResult JSON (sfm-local)")
-    parser.add_argument("--control-points", required=True,
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--control-points",
                         help="path to a control-point spec JSON list")
+    source.add_argument("--from-gps", metavar="INGEST_MANIFEST",
+                        help="derive control points from per-image EXIF GPS in an "
+                             "ingest manifest (turnkey for GPS-tagged captures); "
+                             "pairs each registered image with its GPS anchor")
     parser.add_argument("--max-rms", type=float, default=2.0,
                         help="RMS residual gate in metres (default 2.0)")
     parser.add_argument("--min-span-ratio", type=float, default=1e-3,
@@ -356,7 +392,10 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             raise AlignmentError("--geo-origin must be LAT,LON,ALT") from exc
         geo_origin = GeoAnchor(lat=lat, lon=lon, alt=alt)
-    control_points = load_control_points_json(args.control_points)
+    if args.from_gps:
+        control_points = load_control_points_from_ingest_gps(args.from_gps, reg)
+    else:
+        control_points = load_control_points_json(args.control_points)
     aligned = align_registration(
         reg,
         control_points,

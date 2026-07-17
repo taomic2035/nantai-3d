@@ -16,6 +16,7 @@ from pipeline.alignment import (
     build_control_points,
     control_points_from_geo_anchors,
     fit_sfm_to_enu,
+    load_control_points_from_ingest_gps,
     umeyama_sim3,
 )
 from pipeline.recon_schema import (
@@ -467,3 +468,94 @@ class TestControlPointsFromGeoAnchors:
     def _non_collinear():
         return {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
                 "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
+
+
+class TestFromGpsIngestManifest:
+    """--from-gps: 从 ingest manifest 的逐图 EXIF GPS 一键 turnkey 米制对齐,
+    免手工写 control_points.json。照片带 GPS + 已注册 → 控制点; 拟合门仍权威。"""
+
+    @staticmethod
+    def _photo(name, gps, payload):
+        import hashlib
+
+        from pipeline.ingest_manifest import FrameMapping, SourceRecord
+        digest = hashlib.sha256(payload).hexdigest()
+        return SourceRecord(
+            source_path=name, source_sha256=digest, kind="photo", bytes=len(payload),
+            gps=gps, exif_source="photo-exif",
+            outputs=(FrameMapping(
+                output_path=name, output_sha256=digest, output_bytes=len(payload),
+                source_frame_index=None, preserves_source_bytes=True),))
+
+    def _write_manifest(self, path, images_gps):
+        from datetime import UTC, datetime
+
+        from pipeline.ingest_manifest import IngestParams, build_manifest
+        params = IngestParams(fps=2, max_frames=300, blur_threshold=0, max_long_edge=2560)
+        sources = [self._photo(name, gps, f"payload-{i}".encode())
+                   for i, (name, gps) in enumerate(images_gps.items())]
+        path.write_text(build_manifest(
+            created_utc=datetime.now(UTC), params=params, sources=sources
+        ).model_dump_json(), encoding="utf-8")
+
+    def _synth_gps(self, reg, scale, rotation, t):
+        from pipeline.ingest_manifest import GpsObservation
+        earth_r = 6378137.0
+        out = {}
+        for pose in reg.poses:
+            east, north, up = scale * (rotation @ np.asarray(pose.t_xyz, float)) + t
+            out[pose.image] = GpsObservation(
+                lat=_ORIGIN.lat + np.degrees(north / earth_r),
+                lon=_ORIGIN.lon + np.degrees(
+                    east / (earth_r * np.cos(np.radians(_ORIGIN.lat)))),
+                altitude_m=_ORIGIN.alt + up)
+        return out
+
+    def test_loads_control_points_and_aligns(self, tmp_path):
+        reg = _registration_with_camera_centres(
+            {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
+             "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}, geo_origin=_ORIGIN)
+        images_gps = self._synth_gps(
+            reg, 1.0, _rotation_z(np.radians(15.0)), np.array([2.0, -1.0, 0.5]))
+        mpath = tmp_path / "ingest.json"
+        self._write_manifest(mpath, images_gps)
+
+        cps = load_control_points_from_ingest_gps(mpath, reg)
+        assert {cp.label for cp in cps} == {"a.jpg", "b.jpg", "c.jpg", "d.jpg"}
+        aligned = align_registration(reg, cps, max_rms_m=2.0)
+        assert aligned.alignment_status is AlignmentStatus.ALIGNED
+        assert aligned.world_frame.frame_id == "world-enu"
+
+    def test_no_registered_gps_fails_closed(self, tmp_path):
+        from pipeline.ingest_manifest import GpsObservation
+        reg = _registration_with_camera_centres({"a.jpg": (0.0, 0.0, 0.0)})
+        # manifest 里的图名与注册的不同 → 无匹配 → fail-closed
+        mpath = tmp_path / "ingest.json"
+        self._write_manifest(
+            mpath, {"other.jpg": GpsObservation(lat=26.0, lon=119.0, altitude_m=50.0)})
+        with pytest.raises(AlignmentError, match="GPS"):
+            load_control_points_from_ingest_gps(mpath, reg)
+
+    def test_cli_from_gps_end_to_end(self, tmp_path):
+        from pipeline.alignment import main as align_main
+        reg = _registration_with_camera_centres(
+            {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
+             "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}, geo_origin=_ORIGIN)
+        (tmp_path / "reg.json").write_text(reg.model_dump_json(), encoding="utf-8")
+        self._write_manifest(
+            tmp_path / "ingest.json",
+            self._synth_gps(reg, 1.0, _rotation_z(np.radians(15.0)),
+                            np.array([2.0, -1.0, 0.5])))
+        out = tmp_path / "aligned.json"
+        rc = align_main(["--registration", str(tmp_path / "reg.json"),
+                         "--from-gps", str(tmp_path / "ingest.json"),
+                         "--geo-origin", "26.0,119.0,50.0", "--out", str(out)])
+        assert rc == 0
+        result = RegistrationResult.model_validate_json(out.read_text(encoding="utf-8"))
+        assert result.alignment_status is AlignmentStatus.ALIGNED
+        assert result.target_frame.frame_id == "world-enu"
+        # --control-points 与 --from-gps 互斥
+        with pytest.raises(SystemExit):
+            align_main(["--registration", str(tmp_path / "reg.json"),
+                        "--control-points", "x.json", "--from-gps", "y.json",
+                        "--out", str(out)])
