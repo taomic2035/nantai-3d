@@ -97,6 +97,16 @@ test('capability factory only claims Gaussian rendering for an active Spark laye
   ]);
 });
 
+test('spark chunk capabilities keep full 3DGS fidelity with reconstruction LOD', () => {
+  const { createViewerCapabilities } = subject();
+  const capabilities = createViewerCapabilities('spark-chunks');
+
+  assert.equal(capabilities.renderer.fidelity, 'full-3dgs');
+  assert.equal(capabilities.lod.reconstruction_tiers, true);
+  assert.equal(capabilities.lod.world_chunks, true);
+  assert.equal(capabilities.artifact_kinds.includes('3dgs-ply'), true);
+});
+
 test('bridge resolves capabilities at announcement time and can report a renderer change', () => {
   const { createViewerBridge, createViewerCapabilities } = subject();
   const fake = fakeWindow();

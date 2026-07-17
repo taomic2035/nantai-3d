@@ -46,7 +46,7 @@ const SPARK_RENDERER = Object.freeze({
 });
 
 export function createViewerCapabilities(mode = 'dc-point-preview') {
-  const sparkActive = mode === 'spark';
+  const sparkActive = mode === 'spark' || mode === 'spark-chunks';
   return Object.freeze({
     ...BASE_CAPABILITIES,
     renderer: sparkActive ? SPARK_RENDERER : DC_POINT_RENDERER,
@@ -55,7 +55,7 @@ export function createViewerCapabilities(mode = 'dc-point-preview') {
       supported: true,
       levels: LOD_LEVELS,
       world_chunks: true,
-      reconstruction_tiers: !sparkActive,
+      reconstruction_tiers: mode === 'spark-chunks' || !sparkActive,
     }),
     three_dgs_properties: sparkActive
       ? Object.freeze({
