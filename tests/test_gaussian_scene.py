@@ -57,6 +57,43 @@ class TestTransform:
         small_scene.transform(Sim3(scale=3.0))
         assert np.allclose(small_scene.scale, orig * 3)
 
+    def test_flatten_sh_unblocks_rotation_keeping_view_independent_color(self, tmp_path):
+        """含高阶 SH 的场景旋转被 fail-closed 阻断 (未实现可靠 SH 旋转); flatten_sh
+        丢高阶保 DC (视角无关基色) → sh_degree=0 → 米制/地理对齐的旋转可安全应用。
+        这是真实 3DGS 重建 (nerfstudio splatfacto 输出带 SH) 米制对齐的诚实降级路径。"""
+        n = 16
+        rng = np.random.default_rng(3)
+        xyz = rng.uniform(-1, 1, (n, 3))
+        rgb = np.clip(rng.uniform(0, 1, (n, 3)), 0, 1)
+        sh_rest = rng.uniform(-0.2, 0.2, (n, 9))  # degree 1 (9 = 3*(4-1))
+        scene = GaussianScene(xyz, rgb, sh_rest=sh_rest)
+        assert scene.sh_degree == 1
+        half = np.pi / 4
+        rot = Sim3(quat_wxyz=[np.cos(half), 0, 0, np.sin(half)])
+        with pytest.raises(ValueError, match="SH"):
+            scene.transform(rot)
+
+        dc_before = scene.sh_dc.copy()
+        returned = scene.flatten_sh()
+        assert returned is scene                       # 原地修改并返回 self, 可链式
+        assert scene.sh_degree == 0
+        assert scene.sh_rest.shape == (n, 0)
+        assert np.array_equal(scene.sh_dc, dc_before)  # DC 视角无关基色不变
+
+        scene.transform(rot)                            # 不再阻断
+        assert np.array_equal(scene.sh_dc, dc_before)  # 旋转对 DC 恒等
+
+        # flatten 后存盘/重载是合法 degree-0 3dgs ply
+        p = tmp_path / "flat.ply"
+        scene.save_ply(p, flavor="3dgs")
+        assert GaussianScene.load_ply(p).sh_degree == 0
+
+    def test_flatten_sh_is_idempotent_on_degree0(self):
+        s = GaussianScene(np.array([[1.0, 0, 0]]), np.array([[1.0, 0, 0]]))
+        assert s.sh_degree == 0
+        s.flatten_sh()
+        assert s.sh_degree == 0 and s.sh_rest.shape == (1, 0)
+
     def test_transform_records_anonymous_history(self, small_scene):
         # An untracked transform must leave an honest trace in the history so it
         # cannot masquerade as a never-moved scene.

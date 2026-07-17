@@ -465,6 +465,19 @@ class GaussianScene:
             self.applied_transform_paths
         )
 
+    def flatten_sh(self) -> "GaussianScene":
+        """丢弃高阶球谐 (f_rest), 只保留 DC (视角无关基色), 原地修改并返回 self。
+
+        高阶 SH 编码视角相关外观 (高光/反射), 其正确旋转 (Wigner-D) 本版未实现, 故
+        transform()/apply_frame_transform() 对含高阶 SH 的场景施加非恒等旋转时 fail-closed
+        阻断 (见 _validate_safe_rotation)。flatten 后 sh_degree=0, 旋转对 DC 恒等 → 米制/
+        地理对齐 (sfm-local→ENU 的 Sim3 含旋转) 可安全应用于真实 3DGS 重建。诚实代价: 失去
+        视角相关高光, 保留正确的视角无关基色 —— 远好于施加错误 SH 旋转产生的错误颜色。
+        """
+        self.sh_rest = np.zeros((self.xyz.shape[0], 0), dtype=np.float64)
+        self.sh_degree = 0
+        return self
+
     def _validate_safe_rotation(self, sim3: Sim3) -> None:
         rotation = sim3.rotation_matrix()
         if self.sh_degree > 0 and not np.allclose(rotation, np.eye(3), atol=1e-10):

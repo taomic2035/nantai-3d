@@ -329,6 +329,36 @@ class TestImportEngine:
         assert manifest["provenance"]["synthetic"] is False
         assert manifest["provenance"]["geometry_usability"] == "preview-only"
 
+    def test_flatten_ply_sh_script_unblocks_metric_alignment_of_sh_reconstruction(
+        self, tmp_path,
+    ):
+        # Real 3DGS reconstructions (nerfstudio splatfacto) carry higher-order SH.
+        # Metric/geo alignment applies a Sim3 with ROTATION, which the loader blocks
+        # for SH scenes (no reliable SH rotation → fail-closed). scripts/flatten_ply_sh.py
+        # is the documented honest preprocessing: drop f_rest_*, keep DC → rotation-safe.
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parent.parent
+        rng = np.random.default_rng(5)
+        n = 200
+        scene = GaussianScene(rng.uniform(0, 5, (n, 3)), rng.uniform(0, 1, (n, 3)),
+                              sh_rest=rng.uniform(-0.2, 0.2, (n, 9)))  # degree 1
+        ply = tmp_path / "sh_trained.ply"
+        scene.save_ply(ply, flavor="3dgs")
+        assert GaussianScene.load_ply(ply).sh_degree == 1
+
+        proc = subprocess.run(
+            [sys.executable, "scripts/flatten_ply_sh.py", str(ply)],
+            cwd=root, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+        flat = GaussianScene.load_ply(ply)
+        assert flat.sh_degree == 0
+        # 旋转 (如 sfm-local→ENU 对齐) 现在不再被 SH 阻断
+        flat.transform(Sim3(quat_wxyz=[np.cos(np.pi / 4), 0, 0, np.sin(np.pi / 4)]))
+        assert flat.sh_degree == 0
+
     def test_prepare_import_synthetic_flag_declares_source_honestly(self, tmp_path):
         # An operator importing a 3DGS trained on SYNTHETIC imagery (e.g. the
         # canary's Blender renders via GT cameras) must be able to declare that
