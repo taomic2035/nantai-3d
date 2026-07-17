@@ -219,6 +219,27 @@ class TestHandoffValidation:
         assert e.origin == "real", "真实交付替换 mock 后 origin 须转 real"
         assert e.version == 2, "内容变化须升版 (chunk_content_key/重烘据此拾取新素材)"
 
+    def test_multi_asset_batch_lands_all_as_real(self, tmp_path):
+        """全批真实素材落地实景 (即将发生, 真实素材可能一次交付多个): 一个 v2 交付含
+        多个素材 → 逐个注册, 全部 origin=real (非谎称 mock)。锁 register 循环对批量正确。"""
+        assets_dir = tmp_path / "assets"
+        d = tmp_path / "deliv"
+        _write_deliverable(d, [{"asset_id": f"a{i}", "ply": f"a{i}.ply"} for i in range(4)])
+        manifest = json.loads((d / "manifest.json").read_text())
+        manifest["schema_version"] = 2
+        manifest["coordinate_system"] = {"units": "meters", "axes": "local-z-up"}
+        manifest["generator"] = {"name": "gpt-image2", "version": "3.1"}
+        for item in manifest["items"]:
+            item["sha256"] = _sha256(d / item["ply"])
+        (d / "manifest.json").write_text(json.dumps(manifest))
+
+        r = validate(d, feedback_dir=tmp_path / "fb",
+                     do_register=True, assets_dir=assets_dir)
+        assert sorted(r["registered"]) == ["a0", "a1", "a2", "a3"]
+        reg = AssetRegistry(assets_dir)
+        assert all(reg.doc.assets[f"a{i}"].origin == "real" for i in range(4))
+        assert all(reg.doc.assets[f"a{i}"].version == 1 for i in range(4))
+
     def test_v2_manifest_requires_sha_for_every_item(self, tmp_path):
         d = tmp_path / "deliv"
         _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}])
