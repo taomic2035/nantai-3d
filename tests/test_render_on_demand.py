@@ -22,6 +22,7 @@ from pipeline.mock_layout import MockLayoutGenerator
 from pipeline.render_chunk_to_ply import (
     DEFAULT_LOD_FRACTIONS,
     build_chunk_array,
+    chunk_content_key,
     render_chunkset,
     render_single_chunk,
 )
@@ -29,6 +30,16 @@ from pipeline.render_chunk_to_ply import (
 
 def _ply_count(data: bytes) -> int:
     return PlyData.read(BytesIO(data))['vertex'].count
+
+
+def _distinct_3dgs_ply(path):
+    """一个字节上不同于 seed_registry 素材的合法 3dgs ply, 供 replace() 升版测试。"""
+    from pipeline.gaussian_scene import GaussianScene
+    GaussianScene(
+        [[0.5, 0.5, 0.5], [1.0, 0.0, 0.0], [0.2, 0.9, 0.1]],
+        [[0.2, 0.3, 0.4], [0.1, 0.1, 0.1], [0.7, 0.2, 0.2]],
+    ).save_ply(path, flavor="3dgs")
+    return path
 
 
 def _bake(tmp_path, chunk_range, seed=42):
@@ -212,6 +223,52 @@ def test_manifest_and_layout_written_lf_not_crlf(tmp_path):
     )
     assert b"\r\n" not in (tmp_path / "web" / "manifest.json").read_bytes()
     assert b"\r\n" not in (layouts / "chunk_0_0.json").read_bytes()
+
+
+class TestChunkContentKey:
+    """内容寻址缓存键 (Codex HANDOFF-003 Open Q1): registry=None 只绑
+    (seed,cx,cy,lod); registry≠None 额外绑该 chunk 布局引用的每个素材的 verified
+    sha256 —— 素材 replace() 升版即让键变化, 杜绝'仅按坐标缓存返回陈旧几何'。"""
+
+    def test_key_is_deterministic(self):
+        assert chunk_content_key(1, 2, world_seed=42) == chunk_content_key(1, 2, world_seed=42)
+        assert chunk_content_key(-2, -3, 7, lod=1) == chunk_content_key(-2, -3, 7, lod=1)
+
+    def test_none_registry_binds_only_seed_coords_lod(self):
+        base = chunk_content_key(1, 2, world_seed=42, lod=None)
+        assert chunk_content_key(1, 2, world_seed=42, lod=0) != base
+        assert chunk_content_key(1, 2, world_seed=42, lod=1) != base
+        assert chunk_content_key(1, 3, world_seed=42, lod=None) != base
+        assert chunk_content_key(1, 2, world_seed=7, lod=None) != base
+        assert chunk_content_key(1, 2, 42, lod=0) != chunk_content_key(1, 2, 42, lod=1)
+
+    def test_registry_binds_consumed_asset_sha_and_survives_replace(self, tmp_path):
+        from pipeline.assets import AssetRegistry
+        from pipeline.mock_assets import seed_registry
+
+        assets_dir = tmp_path / "assets"
+        seed_registry(assets_dir)
+        layout = MockLayoutGenerator(42).generate_chunk(1, 2)
+        assert layout.buildings, "chunk (1,2) 须含建筑以引用真实素材"
+        ref_asset = layout.buildings[0].asset_id
+
+        key_none = chunk_content_key(1, 2, world_seed=42, registry=None)
+        key_real = chunk_content_key(1, 2, world_seed=42, registry=AssetRegistry(assets_dir))
+        assert key_real != key_none, "真实素材键须区别于合成代理键"
+
+        # 升版该 chunk 引用的素材 → 同坐标键必须变化 (否则缓存返回陈旧几何)
+        reg = AssetRegistry(assets_dir)
+        reg.replace(ref_asset, _distinct_3dgs_ply(tmp_path / "new.ply"))
+        key_bumped = chunk_content_key(
+            1, 2, world_seed=42, registry=AssetRegistry(assets_dir))
+        assert key_bumped != key_real, "素材 replace 升版后同坐标键须变化"
+
+    @pytest.mark.parametrize("bad", [1.5, math.nan, math.inf, "3", None])
+    def test_rejects_non_integer_coords(self, bad):
+        with pytest.raises(ValueError, match="integer"):
+            chunk_content_key(bad, 0)
+        with pytest.raises(ValueError, match="integer"):
+            chunk_content_key(0, bad)
 
 
 def test_render_single_chunk_with_registry_is_deterministic_and_pure(tmp_path):

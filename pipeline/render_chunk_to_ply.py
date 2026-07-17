@@ -512,6 +512,62 @@ def _lod_subset(arr: np.ndarray, frac: float) -> np.ndarray:
     return arr[np.sort(order[:k])]
 
 
+def _require_int_coords(chunk_x, chunk_y) -> tuple[int, int]:
+    """render + 缓存键共用的 fail-closed 坐标闸。
+
+    非整数/NaN/inf 给出清晰 ValueError, 而非在布局 RNG 深处抛未分类 TypeError;
+    coerce numpy 整数到 python int (路由/调度层常产出 numpy 整数, random.Random 只认原生 int)。
+    """
+    import numbers
+
+    if not (isinstance(chunk_x, numbers.Integral)
+            and isinstance(chunk_y, numbers.Integral)):
+        raise ValueError(
+            f"chunk coordinates must be integers, got ({chunk_x!r}, {chunk_y!r})")
+    return int(chunk_x), int(chunk_y)
+
+
+def chunk_content_key(
+    chunk_x: int,
+    chunk_y: int,
+    world_seed: int = 42,
+    registry=None,
+    lod: int | None = None,
+) -> str:
+    """内容寻址缓存键: 唯一决定 render_single_chunk 输出字节的因素的稳定摘要。
+
+    registry=None (合成代理): 键 = (world_seed, cx, cy, lod), 因合成几何完全由此决定
+    (见 HANDOFF-003 §1)。registry≠None (真实素材): 额外并入该 chunk 布局引用的每个
+    素材的 verified sha256 —— 素材 replace() 升版 (sha 变) 即让键变化, 杜绝"仅按坐标
+    缓存返回陈旧几何"(Codex HANDOFF-003 Open Q1)。廉价: 只生成布局(不渲染)+ 读 registry 摘要。
+    保守: 绑布局引用的全部素材(含渲染时可能降级为代理的), 任一 sha 变即失效——宁可多一次
+    miss, 绝不返回陈旧字节。未验证/缺失素材记为 'proxy' 哨兵(与其渲染时降级为合成代理一致)。
+    """
+    from pipeline.mock_layout import MockLayoutGenerator
+
+    chunk_x, chunk_y = _require_int_coords(chunk_x, chunk_y)
+    parts = [
+        "chunk.content.v1",
+        f"world_seed={world_seed}",
+        f"cx={chunk_x}",
+        f"cy={chunk_y}",
+        f"lod={lod}",
+    ]
+    if registry is not None:
+        layout = MockLayoutGenerator(world_seed).generate_chunk(chunk_x, chunk_y)
+        asset_ids: set[str] = set()
+        for b in layout.buildings:
+            asset_ids.add(b.asset_id)
+        for p in layout.props:
+            asset_ids.add(p.asset_id)
+        for v in layout.vegetation:
+            asset_ids.update(v.asset_ids)
+        for asset_id in sorted(asset_ids):
+            digest = registry.verified_sha256(asset_id) or "proxy"
+            parts.append(f"asset:{asset_id}={digest}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
 def render_single_chunk(
     chunk_x: int,
     chunk_y: int,
@@ -524,22 +580,12 @@ def render_single_chunk(
     render-on-demand 无限世界的内核: 布局由 (world_seed, chunk_x, chunk_y) 经
     MockLayoutGenerator 完全确定, 渲染确定性由本模块的 per-chunk 本地 RNG 保证,
     ply 无时间戳/无熵 —— 故相同入参跨进程字节一致, 可安全用于内容寻址缓存与
-    多实例服务器。任意 (含负) 坐标均可; registry=None 走合成代理 (不触溯源写路径)。
-    lod: 0/1 返回 DEFAULT_LOD_FRACTIONS 子集 (远/中景省带宽), 2 或 None 返回全量。
+    多实例服务器 (缓存键见 chunk_content_key)。任意 (含负) 坐标均可; registry=None
+    走合成代理 (不触溯源写路径)。lod: 0/1 返回 DEFAULT_LOD_FRACTIONS 子集, 2/None 全量。
     """
-    import numbers
-
     from pipeline.mock_layout import MockLayoutGenerator
 
-    # fail-closed 类型闸: 非整数/NaN/inf 坐标给出清晰 ValueError, 而非在布局 RNG
-    # 深处抛未分类 TypeError。coerce numpy 整数到 python int (路由/调度层常产出
-    # numpy 整数, 且 random.Random 只认原生 int)。
-    if not (isinstance(chunk_x, numbers.Integral)
-            and isinstance(chunk_y, numbers.Integral)):
-        raise ValueError(
-            f"chunk coordinates must be integers, got ({chunk_x!r}, {chunk_y!r})")
-    chunk_x, chunk_y = int(chunk_x), int(chunk_y)
-
+    chunk_x, chunk_y = _require_int_coords(chunk_x, chunk_y)
     layout = MockLayoutGenerator(world_seed).generate_chunk(chunk_x, chunk_y)
     arr = build_chunk_array(layout, registry=registry)
     if lod is not None and lod in DEFAULT_LOD_FRACTIONS:
