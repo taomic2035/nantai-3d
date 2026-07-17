@@ -115,3 +115,69 @@ test('cross-origin and wrong-frame messages are ignored', () => {
   });
   assert.equal(bridge.status, 'waiting');
 });
+
+test('dynamic artifact kinds are capability-gated independently from renderer artifacts', () => {
+  const h = harness();
+  const bridge = new StudioViewerBridge({
+    windowObject: h.windowObject, frameWindow: h.frameWindow,
+  });
+  bridge.handleMessage({
+    origin: h.windowObject.location.origin,
+    source: h.frameWindow,
+    data: viewerMessage('ready', {
+      capabilities: {
+        commands: ['loadArtifact'],
+        dynamic_artifact_kinds: ['recon-manifest', 'coverage-audit'],
+        artifact_kinds: ['recon-manifest', '3dgs-ply'],
+      },
+    }),
+  });
+
+  assert.equal(bridge.supportsArtifactKind('coverage-audit'), true);
+  assert.equal(bridge.supportsArtifactKind('3dgs-ply'), false);
+  assert.equal(bridge.supportsArtifactKind('chunk-manifest'), false);
+});
+
+test('loadArtifact sends only a declared dynamic kind and preserves correlation', async () => {
+  const h = harness();
+  const bridge = new StudioViewerBridge({
+    windowObject: h.windowObject,
+    frameWindow: h.frameWindow,
+    idFactory: () => 'coverage-request',
+  });
+  bridge.handleMessage({
+    origin: h.windowObject.location.origin,
+    source: h.frameWindow,
+    data: viewerMessage('ready', {
+      capabilities: {
+        commands: ['loadArtifact'],
+        dynamic_artifact_kinds: ['coverage-audit'],
+      },
+    }),
+  });
+
+  await assert.rejects(
+    () => bridge.loadArtifact('chunk-manifest', { url: '/chunks.json' }),
+    /unsupported dynamic artifact kind/i,
+  );
+  const pending = bridge.loadArtifact('coverage-audit', {
+    url: '/artifacts/coverage-audit.json',
+  });
+  assert.deepEqual(h.sent[0].message.payload, {
+    kind: 'coverage-audit',
+    url: '/artifacts/coverage-audit.json',
+  });
+  bridge.handleMessage({
+    origin: h.windowObject.location.origin,
+    source: h.frameWindow,
+    data: viewerMessage(
+      'artifactLoaded',
+      { result: { kind: 'coverage-audit', coverage: { status: 'diagnostic-unvalidated' } } },
+      'coverage-request',
+    ),
+  });
+  assert.deepEqual(await pending, {
+    kind: 'coverage-audit',
+    coverage: { status: 'diagnostic-unvalidated' },
+  });
+});

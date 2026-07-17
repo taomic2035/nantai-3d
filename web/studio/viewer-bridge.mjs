@@ -48,6 +48,27 @@ export class StudioViewerBridge {
       && this.capabilities.commands.includes(command);
   }
 
+  supportsArtifactKind(kind) {
+    return this.status === 'ready'
+      && typeof kind === 'string'
+      && Array.isArray(this.capabilities.dynamic_artifact_kinds)
+      && this.capabilities.dynamic_artifact_kinds.includes(kind);
+  }
+
+  loadArtifact(kind, { url, manifest } = {}) {
+    if (!this.supportsArtifactKind(kind)) {
+      return Promise.reject(new Error(`unsupported dynamic artifact kind: ${kind}`));
+    }
+    const hasUrl = typeof url === 'string' && url.length > 0;
+    const hasManifest = manifest !== null && typeof manifest === 'object';
+    if (hasUrl === hasManifest) {
+      return Promise.reject(new Error('artifact load requires exactly one of url or manifest'));
+    }
+    return this.command('loadArtifact', hasUrl
+      ? { kind, url }
+      : { kind, manifest });
+  }
+
   command(type, payload = {}) {
     if (this.status !== 'ready') return Promise.reject(new Error('viewer is not ready'));
     if (!this.supports(type)) return Promise.reject(new Error(`unsupported viewer command: ${type}`));
