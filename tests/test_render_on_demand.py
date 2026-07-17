@@ -208,6 +208,32 @@ def test_baked_default_lod_matches_kernel_lod_fractions(tmp_path):
         assert baked == kernel, f"预烘 lod{lod} 与按需 lod{lod} 须字节一致 (同 LOD 比例+同渲染)"
 
 
+def test_registry_on_demand_tile_byte_matches_baked_tile(tmp_path):
+    """SEAM 铁律: 端点若传 registry, 按需 tile 必须与预烘 in-grid tile 逐字节一致 ——
+    这是"无限村庄无接缝"的根本不变量。验证工作流坐实 registry=None 会造成 12.5x 密度
+    断崖(预烘用真实素材/端点出合成代理); 此测锁定'端点接 registry 后接缝真的消失', 且
+    防未来内核漂移。full + LOD 两级均验。"""
+    from pipeline.assets import AssetRegistry
+    from pipeline.mock_assets import seed_registry
+
+    assets_dir = tmp_path / "assets"
+    seed_registry(assets_dir)
+    layouts = tmp_path / "layouts"
+    _write_mock_layouts(layouts, (0, 2, 0, 2))
+    render_chunkset(  # 预烘用真实素材 (uses_assets=true)
+        layouts_dir=layouts, output_dir=tmp_path / "web",
+        chunk_range=(0, 2, 0, 2), assets_dir=assets_dir,
+    )
+    baked_full = (tmp_path / "web" / "chunk_1_1.ply").read_bytes()
+    on_demand = render_single_chunk(1, 1, world_seed=42, registry=AssetRegistry(assets_dir))
+    assert on_demand == baked_full, "按需 registry tile 须与预烘 registry tile 字节一致 (无接缝)"
+    for lod in (0, 1):
+        baked_lod = (tmp_path / "web" / f"chunk_1_1_lod{lod}.ply").read_bytes()
+        od_lod = render_single_chunk(
+            1, 1, world_seed=42, registry=AssetRegistry(assets_dir), lod=lod)
+        assert od_lod == baked_lod, f"按需 registry lod{lod} 须与预烘字节一致"
+
+
 def test_manifest_carries_infinite_grid_metadata(tmp_path):
     """render_chunkset 的 manifest 须含无限网格声明 + 全局 bounds + per-chunk aabb,
     让 viewer 能区分'越界→请求'与'真无内容', 并用真实 z_range 取代硬编码 0。"""
