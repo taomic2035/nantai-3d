@@ -47,6 +47,29 @@
 (`registry=None`)；真实可替换素材的跨 worker 缓存须先有 asset version/SHA 内容键，且跨异构
 平台共享前仍须解 HANDOFF-002。
 
+## 真实重建链路（2026-07-17，Opus lane 已全部就位；待 Codex 接分块 viewer）
+
+真实数据链路已端到端打通，每步的**真实限制均如实文档化**（`docs/manual/reconstruction-setup.md` /
+`docs/real-data-workflow.md`）：
+
+采集 → COLMAP（本机 CPU，**每阶段 6h 卡死 backstop**）→ **外部云 GPU 训练 3DGS** →
+`normalize_ply_quats` → `flatten_ply_sh`（**仅米制对齐时需要**）→ `prepare_import` →
+`reconstruct --engine import [--chunk-size-m 50]` → `alignment --from-gps | --control-points` → 360° 漫游
+
+Opus lane 近期补齐的能力与**已知边界**（均 TDD 锁定）：
+- **高阶 SH 限制**：加载器对「含 `f_rest_*` + 非恒等旋转」**故意 fail-closed**（可靠 SH 旋转未实现，
+  绝不施加错误旋转出错色）。真实训练器（nerfstudio splatfacto）输出 degree-3 SH，故**米制对齐前**
+  须 `scripts/flatten_ply_sh.py` 扁平化（丢高阶保 DC 视角无关基色；代价：失视角高光）。阻断信息自解释。
+- **GPS 对齐的精度现实**：`alignment --from-gps <ingest-manifest>` 可从逐图 EXIF GPS 一键 turnkey
+  对齐，但**消费级 GPS 精度 3~10m**，噪声无法被相似变换解释 → **默认 `--max-rms 2.0` 基本必然
+  fail-closed**（这是正确的：拒绝为噪声盖米制章）。放宽到 5~10 才可能过门，但**精度不优于 GPS 本身**；
+  要 sub-metre 须实测控制点（`enu_xyz`）。失败信息自解释。
+- **大重建分块流式**：`reconstruct --chunk-size-m 50`（或 `scripts/chunk_reconstruction.py`）把上百万
+  高斯的单个 `.ply` 切成 per-chunk ply + LOD + `chunks.json`。纯空间重打包：无损（每高斯恰好落一块）、
+  坐标绝对不动、**provenance 不增不减**（分块**绝不**把 preview-only 变 metric-aligned）。
+  **待 Codex**：viewer 消费 `chunks.json`（规格见 `handoff/HANDOFF-CODEX-004`）。注意其
+  **无 `grid`** —— 重建**不可**程序化续渲，**绝不可**对它投影 `on_demand:true`。
+
 ## 关键文档
 
 - `README.md` — 能力矩阵、快速开始、核心工作流。
@@ -55,6 +78,7 @@
 - `handoff/HANDOFF-CODEX-003-render-on-demand-infinite-world.md` — render-on-demand 集成规格（内核 API + 端点 + 缓存约束）。
 - `handoff/FEEDBACK-HANDOFF-CODEX-003.md` — Codex 集成回执（运行时开闸决策 + 真实素材未决项）。
 - `handoff/REVIEW-CODEX-003-render-on-demand-integration.md` — Opus review 回执（字节/纯度/投影 sign-off + 4 项待处理：真实素材密度断崖 CRITICAL、布局引擎不对称 HIGH、投影 fail-open MEDIUM、越界码 LOW）。
+- `handoff/HANDOFF-CODEX-004-stream-large-reconstructions.md` — 大重建分块流式交办（`chunks.json` 契约；与合成村庄 manifest 同构但**无 `grid`**、坐标绝对、`source` 是标注信任的唯一依据）。
 - `docs/verification/2026-07-16-pipeline-reproducibility-audit.md` — pipeline 可复现性审计（随机源/字节/平台三维度）。
 - `docs/verification/2026-07-16-failclosed-audit-and-fixes.md` — fail-closed/provenance 审计 + 四项 TDD 修复（含 1 项 medium fail-open：矛盾对齐证据不再被提升为 metric）。
 - `handoff/` — Claude↔GPT 素材交办/回执（HANDOFF-00x）。
