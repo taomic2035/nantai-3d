@@ -133,6 +133,81 @@ def test_render_single_chunk_deterministic_across_processes():
     assert run() == run()
 
 
+def _write_mock_layouts(layouts_dir, chunk_range, seed=42):
+    layouts_dir.mkdir(parents=True, exist_ok=True)
+    gen = MockLayoutGenerator(world_seed=seed)
+    x_min, x_max, y_min, y_max = chunk_range
+    for cx in range(x_min, x_max):
+        for cy in range(y_min, y_max):
+            (layouts_dir / f"chunk_{cx}_{cy}.json").write_text(
+                gen.generate_chunk(cx, cy).model_dump_json(indent=2), encoding="utf-8")
+
+
+class TestOnDemandGridRecipe:
+    """grid 元数据须诚实声明按需渲染的完整配方, 让端点忠实复现预烘世界, 消除接缝:
+    - layout_engine: 只有内核 (render_single_chunk 硬编码 MockLayoutGenerator) 能复现的
+      mock 世界才可开按需; GLM/手改世界声明 None → 端点须 fail-closed 不开 (否则风格接缝)。
+    - uses_assets: 端点须用与预烘相同的 registry 设定 (真实素材 vs 合成代理是 12.5x 密度断崖)。"""
+
+    def test_grid_declares_mock_engine_and_uses_assets_true_with_assets(self, tmp_path):
+        from pipeline.mock_assets import seed_registry
+        layouts = tmp_path / "layouts"
+        _write_mock_layouts(layouts, (0, 2, 0, 2))
+        assets_dir = tmp_path / "assets"
+        seed_registry(assets_dir)
+        manifest = render_chunkset(
+            layouts_dir=layouts, output_dir=tmp_path / "web",
+            chunk_range=(0, 2, 0, 2), assets_dir=assets_dir,
+        )
+        assert manifest["grid"]["layout_engine"] == "mock"
+        assert manifest["grid"]["uses_assets"] is True
+
+    def test_grid_uses_assets_false_without_registry(self, tmp_path):
+        layouts = tmp_path / "layouts"
+        _write_mock_layouts(layouts, (0, 2, 0, 2))
+        manifest = render_chunkset(
+            layouts_dir=layouts, output_dir=tmp_path / "web",
+            chunk_range=(0, 2, 0, 2), assets_dir=None,
+        )
+        assert manifest["grid"]["layout_engine"] == "mock"
+        assert manifest["grid"]["uses_assets"] is False
+
+    def test_grid_layout_engine_null_when_not_mock_reproducible(self, tmp_path):
+        # 手改布局 (删一栋楼) → 内核 render_single_chunk 无法复现 → 不得声明 mock。
+        layouts = tmp_path / "layouts"
+        layouts.mkdir()
+        gen = MockLayoutGenerator(world_seed=42)
+        for cx in range(2):
+            for cy in range(2):
+                lay = gen.generate_chunk(cx, cy)
+                if (cx, cy) == (1, 1):
+                    lay.buildings = lay.buildings[:-1]
+                (layouts / f"chunk_{cx}_{cy}.json").write_text(
+                    lay.model_dump_json(indent=2), encoding="utf-8")
+        manifest = render_chunkset(
+            layouts_dir=layouts, output_dir=tmp_path / "web",
+            chunk_range=(0, 2, 0, 2), assets_dir=None,
+        )
+        assert manifest["grid"]["layout_engine"] is None, \
+            "非 mock 可复现的世界不得声明 layout_engine=mock (端点据此 fail-closed 不开按需)"
+
+
+def test_baked_default_lod_matches_kernel_lod_fractions(tmp_path):
+    """L1 单一真源守卫: render_chunkset 默认 LOD 比例须 == 内核 DEFAULT_LOD_FRACTIONS,
+    否则预烘 tile 与按需 tile 在同一相机距离密度突变 (接缝)。registry=None 烘焙
+    (与 render_single_chunk 字节可比), 断言预烘 lod0/lod1 tile 与内核 lod 字节一致。"""
+    layouts = tmp_path / "layouts"
+    _write_mock_layouts(layouts, (0, 1, 0, 1))
+    render_chunkset(
+        layouts_dir=layouts, output_dir=tmp_path / "web",
+        chunk_range=(0, 1, 0, 1), assets_dir=None,  # 默认 lod_levels
+    )
+    for lod in (0, 1):
+        baked = (tmp_path / "web" / f"chunk_0_0_lod{lod}.ply").read_bytes()
+        kernel = render_single_chunk(0, 0, world_seed=42, lod=lod)
+        assert baked == kernel, f"预烘 lod{lod} 与按需 lod{lod} 须字节一致 (同 LOD 比例+同渲染)"
+
+
 def test_manifest_carries_infinite_grid_metadata(tmp_path):
     """render_chunkset 的 manifest 须含无限网格声明 + 全局 bounds + per-chunk aabb,
     让 viewer 能区分'越界→请求'与'真无内容', 并用真实 z_range 取代硬编码 0。"""

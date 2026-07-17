@@ -611,7 +611,9 @@ def render_chunkset(
     layouts_dir = Path(layouts_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    lod_levels = lod_levels if lod_levels is not None else {0: 0.08, 1: 0.30}
+    # 单一真源: 默认 LOD 比例取内核 DEFAULT_LOD_FRACTIONS, 保证预烘 tile 与按需端点
+    # (亦用 DEFAULT_LOD_FRACTIONS) 同比例 —— 否则同相机距离下密度突变 (接缝)。
+    lod_levels = lod_levels if lod_levels is not None else dict(DEFAULT_LOD_FRACTIONS)
 
     registry = None
     if assets_dir is not None:
@@ -622,12 +624,18 @@ def render_chunkset(
             logger.info(f"素材注册表启用: {reg_file} "
                         f"({len(registry.doc.assets)} 个素材)")
 
+    from pipeline.mock_layout import MockLayoutGenerator
+
     x_min, x_max, y_min, y_max = chunk_range
     manifest = {"chunks": [], "chunk_size_m": 200, "asset_consumption": []}
     total_pts = 0
     bmin = [float("inf")] * 3       # 全局 AABB (含真实 z 跨度)
     bmax = [float("-inf")] * 3
     world_seeds: set[int] = set()
+    # 按需端点只能用 render_single_chunk (硬编码 MockLayoutGenerator) 复现世界。
+    # 逐 chunk 验证磁盘 layout 是否 == MockLayoutGenerator(seed) 的可复现输出;
+    # 任一 chunk 是 GLM/手改 → 世界不可被内核忠实续渲 → 不得声明 layout_engine=mock。
+    mock_reproducible = True
 
     for cx in range(x_min, x_max):
         for cy in range(y_min, y_max):
@@ -638,6 +646,10 @@ def render_chunkset(
 
             layout = ChunkLayout(**json.loads(layout_file.read_text(encoding="utf-8")))
             world_seeds.add(layout.world_seed)
+            if mock_reproducible:
+                regen = MockLayoutGenerator(layout.world_seed).generate_chunk(cx, cy)
+                if layout.model_dump_json() != regen.model_dump_json():
+                    mock_reproducible = False
             arr = build_chunk_array(
                 layout,
                 registry=registry,
@@ -701,10 +713,19 @@ def render_chunkset(
         manifest["baked_extent"] = {
             "x_min": min(xs), "x_max": max(xs), "y_min": min(ys), "y_max": max(ys),
         }
+    single_seed = next(iter(world_seeds)) if len(world_seeds) == 1 else None
     manifest["grid"] = {
         "on_demand": False,
         "url_template": "/api/world/chunk/{x}/{y}.ply",
-        "world_seed": next(iter(world_seeds)) if len(world_seeds) == 1 else None,
+        "world_seed": single_seed,
+        # 按需渲染配方 (端点须据此忠实复现预烘世界, 否则接缝):
+        # layout_engine: 仅内核可复现的 mock 世界 (单一 seed + 每 layout 都是
+        #   MockLayoutGenerator(seed) 的可复现输出) 才声明 "mock"; GLM/手改 → None,
+        #   端点须 fail-closed 不开按需 (勿用 mock 替换出风格接缝)。
+        "layout_engine": "mock" if (single_seed is not None and mock_reproducible) else None,
+        # uses_assets: 端点须用与预烘相同的 registry 设定 (真实素材 vs 合成代理是密度断崖);
+        #   为真时端点应传 AssetRegistry(<project>/assets), 缓存键用 chunk_content_key。
+        "uses_assets": registry is not None,
     }
     manifest_path = output_dir / "manifest.json"
     # newline="\n": 与 trust root (recon_manifest/registration) 惯例统一, 让 world
