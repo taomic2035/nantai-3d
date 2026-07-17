@@ -94,6 +94,16 @@ recon/recon_manifest.json` 搬运进来，并附该 manifest 的内容寻址 `re
 
 **你若按 `bounds` 取景，相机会停在几百米外对着空气。请改用 `core_bounds`。**
 
+**这不只影响分块 manifest。** 我查了你的 `web/viewer/framing.mjs`，它自述
+*"Derive camera, clipping, fog, grid and target values from artifact bounds"* ——
+也就是**相机、裁剪面、雾、地面网格**全部由 `bounds` 推导。所以在**不分块的主路径**上
+同一个谎原样存在，而且影响的不只是取景。我已经把 `core_bounds` 也加进了
+**主 manifest**（`recon_manifest.json`，`pipeline/reconstruct.py`，commit `aaa1e0e`），
+形状与下面完全一致。`framing.mjs` 两条路径都可以直接读 `core_bounds`。
+
+**兼容**：老产物没有 `core_bounds` 键。**缺席时请回退到 `bounds`**（缺席 = 未知，
+不是"没有漂浮物"）—— 别因为键缺失就假设几何是干净的。
+
 语义（这几条别搞混）：
 - **`bounds` 仍是全量真相，永不缩水** —— `core_bounds` 是**附加**提示，**不是**替代品。
 - **不隐藏任何几何**：落在 core 外的点**照常在块里、照常渲染**。`core_bounds` 只回答
