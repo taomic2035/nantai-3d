@@ -843,7 +843,7 @@ capability and must never appear to be those model variants.
 - Produces: frozen `ENVIRONMENT_EFFECT_IDENTITY` with exact machine-readable overlay
   semantics for `main.js` and bridge state.
 
-- [ ] **Step 1: Write the failing effect-identity test**
+- [x] **Step 1: Write the failing effect-identity test**
 
 Extend the import list in `web/viewer/environment.test.mjs` with
 `ENVIRONMENT_EFFECT_IDENTITY`, then add:
@@ -859,7 +859,7 @@ test('runtime weather identity is an atmospheric overlay and never relighting', 
 });
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -870,7 +870,7 @@ node --test web/viewer/environment.test.mjs
 Expected: FAIL because `environment.mjs` does not export
 `ENVIRONMENT_EFFECT_IDENTITY`.
 
-- [ ] **Step 3: Implement the minimal immutable identity**
+- [x] **Step 3: Implement the minimal immutable identity**
 
 Add beside the existing environment constants in `web/viewer/environment.mjs`:
 
@@ -884,7 +884,7 @@ export const ENVIRONMENT_EFFECT_IDENTITY = Object.freeze({
 
 Do not add weather-profile names or artifact fields to this object.
 
-- [ ] **Step 4: Run focused and complete Viewer tests**
+- [x] **Step 4: Run focused and complete Viewer tests**
 
 Run:
 
@@ -895,7 +895,7 @@ node --test web/viewer/*.test.mjs web/studio/*.test.mjs
 
 Expected: both commands PASS; the combined Viewer/Studio count increases by one.
 
-- [ ] **Step 5: Commit and push the pure identity**
+- [x] **Step 5: Commit and push the pure identity**
 
 ```bash
 git add web/viewer/environment.mjs web/viewer/environment.test.mjs
@@ -923,7 +923,7 @@ Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>
 - Produces: always-visible honest copy and complete overlay identity in every
   `readState()` / bridge response.
 
-- [ ] **Step 1: Write the failing visible-copy and state-wiring test**
+- [x] **Step 1: Write the failing visible-copy and state-wiring test**
 
 Add to `web/viewer/index-contract.test.mjs`:
 
@@ -955,7 +955,7 @@ assert.match(
 );
 ```
 
-- [ ] **Step 2: Run the static contract and verify RED**
+- [x] **Step 2: Run the static contract and verify RED**
 
 Run:
 
@@ -965,7 +965,7 @@ node --test web/viewer/index-contract.test.mjs
 
 Expected: FAIL on the old unqualified `天气` label and absent effect identity.
 
-- [ ] **Step 3: Make the visible labels unambiguous**
+- [x] **Step 3: Make the visible labels unambiguous**
 
 In `web/viewer/index.html`, replace:
 
@@ -994,7 +994,7 @@ Replace the initial environment status with:
 Increase `.environment-row label` from `min-width: 36px` to `min-width: 108px`
 so the explicit label does not collapse into an unreadable column.
 
-- [ ] **Step 4: Export fixed identity and preserve the notice during degradation**
+- [x] **Step 4: Export fixed identity and preserve the notice during degradation**
 
 Import `ENVIRONMENT_EFFECT_IDENTITY` from `environment.mjs` and replace the
 mutable identity literal in `environmentState` with:
@@ -1027,7 +1027,7 @@ document.getElementById('environment-status').textContent =
 Keep `readState()` returning `environment: { ...environmentState }`; the spread now
 includes all three fixed identity fields.
 
-- [ ] **Step 5: Run focused and complete gates**
+- [x] **Step 5: Run focused and complete gates**
 
 Run:
 
@@ -1042,7 +1042,7 @@ git diff --check
 Expected: all commands PASS; Python may retain only the deliberate non-finite
 fail-closed warning already documented by the repository.
 
-- [ ] **Step 6: Commit and push the visible contract**
+- [x] **Step 6: Commit and push the visible contract**
 
 ```bash
 git add web/viewer/index-contract.test.mjs web/viewer/index.html web/viewer/main.js
@@ -1064,7 +1064,7 @@ Commit must end with the exact Codex co-author trailer.
 - Produces: current-run evidence for 360° view, arbitrary-coordinate travel, all six
   overlay presets and the no-relighting honesty boundary.
 
-- [ ] **Step 1: Start or refresh the current Studio Viewer**
+- [x] **Step 1: Start or refresh the current Studio Viewer**
 
 Verify `http://127.0.0.1:8767/web/viewer/`. If unavailable, start:
 
@@ -1075,7 +1075,7 @@ Verify `http://127.0.0.1:8767/web/viewer/`. If unavailable, start:
 Expected: the loading overlay clears and the overlay disclaimer is visible without
 opening a tooltip.
 
-- [ ] **Step 2: Exercise all six runtime overlays**
+- [x] **Step 2: Exercise all six runtime overlays**
 
 Select `晴 → 阴 → 雨 → 雪 → 雾 → 夜 → 晴`.
 
@@ -1083,7 +1083,7 @@ Expected: every state changes visibly; rain/snow particles appear only in their 
 the status always retains `atmospheric overlay` and `not relighting`; chunk count does
 not jump solely because of a weather selection.
 
-- [ ] **Step 3: Re-prove 360° and arbitrary coordinates**
+- [x] **Step 3: Re-prove 360° and arbitrary coordinates**
 
 Orbit a full turn, switch to free mode, use `WASDQE`, then invoke `G` for one positive
 and one negative ENU coordinate outside the pre-baked extent.
@@ -1091,7 +1091,7 @@ and one negative ENU coordinate outside the pre-baked extent.
 Expected: camera orientation remains continuous, negative coordinates work, and
 same-origin on-demand chunks load without changing overlay identity.
 
-- [ ] **Step 4: Inspect bridge state and repository truth**
+- [x] **Step 4: Inspect bridge state and repository truth**
 
 Call bridge `getState`.
 
