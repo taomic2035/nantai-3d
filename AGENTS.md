@@ -48,7 +48,7 @@
 (`registry=None`)；真实可替换素材的跨 worker 缓存须先有 asset version/SHA 内容键，且跨异构
 平台共享前仍须解 HANDOFF-002。
 
-## 真实重建链路（2026-07-17，Opus lane 已全部就位；待 Codex 接分块 viewer）
+## 真实重建链路（2026-07-17，Opus lane 与 Codex 分块 Viewer 均已就位）
 
 真实数据链路已端到端打通，每步的**真实限制均如实文档化**（`docs/manual/reconstruction-setup.md` /
 `docs/real-data-workflow.md`）：
@@ -69,7 +69,8 @@ Opus lane 近期补齐的能力与**已知边界**（均 TDD 锁定）：
 - **大重建分块流式**：`reconstruct --chunk-size-m 50`（或 `scripts/chunk_reconstruction.py`）把上百万
   高斯的单个 `.ply` 切成 per-chunk ply + LOD + `chunks.json`。纯空间重打包：无损（每高斯恰好落一块）、
   坐标绝对不动、**provenance 不增不减**（分块**绝不**把 preview-only 变 metric-aligned）。
-  **待 Codex**：viewer 消费 `chunks.json`（规格见 `handoff/HANDOFF-CODEX-004`）。注意其
+  **Codex 已完成**：Viewer 消费 `chunks.json`，按相机距离流式调度 Spark/DC 分块与声明的 LOD 密度，
+  并以顶层 `source` 原样显示 provenance（验收见 `handoff/FEEDBACK-HANDOFF-CODEX-004.md`）。注意其
   **无 `grid`** —— 重建**不可**程序化续渲，**绝不可**对它投影 `on_demand:true`。
 - **诚实 UX 三件套**（纯 CPU、零 GPU 依赖；`tests/test_doctor.py` / `test_capture_quality.py` /
   `test_inspect_recon.py` 锁定）。三者都是 provenance-safety 面向人的一侧：**把已有的严谨证据说成人话，
