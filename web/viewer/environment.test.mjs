@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   DEFAULT_WEATHER,
   DEFAULT_ZOOM,
+  ENVIRONMENT_EFFECT_IDENTITY,
   WEATHER_IDS,
   WEATHER_PRESETS,
   ZOOM_MAX,
@@ -13,6 +14,15 @@ import {
   normalizeWeather,
   normalizeZoom,
 } from './environment.mjs';
+
+test('runtime weather identity is an atmospheric overlay and never relighting', () => {
+  assert.deepEqual(ENVIRONMENT_EFFECT_IDENTITY, {
+    effect_kind: 'atmospheric-overlay',
+    effect_source: 'viewer-runtime',
+    relighting: false,
+  });
+  assert.equal(Object.isFrozen(ENVIRONMENT_EFFECT_IDENTITY), true);
+});
 
 test('weather ids and defaults are stable', () => {
   assert.deepEqual(WEATHER_IDS, [

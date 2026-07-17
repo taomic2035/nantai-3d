@@ -6,6 +6,11 @@ export const DEFAULT_ZOOM = 1;
 export const ZOOM_MIN = 0.5;
 export const ZOOM_MAX = 3;
 export const ZOOM_STEP = 0.1;
+export const ENVIRONMENT_EFFECT_IDENTITY = Object.freeze({
+  effect_kind: 'atmospheric-overlay',
+  effect_source: 'viewer-runtime',
+  relighting: false,
+});
 
 function freezePreset(preset) {
   if (preset.fog) Object.freeze(preset.fog);
