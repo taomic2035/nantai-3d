@@ -29,12 +29,50 @@ def _run_canary_build():
     return run_canary_build
 
 
+def _import_production_profile():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.production_profile import (
+        build_production_camera_plan,
+        canonical_production_plan_bytes,
+        production_batch_slice,
+        production_camera_registry_digest,
+    )
+
+    return (
+        build_production_camera_plan,
+        production_batch_slice,
+        production_camera_registry_digest,
+        canonical_production_plan_bytes,
+    )
+
+
 def _run_canary_render():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from pipeline.synthetic_village.canary import run_canary_render
 
     return run_canary_render
+
+
+def _audit_render_coverage():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.coverage_audit import audit_render_coverage
+
+    return audit_render_coverage
+
+
+def _coverage_threshold(min_pixels: int, min_cameras: int):
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.coverage_audit import CoverageThreshold
+
+    return CoverageThreshold(
+        min_pixels=min_pixels,
+        min_cameras=min_cameras,
+        comparison="pixels-greater-or-equal",
+    )
 
 
 def _canonical_camera_id(value: str) -> str:
@@ -68,6 +106,46 @@ def _parser() -> argparse.ArgumentParser:
     )
     render_canary.add_argument("--camera", action="append", type=_canonical_camera_id)
     render_canary.add_argument("--timeout-seconds", type=int, default=15 * 60)
+    audit_coverage = commands.add_parser(
+        "audit-coverage",
+        help=(
+            "Recompute per-component per-camera observation evidence from the real "
+            "instance masks. The threshold is mandatory and has no default: "
+            "'how many pixels count as seen' is not ours to invent."
+        ),
+    )
+    audit_coverage.add_argument("--build-directory", type=Path, required=True)
+    audit_coverage.add_argument(
+        "--min-pixels",
+        type=int,
+        required=True,
+        help=(
+            "Pixels a component must occupy in a frame to count as observed there "
+            "(inclusive: pixels >= min-pixels). On the real 24 frames this single "
+            "number moves the answer between 122 and 4 of 126 components."
+        ),
+    )
+    audit_coverage.add_argument("--min-cameras", type=int, required=True)
+    audit_coverage.add_argument("--report", type=Path)
+    plan_production = commands.add_parser(
+        "plan-production",
+        help=(
+            "Emit the 180-camera production profile plan. The plan is placed along the "
+            "real walkable path network and creek corridor; groups with no topology "
+            "source are reported unplaced rather than sprayed geometrically."
+        ),
+    )
+    plan_production.add_argument("--plan", type=Path, help="Write the full plan JSON here.")
+    plan_production.add_argument(
+        "--batch-count",
+        type=int,
+        help="Split the placed cameras into this many stable batches.",
+    )
+    plan_production.add_argument(
+        "--batch-index",
+        type=int,
+        help="Print only this batch's camera IDs (requires --batch-count).",
+    )
     return parser
 
 
@@ -123,6 +201,74 @@ def main(argv: list[str] | None = None) -> int:
                 sort_keys=True,
             ),
         )
+        return 0
+    if args.command == "audit-coverage":
+        result = _audit_render_coverage()(
+            build_directory=args.build_directory,
+            threshold=_coverage_threshold(args.min_pixels, args.min_cameras),
+        )
+        report = result.report
+        summary = {
+            "audit_duration_seconds": report.audit_duration_seconds,
+            "component_count": report.summary.component_count,
+            "components_meeting_threshold": report.summary.components_meeting_threshold,
+            "components_never_observed": report.summary.components_never_observed,
+            "evidence_sha256": report.evidence_sha256,
+            "frames_audited": report.summary.frames_audited,
+            "instance_ids_crosscheck_agrees": report.instance_ids_crosscheck.agrees,
+            "min_cameras": report.threshold.min_cameras,
+            "min_pixels": report.threshold.min_pixels,
+            "orientation_coverage": "unknown-for-every-component",
+            "render_id": report.render_id,
+            "trust_effect": report.trust_effect,
+        }
+        if args.report is not None:
+            from pipeline.synthetic_village.coverage_audit import write_coverage_report
+
+            summary["report_path"] = str(write_coverage_report(report, args.report))
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "plan-production":
+        build_plan, batch_slice, registry_digest, plan_bytes = _import_production_profile()
+        plan = build_plan()
+        if args.batch_index is not None and args.batch_count is None:
+            raise SystemExit("--batch-index requires --batch-count")
+        summary = {
+            "profile_id": plan.profile_id,
+            "journal_schema": plan.journal_schema,
+            "declared_target_count": plan.declared_target_count,
+            "camera_count": plan.camera_count,
+            "complete": plan.complete,
+            "camera_registry_sha256": registry_digest(plan),
+            "scene_plan_sha256": plan.scene_plan_sha256,
+            "geometry_trust": plan.geometry_trust,
+            "synthetic": plan.synthetic,
+            "group_coverage": [row.model_dump(mode="json") for row in plan.group_coverage],
+            "unplaced_groups": [row.model_dump(mode="json") for row in plan.unplaced_groups],
+            # 没做到的需求必须出现在【操作者实际读的那份输出】里。只写进 plan
+            # JSON 等于没说: 读者看到 132 + complete=false + unplaced_groups
+            # 就会以为其余需求都落地了。
+            "undelivered_requirements": [
+                row.model_dump(mode="json") for row in plan.undelivered_requirements
+            ],
+        }
+        if args.batch_count is not None:
+            if args.batch_index is None:
+                summary["batch_sizes"] = [
+                    len(batch_slice(plan, batch_index=index, batch_count=args.batch_count))
+                    for index in range(args.batch_count)
+                ]
+            else:
+                summary["batch_camera_ids"] = list(
+                    batch_slice(
+                        plan, batch_index=args.batch_index, batch_count=args.batch_count
+                    )
+                )
+        if args.plan is not None:
+            args.plan.parent.mkdir(parents=True, exist_ok=True)
+            args.plan.write_bytes(plan_bytes(plan))
+            summary["plan_path"] = str(args.plan)
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
     raise AssertionError(f"unhandled command: {args.command}")
 
