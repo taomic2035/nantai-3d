@@ -147,6 +147,29 @@ def build_control_points(
     return resolved
 
 
+def control_points_from_geo_anchors(
+    reg: RegistrationResult,
+    image_anchors: dict[str, GeoAnchor],
+) -> list[ControlPoint]:
+    """把逐图 geo 锚点 (通常自 EXIF GPS 派生) 配对成对齐控制点, 直接喂 align_registration。
+
+    让 GPS 标记的采集免手工逐图写 ControlPoint 即可 turnkey 米制对齐: 每张【既注册
+    (在 ``reg.poses`` 有位姿) 又有锚点】的图 → 一个 ``ControlPoint(image=..., geo=...)``,
+    source 侧解析为该位姿的相机中心, target 侧经 ``gps_to_enu`` 归约。未注册或无锚点的
+    图静默排除 (无对应即无证据)。按 image 排序, 输出确定。
+
+    本函数只【组装证据】, 绝不提升信任: 拟合门 (>=3 点、退化守卫、RMS 阈值) 仍由
+    ``fit_sfm_to_enu`` / ``align_registration`` 权威裁决, 证据不足/不一致照样 fail-closed。
+    ``GpsObservation`` (ingest EXIF) 可平凡转 ``GeoAnchor(lat, lon, alt=altitude_m or 0.0)``。
+    """
+    registered = {pose.image for pose in reg.poses}
+    return [
+        ControlPoint(label=image, image=image, geo=image_anchors[image])
+        for image in sorted(image_anchors)
+        if image in registered
+    ]
+
+
 def fit_sfm_to_enu(
     control_points: list[tuple[np.ndarray, np.ndarray, str]],
     geo_origin: GeoAnchor,

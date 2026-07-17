@@ -14,6 +14,7 @@ from pipeline.alignment import (
     AlignmentError,
     align_registration,
     build_control_points,
+    control_points_from_geo_anchors,
     fit_sfm_to_enu,
     umeyama_sim3,
 )
@@ -415,3 +416,54 @@ class TestAlignmentCLI:
         result = RegistrationResult.model_validate_json(raw.decode("utf-8"))
         assert result.alignment_status is AlignmentStatus.ALIGNED
         assert result.target_frame.frame_id == "world-enu"
+
+
+class TestControlPointsFromGeoAnchors:
+    """从逐图 geo 锚点 (EXIF GPS 派生) 一键构造对齐控制点 —— 免手工逐图写 ControlPoint,
+    让 GPS 标记的采集 turnkey 米制对齐; 拟合门 (>=3 点/RMS) 仍权威, 本函数只组装证据。"""
+
+    def test_pairs_only_registered_images_sorted_and_labeled(self):
+        reg = _registration_with_camera_centres(
+            {"a.jpg": (0, 0, 0), "b.jpg": (10, 0, 0), "c.jpg": (0, 10, 1)})
+        anchors = {
+            "b.jpg": GeoAnchor(lat=26.0, lon=119.001, alt=51.0),
+            "a.jpg": GeoAnchor(lat=26.0, lon=119.0, alt=50.0),
+            "z.jpg": GeoAnchor(lat=26.0, lon=119.0, alt=50.0),  # 未注册 → 跳过
+        }
+        cps = control_points_from_geo_anchors(reg, anchors)
+        assert [cp.label for cp in cps] == ["a.jpg", "b.jpg"]  # 排序, 排除未注册
+        for cp in cps:
+            assert cp.image == cp.label
+            assert cp.geo is not None and cp.enu_xyz is None and cp.source_xyz is None
+        assert cps[0].geo.alt == 50.0
+
+    def test_empty_when_no_registered_image_has_an_anchor(self):
+        reg = _registration_with_camera_centres({"a.jpg": (0, 0, 0)})
+        assert control_points_from_geo_anchors(reg, {}) == []
+        assert control_points_from_geo_anchors(
+            reg, {"other.jpg": GeoAnchor(lat=26.0, lon=119.0, alt=50.0)}) == []
+
+    def test_built_control_points_drive_alignment_end_to_end(self):
+        # turnkey 真实路径: 逐图 geo 锚点 → 控制点 → align_registration → world-enu measured
+        reg = _registration_with_camera_centres(
+            self.__class__._non_collinear(), geo_origin=_ORIGIN)
+        scale, rotation, t = 1.0, _rotation_z(np.radians(15.0)), np.array([2.0, -1.0, 0.5])
+        earth_r = 6378137.0
+        anchors = {}
+        for pose in reg.poses:
+            east, north, up = scale * (rotation @ np.asarray(pose.t_xyz, float)) + t
+            anchors[pose.image] = GeoAnchor(
+                lat=_ORIGIN.lat + np.degrees(north / earth_r),
+                lon=_ORIGIN.lon + np.degrees(
+                    east / (earth_r * np.cos(np.radians(_ORIGIN.lat)))),
+                alt=_ORIGIN.alt + up)
+        cps = control_points_from_geo_anchors(reg, anchors)
+        assert len(cps) == len(reg.poses)
+        aligned = align_registration(reg, cps, max_rms_m=2.0)
+        assert aligned.alignment_status is AlignmentStatus.ALIGNED
+        assert aligned.world_frame.frame_id == "world-enu"
+
+    @staticmethod
+    def _non_collinear():
+        return {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
+                "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
