@@ -14,6 +14,13 @@
 frame provenance 申报为 SYNTHETIC，导入分类自动降为 synthetic=true + preview-proxy
 （只降不升——申报合成永远不会提升信任等级，不申报则错标为非合成）。
 
+可选 `--colmap-sparse <sparse/0/points3D.txt>`：当你**声称**这个 ply 是用某个本机 COLMAP
+workspace 训练出来的（Brush / INRIA 原版这类直接吃 workspace 且保留其坐标系的训练器），
+用它做几何一致性检查——对不上就 fail-closed 拒绝生成契约。**只能证伪不能证实**：
+检查不通过是强证据说明拿错了文件；检查"没发现矛盾"**不代表**这个 ply 真来自该 workspace。
+云端 nerfstudio 路线会重跑 COLMAP 并 re-center/rescale，产物不在本机 sparse 坐标系里，
+**不要**对它用这个参数（见 pipeline/splat_provenance.py 的限制一节）。
+
 用法:
     python scripts/prepare_import.py trained/point_cloud.ply [--synthetic]
     # 生成 recon/registration.json + recon/splat-input.json, 并打印导入命令
@@ -93,6 +100,31 @@ def prepare(ply: Path, out_dir: Path, session_id: str,
     return reg_path, splat_path
 
 
+def _check_consistency(ply: Path, sparse: Path) -> bool:
+    """几何一致性检查。返回 False 表示应 fail-closed 中止。
+
+    三态如实转述，**绝不**把"没发现矛盾"包装成"已验证"：
+    contradicted -> 拒绝；unknown -> 放行但明说什么都没检出；
+    not-contradicted -> 放行并明说这不是证明。
+    """
+    from pipeline.splat_provenance import Verdict, check_splat_against_sparse
+
+    result = check_splat_against_sparse(ply, sparse)
+    if result.verdict is Verdict.CONTRADICTED:
+        print(f"[FAIL-CLOSED] {result.summary()}", file=sys.stderr)
+        print("拒绝生成契约: 这个 ply 与你声称的 COLMAP workspace 几何对不上。",
+              file=sys.stderr)
+        return False
+    if result.verdict is Verdict.UNKNOWN:
+        print(f"[UNKNOWN] {result.summary()}")
+        print("  -> 没做成检查, 因此对这个 ply 的来源**没有任何结论** (不是通过)。")
+        return True
+    print(f"[未发现矛盾] {result.summary()}")
+    print("  -> 注意: 这**不是**通过。几何一致只能证伪、不能证实来源; "
+          "它不代表这个 ply 真是用该 workspace 训练的。")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="生成 sfm-local 导入契约 (registration.json + splat-input.json)")
@@ -104,9 +136,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--synthetic", action="store_true",
                     help="来源为合成影像时如实申报 (provenance=SYNTHETIC -> "
                          "synthetic=true + preview-proxy, 只降不升)")
+    ap.add_argument("--colmap-sparse", type=Path, default=None,
+                    help="声称本 ply 训练自某 COLMAP workspace 时, 传其 "
+                         "sparse/0/points3D.txt 做几何一致性检查 (对不上则 fail-closed; "
+                         "只能证伪不能证实; 不适用于云端 nerfstudio 重跑 COLMAP 的路线)")
     args = ap.parse_args(argv)
     if not args.ply.is_file():
         raise SystemExit(f"文件不存在: {args.ply}")
+    if args.colmap_sparse is not None and not _check_consistency(
+        args.ply, args.colmap_sparse
+    ):
+        return 1
     reg_path, splat_path = prepare(args.ply, args.out_dir, args.session_id,
                                    synthetic=args.synthetic)
     print(f"[OK] 已生成:\n  {reg_path}\n  {splat_path}\n")
