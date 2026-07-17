@@ -55,6 +55,10 @@ import {
   normalizeWeather,
   normalizeZoom,
 } from './environment.mjs';
+import {
+  coverageAuditViewModel,
+  isCoverageAudit,
+} from './coverage-audit.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
@@ -78,6 +82,8 @@ const stats = { loaded: 0, evicted: 0, cachedHits: 0 };
 let qualityOverride = null;          // null=按距离自动, 0/1/2=强制 LOD (键 1/2/3, 0 恢复自动)
 let reconManifest = null;            // 重建预览 artifact (recon_manifest.json, 可选)
 let reconManifestUrl = new URL('../data/recon/recon_manifest.json', import.meta.url).href;
+let coverageAudit = null;             // 独立覆盖审计，不改变重建 artifact
+let coverageAuditUrl = null;
 let reconMesh = null;
 let reconLodLoaded = -1;
 let reconVisible = true;
@@ -1052,6 +1058,24 @@ function updateHUD() {
     if (element) element.textContent = String(value);
   }
 
+  const coverage = coverageAuditViewModel(coverageAudit);
+  const coverageFields = {
+    'hud-coverage-status': {
+      value: coverage.summary,
+      color: coverage.color,
+    },
+    'hud-coverage-visibility': coverage.layers.visibility,
+    'hud-coverage-geometry': coverage.layers.geometry,
+    'hud-coverage-sfm': coverage.layers.sfm,
+    'hud-coverage-provenance': coverage.layers.provenance,
+  };
+  for (const [id, field] of Object.entries(coverageFields)) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.textContent = String(field.value ?? field.label);
+    element.style.color = field.color;
+  }
+
   // 加载中状态指示
   const loadEl = document.getElementById('hud-loading');
   if (loadEl) {
@@ -1208,6 +1232,7 @@ async function main() {
       chunk_size_m: chunkSizeM,
       bounds: currentFrame?.bounds ?? null,
       artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
+      coverage: coverageAuditViewModel(coverageAudit),
       camera: { position: { east, north, up }, mode: cameraMode },
       environment: { ...environmentState },
     };
@@ -1281,8 +1306,39 @@ async function main() {
         if (
           kind !== 'recon-manifest'
           && kind !== 'chunk-manifest'
+          && kind !== 'coverage-audit'
         ) {
           throw new Error(`不支持的 artifact kind: ${kind}`);
+        }
+        if (kind === 'coverage-audit') {
+          let nextAudit = artifact;
+          let nextUrl = window.location.href;
+          if (url) {
+            const absoluteUrl = new URL(url, window.location.href);
+            if (absoluteUrl.origin !== window.location.origin) {
+              throw new Error('artifact URL 必须与 viewer 同源');
+            }
+            const response = await fetch(absoluteUrl.href);
+            if (!response.ok) {
+              throw new Error(`无法加载 coverage audit: ${response.status}`);
+            }
+            nextAudit = await response.json();
+            nextUrl = absoluteUrl.href;
+          } else if (!artifact) {
+            throw new Error('loadArtifact 需要 url 或 manifest');
+          }
+          if (!isCoverageAudit(nextAudit)) {
+            throw new Error('无效的 coverage-audit artifact');
+          }
+          coverageAudit = nextAudit;
+          coverageAuditUrl = nextUrl;
+          updateHUD();
+          return {
+            kind,
+            url: coverageAuditUrl,
+            coverage: coverageAuditViewModel(coverageAudit),
+            state: readState(),
+          };
         }
         if (url) {
           const absoluteUrl = new URL(url, window.location.href);

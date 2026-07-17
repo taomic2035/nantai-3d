@@ -3,7 +3,7 @@ export const VIEWER_BRIDGE_SCHEMA_VERSION = 1;
 
 const BASE_CAPABILITIES = Object.freeze({
   dynamic_artifact_kinds: Object.freeze([
-    'recon-manifest', 'chunk-manifest',
+    'recon-manifest', 'chunk-manifest', 'coverage-audit',
   ]),
   layers: Object.freeze(['world', 'reconstruction']),
   camera_reset: true,

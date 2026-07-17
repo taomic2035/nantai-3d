@@ -54,3 +54,30 @@ test('viewer runtime accepts static spatial reconstruction chunks without world 
   assert.match(main, /createSpatialPointLayer\(/);
   assert.doesNotMatch(main, /world_offset/);
 });
+
+test('coverage evidence has a dedicated fail-closed HUD separate from provenance', () => {
+  const coverage = html.match(
+    /<div class="coverage"[^>]*>([\s\S]*?)<\/div>\s*<div class="legend">/,
+  )?.[1];
+  assert.ok(coverage, 'coverage HUD section must exist before the legend');
+  for (const id of [
+    'hud-coverage-status',
+    'hud-coverage-visibility',
+    'hud-coverage-geometry',
+    'hud-coverage-sfm',
+    'hud-coverage-provenance',
+  ]) {
+    assert.match(coverage, new RegExp(`id="${id}"`));
+  }
+  assert.match(coverage, /渲染可见/);
+  assert.doesNotMatch(coverage, /可重建|已覆盖|可测量/);
+});
+
+test('viewer loads coverage audit independently from reconstruction artifacts', () => {
+  assert.match(main, /from ['"]\.\/coverage-audit\.mjs['"]/);
+  assert.match(main, /kind\s*===\s*['"]coverage-audit['"]/);
+  assert.match(main, /isCoverageAudit\(/);
+  assert.match(main, /coverageAuditViewModel\(/);
+  assert.match(main, /coverage:\s*coverageAuditViewModel\(/);
+  assert.match(main, /absoluteUrl\.origin\s*!==\s*window\.location\.origin/);
+});
