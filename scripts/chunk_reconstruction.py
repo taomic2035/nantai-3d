@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +32,27 @@ from pipeline.spatial_chunk import (
 )
 
 
+def _source_provenance(recon_manifest: Path | None) -> dict | None:
+    """从源 recon_manifest.json 取信任判定 + 其内容寻址 sha (供 chunks.json 诚实标注/回溯)。
+
+    只搬运源已挣得的判定, 从不产生判定; manifest 缺 geometry_usability 时该键缺席 (未知)。
+    """
+    if recon_manifest is None:
+        return None
+    if not recon_manifest.is_file():
+        raise SystemExit(f"--recon-manifest 文件不存在: {recon_manifest}")
+    raw = recon_manifest.read_bytes()
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"--recon-manifest 不是合法 JSON: {recon_manifest}: {exc}") from exc
+    provenance: dict = {"recon_manifest_sha256": hashlib.sha256(raw).hexdigest()}
+    usability = (parsed.get("provenance") or {}).get("geometry_usability")
+    if usability is not None:      # 缺席即未知, 不编造
+        provenance["geometry_usability"] = usability
+    return provenance
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="把大重建 3DGS PLY 空间分块为可流式 chunk + LOD + manifest")
@@ -38,19 +61,26 @@ def main(argv: list[str] | None = None) -> int:
                     help="输出目录 (写 chunk_*.ply + LOD + chunks.json)")
     ap.add_argument("--chunk-size-m", type=float, default=DEFAULT_CHUNK_SIZE_M,
                     help=f"XY 网格边长, 米 (默认 {DEFAULT_CHUNK_SIZE_M:g})")
+    ap.add_argument("--recon-manifest", type=Path, default=None,
+                    help="源 recon_manifest.json: 把其 geometry_usability 判定 + 该 manifest "
+                         "的内容寻址 sha256 记入 chunks.json, 让消费者能诚实标注信任等级并回溯 "
+                         "(不提供则该字段缺席 = 未知, 绝不编造)")
     args = ap.parse_args(argv)
 
     if not args.ply.is_file():
         raise SystemExit(f"文件不存在: {args.ply}")
+    source_provenance = _source_provenance(args.recon_manifest)
     scene = GaussianScene.load_ply(args.ply)
     manifest = partition_scene_to_chunks(
-        scene, args.out_dir, chunk_size_m=args.chunk_size_m)
+        scene, args.out_dir, chunk_size_m=args.chunk_size_m,
+        source_provenance=source_provenance)
 
     source = manifest["source"]
     print(f"[OK] {manifest['total_points']} 高斯 → {manifest['total_chunks']} 块 "
           f"({manifest['chunk_size_m']:g}m 网格) → {args.out_dir / MANIFEST_NAME}")
     print(f"  源坐标契约 (未被分块改动): frame_id={source['frame_id']} "
-          f"units={source['units']}")
+          f"units={source['units']} "
+          f"geometry_usability={source.get('geometry_usability', '未知(未给 --recon-manifest)')}")
     print(f"  LOD: {dict(DEFAULT_LOD_FRACTIONS)} + lod2=全量; "
           f"bounds={manifest['bounds']['min']} .. {manifest['bounds']['max']}")
     return 0

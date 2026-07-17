@@ -121,6 +121,54 @@ class TestPartition:
             assert loaded.units == "arbitrary"
             assert list(loaded.applied_transform_ids) == ["xf-abc"]
 
+    def test_source_provenance_is_carried_with_content_addressed_link(self, tmp_path):
+        """分块产物须带源的信任判定 + 内容寻址链接, 否则消费者无法诚实标注
+        (preview-only vs metric-aligned) —— 重打包不该丢信任等级。"""
+        scene = _scene(n=200, frame_id="world-enu", units="meters")
+        manifest = partition_scene_to_chunks(
+            scene, tmp_path, chunk_size_m=60.0,
+            source_provenance={
+                "geometry_usability": "metric-aligned",
+                "recon_manifest_sha256": "a" * 64,
+            })
+        src = manifest["source"]
+        assert src["geometry_usability"] == "metric-aligned"
+        assert src["recon_manifest_sha256"] == "a" * 64
+        assert src["frame_id"] == "world-enu"      # 原有字段不被覆盖
+        assert json.loads(
+            (tmp_path / "chunks.json").read_text(encoding="utf-8")
+        )["source"]["geometry_usability"] == "metric-aligned"
+
+    def test_source_provenance_absent_stays_absent_not_guessed(self, tmp_path):
+        """未提供源判定时, 绝不猜测/编造信任等级 (缺席即未知)。"""
+        manifest = partition_scene_to_chunks(
+            _scene(n=100), tmp_path, chunk_size_m=60.0)
+        assert "geometry_usability" not in manifest["source"]
+        assert "recon_manifest_sha256" not in manifest["source"]
+
+    def test_cli_embeds_recon_manifest_provenance(self, tmp_path):
+        """CLI --recon-manifest: 把源 manifest 的判定 + 其内容 sha 记入 chunks.json。"""
+        import hashlib
+
+        import scripts.chunk_reconstruction as cr
+        scene = _scene(n=150, frame_id="world-enu", units="meters")
+        ply = tmp_path / "recon.ply"
+        scene.save_ply(ply, flavor="3dgs")
+        recon_manifest = tmp_path / "recon_manifest.json"
+        recon_manifest.write_text(json.dumps(
+            {"provenance": {"geometry_usability": "preview-only", "synthetic": False}}),
+            encoding="utf-8")
+
+        rc = cr.main([str(ply), "--out-dir", str(tmp_path / "out"),
+                      "--chunk-size-m", "80", "--recon-manifest", str(recon_manifest)])
+        assert rc == 0
+        out = json.loads(
+            (tmp_path / "out" / "chunks.json").read_text(encoding="utf-8"))
+        # 源是 preview-only → 分块产物照样 preview-only (绝不因分块升级)
+        assert out["source"]["geometry_usability"] == "preview-only"
+        assert out["source"]["recon_manifest_sha256"] == hashlib.sha256(
+            recon_manifest.read_bytes()).hexdigest()
+
     def test_manifest_written_lf_and_deterministic(self, tmp_path):
         """manifest 跨平台 LF 字节可复现 (与 trust root 惯例一致); 分块确定。"""
         scene = _scene(n=400)

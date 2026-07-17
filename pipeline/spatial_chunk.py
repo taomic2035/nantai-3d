@@ -42,6 +42,7 @@ def partition_scene_to_chunks(
     out_dir: str | Path,
     chunk_size_m: float = DEFAULT_CHUNK_SIZE_M,
     lod_fractions: dict[int, float] | None = None,
+    source_provenance: dict | None = None,
 ) -> dict:
     """把一个大场景按 XY 网格空间分块 → per-chunk ply + LOD + 流式 manifest。
 
@@ -52,6 +53,11 @@ def partition_scene_to_chunks(
     返回 manifest dict (同时以 LF 写到 ``out_dir/chunks.json``, 跨平台字节可复现)。
     provenance: 每块继承源 scene 的 frame_id/units/applied_transform_ids (``crop_aabb``
     经 ``_subset`` 保留), manifest 的 ``source`` 如实记录源契约 —— 分块绝不提升信任。
+
+    ``source_provenance``: 源 recon manifest 的信任判定 (如
+    ``{"geometry_usability": ..., "recon_manifest_sha256": ...}``) 并入 ``source``, 让消费者
+    能诚实标注 preview-only / metric-aligned 并回溯到挣得该判定的 manifest。**缺席即未知**:
+    不提供就不写该字段, 绝不猜测/编造信任等级 (分块只搬运判定, 从不产生判定)。
     """
     chunk_size_m = _require_positive_size(chunk_size_m)
     if len(scene) == 0:
@@ -120,6 +126,9 @@ def partition_scene_to_chunks(
             "frame_id": scene.frame_id,
             "units": scene.units,
             "applied_transform_ids": list(scene.applied_transform_ids),
+            # 源 manifest 的信任判定 (geometry_usability + 内容寻址 sha) 若提供则并入,
+            # 让消费者能诚实标注并回溯; 缺席即未知, 绝不编造。
+            **(dict(source_provenance) if source_provenance else {}),
         },
     }
     # newline="\n": 与 trust root (registration/recon_manifest/world manifest) 惯例统一,

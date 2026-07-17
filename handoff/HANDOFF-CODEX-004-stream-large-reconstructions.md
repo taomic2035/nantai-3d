@@ -48,9 +48,19 @@
   "total_chunks": 64, "total_points": 120000,
   "bounds": {"min": [x,y,z], "max": [x,y,z]},
   "extent": {"x_min": -4, "x_max": 3, "y_min": -4, "y_max": 3},
-  "source": {"frame_id": "world-enu", "units": "meters", "applied_transform_ids": []}
+  "source": {
+    "frame_id": "world-enu", "units": "meters", "applied_transform_ids": [],
+    "geometry_usability": "metric-aligned",
+    "recon_manifest_sha256": "…"
+  }
 }
 ```
+
+**`source` 是你标注信任的唯一依据**：`geometry_usability`（`preview-only` / `metric-aligned` /
+`preview-proxy`）是**源 recon manifest 挣得的判定**，由 `chunk_reconstruction.py --recon-manifest
+recon/recon_manifest.json` 搬运进来，并附该 manifest 的内容寻址 `recon_manifest_sha256` 供回溯核验。
+**分块从不产生判定**：未给 `--recon-manifest` 时这两个键**缺席 = 未知**（不是 preview-only，
+更不是 metric）—— 缺席就别标注信任等级，别猜。
 
 与合成村庄 manifest **同构**（`chunks`/`lod`/`aabb`/`bounds`；`lod2` == 全量），
 故你的现有 chunk 流式路径应能大部分复用。差异：
