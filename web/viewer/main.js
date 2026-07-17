@@ -1174,7 +1174,7 @@ async function main() {
   chunkSizeM = manifest.chunk_size_m ?? 200;
   buildChunkIndex();
   await loadReconManifest();
-  applyFraming(computeFraming(manifest, reconManifest?.bounds));
+  applyFraming(computeFraming(manifest, reconManifest));
   await loadReconstructionLayer();
 
   const xCount = new Set(manifest.chunks.map((chunk) => chunk.x)).size;
@@ -1364,7 +1364,7 @@ async function main() {
           throw new Error('loadArtifact 需要 url 或 manifest');
         }
 
-        applyFraming(computeFraming(manifest, reconManifest?.bounds), false);
+        applyFraming(computeFraming(manifest, reconManifest), false);
         const rendererResult = await loadReconstructionLayer();
         return {
           kind,

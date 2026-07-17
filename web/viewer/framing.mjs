@@ -28,6 +28,21 @@ function unionBounds(left, right) {
   };
 }
 
+/**
+ * Select the bounded scene core for presentation when it is valid.
+ *
+ * `bounds` remains the full geometric truth for loading and inspection.
+ * `core_bounds` is only an additive camera/framing hint that keeps sparse
+ * reconstruction floaters from dominating presentation.
+ */
+export function preferredFramingBounds(artifact) {
+  return (
+    copyBounds(artifact?.core_bounds)
+    ?? copyBounds(artifact?.bounds)
+    ?? copyBounds(artifact)
+  );
+}
+
 /** Compute ENU world bounds from manifest chunk indices. */
 export function computeWorldBounds(manifest) {
   const chunks = manifest?.chunks ?? [];
@@ -63,8 +78,10 @@ export function computeWorldBounds(manifest) {
 export function computeFraming(manifest, reconBounds = null, fovDegrees = 65) {
   const chunks = manifest?.chunks ?? [];
   const chunkSize = manifest?.chunk_size_m ?? 200;
-  const chunkBounds = chunks.length > 0 ? computeWorldBounds(manifest) : null;
-  const validReconBounds = copyBounds(reconBounds);
+  const chunkBounds = chunks.length > 0
+    ? preferredFramingBounds(manifest) ?? computeWorldBounds(manifest)
+    : null;
+  const validReconBounds = preferredFramingBounds(reconBounds);
   const bounds = unionBounds(chunkBounds, validReconBounds);
   if (!bounds) throw new Error('cannot frame an empty world');
 

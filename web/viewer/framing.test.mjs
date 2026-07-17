@@ -40,6 +40,40 @@ test('computeWorldBounds prefers the manifest three-dimensional bounds', () => {
   assert.deepEqual(computeWorldBounds(manifest), manifest.bounds);
 });
 
+test('computeFraming prefers a valid core_bounds hint without shrinking full bounds', () => {
+  const { computeFraming, computeWorldBounds } = subject();
+  const manifest = {
+    chunk_size_m: 50,
+    chunks: [{ x: 0, y: 0 }],
+    bounds: { min: [-600, -400, -300], max: [700, 500, 420] },
+    core_bounds: {
+      min: [-30, -20, -5],
+      max: [45, 55, 25],
+      axis_percentile: 0.995,
+      contains_points: 980,
+      contains_fraction: 0.98,
+    },
+  };
+
+  assert.deepEqual(computeWorldBounds(manifest), manifest.bounds);
+  assert.deepEqual(computeFraming(manifest).bounds, {
+    min: [-30, -20, -5],
+    max: [45, 55, 25],
+  });
+});
+
+test('computeFraming falls back to full bounds when core_bounds is invalid', () => {
+  const { computeFraming } = subject();
+  const manifest = {
+    chunk_size_m: 50,
+    chunks: [{ x: 0, y: 0 }],
+    bounds: { min: [-60, -40, -30], max: [70, 50, 42] },
+    core_bounds: { min: [10, 10, 10], max: [-10, -10, -10] },
+  };
+
+  assert.deepEqual(computeFraming(manifest).bounds, manifest.bounds);
+});
+
 test('computeWorldBounds unions per-chunk AABBs when global bounds are absent', () => {
   const { computeWorldBounds } = subject();
   const manifest = {
@@ -96,6 +130,22 @@ test('computeFraming unions reconstruction bounds with chunk bounds', () => {
   assert.equal(frame.gridSize, 600);
   assert.ok(frame.fogNear < frame.fogFar);
   assert.ok(frame.far > frame.cameraDistance);
+});
+
+test('computeFraming prefers reconstruction core_bounds when given its manifest', () => {
+  const { computeFraming } = subject();
+  const frame = computeFraming(
+    { chunk_size_m: 50, chunks: [] },
+    {
+      bounds: { min: [-600, -400, -300], max: [700, 500, 420] },
+      core_bounds: { min: [-30, -20, -5], max: [45, 55, 25] },
+    },
+  );
+
+  assert.deepEqual(frame.bounds, {
+    min: [-30, -20, -5],
+    max: [45, 55, 25],
+  });
 });
 
 test('worldToMinimap keeps north at the top of the canvas', () => {
