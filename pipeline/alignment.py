@@ -396,13 +396,28 @@ def main(argv: list[str] | None = None) -> int:
         control_points = load_control_points_from_ingest_gps(args.from_gps, reg)
     else:
         control_points = load_control_points_json(args.control_points)
-    aligned = align_registration(
-        reg,
-        control_points,
-        geo_origin=geo_origin,
-        max_rms_m=args.max_rms,
-        min_span_ratio=args.min_span_ratio,
-    )
+    try:
+        aligned = align_registration(
+            reg,
+            control_points,
+            geo_origin=geo_origin,
+            max_rms_m=args.max_rms,
+            min_span_ratio=args.min_span_ratio,
+        )
+    except AlignmentError as exc:
+        # 自解释失败: 消费级 GPS 撞 RMS 门是最常见的困惑点, 别只丢一句 exceeds max_rms。
+        if args.from_gps and "max_rms" in str(exc):
+            raise AlignmentError(
+                f"{exc}\n"
+                f"提示: --from-gps 用的是消费级 EXIF GPS (精度约 3~10m)。GPS 噪声无法被相似"
+                f"变换解释, 残差 ≈ 噪声量级, 故常超默认 --max-rms 2.0 —— 这是【正确】的 "
+                f"fail-closed (拒绝为噪声数据盖米制章)。出路: (1) 放宽 --max-rms 5~10, 但"
+                f"对齐精度不会好于 GPS 本身, 只在米级可信, 别做厘米级测量; (2) 要高精度改用"
+                f"实测控制点 --control-points (enu_xyz, 全站仪/RTK) 走 sub-metre 路; "
+                f"(3) RTK 无人机 (~2~5cm) 则 GPS 路径本就够好。实际残差见证据串 "
+                f"sim3.alignment.v1 的 rms_residual_m。"
+            ) from exc
+        raise
     # LF: registration.json is a trust root; keep it byte-reproducible across OSes.
     Path(args.out).write_text(aligned.model_dump_json(indent=2) + "\n",
                               encoding="utf-8", newline="\n")

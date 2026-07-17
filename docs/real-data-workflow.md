@@ -71,6 +71,14 @@
 > 的 `output_path` 匹配 `pose.image`，不匹配者静默排除。拟合门（≥3 点/退化/RMS）仍权威，
 > 匹配不足即 fail-closed 并给出清晰错误。Python API 亦可：
 > `pipeline.alignment.control_points_from_geo_anchors(reg, {image: GeoAnchor})`。
+>
+> ⚠️ **精度现实（重要，别被默认门挡住还不明白为什么）**：消费级 EXIF GPS（手机/无人机）
+> 精度约 **3–10 m**。GPS 噪声**无法**被相似变换解释，所以拟合残差 ≈ 噪声量级 →
+> **默认 `--max-rms 2.0` 基本必然 fail-closed**（这是**正确**的：它拒绝为噪声数据盖上米制章）。
+> 实务：① 放宽到 `--max-rms 5`~`10` 才可能过门，但**对齐精度不会好于 GPS 本身**——
+> 得到的 `metric-aligned` 只在米级尺度可信，别拿它做厘米级测量；② 要高精度就用**实测控制点**
+> （`enu_xyz`，全站仪/RTK），那才是 sub-metre 的路；③ RTK 无人机（~2–5 cm）则 GPS 路径就够好。
+> 证据串 `sim3.alignment.v1` 里记着实际 `rms_residual_m`——**以它判断你的对齐到底多准**。
 
 **fail-closed 门**（任一不满足 → 保持 sfm-local/UNALIGNED，绝不升级为米制）：
 计数 ≥3；源点非退化（共线/共面被拒）；Umeyama 拟合强制 det=+1（不产反射）；`scale>0`；

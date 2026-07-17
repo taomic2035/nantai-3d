@@ -536,6 +536,33 @@ class TestFromGpsIngestManifest:
         with pytest.raises(AlignmentError, match="GPS"):
             load_control_points_from_ingest_gps(mpath, reg)
 
+    def test_noisy_consumer_gps_failure_explains_accuracy_limit(self, tmp_path):
+        """消费级 GPS (3~10m 噪声) 无法被相似变换解释 → 残差超默认 2m 门 → 正确 fail-closed。
+        但错误须【自解释】: 点出 GPS 精度现实 + 出路 (放宽 max-rms / 改用实测控制点),
+        而非只丢一句 exceeds max_rms 让用户困惑于"为什么 GPS 对不上"。"""
+        from pipeline.alignment import main as align_main
+        from pipeline.ingest_manifest import GpsObservation
+        reg = _registration_with_camera_centres(
+            {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
+             "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}, geo_origin=_ORIGIN)
+        clean = self._synth_gps(reg, 1.0, _rotation_z(0.0), np.array([0.0, 0.0, 0.0]))
+        # ~8m 随机噪声 (消费级 GPS 量级), 相似变换解释不了 → RMS 超门
+        rng = np.random.default_rng(4)
+        noisy = {}
+        for name, obs in clean.items():
+            noisy[name] = GpsObservation(
+                lat=obs.lat + np.degrees(rng.normal(0, 8.0) / 6378137.0),
+                lon=obs.lon + np.degrees(rng.normal(0, 8.0) / 6378137.0),
+                altitude_m=obs.altitude_m + rng.normal(0, 8.0))
+        (tmp_path / "reg.json").write_text(reg.model_dump_json(), encoding="utf-8")
+        self._write_manifest(tmp_path / "ingest.json", noisy)
+
+        with pytest.raises(AlignmentError, match="GPS"):
+            align_main(["--registration", str(tmp_path / "reg.json"),
+                        "--from-gps", str(tmp_path / "ingest.json"),
+                        "--geo-origin", "26.0,119.0,50.0", "--max-rms", "2.0",
+                        "--out", str(tmp_path / "aligned.json")])
+
     def test_cli_from_gps_end_to_end(self, tmp_path):
         from pipeline.alignment import main as align_main
         reg = _registration_with_camera_centres(
