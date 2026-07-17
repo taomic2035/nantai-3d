@@ -70,7 +70,8 @@ class TestTransform:
         assert scene.sh_degree == 1
         half = np.pi / 4
         rot = Sim3(quat_wxyz=[np.cos(half), 0, 0, np.sin(half)])
-        with pytest.raises(ValueError, match="SH"):
+        # 阻断信息须自文档化: 指向 flatten 解法, 而非留用户面对死路。
+        with pytest.raises(ValueError, match="flatten"):
             scene.transform(rot)
 
         dc_before = scene.sh_dc.copy()

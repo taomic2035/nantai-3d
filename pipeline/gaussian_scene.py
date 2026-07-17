@@ -482,7 +482,9 @@ class GaussianScene:
         rotation = sim3.rotation_matrix()
         if self.sh_degree > 0 and not np.allclose(rotation, np.eye(3), atol=1e-10):
             raise ValueError(
-                "rotation 会改变高阶 SH 球谐基；当前版本未实现可靠 SH rotation，已阻断")
+                "rotation 会改变高阶 SH 球谐基；当前版本未实现可靠 SH rotation，已阻断。"
+                "如需米制/地理对齐真实 SH 重建，先扁平化 SH（丢 f_rest 保 DC 视角无关基色）："
+                "scripts/flatten_ply_sh.py 或 GaussianScene.flatten_sh()")
 
     @staticmethod
     def _require_float32_representable(label: str, values: np.ndarray) -> None:
