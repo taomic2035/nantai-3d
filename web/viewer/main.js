@@ -50,6 +50,7 @@ import {
 import {
   DEFAULT_WEATHER,
   DEFAULT_ZOOM,
+  ENVIRONMENT_EFFECT_IDENTITY,
   ZOOM_STEP,
   createPrecipitationPositions,
   getWeatherPreset,
@@ -108,9 +109,11 @@ let minimapCtx = null;
 const environmentState = {
   weather: DEFAULT_WEATHER,
   zoom: DEFAULT_ZOOM,
-  effect_source: 'viewer-runtime',
+  ...ENVIRONMENT_EFFECT_IDENTITY,
   precipitation_status: 'ready',
 };
+const ENVIRONMENT_EFFECT_NOTICE =
+  '大气叠加 atmospheric overlay · 非重光照 not relighting';
 let hemisphereLight = null;
 let precipitationPoints = null;
 let precipitationEffect = null;
@@ -453,8 +456,8 @@ function syncEnvironmentUI() {
   document.getElementById('hud-zoom').textContent = zoomText;
   document.getElementById('environment-status').textContent =
     environmentState.precipitation_status === 'degraded'
-      ? '降水粒子已降级 · 背景/雾/光照仍生效'
-      : 'Viewer 实时效果 · 不改变重建来源';
+      ? `${ENVIRONMENT_EFFECT_NOTICE} · 降水粒子已降级，背景/雾仍生效`
+      : `${ENVIRONMENT_EFFECT_NOTICE} · 不改变 3DGS 已烘焙光照`;
 }
 
 function configurePrecipitation(effect) {

@@ -31,9 +31,29 @@ test('environment status and HUD values are visible but separate from provenance
   assert.doesNotMatch(provenance, /hud-weather|hud-zoom|environment-status/);
 });
 
+test('runtime weather is visibly an overlay and never claims relighting', () => {
+  assert.match(
+    html,
+    /<label[^>]*for="weather-control"[^>]*>视觉天气（叠加）<\/label>/,
+  );
+  assert.match(html, /<div class="stat">大气叠加: <b id="hud-weather">/);
+  assert.match(
+    html,
+    /id="environment-status"[^>]*>大气叠加 atmospheric overlay · 非重光照 not relighting · 不改变 3DGS 已烘焙光照<\/p>/,
+  );
+  assert.doesNotMatch(html, /<div class="stat">天气:/);
+  assert.match(main, /ENVIRONMENT_EFFECT_IDENTITY/);
+  assert.match(main, /\.\.\.ENVIRONMENT_EFFECT_IDENTITY/);
+  assert.match(main, /atmospheric overlay/);
+  assert.match(main, /not relighting/);
+});
+
 test('viewer runtime wires environment state without mutating provenance', () => {
   assert.match(main, /from ['"]\.\/environment\.mjs['"]/);
-  assert.match(main, /effect_source:\s*['"]viewer-runtime['"]/);
+  assert.match(
+    main,
+    /import\s*\{[\s\S]*ENVIRONMENT_EFFECT_IDENTITY[\s\S]*\}\s*from ['"]\.\/environment\.mjs['"]/,
+  );
   assert.match(main, /setWeather:\s*\(\{\s*weather\s*\}\)\s*=>/);
   assert.match(main, /setZoom:\s*\(\{\s*zoom\s*\}\)\s*=>/);
   assert.match(main, /camera\.zoom\s*=\s*environmentState\.zoom/);

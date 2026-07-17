@@ -65,7 +65,7 @@
     backdrop-filter: blur(6px); z-index: 10;
   }
   .environment-row { display: flex; align-items: center; gap: 10px; margin: 4px 0; }
-  .environment-row label { min-width: 36px; color: #b8c3cc; font-size: 12px; }
+  .environment-row label { min-width: 108px; color: #b8c3cc; font-size: 12px; }
   .environment-row select, .environment-row button {
     min-height: 32px; color: #fff; background: #27313b;
     border: 1px solid rgba(255,255,255,0.18); border-radius: 5px;
@@ -95,7 +95,7 @@
   <div class="stat">当前 chunk: <b id="hud-current">(0,0)</b></div>
   <div class="stat">画质 LOD: <b id="hud-lod">自动</b></div>
   <div class="stat">重建预览: <b id="hud-recon">无</b></div>
-  <div class="stat">天气: <b id="hud-weather">晴</b></div>
+  <div class="stat">大气叠加: <b id="hud-weather">晴</b></div>
   <div class="stat">缩放: <b id="hud-zoom">1.0×</b></div>
   <div class="provenance">
     <div class="stat">requested / actual: <b id="hud-requested-engine">unknown</b> / <b id="hud-actual-engine">unknown</b></div>
@@ -136,7 +136,7 @@
 
 <section id="environment-controls" aria-label="环境控制" style="display:none">
   <div class="environment-row">
-    <label for="weather-control">天气</label>
+    <label for="weather-control">视觉天气（叠加）</label>
     <select id="weather-control">
       <option value="clear">晴</option>
       <option value="overcast">阴</option>
@@ -152,7 +152,7 @@
     <output id="zoom-value" for="zoom-control" aria-live="polite">1.0×</output>
     <button id="zoom-reset" type="button">1×</button>
   </div>
-  <p id="environment-status" aria-live="polite">Viewer 实时效果 · 不改变重建来源</p>
+  <p id="environment-status" aria-live="polite">大气叠加 atmospheric overlay · 非重光照 not relighting · 不改变 3DGS 已烘焙光照</p>
 </section>
 
 <div id="controls" style="display:none">
