@@ -450,6 +450,17 @@ function normalSpreadLabel(components) {
     : ` · observed normal span ${min}–${max}°`;
 }
 
+function coreNormalSpreadLabel(components) {
+  const values = components
+    .map((component) => component.normal_spread.observed_normal_angular_spread_deg)
+    .filter(Number.isFinite);
+  if (values.length === 0) return '';
+  const min = Math.min(...values).toFixed(1);
+  const max = Math.max(...values).toFixed(1);
+  const range = min === max ? min : `${min}-${max}`;
+  return `observed surface normal span ${range}° · not facade identity`;
+}
+
 function coreCoverageAuditViewModel(audit) {
   const threshold = audit.threshold;
   const visibilityLabel = (
@@ -463,6 +474,10 @@ function coreCoverageAuditViewModel(audit) {
     ? 'instance_ids crosscheck failed'
     : `${visibilityLabel} · diagnostic-unvalidated`;
   const hasAzimuth = audit.components.some((component) => component.azimuth);
+  const geometryNotes = [];
+  if (hasAzimuth) geometryNotes.push('azimuth is not facade evidence');
+  const normalSpan = coreNormalSpreadLabel(audit.components);
+  if (normalSpan) geometryNotes.push(normalSpan);
   return {
     status,
     color: COVERAGE_STATUS_COLORS[status],
@@ -481,7 +496,7 @@ function coreCoverageAuditViewModel(audit) {
       ),
       geometry: layer(
         'unknown',
-        hasAzimuth ? 'unknown · azimuth is not facade evidence' : 'unknown',
+        geometryNotes.length > 0 ? `unknown · ${geometryNotes.join(' · ')}` : 'unknown',
       ),
       sfm: layer('unknown', 'unknown · no measured SfM evidence'),
       provenance: layer(

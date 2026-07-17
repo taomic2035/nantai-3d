@@ -392,6 +392,16 @@ test('core normal evidence re-derives the declared angular span', () => {
   assert.equal(isCoverageAudit(lyingSpan), false);
 });
 
+test('core HUD presents observed normal span without claiming facade identity', () => {
+  const { coverageAuditViewModel } = subject();
+  const model = coverageAuditViewModel(twoNormalCoreAudit());
+
+  assert.equal(model.layers.geometry.status, 'unknown');
+  assert.match(model.layers.geometry.label, /observed surface normal span 90\.0/);
+  assert.match(model.layers.geometry.label, /not facade identity/);
+  assert.doesNotMatch(model.layers.geometry.label, /front|back|360.?coverage/i);
+});
+
 test('core report crosscheck disagreement is explicit evidence failure', () => {
   const { coverageAuditViewModel, isCoverageAudit } = subject();
   const audit = coreAudit({
