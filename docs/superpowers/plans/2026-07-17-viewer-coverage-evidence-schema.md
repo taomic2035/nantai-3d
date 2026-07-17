@@ -16,7 +16,7 @@
 - Modify: `web/viewer/coverage-audit.test.mjs`
 - Modify: `web/viewer/coverage-audit.mjs`
 
-- [ ] **Step 1: Extend the valid core fixture**
+- [x] **Step 1: Extend the valid core fixture**
 
 Add the current producer fields to `coreAudit()`:
 
@@ -53,7 +53,7 @@ normal_spread: {
 },
 ```
 
-- [ ] **Step 2: Write failing identity tests**
+- [x] **Step 2: Write failing identity tests**
 
 Add one test that deep-clones the valid fixture and independently corrupts:
 
@@ -68,7 +68,7 @@ camera_centers[0].center_source
 Assert `isCoverageAudit()` is false for every corrupted report and for a report
 whose three digest arrays do not name the same camera set.
 
-- [ ] **Step 3: Run the test and verify RED**
+- [x] **Step 3: Run the test and verify RED**
 
 Run:
 
@@ -78,7 +78,7 @@ node --test --test-name-pattern="anchors every core coverage input" web/viewer/c
 
 Expected: FAIL because the existing core validator ignores the new fields.
 
-- [ ] **Step 4: Implement minimal anchor validation**
+- [x] **Step 4: Implement minimal anchor validation**
 
 Add pure helpers that validate:
 
@@ -89,7 +89,7 @@ Add pure helpers that validate:
 - camera centers with unique IDs, exact source semantics, and two finite values;
 - a GLB digest whenever any component carries azimuth evidence.
 
-- [ ] **Step 5: Run the focused and existing coverage tests**
+- [x] **Step 5: Run the focused and existing coverage tests**
 
 Run:
 
@@ -105,7 +105,7 @@ Expected: all tests pass.
 - Modify: `web/viewer/coverage-audit.test.mjs`
 - Modify: `web/viewer/coverage-audit.mjs`
 
-- [ ] **Step 1: Write failing normal-evidence tests**
+- [x] **Step 1: Write failing normal-evidence tests**
 
 Add tests proving that:
 
@@ -116,7 +116,7 @@ Add tests proving that:
   `unknown_reason=null`;
 - changing the declared angle from `90` to `89` is rejected.
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run:
 
@@ -127,7 +127,7 @@ node --test --test-name-pattern="normal evidence" web/viewer/coverage-audit.test
 Expected: FAIL because the existing validator ignores per-observation normals
 and the derived span.
 
-- [ ] **Step 3: Implement minimal normal validation**
+- [x] **Step 3: Implement minimal normal validation**
 
 Add pure helpers that:
 
@@ -141,7 +141,7 @@ Use only qualifying observations with non-null normals. Round the maximum
 pairwise angle to three decimals, matching the producer. Preserve `null` as
 unknown when fewer than two vectors exist.
 
-- [ ] **Step 4: Run the coverage tests**
+- [x] **Step 4: Run the coverage tests**
 
 Run:
 
@@ -157,7 +157,7 @@ Expected: all tests pass.
 - Modify: `web/viewer/coverage-audit.test.mjs`
 - Modify: `web/viewer/coverage-audit.mjs`
 
-- [ ] **Step 1: Write the failing HUD test**
+- [x] **Step 1: Write the failing HUD test**
 
 Build a valid two-normal core audit and assert:
 
@@ -168,7 +168,7 @@ assert.match(model.layers.geometry.label, /not facade identity/);
 assert.doesNotMatch(model.layers.geometry.label, /front|back|360.coverage/i);
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run:
 
@@ -178,13 +178,13 @@ node --test --test-name-pattern="presents observed normal span" web/viewer/cover
 
 Expected: FAIL because the current core HUD mentions only azimuth.
 
-- [ ] **Step 3: Implement the minimal label**
+- [x] **Step 3: Implement the minimal label**
 
 Derive the finite measured span range from `component.normal_spread`. Keep the
 Geometry layer status `unknown`; append the range and the exact disclaimer
 `not facade identity`. Do not turn any span into a pass/fail decision.
 
-- [ ] **Step 4: Run the complete Viewer suite**
+- [x] **Step 4: Run the complete Viewer suite**
 
 Run:
 
@@ -194,7 +194,7 @@ node --test web/viewer/*.test.mjs web/studio/*.test.mjs
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit and push path-limited changes**
+- [x] **Step 5: Commit and push path-limited changes**
 
 Stage only:
 
@@ -209,3 +209,14 @@ Every commit must end with:
 ```text
 Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>
 ```
+
+## Verification evidence
+
+- `node --test web/viewer/coverage-audit.test.mjs`: 15/15 passed.
+- `node --test web/viewer/*.test.mjs web/studio/*.test.mjs`: 183/183 passed.
+- The current Opus audit kernel produced a 126-component, 24-frame report in
+  memory; the Viewer accepted it as `diagnostic-unvalidated` and kept Geometry
+  `unknown` while presenting the measured `0.3–173.8°` observed-normal range.
+- The stale untracked `web/data/coverage-audit.json` lacks the new anchored
+  evidence and is intentionally rejected as invalid rather than silently
+  upgraded.
