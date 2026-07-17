@@ -20,6 +20,8 @@ const EVIDENCE_STATUSES = new Set([
   'fail',
 ]);
 const RELEASE_STATUSES = new Set(['unknown', 'pass', 'fail']);
+const CAMERA_CENTER_SOURCE =
+  'renders/cameras/<camera_id>.json:measured_c2w_blender';
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -31,6 +33,44 @@ function isFiniteInRange(value, min, max) {
 
 function validDigest(value) {
   return typeof value === 'string' && SHA256.test(value);
+}
+
+function validEvidenceDigests(value) {
+  if (
+    !Array.isArray(value)
+    || !value.every((item) => (
+      isRecord(item)
+      && typeof item.camera_id === 'string'
+      && item.camera_id.length > 0
+      && typeof item.path === 'string'
+      && item.path.length > 0
+      && validDigest(item.sha256)
+    ))
+  ) return false;
+  const cameraIds = value.map((item) => item.camera_id);
+  return new Set(cameraIds).size === cameraIds.length;
+}
+
+function sameStringSet(left, right) {
+  if (left.size !== right.size) return false;
+  return [...left].every((value) => right.has(value));
+}
+
+function validCoreCameraCenters(value, cameraIds) {
+  if (
+    !Array.isArray(value)
+    || !value.every((item) => (
+      isRecord(item)
+      && typeof item.camera_id === 'string'
+      && cameraIds.has(item.camera_id)
+      && item.center_source === CAMERA_CENTER_SOURCE
+      && Array.isArray(item.center_xy_m)
+      && item.center_xy_m.length === 2
+      && item.center_xy_m.every(Number.isFinite)
+    ))
+  ) return false;
+  const centerIds = value.map((item) => item.camera_id);
+  return new Set(centerIds).size === centerIds.length;
 }
 
 function validEvidenceSection(section) {
@@ -181,23 +221,29 @@ function isCoreCoverageAudit(value) {
     value.build_id,
     value.journal_sha256,
     value.object_registry_sha256,
+    value.build_report_sha256,
   ]) {
     if (!validDigest(digest)) return false;
   }
+  if (value.glb_sha256 !== null && !validDigest(value.glb_sha256)) return false;
   if (!validCoreThreshold(value.threshold)) return false;
+  if (!validEvidenceDigests(value.mask_digests)) return false;
+  if (!validEvidenceDigests(value.camera_metadata_digests)) return false;
+  if (!validEvidenceDigests(value.normal_digests)) return false;
+  const maskCameraIds = new Set(value.mask_digests.map((item) => item.camera_id));
+  const metadataCameraIds = new Set(
+    value.camera_metadata_digests.map((item) => item.camera_id),
+  );
+  const normalCameraIds = new Set(value.normal_digests.map((item) => item.camera_id));
+  if (!sameStringSet(maskCameraIds, metadataCameraIds)) return false;
+  if (!sameStringSet(maskCameraIds, normalCameraIds)) return false;
   if (
-    !Array.isArray(value.mask_digests)
-    || !value.mask_digests.every((item) => (
-      isRecord(item)
-      && typeof item.camera_id === 'string'
-      && item.camera_id.length > 0
-      && typeof item.path === 'string'
-      && item.path.length > 0
-      && validDigest(item.sha256)
-    ))
+    !Number.isFinite(value.normal_unit_length_tolerance)
+    || value.normal_unit_length_tolerance <= 0
   ) return false;
-  const maskCameraIds = value.mask_digests.map((item) => item.camera_id);
-  if (new Set(maskCameraIds).size !== maskCameraIds.length) return false;
+  if (!validCoreCameraCenters(value.camera_centers, metadataCameraIds)) return false;
+  if (value.glb_sha256 === null && value.camera_centers.length > 0) return false;
+  const centerCameraIds = new Set(value.camera_centers.map((item) => item.camera_id));
 
   const crosscheck = value.instance_ids_crosscheck;
   if (
@@ -220,6 +266,14 @@ function isCoreCoverageAudit(value) {
   ) return false;
   const instanceIds = value.components.map((component) => component.instance_id);
   if (new Set(instanceIds).size !== instanceIds.length) return false;
+  const componentsWithAzimuth = value.components.filter((component) => component.azimuth);
+  if (componentsWithAzimuth.length > 0 && value.glb_sha256 === null) return false;
+  if (
+    componentsWithAzimuth.some((component) => component.observations.some(
+      (observation) => observation.meets_threshold
+        && !centerCameraIds.has(observation.camera_id),
+    ))
+  ) return false;
 
   const summary = value.summary;
   if (!isRecord(summary)) return false;

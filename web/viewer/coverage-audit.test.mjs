@@ -59,6 +59,7 @@ function coreAudit(overrides = {}) {
       pixels: 800,
       frame_fraction: 800 / 589824,
       meets_threshold: true,
+      mean_unit_normal_xyz: [1, 0, 0],
     }],
     observed_camera_count: 1,
     qualifying_camera_count: 1,
@@ -71,6 +72,13 @@ function coreAudit(overrides = {}) {
     },
     orientation_coverage: 'unknown',
     orientation_unknown_reason: 'component orientation is not declared',
+    normal_spread: {
+      semantics: 'observed-surface-normal-angular-spread-not-facade-identity',
+      normal_source: 'renders/normal/<camera_id>.exr:X,Y,Z-world-space-unit-vector',
+      qualifying_camera_normal_count: 1,
+      observed_normal_angular_spread_deg: null,
+      unknown_reason: 'fewer than two qualifying camera normals',
+    },
   }];
   return {
     schema_version: 'nantai.synthetic-village.coverage-audit.v1',
@@ -83,11 +91,29 @@ function coreAudit(overrides = {}) {
     build_id: 'f'.repeat(64),
     journal_sha256: '1'.repeat(64),
     object_registry_sha256: '2'.repeat(64),
+    build_report_sha256: '4'.repeat(64),
+    glb_sha256: '5'.repeat(64),
     threshold,
     mask_digests: [{
       camera_id: 'camera-outer-001',
       path: 'instance/camera-outer-001.png',
       sha256: '3'.repeat(64),
+    }],
+    camera_metadata_digests: [{
+      camera_id: 'camera-outer-001',
+      path: 'cameras/camera-outer-001.json',
+      sha256: '6'.repeat(64),
+    }],
+    normal_digests: [{
+      camera_id: 'camera-outer-001',
+      path: 'normal/camera-outer-001.exr',
+      sha256: '7'.repeat(64),
+    }],
+    normal_unit_length_tolerance: 0.001,
+    camera_centers: [{
+      camera_id: 'camera-outer-001',
+      center_source: 'renders/cameras/<camera_id>.json:measured_c2w_blender',
+      center_xy_m: [10, 20],
     }],
     instance_ids_crosscheck: {
       agrees: true,
@@ -267,6 +293,25 @@ test('core pixel-mask report is accepted only as uncalibrated visibility diagnos
   assert.match(model.layers.geometry.label, /azimuth is not facade evidence/i);
   assert.equal(model.layers.sfm.status, 'unknown');
   assert.equal(model.layers.provenance.status, 'diagnostic-unvalidated');
+});
+
+test('core report anchors every coverage input before accepting derived evidence', () => {
+  const { isCoverageAudit } = subject();
+  const valid = coreAudit();
+  assert.equal(isCoverageAudit(valid), true);
+
+  const mutations = [
+    (audit) => { delete audit.build_report_sha256; },
+    (audit) => { audit.glb_sha256 = null; },
+    (audit) => { audit.camera_metadata_digests[0].sha256 = 'not-a-digest'; },
+    (audit) => { audit.normal_digests[0].camera_id = 'camera-ground-001'; },
+    (audit) => { audit.camera_centers[0].center_source = 'filename-inference'; },
+  ];
+  for (const mutate of mutations) {
+    const invalid = structuredClone(valid);
+    mutate(invalid);
+    assert.equal(isCoverageAudit(invalid), false);
+  }
 });
 
 test('core report crosscheck disagreement is explicit evidence failure', () => {
