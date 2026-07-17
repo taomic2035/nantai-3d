@@ -8,6 +8,7 @@ dependencies = [
     "exifread>=3.0",
     "Pillow>=10.4",
     "opencv-python-headless>=4.10",  # 视频抽帧 + 模糊检测
+    "OpenEXR>=3.2",  # synthetic-village 深度 EXR → COLMAP/Brush 数据集
     # L0 分割 (云端GPU, 本机可选)
     # "segment-anything-2",  # 需 Python 3.11, 云端安装
     # "groundingdino-py",    # 需 Python 3.11, 云端安装
