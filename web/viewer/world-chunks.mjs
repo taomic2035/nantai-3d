@@ -31,6 +31,13 @@ export function worldChunkAvailable(manifest, hasBakedEntry) {
   return Boolean(hasBakedEntry) || isValidOnDemandGrid(manifest);
 }
 
+export function shouldRetryWorldChunkFailure(error) {
+  return !(
+    error?.status === 422
+    && error.apiCode === 'world_bounds_exceeded'
+  );
+}
+
 /** Resolve a baked chunk first, then the exact same-origin on-demand contract. */
 export function resolveWorldChunkSource(manifest, entry, chunkX, chunkY, lod) {
   assertSchedulerInputs(chunkX, chunkY, lod);

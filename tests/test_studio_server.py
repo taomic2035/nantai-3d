@@ -995,6 +995,27 @@ class TestHttpContract:
         assert json.loads(payload)["error"]["code"] == "invalid_world_chunk_request"
 
     @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/world/chunk/30501/0.ply?lod=2",
+            "/api/world/chunk/-149501/0.ply?lod=2",
+            "/api/world/chunk/0/32001.ply?lod=2",
+            "/api/world/chunk/0/-58001.ply?lod=2",
+        ],
+    )
+    def test_on_demand_world_chunk_distinguishes_geographic_envelope(
+        self, tmp_path, path,
+    ):
+        _write_v2_project(tmp_path)
+        self._enable_on_demand_world(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(server, "GET", path)
+
+        assert status == 422
+        assert json.loads(payload)["error"]["code"] == "world_bounds_exceeded"
+
+    @pytest.mark.parametrize(
         "grid",
         [
             None,

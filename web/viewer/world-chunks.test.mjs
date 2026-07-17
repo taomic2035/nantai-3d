@@ -80,3 +80,21 @@ test('coordinates and LOD must be safe integers from the viewer scheduler', () =
     /LOD/,
   );
 });
+
+test('only the geographic-envelope response is a terminal chunk failure', () => {
+  const { shouldRetryWorldChunkFailure } = subject();
+
+  assert.equal(shouldRetryWorldChunkFailure({
+    status: 422,
+    apiCode: 'world_bounds_exceeded',
+  }), false);
+  assert.equal(shouldRetryWorldChunkFailure({
+    status: 422,
+    apiCode: 'other_validation_error',
+  }), true);
+  assert.equal(shouldRetryWorldChunkFailure({
+    status: 500,
+    apiCode: 'world_chunk_render_failed',
+  }), true);
+  assert.equal(shouldRetryWorldChunkFailure(new TypeError('network failure')), true);
+});

@@ -89,3 +89,11 @@ test('viewer loads coverage audit independently from reconstruction artifacts', 
   assert.match(main, /coverage:\s*coverageAuditViewModel\(/);
   assert.match(main, /absoluteUrl\.origin\s*!==\s*window\.location\.origin/);
 });
+
+test('terminal world-envelope failures do not enter the chunk retry loop', () => {
+  assert.match(main, /shouldRetryWorldChunkFailure/);
+  assert.match(main, /terminalChunkFailures/);
+  assert.match(main, /error\.status\s*=\s*res\.status/);
+  assert.match(main, /error\.apiCode\s*=/);
+  assert.match(main, /terminalChunkFailures\.add\(key\)/);
+});

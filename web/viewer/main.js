@@ -44,6 +44,7 @@ import {
 } from './camera-pose.mjs';
 import {
   resolveWorldChunkSource,
+  shouldRetryWorldChunkFailure,
   worldChunkAvailable,
 } from './world-chunks.mjs';
 import {
@@ -78,6 +79,7 @@ const chunkBorders = new Map();     // chunk_id → THREE.Line (边界线)
 const lruOrder = [];                // chunk_id 数组, 末尾为最近访问
 const loadingSet = new Set();        // 正在加载中的 chunk_id
 const failedChunkRetryAt = new Map(); // 请求失败后的有界重试，避免 404/5xx spam
+const terminalChunkFailures = new Set(); // 已确认越过世界信封，不再重复请求
 const stats = { loaded: 0, evicted: 0, cachedHits: 0 };
 let qualityOverride = null;          // null=按距离自动, 0/1/2=强制 LOD (键 1/2/3, 0 恢复自动)
 let reconManifest = null;            // 重建预览 artifact (recon_manifest.json, 可选)
@@ -169,7 +171,19 @@ function parsePly(buffer) {
 
 async function loadPlyUrl(url, label = url) {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`加载失败 ${label}: ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(`加载失败 ${label}: ${res.status}`);
+    error.status = res.status;
+    error.apiCode = null;
+    if (res.headers.get('content-type')?.includes('application/json')) {
+      try {
+        error.apiCode = (await res.json())?.error?.code ?? null;
+      } catch {
+        error.apiCode = null;
+      }
+    }
+    throw error;
+  }
   const buf = await res.arrayBuffer();
   return parsePly(buf);
 }
@@ -285,6 +299,7 @@ async function loadChunk(cx, cy, wantLod = 2) {
     return;
   }
   if (loadingSet.has(key)) return;
+  if (terminalChunkFailures.has(key)) return;
   if ((failedChunkRetryAt.get(key) ?? 0) > Date.now()) return;
   const entry = chunkIndex.get(key);
   const source = resolveWorldChunkSource(manifest, entry, cx, cy, wantLod);
@@ -310,6 +325,7 @@ async function loadChunk(cx, cy, wantLod = 2) {
     chunkMeshes.set(key, mesh);
     chunkLod.set(key, wantLod);
     failedChunkRetryAt.delete(key);
+    terminalChunkFailures.delete(key);
     touchLRU(key);
     stats.loaded++;
 
@@ -321,8 +337,14 @@ async function loadChunk(cx, cy, wantLod = 2) {
       chunkBorders.set(key, border);
     }
   } catch (e) {
-    failedChunkRetryAt.set(key, Date.now() + 5000);
-    console.error(`chunk ${key} 加载失败:`, e);
+    if (shouldRetryWorldChunkFailure(e)) {
+      failedChunkRetryAt.set(key, Date.now() + 5000);
+      console.error(`chunk ${key} 加载失败:`, e);
+    } else {
+      terminalChunkFailures.add(key);
+      failedChunkRetryAt.delete(key);
+      console.warn(`chunk ${key} 已越过世界可渲染边界，停止重试`);
+    }
   } finally {
     loadingSet.delete(key);
   }

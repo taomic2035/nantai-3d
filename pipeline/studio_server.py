@@ -36,6 +36,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from plyfile import PlyData, PlyParseError
+from pydantic import ValidationError
 
 from pipeline.assets import AssetRegistry
 from pipeline.gaussian_scene import GaussianScene
@@ -1263,6 +1264,20 @@ def _on_demand_world_manifest(root: Path) -> dict[str, Any] | None:
     return _valid_on_demand_world_manifest(manifest)
 
 
+def _is_world_bounds_validation_error(error: ValidationError) -> bool:
+    """Identify the mock world's finite WGS84 envelope without hiding other bugs."""
+
+    issues = error.errors(include_url=False)
+    return bool(issues) and all(
+        tuple(issue.get("loc", ())) in {
+            ("geo_origin", "lat"),
+            ("geo_origin", "lon"),
+        }
+        and issue.get("type") in {"greater_than_equal", "less_than_equal"}
+        for issue in issues
+    )
+
+
 class StudioRequestHandler(BaseHTTPRequestHandler):
     """HTTP handler configured with a project root by :func:`make_server`."""
 
@@ -1545,6 +1560,22 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     registry=registry,
                     lod=lod,
                 )
+            except ValidationError as exc:
+                if _is_world_bounds_validation_error(exc):
+                    self._error(
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        "world_bounds_exceeded",
+                        "The requested world chunk is outside the renderable geographic envelope.",
+                        head_only=head_only,
+                    )
+                else:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "world_chunk_render_failed",
+                        "The world chunk failed internal layout validation.",
+                        head_only=head_only,
+                    )
+                return
             except ValueError:
                 self._error(
                     HTTPStatus.BAD_REQUEST,
