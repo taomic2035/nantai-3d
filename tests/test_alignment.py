@@ -161,9 +161,11 @@ class TestFitGates:
         assert np.isclose(evidence.rms_residual_m, 0.0, atol=1e-6)
         assert np.isclose(evidence.scale, 1.7, atol=1e-6)
 
-    def test_fewer_than_three_points_fail_closed(self):
+    def test_fewer_than_four_points_fail_closed(self):
+        # 契约由 '>=3' 改为 '>=4 non-coplanar': 3 点去心后秩恒 <=2 (s3 恒为 0), 共面
+        # 守卫必然拒绝, 故旧的 '>=3' 是永不可达的死代码 —— 契约说了假话。
         src, dst = self._consistent_points(n=2)
-        with pytest.raises(AlignmentError, match=">=3 control points"):
+        with pytest.raises(AlignmentError, match=">=4 non-coplanar control points"):
             fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
 
     def test_collinear_points_fail_closed(self):

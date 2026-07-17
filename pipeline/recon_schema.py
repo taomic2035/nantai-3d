@@ -520,6 +520,15 @@ class ControlPoint(BaseModel):
     image: str | None = None
     enu_xyz: tuple[float, float, float] | None = None
     geo: GeoAnchor | None = None
+    # 靶标【不是物理测量, 而是从另一次对齐派生】时, 记下那次对齐的 transform_id
+    # (内容寻址)。None = 未声明派生 (实测控制点 / GPS 锚)。
+    #
+    # 为什么这个标记必须长在 ControlPoint 上而不是只做函数参数: 派生性一旦在数据里
+    # 丢失就【无法再恢复】—— 实测过的洗白旁路是 control_points_from_shared_images 的
+    # 输出直接喂 align_registration, 派生模式的三道门 (留出/n_effective/误差复合) 全部
+    # 静默跳过, 产出的证据与一次真实实测控制点对齐【逐字段不可区分】。靠 docstring
+    # 劝阻不是 fail-closed; 标记跟着靶标走, 使用处才能机器可验证地拒绝。
+    derived_from_alignment: str | None = None
 
     @field_validator("source_xyz", "enu_xyz")
     @classmethod
@@ -572,6 +581,26 @@ class Sim3AlignmentEvidence(BaseModel):
     control_point_labels: tuple[str, ...]
     passed: bool
 
+    # --- 跨批次 (派生靶标) 专用字段 ---------------------------------------
+    # 全部带默认值, 老 JSON 仍可解析; None 表示"该门未运行", 不表示"该门通过"。
+    # 去重后的【有效】控制点数: 同一位置重复采样不增加约束, 但会把 n_control_points
+    # 撑大。所有点数门作用在这个数上, 两个数都写进证据供复核。
+    n_effective_control_points: int | None = Field(default=None, ge=0)
+    # 留出验证 (leave-k-out) 的留出点残差, 米。fit RMS 把噪声吸进 Sim3 的 7 个自由度
+    # 故系统性偏乐观, 这个数才是载荷门量的东西。算得动就记 (含非派生对齐 —— 下游的
+    # 误差复合门要拿它当上游项); None = 算不动 (点太少/折退化), 【不是】"该门通过"。
+    # 注意: 记了不等于【裁决】了 —— 只有派生模式拿它当门, 非派生模式只记录。
+    # 【别把它当"真实对齐误差"】: 它只在控制点凸包【内】、且只在可辨识方向上验证。
+    # 实测 60m 细长航带留出 0.032m 而 100m 外真实误差 4.00m —— 差两个数量级。
+    holdout_rms_m: float | None = Field(default=None, ge=0)
+    holdout_max_m: float | None = Field(default=None, ge=0)
+    holdout_folds: int | None = Field(default=None, ge=0)
+    # 上游 (参考批) 的对齐误差, 米。靶标派生自它, 故本批总误差 >= 它 + 本批留出误差。
+    upstream_alignment_rms_m: float | None = Field(default=None, ge=0)
+    # 靶标来源。'derived-from-alignment:<transform_id>' 让"靶标是派生的而非物理测量
+    # 的"机器可溯: transform_id 内容寻址, 消费者可自行复核。
+    control_target_provenance: str | None = None
+
     def to_evidence(self) -> str:
         payload = json.dumps(
             self.model_dump(mode="json"),
@@ -586,6 +615,65 @@ class Sim3AlignmentEvidence(BaseModel):
         prefix = "sim3.alignment.v1="
         if not evidence.startswith(prefix):
             raise ValueError("not a sim3.alignment.v1 evidence string")
+        return cls.model_validate_json(evidence.split("=", 1)[1])
+
+
+class PreviewMergeEvidence(BaseModel):
+    """把一批 SfM 重建缝进【另一批的任意 frame】的 Sim3 拟合记录 —— 【不含任何米制声称】。
+
+    这是 ``Sim3AlignmentEvidence`` 的【preview-only 对偶】, 刻意分成两个类型而不是
+    复用: 后者的字段【逐个叫 ``*_m``】并要求 ``geo_origin``, 而这里的残差量在参考批
+    的 SfM gauge 里 —— 那是【任意单位】。把任意单位塞进一个叫 ``rms_residual_m`` 的
+    字段, 正是本仓库存在的理由要挡的事: 实测同一个 7.09cm 的物理事实, 三种 COLMAP
+    gauge 下直读得 0.000677 / 0.067697 / 6.769743。故本类型【一个 *_m 字段都没有】。
+
+    序列化前缀 ``sim3.preview-merge.v1=`` 与 ``sim3.alignment.v1=`` 【互不可解析】,
+    这是刻意的: 米制消费者 (``_reference_alignment_evidence``) 靠前缀找证据, 前缀分开
+    = preview 产物无法被当成米制对齐的上游, 洗白旁路因而在【类型层】就不成立。
+
+    ``relative_rms`` (= rms / 靶标跨度) 是本记录唯一的【判据】: 它无量纲, 故不随参考批
+    的 gauge 浮动 —— 见 ``TestPreviewOnlyMerge::test_preview_gate_is_dimensionless_not_metres``。
+    ``*_source_units`` 的几个数只供人读与复核, 它们随 gauge 浮动, 【不是】判据。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    method: Literal["umeyama-sim3"]
+    n_control_points: int = Field(ge=0)
+    scale: float
+    # 以下三个量在【参考批的 SfM gauge】里, 是任意单位。名字必须说出这件事。
+    rms_residual_source_units: float = Field(ge=0)
+    max_residual_source_units: float = Field(ge=0)
+    target_extent_source_units: float = Field(gt=0)
+    # 无量纲, gauge 无关 —— 这两个才是判据。
+    relative_rms: float = Field(ge=0)
+    relative_max: float = Field(ge=0)
+    max_relative_rms_threshold: float = Field(gt=0)
+    source_singular_values: tuple[float, float, float]
+    min_span_ratio: float
+    control_point_labels: tuple[str, ...]
+    passed: bool
+    # 留出验证的相对残差; None = 该门【未运行】(点太少/折退化), 不是"该门通过"。
+    holdout_relative_rms: float | None = Field(default=None, ge=0)
+    holdout_folds: int | None = Field(default=None, ge=0)
+    # 靶标取自哪一批的 pose_frame。preview 没有"上游误差"可复合 —— 因为它不声称米,
+    # 没有米制预算可超。这个字段只说【坐标系跟谁走】。
+    reference_pose_frame_id: str = Field(min_length=1)
+
+    def to_evidence(self) -> str:
+        payload = json.dumps(
+            self.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return f"sim3.preview-merge.v1={payload}"
+
+    @classmethod
+    def parse(cls, evidence: str) -> PreviewMergeEvidence:
+        prefix = "sim3.preview-merge.v1="
+        if not evidence.startswith(prefix):
+            raise ValueError("not a sim3.preview-merge.v1 evidence string")
         return cls.model_validate_json(evidence.split("=", 1)[1])
 
 
