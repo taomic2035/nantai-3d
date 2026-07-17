@@ -132,6 +132,51 @@ function coreAudit(overrides = {}) {
   };
 }
 
+function twoNormalCoreAudit() {
+  const audit = coreAudit();
+  audit.mask_digests.push({
+    camera_id: 'camera-outer-002',
+    path: 'instance/camera-outer-002.png',
+    sha256: '8'.repeat(64),
+  });
+  audit.camera_metadata_digests.push({
+    camera_id: 'camera-outer-002',
+    path: 'cameras/camera-outer-002.json',
+    sha256: '9'.repeat(64),
+  });
+  audit.normal_digests.push({
+    camera_id: 'camera-outer-002',
+    path: 'normal/camera-outer-002.exr',
+    sha256: 'a'.repeat(64),
+  });
+  audit.camera_centers.push({
+    camera_id: 'camera-outer-002',
+    center_source: 'renders/cameras/<camera_id>.json:measured_c2w_blender',
+    center_xy_m: [20, 10],
+  });
+  const component = audit.components[0];
+  component.observations.push({
+    camera_id: 'camera-outer-002',
+    pixels: 900,
+    frame_fraction: 900 / 589824,
+    meets_threshold: true,
+    mean_unit_normal_xyz: [0, 1, 0],
+  });
+  component.observed_camera_count = 2;
+  component.qualifying_camera_count = 2;
+  component.azimuth.qualifying_camera_azimuths_deg = [30, 120];
+  component.azimuth.max_gap_deg = 270;
+  component.normal_spread = {
+    semantics: 'observed-surface-normal-angular-spread-not-facade-identity',
+    normal_source: 'renders/normal/<camera_id>.exr:X,Y,Z-world-space-unit-vector',
+    qualifying_camera_normal_count: 2,
+    observed_normal_angular_spread_deg: 90,
+    unknown_reason: null,
+  };
+  audit.summary.frames_audited = 2;
+  return audit;
+}
+
 test('missing or malformed audits stay unknown', () => {
   const { coverageAuditViewModel } = subject();
 
@@ -312,6 +357,39 @@ test('core report anchors every coverage input before accepting derived evidence
     mutate(invalid);
     assert.equal(isCoverageAudit(invalid), false);
   }
+});
+
+test('core normal evidence requires finite unit vectors and explicit unknowns', () => {
+  const { isCoverageAudit } = subject();
+  const valid = coreAudit();
+  assert.equal(isCoverageAudit(valid), true);
+
+  const nonUnit = structuredClone(valid);
+  nonUnit.components[0].observations[0].mean_unit_normal_xyz = [2, 0, 0];
+  assert.equal(isCoverageAudit(nonUnit), false);
+
+  const missingSpread = structuredClone(valid);
+  delete missingSpread.components[0].normal_spread;
+  assert.equal(isCoverageAudit(missingSpread), false);
+
+  const fakeMeasuredZero = structuredClone(valid);
+  fakeMeasuredZero.components[0].normal_spread.observed_normal_angular_spread_deg = 0;
+  fakeMeasuredZero.components[0].normal_spread.unknown_reason = null;
+  assert.equal(isCoverageAudit(fakeMeasuredZero), false);
+});
+
+test('core normal evidence re-derives the declared angular span', () => {
+  const { isCoverageAudit } = subject();
+  const valid = twoNormalCoreAudit();
+  assert.equal(isCoverageAudit(valid), true);
+
+  const lyingCount = structuredClone(valid);
+  lyingCount.components[0].normal_spread.qualifying_camera_normal_count = 1;
+  assert.equal(isCoverageAudit(lyingCount), false);
+
+  const lyingSpan = structuredClone(valid);
+  lyingSpan.components[0].normal_spread.observed_normal_angular_spread_deg = 89;
+  assert.equal(isCoverageAudit(lyingSpan), false);
 });
 
 test('core report crosscheck disagreement is explicit evidence failure', () => {

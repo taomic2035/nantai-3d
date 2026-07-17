@@ -22,6 +22,10 @@ const EVIDENCE_STATUSES = new Set([
 const RELEASE_STATUSES = new Set(['unknown', 'pass', 'fail']);
 const CAMERA_CENTER_SOURCE =
   'renders/cameras/<camera_id>.json:measured_c2w_blender';
+const NORMAL_SPREAD_SEMANTICS =
+  'observed-surface-normal-angular-spread-not-facade-identity';
+const NORMAL_SOURCE =
+  'renders/normal/<camera_id>.exr:X,Y,Z-world-space-unit-vector';
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -146,7 +150,34 @@ function validCoreThreshold(threshold) {
   );
 }
 
-function validCoreObservation(observation, threshold) {
+function validUnitVector(vector, tolerance) {
+  if (
+    !Array.isArray(vector)
+    || vector.length !== 3
+    || !vector.every(Number.isFinite)
+  ) return false;
+  const length = Math.hypot(...vector);
+  return Math.abs(length - 1) <= tolerance;
+}
+
+function maxPairwiseNormalAngleDeg(vectors) {
+  if (vectors.length < 2) return null;
+  let widest = 0;
+  for (let first = 0; first < vectors.length; first += 1) {
+    for (let second = first + 1; second < vectors.length; second += 1) {
+      const dot = vectors[first].reduce(
+        (sum, value, index) => sum + value * vectors[second][index],
+        0,
+      );
+      const denominator = Math.hypot(...vectors[first]) * Math.hypot(...vectors[second]);
+      const cosine = Math.max(-1, Math.min(1, dot / denominator));
+      widest = Math.max(widest, Math.acos(cosine) * 180 / Math.PI);
+    }
+  }
+  return Math.round((widest + Number.EPSILON) * 1000) / 1000;
+}
+
+function validCoreObservation(observation, threshold, normalTolerance) {
   return (
     isRecord(observation)
     && typeof observation.camera_id === 'string'
@@ -160,6 +191,10 @@ function validCoreObservation(observation, threshold) {
       observation.pixels / threshold.frame_pixel_count,
     )
     && observation.meets_threshold === (observation.pixels >= threshold.min_pixels)
+    && (
+      observation.mean_unit_normal_xyz === null
+      || validUnitVector(observation.mean_unit_normal_xyz, normalTolerance)
+    )
   );
 }
 
@@ -181,7 +216,39 @@ function validCoreAzimuth(azimuth) {
   );
 }
 
-function validCoreComponent(component, threshold) {
+function validCoreNormalSpread(component, threshold) {
+  const spread = component.normal_spread;
+  if (
+    !isRecord(spread)
+    || spread.semantics !== NORMAL_SPREAD_SEMANTICS
+    || spread.normal_source !== NORMAL_SOURCE
+    || !Number.isInteger(spread.qualifying_camera_normal_count)
+    || spread.qualifying_camera_normal_count < 0
+  ) return false;
+  const vectors = component.observations
+    .filter(
+      (observation) => (
+        observation.pixels >= threshold.min_pixels
+        && observation.mean_unit_normal_xyz !== null
+      ),
+    )
+    .map((observation) => observation.mean_unit_normal_xyz);
+  if (spread.qualifying_camera_normal_count !== vectors.length) return false;
+  const expected = maxPairwiseNormalAngleDeg(vectors);
+  if (expected === null) {
+    return (
+      spread.observed_normal_angular_spread_deg === null
+      && typeof spread.unknown_reason === 'string'
+      && spread.unknown_reason.length > 0
+    );
+  }
+  return (
+    spread.observed_normal_angular_spread_deg === expected
+    && spread.unknown_reason === null
+  );
+}
+
+function validCoreComponent(component, threshold, normalTolerance) {
   if (!isRecord(component)) return false;
   if (typeof component.object_id !== 'string' || component.object_id.length === 0) return false;
   if (!Number.isInteger(component.instance_id) || component.instance_id < 1) return false;
@@ -191,7 +258,7 @@ function validCoreComponent(component, threshold) {
   if (
     !Array.isArray(component.observations)
     || !component.observations.every(
-      (observation) => validCoreObservation(observation, threshold),
+      (observation) => validCoreObservation(observation, threshold, normalTolerance),
     )
   ) return false;
   const cameraIds = component.observations.map((observation) => observation.camera_id);
@@ -207,7 +274,10 @@ function validCoreComponent(component, threshold) {
     typeof component.orientation_unknown_reason !== 'string'
     || component.orientation_unknown_reason.length === 0
   ) return false;
-  return validCoreAzimuth(component.azimuth);
+  return (
+    validCoreAzimuth(component.azimuth)
+    && validCoreNormalSpread(component, threshold)
+  );
 }
 
 function isCoreCoverageAudit(value) {
@@ -261,7 +331,11 @@ function isCoreCoverageAudit(value) {
   if (
     !Array.isArray(value.components)
     || !value.components.every(
-      (component) => validCoreComponent(component, value.threshold),
+      (component) => validCoreComponent(
+        component,
+        value.threshold,
+        value.normal_unit_length_tolerance,
+      ),
     )
   ) return false;
   const instanceIds = value.components.map((component) => component.instance_id);
