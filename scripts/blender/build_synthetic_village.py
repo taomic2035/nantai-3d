@@ -28,6 +28,11 @@ MAX_REQUEST_BYTES = 16 * 1024 * 1024
 REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v1"
 REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v1"
 FIDELITY = "simplified-pbr-not-render-parity"
+# 可选 weather 块的 schema, 必须与 pipeline/synthetic_village/weather_profile.py
+# 的 WEATHER_PROFILE_SCHEMA 逐字一致。weather 缺省 -> 走 canary 原样光照。
+WEATHER_PROFILE_SCHEMA = "nantai.synthetic-village.weather-profile.v1"
+# build 侧固定灯光角色 (overcast-world-background 校验要求; scene-graph token, 不随天气改)。
+WEATHER_LIGHT_ROLES = ("neutral-overcast-key", "neutral-sky-fill", "terrain-separation")
 
 SEMANTIC_CLASSES = (
     "background",
@@ -392,6 +397,58 @@ def _load_request(path: Path):
         raise RuntimeBuildError("request is not valid bounded UTF-8 JSON") from exc
 
 
+def _validate_weather_block(weather):
+    # weather 块的 fail-closed 校验: 未知/缺字段、schema 不符、角色不是固定三 token,
+    # 或 lighting_digest 与 lighting 字节对不上 (被手改) -> 一律拒绝。
+    _expect_keys(
+        weather,
+        ("profile_id", "schema", "lighting_digest", "lighting"),
+        "weather",
+    )
+    if weather["schema"] != WEATHER_PROFILE_SCHEMA:
+        raise RuntimeBuildError("weather schema is not the weather-profile.v1 contract")
+    if not _is_slug(weather["profile_id"]):
+        raise RuntimeBuildError("weather profile_id is invalid")
+    if not _is_sha256(weather["lighting_digest"]):
+        raise RuntimeBuildError("weather lighting_digest is invalid")
+    lighting = weather["lighting"]
+    _expect_keys(
+        lighting,
+        (
+            "roles",
+            "sun_energy",
+            "sun_angle_deg",
+            "sun_rotation_euler_deg",
+            "sun_color",
+            "fill_energy",
+            "fill_color",
+            "fill_location",
+            "rim_energy",
+            "rim_angle_deg",
+            "rim_rotation_euler_deg",
+            "world_color",
+            "world_strength",
+        ),
+        "weather lighting",
+    )
+    if list(lighting["roles"]) != list(WEATHER_LIGHT_ROLES):
+        raise RuntimeBuildError("weather light roles are not the frozen scene-graph tokens")
+    for triple_key in ("sun_rotation_euler_deg", "sun_color", "fill_color", "world_color"):
+        value = lighting[triple_key]
+        if not isinstance(value, list) or len(value) != 3:
+            raise RuntimeBuildError(f"weather lighting {triple_key} is not a 3-vector")
+    # 内容寻址 fail-closed: 摘要必须复算等于 lighting 的 canonical 字节。
+    canonical = json.dumps(
+        lighting,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if _sha256_bytes(canonical) != weather["lighting_digest"]:
+        raise RuntimeBuildError("weather lighting_digest does not match lighting bytes")
+
+
 def _validate_request(request, raw):
     top_keys = (
         "schema_version",
@@ -409,7 +466,13 @@ def _validate_request(request, raw):
         "visual_slot_registry",
         "requested_artifacts",
     )
-    _expect_keys(request, top_keys, "request")
+    # weather 是【可选】top key: 缺席 -> canary 14 键契约原样不变; 出现 -> 天气变体,
+    # 该块进入 canonical payload 故 build_id 自动按天气分叉。
+    if "weather" in request:
+        _expect_keys(request, (*top_keys, "weather"), "request")
+        _validate_weather_block(request["weather"])
+    else:
+        _expect_keys(request, top_keys, "request")
     if raw != _canonical_bytes(request):
         raise RuntimeBuildError("request must be canonical JSON")
     if (
@@ -1807,42 +1870,84 @@ def _configure_scene(request, materials):
     scene["nv_fidelity"] = FIDELITY
     scene["nv_synthetic"] = True
 
+    # 天气 = 改场景【光照本身】。缺省 (weather 缺席) -> 与 canary 逐值一致的中性阴天。
+    # 有 weather 块 -> 用其【已解算】的具体数值 (色温->rgb、高度角/方位->euler 都在
+    # pipeline/weather_profile.py 侧算好), builder 只做哑赋值。灯光角色恒为固定三 token。
+    weather = request.get("weather")
+    lighting = weather["lighting"] if weather is not None else None
+
     world = bpy.data.worlds.new("World")
     world.use_nodes = True
     background = world.node_tree.nodes.get("Background")
-    background.inputs["Color"].default_value = (0.43, 0.55, 0.62, 1.0)
-    background.inputs["Strength"].default_value = 0.62
+    if lighting is None:
+        world_rgb = (0.43, 0.55, 0.62)
+        world_strength = 0.62
+    else:
+        world_rgb = tuple(lighting["world_color"])
+        world_strength = lighting["world_strength"]
+    background.inputs["Color"].default_value = (
+        world_rgb[0],
+        world_rgb[1],
+        world_rgb[2],
+        1.0,
+    )
+    background.inputs["Strength"].default_value = world_strength
     world["nv_auxiliary_id"] = "background-world"
     world["nv_semantic_id"] = 0
     world["nv_synthetic"] = True
     scene.world = world
 
+    sun_role, fill_role, rim_role = (
+        tuple(lighting["roles"]) if lighting is not None else WEATHER_LIGHT_ROLES
+    )
+
     lighting_collection = _new_collection("nv__lighting")
     sun_data = bpy.data.lights.new("nv__sun-data", "SUN")
-    sun_data.energy = 2.2
-    sun_data.angle = math.radians(14.0)
+    if lighting is None:
+        sun_data.energy = 2.2
+        sun_data.angle = math.radians(14.0)
+        sun_rotation_deg = (28.0, -18.0, -42.0)
+    else:
+        sun_data.energy = lighting["sun_energy"]
+        sun_data.angle = math.radians(lighting["sun_angle_deg"])
+        sun_data.color = tuple(lighting["sun_color"])
+        sun_rotation_deg = tuple(lighting["sun_rotation_euler_deg"])
     sun = bpy.data.objects.new("nv__sun", sun_data)
     lighting_collection.objects.link(sun)
-    sun.rotation_euler = (math.radians(28.0), math.radians(-18.0), math.radians(-42.0))
-    sun["nv_role"] = "neutral-overcast-key"
+    sun.rotation_euler = (
+        math.radians(sun_rotation_deg[0]),
+        math.radians(sun_rotation_deg[1]),
+        math.radians(sun_rotation_deg[2]),
+    )
+    sun["nv_role"] = sun_role
 
     fill_data = bpy.data.lights.new("nv__fill-data", "AREA")
-    fill_data.energy = 1400.0
     fill_data.shape = "DISK"
     fill_data.size = 90.0
+    if lighting is None:
+        fill_data.energy = 1400.0
+        fill_location = (-80.0, -120.0, 230.0)
+    else:
+        fill_data.energy = lighting["fill_energy"]
+        fill_data.color = tuple(lighting["fill_color"])
+        fill_location = tuple(lighting["fill_location"])
     fill = bpy.data.objects.new("nv__fill", fill_data)
     lighting_collection.objects.link(fill)
-    fill.location = (-80.0, -120.0, 230.0)
+    fill.location = fill_location
     fill.rotation_euler = (0.0, 0.0, 0.0)
-    fill["nv_role"] = "neutral-sky-fill"
+    fill["nv_role"] = fill_role
 
     rim_data = bpy.data.lights.new("nv__rim-data", "SUN")
-    rim_data.energy = 0.7
-    rim_data.angle = math.radians(24.0)
+    if lighting is None:
+        rim_data.energy = 0.7
+        rim_data.angle = math.radians(24.0)
+    else:
+        rim_data.energy = lighting["rim_energy"]
+        rim_data.angle = math.radians(lighting["rim_angle_deg"])
     rim = bpy.data.objects.new("nv__rim", rim_data)
     lighting_collection.objects.link(rim)
     rim.rotation_euler = (math.radians(55.0), 0.0, math.radians(125.0))
-    rim["nv_role"] = "terrain-separation"
+    rim["nv_role"] = rim_role
     return scene
 
 

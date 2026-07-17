@@ -47,6 +47,14 @@ def _import_production_profile():
     )
 
 
+def _import_weather_profile():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village import weather_profile
+
+    return weather_profile
+
+
 def _run_canary_render():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -145,6 +153,29 @@ def _parser() -> argparse.ArgumentParser:
         "--batch-index",
         type=int,
         help="Print only this batch's camera IDs (requires --batch-count).",
+    )
+    weather_variants = commands.add_parser(
+        "weather-variants",
+        help=(
+            "Emit the multi-weather relighting manifest (clear-noon / overcast / "
+            "golden-hour). Each variant is a distinct scene relighting that yields a "
+            "new blend_sha256 on the build side; this repo has no 3DGS trainer, so the "
+            "manifest is render input + contract only, not a trained multi-weather 3DGS."
+        ),
+    )
+    weather_variants.add_argument(
+        "--manifest",
+        type=Path,
+        help="Write the full canonical weather-variants manifest JSON here.",
+    )
+    weather_variants.add_argument(
+        "--profile",
+        help="A weather profile ID to emit a build-request weather block for.",
+    )
+    weather_variants.add_argument(
+        "--request-block",
+        type=Path,
+        help="Write the --profile weather request block JSON here (needs --profile).",
     )
     return parser
 
@@ -268,6 +299,50 @@ def main(argv: list[str] | None = None) -> int:
             args.plan.parent.mkdir(parents=True, exist_ok=True)
             args.plan.write_bytes(plan_bytes(plan))
             summary["plan_path"] = str(args.plan)
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "weather-variants":
+        weather = _import_weather_profile()
+        if args.request_block is not None and args.profile is None:
+            raise SystemExit("--request-block requires --profile")
+        manifest = weather.build_weather_variants_manifest()
+        summary = {
+            "schema": manifest["schema"],
+            "synthetic": manifest["synthetic"],
+            "geometry_trust": manifest["geometry_trust"],
+            "sky_model": manifest["sky_model"],
+            "variants": [
+                {
+                    "profile_id": row["profile_id"],
+                    "description": row["description"],
+                    "sun_elevation_deg": row["sun_elevation_deg"],
+                    "sun_azimuth_deg": row["sun_azimuth_deg"],
+                    "sun_color_temp_k": row["sun_color_temp_k"],
+                    "lighting_digest": row["lighting_digest"],
+                }
+                for row in manifest["variants"]
+            ],
+            "pipeline_status_note": manifest["pipeline_status_note"],
+        }
+        if args.manifest is not None:
+            args.manifest.parent.mkdir(parents=True, exist_ok=True)
+            args.manifest.write_bytes(weather.canonical_manifest_bytes(manifest))
+            summary["manifest_path"] = str(args.manifest)
+        if args.profile is not None:
+            block = weather.weather_request_block(args.profile)
+            if args.request_block is not None:
+                args.request_block.parent.mkdir(parents=True, exist_ok=True)
+                args.request_block.write_bytes(
+                    (
+                        json.dumps(block, ensure_ascii=False, indent=2, sort_keys=True)
+                        + "\n"
+                    ).encode("utf-8"),
+                )
+                summary["request_block_path"] = str(args.request_block)
+            summary["selected_profile"] = {
+                "profile_id": block["profile_id"],
+                "lighting_digest": block["lighting_digest"],
+            }
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
     raise AssertionError(f"unhandled command: {args.command}")
