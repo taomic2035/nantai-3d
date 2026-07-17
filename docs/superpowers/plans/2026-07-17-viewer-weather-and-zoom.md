@@ -808,3 +808,314 @@ Expected:
 - GitHub Actions for the final runtime commit is observed green when the API is available.
 
 Only after every item is proven may the persistent goal be marked complete.
+
+---
+
+## 2026-07-18 Honesty Refinement
+
+Opus has now delivered three content-addressed Blender lighting input profiles in
+`pipeline/synthetic_village/weather_profile.py`. They are not trained 3DGS artifacts:
+the manifest explicitly says Blender execution and one cloud-GPU retraining per variant
+still remain. The existing six Viewer presets therefore stay a separate runtime-overlay
+capability and must never appear to be those model variants.
+
+### Additional Global Constraints
+
+- Runtime weather identity is always
+  `{effect_kind:"atmospheric-overlay",effect_source:"viewer-runtime",relighting:false}`.
+- UI must visibly say `atmospheric overlay` and `not relighting`; a tooltip or hidden
+  metadata field is insufficient.
+- The HUD and selector must not use an unqualified `天气` label for runtime presets.
+- Degraded precipitation must retain the same overlay/not-relighting notice.
+- No `weather-variants.json` or model-weather selector is loaded until trained,
+  content-addressed 3DGS artifacts actually exist.
+- Artifact provenance, geometry usability, renderer fidelity, chunk scheduling and ENU
+  camera state remain unchanged.
+
+### Task 6: Pure Runtime Effect Identity
+
+**Files:**
+- Modify: `web/viewer/environment.test.mjs`
+- Modify: `web/viewer/environment.mjs`
+
+**Interfaces:**
+- Consumes: no DOM, Three.js, manifest or renderer state.
+- Produces: frozen `ENVIRONMENT_EFFECT_IDENTITY` with exact machine-readable overlay
+  semantics for `main.js` and bridge state.
+
+- [ ] **Step 1: Write the failing effect-identity test**
+
+Extend the import list in `web/viewer/environment.test.mjs` with
+`ENVIRONMENT_EFFECT_IDENTITY`, then add:
+
+```js
+test('runtime weather identity is an atmospheric overlay and never relighting', () => {
+  assert.deepEqual(ENVIRONMENT_EFFECT_IDENTITY, {
+    effect_kind: 'atmospheric-overlay',
+    effect_source: 'viewer-runtime',
+    relighting: false,
+  });
+  assert.equal(Object.isFrozen(ENVIRONMENT_EFFECT_IDENTITY), true);
+});
+```
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```bash
+node --test web/viewer/environment.test.mjs
+```
+
+Expected: FAIL because `environment.mjs` does not export
+`ENVIRONMENT_EFFECT_IDENTITY`.
+
+- [ ] **Step 3: Implement the minimal immutable identity**
+
+Add beside the existing environment constants in `web/viewer/environment.mjs`:
+
+```js
+export const ENVIRONMENT_EFFECT_IDENTITY = Object.freeze({
+  effect_kind: 'atmospheric-overlay',
+  effect_source: 'viewer-runtime',
+  relighting: false,
+});
+```
+
+Do not add weather-profile names or artifact fields to this object.
+
+- [ ] **Step 4: Run focused and complete Viewer tests**
+
+Run:
+
+```bash
+node --test web/viewer/environment.test.mjs
+node --test web/viewer/*.test.mjs web/studio/*.test.mjs
+```
+
+Expected: both commands PASS; the combined Viewer/Studio count increases by one.
+
+- [ ] **Step 5: Commit and push the pure identity**
+
+```bash
+git add web/viewer/environment.mjs web/viewer/environment.test.mjs
+git diff --cached --check
+git commit -m "fix(viewer): identify weather as runtime overlay"
+git push origin main
+```
+
+Commit must end with:
+
+```text
+Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>
+```
+
+### Task 7: Visible Disclaimer and Exported State
+
+**Files:**
+- Modify: `web/viewer/index-contract.test.mjs`
+- Modify: `web/viewer/index.html`
+- Modify: `web/viewer/main.js`
+
+**Interfaces:**
+- Consumes: `ENVIRONMENT_EFFECT_IDENTITY` from Task 6 and the existing environment
+  controls/runtime.
+- Produces: always-visible honest copy and complete overlay identity in every
+  `readState()` / bridge response.
+
+- [ ] **Step 1: Write the failing visible-copy and state-wiring test**
+
+Add to `web/viewer/index-contract.test.mjs`:
+
+```js
+test('runtime weather is visibly an overlay and never claims relighting', () => {
+  assert.match(
+    html,
+    /<label[^>]*for="weather-control"[^>]*>视觉天气（叠加）<\/label>/,
+  );
+  assert.match(html, /<div class="stat">大气叠加: <b id="hud-weather">/);
+  assert.match(
+    html,
+    /id="environment-status"[^>]*>大气叠加 atmospheric overlay · 非重光照 not relighting · 不改变 3DGS 已烘焙光照<\/p>/,
+  );
+  assert.doesNotMatch(html, /<div class="stat">天气:/);
+  assert.match(main, /ENVIRONMENT_EFFECT_IDENTITY/);
+  assert.match(main, /\.\.\.ENVIRONMENT_EFFECT_IDENTITY/);
+  assert.match(main, /atmospheric overlay/);
+  assert.match(main, /not relighting/);
+});
+```
+
+Extend `viewer runtime wires environment state without mutating provenance` with:
+
+```js
+assert.match(
+  main,
+  /import\s*\{[\s\S]*ENVIRONMENT_EFFECT_IDENTITY[\s\S]*\}\s*from ['"]\.\/environment\.mjs['"]/,
+);
+```
+
+- [ ] **Step 2: Run the static contract and verify RED**
+
+Run:
+
+```bash
+node --test web/viewer/index-contract.test.mjs
+```
+
+Expected: FAIL on the old unqualified `天气` label and absent effect identity.
+
+- [ ] **Step 3: Make the visible labels unambiguous**
+
+In `web/viewer/index.html`, replace:
+
+```html
+<div class="stat">天气: <b id="hud-weather">晴</b></div>
+```
+
+with:
+
+```html
+<div class="stat">大气叠加: <b id="hud-weather">晴</b></div>
+```
+
+Replace the weather-control label with:
+
+```html
+<label for="weather-control">视觉天气（叠加）</label>
+```
+
+Replace the initial environment status with:
+
+```html
+<p id="environment-status" aria-live="polite">大气叠加 atmospheric overlay · 非重光照 not relighting · 不改变 3DGS 已烘焙光照</p>
+```
+
+Increase `.environment-row label` from `min-width: 36px` to `min-width: 108px`
+so the explicit label does not collapse into an unreadable column.
+
+- [ ] **Step 4: Export fixed identity and preserve the notice during degradation**
+
+Import `ENVIRONMENT_EFFECT_IDENTITY` from `environment.mjs` and replace the
+mutable identity literal in `environmentState` with:
+
+```js
+const environmentState = {
+  weather: DEFAULT_WEATHER,
+  zoom: DEFAULT_ZOOM,
+  ...ENVIRONMENT_EFFECT_IDENTITY,
+  precipitation_status: 'ready',
+};
+```
+
+Add one UI copy constant beside the state:
+
+```js
+const ENVIRONMENT_EFFECT_NOTICE =
+  '大气叠加 atmospheric overlay · 非重光照 not relighting';
+```
+
+Replace the `environment-status` assignment in `syncEnvironmentUI()` with:
+
+```js
+document.getElementById('environment-status').textContent =
+  environmentState.precipitation_status === 'degraded'
+    ? `${ENVIRONMENT_EFFECT_NOTICE} · 降水粒子已降级，背景/雾仍生效`
+    : `${ENVIRONMENT_EFFECT_NOTICE} · 不改变 3DGS 已烘焙光照`;
+```
+
+Keep `readState()` returning `environment: { ...environmentState }`; the spread now
+includes all three fixed identity fields.
+
+- [ ] **Step 5: Run focused and complete gates**
+
+Run:
+
+```bash
+node --test web/viewer/index-contract.test.mjs web/viewer/environment.test.mjs
+node --test web/viewer/*.test.mjs web/studio/*.test.mjs
+.venv/bin/python make.py test
+.venv/bin/python make.py lint
+git diff --check
+```
+
+Expected: all commands PASS; Python may retain only the deliberate non-finite
+fail-closed warning already documented by the repository.
+
+- [ ] **Step 6: Commit and push the visible contract**
+
+```bash
+git add web/viewer/index-contract.test.mjs web/viewer/index.html web/viewer/main.js
+git diff --cached --check
+git commit -m "fix(viewer): distinguish overlays from relighting"
+git push origin main
+```
+
+Commit must end with the exact Codex co-author trailer.
+
+### Task 8: Browser Acceptance and Full Goal Audit
+
+**Files:**
+- No planned production file changes.
+
+**Interfaces:**
+- Consumes: the live Viewer, bridge `getState`, Studio server on localhost and the
+  current `main`.
+- Produces: current-run evidence for 360° view, arbitrary-coordinate travel, all six
+  overlay presets and the no-relighting honesty boundary.
+
+- [ ] **Step 1: Start or refresh the current Studio Viewer**
+
+Verify `http://127.0.0.1:8767/web/viewer/`. If unavailable, start:
+
+```bash
+.venv/bin/python -m pipeline.studio_server --host 127.0.0.1 --port 8767
+```
+
+Expected: the loading overlay clears and the overlay disclaimer is visible without
+opening a tooltip.
+
+- [ ] **Step 2: Exercise all six runtime overlays**
+
+Select `晴 → 阴 → 雨 → 雪 → 雾 → 夜 → 晴`.
+
+Expected: every state changes visibly; rain/snow particles appear only in their states;
+the status always retains `atmospheric overlay` and `not relighting`; chunk count does
+not jump solely because of a weather selection.
+
+- [ ] **Step 3: Re-prove 360° and arbitrary coordinates**
+
+Orbit a full turn, switch to free mode, use `WASDQE`, then invoke `G` for one positive
+and one negative ENU coordinate outside the pre-baked extent.
+
+Expected: camera orientation remains continuous, negative coordinates work, and
+same-origin on-demand chunks load without changing overlay identity.
+
+- [ ] **Step 4: Inspect bridge state and repository truth**
+
+Call bridge `getState`.
+
+Expected:
+
+```json
+{
+  "effect_kind": "atmospheric-overlay",
+  "effect_source": "viewer-runtime",
+  "relighting": false
+}
+```
+
+The object also contains the selected `weather`, current `zoom` and precipitation
+status. Artifact provenance is unchanged, no manifest is rewritten, `git status` is
+clean and `HEAD...origin/main` is `0 0`.
+
+- [ ] **Step 5: Observe final CI**
+
+Run:
+
+```bash
+gh run list --branch main --limit 5
+```
+
+Expected: CI for the final code commit reaches `completed / success`. Only then may
+the persistent goal completion audit decide whether the full objective is achieved.

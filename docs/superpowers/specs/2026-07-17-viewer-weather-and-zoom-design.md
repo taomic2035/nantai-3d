@@ -28,9 +28,10 @@ Nantai Viewer 已支持：
 采用“实时天气状态机 + 相机局部粒子 + 独立光学缩放”方案。
 
 没有选择仅换背景色，因为它无法让雨雪产生足够明确的视觉反馈。本次也不提供每种天气独立的
-3DGS，因为对应的多天气 Blender 渲染和云训练产物尚未交付。未来的真实光照变体必须是不同的
-build / 3DGS artifact，并拥有各自的 build id、内容摘要和 provenance；那不是本 Viewer runtime
-状态机的一个 preset。
+3DGS。Opus 已交付 `clear-noon`、`overcast`、`golden-hour` 三套内容寻址的 Blender 光照输入契约，
+但尚未实跑完整 Blender 变体、云端重训或交付可切换的 3DGS artifact。未来的真实光照变体必须是
+不同的 build / 3DGS artifact，并拥有各自的 build id、内容摘要和 provenance；那不是本 Viewer
+runtime 状态机的一个 preset。
 
 实时方案保留同一世界、同一坐标和同一重建结果，只改变背景、雾、环境光及有界粒子。它能即时
 切换、适配无限地图，但只允许标记为 `atmospheric overlay, not relighting`。
