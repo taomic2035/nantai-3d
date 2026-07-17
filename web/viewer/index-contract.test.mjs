@@ -55,6 +55,12 @@ test('viewer runtime accepts static spatial reconstruction chunks without world 
   assert.doesNotMatch(main, /world_offset/);
 });
 
+test('spatial reconstruction HUD exposes only evidence-backed active point estimates', () => {
+  assert.match(main, /active_estimated_points/);
+  assert.match(main, /Number\.isSafeInteger\(/);
+  assert.match(main, /~\$\{rendererState\.active_estimated_points\.toLocaleString\(\)\} splats/);
+});
+
 test('coverage evidence has a dedicated fail-closed HUD separate from provenance', () => {
   const coverage = html.match(
     /<div class="coverage"[^>]*>([\s\S]*?)<\/div>\s*<div class="legend">/,

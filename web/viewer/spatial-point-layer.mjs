@@ -24,6 +24,31 @@ function loadedState(manifestUrl) {
   };
 }
 
+function activeDensityEvidence(active) {
+  const records = [...active.values()];
+  if (
+    records.length === 0
+    || records.some((record) => (
+      !Number.isSafeInteger(record.estimatedPointCount)
+      || !Number.isFinite(record.lodFraction)
+    ))
+  ) {
+    return {
+      active_estimated_points: null,
+      active_lod_fractions: null,
+    };
+  }
+  return {
+    active_estimated_points: records.reduce(
+      (total, record) => total + record.estimatedPointCount,
+      0,
+    ),
+    active_lod_fractions: [
+      ...new Set(records.map((record) => record.lodFraction)),
+    ].sort((left, right) => left - right),
+  };
+}
+
 export function createSpatialPointLayer({
   scene,
   loadPointMesh,
@@ -65,6 +90,7 @@ export function createSpatialPointLayer({
       active: active.size,
       loading: loading.size,
       cache_max: cacheMax,
+      ...activeDensityEvidence(active),
       ...stats,
     };
   }
@@ -128,7 +154,9 @@ export function createSpatialPointLayer({
   }
 
   function startChunkLoad(request, generation) {
-    const { key, entry, lod } = request;
+    const {
+      key, entry, lod, lodFraction, estimatedPointCount,
+    } = request;
     const url = resolveSpatialChunkUrl(manifestUrl, entry, lod);
     if (!url) {
       state.last_error = `chunk ${key} has no safe LOD${lod} artifact`;
@@ -142,7 +170,9 @@ export function createSpatialPointLayer({
     const promise = (async () => {
       let mesh = null;
       try {
-        mesh = await loadPointMesh({ entry, key, lod, url });
+        mesh = await loadPointMesh({
+          entry, key, lod, lodFraction, estimatedPointCount, url,
+        });
         const current = (
           generation === loadGeneration
           && keyGenerations.get(key) === token
@@ -156,7 +186,9 @@ export function createSpatialPointLayer({
         mesh.visible = visible;
         scene.add(mesh);
         const old = active.get(key);
-        active.set(key, { lod, mesh, url });
+        active.set(key, {
+          lod, lodFraction, estimatedPointCount, mesh, url,
+        });
         if (old && old.mesh !== mesh) disposeOne(old.mesh);
         touch(key);
         stats.loaded += 1;

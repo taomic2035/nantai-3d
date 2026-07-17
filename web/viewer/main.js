@@ -1035,11 +1035,16 @@ function updateHUD() {
     const count = reconManifest?.gaussian_count ?? reconManifest?.point_count ?? 'unknown';
     const rendererState = activeReconstructionState();
     const spatial = isSpatialChunkManifest(reconManifest);
+    const estimatedSpatialPoints = Number.isSafeInteger(
+      rendererState?.active_estimated_points,
+    )
+      ? ` · ~${rendererState.active_estimated_points.toLocaleString()} splats`
+      : '';
     reconEl.textContent = !reconManifest ? '无'
       : !reconVisible ? '已隐藏 (R 显示)'
       : spatial
         ? `${rendererState?.active ?? 0}/${reconManifest.chunks.length} chunks`
-          + ` (${viewerCapabilities.renderer.label})`
+          + ` (${viewerCapabilities.renderer.label})${estimatedSpatialPoints}`
       : rendererState?.mode === 'spark'
         ? `${count} splats (${viewerCapabilities.renderer.label})`
       : reconLodLoaded >= 0

@@ -36,6 +36,31 @@ function sparkState(manifestUrl) {
   };
 }
 
+function activeDensityEvidence(active) {
+  const records = [...active.values()];
+  if (
+    records.length === 0
+    || records.some((record) => (
+      !Number.isSafeInteger(record.estimatedPointCount)
+      || !Number.isFinite(record.lodFraction)
+    ))
+  ) {
+    return {
+      active_estimated_points: null,
+      active_lod_fractions: null,
+    };
+  }
+  return {
+    active_estimated_points: records.reduce(
+      (total, record) => total + record.estimatedPointCount,
+      0,
+    ),
+    active_lod_fractions: [
+      ...new Set(records.map((record) => record.lodFraction)),
+    ].sort((left, right) => left - right),
+  };
+}
+
 export function createSpatialSplatLayer({
   scene,
   renderer,
@@ -117,6 +142,7 @@ export function createSpatialSplatLayer({
       active: active.size,
       loading: loading.size,
       cache_max: cacheMax,
+      ...activeDensityEvidence(active),
       ...stats,
     };
   }
@@ -186,7 +212,9 @@ export function createSpatialSplatLayer({
   }
 
   function startChunkLoad(request, generation) {
-    const { key, entry, lod } = request;
+    const {
+      key, entry, lod, lodFraction, estimatedPointCount,
+    } = request;
     const url = resolveSpatialChunkUrl(manifestUrl, entry, lod);
     if (!url) {
       state.last_error = `chunk ${key} has no safe LOD${lod} artifact`;
@@ -221,7 +249,9 @@ export function createSpatialSplatLayer({
         }
 
         const old = active.get(key);
-        active.set(key, { lod, mesh, url });
+        active.set(key, {
+          lod, lodFraction, estimatedPointCount, mesh, url,
+        });
         if (old && old.mesh !== mesh) disposeMesh(old.mesh);
         mesh.visible = visible;
         touch(key);

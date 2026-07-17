@@ -50,11 +50,13 @@ const MANIFEST = {
   schema_version: 1,
   kind: 'spatial-chunks',
   chunk_size_m: 50,
+  lod_fractions: { 0: 0.07, 1: 0.25, 2: 1 },
   chunks: [
     {
       id: '0_0',
       x: 0,
       y: 0,
+      point_count: 200,
       ply_file: 'chunk_0_0.ply',
       lod: { 0: 'chunk_0_0_lod0.ply', 1: 'chunk_0_0_lod1.ply', 2: 'chunk_0_0.ply' },
       aabb: { min: [0, 0, 0], max: [49, 49, 10] },
@@ -63,6 +65,7 @@ const MANIFEST = {
       id: '1_0',
       x: 1,
       y: 0,
+      point_count: 120,
       ply_file: 'chunk_1_0.ply',
       lod: { 0: 'chunk_1_0_lod0.ply', 1: 'chunk_1_0_lod1.ply', 2: 'chunk_1_0.ply' },
       aabb: { min: [50, 0, 0], max: [99, 49, 10] },
@@ -71,6 +74,7 @@ const MANIFEST = {
       id: '2_0',
       x: 2,
       y: 0,
+      point_count: 80,
       ply_file: 'chunk_2_0.ply',
       lod: { 0: 'chunk_2_0_lod0.ply', 1: 'chunk_2_0_lod1.ply', 2: 'chunk_2_0.ply' },
       aabb: { min: [100, 0, 0], max: [149, 49, 10] },
@@ -98,10 +102,36 @@ test('loads nearby point chunks and keeps a bounded cache', async () => {
 
   assert.equal(scene.children.length, 2);
   assert.equal(layer.getState().active, 2);
+  assert.equal(layer.getState().active_estimated_points, 230);
+  assert.deepEqual(layer.getState().active_lod_fractions, [0.25, 1]);
   assert.deepEqual(
     loadedUrls.map((url) => url.split('/').at(-1)).sort(),
     ['chunk_0_0.ply', 'chunk_1_0_lod1.ply'],
   );
+});
+
+test('keeps aggregate point chunk density unknown when any active evidence is incomplete', async () => {
+  const { createSpatialPointLayer } = subject();
+  const scene = fakeScene();
+  const incomplete = {
+    ...MANIFEST,
+    chunks: MANIFEST.chunks.map((entry, index) => (
+      index === 1 ? { ...entry, point_count: undefined } : entry
+    )),
+  };
+  const layer = createSpatialPointLayer({
+    scene,
+    cacheMax: 2,
+    loadPointMesh: async ({ url }) => pointMesh(url),
+    disposeMesh: (mesh) => { mesh.disposed = true; },
+  });
+
+  layer.load({ manifest: incomplete, manifestUrl: MANIFEST_URL });
+  await layer.update({ cameraWorld: [25, 25, 2] });
+
+  assert.equal(layer.getState().active, 2);
+  assert.equal(layer.getState().active_estimated_points, null);
+  assert.equal(layer.getState().active_lod_fractions, null);
 });
 
 test('LOD replacement disposes old point meshes and evicts non-needed chunks', async () => {
