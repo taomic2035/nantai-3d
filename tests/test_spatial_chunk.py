@@ -92,6 +92,20 @@ class TestPartition:
         assert manifest["source"]["units"] == "meters"
         json.dumps(manifest)
 
+    def test_manifest_declares_lod_fractions_not_just_filenames(self, tmp_path):
+        """manifest 须声明各 LOD 的【比例】而非只给文件名 —— 否则消费者不知道 lod0 是
+        8% 还是别的密度, 无法据此按距离正确选级 (早先审计标记的同类潜在缺口)。"""
+        manifest = partition_scene_to_chunks(
+            _scene(n=500), tmp_path, chunk_size_m=100.0,
+            lod_fractions={0: 0.1, 1: 0.4})
+        assert manifest["lod_fractions"] == {"0": 0.1, "1": 0.4, "2": 1.0}, \
+            "含 lod2=1.0 全量, 让消费者无需猜测任何一级的密度语义"
+        # 声明的比例须与实际产出一致
+        chunk = max(manifest["chunks"], key=lambda c: c["point_count"])
+        full = len(GaussianScene.load_ply(tmp_path / chunk["lod"]["2"]))
+        lod0 = len(GaussianScene.load_ply(tmp_path / chunk["lod"]["0"]))
+        assert abs(lod0 / full - 0.1) < 0.05, "声明的 lod0 比例须反映实际密度"
+
     def test_lod_levels_are_progressively_sparser(self, tmp_path):
         """每块出 LOD: lod0 < lod1 < 全量(lod2), viewer 按距离选级省带宽。"""
         scene = _scene(n=2000)

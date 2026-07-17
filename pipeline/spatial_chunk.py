@@ -112,6 +112,12 @@ def partition_scene_to_chunks(
         "kind": "spatial-chunks",
         "chunk_size_m": chunk_size_m,
         "chunks": chunks,
+        # 各 LOD 的实际比例 (含 lod2=1.0 全量): 只给文件名的话, 消费者不知道 lod0 是 8%
+        # 还是别的密度, 无法按相机距离正确选级。声明出来, 语义不用猜。
+        "lod_fractions": {
+            **{str(level): float(frac) for level, frac in sorted(fractions.items())},
+            "2": 1.0,
+        },
         "total_chunks": len(chunks),
         "total_points": total_points,
         "bounds": {"min": bmin, "max": bmax},

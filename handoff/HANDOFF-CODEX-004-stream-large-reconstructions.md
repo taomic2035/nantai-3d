@@ -45,6 +45,7 @@
       "aabb": {"min": [0.0, -50.0, 0.0], "max": [49.9, -0.1, 14.9]}
     }
   ],
+  "lod_fractions": {"0": 0.08, "1": 0.3, "2": 1.0},
   "total_chunks": 64, "total_points": 120000,
   "bounds": {"min": [x,y,z], "max": [x,y,z]},
   "extent": {"x_min": -4, "x_max": 3, "y_min": -4, "y_max": 3},
@@ -76,6 +77,8 @@ recon/recon_manifest.json` 搬运进来，并附该 manifest 的内容寻址 `re
 
 1. **viewer 消费 `kind:"spatial-chunks"` 的 manifest**：按 `aabb` 与相机距离选块 +
    选 LOD（0 远 / 1 中 / 2 近），只载视野附近的块。可直接复用现有 chunk 流式与 LOD 选级逻辑。
+   **`lod_fractions` 声明了每一级的实际密度比例**（含 `"2": 1.0` 全量）—— 按距离选级时
+   直接读它，不用猜 lod0 到底是 8% 还是别的（不同世界/不同烘焙可用不同比例）。
 2. **provenance 显示以 `source` 为准**（分块不改信任等级）。
 3. **不要给它开按需**（无 `grid`；重建无法程序化续渲，越界即无内容）。
 4. 若你希望我调整 manifest 形状（键名/嵌套/加 `world_offset` 以复用更多现有代码），
