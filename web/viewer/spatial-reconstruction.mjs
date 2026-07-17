@@ -47,6 +47,24 @@ function bakedChunkPath(entry, lod) {
   return safeRelativeArtifactPath(entry.ply_file) ? entry.ply_file : null;
 }
 
+export function declaredLodFraction(manifest, lod) {
+  const fraction = manifest?.lod_fractions?.[String(lod)];
+  return Number.isFinite(fraction) && fraction > 0 && fraction <= 1
+    ? fraction
+    : null;
+}
+
+export function estimatedLodPointCount(entry, lodFraction) {
+  if (
+    !Number.isSafeInteger(entry?.point_count)
+    || entry.point_count <= 0
+    || !Number.isFinite(lodFraction)
+    || lodFraction <= 0
+    || lodFraction > 1
+  ) return null;
+  return Math.ceil(entry.point_count * lodFraction);
+}
+
 export function isSpatialChunkManifest(manifest) {
   if (
     manifest?.schema_version !== 1
@@ -127,11 +145,14 @@ export function selectSpatialChunkRequests(
         distance < chunkSize * 0.5 ? 2
           : distance < chunkSize * 1.5 ? 1 : 0
       );
+      const lodFraction = declaredLodFraction(manifest, lod);
       return {
         key: `${entry.x}_${entry.y}`,
         entry,
         distance,
         lod,
+        lodFraction,
+        estimatedPointCount: estimatedLodPointCount(entry, lodFraction),
       };
     })
     .filter(({ distance }) => distance <= maxDistance)

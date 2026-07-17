@@ -22,11 +22,13 @@ const VALID_MANIFEST = {
   schema_version: 1,
   kind: 'spatial-chunks',
   chunk_size_m: 50,
+  lod_fractions: { 0: 0.07, 1: 0.25, 2: 1 },
   chunks: [
     {
       id: '0_0',
       x: 0,
       y: 0,
+      point_count: 200,
       ply_file: 'chunk_0_0.ply',
       lod: { 0: 'chunk_0_0_lod0.ply', 1: 'chunk_0_0_lod1.ply', 2: 'chunk_0_0.ply' },
       aabb: { min: [0, 0, -2], max: [49, 49, 12] },
@@ -35,6 +37,7 @@ const VALID_MANIFEST = {
       id: '1_0',
       x: 1,
       y: 0,
+      point_count: 120,
       ply_file: 'chunk_1_0.ply',
       lod: { 0: 'chunk_1_0_lod0.ply', 1: 'chunk_1_0_lod1.ply', 2: 'chunk_1_0.ply' },
       aabb: { min: [50, 0, -1], max: [99, 49, 11] },
@@ -43,6 +46,7 @@ const VALID_MANIFEST = {
       id: '2_0',
       x: 2,
       y: 0,
+      point_count: 80,
       ply_file: 'chunk_2_0.ply',
       lod: { 0: 'chunk_2_0_lod0.ply', 1: 'chunk_2_0_lod1.ply', 2: 'chunk_2_0.ply' },
       aabb: { min: [100, 0, 0], max: [149, 49, 10] },
@@ -51,6 +55,7 @@ const VALID_MANIFEST = {
       id: '5_0',
       x: 5,
       y: 0,
+      point_count: 10,
       ply_file: 'chunk_5_0.ply',
       lod: { 2: 'chunk_5_0.ply' },
       aabb: { min: [250, 0, 0], max: [299, 49, 10] },
@@ -135,11 +140,13 @@ test('selects nearby AABBs with deterministic near-high far-low LOD', () => {
 
   assert.deepEqual(
     selectSpatialChunkRequests(VALID_MANIFEST, [25, 25, 3], { radiusChunks: 2 })
-      .map(({ key, lod, distance }) => [key, lod, distance]),
+      .map(({
+        key, lod, distance, lodFraction, estimatedPointCount,
+      }) => [key, lod, distance, lodFraction, estimatedPointCount]),
     [
-      ['0_0', 2, 0],
-      ['1_0', 1, 25],
-      ['2_0', 0, 75],
+      ['0_0', 2, 0, 1, 200],
+      ['1_0', 1, 25, 0.25, 30],
+      ['2_0', 0, 75, 0.07, 6],
     ],
   );
   assert.deepEqual(
@@ -150,4 +157,29 @@ test('selects nearby AABBs with deterministic near-high far-low LOD', () => {
     ).map(({ key, lod }) => [key, lod]),
     [['0_0', 0], ['1_0', 0], ['2_0', 0]],
   );
+});
+
+test('keeps absent or invalid LOD density evidence unknown', () => {
+  const { estimatedLodPointCount, selectSpatialChunkRequests } = subject();
+
+  for (const lodFractions of [
+    undefined,
+    { ...VALID_MANIFEST.lod_fractions, 2: Number.NaN },
+    { ...VALID_MANIFEST.lod_fractions, 2: 0 },
+    { ...VALID_MANIFEST.lod_fractions, 2: 1.01 },
+  ]) {
+    const [request] = selectSpatialChunkRequests(
+      { ...VALID_MANIFEST, lod_fractions: lodFractions },
+      [25, 25, 3],
+      { radiusChunks: 0 },
+    );
+    assert.equal(request.lod, 2);
+    assert.equal(request.lodFraction, null);
+    assert.equal(request.estimatedPointCount, null);
+  }
+
+  for (const fraction of [undefined, Number.NaN, 0, 1.01]) {
+    assert.equal(estimatedLodPointCount({ point_count: 200 }, fraction), null);
+  }
+  assert.equal(estimatedLodPointCount({ point_count: 0 }, 0.25), null);
 });
