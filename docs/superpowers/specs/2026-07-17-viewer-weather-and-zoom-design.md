@@ -1,7 +1,7 @@
 # Viewer 天气切换与统一缩放设计
 
 日期：2026-07-17
-状态：已批准，待书面规格复核
+状态：方案 B 已批准，诚实天气补充待书面规格复核
 范围：`web/viewer/` 的运行时环境表现、缩放交互与 Studio bridge 契约
 
 ## 1. 背景与目标
@@ -18,29 +18,36 @@ Nantai Viewer 已支持：
 1. 晴、阴、雨、雪、雾、夜六种天气可随时切换；
 2. 环绕与自由视角都有明确、可编程、可复位的光学缩放。
 
-天气仅是 Viewer 的实时渲染效果。它不得改写重建 artifact、世界坐标、素材内容、可信度或
-provenance，也不得伪装成拍摄时的真实天气。
+本规格里的“天气”仅是 Viewer 的实时**大气叠加**。它不得改写重建 artifact、世界坐标、
+素材内容、可信度或 provenance，也不得伪装成拍摄时的真实天气或对已有 3DGS 的重光照。
+3DGS 的光照已经烘焙在高斯球谐系数中；Viewer 改背景、雾、环境光或雨雪粒子不会改变这些
+系数。
 
 ## 2. 已选方案与取舍
 
 采用“实时天气状态机 + 相机局部粒子 + 独立光学缩放”方案。
 
-没有选择仅换背景色，因为它无法让雨雪产生足够明确的视觉反馈；也没有选择为每种天气重建一套
-3DGS，因为那会把渲染偏好错误地混入 artifact provenance，且训练和存储成本不符合本阶段目标。
+没有选择仅换背景色，因为它无法让雨雪产生足够明确的视觉反馈。本次也不提供每种天气独立的
+3DGS，因为对应的多天气 Blender 渲染和云训练产物尚未交付。未来的真实光照变体必须是不同的
+build / 3DGS artifact，并拥有各自的 build id、内容摘要和 provenance；那不是本 Viewer runtime
+状态机的一个 preset。
 
 实时方案保留同一世界、同一坐标和同一重建结果，只改变背景、雾、环境光及有界粒子。它能即时
-切换、适配无限地图，并且能诚实地标记为 runtime effect。
+切换、适配无限地图，但只允许标记为 `atmospheric overlay, not relighting`。
 
 ## 3. 范围
 
 ### 3.1 本次实现
 
 - 六个稳定 weather id：`clear`、`overcast`、`rain`、`snow`、`fog`、`night`；
-- Viewer 内可见的天气选择器、缩放滑杆、缩放复位按钮；
+- Viewer 内可见的“视觉天气（叠加）”选择器、缩放滑杆、缩放复位按钮；
 - 自由视角滚轮缩放；环绕视角继续保留既有滚轮推拉；
 - 两种视角都响应同一个光学缩放值；
-- HUD 显示当前天气和光学缩放倍率；
+- HUD 显示当前大气效果和光学缩放倍率；
 - bridge 新增 `setWeather`、`setZoom`，`getState` 回报当前值；
+- UI 常驻显示“大气叠加（atmospheric overlay）· 非重光照（not relighting）”；
+- bridge / `getState` 以机器字段声明 `effect_kind: "atmospheric-overlay"`、
+  `effect_source: "viewer-runtime"`、`relighting: false`；
 - 天气切换即时生效，不重载 chunk 或 reconstruction；
 - 纯状态测试、bridge 测试、浏览器交互和视觉验收。
 
@@ -49,8 +56,10 @@ provenance，也不得伪装成拍摄时的真实天气。
 - 不模拟积雪堆积、地面积水、反射、雷电、风场或昼夜时间轴；
 - 不修改 Gaussian 数据、点云颜色、素材文件或 world/recon manifest；
 - 不声明天气是 measured、captured 或 reconstructed；
+- 不声称背景、雾、环境光或粒子改变了 3DGS 已烘焙的太阳角、阴影、材质高光或表面颜色；
 - 不为 Studio 新增完整天气编辑工作流；Studio 可先通过 bridge 使用能力；
 - 不改变无限地图缓存、LOD 或坐标调度规则。
+- 不提前加入尚无有效 artifact 的“模型天气”空入口。
 
 ## 4. 架构与组件边界
 
@@ -87,17 +96,20 @@ chunk 调度的唯一空间输入。
 
 新增紧凑的环境控制卡：
 
-- 天气下拉选择器，使用中文显示名但提交稳定英文 id；
+- “视觉天气（叠加）”下拉选择器，使用中文显示名但提交稳定英文 id；
 - 缩放滑杆，显示实时倍率；
 - “1×”复位按钮；
-- 原生 label、键盘焦点和 `aria-live` 状态文本。
+- 原生 label、键盘焦点和 `aria-live` 状态文本；
+- 控件卡内常驻显示中英双语诚实说明，不能只在错误或悬浮提示中出现；
+- HUD 的字段名使用“大气”或“视觉天气（叠加）”，不得单独显示成无修饰的“天气”。
 
 控件应避开 HUD、mini-map 和底部键位说明，在窄屏上允许换行或缩小宽度。画布上的键盘移动在
 表单控件获得焦点时不得误触发。
 
 ## 5. 天气模型
 
-六个 preset 只包含渲染参数，不包含 provenance 字段：
+六个 preset 只包含 Viewer runtime 渲染参数，不包含 artifact provenance 字段。表中的“光照”
+只作用于 Three.js 可受光对象和 Viewer 表现，不会重算 3DGS 球谐颜色：
 
 | id | 背景/光照 | 雾 | 粒子 |
 |---|---|---|---|
@@ -142,12 +154,16 @@ Viewer 单一运行时状态增加：
   "environment": {
     "weather": "clear",
     "zoom": 1.0,
-    "effect_source": "viewer-runtime"
+    "effect_kind": "atmospheric-overlay",
+    "effect_source": "viewer-runtime",
+    "relighting": false
   }
 }
 ```
 
-`effect_source` 是展示性声明，不进入 artifact provenance。
+这三个效果身份字段是固定的 Viewer capability 事实，不由 weather id、文件名或模型名推断，
+也不进入 artifact provenance。`getState` 和每次 `stateChanged` 都必须保留完整字段；调用方不能
+把缺失字段解释为 `relighting: true`。
 
 bridge capability 的 `commands` 增加：
 
@@ -165,7 +181,10 @@ bridge capability 的 `commands` 增加：
 - WebGL 不支持或粒子创建失败时，背景、雾和光照仍可切换，HUD 显示粒子效果降级；
 - 天气切换失败不影响当前世界、重建层和相机；
 - artifact provenance、geometry usability、artifact fidelity 与 viewer fidelity 计算保持原样；
-- runtime weather 不能被提升为真实采集环境证据。
+- runtime weather 不能被提升为真实采集环境证据；
+- UI 和导出状态必须明确包含 `atmospheric overlay` / `not relighting` 语义；
+- 当前六个 runtime preset 与未来独立的多天气 3DGS artifact 是两条能力路径，不能复用同一个
+  weather id 切换来混淆。
 
 ## 9. 测试策略
 
@@ -175,7 +194,8 @@ bridge capability 的 `commands` 增加：
    - 六种合法 weather；
    - 未知 weather 拒绝；
    - 缩放默认值、有限数字、上下界和非数字拒绝；
-   - preset 不可变且粒子数量不超过硬上限。
+   - preset 不可变且粒子数量不超过硬上限；
+   - 固定效果身份是 atmospheric overlay，且 `relighting` 恒为 false。
 2. `bridge.test.mjs`
    - capabilities 宣告新命令；
    - 两个命令正确路由并返回 `stateChanged`；
@@ -183,6 +203,8 @@ bridge capability 的 `commands` 增加：
    - provenance 归一化结果不随 environment state 改变。
 3. Viewer 静态/DOM 测试
    - 天气选择器、缩放滑杆、label、复位按钮存在；
+   - 控件和 HUD 不再把 runtime preset 无修饰地称为真实“天气”；
+   - 常驻中英双语免责声明可见，不能只依赖 title 或 tooltip；
    - 本地模块引用可加载。
 4. 浏览器验收
    - 六种天气可连续切换且无控制台错误；
@@ -199,6 +221,7 @@ bridge capability 的 `commands` 增加：
 - 用户能在 Viewer 内自由切换六种天气，并立即看见差异；
 - 用户能在环绕和自由模式设置、观察和复位 `0.5x–3.0x` 光学缩放；
 - Studio bridge 可读取和设置天气/缩放；
+- UI 与 bridge state 都明确说明它是 atmospheric overlay、不是 relighting；
 - 天气/缩放不触发 chunk 重建、reconstruction 重载或缓存增长；
 - 无限地图、任意 ENU 坐标传送、360° 视角和 LOD 原能力回归通过；
 - provenance 和 fidelity 仍严格 fail-closed；
