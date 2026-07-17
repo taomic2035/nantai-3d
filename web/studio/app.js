@@ -14,6 +14,7 @@ import {
 import { selectStudioAdapter } from './adapter-factory.mjs';
 import { SCENARIO_NAMES } from './mock-adapter.mjs';
 import { StudioViewerBridge } from './viewer-bridge.mjs';
+import { loadOptionalCoverageAudit } from './coverage-audit-loader.mjs';
 import { JobController } from './job-controller.mjs';
 import {
   ingestConfirmationModel,
@@ -507,6 +508,7 @@ function setupB1PrimaryAction() {
 function setupViewerBridge() {
   const frame = byId('viewer-frame');
   const status = byId('viewer-status');
+  let coverageProbe = null;
   const viewerButtons = [...document.querySelectorAll('[data-viewer-command]')];
   viewerButtons.forEach((button) => { button.disabled = true; });
   const bridge = new StudioViewerBridge({
@@ -533,6 +535,21 @@ function setupViewerBridge() {
           renderPipeline();
           renderInspector();
           renderProvenance();
+        }
+        if (!coverageProbe) {
+          coverageProbe = loadOptionalCoverageAudit({ bridge })
+            .then((result) => {
+              if (result.status === 'loaded') {
+                announce(`覆盖审计已加载：${result.coverage.status}`);
+              }
+              return result;
+            })
+            .catch((error) => {
+              announce(`覆盖审计加载失败：${error.message}`);
+            })
+            .finally(() => {
+              coverageProbe = null;
+            });
         }
       }
     },

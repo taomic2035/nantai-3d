@@ -44,6 +44,15 @@ test('viewer iframe loads only after the bridge listener starts', () => {
   assert.match(app, /bridge\.start\(\);\s*frame\.src\s*=\s*frame\.dataset\.src;/);
 });
 
+test('Studio quietly probes and loads the canonical coverage audit after Viewer readiness', () => {
+  assert.match(
+    app,
+    /import\s*\{[^}]*loadOptionalCoverageAudit[^}]*\}\s*from\s*['"]\.\/coverage-audit-loader\.mjs['"]/s,
+  );
+  assert.match(app, /next\s*===\s*['"]ready['"][\s\S]*loadOptionalCoverageAudit\(\{\s*bridge/s);
+  assert.match(app, /result\.status\s*===\s*['"]loaded['"]/);
+});
+
 test('B1 ingest uses an explicit confirmation without command or path fields', () => {
   assert.match(html, /id="ingest-dialog"/);
   assert.match(html, /id="ingest-cancel-notice"/);
