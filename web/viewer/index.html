@@ -13,7 +13,8 @@
     background: rgba(20, 22, 28, 0.85); color: #e0e0e0;
     border-radius: 8px; font-size: 13px; line-height: 1.6;
     backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,0.1);
-    max-width: 440px; z-index: 10;
+    max-width: 440px; max-height: calc(100vh - 96px); overflow-y: auto;
+    scrollbar-gutter: stable; z-index: 10;
   }
   #hud h1 { font-size: 15px; margin-bottom: 8px; color: #7fd1ff; }
   #hud .stat { color: #aaa; }

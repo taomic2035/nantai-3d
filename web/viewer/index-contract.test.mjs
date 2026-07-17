@@ -73,6 +73,14 @@ test('coverage evidence has a dedicated fail-closed HUD separate from provenance
   assert.doesNotMatch(coverage, /可重建|已覆盖|可测量/);
 });
 
+test('expanded evidence HUD stays within the viewport and can scroll', () => {
+  const hudRule = html.match(/#hud\s*\{([\s\S]*?)\}/)?.[1];
+  assert.ok(hudRule, 'HUD style rule must exist');
+  assert.match(hudRule, /max-height:\s*calc\(100vh\s*-\s*96px\)/);
+  assert.match(hudRule, /overflow-y:\s*auto/);
+  assert.match(hudRule, /scrollbar-gutter:\s*stable/);
+});
+
 test('viewer loads coverage audit independently from reconstruction artifacts', () => {
   assert.match(main, /from ['"]\.\/coverage-audit\.mjs['"]/);
   assert.match(main, /kind\s*===\s*['"]coverage-audit['"]/);
