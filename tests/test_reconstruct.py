@@ -329,6 +329,34 @@ class TestImportEngine:
         assert manifest["provenance"]["synthetic"] is False
         assert manifest["provenance"]["geometry_usability"] == "preview-only"
 
+    def test_chunk_size_produces_linked_streamable_chunks(self, photos_dir, tmp_path):
+        """--chunk-size-m 一步产出可流式分块并【自动】链接 provenance: recon manifest 指向
+        chunks.json, chunks.json 带本次重建挣得的 geometry_usability —— 无需手工传
+        --recon-manifest, 杜绝忘记而丢信任标签。分块无损 (总点数守恒)。"""
+        web = tmp_path / "web"
+        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
+                        web_dir=web, engine="mock", reg_engine="mock",
+                        chunk_size_m=50.0)
+        ref = m["artifacts"]["chunks"]
+        assert ref["chunk_size_m"] == 50.0
+        assert ref["total_chunks"] >= 1
+        chunks = json.loads((web / ref["manifest"]).read_text(encoding="utf-8"))
+        assert chunks["kind"] == "spatial-chunks"
+        assert chunks["total_points"] == m["gaussian_count"], "分块须无损"
+        assert ref["total_chunks"] == chunks["total_chunks"]
+        # provenance 自动随行, 且与本次重建判定一致 (分块绝不升级信任)
+        assert (chunks["source"]["geometry_usability"]
+                == m["provenance"]["geometry_usability"])
+        assert (web / ref["manifest"]).parent.joinpath(
+            chunks["chunks"][0]["ply_file"]).is_file()
+
+    def test_no_chunk_size_produces_no_chunks(self, photos_dir, tmp_path):
+        """默认不分块: 不写 chunks 产物, manifest 不含该引用 (additive, 行为不变)。"""
+        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
+                        web_dir=tmp_path / "web", engine="mock", reg_engine="mock")
+        assert "chunks" not in m["artifacts"]
+        assert not (tmp_path / "web" / "chunks").exists()
+
     def test_sh_reconstruction_needs_flatten_to_metric_align_through_rotation(
         self, photos_dir, tmp_path,
     ):

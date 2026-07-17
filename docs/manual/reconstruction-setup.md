@@ -143,11 +143,17 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
 .venv\Scripts\python make.py serve   # http://127.0.0.1:8000/web/studio/
 ```
 
-- **大场景流式（可选）**：真实重建是**单个**可能上百万高斯的 `.ply`，viewer 整块加载——大场景下载慢、无空间裁剪。按 XY 网格切成可流式的块 + LOD，viewer 只载相机附近的块：
+- **大场景流式（可选，推荐一步到位）**：真实重建是**单个**可能上百万高斯的 `.ply`，viewer 整块加载——大场景下载慢、无空间裁剪。给导入加 `--chunk-size-m` 即额外产出可流式的块 + LOD，viewer 只载相机附近的块：
   ```powershell
-  .venv\Scripts\python scripts\chunk_reconstruction.py trained\point_cloud.ply --out-dir web\data\recon-chunks --chunk-size-m 50
+  # 在上面 Step 2 的导入命令后追加即可（本次重建的信任判定自动随分块产物走）
+  .venv\Scripts\python -m pipeline.reconstruct --engine import ... --chunk-size-m 50
   ```
-  纯空间重打包：**不改几何/坐标/provenance**（每个高斯恰好落一个块，无损不重复；每块继承源 `frame_id`/`units`/transform 历史）。**分块不会**把 `preview-only` 变成 `metric-aligned`——米制要在对齐那步挣。实测 12 万高斯/400m 场景 → 64 块（50m 网格）。（viewer 消费该 `chunks.json` 待 Codex 接线，见 `handoff/HANDOFF-CODEX-004`。）
+  也可对已有 `.ply` 单独分块（需手工传 `--recon-manifest` 才能带上信任判定，否则该字段缺席=未知）：
+  ```powershell
+  .venv\Scripts\python scripts\chunk_reconstruction.py trained\point_cloud.ply `
+    --out-dir web\data\recon-chunks --chunk-size-m 50 --recon-manifest recon\recon_manifest.json
+  ```
+  纯空间重打包：**不改几何/坐标/provenance**（每个高斯恰好落一个块，无损不重复；每块继承源 `frame_id`/`units`/transform 历史）。**分块不会**把 `preview-only` 变成 `metric-aligned`——米制要在对齐那步挣。实测 12 万高斯/400m 场景 → 64 块（50m 网格）。（viewer 消费 `chunks.json` 待 Codex 接线，见 `handoff/HANDOFF-CODEX-004`。）
 - 结果 `geometry_usability` = **`preview-only`**（sfm-local 非米制/未对齐）——这是**诚实**的：没有控制点就不冒充米制。
 - 想要 **`metric-aligned`**（真实尺度/地理对齐）：提供控制点/GPS，走 `pipeline.alignment`（见 [real-data-workflow.md](../real-data-workflow.md)），流程我已打通并验证。
   - ⚠️ **高阶 SH 限制（米制对齐才会遇到）**：米制/地理对齐会把场景经含**旋转**的 Sim3 变到 ENU 世界；而高阶球谐（`f_rest_*`，nerfstudio splatfacto 等训练器都会输出）的**正确旋转本仓库未实现**，加载器对「含高阶 SH + 旋转」**故意 fail-closed 阻断**（绝不施加错误 SH 旋转产生错误颜色）。**诚实解法**：对齐前先扁平化 SH——`python scripts/flatten_ply_sh.py trained/point_cloud.ply`（丢高阶 `f_rest_*`、保 DC 视角无关基色）。代价：失去视角相关高光，保留正确基色。**仅米制对齐需要**；基本 `preview-only` 漫游（不含旋转）无需此步。

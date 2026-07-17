@@ -535,8 +535,15 @@ def reconstruct(photos_dir: str | Path = "photos",
                 dedup_voxel: float = 0.10,
                 replace_margin: float = 2.0,
                 registration: RegistrationResult | None = None,
-                colmap_use_gpu: bool = False) -> dict:
-    """端到端重建, 返回 manifest dict"""
+                colmap_use_gpu: bool = False,
+                chunk_size_m: float | None = None) -> dict:
+    """端到端重建, 返回 manifest dict
+
+    ``chunk_size_m``: 给出时额外把成品场景按 XY 网格切成可流式的 chunk + LOD
+    (``web_dir/chunks/``), 供 viewer 只载相机附近的块 —— 大重建 (上百万高斯) 才漫游得动。
+    本次重建挣得的 ``geometry_usability`` 自动随分块产物走 (免手工链接, 杜绝忘记而丢信任
+    标签); 分块是纯空间重打包, 不改几何/坐标/provenance。缺省 None = 不分块 (行为不变)。
+    """
     photos_dir = Path(photos_dir)
     out_dir = Path(out_dir)
     web_dir = Path(web_dir)
@@ -810,6 +817,22 @@ def reconstruct(photos_dir: str | Path = "photos",
         synthetic=is_synthetic,
         provenance_known=provenance_known,
     )
+    chunks_artifact = None
+    if chunk_size_m is not None:
+        from pipeline.spatial_chunk import MANIFEST_NAME, partition_scene_to_chunks
+        chunk_manifest = partition_scene_to_chunks(
+            merged, web_dir / "chunks", chunk_size_m=chunk_size_m,
+            # 本次重建挣得的判定随分块产物走: 免手工 --recon-manifest 链接 (忘了就丢信任标签)。
+            # 分块只搬运判定, 从不产生判定, 更不因分块升级。
+            source_provenance={"geometry_usability": geometry_usability},
+        )
+        chunks_artifact = {
+            "manifest": f"chunks/{MANIFEST_NAME}",
+            "chunk_size_m": chunk_manifest["chunk_size_m"],
+            "total_chunks": chunk_manifest["total_chunks"],
+            "total_points": chunk_manifest["total_points"],
+        }
+
     manifest = {
         "schema_version": 2,
         "engine": engine,
@@ -827,6 +850,8 @@ def reconstruct(photos_dir: str | Path = "photos",
         "artifacts": {
             "full_3dgs": full_artifact,
             "lod": lod_artifacts,
+            # 仅在请求分块时出现 (additive, 默认行为不变)
+            **({"chunks": chunks_artifact} if chunks_artifact else {}),
         },
         "sessions": [
             {"session_id": s.session_id, "kind": s.kind,
@@ -943,6 +968,10 @@ def main():
                               "world-enu ALIGNED 结果)；提供时跳过重新配准"))
     parser.add_argument("--colmap-gpu", action="store_true",
                         help=("COLMAP SIFT 用 GPU (默认 CPU，无 NVIDIA/headless 更可靠)"))
+    parser.add_argument("--chunk-size-m", type=float, default=None, metavar="METERS",
+                        help=("额外产出可流式空间分块 (web/chunks/, XY 网格边长米数)：大重建 "
+                              "(上百万高斯) 让 viewer 只载相机附近的块才漫游得动；本次重建的 "
+                              "geometry_usability 自动随分块产物走。缺省不分块"))
     args = parser.parse_args()
 
     registration = None
@@ -956,10 +985,14 @@ def main():
         splat_map=_parse_splat_args(args.splat) or None,
         base_scene=args.base_scene, dedup_voxel=args.dedup_voxel,
         replace_margin=args.replace_margin, registration=registration,
-        colmap_use_gpu=args.colmap_gpu,
+        colmap_use_gpu=args.colmap_gpu, chunk_size_m=args.chunk_size_m,
     )
     print(f"\n重建完成: {manifest['gaussian_count']} 高斯")
     print(f"  LOD: {manifest['lod']}")
+    if "chunks" in manifest["artifacts"]:
+        chunks = manifest["artifacts"]["chunks"]
+        print(f"  可流式分块: {chunks['total_chunks']} 块 "
+              f"({chunks['chunk_size_m']:g}m 网格) → {chunks['manifest']}")
     print("  查看: make serve  # http://127.0.0.1:8000/web/studio/")
 
 
