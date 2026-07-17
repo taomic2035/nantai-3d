@@ -104,6 +104,27 @@ def test_render_single_chunk_returns_deterministic_ply_bytes():
     assert c != a
 
 
+def test_single_cli_writes_ply_matching_kernel(tmp_path):
+    """--single CLI (调试/移交入口, 随 release ship) 写出的 ply 须与 render_single_chunk
+    内核字节一致; 负坐标 + LOD 均可。untested CLI 会静默坏, 是 release 风险。"""
+    root = Path(__file__).resolve().parent.parent
+
+    def run_single(args, out):
+        proc = subprocess.run(
+            [sys.executable, "-m", "pipeline.render_chunk_to_ply",
+             "--single", *args, "--out", str(out)],
+            cwd=root, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        return out.read_bytes()
+
+    # 负坐标 + LOD
+    assert run_single(["4", "-2", "--seed", "42", "--lod", "0"], tmp_path / "a.ply") \
+        == render_single_chunk(4, -2, world_seed=42, lod=0)
+    # 全量 (无 lod)
+    assert run_single(["0", "0"], tmp_path / "b.ply") \
+        == render_single_chunk(0, 0, world_seed=42)
+
+
 def test_render_single_chunk_negative_index():
     """内核对负坐标也返回有效 ply (无限世界必含负象限)。"""
     data = render_single_chunk(-2, -3, world_seed=42)
