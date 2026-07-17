@@ -81,8 +81,46 @@ gate 返回 None 时**不 return，直落通用静态服务**，原样吐磁盘 
 - `05d2b49` — `chunk_content_key(cx,cy,world_seed,registry,lod)`（回答 Open Q1；素材 sha 纳入键，replace 即失效）。
 - 三份验证脚本在 scratchpad（只读）。
 
+## 附：#1+#2 的 turnkey 建议改动（你 lane，仅供参考，你定夺）
+
+为让 CRITICAL 赶在下次重烘前落地，给出精确最小改动（基于我读到的当前代码，行号约值）。
+
+**A. 端点 gate 加 layout_engine 门（#2，`_on_demand_world_manifest` :1236-1244 尾部）：**
+```python
+    if type(world_seed) is not int:
+        return None
+    if grid.get("layout_engine") != "mock":   # 内核只能忠实复现 mock 世界
+        return None
+    return manifest
+```
+
+**B. 端点按 uses_assets 传 registry（#1，:1497-1506）：**
+```python
+    grid = world_manifest["grid"]
+    world_seed = grid["world_seed"]
+    lod = int(query.removeprefix("lod=")) if query else None
+    # 用与预烘相同的 registry 设定, 否则真实素材世界在按需区出合成代理密度断崖
+    registry = None
+    if grid.get("uses_assets"):
+        from pipeline.assets import AssetRegistry
+        registry = AssetRegistry(self.project_root / "assets")
+    try:
+        payload = render_single_chunk(
+            chunk_x, chunk_y, world_seed=world_seed, registry=registry, lod=lod,
+        )
+```
+
+**关于 ETag / 缓存键**：你现在的 `ETag = "sha256:" + sha256(payload)`（:1523）**已是内容寻址且诚实**——
+它是实际字节（含真实素材）的摘要，传 registry 后自动正确，**无需为 ETag 改动**。`chunk_content_key`
+（`05d2b49`）是给**将来若加服务端渲染缓存**（想在渲染前就查缓存、避免重渲）用的键：它只生成布局+读
+素材 sha（不渲染）即可算键，素材 `replace()` 升版即失效。当前"渲染后 hash payload"的 ETag 路径无需它。
+
+**测试**：我已落库 `test_registry_on_demand_tile_byte_matches_baked_tile`（`f469a62`）——预烘 uses_assets
+世界后，`render_single_chunk(registry)` 的 full+lod0/1 与预烘 tile 逐字节一致。你接上 B 后，端点 payload
+即等于预烘 tile，接缝消失，该测试是你的地基保证。
+
 ## 结论
 
-集成层扎实，字节/纯度/投影核心我 sign-off。剩 4 项：#1/#2 我已在 manifest 侧补齐配方声明，
-端点消费（读 uses_assets 传 registry、layout_engine 门）是你 lane 的收尾；#3 是投影层小加固（很小，
-把诚实性从"依赖磁盘不变量"升级为"服务器无条件强制"）；#4 建议。#1 应赶在下次生产重烘前落地。
+集成层扎实，字节/纯度/投影核心我 sign-off。剩 4 项：#1/#2 我已在 manifest 侧补齐配方声明 + 上方 turnkey
+建议，端点消费是你 lane 的收尾；#3 是投影层小加固（很小，把诚实性从"依赖磁盘不变量"升级为"服务器无
+条件强制"）；#4 建议。**#1 应赶在下次生产重烘前落地**（重烘写 grid → 投影 true → 断崖激活）。
