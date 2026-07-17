@@ -32,7 +32,7 @@ MANIFEST_NAME = "chunks.json"
 DEFAULT_CORE_AXIS_PERCENTILE = 0.995
 
 
-def _core_bounds(xyz: np.ndarray, axis_percentile: float) -> dict:
+def core_bounds(xyz: np.ndarray, axis_percentile: float) -> dict:
     """主体几何的 AABB (供 viewer 取景), **附加**于全量 bounds 之上而非替代它。
 
     **为什么需要它**: 真实 3DGS 训练必然产出漂浮物 —— 少数高斯被优化到场景外几百米。
@@ -158,7 +158,7 @@ def partition_scene_to_chunks(
         # core_bounds = 主体几何在哪的实测提示, 供取景 —— 真实 3DGS 的漂浮物会把
         # bounds 撑大一个数量级, 照 bounds 取景相机会停在几百米外对着空气。
         # 附加而非替代: 不隐藏任何几何, 被排除的点照常在块里渲染。
-        "core_bounds": _core_bounds(scene.xyz, core_axis_percentile),
+        "core_bounds": core_bounds(scene.xyz, core_axis_percentile),
         "extent": {
             "x_min": min(c["x"] for c in chunks),
             "x_max": max(c["x"] for c in chunks),

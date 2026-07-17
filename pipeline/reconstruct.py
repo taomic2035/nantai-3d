@@ -47,6 +47,7 @@ from pipeline.recon_schema import (
     SplatInput,
 )
 from pipeline.registration import register
+from pipeline.spatial_chunk import DEFAULT_CORE_AXIS_PERCENTILE, core_bounds
 
 DEFAULT_OUT_DIR = "recon"
 DEFAULT_WEB_DIR = "web/data/recon"
@@ -838,7 +839,14 @@ def reconstruct(photos_dir: str | Path = "photos",
         "engine": engine,
         "registration_engine": reg.engine,
         "gaussian_count": len(merged),
+        # bounds = 全量真相 (含漂浮物), 永不缩水。
         "bounds": {"min": lo.tolist(), "max": hi.tolist()},
+        # core_bounds = 主体几何在哪的【实测】提示。viewer 的 framing 由 bounds 推导
+        # 相机/裁剪面/雾/地面网格, 而真实 3DGS 训练必然产出漂浮物 (少数高斯被优化到
+        # 场景外几百米): 实测一个 Brush 实训重建 Z 向 90% 分位 52.6m, bounds 却达 720m。
+        # 照 bounds 取景, 相机会停在几百米外, 裁剪面/雾/网格也全被拉到无意义的尺度。
+        # 附加而非替代: 不隐藏任何几何, 落在 core 外的点照常渲染 (详见 _core_bounds)。
+        "core_bounds": core_bounds(merged.xyz, DEFAULT_CORE_AXIS_PERCENTILE),
         "spatial_parameters": {
             "frame_id": reg.target_frame.frame_id,
             "units": reg.target_frame.units.value,

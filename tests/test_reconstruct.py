@@ -203,6 +203,45 @@ class TestImportEngine:
                 splat_map={"video_vid_A": "scene.ply"},  # type: ignore[arg-type]
             )
 
+    def test_manifest_core_bounds_keeps_framing_off_the_floaters(
+        self, photos_dir, tmp_path
+    ):
+        """viewer 的 framing.mjs 由 manifest.bounds 推导【相机/裁剪面/雾/地面网格】。
+        真实 3DGS 必带漂浮物: 实测一个 Brush 实训重建 (67878 高斯) 的 bounds 是
+        1328x877x720m, 而 Z 向 90% 分位仅 52.6m —— 被噪声撑大 13 倍。照 bounds 取景,
+        相机会停在几百米外, 裁剪面/雾/网格也全被拉到无意义的尺度。
+
+        故主 manifest 须【另报】core_bounds。铁律: bounds 仍是全量真相 (绝不缩水),
+        core_bounds 是【附加】取景提示, 且覆盖率是【实测】而非从分位数推算。
+        """
+        rng = np.random.default_rng(5)
+        core = np.column_stack([rng.uniform(0, 20, 1500), rng.uniform(0, 20, 1500),
+                                rng.uniform(0, 6, 1500)])
+        floaters = np.array([[300.0, 260.0, 200.0], [-280.0, -240.0, -190.0]])
+        xyz = np.vstack([core, floaters])
+        ext_ply = tmp_path / "floaty.ply"
+        GaussianScene(xyz, np.full((len(xyz), 3), 0.5)).save_ply(ext_ply, flavor="3dgs")
+
+        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
+                        web_dir=tmp_path / "web", engine="import", reg_engine="mock",
+                        splat_map=[SplatInput(session_id="video_vid_A",
+                                              path=str(ext_ply),
+                                              source_frame=_mock_source_frame())],
+                        dedup_voxel=0.0)
+
+        # bounds 仍是全量真相: 漂浮物在内, 绝不因为难看就砍掉
+        assert m["bounds"]["max"][2] > 150.0
+        cb = m["core_bounds"]
+        assert np.array(cb["max"])[2] - np.array(cb["min"])[2] < 20.0, \
+            "core_bounds 须把 Z 向漂浮物排除在取景之外"
+
+        # 覆盖率是实测数, 不是拿 axis_percentile 冒充 (三轴联合覆盖 < 单轴分位)
+        lo, hi = np.array(cb["min"]), np.array(cb["max"])
+        scene = GaussianScene.load_ply(tmp_path / "recon" / "scene_full.ply")
+        actual = int(np.sum(np.all((scene.xyz >= lo) & (scene.xyz <= hi), axis=1)))
+        assert cb["contains_points"] == actual
+        assert np.isclose(cb["contains_fraction"], actual / len(scene))
+
     def test_import_aligns_by_session(self, photos_dir, tmp_path):
         rng = np.random.default_rng(2)
         ext = GaussianScene(rng.uniform(0, 10, (800, 3)),
