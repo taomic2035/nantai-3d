@@ -57,17 +57,22 @@ class TestTransform:
         small_scene.transform(Sim3(scale=3.0))
         assert np.allclose(small_scene.scale, orig * 3)
 
-    def test_flatten_sh_unblocks_rotation_keeping_view_independent_color(self, tmp_path):
+    # degree d 的 sh_rest 宽 = 3*((d+1)^2 - 1); degree 3 (宽 45) 是 nerfstudio
+    # splatfacto 等真实训练器的默认输出, 必须覆盖到。
+    @pytest.mark.parametrize("degree,width", [(1, 9), (2, 24), (3, 45)])
+    def test_flatten_sh_unblocks_rotation_keeping_view_independent_color(
+        self, tmp_path, degree, width,
+    ):
         """含高阶 SH 的场景旋转被 fail-closed 阻断 (未实现可靠 SH 旋转); flatten_sh
         丢高阶保 DC (视角无关基色) → sh_degree=0 → 米制/地理对齐的旋转可安全应用。
-        这是真实 3DGS 重建 (nerfstudio splatfacto 输出带 SH) 米制对齐的诚实降级路径。"""
+        这是真实 3DGS 重建 (nerfstudio splatfacto 输出 degree 3 SH) 米制对齐的诚实降级路径。"""
         n = 16
         rng = np.random.default_rng(3)
         xyz = rng.uniform(-1, 1, (n, 3))
         rgb = np.clip(rng.uniform(0, 1, (n, 3)), 0, 1)
-        sh_rest = rng.uniform(-0.2, 0.2, (n, 9))  # degree 1 (9 = 3*(4-1))
+        sh_rest = rng.uniform(-0.2, 0.2, (n, width))
         scene = GaussianScene(xyz, rgb, sh_rest=sh_rest)
-        assert scene.sh_degree == 1
+        assert scene.sh_degree == degree
         half = np.pi / 4
         rot = Sim3(quat_wxyz=[np.cos(half), 0, 0, np.sin(half)])
         # 阻断信息须自文档化: 指向 flatten 解法, 而非留用户面对死路。

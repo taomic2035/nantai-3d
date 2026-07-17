@@ -172,6 +172,21 @@ class TestOnDemandGridRecipe:
         assert manifest["grid"]["layout_engine"] == "mock"
         assert manifest["grid"]["uses_assets"] is False
 
+    def test_multi_seed_world_disables_on_demand(self, tmp_path):
+        """混 seed 烘焙 → world_seed 无单一值 → 端点无法确定按需 seed → fail-closed
+        禁按需 (world_seed=None 且 layout_engine=None)。"""
+        layouts = tmp_path / "layouts"
+        layouts.mkdir()
+        for (cx, cy), seed in [((0, 0), 42), ((0, 1), 7)]:
+            (layouts / f"chunk_{cx}_{cy}.json").write_text(
+                MockLayoutGenerator(seed).generate_chunk(cx, cy).model_dump_json(),
+                encoding="utf-8")
+        manifest = render_chunkset(
+            layouts_dir=layouts, output_dir=tmp_path / "web",
+            chunk_range=(0, 1, 0, 2), assets_dir=None)
+        assert manifest["grid"]["world_seed"] is None
+        assert manifest["grid"]["layout_engine"] is None
+
     def test_grid_layout_engine_null_when_not_mock_reproducible(self, tmp_path):
         # 手改布局 (删一栋楼) → 内核 render_single_chunk 无法复现 → 不得声明 mock。
         layouts = tmp_path / "layouts"
