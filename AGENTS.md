@@ -28,6 +28,20 @@
 - **"完美"不可达**：3DGS 对天空/玻璃/水面/无纹理面有空洞与漂浮物；只能漫游拍到的体积。
 - 端到端安装/使用手册（COLMAP + 云 GPU 训练 + 导入本仓库）：见 **`docs/manual/reconstruction-setup.md`**（Opus 编写中；用户配合云 GPU 账号/注册）。
 
+### macOS Apple Silicon 本机实测（2026-07-17）
+
+- 机器：macOS 26.5.2 / arm64 / 32 GB。`make.py doctor` 实测 COLMAP 4.1.0（CPU SfM）、
+  Brush 0.3.0（wgpu 受限训练）、Python 必需/可选依赖均可用；仍无 NVIDIA CUDA 栈。
+- MLX 0.32.0 已隔离安装到 `.nantai-studio/venvs/mlx`，Metal 矩阵探针实测
+  `Device(gpu, 0)`；它不是 gsplat/nerfstudio CUDA 自定义算子的透明替代。
+- Blender 4.5.11 LTS Apple Silicon 官方包已安装到 `/Applications/Blender.app` 并通过
+  SHA-256、codesign 与 headless version 探针；但正式 canary 工具链仍严格锁定
+  Windows x64 `third/blender/blender.exe`，因此 Mac Blender **尚不能**被该链路当成已验证运行时。
+- 素材 registry 实测为 **9/11**：九份本机 payload 与登记 SHA 逐字节一致；
+  `stone_wall_01`、`fence_wood_01` 的 Mac 生成字节仍漂移并被 fail-closed 拒绝。
+  不得重新登记这两份本机字节来掩盖跨平台差异。完整回执见
+  `handoff/FEEDBACK-CODEX-007-macos-environment-audit.md`。
+
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 
 「无限村庄任意坐标漫游」的**管线内核已完整并对抗性验证 CLEAN**（Opus lane）：
