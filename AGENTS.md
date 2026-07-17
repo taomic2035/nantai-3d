@@ -21,6 +21,7 @@
 ## ⚠️ 机器现实与重建能力边界（2026-07-15，已确认）
 
 - **开发机无 NVIDIA GPU**：仅 Intel UHD Graphics 770 集显（无 CUDA），i7-14700 / 32GB / D盘 1.4TB。
+  （核对**任意**机器的同样事实：`python make.py doctor` 实测并报告，不必信本节的记录——详见下方「诚实 UX 三件套」。）
 - **本仓库不训练 3DGS**：它是重建管线**外围**的诚实封装层——摄取 → 坐标/位姿契约 → 米制 ENU 对齐（`pipeline/alignment.py`）→ 3DGS 导入/拼接/LOD/素材 → Spark Viewer（360° 漫游可用）。**把图片变成 3D 几何的两步是外部的**：
   1. **相机位姿（SfM）**：COLMAP（本机 CPU 可跑，慢；未安装则回退 mock/synthetic，非真实）。
   2. **3DGS 训练**：**仓库无训练器**。CUDA 训练器（gsplat/nerfstudio/Inria）本机跑不了。**实际主路径 = 云 GPU 租赁**；本机 Intel 集显跑 Brush 仅为受限的小场景试验档。
@@ -52,9 +53,10 @@
 真实数据链路已端到端打通，每步的**真实限制均如实文档化**（`docs/manual/reconstruction-setup.md` /
 `docs/real-data-workflow.md`）：
 
-采集 → COLMAP（本机 CPU，**每阶段 6h 卡死 backstop**）→ **外部云 GPU 训练 3DGS** →
-`normalize_ply_quats` → `flatten_ply_sh`（**仅米制对齐时需要**）→ `prepare_import` →
-`reconstruct --engine import [--chunk-size-m 50]` → `alignment --from-gps | --control-points` → 360° 漫游
+采集 → **`check_capture` 预检**（在烧掉 COLMAP 的几小时之前）→ COLMAP（本机 CPU，**每阶段 6h 卡死 backstop**）→
+**外部云 GPU 训练 3DGS** → `normalize_ply_quats` → `flatten_ply_sh`（**仅米制对齐时需要**）→ `prepare_import` →
+`reconstruct --engine import [--chunk-size-m 50]` → `alignment --from-gps | --control-points` →
+**`inspect_recon`**（读懂产物能不能量）→ 360° 漫游
 
 Opus lane 近期补齐的能力与**已知边界**（均 TDD 锁定）：
 - **高阶 SH 限制**：加载器对「含 `f_rest_*` + 非恒等旋转」**故意 fail-closed**（可靠 SH 旋转未实现，
@@ -69,6 +71,23 @@ Opus lane 近期补齐的能力与**已知边界**（均 TDD 锁定）：
   坐标绝对不动、**provenance 不增不减**（分块**绝不**把 preview-only 变 metric-aligned）。
   **待 Codex**：viewer 消费 `chunks.json`（规格见 `handoff/HANDOFF-CODEX-004`）。注意其
   **无 `grid`** —— 重建**不可**程序化续渲，**绝不可**对它投影 `on_demand:true`。
+- **诚实 UX 三件套**（纯 CPU、零 GPU 依赖；`tests/test_doctor.py` / `test_capture_quality.py` /
+  `test_inspect_recon.py` 锁定）。三者都是 provenance-safety 面向人的一侧：**把已有的严谨证据说成人话，
+  绝不新增信任**。改它们时别破坏各自的诚实性约束（源码顶部有逐条说明）：
+  - `scripts/doctor.py` ≡ `make.py doctor` —— 实测本机能跑重建的哪几步（COLMAP/Brush/GPU/Python 依赖/
+    素材注册表/磁盘），给 can / cannot / **unclear** 小结（探不准进 unclear，**不替用户下结论**）。
+    **退出码恒为 0**：报的是机器状态，「缺 COLMAP」是**结论**不是失败，非 0 会逼 CI 把正常报告当故障。
+    GPU 只判「未探测到**可用的** CUDA 栈」（依据 `nvidia-smi` 缺席，**证据推理非硬件事实**）；
+    素材 sha **默认不校验**，报告明写「未校验」，`--verify-assets` 才实测（`make.py doctor` 不带此开关）。
+  - `scripts/check_capture.py` ≡ `make.py check-capture`（`PHOTOS=` 传目录）—— 跑 COLMAP 前用**单图证据**
+    预检（张数/模糊/分辨率/EXIF GPS + 匹配器建议 + 由手册 §4 实测锚点外推的耗时**粗估**）。
+    **红线**：**重叠度是图之间的关系，单图分析测不到** → `likely` 仅意味「没发现明显硬伤」，
+    **绝不可**被描述成「预检通过就能重建」。退出码 `0` = 出了报告（无论结论好坏），`2` = 没法分析。
+  - `scripts/inspect_recon.py` ≡ `make.py inspect-recon`（`MANIFEST=` 传路径）—— 把 `recon_manifest.json`
+    翻成人话（能不能量 / 精度 / 变换链 / **未知项**）。**只翻译不提升信任**；矛盾（声称 `metric-*` 但证据
+    `passed:false` / 无法解析 / 非米制 / `synthetic=true`）→ 指出矛盾 + 按 `preview-only` 处理 +
+    **退出码 2**（可当 CI 门；判据与 `reconstruct._derive_geometry_usability` 同源）。
+    **限制**：只读 manifest 声称 + 内部自洽性，**不碰 PLY 字节**、不校验 `artifacts.*.sha256`、不重算残差。
 
 ## 关键文档
 

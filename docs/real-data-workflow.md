@@ -19,6 +19,24 @@
 
 **关键**：配准必须非合成（COLMAP sfm，provenance=SFM）。用 mock 配准对齐真实几何会正确降级为 `preview-proxy`——合成配准上的对齐不可信。
 
+## 步骤 0 · 采集预检（可选，但下一步很贵）
+
+步骤 1 的 COLMAP 是整条链最贵的一步（无序 ~300 图实测 2–5+ 小时，见
+[reconstruction-setup.md §4](manual/reconstruction-setup.md)）。开跑前先用单图证据看一眼这批照片：
+
+```bash
+.venv/bin/python scripts/check_capture.py photos/
+.venv/bin/python scripts/check_capture.py photos/ --json > precheck.json   # 机读
+```
+
+对**本文档**尤其有用的一项：它报告**多少图带 EXIF GPS**——那决定了步骤 2 能不能走
+`--from-gps` 免手写 `control_points.json`（一张都没有时，它会直接告诉你「无法走 `--from-gps`
+米制对齐，要米制请用实测控制点」）。
+
+⚠️ **这是启发式预检，不能替代真跑 COLMAP**：决定成败的**重叠度**是图**之间**的关系，
+**单图分析测不出来**。`likely` 只意味「没发现明显硬伤」，**不是**能重建的保证；`unlikely`
+也不保证一定失败。退出码 `0` = 出了报告（无论结论好坏），`2` = 没法分析（fail-closed）。
+
 ## 步骤 1 · COLMAP 配准（sfm-local）
 
 ```bash
@@ -124,6 +142,26 @@ print('target=',c['target_frame']['frame_id'], 'aligned=',c['alignment_status'],
 'synthetic=',p['synthetic'], 'usability=',p['geometry_usability'])"
 # 期望: target= world-enu aligned= aligned synthetic= False usability= metric-aligned
 ```
+
+人话版（同一份 manifest，另外做**矛盾检查**并读出**实际对齐精度**）：
+
+```bash
+.venv/bin/python scripts/inspect_recon.py web/data/recon/recon_manifest.json
+```
+
+米制通过时它会印出「真实尺度 + 地理对齐，可测量（对齐残差 X 米）」并附一句
+「**别做比 X 米更精细的测量**」——X 取自 `sim3.alignment.v1` 证据串里**实际记录**的
+`rms_residual_m`（多条证据时取**最差**的一条，保守）；没有该证据串时它说「精度未知」，**不猜数字**。
+
+**它同时是个门**：manifest 声称 `metric-*` 却与自带证据矛盾（`passed:false` / 证据无法解析 /
+`metric_evidence` 为空 / target frame 不是米制 / `synthetic=true` / 声称 `metric-aligned` 但没挣得
+地理对齐）→ 指出矛盾、按 `preview-only` 处理、**退出码 2**。这与 `pipeline/reconstruct.py` 的
+fail-closed 判据同源，用于识别外来的/被篡改的/旧版有 bug 的代码产出的 manifest。
+
+⚠️ **限制**：它只读 manifest 的**声称**与 manifest **内部**自洽性——**不碰 PLY 字节**、不校验
+`artifacts.*.sha256`、不重算残差。所以「检查通过」= manifest **自洽**，**不等于**产物没被换过：
+manifest 里记着每个 artifact 的 `sha256`（PLY 摘要）、sidecar `recon_manifest.sha256` 覆盖 manifest
+本身，但**这两个 `inspect_recon` 都不校验**——要查「manifest 自洽但 PLY 被换了」得另跑完整性校验。
 
 信任根 `recon_manifest.json` / `recon/registration.json` 以 LF 写出（跨 OS 字节可复现）；
 `recon_manifest.sha256` sidecar 可对 manifest 整体做完整性校验/签名。

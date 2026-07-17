@@ -23,6 +23,19 @@
 Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 NVIDIA、无 CUDA）**。
 → **实测：位姿(A)本机 COLMAP CPU 可跑（30 图 ~46 秒）；训练(B)本机 Brush 也能跑（中小场景）——全本机闭环已跑通**。大场景/高质量仍首选云 GPU。
 
+**核对你自己的机器**（上面是这台开发机的记录，不是你的机器）——跑一次体检，实测同样的事实：
+
+```powershell
+.venv\Scripts\python make.py doctor
+.venv\Scripts\python scripts\doctor.py --json        # 机读，供脚本/CI 消费
+```
+
+它实测 COLMAP / Brush / GPU / Python 依赖 / 素材注册表 / 磁盘，并给出「本机能跑 / 本机不能跑 / **无法判定**」小结——探测不确定的一律进「无法判定」，不替你下结论。
+
+- **退出码恒为 0**：报的是机器状态，不是「合不合格」。「缺 COLMAP」是体检的**结论**（也是很多机器的正常状态），不是体检失败。要按结论决策，请读 `--json` 的 `checks[*].status`（`ok` / `missing` / `degraded` / `unknown`）。
+- ⚠️ **GPU 那条是证据推理，不是硬件事实**：它判的是「**未探测到可用的 NVIDIA CUDA 栈**」，依据是找不到随 NVIDIA 驱动一起安装的 `nvidia-smi`。它**不**声称你机器里没有 N 卡（比如驱动没装的 N 卡机也会报这个）。
+- ⚠️ **素材 sha 默认不校验**：报告会明写「sha **未校验**」（要哈希全部 PLY，慢）。要实测校验加 `--verify-assets`（`make.py doctor` 不带这个开关，直接调脚本）。
+
 ## 2. 已为你准备好的（`third/`，我下载的）
 
 | 工具 | 用途 | 位置 | 能否本机跑 |
@@ -45,6 +58,29 @@ Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 
 
 ---
 
+## 先跑采集预检（在烧掉几小时之前）
+
+下面那条一键命令的第一步就是 COLMAP——**无序 ~300 图可能跑 2–5+ 小时**（§4 实测）才发现这批图根本没法重建。开跑之前先用**单图就能拿到的证据**看一眼：
+
+```powershell
+.venv\Scripts\python make.py check-capture                        # 默认检 photos\
+$env:PHOTOS='<你的图片目录>'; .venv\Scripts\python make.py check-capture
+.venv\Scripts\python scripts\check_capture.py photos\ --json      # 机读
+```
+
+它只做单图分析（解码 + Laplacian 模糊分 + 读 EXIF），**不跑匹配**，成本远低于它想帮你省下的那步。报告内容：张数（对照建议的 50–300）、模糊度、分辨率、EXIF 拍摄时间/GPS 覆盖、建议匹配器（`exhaustive` / `sequential`）与图对数、**由 §4 实测锚点外推的耗时粗估**，最后给一个 `likely` / `risky` / `unlikely` 结论。
+
+> **只吃图片目录**（递归扫描；支持 `.bmp` `.heic` `.jpeg` `.jpg` `.png` `.tif` `.tiff` `.webp`）。**视频输入先抽帧再预检**：`.venv\Scripts\python make.py ingest`（`input\` → `photos\`），再 `make.py check-capture`。直接把 `.mp4` 或只含视频的目录喂给它 → fail-closed 退出码 `2`（实测），报错本身就会告诉你先去抽帧。
+
+⚠️ **别把预检当成功保证**——工具自己在报告末尾也会把这些限制重复一遍，请一起读：
+
+- **重叠度它测不到。** 相邻图重叠 ≥60% 是 SfM 成败的**首要**因素，但那是图**之间**的关系，**单图分析测不出来**。要确知只能真跑 COLMAP——而那正是最贵的一步。
+- 所以 `likely` 只意味着「**没发现明显硬伤**」，**不等于能重建**；`unlikely` 也不保证一定失败。
+- 一律测不到的还有：曝光一致性、纹理独特性、玻璃/水面/天空占比、移动物体、是否绕拍成环。
+- 模糊阈值（默认 `80.0`，与 `pipeline.ingest` 抽帧一致）是**启发式**经验值，受分辨率/纹理/曝光影响：低分不等于一定匹配失败，高分也不保证匹配得上。请自己抽查低分图再决定重不重拍。
+- 耗时是**粗估**（由 §4 实测锚点线性外推），不是承诺；小批量（<50 图）它会明显过估，报告里会自己说明。
+- **退出码**：`0` = 出了报告（**无论结论好坏**）；`2` = 没法分析（目录不存在 / 没有图片），fail-closed。
+
 ## 最简：一键本机重建 ✅（已实测）
 
 拍好图后，一条命令跑完 COLMAP→Brush→导入（无需手动分步）。已在本机合成场景实测通过：
@@ -65,6 +101,8 @@ Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 
 ---
 
 ## 4. 步骤 A · COLMAP 相机位姿（本机 CPU）✅
+
+> **这就是可能烧掉 2–5 小时的那一步。** 跑之前先过一遍上面的[采集预检](#先跑采集预检在烧掉几小时之前)（`make.py check-capture`）——它只做单图分析、不跑匹配。但记住它**测不到重叠度**，通过预检不是能重建的保证。
 
 **已下到 `third/colmap/`。** 加入 PATH 后本仓库会自动调用（我已把仓库默认改为 **CPU SIFT**，无 N 卡也可靠；有卡想提速加 `--colmap-gpu`）：
 
@@ -140,7 +178,11 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
   --registration recon\registration.json --splat recon\splat-input.json `
   --dedup-voxel 0 --replace-margin 0 --photos photos
 
-# Step 3：查看，360° 漫游
+# Step 3：读懂你拿到的东西 —— 这几何到底能不能拿去量？
+.venv\Scripts\python make.py inspect-recon
+#   默认读 web\data\recon\recon_manifest.json；换一份: $env:MANIFEST='<路径>'
+
+# Step 4：查看，360° 漫游
 .venv\Scripts\python make.py serve   # http://127.0.0.1:8000/web/studio/
 ```
 
@@ -155,7 +197,12 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
     --out-dir web\data\recon-chunks --chunk-size-m 50 --recon-manifest recon\recon_manifest.json
   ```
   纯空间重打包：**不改几何/坐标/provenance**（每个高斯恰好落一个块，无损不重复；每块继承源 `frame_id`/`units`/transform 历史）。**分块不会**把 `preview-only` 变成 `metric-aligned`——米制要在对齐那步挣。实测 12 万高斯/400m 场景 → 64 块（50m 网格）。（viewer 消费 `chunks.json` 待 Codex 接线，见 `handoff/HANDOFF-CODEX-004`。）
-- 结果 `geometry_usability` = **`preview-only`**（sfm-local 非米制/未对齐）——这是**诚实**的：没有控制点就不冒充米制。
+- **Step 3 在做什么**：`recon_manifest.json` 里的 `geometry_usability` / `coordinate_contract` / `metric_evidence` 是机器可验证的严谨字段，但人读不出「**这玩意儿能不能量尺寸**」。`inspect-recon` 只做翻译：高斯数、包围盒（**带单位**——不是米制时会直说「不是米，别拿去量」）、能不能测量、精度、变换链、LOD/分块产物，以及**哪些是未知**。
+  - **只翻译，绝不提升信任**：manifest 说 `preview-only` 就是 `preview-only`，哪怕包围盒数字看起来像米制。缺字段一律报「未知」，不给好看的数字。
+  - **矛盾时证据打败声称**：manifest 声称 `metric-*` 却带 `passed:false` / 对齐证据无法解析 / 单位不是米 / `synthetic=true` —— 它**指出矛盾并按 `preview-only` 处理**，退出码 **2**（可当 CI 门用）。反过来，**检查通过不等于产物能用**：它只说明 manifest **自洽**。
+  - **限制**：只读 manifest **声称**的内容 + manifest 内部自洽性。**不碰 PLY 字节**、不校验 artifacts 的 `sha256`、不重算残差——所以它查不出「manifest 自洽但 PLY 被换了」（那要另跑完整性校验）。精度只从 `sim3.alignment.v1` 证据串读；米制若靠别的证据（如实测标尺）挣得，它只能如实说「精度未知」。
+  - **退出码**：`0` = 读通了；`2` = manifest 自相矛盾；`1` = 文件不存在 / 不是合法 JSON。
+- 结果 `geometry_usability` = **`preview-only`**（sfm-local 非米制/未对齐）——这是**诚实**的：没有控制点就不冒充米制。`inspect-recon` 会把它翻成「不能测量：尺度是任意的，只能看」，并告诉你怎么升级。
 - 想要 **`metric-aligned`**（真实尺度/地理对齐）：提供控制点/GPS，走 `pipeline.alignment`（见 [real-data-workflow.md](../real-data-workflow.md)），流程我已打通并验证。
   - ⚠️ **高阶 SH 限制（米制对齐才会遇到）**：米制/地理对齐会把场景经含**旋转**的 Sim3 变到 ENU 世界；而高阶球谐（`f_rest_*`，nerfstudio splatfacto 等训练器都会输出）的**正确旋转本仓库未实现**，加载器对「含高阶 SH + 旋转」**故意 fail-closed 阻断**（绝不施加错误 SH 旋转产生错误颜色）。**诚实解法**：对齐前先扁平化 SH——`python scripts/flatten_ply_sh.py trained/point_cloud.ply`（丢高阶 `f_rest_*`、保 DC 视角无关基色）。代价：失去视角相关高光，保留正确基色。**仅米制对齐需要**；基本 `preview-only` 漫游（不含旋转）无需此步。
 

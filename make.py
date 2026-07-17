@@ -12,7 +12,13 @@
 - node --test 的 glob 在 Python 内展开后再传给 node，不依赖 POSIX shell 的通配。
 - clean 用 shutil.rmtree 取代 `rm -rf`。
 
+带参数的 target 经环境变量传参（对应 Makefile 的 `make <target> VAR=...`）：
+    PHOTOS=<照片目录>        check-capture（默认 photos）
+    MANIFEST=<manifest 路径>  inspect-recon（默认 web/data/recon/recon_manifest.json）
+    DELIV=<交付目录>         validate-handoff（默认 HANDOFF-002）
+
 与 Makefile 保持等价的 target 名称；Makefile 仍保留给有 make 的 POSIX 环境。
+例外：doctor / check-capture / inspect-recon 目前只有本脚本有，Makefile 尚未补。
 """
 from __future__ import annotations
 
@@ -63,12 +69,27 @@ def lint() -> None:
     run([PY, "-m", "ruff", "check", "pipeline", "tests"])
 
 
+def doctor() -> None:
+    # 退出码恒为 0（缺 COLMAP/GPU 是体检的结论，不是体检的失败），故不会中断 target 串。
+    run([PY, "scripts/doctor.py"])
+
+
 def ingest() -> None:
     run([PY, "-m", "pipeline.ingest", "--input", "input", "--output", "photos"])
 
 
+def check_capture() -> None:
+    photos = os.environ.get("PHOTOS", "photos")
+    run([PY, "scripts/check_capture.py", photos])
+
+
 def reconstruct() -> None:
     run([PY, "-m", "pipeline.reconstruct", "--photos", "photos"])
+
+
+def inspect_recon() -> None:
+    manifest = os.environ.get("MANIFEST", "web/data/recon/recon_manifest.json")
+    run([PY, "scripts/inspect_recon.py", manifest])
 
 
 def world() -> None:
@@ -111,8 +132,10 @@ def clean() -> None:
 
 
 TARGETS = {
-    "setup": setup, "test": test, "lint": lint, "ingest": ingest,
-    "reconstruct": reconstruct, "world": world, "assets": assets,
+    "setup": setup, "test": test, "lint": lint, "doctor": doctor,
+    "ingest": ingest, "check-capture": check_capture,
+    "reconstruct": reconstruct, "inspect-recon": inspect_recon,
+    "world": world, "assets": assets,
     "validate-handoff": validate_handoff, "serve": serve, "verify": verify,
     "clean": clean,
 }
