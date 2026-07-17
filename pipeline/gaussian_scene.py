@@ -116,7 +116,19 @@ class GaussianScene:
         applied_transform_ids: list[str] | tuple[str, ...] | None = None,
         applied_transform_paths: list[list[str]] | tuple[tuple[str, ...], ...] | None = None,
         provenance_frames: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        lossy_edits: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     ):
+        """``lossy_edits``: 【有损几何编辑】的记录 (如 outlier_trim 按判据丢弃高斯)。
+
+        为什么必须存在: frame_id / units / applied_transform_ids 都由 ``_subset``/``merge``
+        逐字保留, 有损剔除曾是唯一一个"改了几何却不留痕"的操作。剔除的 sidecar manifest
+        在 ply 被复制/改名/导入之后就掉队了, 而字节里什么都没留下 —— 下游会拿到一个
+        "看起来是完整重建、实际少了 21%"的 ply 而无从得知。故记录必须随 ply 字节走。
+
+        **诚实语义 (与 applied_transform_ids 同一约定)**: 空列表意味着"**没有记录**",
+        **不意味着"没发生过"** —— 没有证据 != 有证据表明没有。外部工具剔过再喂进来的
+        ply 同样是空列表。故消费者只能把空列表读作"未知", 绝不可读作"几何完整"。
+        """
         n = len(xyz)
         self.xyz = np.asarray(xyz, dtype=np.float64).reshape(n, 3)
         self._require_finite("xyz", self.xyz)
@@ -216,6 +228,18 @@ class GaussianScene:
                 raise ValueError("provenance frames must be JSON serializable") from exc
             if normalized_frame not in self.provenance_frames:
                 self.provenance_frames.append(normalized_frame)
+
+        # 与 provenance_frames 同样的规范化与去重: 记录须可 JSON 化才能随 ply 字节走。
+        self.lossy_edits: list[dict[str, Any]] = []
+        for edit in lossy_edits or []:
+            if not isinstance(edit, dict):
+                raise ValueError("lossy edits must be JSON objects")
+            try:
+                normalized_edit = json.loads(json.dumps(edit, ensure_ascii=True))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("lossy edits must be JSON serializable") from exc
+            if normalized_edit not in self.lossy_edits:
+                self.lossy_edits.append(normalized_edit)
 
     def __len__(self) -> int:
         return len(self.xyz)
@@ -325,6 +349,7 @@ class GaussianScene:
                 applied_transform_ids=metadata.get("applied_transform_ids", []),
                 applied_transform_paths=metadata.get("applied_transform_paths"),
                 provenance_frames=metadata.get("provenance_frames", []),
+                lossy_edits=metadata.get("lossy_edits", []),
             )
 
         if 'r' in names:  # simple 格式 (本项目合成 ply)
@@ -348,6 +373,7 @@ class GaussianScene:
                 applied_transform_ids=metadata.get("applied_transform_ids", []),
                 applied_transform_paths=metadata.get("applied_transform_paths"),
                 provenance_frames=metadata.get("provenance_frames", []),
+                lossy_edits=metadata.get("lossy_edits", []),
             )
 
         raise ValueError(f"无法识别的 ply 顶点属性: {names}")
@@ -403,6 +429,9 @@ class GaussianScene:
             "applied_transform_ids": self.applied_transform_ids,
             "applied_transform_paths": self.applied_transform_paths,
             "provenance_frames": self.provenance_frames,
+            # 有损几何编辑随字节走: sidecar manifest 会在 ply 被复制/改名/导入后掉队。
+            # 空列表 == 没有记录, 不等于没发生过 (见 __init__ docstring)。
+            "lossy_edits": self.lossy_edits,
         }
         comment = "nantai_meta=" + json.dumps(
             metadata, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
@@ -596,6 +625,13 @@ class GaussianScene:
             for frame in scene.provenance_frames:
                 if frame not in provenance_frames:
                     provenance_frames.append(frame.copy())
+        # 并集: 只要【任一】输入被有损剔除过, 结果就带着这个事实。混进干净场景绝不能
+        # 把痕迹洗掉 —— 那会让"拼接"变成洗白 provenance 的后门。
+        lossy_edits: list[dict[str, Any]] = []
+        for scene in scenes:
+            for edit in scene.lossy_edits:
+                if edit not in lossy_edits:
+                    lossy_edits.append(edit.copy())
         merged = cls(
             np.concatenate([s.xyz for s in scenes]),
             np.concatenate([s.rgb for s in scenes]),
@@ -614,6 +650,7 @@ class GaussianScene:
             applied_transform_ids=transform_ids,
             applied_transform_paths=transform_paths,
             provenance_frames=provenance_frames,
+            lossy_edits=lossy_edits,
         )
         if dedup_voxel > 0:
             merged = merged.deduplicate(dedup_voxel)
@@ -667,6 +704,8 @@ class GaussianScene:
             applied_transform_ids=self.applied_transform_ids,
             applied_transform_paths=self.applied_transform_paths,
             provenance_frames=self.provenance_frames,
+            # 取子集 (分块/降 LOD) 不能把"这份几何被剔过"的事实弄丢。
+            lossy_edits=self.lossy_edits,
         )
 
     # ============ LOD / 可变清晰 ============

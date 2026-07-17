@@ -333,3 +333,46 @@ class TestBadCriterionIsExposed:
         # 只丢 4.8% 的点, bounds 体积却塌到近乎 0 → 判据有效的证据
         assert report.dropped_fraction < 0.05
         assert report.bounds_volume_retained_fraction < 0.001
+
+
+class TestLossyEditIsRecordedInPlyBytes:
+    """剔除记录必须在【产物 ply 自己的字节】里, 不能只在 sidecar manifest。
+
+    sidecar 用 sha256 绑定字节没错, 但 ply 被复制/改名/被 prepare_import 吃进去之后,
+    sidecar 就掉队了 —— 下游拿到一个"看起来是完整重建、实际少了 21%"的 ply, 无从得知。
+    """
+
+    def test_trimmed_ply_carries_the_edit_in_its_own_metadata(
+            self, clustered_scene, tmp_path):
+        out = tmp_path / "t.ply"
+        trim_scene(clustered_scene, out,
+                   rules=[OccupancyRule(voxel_size=5.0, min_occupancy=2)], confirm=True)
+
+        # 只读 ply (完全不看 sidecar), 也必须知道它被剔过
+        reloaded = GaussianScene.load_ply(out)
+        assert len(reloaded.lossy_edits) == 1, "只读 ply 的下游必须能得知它被剔过"
+        edit = reloaded.lossy_edits[0]
+        assert edit["operation"] == "outlier_trim"
+        assert edit["lossy"] is True
+        assert edit["points_before"] == len(clustered_scene)
+        assert edit["points_after"] == len(reloaded)
+        assert edit["dropped"] == len(clustered_scene) - len(reloaded)
+        # 判据与阈值要能回溯, 否则"被剔过"是个无法解释的事实
+        assert "voxel_occupancy" in json.dumps(edit, ensure_ascii=False)
+        # 单位诚实: 阈值有量纲, 绝不假定为米
+        assert edit["threshold_units"] == clustered_scene.units
+        # 可回溯到完整 sidecar
+        assert edit["trim_id"]
+
+    def test_untrimmed_ply_records_nothing(self, clustered_scene, tmp_path):
+        """没剔过就不该凭空多出记录 (空列表 == 没有记录)。"""
+        p = tmp_path / "plain.ply"
+        clustered_scene.save_ply(p, flavor="3dgs")
+        assert GaussianScene.load_ply(p).lossy_edits == []
+
+    def test_dry_run_does_not_mutate_the_input_scene(self, clustered_scene):
+        """dry-run 一个字节都不写, 也绝不能污染内存里的输入场景。"""
+        before = list(clustered_scene.lossy_edits)
+        evaluate_trim(clustered_scene,
+                      rules=[OccupancyRule(voxel_size=5.0, min_occupancy=2)])
+        assert clustered_scene.lossy_edits == before

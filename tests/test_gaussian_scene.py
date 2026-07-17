@@ -202,3 +202,57 @@ class TestQualityLevels:
             loaded = GaussianScene.load_ply(tmp_path / fname)
             counts[level] = len(loaded)
         assert counts[0] < counts[1] < counts[2] == 500
+
+
+class TestLossyEditProvenance:
+    """有损几何编辑 (剔除高斯) 必须留在 ply 【自己的字节】里。
+
+    背景: pipeline/outlier_trim.py 按显式判据丢弃离群高斯 —— 实测一次真实剔除丢掉
+    21.1% 的高斯。它把记录写进 sidecar manifest (<out>.ply.trim_manifest.json), 但
+    **ply 复制/改名/被 prepare_import 吃进去之后, sidecar 就掉队了**, 而字节里什么都
+    没留下 —— 下游拿到一个"看起来是完整重建、实际少了 21%"的 ply, 无从得知。
+
+    frame_id / units / applied_transform_ids 都由 _subset/merge 逐字保留, 有损剔除
+    是唯一一个"改了几何却不留痕"的操作。本组测试把它接上同一条 provenance 链。
+
+    诚实语义: 空列表意味着"**没有记录**", 不意味着"没发生过" —— 与
+    applied_transform_ids 同一约定 (没有证据 != 有证据表明没有)。
+    """
+
+    def _scene(self, n=40, **kw):
+        rng = np.random.default_rng(4)
+        return GaussianScene(rng.uniform(0, 10, (n, 3)), rng.uniform(0, 1, (n, 3)), **kw)
+
+    _EDIT = {"kind": "outlier-trim", "rule": "voxel_occupancy(voxel_size=5.0,"
+             " min_occupancy=5)", "points_before": 100, "points_after": 79, "dropped": 21}
+
+    def test_lossy_edit_survives_ply_roundtrip(self, tmp_path):
+        """痕迹必须在 ply 【字节】里, 而不只在旁边的 manifest 里。"""
+        scene = self._scene(lossy_edits=[self._EDIT])
+        p = tmp_path / "trimmed.ply"
+        scene.save_ply(p, flavor="3dgs")
+        assert GaussianScene.load_ply(p).lossy_edits == [self._EDIT]
+
+    def test_subset_preserves_lossy_edits(self):
+        """crop_aabb / to_quality 走 _subset —— 分块或降 LOD 绝不能把痕迹弄丢。"""
+        scene = self._scene(lossy_edits=[self._EDIT])
+        assert scene.to_quality(0.5).lossy_edits == [self._EDIT]
+        assert scene.crop_aabb((0.0, 0.0), (5.0, 5.0)).lossy_edits == [self._EDIT]
+
+    def test_merge_unions_lossy_edits_and_never_drops_them(self):
+        """拼接: 只要【任一】输入被剔过, 结果就带着这个事实。混进一个干净场景
+        绝不能把痕迹洗掉 —— 那是最典型的 fail-open。"""
+        dirty = self._scene(lossy_edits=[self._EDIT])
+        clean = self._scene()
+        assert GaussianScene.merge([clean, dirty]).lossy_edits == [self._EDIT]
+        assert GaussianScene.merge([dirty, clean]).lossy_edits == [self._EDIT]
+
+    def test_absent_record_means_unknown_not_clean(self, tmp_path):
+        """铁律: 空列表 == "没有记录", **不等于** "没发生过有损编辑"。
+        docstring 必须明说这一点, 否则消费者会把"没记录"读成"干净"。"""
+        p = tmp_path / "plain.ply"
+        self._scene().save_ply(p, flavor="3dgs")
+        assert GaussianScene.load_ply(p).lossy_edits == []
+        doc = GaussianScene.__init__.__doc__ or GaussianScene.__doc__ or ""
+        assert "没有记录" in doc and "没发生过" in doc, \
+            "空列表的语义必须写进 docstring: 没有证据 != 有证据表明没有"

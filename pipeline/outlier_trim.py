@@ -440,6 +440,24 @@ def trim_scene(
         raise ValueError(f"剔除 manifest 已存在, 拒绝覆盖: {manifest_path}")
 
     trimmed = scene._subset(np.where(report.keep_mask)[0])
+
+    # 记录随【ply 字节】走, 而不只在 sidecar manifest 里: sidecar 用 sha256 绑定了字节,
+    # 但 ply 一旦被复制/改名/被 prepare_import 吃进去, sidecar 就掉队了 —— 下游会拿到
+    # 一个"看起来是完整重建、实际少了一大截"的 ply 而无从得知。_subset 已继承源场景
+    # 既有的 lossy_edits, 这里【追加】本次剔除 (不是覆盖: 剔了两次就该有两条)。
+    trim_id = derive_trim_id(scene, rules)
+    trimmed.lossy_edits = [*trimmed.lossy_edits, {
+        "operation": "outlier_trim",
+        "lossy": True,
+        "rules": [rule.as_json() for rule in rules],
+        # 阈值有量纲, 单位就是场景声明的单位 —— 绝不假定为米。
+        "threshold_units": report.threshold_units,
+        "points_before": report.input_points,
+        "points_after": report.kept_points,
+        "dropped": report.dropped_points,
+        # 回溯到完整 sidecar (逐规则明细/分位分布/告警都在那里)。
+        "trim_id": trim_id,
+    }]
     trimmed.save_ply(out_path, flavor=flavor)
 
     manifest: dict[str, Any] = {
