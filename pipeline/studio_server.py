@@ -37,6 +37,7 @@ from urllib.parse import unquote, urlsplit
 
 from plyfile import PlyData, PlyParseError
 
+from pipeline.assets import AssetRegistry
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.render_chunk_to_ply import render_single_chunk
 from pipeline.studio_jobs import JobContractError, JobService, WriterBusyError
@@ -1219,9 +1220,7 @@ def _content_type(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
-def _on_demand_world_manifest(root: Path) -> dict[str, Any] | None:
-    """Read a valid grid contract that this runtime can safely activate."""
-
+def _read_world_manifest(root: Path) -> dict[str, Any] | None:
     manifest_path = root / "web/data/manifest.json"
     resolved = _resolve_real_evidence_file(
         root,
@@ -1233,15 +1232,35 @@ def _on_demand_world_manifest(root: Path) -> dict[str, Any] | None:
     manifest, error = _read_json(resolved)
     if error is not None or not isinstance(manifest, dict):
         return None
+    return manifest
+
+
+def _valid_on_demand_world_manifest(
+    manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Accept only a complete recipe that the runtime can reproduce faithfully."""
+
     grid = manifest.get("grid")
     if not isinstance(grid, dict) or type(grid.get("on_demand")) is not bool:
         return None
     if grid.get("url_template") != "/api/world/chunk/{x}/{y}.ply":
         return None
-    world_seed = grid.get("world_seed")
-    if type(world_seed) is not int:
+    if type(grid.get("world_seed")) is not int:
+        return None
+    if grid.get("layout_engine") != "mock":
+        return None
+    if type(grid.get("uses_assets")) is not bool:
         return None
     return manifest
+
+
+def _on_demand_world_manifest(root: Path) -> dict[str, Any] | None:
+    """Read a valid grid contract that this runtime can safely activate."""
+
+    manifest = _read_world_manifest(root)
+    if manifest is None:
+        return None
+    return _valid_on_demand_world_manifest(manifest)
 
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
@@ -1494,14 +1513,36 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
                 return
-            world_seed = world_manifest["grid"]["world_seed"]
+            grid = world_manifest["grid"]
+            world_seed = grid["world_seed"]
             lod = int(query.removeprefix("lod=")) if query else None
+            registry = None
+            if grid["uses_assets"]:
+                registry_path = self.project_root / "assets/registry.json"
+                if registry_path.is_symlink() or not registry_path.is_file():
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "world_chunk_render_failed",
+                        "The declared asset registry is unavailable.",
+                        head_only=head_only,
+                    )
+                    return
+                try:
+                    registry = AssetRegistry(self.project_root / "assets")
+                except (OSError, RuntimeError, ValueError):
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "world_chunk_render_failed",
+                        "The declared asset registry could not be read safely.",
+                        head_only=head_only,
+                    )
+                    return
             try:
                 payload = render_single_chunk(
                     chunk_x,
                     chunk_y,
                     world_seed=world_seed,
-                    registry=None,
+                    registry=registry,
                     lod=lod,
                 )
             except ValueError:
@@ -1557,12 +1598,15 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if request_path == "/web/data/manifest.json":
-            world_manifest = _on_demand_world_manifest(self.project_root)
+            world_manifest = _read_world_manifest(self.project_root)
             if world_manifest is not None:
                 runtime_manifest = dict(world_manifest)
+                persisted_grid = world_manifest.get("grid")
                 runtime_manifest["grid"] = {
-                    **world_manifest["grid"],
-                    "on_demand": True,
+                    **(persisted_grid if isinstance(persisted_grid, dict) else {}),
+                    "on_demand": (
+                        _valid_on_demand_world_manifest(world_manifest) is not None
+                    ),
                 }
                 self._send_json(
                     HTTPStatus.OK,

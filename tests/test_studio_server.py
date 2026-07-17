@@ -815,13 +815,21 @@ class TestProjectSnapshot:
 
 class TestHttpContract:
     @staticmethod
-    def _enable_on_demand_world(root: Path, *, world_seed: int = 42) -> None:
+    def _enable_on_demand_world(
+        root: Path,
+        *,
+        world_seed: int = 42,
+        uses_assets: bool = False,
+        layout_engine: str | None = "mock",
+    ) -> None:
         manifest_path = root / "web/data/manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["grid"] = {
             "on_demand": True,
             "url_template": "/api/world/chunk/{x}/{y}.ply",
             "world_seed": world_seed,
+            "layout_engine": layout_engine,
+            "uses_assets": uses_assets,
         }
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -865,6 +873,49 @@ class TestHttpContract:
         assert cached_payload == head_payload == b""
         assert not (tmp_path / "web/data/chunk_2_-3.ply").exists()
 
+    def test_on_demand_world_chunk_uses_asset_registry_when_declared(
+        self, tmp_path,
+    ):
+        from pipeline.assets import AssetRegistry
+        from pipeline.mock_assets import seed_registry
+        from pipeline.render_chunk_to_ply import render_single_chunk
+
+        _write_v2_project(tmp_path)
+        (tmp_path / "assets/registry.json").unlink()
+        seed_registry(tmp_path / "assets")
+        self._enable_on_demand_world(tmp_path, uses_assets=True)
+        registry_path = tmp_path / "assets/registry.json"
+        registry_before = registry_path.read_bytes()
+        expected = render_single_chunk(
+            1, 1, world_seed=42, registry=AssetRegistry(tmp_path / "assets"), lod=0,
+        )
+        proxy = render_single_chunk(1, 1, world_seed=42, registry=None, lod=0)
+        assert expected != proxy
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server, "GET", "/api/world/chunk/1/1.ply?lod=0",
+            )
+
+        assert status == 200
+        assert payload == expected
+        assert registry_path.read_bytes() == registry_before
+
+    def test_on_demand_world_declared_assets_missing_registry_fails_closed(
+        self, tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        (tmp_path / "assets/registry.json").unlink()
+        self._enable_on_demand_world(tmp_path, uses_assets=True)
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server, "GET", "/api/world/chunk/1/1.ply?lod=0",
+            )
+
+        assert status == 500
+        assert json.loads(payload)["error"]["code"] == "world_chunk_render_failed"
+
     def test_studio_runtime_enables_valid_world_grid_without_rewriting_manifest(
         self, tmp_path,
     ):
@@ -875,6 +926,8 @@ class TestHttpContract:
             "on_demand": False,
             "url_template": "/api/world/chunk/{x}/{y}.ply",
             "world_seed": 42,
+            "layout_engine": "mock",
+            "uses_assets": False,
         }
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -892,6 +945,32 @@ class TestHttpContract:
         assert runtime_manifest["grid"]["on_demand"] is True
         assert persisted_manifest["grid"]["on_demand"] is False
         assert chunk_payload.startswith(b"ply\n")
+
+    def test_on_demand_world_rejects_non_mock_layout_engine(self, tmp_path):
+        _write_v2_project(tmp_path)
+        self._enable_on_demand_world(tmp_path, layout_engine="glm")
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server, "GET", "/api/world/chunk/0/0.ply?lod=2",
+            )
+
+        assert status == 409
+        assert json.loads(payload)["error"]["code"] == "world_on_demand_unavailable"
+
+    def test_runtime_manifest_forces_invalid_persisted_opt_in_off(self, tmp_path):
+        _write_v2_project(tmp_path)
+        self._enable_on_demand_world(tmp_path, layout_engine="glm")
+        manifest_path = tmp_path / "web/data/manifest.json"
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(server, "GET", "/web/data/manifest.json")
+
+        runtime_manifest = json.loads(payload)
+        persisted_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert status == 200
+        assert runtime_manifest["grid"]["on_demand"] is False
+        assert persisted_manifest["grid"]["on_demand"] is True
 
     @pytest.mark.parametrize(
         "path",
@@ -923,6 +1002,19 @@ class TestHttpContract:
             {"on_demand": "false", "world_seed": 42},
             {"on_demand": True, "world_seed": None},
             {"on_demand": True, "world_seed": True},
+            {
+                "on_demand": False,
+                "url_template": "/api/world/chunk/{x}/{y}.ply",
+                "world_seed": 42,
+                "layout_engine": "mock",
+            },
+            {
+                "on_demand": False,
+                "url_template": "/api/world/chunk/{x}/{y}.ply",
+                "world_seed": 42,
+                "layout_engine": "glm",
+                "uses_assets": False,
+            },
         ],
     )
     def test_on_demand_world_chunk_fails_closed_without_valid_manifest_opt_in(
