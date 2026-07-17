@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 素材；SHA 校验、版本历史、CAS、全类型消费报告 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位，均有 SHA、CAS 与来源证据 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制；本地 adapter 只读，任务仍从 CLI 启动 |
 | GPU 训练真实 3DGS | **external** | 仓库支持标准 PLY 导入，但不内置训练器或训练完成声明 |
 
@@ -67,6 +67,48 @@ make verify PY=.venv/bin/python
 .venv/bin/python -m ruff check pipeline tests
 git diff --check
 ```
+
+## Release 模拟视觉素材包
+
+没有真实素材时，可使用 [Synthetic Mountain Village Canary Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-canary-2026-07-16)
+中的最终视觉包 `synthetic-mountain-village-visual-pack-hybrid-v3-2026-07-17.zip`。它包含 68 个通用山村设计槽位：
+16 个关键视角、8 个环境视角、24 个材质、12 个建筑细节和 8 个道具；每条记录都指向内容寻址 PNG，并携带可核验的来源 manifest。
+
+在 Windows PowerShell 中下载、校验并安装到 Studio/Canary 的默认读取位置：
+
+```powershell
+$releaseDir = ".nantai-studio\release-downloads\hybrid-v3"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download synthetic-village-canary-2026-07-16 `
+  --pattern "synthetic-mountain-village-visual-pack-hybrid-v3-2026-07-17.zip" `
+  --pattern "SHA256SUMS.txt" --dir $releaseDir --clobber
+
+$archive = Join-Path $releaseDir "synthetic-mountain-village-visual-pack-hybrid-v3-2026-07-17.zip"
+$expected = ((Get-Content (Join-Path $releaseDir "SHA256SUMS.txt")) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "visual pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v3" -Force
+```
+
+macOS/Linux 可在下载目录执行 `sha256sum -c SHA256SUMS.txt`，再将 ZIP 解压到
+`.nantai-studio/synthetic-village/hybrid-v3/`。安装后，默认 manifest 应位于
+`.nantai-studio/synthetic-village/hybrid-v3/visual-sources/visual-sources.json`；可用下面的加载器校验数量与 synthetic 标记：
+
+```bash
+python -c "from pathlib import Path; from pipeline.synthetic_village.visual_sources import load_visual_source_manifest; m=load_visual_source_manifest(Path('.nantai-studio/synthetic-village/hybrid-v3/visual-sources/visual-sources.json')); assert m.synthetic and len(m.records) == 68; print('visual pack verified:', len(m.records))"
+python scripts/synthetic_village.py build-canary
+```
+
+ZIP 内的 `default-resources/` 与 `source-evidence/` 是审计快照，不应覆盖仓库中受版本控制的
+`assets/default-resources/`。槽位记录不可原地改写；替换图片时应通过
+`pipeline.synthetic_village.visual_sources.import_visual_source(..., pack_root=<新目录>)` 创建新的 pack revision，
+再将 `visual_pack_root` 显式传给 `run_canary_build`。CLI 的 `import-visual` 固定写默认 pack，已占用槽位会 fail closed。
+
+这些图片全部明确标记为 `synthetic=true`，用途是可替换的设计参考、材质/细节/道具输入和流程演示；
+它们不是同一真实场景的几何一致多视图，不是训练完成的 3DGS，也不能单独证明可在任意坐标 360° 漫游。
+真实重建仍需按[端到端重建手册](docs/manual/reconstruction-setup.md)完成真实采集、COLMAP 位姿和外部 GPU 3DGS 训练。
 
 ## 核心工作流
 
