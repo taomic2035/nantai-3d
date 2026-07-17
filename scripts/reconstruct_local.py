@@ -111,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
                          "视频输入自动开启")
     ap.add_argument("--colmap-gpu", action="store_true",
                     help="COLMAP SIFT 用 GPU (默认 CPU, 无 N 卡/headless 更可靠)")
+    ap.add_argument("--chunk-size-m", type=float, default=None, metavar="METERS",
+                    help=("额外产出可流式空间分块 (XY 网格边长米数)：大场景重建让 viewer "
+                          "只载相机附近的块才漫游得动；本次重建的信任判定自动随分块产物走。"
+                          "缺省不分块"))
     ap.add_argument("--web", type=Path, default=ROOT / "web" / "data" / "recon",
                     help="viewer 数据输出 (默认 web/data/recon)")
     args = ap.parse_args(argv)
@@ -188,11 +192,15 @@ def main(argv: list[str] | None = None) -> int:
          "--out-dir", str(ws)])
 
     print("\n=== 4/4 导入 → viewer 数据 ===")
-    run([py, "-m", "pipeline.reconstruct", "--engine", "import",
-         "--registration", str(ws / "registration.json"),
-         "--splat", str(ws / "splat-input.json"),
-         "--out", str(ws / "out"), "--web", str(args.web),
-         "--dedup-voxel", "0", "--replace-margin", "0", "--photos", str(args.photos)])
+    import_cmd = [py, "-m", "pipeline.reconstruct", "--engine", "import",
+                  "--registration", str(ws / "registration.json"),
+                  "--splat", str(ws / "splat-input.json"),
+                  "--out", str(ws / "out"), "--web", str(args.web),
+                  "--dedup-voxel", "0", "--replace-margin", "0",
+                  "--photos", str(args.photos)]
+    if args.chunk_size_m is not None:
+        import_cmd += ["--chunk-size-m", str(args.chunk_size_m)]
+    run(import_cmd)
 
     print(f"\n[OK] 本机重建完成 → {args.web}")
     print("查看 360° 漫游:  python make.py serve   # http://127.0.0.1:8000/web/studio/")
