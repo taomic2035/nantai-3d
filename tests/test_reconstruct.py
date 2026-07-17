@@ -329,6 +329,78 @@ class TestImportEngine:
         assert manifest["provenance"]["synthetic"] is False
         assert manifest["provenance"]["geometry_usability"] == "preview-only"
 
+    def test_sh_reconstruction_needs_flatten_to_metric_align_through_rotation(
+        self, photos_dir, tmp_path,
+    ):
+        # End-to-end real-data-workflow.md step 3: a REAL 3DGS with higher-order SH,
+        # imported through a NON-identity-rotation Sim3 into an ENU-aligned world.
+        # Without flatten the loader fail-closes on SH+rotation; after flatten the same
+        # import reaches geometry_usability=metric-aligned (flatten drops f_rest only —
+        # it never touches the frame/units/provenance that earn the metric class).
+        from pipeline.alignment import align_registration
+        from pipeline.recon_schema import (
+            CameraIntrinsics,
+            CameraPose,
+            ControlPoint,
+            GeoAnchor,
+            TransformMethod,
+        )
+
+        centres = {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
+                   "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
+        session = CaptureSession(session_id="s0", kind="photo_batch",
+                                 source="photos", images=list(centres))
+        reg = RegistrationResult(
+            schema_version=2, engine="colmap",
+            pose_frame=_arbitrary_source_frame(), world_frame=None,
+            alignment_status=AlignmentStatus.UNALIGNED, sessions=[session],
+            poses=[CameraPose(image=img, session_id="s0", quat_wxyz=[1, 0, 0, 0],
+                              t_xyz=list(xyz),
+                              intrinsics=CameraIntrinsics.from_fov(640, 480))
+                   for img, xyz in centres.items()])
+        aligned = align_registration(
+            reg,
+            [ControlPoint(label=img, image=img, enu_xyz=xyz)
+             for img, xyz in centres.items()],
+            geo_origin=GeoAnchor(lat=26.0, lon=119.0, alt=50.0), max_rms_m=2.0,
+        )
+
+        rng = np.random.default_rng(11)
+        n = 600
+        sh_scene = GaussianScene(rng.uniform(0, 10, (n, 3)), rng.uniform(0, 1, (n, 3)),
+                                 sh_rest=rng.uniform(-0.2, 0.2, (n, 9)))  # degree 1 SH
+        assert sh_scene.sh_degree == 1
+        trainer_frame = CoordinateFrame(
+            frame_id="trainer-local", handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP, units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC, geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.MEASURED, evidence=["trainer export contract"])
+        half = np.radians(15)  # 非恒等旋转 (30° 绕 Z), 模拟真实 sfm-local→ENU 对齐
+        transform = FrameTransform(
+            source_frame="trainer-local", target_frame="world-enu",
+            sim3=Sim3(scale=1.0, quat_wxyz=[np.cos(half), 0.0, 0.0, np.sin(half)],
+                      t_xyz=[0.0, 0.0, 0.0]),
+            method=TransformMethod.EXTERNAL_SIM3, evidence=["control-point fit"])
+
+        def _import(scene):
+            ply = tmp_path / "trained.ply"
+            scene.save_ply(ply, flavor="3dgs")
+            return reconstruct(
+                photos_dir=photos_dir, out_dir=tmp_path / "recon",
+                web_dir=tmp_path / "web", engine="import", registration=aligned,
+                splat_map=[SplatInput(session_id="s0", path=str(ply),
+                                      source_frame=trainer_frame, transform=transform)],
+                dedup_voxel=0.0)
+
+        # 未 flatten: SH + 旋转 → fail-closed 阻断
+        with pytest.raises(ValueError, match="SH"):
+            _import(sh_scene)
+        # flatten 后: 同一导入到达 metric-aligned
+        m = _import(sh_scene.flatten_sh())
+        assert m["coordinate_contract"]["alignment_status"] == "aligned"
+        assert m["provenance"]["synthetic"] is False
+        assert m["provenance"]["geometry_usability"] == "metric-aligned"
+
     def test_flatten_ply_sh_script_unblocks_metric_alignment_of_sh_reconstruction(
         self, tmp_path,
     ):
