@@ -90,6 +90,8 @@
   --splat trained/drone-splat-input.json
 ```
 
+> ⚠️ **高阶 SH + 旋转对齐**：真实对齐的 `sim3` 一般含**非恒等旋转**（上例的 `quat_wxyz:[1,0,0,0]` 只是占位），而真实 3DGS（nerfstudio splatfacto 等）带高阶球谐 `f_rest_*`。其正确旋转本仓库未实现，导入时 canonical loader 对「SH + 旋转」**fail-closed 阻断**（绝不施加错误 SH 旋转）。导入前先扁平化：`python scripts/flatten_ply_sh.py trained/drone.ply`（丢 `f_rest_*`、保 DC 视角无关基色；代价：失去视角相关高光，保留正确基色）。仅 measured/对齐（含旋转）路径需要；preview-only sfm-local 漫游无需。
+
 ## 步骤 4 · 验证是 measured
 
 ```bash
