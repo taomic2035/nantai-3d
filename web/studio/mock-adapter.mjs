@@ -50,6 +50,12 @@ function baseSnapshot() {
     },
     assets: {
       registered: 11, consumed: 11, blocked: 0, registry_revision: 'mock-r2',
+      current_handoff: {
+        id: 'HANDOFF-001',
+        item_count: 11,
+        manifest_sha256: '0'.repeat(64),
+        preview_uri: '/handoff/deliverables/HANDOFF-001/previews/contact-sheet.png',
+      },
       items: [
         ...['house_barn_01', 'house_stone_01', 'house_thatch_01', 'house_wood_01', 'house_wood_02']
           .map((id) => ({ id, kind: 'building', version: 1, validated: true, consumed: true })),

@@ -288,6 +288,50 @@ class TestProjectSnapshot:
             "sources", "align", "reconstruct", "stitch", "assets", "review"
         }
 
+    def test_asset_registry_handoff_requires_exact_id_and_sha_match(self, tmp_path):
+        _write_v2_project(tmp_path)
+        registry = json.loads(
+            (tmp_path / "assets/registry.json").read_text(encoding="utf-8")
+        )
+        tree_sha = registry["assets"]["tree"]["sha256"]
+        deliverable = tmp_path / "handoff/deliverables/HANDOFF-TEST"
+        deliverable.mkdir(parents=True)
+        manifest_path = deliverable / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "handoff_id": "HANDOFF-TEST",
+                    "generator": {"source_handoff": "HANDOFF-DESIGN"},
+                    "items": [
+                        {
+                            "asset_id": "tree",
+                            "kind": "vegetation",
+                            "ply": "tree.ply",
+                            "footprint_m": [3, 3, 5],
+                            "sha256": tree_sha,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assets = build_project_snapshot(tmp_path)["assets"]
+
+        assert assets["current_handoff"] == {
+            "id": "HANDOFF-TEST",
+            "item_count": 1,
+            "manifest_sha256": _sha256(manifest_path),
+            "source_handoff": "HANDOFF-DESIGN",
+        }
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["items"][0]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        assert build_project_snapshot(tmp_path)["assets"]["current_handoff"] is None
+
     def test_missing_reconstruction_payload_fails_closed(self, tmp_path):
         _write_v2_project(tmp_path)
         (tmp_path / "recon/scene_full.ply").unlink()

@@ -192,7 +192,12 @@ function stitchInspector() {
 
 function assetsInspector() {
   const assets = snapshot.assets ?? {};
+  const currentHandoff = assets.current_handoff;
   const validation = commandCapability(serviceCapabilities, 'validate-assets');
+  const canValidate = validation.enabled && Boolean(currentHandoff?.id);
+  const validationReason = currentHandoff?.id
+    ? validation.reason
+    : '当前 Registry 未与唯一 handoff 的完整 ID、SHA-256 和 kind 集合精确匹配。';
   const cards = (assets.items ?? []).map((item) => `<article class="asset-card">
     <b title="${escapeHtml(item.id)}">${escapeHtml(item.id)}</b>
     <span>${escapeHtml(item.kind)} · v${escapeHtml(item.version)}</span>
@@ -205,13 +210,22 @@ function assetsInspector() {
       : '所有已注册素材都有世界消费证据；替换仍需通过版本与哈希门禁。',
     (assets.blocked ?? 0) ? 'warning' : '',
   )}
-  <p class="eyebrow">HANDOFF-001</p>
+  <p class="eyebrow">${escapeHtml(currentHandoff?.id ?? '来源 handoff 未匹配')}</p>
+  ${facts([
+    ['Registry revision', assets.registry_revision ?? 'unknown'],
+    ['Manifest SHA-256', currentHandoff?.manifest_sha256 ?? '无可验证匹配'],
+    ['视觉源 handoff', currentHandoff?.source_handoff ?? '未声明'],
+  ])}
   <div class="asset-grid">${cards}</div>
-  <img class="contact-sheet" src="/handoff/deliverables/HANDOFF-001/previews/contact-sheet.png" alt="HANDOFF-001 十一个模拟高斯素材接触表">
+  ${currentHandoff?.preview_uri
+    ? `<img class="contact-sheet" src="${escapeHtml(currentHandoff.preview_uri)}" alt="${escapeHtml(currentHandoff.id)} 素材接触表">`
+    : ''}
   <div class="inline-actions"><button class="button" type="button" id="validate-assets"
-    ${validation.enabled ? '' : 'disabled'} aria-describedby="validate-assets-reason">验证 11 个素材</button></div>
+    ${canValidate ? '' : 'disabled'} aria-describedby="validate-assets-reason">复验 ${escapeHtml(
+      currentHandoff?.id ?? '当前素材',
+    )} · ${escapeHtml(currentHandoff?.item_count ?? assets.registered ?? 0)} 项</button></div>
   <span class="action-reason" id="validate-assets-reason">${escapeHtml(
-    validation.enabled ? '' : validation.reason,
+    canValidate ? '' : validationReason,
   )}</span>`;
 }
 
@@ -256,9 +270,10 @@ function renderInspector() {
   byId('rescan-sources')?.addEventListener('click', openIngestConfirmation);
   byId('validate-assets')?.addEventListener('click', async () => {
     const validation = commandCapability(serviceCapabilities, 'validate-assets');
-    if (!validation.enabled) return;
+    const currentHandoff = snapshot.assets?.current_handoff;
+    if (!validation.enabled || !currentHandoff?.id) return;
     try {
-      const report = await adapter.validateAssetCandidate({ asset_id: 'HANDOFF-001' });
+      const report = await adapter.validateAssetCandidate({ asset_id: currentHandoff.id });
       announce(`素材验证 ${report.passed ? '通过' : '失败'}`);
     } catch (error) {
       announce(`素材验证不可用：${error.message}`);

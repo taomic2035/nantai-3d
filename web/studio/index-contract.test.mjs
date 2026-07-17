@@ -61,3 +61,9 @@ test('B1 ingest uses an explicit confirmation without command or path fields', (
   assert.match(app, /adapter\.startJob\('ingest', parameters\)/);
   assert.doesNotMatch(app, /engine:\s*adapter\.kind/);
 });
+
+test('asset workspace derives the current handoff from snapshot evidence', () => {
+  assert.match(app, /assets\.current_handoff/);
+  assert.match(app, /currentHandoff\.id/);
+  assert.doesNotMatch(app, /asset_id:\s*['"]HANDOFF-001['"]/);
+});

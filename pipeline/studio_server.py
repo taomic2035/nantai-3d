@@ -738,6 +738,7 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
         "consumed": 0,
         "blocked": 0,
         "registry_revision": "missing-or-invalid",
+        "current_handoff": None,
         "items": [],
     }
     assets_root = root / "assets"
@@ -884,8 +885,89 @@ def _asset_snapshot(root: Path) -> dict[str, Any]:
         "consumed": consumed_count,
         "blocked": len(items) - consumed_count,
         "registry_revision": revision,
+        "current_handoff": _current_asset_handoff(root, items),
         "items": items,
     }
+
+
+def _current_asset_handoff(
+    root: Path, registry_items: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Identify one handoff only from an exact, validated registry identity match."""
+    if not registry_items or any(not item.get("validated") for item in registry_items):
+        return None
+    registry_identity = {
+        item["id"]: (item["sha256"], item["kind"]) for item in registry_items
+    }
+    deliverables_root = root / "handoff/deliverables"
+    if not _is_real_project_subtree(root, deliverables_root):
+        return None
+
+    matches: list[dict[str, Any]] = []
+    for deliverable in sorted(deliverables_root.iterdir(), key=lambda path: path.name):
+        if not _is_real_project_subtree(root, deliverable):
+            continue
+        manifest_path = _resolve_real_evidence_file(
+            root, deliverable / "manifest.json", approved_root="handoff"
+        )
+        if manifest_path is None:
+            continue
+        manifest, error = _read_json(manifest_path)
+        if (
+            error is not None
+            or not manifest
+            or manifest.get("schema_version") != 2
+            or manifest.get("handoff_id") != deliverable.name
+        ):
+            continue
+        manifest_items = manifest.get("items")
+        if not isinstance(manifest_items, list):
+            continue
+        manifest_identity: dict[str, tuple[str, str]] = {}
+        valid_manifest = True
+        for row in manifest_items:
+            if not isinstance(row, dict):
+                valid_manifest = False
+                break
+            asset_id = row.get("asset_id")
+            sha256 = row.get("sha256")
+            kind = row.get("kind")
+            if (
+                not isinstance(asset_id, str)
+                or not asset_id
+                or asset_id in manifest_identity
+                or not isinstance(sha256, str)
+                or len(sha256) != 64
+                or not isinstance(kind, str)
+                or not kind
+            ):
+                valid_manifest = False
+                break
+            manifest_identity[asset_id] = (sha256, kind)
+        if not valid_manifest or manifest_identity != registry_identity:
+            continue
+        match: dict[str, Any] = {
+            "id": deliverable.name,
+            "item_count": len(manifest_identity),
+            "manifest_sha256": _sha256_file(manifest_path),
+        }
+        generator = manifest.get("generator")
+        source_handoff = (
+            generator.get("source_handoff") if isinstance(generator, dict) else None
+        )
+        if isinstance(source_handoff, str) and source_handoff:
+            match["source_handoff"] = source_handoff
+        preview_path = _resolve_real_evidence_file(
+            root,
+            deliverable / "previews/contact-sheet.png",
+            approved_root="handoff",
+        )
+        if preview_path is not None:
+            match["preview_uri"] = (
+                f"/handoff/deliverables/{deliverable.name}/previews/contact-sheet.png"
+            )
+        matches.append(match)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _world_composition_available(root: Path) -> bool:
