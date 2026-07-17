@@ -42,6 +42,70 @@ function diagnosticAudit(overrides = {}) {
   };
 }
 
+function coreAudit(overrides = {}) {
+  const threshold = {
+    min_pixels: 590,
+    min_cameras: 3,
+    comparison: 'pixels-greater-or-equal',
+    frame_pixel_count: 589824,
+    min_frame_fraction: 590 / 589824,
+  };
+  const components = [{
+    object_id: 'stone-bridge-01',
+    instance_id: 17,
+    semantic_class: 'bridge',
+    observations: [{
+      camera_id: 'camera-outer-001',
+      pixels: 800,
+      frame_fraction: 800 / 589824,
+      meets_threshold: true,
+    }],
+    observed_camera_count: 1,
+    qualifying_camera_count: 1,
+    meets_threshold: false,
+    azimuth: {
+      semantics: 'camera-azimuth-around-component-center-not-facade-coverage',
+      center_source: 'village-canary.glb:extras.nv_source_transform',
+      qualifying_camera_azimuths_deg: [30],
+      max_gap_deg: 360,
+    },
+    orientation_coverage: 'unknown',
+    orientation_unknown_reason: 'component orientation is not declared',
+  }];
+  return {
+    schema_version: 'nantai.synthetic-village.coverage-audit.v1',
+    evidence_sha256: 'd'.repeat(64),
+    synthetic: true,
+    verification_level: 'L2',
+    fidelity: 'simplified-pbr-not-render-parity',
+    trust_effect: 'audit-only-no-trust-elevation',
+    render_id: 'e'.repeat(64),
+    build_id: 'f'.repeat(64),
+    journal_sha256: '1'.repeat(64),
+    object_registry_sha256: '2'.repeat(64),
+    threshold,
+    mask_digests: [{
+      camera_id: 'camera-outer-001',
+      path: 'instance/camera-outer-001.png',
+      sha256: '3'.repeat(64),
+    }],
+    instance_ids_crosscheck: {
+      agrees: true,
+      declared_only: [],
+      observed_only: [],
+    },
+    components,
+    summary: {
+      component_count: 1,
+      components_meeting_threshold: 0,
+      components_never_observed: 0,
+      frames_audited: 1,
+    },
+    audit_duration_seconds: 0.25,
+    ...overrides,
+  };
+}
+
 test('missing or malformed audits stay unknown', () => {
   const { coverageAuditViewModel } = subject();
 
@@ -187,4 +251,54 @@ test('exactly three camera centers cannot claim a third singular-value ratio', (
 
   assert.equal(isCoverageAudit(invalid), false);
   assert.equal(isCoverageAudit(valid), true);
+});
+
+test('core pixel-mask report is accepted only as uncalibrated visibility diagnostic', () => {
+  const { coverageAuditViewModel, isCoverageAudit } = subject();
+  const audit = coreAudit();
+
+  assert.equal(isCoverageAudit(audit), true);
+  const model = coverageAuditViewModel(audit);
+  assert.equal(model.status, 'diagnostic-unvalidated');
+  assert.match(model.summary, /渲染可见/);
+  assert.match(model.layers.visibility.label, /0\/1 components/);
+  assert.match(model.layers.visibility.label, />=590 px/);
+  assert.equal(model.layers.geometry.status, 'unknown');
+  assert.match(model.layers.geometry.label, /azimuth is not facade evidence/i);
+  assert.equal(model.layers.sfm.status, 'unknown');
+  assert.equal(model.layers.provenance.status, 'diagnostic-unvalidated');
+});
+
+test('core report crosscheck disagreement is explicit evidence failure', () => {
+  const { coverageAuditViewModel, isCoverageAudit } = subject();
+  const audit = coreAudit({
+    instance_ids_crosscheck: {
+      agrees: false,
+      declared_only: ['camera-outer-001:17'],
+      observed_only: [],
+    },
+  });
+
+  assert.equal(isCoverageAudit(audit), true);
+  const model = coverageAuditViewModel(audit);
+  assert.equal(model.status, 'fail');
+  assert.equal(model.layers.visibility.status, 'fail');
+  assert.match(model.summary, /instance_ids crosscheck failed/i);
+});
+
+test('core report rejects derived observation and summary contradictions', () => {
+  const { isCoverageAudit } = subject();
+  const inconsistentObservation = coreAudit();
+  inconsistentObservation.components[0].observations[0].meets_threshold = false;
+  const inconsistentSummary = coreAudit({
+    summary: {
+      component_count: 99,
+      components_meeting_threshold: 0,
+      components_never_observed: 0,
+      frames_audited: 1,
+    },
+  });
+
+  assert.equal(isCoverageAudit(inconsistentObservation), false);
+  assert.equal(isCoverageAudit(inconsistentSummary), false);
 });
