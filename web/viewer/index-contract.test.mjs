@@ -43,3 +43,14 @@ test('viewer runtime wires environment state without mutating provenance', () =>
   assert.doesNotMatch(main, /reconManifest\.environment\s*=/);
   assert.doesNotMatch(main, /manifest\.environment\s*=/);
 });
+
+test('viewer runtime accepts static spatial reconstruction chunks without world offsets', () => {
+  assert.match(main, /from ['"]\.\/spatial-reconstruction\.mjs['"]/);
+  assert.match(main, /from ['"]\.\/splat-chunks-layer\.mjs['"]/);
+  assert.match(main, /from ['"]\.\/spatial-point-layer\.mjs['"]/);
+  assert.match(main, /kind\s*!==\s*['"]recon-manifest['"][\s\S]*kind\s*!==\s*['"]chunk-manifest['"]/);
+  assert.match(main, /isSpatialChunkManifest\(/);
+  assert.match(main, /createSpatialSplatLayer\(/);
+  assert.match(main, /createSpatialPointLayer\(/);
+  assert.doesNotMatch(main, /world_offset/);
+});

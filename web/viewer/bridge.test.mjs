@@ -62,7 +62,10 @@ test('start announces same-origin ready with honest DC point capabilities', () =
   assert.deepEqual(fake.sent[0].message.payload.capabilities, VIEWER_CAPABILITIES);
   assert.equal(VIEWER_CAPABILITIES.renderer.fidelity, 'dc-point-preview');
   assert.equal(VIEWER_CAPABILITIES.renderer.anisotropic_covariance, false);
-  assert.deepEqual(VIEWER_CAPABILITIES.dynamic_artifact_kinds, ['recon-manifest']);
+  assert.deepEqual(
+    VIEWER_CAPABILITIES.dynamic_artifact_kinds,
+    ['recon-manifest', 'chunk-manifest'],
+  );
   assert.deepEqual(VIEWER_CAPABILITIES.three_dgs_properties.consumed, []);
   assert.ok(VIEWER_CAPABILITIES.commands.includes('resetCamera'));
   assert.ok(VIEWER_CAPABILITIES.commands.includes('setBounds'));
@@ -342,6 +345,45 @@ test('artifactProvenance reads the reconstruction v2 coordinate contract', () =>
       artifact_fidelity: 'full-3dgs',
       viewer_fidelity: 'dc-point-preview',
     },
+  );
+});
+
+test('spatial chunk provenance comes only from its machine-readable source', () => {
+  const { artifactProvenance, createViewerCapabilities } = subject();
+  assert.deepEqual(
+    artifactProvenance({
+      schema_version: 1,
+      kind: 'spatial-chunks',
+      frame: 'untrusted-filename-frame',
+      units: 'meters',
+      geometry_usability: 'metric',
+      source: {
+        frame_id: 'synthetic-local',
+        units: 'arbitrary',
+        geometry_usability: 'preview-proxy',
+      },
+    }, createViewerCapabilities('spark-chunks')),
+    {
+      requested_engine: 'unknown',
+      actual_engine: 'unknown',
+      synthetic: 'unknown',
+      frame: 'synthetic-local',
+      units: 'arbitrary',
+      handedness: 'unknown',
+      geometry_usability: 'preview-proxy',
+      artifact_fidelity: 'unknown',
+      viewer_fidelity: 'full-3dgs',
+    },
+  );
+
+  assert.equal(
+    artifactProvenance({
+      schema_version: 1,
+      kind: 'spatial-chunks',
+      geometry_usability: 'metric',
+      source: {},
+    }).geometry_usability,
+    'unknown',
   );
 });
 

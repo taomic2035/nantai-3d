@@ -2,7 +2,9 @@ export const VIEWER_BRIDGE_CHANNEL = 'nantai-viewer';
 export const VIEWER_BRIDGE_SCHEMA_VERSION = 1;
 
 const BASE_CAPABILITIES = Object.freeze({
-  dynamic_artifact_kinds: Object.freeze(['recon-manifest']),
+  dynamic_artifact_kinds: Object.freeze([
+    'recon-manifest', 'chunk-manifest',
+  ]),
   layers: Object.freeze(['world', 'reconstruction']),
   camera_reset: true,
   commands: Object.freeze([
@@ -111,34 +113,47 @@ function renderedArtifactFidelity(manifest, provenance, capabilities) {
 
 /** Normalize machine-readable artifact provenance without inferring trust. */
 export function artifactProvenance(manifest = {}, capabilities = VIEWER_CAPABILITIES) {
-  const provenance = manifest.provenance ?? {};
-  const coordinateContract = manifest.coordinate_contract ?? {};
-  const worldFrame = (
-    manifest.world_frame
-    ?? provenance.world_frame
-    ?? coordinateContract.target_frame
-    ?? {}
-  );
+  const spatialChunks = manifest.kind === 'spatial-chunks';
+  const provenance = spatialChunks ? (manifest.source ?? {}) : (manifest.provenance ?? {});
+  const coordinateContract = spatialChunks ? {} : (manifest.coordinate_contract ?? {});
+  const worldFrame = spatialChunks
+    ? {
+      frame_id: provenance.frame_id,
+      units: provenance.units,
+      handedness: provenance.handedness,
+    }
+    : (
+      manifest.world_frame
+      ?? provenance.world_frame
+      ?? coordinateContract.target_frame
+      ?? {}
+    );
   return {
     requested_engine: unknown(
-      manifest.requested_engine
+      (spatialChunks ? undefined : manifest.requested_engine)
       ?? provenance.requested_engine
       ?? provenance.requested_reconstruction_engine,
     ),
     actual_engine: unknown(
-      manifest.actual_engine
+      (spatialChunks ? undefined : manifest.actual_engine)
       ?? provenance.actual_engine
       ?? provenance.actual_reconstruction_engine
-      ?? manifest.engine,
+      ?? (spatialChunks ? undefined : manifest.engine),
     ),
-    synthetic: unknown(manifest.synthetic ?? provenance.synthetic),
+    synthetic: unknown((spatialChunks ? undefined : manifest.synthetic) ?? provenance.synthetic),
     frame: unknown(
-      worldFrame.name ?? worldFrame.frame ?? worldFrame.frame_id ?? manifest.frame,
+      worldFrame.name
+      ?? worldFrame.frame
+      ?? worldFrame.frame_id
+      ?? (spatialChunks ? undefined : manifest.frame),
     ),
-    units: unknown(worldFrame.units ?? manifest.units),
-    handedness: unknown(worldFrame.handedness ?? manifest.handedness),
+    units: unknown(worldFrame.units ?? (spatialChunks ? undefined : manifest.units)),
+    handedness: unknown(
+      worldFrame.handedness ?? (spatialChunks ? undefined : manifest.handedness),
+    ),
     geometry_usability: unknown(
-      manifest.geometry_usability ?? provenance.geometry_usability,
+      (spatialChunks ? undefined : manifest.geometry_usability)
+      ?? provenance.geometry_usability,
     ),
     artifact_fidelity: unknown(
       renderedArtifactFidelity(manifest, provenance, capabilities),

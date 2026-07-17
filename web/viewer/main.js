@@ -31,6 +31,9 @@ import {
   createSplatLayer,
   isSupersededLoadResult,
 } from './splat-layer.mjs';
+import { isSpatialChunkManifest } from './spatial-reconstruction.mjs';
+import { createSpatialSplatLayer } from './splat-chunks-layer.mjs';
+import { createSpatialPointLayer } from './spatial-point-layer.mjs';
 import {
   clampPitch,
   directionFromYawPitchThree,
@@ -82,6 +85,10 @@ let reconLoading = false;
 let worldVisible = true;
 let viewerBridge = null;
 let splatLayer = null;
+let spatialSplatLayer = null;
+let spatialPointLayer = null;
+let spatialReconUpdating = false;
+let spatialSplatFallbackReason = null;
 let viewerCapabilities = createViewerCapabilities();
 const clock = new THREE.Clock();
 const keys = { w: false, a: false, s: false, d: false, q: false, e: false, shift: false };
@@ -204,6 +211,11 @@ function makePointsMesh(parsed) {
   });
 
   return new THREE.Points(geo, mat);
+}
+
+function disposePointMesh(mesh) {
+  mesh?.geometry?.dispose();
+  mesh?.material?.dispose();
 }
 
 // ============ Chunk 索引 (从 manifest 建立 chunk_id → 元数据) ============
@@ -575,6 +587,20 @@ function init() {
   document.getElementById('canvas-container').appendChild(renderer.domElement);
 
   splatLayer = createSplatLayer({ scene, renderer });
+  spatialSplatLayer = createSpatialSplatLayer({ scene, renderer });
+  spatialPointLayer = createSpatialPointLayer({
+    scene,
+    loadPointMesh: async ({ key, lod, url }) => {
+      const parsed = await loadPlyUrl(url, `reconstruction chunk ${key} LOD${lod}`);
+      // Chunks are already in one absolute source frame. Apply only the
+      // global ENU-to-Three axis mapping; never add a per-chunk translation.
+      transformPositionsInPlace(parsed.positions);
+      const mesh = makePointsMesh(parsed);
+      mesh.name = `recon_chunk_${key}_lod${lod}`;
+      return mesh;
+    },
+    disposeMesh: disposePointMesh,
+  });
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -632,6 +658,8 @@ function onKeyDown(e) {
     reconVisible = !reconVisible;
     if (reconMesh) reconMesh.visible = reconVisible;
     splatLayer?.setVisible(reconVisible);
+    spatialSplatLayer?.setVisible(reconVisible);
+    spatialPointLayer?.setVisible(reconVisible);
   }
   // F 键切换 自由/环绕 视角 (忽略长按重复与修饰键组合)
   if (k === 'f' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -794,7 +822,11 @@ async function loadReconManifest(url = reconManifestUrl) {
     const absoluteUrl = new URL(url, window.location.href).href;
     const res = await fetch(absoluteUrl);
     if (!res.ok) return false;
-    reconManifest = await res.json();
+    const artifact = await res.json();
+    if (artifact?.kind === 'spatial-chunks' && !isSpatialChunkManifest(artifact)) {
+      return false;
+    }
+    reconManifest = artifact;
     reconManifestUrl = absoluteUrl;
     const count = reconManifest.gaussian_count ?? reconManifest.point_count ?? 'unknown';
     console.log(`重建 artifact: ${count} points, ` +
@@ -806,8 +838,43 @@ async function loadReconManifest(url = reconManifestUrl) {
   }
 }
 
+function activeReconstructionState() {
+  const spatialSpark = spatialSplatLayer?.getState();
+  if (spatialSpark?.mode === 'spark-chunks') return spatialSpark;
+  const spatialPoints = spatialPointLayer?.getState();
+  if (spatialPoints?.mode === 'dc-point-chunks') {
+    return {
+      ...spatialPoints,
+      spark_fallback_reason: spatialSplatFallbackReason,
+    };
+  }
+  return splatLayer?.getState() ?? null;
+}
+
+async function updateSpatialRecon() {
+  if (spatialReconUpdating || !isSpatialChunkManifest(reconManifest)) return;
+  const activeLayer = activeReconstructionState()?.mode === 'spark-chunks'
+    ? spatialSplatLayer : spatialPointLayer;
+  if (!activeLayer) return;
+  spatialReconUpdating = true;
+  try {
+    await activeLayer.update({
+      cameraWorld: threeToWorld([
+        camera.position.x, camera.position.y, camera.position.z,
+      ]),
+      lodOverride: qualityOverride,
+    });
+  } finally {
+    spatialReconUpdating = false;
+  }
+}
+
 async function updateRecon() {
   if (!reconManifest || reconLoading) return;
+  if (isSpatialChunkManifest(reconManifest)) {
+    await updateSpatialRecon();
+    return;
+  }
   if (splatLayer?.getState().mode === 'spark') return;
   let tier;
   if (qualityOverride !== null) {
@@ -856,8 +923,46 @@ function disposeReconPointPreview() {
   reconLodLoaded = -1;
 }
 
+function disposeSpatialReconstruction() {
+  spatialSplatLayer?.dispose();
+  spatialPointLayer?.dispose();
+  spatialReconUpdating = false;
+  spatialSplatFallbackReason = null;
+}
+
 async function loadReconstructionLayer() {
   disposeReconPointPreview();
+  if (isSpatialChunkManifest(reconManifest)) {
+    splatLayer?.dispose();
+    spatialPointLayer?.dispose();
+    const sparkResult = await spatialSplatLayer.load({
+      manifest: reconManifest,
+      manifestUrl: reconManifestUrl,
+      visible: reconVisible,
+    });
+    if (isSupersededLoadResult(sparkResult)) return sparkResult;
+
+    let result = sparkResult;
+    if (sparkResult.mode !== 'spark-chunks') {
+      spatialSplatFallbackReason = sparkResult.reason;
+      const pointResult = spatialPointLayer.load({
+        manifest: reconManifest,
+        manifestUrl: reconManifestUrl,
+        visible: reconVisible,
+      });
+      result = {
+        ...pointResult,
+        spark_fallback_reason: spatialSplatFallbackReason,
+      };
+      console.warn(`${spatialSplatFallbackReason}; 使用分块 DC point preview`);
+    }
+    viewerCapabilities = createViewerCapabilities(result.mode);
+    viewerBridge?.announceCapabilities();
+    await updateSpatialRecon();
+    return result;
+  }
+
+  disposeSpatialReconstruction();
   const result = await splatLayer.load({
     manifest: reconManifest ?? {},
     manifestUrl: reconManifestUrl,
@@ -900,10 +1005,14 @@ function updateHUD() {
   const reconEl = document.getElementById('hud-recon');
   if (reconEl) {
     const count = reconManifest?.gaussian_count ?? reconManifest?.point_count ?? 'unknown';
-    const splatState = splatLayer?.getState();
+    const rendererState = activeReconstructionState();
+    const spatial = isSpatialChunkManifest(reconManifest);
     reconEl.textContent = !reconManifest ? '无'
       : !reconVisible ? '已隐藏 (R 显示)'
-      : splatState?.mode === 'spark'
+      : spatial
+        ? `${rendererState?.active ?? 0}/${reconManifest.chunks.length} chunks`
+          + ` (${viewerCapabilities.renderer.label})`
+      : rendererState?.mode === 'spark'
         ? `${count} splats (${viewerCapabilities.renderer.label})`
       : reconLodLoaded >= 0
         ? `LOD${reconLodLoaded} (${count} points, ${viewerCapabilities.renderer.label})`
@@ -912,10 +1021,17 @@ function updateHUD() {
 
   const rendererReason = document.getElementById('hud-renderer-reason');
   if (rendererReason) {
-    const splatState = splatLayer?.getState();
-    rendererReason.textContent = splatState?.mode === 'spark'
+    const rendererState = activeReconstructionState();
+    rendererReason.textContent = (
+      rendererState?.mode === 'spark'
+      || rendererState?.mode === 'spark-chunks'
+    )
       ? 'full_3dgs 已由 Spark 初始化'
-      : (splatState?.reason ?? 'DC point preview');
+      : (
+        rendererState?.spark_fallback_reason
+        ?? rendererState?.reason
+        ?? 'DC point preview'
+      );
   }
 
   const title = document.getElementById('hud-title');
@@ -1086,7 +1202,7 @@ async function main() {
     return {
       renderer: viewerCapabilities.renderer,
       capabilities: viewerCapabilities,
-      renderer_status: splatLayer?.getState() ?? null,
+      renderer_status: activeReconstructionState(),
       lod: qualityOverride ?? 'auto',
       layers: { world: worldVisible, reconstruction: reconVisible },
       chunk_size_m: chunkSizeM,
@@ -1140,6 +1256,8 @@ async function main() {
           reconVisible = nextVisible;
           if (reconMesh) reconMesh.visible = reconVisible;
           splatLayer?.setVisible(reconVisible);
+          spatialSplatLayer?.setVisible(reconVisible);
+          spatialPointLayer?.setVisible(reconVisible);
         } else {
           throw new Error(`未知图层: ${layer}`);
         }
@@ -1160,7 +1278,12 @@ async function main() {
         return readState();
       },
       loadArtifact: async ({ kind = 'recon-manifest', url, manifest: artifact }) => {
-        if (kind !== 'recon-manifest') throw new Error(`不支持的 artifact kind: ${kind}`);
+        if (
+          kind !== 'recon-manifest'
+          && kind !== 'chunk-manifest'
+        ) {
+          throw new Error(`不支持的 artifact kind: ${kind}`);
+        }
         if (url) {
           const absoluteUrl = new URL(url, window.location.href);
           if (absoluteUrl.origin !== window.location.origin) {
@@ -1169,8 +1292,18 @@ async function main() {
           if (!await loadReconManifest(absoluteUrl.href)) {
             throw new Error(`无法加载 artifact: ${absoluteUrl.href}`);
           }
+          if (kind === 'chunk-manifest' && !isSpatialChunkManifest(reconManifest)) {
+            throw new Error('chunk-manifest 必须是有效的 spatial-chunks manifest');
+          }
         } else if (artifact) {
+          if (
+            (kind === 'chunk-manifest' || artifact.kind === 'spatial-chunks')
+            && !isSpatialChunkManifest(artifact)
+          ) {
+            throw new Error('无效的 spatial-chunks manifest');
+          }
           reconManifest = artifact;
+          reconManifestUrl = window.location.href;
         } else {
           throw new Error('loadArtifact 需要 url 或 manifest');
         }
