@@ -179,14 +179,45 @@ class TestHandoffValidation:
             "units": "meters",
             "axes": "local-z-up",
         }
-        manifest["generator"] = {"name": "test", "version": "1"}
+        manifest["generator"] = {"name": "gpt-image2", "version": "3.1"}
         manifest["items"][0]["sha256"] = _sha256(d / "a1.ply")
         manifest_path.write_text(json.dumps(manifest))
         r = validate(d, feedback_dir=tmp_path / "fb",
                      do_register=True, assets_dir=tmp_path / "assets")
         assert r["registered"] == ["a1"]
         reg = AssetRegistry(tmp_path / "assets")
-        assert reg.doc.assets["a1"].origin == "gpt-mock"
+        # origin 须诚实反映来源: --register 只落 v2 正式交付 (schema_version<2 fatal),
+        # 是真实交付素材 → "real", 绝不该谎称占位 "gpt-mock"。
+        assert reg.doc.assets["a1"].origin == "real"
+
+    def test_real_deliverable_replacing_mock_bumps_version_and_origin(
+        self, tmp_path, asset_ply,
+    ):
+        """真实素材落地实景 (即将发生): GPT 的 v2 交付替换既有 gpt-mock 占位 →
+        版本升 + origin 转 real (不谎称 mock)。版本升是 chunk_content_key 缓存失效 /
+        重烘拾取新素材的依据。"""
+        assets_dir = tmp_path / "assets"
+        reg0 = AssetRegistry(assets_dir)
+        reg0.register("a1", asset_ply, kind="building",
+                      origin="gpt-mock", footprint_m=[8, 6, 5])
+        assert reg0.doc.assets["a1"].version == 1
+        assert reg0.doc.assets["a1"].origin == "gpt-mock"
+
+        d = tmp_path / "deliv"
+        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}])  # 不同几何 → 内容变化
+        manifest = json.loads((d / "manifest.json").read_text())
+        manifest["schema_version"] = 2
+        manifest["coordinate_system"] = {"units": "meters", "axes": "local-z-up"}
+        manifest["generator"] = {"name": "gpt-image2", "version": "3.1"}
+        manifest["items"][0]["sha256"] = _sha256(d / "a1.ply")
+        (d / "manifest.json").write_text(json.dumps(manifest))
+
+        r = validate(d, feedback_dir=tmp_path / "fb",
+                     do_register=True, assets_dir=assets_dir)
+        assert r["registered"] == ["a1"]
+        e = AssetRegistry(assets_dir).doc.assets["a1"]
+        assert e.origin == "real", "真实交付替换 mock 后 origin 须转 real"
+        assert e.version == 2, "内容变化须升版 (chunk_content_key/重烘据此拾取新素材)"
 
     def test_v2_manifest_requires_sha_for_every_item(self, tmp_path):
         d = tmp_path / "deliv"

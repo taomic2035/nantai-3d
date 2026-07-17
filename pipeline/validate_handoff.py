@@ -257,9 +257,14 @@ def validate(deliverable_dir: str | Path,
     if all_pass and do_register and manifest:
         from pipeline.assets import AssetRegistry
         reg = AssetRegistry(assets_dir)
+        # origin 诚实反映来源: --register 只落 schema_version>=2 的正式交付 (v1 在上方
+        # fatal, v2 必带 generator + sha256 整体校验), 是真实交付素材 → "real", 而非占位
+        # "gpt-mock" (后者是 seed_registry 的合成占位路径)。generator 详细身份保存在
+        # deliverable manifest / 回执里可审计; origin 枚举 (synthetic/gpt-mock/real) 只记来源类别。
+        origin = "real" if manifest.generator is not None else "gpt-mock"
         for item in manifest.items:
             reg.register(item.asset_id, deliverable_dir / item.ply,
-                         kind=item.kind, origin="gpt-mock",
+                         kind=item.kind, origin=origin,
                          footprint_m=item.footprint_m)
             registered.append(item.asset_id)
         logger.info(f"已导入 {len(registered)} 个素材到 {assets_dir}/")
