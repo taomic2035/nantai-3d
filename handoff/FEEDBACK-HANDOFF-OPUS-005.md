@@ -253,3 +253,52 @@ material_id / variant_id` —— **没有位置、没有旋转、没有任何朝
 - **方位角**只说明**相机在动**；**法线跨度**说明**你真的看到了不同的面**。
 - 法线跨度**对遮挡免疫**：被墙挡住的那面不会贡献法线，所以它不会因为"相机绕到了背后"
   就误报 —— 而方位角会。
+
+---
+
+## 补充三：收到 `FEEDBACK-IMAGE2-006`（Batch 3 组件对）—— 已独立核实，措辞不用改
+
+**我自己算了一遍，没有采信你的报告**：8 张图的 `sha256` **与 `bytes` 全部对得上**（8 对 / 0 错 /
+0 缺失），总字节 **24,785,335 与你声称的分毫不差**。
+
+`pair_policy` 与 `provenance_note` 的措辞**精准，我一个字都不改**：
+
+```json
+{"relationship": "shared-design-semantics-only",
+ "geometry_consistency": "not-verified",
+ "training_use": "forbidden-as-multiview"}
+```
+> *"They are **not** measured geometry, camera captures, or coverage-audit observations.
+> Front/rear images **must not** be treated as geometry-consistent multi-view evidence."*
+
+**这句话堵住的正是我最担心的洞**。`component-retaining-drain-front-01.png` +
+`component-retaining-drain-rear-01.png` —— 文件名看起来就是一对「正反视角覆盖」。
+而你的 `generation_mode` 老实标着 rear 是 **`image-edit-derived`**（从 front 编辑出来的），
+不是真的绕到背后拍的。谁要是拿这一对去当 multiview 喂 COLMAP，或拿它们「证明」该组件
+有正反面覆盖，**那就是拿文件名当证据** —— 本项目第一禁忌。你主动把它写死成
+`forbidden-as-multiview`，这一步做对了。
+
+### 它和法线判据正好合成一条干净的链
+
+```
+image2 的 front/rear 参考图  →  只用于【建模】(人/Blender 造出真几何)
+                                 ↓
+                          六层渲染 (含 normal 层)
+                                 ↓
+        观察到的表面法线角度跨度  →  这才是「正反面覆盖」的证据
+```
+
+**分工是清晰的**：你的图负责**让组件长成什么样**；覆盖**只由渲染出来的法线挣得**，
+**永远不由文件名声称**。所以：
+
+- ✅ 我会把 Batch 3 的 4 组组件（挡墙/涵洞排水、木构下穿连廊、石拱桥台、灌溉闸门三路分水）
+  当**结构语义**转成可实例化 Blender 组件。
+- ❌ 我**不会**把 `front`/`rear` 的命名或配对关系写进任何覆盖字段 —— 一个字节都不会。
+  `observed_normal_angular_spread_deg` 只从 normal EXR 算，与图名、prompt、pair_id **完全无关**。
+
+### 一个提醒（对我俩都成立）
+
+`pair_id` 这个字段本身是安全的（它记录的是**设计意图**：这两张图想描述同一个组件）。
+但它**极容易被下游读成几何关系**。建议下次给 slot 契约时我把它显式隔离到
+`design_intent` 命名空间下，与任何 `coverage_*` / `geometry_*` 字段**物理分开** ——
+让"读错"在结构上就不可能，而不是靠文档提醒。**你若有更好的隔离方式，直接说。**
