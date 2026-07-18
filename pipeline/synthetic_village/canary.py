@@ -47,6 +47,17 @@ from pipeline.synthetic_village.defaults import (
     load_default_recipe,
     load_default_visual_slots,
 )
+from pipeline.synthetic_village.glb_material_audit import (
+    ExpectedGlbMaterial,
+    audit_textured_glb,
+)
+from pipeline.synthetic_village.material_bundle import (
+    ALGORITHM_ID,
+    MATERIAL_BUNDLE_MANIFEST,
+    DerivedMaterialBundle,
+    MaterialBundleError,
+    load_material_bundle,
+)
 from pipeline.synthetic_village.scene_plan import (
     SEMANTIC_ORDER,
     ScenePlan,
@@ -67,6 +78,8 @@ from pipeline.synthetic_village.visual_sources import (
 ROOT = Path(__file__).resolve().parents[2]
 BUILD_REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v1"
 BUILD_REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v1"
+TEXTURED_BUILD_REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v2"
+TEXTURED_BUILD_REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v2"
 RENDER_REQUEST_SCHEMA = "nantai.synthetic-village.render-frame-request.v1"
 RENDER_FRAME_REPORT_SCHEMA = "nantai.synthetic-village.render-frame-report.v1"
 RENDER_JOURNAL_SCHEMA = "nantai.synthetic-village.render-journal.v1"
@@ -111,6 +124,13 @@ VisualImplementation = Literal[
     "environment-element-v1",
     "prop-element-v1",
     "not-instantiated-v1",
+]
+UvPolicy = Literal[
+    "world-xy",
+    "dominant-axis-box",
+    "roof-slope",
+    "object-long-axis",
+    "leaf-card",
 ]
 
 MATERIAL_FAMILIES = (
@@ -373,6 +393,100 @@ class VisualSlotRegistryEntry(FrozenModel):
         return self
 
 
+class MaterialInputRecord(FrozenModel):
+    slot_id: str = Field(pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$")
+    source_sha256: Sha256
+    base_color_sha256: Sha256
+    normal_sha256: Sha256
+    orm_sha256: Sha256
+    width: Literal[1024] = 1024
+    height: Literal[1024] = 1024
+    uv_policy: UvPolicy
+    nominal_tile_m: float = Field(gt=0, allow_inf_nan=False)
+    normal_strength: float = Field(gt=0, allow_inf_nan=False)
+    synthetic: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _distinct_map_roles(self) -> MaterialInputRecord:
+        if len(
+            {
+                self.base_color_sha256,
+                self.normal_sha256,
+                self.orm_sha256,
+            },
+        ) != 3:
+            raise ValueError("material input map roles must use three distinct hashes")
+        return self
+
+
+class TexturedVisualSlotRegistryEntry(FrozenModel):
+    slot_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    category: SlotCategory
+    usage_mode: Literal[
+        "design-reference-only",
+        "procedural-placeholder-v1",
+        "runtime-material-source-v1",
+    ]
+    source_sha256: Sha256 | None
+    reference_status: VisualReferenceStatus
+    canary_critical: bool
+    build_status: VisualBuildStatus
+    implementation: Literal[
+        "composition-reference-v1",
+        "derived-pbr-material-v1",
+        "geometry-detail-v1",
+        "environment-element-v1",
+        "prop-element-v1",
+        "not-instantiated-v1",
+    ]
+    component_tag: str | None = Field(
+        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
+    evidence_ids: tuple[EvidenceId, ...]
+
+    @model_validator(mode="after")
+    def _validate_textured_provenance(self) -> TexturedVisualSlotRegistryEntry:
+        sourced = self.usage_mode in {
+            "design-reference-only",
+            "runtime-material-source-v1",
+        }
+        if sourced != (self.source_sha256 is not None):
+            raise ValueError("sourced textured slots require exactly one verified SHA-256")
+        expected_reference = "verified-design-reference" if sourced else "no-reference"
+        if self.reference_status != expected_reference:
+            raise ValueError("textured visual reference status does not match provenance")
+        if self.evidence_ids != tuple(sorted(set(self.evidence_ids))):
+            raise ValueError("textured visual evidence IDs must be unique and sorted")
+        if self.build_status == "declared-not-instantiated":
+            if (
+                self.implementation != "not-instantiated-v1"
+                or self.component_tag is not None
+                or self.evidence_ids
+            ):
+                raise ValueError("unbuilt textured slots cannot claim implementation evidence")
+        else:
+            implementation_by_category = {
+                "key-view": "composition-reference-v1",
+                "material": "derived-pbr-material-v1",
+                "detail": "geometry-detail-v1",
+                "environment": "environment-element-v1",
+                "prop": "prop-element-v1",
+            }
+            if (
+                self.implementation != implementation_by_category[self.category]
+                or self.component_tag is None
+                or not self.evidence_ids
+            ):
+                raise ValueError("built textured slot evidence does not match its category")
+        if self.category == "material" and (
+            self.usage_mode != "runtime-material-source-v1"
+            or self.build_status != "instantiated"
+            or self.implementation != "derived-pbr-material-v1"
+        ):
+            raise ValueError("textured material slots require runtime derived PBR sources")
+        return self
+
+
 class ArtifactRequest(FrozenModel):
     name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*\.(?:blend|glb|png)$")
     kind: Literal["blender-scene", "gltf-binary", "rgb-preview"]
@@ -386,6 +500,68 @@ ARTIFACT_REQUESTS = (
     ArtifactRequest(name="village-canary.blend", kind="blender-scene"),
     ArtifactRequest(name="village-canary.glb", kind="gltf-binary"),
 )
+
+
+def _validate_common_request_contract(request) -> None:
+    expected_scene_sha = hashlib.sha256(
+        canonical_scene_plan_bytes(request.scene_plan),
+    ).hexdigest()
+    expected_camera_sha = hashlib.sha256(
+        canonical_camera_plan_bytes(request.camera_plan),
+    ).hexdigest()
+    if request.source_hashes.scene_plan_sha256 != expected_scene_sha:
+        raise ValueError("scene plan SHA-256 is not canonical")
+    if request.source_hashes.camera_plan_sha256 != expected_camera_sha:
+        raise ValueError("camera plan SHA-256 is not canonical")
+    expected_semantics = _semantic_registry()
+    if request.semantic_registry != expected_semantics:
+        raise ValueError("semantic registry is not the stable v1 taxonomy")
+    expected_materials = _material_registry(request.scene_plan)
+    if request.material_registry != expected_materials:
+        raise ValueError("material registry is not the stable v1 mapping")
+    if request.object_registry != _object_registry(
+        request.scene_plan,
+        expected_semantics,
+        expected_materials,
+    ):
+        raise ValueError("object registry does not match the canonical scene")
+    if request.auxiliary_registry != AUXILIARY_REGISTRY:
+        raise ValueError("auxiliary registry is not the stable v1 mapping")
+    if request.requested_artifacts != ARTIFACT_REQUESTS:
+        raise ValueError("requested artifact registry is not the exact v1 set")
+
+
+def _validate_visual_build_evidence(
+    request,
+    *,
+    implementation_by_category: dict[str, str],
+) -> None:
+    slot_ids = tuple(item.slot_id for item in request.visual_slot_registry)
+    expected_categories = _expected_visual_slot_categories()
+    if slot_ids != tuple(sorted(expected_categories)):
+        raise ValueError("visual slot registry must be the exact sorted v1 taxonomy")
+    for item in request.visual_slot_registry:
+        if item.category != expected_categories[item.slot_id]:
+            raise ValueError("visual slot category does not match the stable v1 taxonomy")
+        component_tag, evidence_ids = _visual_slot_build_evidence(
+            item.slot_id,
+            request.scene_plan,
+        )
+        if component_tag is not None and not evidence_ids:
+            raise ValueError("visual slot component has no canonical scene evidence")
+        expected_status = "instantiated" if evidence_ids else "declared-not-instantiated"
+        expected_implementation = (
+            implementation_by_category[item.category]
+            if evidence_ids
+            else "not-instantiated-v1"
+        )
+        if (
+            item.component_tag != component_tag
+            or item.evidence_ids != evidence_ids
+            or item.build_status != expected_status
+            or item.implementation != expected_implementation
+        ):
+            raise ValueError("visual slot build evidence does not match the canonical scene")
 
 
 class BuildRequest(FrozenModel):
@@ -414,63 +590,17 @@ class BuildRequest(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_registry_and_content_addresses(self) -> BuildRequest:
-        expected_scene_sha = hashlib.sha256(
-            canonical_scene_plan_bytes(self.scene_plan),
-        ).hexdigest()
-        expected_camera_sha = hashlib.sha256(
-            canonical_camera_plan_bytes(self.camera_plan),
-        ).hexdigest()
-        if self.source_hashes.scene_plan_sha256 != expected_scene_sha:
-            raise ValueError("scene plan SHA-256 is not canonical")
-        if self.source_hashes.camera_plan_sha256 != expected_camera_sha:
-            raise ValueError("camera plan SHA-256 is not canonical")
-        expected_semantics = _semantic_registry()
-        if self.semantic_registry != expected_semantics:
-            raise ValueError("semantic registry is not the stable v1 taxonomy")
-        expected_materials = _material_registry(self.scene_plan)
-        if self.material_registry != expected_materials:
-            raise ValueError("material registry is not the stable v1 mapping")
-        if self.object_registry != _object_registry(
-            self.scene_plan,
-            expected_semantics,
-            expected_materials,
-        ):
-            raise ValueError("object registry does not match the canonical scene")
-        if self.auxiliary_registry != AUXILIARY_REGISTRY:
-            raise ValueError("auxiliary registry is not the stable v1 mapping")
-        if self.requested_artifacts != ARTIFACT_REQUESTS:
-            raise ValueError("requested artifact registry is not the exact v1 set")
-        slot_ids = tuple(item.slot_id for item in self.visual_slot_registry)
-        expected_categories = _expected_visual_slot_categories()
-        if slot_ids != tuple(sorted(expected_categories)):
-            raise ValueError("visual slot registry must be the exact sorted v1 taxonomy")
-        implementation_by_category = {
-            "key-view": "composition-reference-v1",
-            "material": "pbr-material-v1",
-            "detail": "geometry-detail-v1",
-            "environment": "environment-element-v1",
-            "prop": "prop-element-v1",
-        }
-        for item in self.visual_slot_registry:
-            if item.category != expected_categories[item.slot_id]:
-                raise ValueError("visual slot category does not match the stable v1 taxonomy")
-            component_tag, evidence_ids = _visual_slot_build_evidence(
-                item.slot_id,
-                self.scene_plan,
-            )
-            if component_tag is not None and not evidence_ids:
-                raise ValueError("visual slot component has no canonical scene evidence")
-            expected_status = "instantiated" if evidence_ids else "declared-not-instantiated"
-            expected_implementation = (
-                implementation_by_category[item.category] if evidence_ids else "not-instantiated-v1"
-            )
-            if (
-                item.component_tag != component_tag
-                or item.evidence_ids != evidence_ids
-                or item.build_status != expected_status
-                or item.implementation != expected_implementation
-            ):
-                raise ValueError("visual slot build evidence does not match the canonical scene")
+        _validate_common_request_contract(self)
+        _validate_visual_build_evidence(
+            self,
+            implementation_by_category={
+                "key-view": "composition-reference-v1",
+                "material": "pbr-material-v1",
+                "detail": "geometry-detail-v1",
+                "environment": "environment-element-v1",
+                "prop": "prop-element-v1",
+            },
+        )
         material_slots = [item for item in self.visual_slot_registry if item.category == "material"]
         if len(material_slots) != 24:
             raise ValueError("all 24 visual material slots require build records")
@@ -479,6 +609,72 @@ class BuildRequest(FrozenModel):
         ).hexdigest()
         if self.build_id != expected_build_id:
             raise ValueError("build_id does not match the canonical request inputs")
+        return self
+
+
+class TexturedBuildRequest(FrozenModel):
+    schema_version: Literal[
+        "nantai.synthetic-village.blender-build-request.v2"
+    ] = TEXTURED_BUILD_REQUEST_SCHEMA
+    build_id: Sha256
+    synthetic: Literal[True] = True
+    verification_level: Literal["L2"] = "L2"
+    scene_plan: ScenePlan
+    camera_plan: CameraPlan
+    source_hashes: SourceHashes
+    tool_identity: ToolIdentity
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(
+        min_length=3,
+        max_length=3,
+    )
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    material_registry: tuple[MaterialRegistryEntry, ...] = Field(min_length=11, max_length=11)
+    visual_slot_registry: tuple[TexturedVisualSlotRegistryEntry, ...] = Field(
+        min_length=68,
+        max_length=68,
+    )
+    requested_artifacts: tuple[ArtifactRequest, ...] = Field(min_length=6, max_length=6)
+    material_bundle_manifest_sha256: Sha256
+    material_bundle_id: Sha256
+    material_input_registry: tuple[MaterialInputRecord, ...] = Field(
+        min_length=24,
+        max_length=24,
+    )
+
+    @model_validator(mode="after")
+    def _validate_textured_request(self) -> TexturedBuildRequest:
+        _validate_common_request_contract(self)
+        _validate_visual_build_evidence(
+            self,
+            implementation_by_category={
+                "key-view": "composition-reference-v1",
+                "material": "derived-pbr-material-v1",
+                "detail": "geometry-detail-v1",
+                "environment": "environment-element-v1",
+                "prop": "prop-element-v1",
+            },
+        )
+        input_ids = tuple(item.slot_id for item in self.material_input_registry)
+        if (
+            input_ids != tuple(sorted(VISUAL_MATERIAL_SLOT_IDS))
+            or len(set(input_ids)) != 24
+        ):
+            raise ValueError("material input registry must be the exact sorted 24-slot set")
+        inputs = {item.slot_id: item for item in self.material_input_registry}
+        material_slots = [
+            item for item in self.visual_slot_registry if item.category == "material"
+        ]
+        if len(material_slots) != 24 or any(
+            item.source_sha256 != inputs[item.slot_id].source_sha256
+            for item in material_slots
+        ):
+            raise ValueError("textured visual slots do not match material input sources")
+        expected_build_id = hashlib.sha256(
+            canonical_textured_build_request_bytes(self, exclude_build_id=True),
+        ).hexdigest()
+        if self.build_id != expected_build_id:
+            raise ValueError("build_id does not match the canonical textured request inputs")
         return self
 
 
@@ -697,6 +893,93 @@ class BuildReport(FrozenModel):
         artifact_contract = tuple((item.name, item.kind) for item in ARTIFACT_REQUESTS)
         if tuple((item.name, item.kind) for item in self.artifacts) != artifact_contract:
             raise ValueError("report artifact registry is not the exact sorted v1 set")
+        return self
+
+
+class TexturedBuildReport(FrozenModel):
+    schema_version: Literal[
+        "nantai.synthetic-village.blender-build-report.v2"
+    ] = TEXTURED_BUILD_REPORT_SCHEMA
+    build_id: Sha256
+    synthetic: Literal[True] = True
+    verification_level: Literal["L2"] = "L2"
+    fidelity: Literal[
+        "synthetic-derived-pbr-not-render-parity"
+    ] = "synthetic-derived-pbr-not-render-parity"
+    tool_identity: ToolIdentity
+    source_hashes: SourceHashes
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(
+        min_length=3,
+        max_length=3,
+    )
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    material_registry: tuple[MaterialRegistryEntry, ...] = Field(min_length=11, max_length=11)
+    visual_slot_registry: tuple[TexturedVisualSlotRegistryEntry, ...] = Field(
+        min_length=68,
+        max_length=68,
+    )
+    material_bundle_manifest_sha256: Sha256
+    material_bundle_id: Sha256
+    material_input_registry: tuple[MaterialInputRecord, ...] = Field(
+        min_length=24,
+        max_length=24,
+    )
+    camera_registry: tuple[CameraRegistryEntry, ...] = Field(min_length=24, max_length=24)
+    preview_registry: tuple[PreviewCameraRecord, ...] = Field(min_length=4, max_length=4)
+    counts: BuildCounts
+    validation: BuildValidation
+    determinism: BuildDeterminism
+    artifacts: tuple[ArtifactRecord, ...] = Field(min_length=6, max_length=6)
+
+    @model_validator(mode="after")
+    def _validate_complete_textured_report(self) -> TexturedBuildReport:
+        if self.semantic_registry != _semantic_registry():
+            raise ValueError("textured report semantic registry is not stable")
+        if self.auxiliary_registry != AUXILIARY_REGISTRY:
+            raise ValueError("textured report auxiliary registry is not stable")
+        expected_materials = tuple(
+            MaterialRegistryEntry(material_family=family, material_id=index)
+            for index, family in enumerate(MATERIAL_FAMILIES, start=1)
+        )
+        if self.material_registry != expected_materials:
+            raise ValueError("textured report material registry is not stable")
+        instance_ids = tuple(item.instance_id for item in self.object_registry)
+        object_ids = tuple(item.object_id for item in self.object_registry)
+        if instance_ids != tuple(range(1, 127)) or len(set(object_ids)) != 126:
+            raise ValueError("textured report object registry is incomplete")
+        if any(item.variant_id != _prop_variant(item.object_id) for item in self.object_registry):
+            raise ValueError("textured report prop variants are not stable")
+        slot_ids = tuple(item.slot_id for item in self.visual_slot_registry)
+        if slot_ids != tuple(sorted(slot_ids)) or len(set(slot_ids)) != 68:
+            raise ValueError("textured report visual slots are incomplete")
+        material_slots = [
+            item for item in self.visual_slot_registry if item.category == "material"
+        ]
+        if len(material_slots) != 24:
+            raise ValueError("textured report requires all 24 visual materials")
+        input_ids = tuple(item.slot_id for item in self.material_input_registry)
+        if input_ids != tuple(sorted(VISUAL_MATERIAL_SLOT_IDS)):
+            raise ValueError("textured report material inputs are incomplete")
+        if any(
+            item.source_sha256
+            != self.material_input_registry[input_ids.index(item.slot_id)].source_sha256
+            for item in material_slots
+        ):
+            raise ValueError("textured report material source identities disagree")
+        if len({item.camera_id for item in self.camera_registry}) != 24:
+            raise ValueError("textured report camera registry IDs must be unique")
+        expected_previews = (
+            "preview-bridge.png",
+            "preview-central.png",
+            "preview-outer.png",
+            "preview-upper.png",
+        )
+        if tuple(item.artifact_name for item in self.preview_registry) != expected_previews:
+            raise ValueError("textured report preview registry is not stable")
+        artifact_contract = tuple((item.name, item.kind) for item in ARTIFACT_REQUESTS)
+        if tuple((item.name, item.kind) for item in self.artifacts) != artifact_contract:
+            raise ValueError("textured report artifact registry is not exact")
         return self
 
 
@@ -979,7 +1262,20 @@ def canonical_build_request_bytes(
     return _canonical_json_bytes(request.model_dump(mode="json", exclude=exclude))
 
 
+def canonical_textured_build_request_bytes(
+    request: TexturedBuildRequest,
+    *,
+    exclude_build_id: bool = False,
+) -> bytes:
+    exclude = {"build_id"} if exclude_build_id else None
+    return _canonical_json_bytes(request.model_dump(mode="json", exclude=exclude))
+
+
 def canonical_build_report_bytes(report: BuildReport) -> bytes:
+    return _canonical_json_bytes(report.model_dump(mode="json", by_alias=True))
+
+
+def canonical_textured_build_report_bytes(report: TexturedBuildReport) -> bytes:
     return _canonical_json_bytes(report.model_dump(mode="json", by_alias=True))
 
 
@@ -1167,6 +1463,44 @@ def load_build_report(path: Path) -> BuildReport:
         raise CanaryBuildError(f"build report validation failed: {exc}") from exc
 
 
+def load_textured_build_report(path: Path) -> TexturedBuildReport:
+    """Load a bounded canonical schema-v2 report without trusting its filename."""
+
+    path = Path(path).absolute()
+    try:
+        parent = _require_real_directory(path.parent, label="textured build report directory")
+        if _is_linklike(path) or path.parent != parent:
+            raise CanaryBuildError("textured build report path is redirected")
+        before = path.stat()
+        if before.st_size <= 0 or before.st_size > MAX_BUILD_REPORT_BYTES:
+            raise CanaryBuildError("textured build report size is invalid")
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if _stat_signature(before) != _stat_signature(opened):
+                raise CanaryBuildError("textured build report changed before bounded read")
+            raw = stream.read(MAX_BUILD_REPORT_BYTES + 1)
+            after_open = os.fstat(stream.fileno())
+        after = path.stat()
+        if (
+            len(raw) != before.st_size
+            or len(raw) > MAX_BUILD_REPORT_BYTES
+            or _stat_signature(opened) != _stat_signature(after_open)
+            or _stat_signature(before) != _stat_signature(after)
+        ):
+            raise CanaryBuildError("textured build report changed during bounded read")
+        parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+        if _contains_private_path(parsed):
+            raise CanaryBuildError("textured build report contains a private path or username")
+        report = TexturedBuildReport.model_validate_json(raw)
+        if raw != canonical_textured_build_report_bytes(report):
+            raise CanaryBuildError("textured build report must be canonical JSON")
+        return report
+    except CanaryBuildError:
+        raise
+    except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
+        raise CanaryBuildError(f"textured build report validation failed: {exc}") from exc
+
+
 def _sha256_stable_artifact(path: Path) -> tuple[str, int]:
     if _is_linklike(path) or not path.is_file():
         raise CanaryBuildError(f"artifact is missing or redirected: {path.name}")
@@ -1231,6 +1565,54 @@ def verify_build_report(
         digest, size = _sha256_stable_artifact(artifact_path)
         if digest != artifact.sha256 or size != artifact.size_bytes:
             raise CanaryBuildError(f"artifact digest or size mismatch: {artifact.name}")
+
+
+def verify_textured_build_report(
+    report: TexturedBuildReport,
+    *,
+    request: TexturedBuildRequest,
+    staging: Path,
+) -> None:
+    """Verify schema-v2 report identity and every staged artifact byte."""
+
+    staging = _require_real_directory(staging, label="textured build staging directory")
+    for label in (
+        "build_id",
+        "tool_identity",
+        "source_hashes",
+        "object_registry",
+        "auxiliary_registry",
+        "semantic_registry",
+        "material_registry",
+        "visual_slot_registry",
+        "material_bundle_manifest_sha256",
+        "material_bundle_id",
+        "material_input_registry",
+    ):
+        if getattr(report, label) != getattr(request, label):
+            raise CanaryBuildError(
+                f"textured build report {label.replace('_', ' ')} was tampered",
+            )
+    for reported, requested in zip(
+        report.camera_registry,
+        request.camera_plan.cameras,
+        strict=True,
+    ):
+        if (
+            reported.camera_id != requested.camera_id
+            or reported.blender_camera_name != f"nv__{requested.camera_id}"
+            or reported.requested_c2w_blender != requested.c2w_blender
+        ):
+            raise CanaryBuildError("textured build camera registry was tampered")
+    for artifact in report.artifacts:
+        artifact_path = staging / artifact.name
+        if artifact_path.parent != staging:
+            raise CanaryBuildError("textured artifact escapes the build staging directory")
+        digest, size = _sha256_stable_artifact(artifact_path)
+        if digest != artifact.sha256 or size != artifact.size_bytes:
+            raise CanaryBuildError(
+                f"textured artifact digest or size mismatch: {artifact.name}",
+            )
 
 
 def _semantic_registry() -> tuple[SemanticRegistryEntry, ...]:
@@ -1432,6 +1814,97 @@ def _visual_slot_registry(
     return tuple(rows), catalog, manifest
 
 
+def _material_input_registry(
+    bundle: DerivedMaterialBundle,
+) -> tuple[MaterialInputRecord, ...]:
+    return tuple(
+        MaterialInputRecord(
+            slot_id=record.slot_id,
+            source_sha256=record.source_sha256,
+            base_color_sha256=record.base_color.sha256,
+            normal_sha256=record.normal.sha256,
+            orm_sha256=record.orm.sha256,
+            width=record.base_color.width,
+            height=record.base_color.height,
+            uv_policy=record.uv_policy,
+            nominal_tile_m=record.nominal_tile_m,
+            normal_strength=record.normal_strength,
+        )
+        for record in bundle.records
+    )
+
+
+def _textured_visual_slot_registry(
+    repo_root: Path,
+    visual_pack_root: Path,
+    material_inputs: tuple[MaterialInputRecord, ...],
+    scene_plan: ScenePlan,
+):
+    catalog = load_default_visual_slots(
+        repo_root
+        / "assets/default-resources/synthetic-mountain-village-visual-slots-v1.json",
+    )
+    manifest = load_visual_source_manifest(visual_pack_root / VISUAL_MANIFEST_NAME)
+    sources = {record.slot_id: record.sha256 for record in manifest.records}
+    catalog_ids = {slot.slot_id for slot in catalog.slots}
+    if not set(sources).issubset(catalog_ids):
+        raise CanaryBuildError("visual source manifest references an unknown textured slot")
+    input_by_slot = {row.slot_id: row for row in material_inputs}
+    implementation_by_category = {
+        "key-view": "composition-reference-v1",
+        "material": "derived-pbr-material-v1",
+        "detail": "geometry-detail-v1",
+        "environment": "environment-element-v1",
+        "prop": "prop-element-v1",
+    }
+    rows = []
+    for slot in sorted(catalog.slots, key=lambda item: item.slot_id):
+        component_tag, evidence_ids = _visual_slot_build_evidence(
+            slot.slot_id,
+            scene_plan,
+        )
+        if slot.category == "material":
+            material_input = input_by_slot.get(slot.slot_id)
+            if material_input is None:
+                raise CanaryBuildError("material bundle is missing a visual material slot")
+            usage_mode = "runtime-material-source-v1"
+            source_sha256 = material_input.source_sha256
+            reference_status = "verified-design-reference"
+        else:
+            source_sha256 = sources.get(slot.slot_id)
+            usage_mode = (
+                "design-reference-only"
+                if source_sha256 is not None
+                else "procedural-placeholder-v1"
+            )
+            reference_status = (
+                "verified-design-reference"
+                if source_sha256 is not None
+                else "no-reference"
+            )
+        build_status = "instantiated" if evidence_ids else "declared-not-instantiated"
+        implementation = (
+            implementation_by_category[slot.category]
+            if evidence_ids
+            else "not-instantiated-v1"
+        )
+        rows.append(
+            TexturedVisualSlotRegistryEntry(
+                slot_id=slot.slot_id,
+                category=slot.category,
+                usage_mode=usage_mode,
+                source_sha256=source_sha256,
+                reference_status=reference_status,
+                canary_critical=slot.canary_critical,
+                build_status=build_status,
+                implementation=implementation,
+                component_tag=component_tag,
+                evidence_ids=evidence_ids,
+            ),
+        )
+    return tuple(rows), catalog, manifest
+
+
 def _tool_identity(receipt: ToolInstallReceipt, *, runtime_build_hash: str) -> ToolIdentity:
     return ToolIdentity(
         tool_id="blender",
@@ -1516,10 +1989,117 @@ def build_canary_request(
     return BuildRequest(build_id=build_id, **payload)
 
 
+def build_textured_canary_request(
+    *,
+    repo_root: Path = ROOT,
+    material_bundle_root: Path,
+    scene_plan: ScenePlan | None = None,
+    camera_plan: CameraPlan | None = None,
+    visual_pack_root: Path | None = None,
+) -> TexturedBuildRequest:
+    """Build schema v2 only from a fully verified material bundle and source pack."""
+
+    repo_root = Path(repo_root).absolute()
+    active_scene = scene_plan or build_scene_plan()
+    active_camera = camera_plan or build_camera_plan(active_scene)
+    recipe_path = repo_root / "assets/default-resources/synthetic-mountain-village-v1.json"
+    lock_path = repo_root / "tools.lock.json"
+    builder_script = repo_root / "scripts/blender/build_synthetic_village.py"
+    pack_root = Path(
+        visual_pack_root
+        or repo_root / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources",
+    ).absolute()
+    bundle_root = Path(material_bundle_root).absolute()
+    try:
+        bundle = load_material_bundle(bundle_root)
+    except MaterialBundleError as exc:
+        raise CanaryBuildError(f"material bundle cannot be trusted: {exc}") from exc
+    inputs = _material_input_registry(bundle)
+    recipe = load_default_recipe(recipe_path)
+    if active_scene.recipe_id != recipe.recipe_id:
+        raise CanaryBuildError("scene plan does not reference the tracked recipe")
+    slots, catalog, manifest = _textured_visual_slot_registry(
+        repo_root,
+        pack_root,
+        inputs,
+        active_scene,
+    )
+    source_manifest_sha256 = hashlib.sha256(
+        canonical_manifest_bytes(manifest),
+    ).hexdigest()
+    if (
+        bundle.source_pack_id != manifest.pack_id
+        or bundle.source_manifest_sha256 != source_manifest_sha256
+    ):
+        raise CanaryBuildError("material bundle does not match the selected visual source pack")
+    sources = {
+        record.slot_id: record.sha256
+        for record in manifest.records
+        if record.category == "material"
+    }
+    if sources != {row.slot_id: row.source_sha256 for row in inputs}:
+        raise CanaryBuildError("material bundle source hashes do not match the visual source pack")
+    lock = load_tool_lock(lock_path)
+    receipt = verify_locked_install(
+        lock.blender,
+        repo_root / Path(lock.blender.install_dir),
+    )
+    semantics = _semantic_registry()
+    materials = _material_registry(active_scene)
+    objects = _object_registry(active_scene, semantics, materials)
+    source_hashes = SourceHashes(
+        default_recipe_sha256=hashlib.sha256(canonical_json_bytes(recipe)).hexdigest(),
+        visual_catalog_sha256=hashlib.sha256(canonical_json_bytes(catalog)).hexdigest(),
+        visual_source_manifest_sha256=source_manifest_sha256,
+        scene_plan_sha256=hashlib.sha256(
+            canonical_scene_plan_bytes(active_scene),
+        ).hexdigest(),
+        camera_plan_sha256=hashlib.sha256(
+            canonical_camera_plan_bytes(active_camera),
+        ).hexdigest(),
+        tool_lock_sha256=_sha256_file(lock_path),
+        builder_script_sha256=_sha256_file(builder_script),
+    )
+    bundle_manifest_sha256 = _sha256_file(
+        bundle_root / MATERIAL_BUNDLE_MANIFEST,
+    )
+    payload = {
+        "schema_version": TEXTURED_BUILD_REQUEST_SCHEMA,
+        "synthetic": True,
+        "verification_level": "L2",
+        "scene_plan": active_scene,
+        "camera_plan": active_camera,
+        "source_hashes": source_hashes,
+        "tool_identity": _tool_identity(
+            receipt,
+            runtime_build_hash=lock.blender.runtime_build_hash,
+        ),
+        "object_registry": objects,
+        "auxiliary_registry": AUXILIARY_REGISTRY,
+        "semantic_registry": semantics,
+        "material_registry": materials,
+        "visual_slot_registry": slots,
+        "requested_artifacts": ARTIFACT_REQUESTS,
+        "material_bundle_manifest_sha256": bundle_manifest_sha256,
+        "material_bundle_id": bundle.bundle_id,
+        "material_input_registry": inputs,
+    }
+    build_id = hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+    return TexturedBuildRequest(build_id=build_id, **payload)
+
+
 @dataclass(frozen=True)
 class CanaryBuildResult:
     final_directory: Path
     report: BuildReport
+    stdout: str
+    stderr: str
+
+
+@dataclass(frozen=True)
+class TexturedCanaryBuildResult:
+    final_directory: Path
+    report: TexturedBuildReport
     stdout: str
     stderr: str
 
@@ -1641,6 +2221,138 @@ def _verify_snapshots_unchanged(snapshots: tuple[_FileSnapshot, ...]) -> None:
         actual = _snapshot_regular_file(expected.path)
         if actual.signature != expected.signature or actual.sha256 != expected.sha256:
             raise CanaryBuildError(f"canary input changed during build: {expected.path.name}")
+
+
+def _collect_material_bundle_snapshots(
+    material_bundle_root: Path,
+) -> tuple[_FileSnapshot, ...]:
+    try:
+        bundle = load_material_bundle(material_bundle_root)
+    except MaterialBundleError as exc:
+        raise CanaryBuildError(f"material bundle cannot be snapshotted: {exc}") from exc
+    paths = {
+        material_bundle_root / MATERIAL_BUNDLE_MANIFEST,
+        *(
+            material_bundle_root / descriptor.object_path
+            for record in bundle.records
+            for descriptor in (record.base_color, record.normal, record.orm)
+        ),
+    }
+    return tuple(_snapshot_regular_file(path) for path in sorted(paths))
+
+
+def _copy_material_snapshot(
+    *,
+    source: Path,
+    destination: Path,
+    expected_sha256: str,
+) -> _FileSnapshot:
+    source_snapshot = _snapshot_regular_file(source)
+    if source_snapshot.sha256 != expected_sha256:
+        raise CanaryBuildError("material source does not match its requested SHA-256")
+    digest = hashlib.sha256()
+    try:
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            opened = os.fstat(input_stream.fileno())
+            if _stat_signature(opened) != source_snapshot.signature:
+                raise CanaryBuildError("material source changed before snapshot copy")
+            for chunk in iter(lambda: input_stream.read(1 << 20), b""):
+                digest.update(chunk)
+                output_stream.write(chunk)
+            if _stat_signature(os.fstat(input_stream.fileno())) != source_snapshot.signature:
+                raise CanaryBuildError("material source changed during snapshot copy")
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+    except CanaryBuildError:
+        destination.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        destination.unlink(missing_ok=True)
+        raise CanaryBuildError(f"material snapshot copy failed: {exc}") from exc
+    if digest.hexdigest() != expected_sha256:
+        destination.unlink(missing_ok=True)
+        raise CanaryBuildError("material snapshot copy digest is invalid")
+    if _snapshot_regular_file(source) != source_snapshot:
+        destination.unlink(missing_ok=True)
+        raise CanaryBuildError("material source changed after snapshot copy")
+    copied = _snapshot_regular_file(destination)
+    if copied.sha256 != expected_sha256:
+        destination.unlink(missing_ok=True)
+        raise CanaryBuildError("material snapshot bytes changed after copy")
+    return copied
+
+
+def snapshot_material_inputs(
+    *,
+    request: TexturedBuildRequest,
+    material_bundle_root: Path,
+    invocation_root: Path,
+) -> tuple[_FileSnapshot, ...]:
+    """Copy exact bundle objects into a path-minimal, immutable invocation snapshot."""
+
+    material_bundle_root = _require_real_directory(
+        material_bundle_root,
+        label="material bundle root",
+    )
+    invocation_root = _require_real_directory(
+        invocation_root,
+        label="material invocation root",
+    )
+    try:
+        bundle = load_material_bundle(material_bundle_root)
+    except MaterialBundleError as exc:
+        raise CanaryBuildError(f"material bundle cannot be trusted for snapshot: {exc}") from exc
+    manifest_snapshot = _snapshot_regular_file(
+        material_bundle_root / MATERIAL_BUNDLE_MANIFEST,
+    )
+    if (
+        bundle.bundle_id != request.material_bundle_id
+        or manifest_snapshot.sha256 != request.material_bundle_manifest_sha256
+        or _material_input_registry(bundle) != request.material_input_registry
+    ):
+        raise CanaryBuildError("material bundle does not match the textured request")
+    material_root = invocation_root / "material-inputs"
+    if material_root.exists() or _is_linklike(material_root):
+        raise CanaryBuildError("material invocation snapshot must start absent")
+    material_root.mkdir(exist_ok=False)
+    _flush_directory(invocation_root)
+    _require_real_directory(material_root, label="material invocation snapshot")
+    descriptors = {
+        descriptor.sha256: descriptor
+        for record in bundle.records
+        for descriptor in (record.base_color, record.normal, record.orm)
+    }
+    requested_hashes = {
+        digest
+        for row in request.material_input_registry
+        for digest in (
+            row.base_color_sha256,
+            row.normal_sha256,
+            row.orm_sha256,
+        )
+    }
+    if requested_hashes != set(descriptors):
+        raise CanaryBuildError("textured request map set does not match the material bundle")
+    try:
+        snapshots = tuple(
+            _copy_material_snapshot(
+                source=material_bundle_root / descriptors[digest].object_path,
+                destination=material_root / f"{digest}.png",
+                expected_sha256=digest,
+            )
+            for digest in sorted(requested_hashes)
+        )
+        _flush_directory(material_root)
+        _verify_snapshots_unchanged(snapshots)
+        return snapshots
+    except (CanaryBuildError, OSError):
+        if material_root.is_dir() and not _is_linklike(material_root):
+            shutil.rmtree(material_root, ignore_errors=True)
+            try:
+                _flush_directory(invocation_root)
+            except OSError:
+                pass
+        raise
 
 
 def _write_new_file(path: Path, payload: bytes) -> None:
@@ -1779,6 +2491,68 @@ def _run_blender_process(
         raise
     except OSError as exc:
         raise CanaryBuildError(f"cannot launch verified Blender runtime: {exc}") from exc
+
+
+def _run_textured_blender_process(
+    *,
+    repo_root: Path,
+    executable: Path,
+    request_path: Path,
+    material_root: Path,
+    staging: Path,
+    invocation_root: Path,
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    argv = [
+        str(executable),
+        "--background",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--python-exit-code",
+        "17",
+        "--python",
+        "scripts/blender/build_synthetic_village.py",
+        "--",
+        "--request",
+        str(request_path),
+        "--materials",
+        str(material_root),
+        "--staging",
+        str(staging),
+    ]
+    environment = _minimum_blender_environment(invocation_root)
+    try:
+        timeout_error = None
+        with (
+            _BoundedPipeCapture("stdout") as stdout,
+            _BoundedPipeCapture("stderr") as stderr,
+        ):
+            try:
+                completed = subprocess.run(
+                    argv,
+                    check=False,
+                    shell=False,
+                    cwd=str(repo_root),
+                    env=environment,
+                    timeout=timeout_seconds,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout.writer,
+                    stderr=stderr.writer,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timeout_error = exc
+                completed = None
+        if timeout_error is not None:
+            raise CanaryBuildError(
+                f"Blender textured build exceeded the {timeout_seconds}-second timeout",
+            ) from timeout_error
+        if completed is None:
+            raise CanaryBuildError("Blender textured process returned no status")
+        return completed.returncode, stdout.text(), stderr.text()
+    except CanaryBuildError:
+        raise
+    except OSError as exc:
+        raise CanaryBuildError(f"cannot launch verified textured Blender runtime: {exc}") from exc
 
 
 def _validate_staging_entries(staging: Path) -> None:
@@ -1951,6 +2725,184 @@ def run_canary_build(
         raise CanaryBuildError(f"canary build lock is unavailable: {exc}") from exc
     except (OSError, ValueError, ValidationError) as exc:
         raise CanaryBuildError(f"canary build failed safely: {exc}") from exc
+    finally:
+        if staging is not None:
+            _cleanup_owned_directory(
+                staging,
+                work_root=active_work_root,
+                expected_name=staging.name,
+            )
+        if invocation_root is not None:
+            _cleanup_owned_directory(
+                invocation_root,
+                work_root=active_work_root,
+                expected_name=invocation_root.name,
+            )
+
+
+def _expected_glb_materials(
+    request: TexturedBuildRequest,
+) -> tuple[ExpectedGlbMaterial, ...]:
+    return tuple(
+        ExpectedGlbMaterial(
+            slot_id=row.slot_id,
+            source_sha256=row.source_sha256,
+            bundle_id=request.material_bundle_id,
+            algorithm_id=ALGORITHM_ID,
+        )
+        for row in request.material_input_registry
+    )
+
+
+def _audit_staged_textured_glb(
+    *,
+    request: TexturedBuildRequest,
+    report: TexturedBuildReport,
+    staging: Path,
+) -> None:
+    glb_record = next(
+        (record for record in report.artifacts if record.name == "village-canary.glb"),
+        None,
+    )
+    if glb_record is None:
+        raise CanaryBuildError("textured build report has no GLB artifact")
+    try:
+        audit = audit_textured_glb(
+            staging / glb_record.name,
+            _expected_glb_materials(request),
+        )
+    except ValueError as exc:
+        raise CanaryBuildError(f"textured GLB material audit failed: {exc}") from exc
+    if audit.glb_sha256 != glb_record.sha256:
+        raise CanaryBuildError("textured GLB audit digest does not match the build report")
+
+
+def run_textured_canary_build(
+    *,
+    material_bundle_root: Path,
+    repo_root: Path = ROOT,
+    visual_pack_root: Path | None = None,
+    work_root: Path | None = None,
+    timeout_seconds: int = DEFAULT_BUILD_TIMEOUT_SECONDS,
+) -> TexturedCanaryBuildResult:
+    """Build and publish a schema-v2 canary only after byte-level material audit."""
+
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or not 1 <= timeout_seconds <= 24 * 60 * 60
+    ):
+        raise CanaryBuildError("build timeout must be an integer from 1 to 86400 seconds")
+    repo_root = _require_real_directory(Path(repo_root).absolute(), label="repository root")
+    pack_root = _require_real_directory(
+        Path(
+            visual_pack_root
+            or repo_root / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources",
+        ).absolute(),
+        label="visual source pack",
+    )
+    bundle_root = _require_real_directory(
+        Path(material_bundle_root).absolute(),
+        label="material bundle root",
+    )
+    active_work_root = _prepare_private_work_root(repo_root, work_root)
+    invocation_root: Path | None = None
+    staging: Path | None = None
+    try:
+        with ProjectFileLock(active_work_root / ".textured-canary-build.lock", role="writer"):
+            snapshots = _collect_input_snapshots(repo_root, pack_root)
+            bundle_snapshots = _collect_material_bundle_snapshots(bundle_root)
+            scene = build_scene_plan()
+            request = build_textured_canary_request(
+                repo_root=repo_root,
+                scene_plan=scene,
+                camera_plan=build_camera_plan(scene),
+                visual_pack_root=pack_root,
+                material_bundle_root=bundle_root,
+            )
+            _verify_snapshots_unchanged((*snapshots, *bundle_snapshots))
+            final_directory = active_work_root / request.build_id
+            if final_directory.exists() or _is_linklike(final_directory):
+                raise CanaryBuildError(
+                    f"canary destination already exists: {final_directory.name}",
+                )
+
+            nonce = uuid.uuid4().hex
+            invocation_root = active_work_root / f".invocation-{nonce}"
+            staging = active_work_root / f".staging-{nonce}"
+            invocation_root.mkdir(exist_ok=False)
+            _flush_directory(active_work_root)
+            _require_real_directory(invocation_root, label="textured invocation directory")
+            if staging.exists() or _is_linklike(staging):
+                raise CanaryBuildError("textured staging destination must start absent")
+            request_path = invocation_root / "build-request.json"
+            _write_new_file(
+                request_path,
+                canonical_textured_build_request_bytes(request),
+            )
+            request_snapshot = _snapshot_regular_file(request_path)
+            material_snapshots = snapshot_material_inputs(
+                request=request,
+                material_bundle_root=bundle_root,
+                invocation_root=invocation_root,
+            )
+            material_root = invocation_root / "material-inputs"
+
+            returncode, stdout, stderr = _run_textured_blender_process(
+                repo_root=repo_root,
+                executable=repo_root / "third/blender/blender.exe",
+                request_path=request_path,
+                material_root=material_root,
+                staging=staging,
+                invocation_root=invocation_root,
+                timeout_seconds=timeout_seconds,
+            )
+            immutable_inputs = (
+                *snapshots,
+                *bundle_snapshots,
+                request_snapshot,
+                *material_snapshots,
+            )
+            _verify_snapshots_unchanged(immutable_inputs)
+            if returncode != 0:
+                raise CanaryBuildError(
+                    f"Blender textured build failed with exit code {returncode}",
+                )
+            report_path = staging / "build-report.json"
+            if not report_path.is_file() or _is_linklike(report_path):
+                raise CanaryBuildError(
+                    "Blender textured build completed without a trusted report",
+                )
+            report = load_textured_build_report(report_path)
+            verify_textured_build_report(report, request=request, staging=staging)
+            _audit_staged_textured_glb(
+                request=request,
+                report=report,
+                staging=staging,
+            )
+            _validate_staging_entries(staging)
+            _durably_flush_verified_staging(staging)
+            _verify_snapshots_unchanged(immutable_inputs)
+            verify_textured_build_report(report, request=request, staging=staging)
+            _audit_staged_textured_glb(
+                request=request,
+                report=report,
+                staging=staging,
+            )
+            _move_directory_noreplace(staging, final_directory)
+            staging = None
+            return TexturedCanaryBuildResult(
+                final_directory=final_directory,
+                report=report,
+                stdout=stdout,
+                stderr=stderr,
+            )
+    except CanaryBuildError:
+        raise
+    except JobContractError as exc:
+        raise CanaryBuildError(f"textured canary lock is unavailable: {exc}") from exc
+    except (OSError, ValueError, ValidationError) as exc:
+        raise CanaryBuildError(f"textured canary build failed safely: {exc}") from exc
     finally:
         if staging is not None:
             _cleanup_owned_directory(

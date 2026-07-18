@@ -29,12 +29,18 @@ from pipeline.synthetic_village.canary import (
     CanaryBuildError,
     PreviewCameraRecord,
     SemanticRegistryEntry,
+    TexturedBuildReport,
+    TexturedBuildRequest,
     VisualSlotRegistryEntry,
     build_canary_request,
+    build_textured_canary_request,
     canonical_build_report_bytes,
     canonical_build_request_bytes,
+    canonical_textured_build_report_bytes,
+    canonical_textured_build_request_bytes,
     load_build_report,
     run_canary_build,
+    run_textured_canary_build,
     verify_build_report,
 )
 from pipeline.synthetic_village.defaults import (
@@ -48,6 +54,7 @@ from pipeline.synthetic_village.visual_sources import (
     canonical_manifest_bytes,
     load_visual_source_manifest,
 )
+from tests.synthetic_material_fixtures import publish_material_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 VISUAL_PACK_ROOT = ROOT / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources"
@@ -217,6 +224,171 @@ def test_build_request_is_frozen_complete_and_content_addressed() -> None:
         request.build_id = "0" * 64
 
 
+@pytest.fixture(scope="module")
+def textured_material_inputs(
+    _hermetic_canary_inputs,
+    tmp_path_factory: pytest.TempPathFactory,
+):
+    del _hermetic_canary_inputs
+    return publish_material_fixture(tmp_path_factory.mktemp("textured-canary-materials"))
+
+
+def test_textured_request_binds_exact_material_bundle_without_private_paths(
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+
+    assert request.schema_version == "nantai.synthetic-village.blender-build-request.v2"
+    assert len(request.material_input_registry) == 24
+    assert all(
+        row.usage_mode == "runtime-material-source-v1"
+        and row.implementation == "derived-pbr-material-v1"
+        for row in request.visual_slot_registry
+        if row.category == "material"
+    )
+    raw = canonical_textured_build_request_bytes(request)
+    assert b".nantai-studio" not in raw
+    assert str(Path.home()).encode() not in raw
+    assert (
+        hashlib.sha256(
+            canonical_textured_build_request_bytes(
+                request,
+                exclude_build_id=True,
+            ),
+        ).hexdigest()
+        == request.build_id
+    )
+
+
+def _rebuild_textured_payload(
+    request: TexturedBuildRequest,
+    **updates,
+) -> dict:
+    candidate = request.model_copy(update=updates)
+    payload = dict(candidate.__dict__)
+    payload["build_id"] = hashlib.sha256(
+        canonical_textured_build_request_bytes(
+            candidate,
+            exclude_build_id=True,
+        ),
+    ).hexdigest()
+    return payload
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing-record", "duplicate-slot", "duplicate-map", "v1-material-usage"],
+)
+def test_textured_request_rejects_incomplete_or_downgraded_material_identity(
+    textured_material_inputs,
+    mutation: str,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    material_rows = list(request.material_input_registry)
+    visual_rows = list(request.visual_slot_registry)
+    if mutation == "missing-record":
+        material_rows.pop()
+    elif mutation == "duplicate-slot":
+        material_rows[-1] = material_rows[-1].model_copy(
+            update={"slot_id": material_rows[0].slot_id},
+        )
+    elif mutation == "duplicate-map":
+        material_rows[0] = material_rows[0].model_copy(
+            update={"normal_sha256": material_rows[0].base_color_sha256},
+        )
+    else:
+        target_index = next(
+            index for index, row in enumerate(visual_rows) if row.category == "material"
+        )
+        visual_rows[target_index] = visual_rows[target_index].model_copy(
+            update={"usage_mode": "design-reference-only"},
+        )
+
+    payload = _rebuild_textured_payload(
+        request,
+        material_input_registry=tuple(material_rows),
+        visual_slot_registry=tuple(visual_rows),
+    )
+    with pytest.raises(ValidationError):
+        TexturedBuildRequest.model_validate(payload)
+
+
+def test_textured_request_build_id_includes_bundle_and_map_identity(
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    payload = {
+        **request.__dict__,
+        "material_bundle_manifest_sha256": "3" * 64,
+    }
+
+    with pytest.raises(ValidationError, match="build_id"):
+        TexturedBuildRequest.model_validate(payload)
+
+    material_rows = list(request.material_input_registry)
+    material_rows[0] = material_rows[0].model_copy(
+        update={"base_color_sha256": "4" * 64},
+    )
+    payload = {
+        **request.__dict__,
+        "material_input_registry": tuple(material_rows),
+    }
+    with pytest.raises(ValidationError, match="build_id|distinct"):
+        TexturedBuildRequest.model_validate(payload)
+
+
+def test_textured_request_rejects_corrupt_bundle_bytes(
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    manifest_path = bundle.final_directory / "manifest.json"
+    original_manifest = manifest_path.read_bytes()
+    try:
+        manifest_path.write_bytes(original_manifest + b" ")
+        with pytest.raises(CanaryBuildError, match="material bundle"):
+            build_textured_canary_request(
+                repo_root=ROOT,
+                visual_pack_root=visual_root,
+                material_bundle_root=bundle.final_directory,
+            )
+    finally:
+        manifest_path.write_bytes(original_manifest)
+
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    first_map = request.material_input_registry[0].base_color_sha256
+    map_path = bundle.final_directory / "objects" / f"{first_map}.png"
+    original_map = map_path.read_bytes()
+    try:
+        map_path.write_bytes(b"corrupt")
+        with pytest.raises(CanaryBuildError, match="material bundle"):
+            build_textured_canary_request(
+                repo_root=ROOT,
+                visual_pack_root=visual_root,
+                material_bundle_root=bundle.final_directory,
+            )
+    finally:
+        map_path.write_bytes(original_map)
+
+
 def test_request_records_each_visual_slot_as_reference_or_placeholder() -> None:
     request = build_canary_request(
         repo_root=ROOT,
@@ -370,6 +542,125 @@ def _valid_report(request: BuildRequest, staging: Path) -> BuildReport:
         semantic_registry=request.semantic_registry,
         material_registry=request.material_registry,
         visual_slot_registry=request.visual_slot_registry,
+        camera_registry=tuple(
+            CameraRegistryEntry(
+                camera_id=camera.camera_id,
+                blender_camera_name=f"nv__{camera.camera_id}",
+                requested_c2w_blender=camera.c2w_blender,
+                measured_c2w_blender=camera.c2w_blender,
+                max_translation_error_m=0.0,
+                max_rotation_entry_error=0.0,
+                translation_error_limit_m=0.00004,
+                rotation_entry_error_limit=0.00000032,
+            )
+            for camera in request.camera_plan.cameras
+        ),
+        preview_registry=(
+            PreviewCameraRecord(
+                artifact_name="preview-bridge.png",
+                blender_camera_name="nv__preview-camera-temporary",
+                eye_xyz=(-92.0, -205.0, 108.0),
+                target_xyz=(-175.0, -115.0, 43.0),
+                lens_mm=46.0,
+                clip_start_m=1.0,
+                clip_end_m=2000.0,
+                image_width_px=1024,
+                image_height_px=576,
+            ),
+            PreviewCameraRecord(
+                artifact_name="preview-central.png",
+                blender_camera_name="nv__preview-camera-temporary",
+                eye_xyz=(108.0, -142.0, 140.0),
+                target_xyz=(0.0, 10.0, 71.0),
+                lens_mm=42.0,
+                clip_start_m=1.0,
+                clip_end_m=2000.0,
+                image_width_px=1024,
+                image_height_px=576,
+            ),
+            PreviewCameraRecord(
+                artifact_name="preview-outer.png",
+                blender_camera_name="nv__preview-camera-temporary",
+                eye_xyz=(330.0, -290.0, 225.0),
+                target_xyz=(0.0, 15.0, 70.0),
+                lens_mm=32.0,
+                clip_start_m=1.0,
+                clip_end_m=2000.0,
+                image_width_px=1024,
+                image_height_px=576,
+            ),
+            PreviewCameraRecord(
+                artifact_name="preview-upper.png",
+                blender_camera_name="nv__preview-camera-temporary",
+                eye_xyz=(305.0, 5.0, 175.0),
+                target_xyz=(170.0, 115.0, 94.0),
+                lens_mm=44.0,
+                clip_start_m=1.0,
+                clip_end_m=2000.0,
+                image_width_px=1024,
+                image_height_px=576,
+            ),
+        ),
+        counts=BuildCounts(
+            canonical_roots=126,
+            mesh_objects=130,
+            scene_material_families=11,
+            visual_materials=24,
+            cameras=24,
+            lights=3,
+            auxiliary_semantic_objects=2,
+        ),
+        validation=BuildValidation(
+            canonical_object_ids_match=True,
+            camera_matrices_within_tolerance=True,
+            finite_nonempty_meshes=True,
+            semantic_ids_unique=True,
+            material_ids_unique=True,
+            auxiliary_semantics_present=True,
+            all_visual_material_slots_built=True,
+            canary_critical_slots_fulfilled=True,
+            prop_type_counts={
+                variant: 2
+                for variant in (
+                    "water-jar",
+                    "firewood-stack",
+                    "bamboo-basket",
+                    "wooden-bench",
+                    "farming-tools",
+                    "grain-rack",
+                    "stone-trough",
+                    "handcart",
+                )
+            },
+        ),
+        determinism=BuildDeterminism(
+            request_bytes="canonical-json-v1",
+            scene_plan_bytes="canonical-json-v1",
+            camera_plan_bytes="canonical-json-v1",
+            blend_bytes="measured-not-guaranteed",
+            glb_bytes="measured-not-guaranteed",
+            preview_bytes="measured-not-guaranteed",
+        ),
+        artifacts=_write_artifacts(staging),
+    )
+
+
+def _valid_textured_report(
+    request: TexturedBuildRequest,
+    staging: Path,
+) -> TexturedBuildReport:
+    return TexturedBuildReport(
+        build_id=request.build_id,
+        tool_identity=request.tool_identity,
+        source_hashes=request.source_hashes,
+        object_registry=request.object_registry,
+        auxiliary_registry=request.auxiliary_registry,
+        semantic_registry=request.semantic_registry,
+        material_registry=request.material_registry,
+        visual_slot_registry=request.visual_slot_registry,
+        material_bundle_manifest_sha256=request.material_bundle_manifest_sha256,
+        material_bundle_id=request.material_bundle_id,
+        material_input_registry=request.material_input_registry,
         camera_registry=tuple(
             CameraRegistryEntry(
                 camera_id=camera.camera_id,
@@ -1801,6 +2092,131 @@ def _successful_fake_subprocess(calls: list[tuple[list[str], dict[str, object]]]
         return subprocess.CompletedProcess(argv, 0)
 
     return run
+
+
+def _successful_textured_fake_subprocess(
+    calls: list[tuple[list[str], dict[str, object]]],
+):
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        request_path = Path(argv[argv.index("--request") + 1])
+        material_root = Path(argv[argv.index("--materials") + 1])
+        staging = Path(argv[argv.index("--staging") + 1])
+        request = TexturedBuildRequest.model_validate_json(request_path.read_bytes())
+        assert material_root.parent == request_path.parent
+        assert {path.name for path in material_root.iterdir()} == {
+            f"{digest}.png"
+            for row in request.material_input_registry
+            for digest in (
+                row.base_color_sha256,
+                row.normal_sha256,
+                row.orm_sha256,
+            )
+        }
+        assert not staging.exists(), "runtime must own absent-only staging publication"
+        staging.mkdir()
+        report = _valid_textured_report(request, staging)
+        (staging / "build-report.json").write_bytes(
+            canonical_textured_build_report_bytes(report),
+        )
+        kwargs["stdout"].write(b"textured blender stdout\n")
+        kwargs["stderr"].write(b"textured blender stderr\n")
+        return subprocess.CompletedProcess(argv, 0)
+
+    return run
+
+
+def test_textured_runner_snapshots_materials_and_uses_exact_argv(
+    textured_material_inputs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pipeline.synthetic_village.canary as canary
+
+    visual_root, bundle = textured_material_inputs
+    work_root = _private_work_root()
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    audits = []
+    monkeypatch.setattr(subprocess, "run", _successful_textured_fake_subprocess(calls))
+
+    def audit_glb(path, expected_materials):
+        audits.append((Path(path), expected_materials))
+        artifact = next(
+            row
+            for row in load_textured_report_from_staging(Path(path).parent).artifacts
+            if row.name == "village-canary.glb"
+        )
+        return SimpleNamespace(glb_sha256=artifact.sha256)
+
+    def load_textured_report_from_staging(staging: Path):
+        return TexturedBuildReport.model_validate_json(
+            (staging / "build-report.json").read_bytes(),
+        )
+
+    monkeypatch.setattr(canary, "audit_textured_glb", audit_glb)
+    try:
+        result = run_textured_canary_build(
+            repo_root=ROOT,
+            visual_pack_root=visual_root,
+            material_bundle_root=bundle.final_directory,
+            work_root=work_root,
+            timeout_seconds=321,
+        )
+
+        assert result.final_directory == work_root / result.report.build_id
+        assert result.stdout == "textured blender stdout\n"
+        assert result.stderr == "textured blender stderr\n"
+        assert len(calls) == 1
+        argv, kwargs = calls[0]
+        assert argv[-6:] == [
+            "--request",
+            argv[-5],
+            "--materials",
+            argv[-3],
+            "--staging",
+            argv[-1],
+        ]
+        assert kwargs["shell"] is False
+        assert kwargs["cwd"] == str(ROOT.absolute())
+        assert kwargs["timeout"] == 321
+        assert len(audits) == 2
+        assert len(audits[0][1]) == 24
+        assert not list(work_root.glob(".staging-*"))
+        assert not list(work_root.glob(".invocation-*"))
+    finally:
+        shutil.rmtree(work_root, ignore_errors=True)
+
+
+def test_textured_runner_rejects_snapshot_mutation_and_cleans_private_work(
+    textured_material_inputs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    work_root = _private_work_root()
+
+    def mutate_snapshot(argv, **kwargs):
+        material_root = Path(argv[argv.index("--materials") + 1])
+        first = sorted(material_root.iterdir())[0]
+        first.write_bytes(first.read_bytes() + b"tampered")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", mutate_snapshot)
+    try:
+        with pytest.raises(CanaryBuildError, match="changed during build"):
+            run_textured_canary_build(
+                repo_root=ROOT,
+                visual_pack_root=visual_root,
+                material_bundle_root=bundle.final_directory,
+                work_root=work_root,
+            )
+        if work_root.exists():
+            assert not list(work_root.glob(".staging-*"))
+            assert not list(work_root.glob(".invocation-*"))
+            assert not any(
+                path.is_dir() and len(path.name) == 64
+                for path in work_root.iterdir()
+            )
+    finally:
+        shutil.rmtree(work_root, ignore_errors=True)
 
 
 def test_runner_uses_fixed_argv_minimum_environment_and_absent_publish(
