@@ -22,6 +22,13 @@ pytest, Ruff.
 **前端验证:** No — the final rendered canary is inspected visually, but this
 slice does not change Viewer UI.
 
+**Current status (2026-07-19):** Tasks 1--4 are implemented. The production
+profile now resolves six verified three-dimensional walkable edges, places all
+48 elevated cameras bidirectionally, and reports `180/180` complete with two
+ground-connected loop evidence rows. Task 5 remains pending: the 180 frames
+have not yet been rendered or accepted by overlap/coverage/held-out-image
+quality gates.
+
 ---
 
 ## Finish line and exclusions
@@ -90,7 +97,7 @@ water and drainage collisions fail closed.
 **Step 1: Write failing contract tests**
 
 Tests require the four exact component kinds, stable instance IDs 127--130,
-semantic ID 12, two loop IDs, absolute finite millimetre-grid coordinates,
+semantic ID 14, two loop IDs, absolute finite millimetre-grid coordinates,
 ground attachments on real path objects, elevated clearance, collision-free
 centerlines, and canonical bytes bound to the ScenePlan SHA-256. Adversarial
 reloads change the digest, node, width, attachment and collision envelope.

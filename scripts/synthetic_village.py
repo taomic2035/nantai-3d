@@ -398,13 +398,14 @@ def main(argv: list[str] | None = None) -> int:
             "complete": plan.complete,
             "camera_registry_sha256": registry_digest(plan),
             "scene_plan_sha256": plan.scene_plan_sha256,
+            "elevated_topology_sha256": plan.elevated_topology_sha256,
             "geometry_trust": plan.geometry_trust,
             "synthetic": plan.synthetic,
             "group_coverage": [row.model_dump(mode="json") for row in plan.group_coverage],
+            "route_loops": [row.model_dump(mode="json") for row in plan.route_loops],
             "unplaced_groups": [row.model_dump(mode="json") for row in plan.unplaced_groups],
             # 没做到的需求必须出现在【操作者实际读的那份输出】里。只写进 plan
-            # JSON 等于没说: 读者看到 132 + complete=false + unplaced_groups
-            # 就会以为其余需求都落地了。
+            # JSON 等于没说。
             "undelivered_requirements": [
                 row.model_dump(mode="json") for row in plan.undelivered_requirements
             ],

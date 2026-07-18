@@ -7,11 +7,9 @@
     分组 -> fail-closed, 绝不用几何撒点冒充。
   * 相机增多【绝不】提升 geometry trust。
 
-诚实边界 (实测, 见模块级常量 _ELEVATED_PEDESTRIAN_REASON):
-  场景里【不存在】抬升人行拓扑 —— "detail-stone-stair-01" 与
-  "detail-timber-balcony-01" 在 canary.DETAIL_SLOT_COMPONENTS 里都映射到 None,
-  即它们只是贴图槽位, 【没有对应几何】。因此 elevated-pedestrian 这一组
-  (48 相机) 无法诚实交付, 本模块对它 fail-closed。
+抬升人行组只消费 ``ElevatedTopologyPlan`` 的三维中心线。该计划绑定精确
+ScenePlan 摘要并通过碰撞/净空验证；图片槽位、文件名和固定离地偏移均不参与
+相机放置。拓扑缺失或与场景摘要不一致时仍 fail-closed。
 """
 
 from __future__ import annotations
@@ -32,7 +30,13 @@ from .camera_plan import (
     _q3,
     _scene_digest,
 )
-from .canary import DETAIL_SLOT_COMPONENTS
+from .elevated_topology import (
+    ElevatedTopologyPlan,
+    LoopId,
+    build_elevated_topology_plan,
+    canonical_elevated_topology_bytes,
+    verify_elevated_topology_plan,
+)
 from .scene_plan import ScenePlan, build_scene_plan, terrain_height_m
 
 #: req 1「180 个 pose 全部【有限】」: 几何字段必须显式拒绝 NaN/Inf。
@@ -56,6 +60,7 @@ TARGET_CAMERA_COUNT = 180
 
 EYE_HEIGHT_M = 1.6
 ROUTE_LOOKAHEAD_M = 25.0
+ELEVATED_LOOKAHEAD_M = 8.0
 CORRIDOR_LOOKAHEAD_M = 45.0
 PERIMETER_MARGIN_M = 35.0
 PERIMETER_EYE_HEIGHT_M = 6.0
@@ -79,56 +84,6 @@ CameraGroupId = Literal[
     "environment-corridor",
     "audit-overview",
 ]
-
-#: 抬升人行拓扑【本该】来自的槽位。理由必须点名它们, 且它们必须真的没几何。
-ELEVATED_PEDESTRIAN_SLOTS: tuple[str, ...] = (
-    "detail-stone-stair-01",
-    "detail-timber-balcony-01",
-)
-
-
-def _elevated_pedestrian_reason() -> str:
-    """从【实时证据】生成拒绝布点的理由, 而不是手写一段可能过期的话。
-
-    以前这是一个手写常量, 唯一的约束是 min_length=20 —— 把整段实证换成
-    "not placed for unspecified reasons xxxxxxxxxxxx" 全套照绿, 消费者拿到的
-    "机器可读理由"不含任何机器可读信息。
-
-    现在理由由 DETAIL_SLOT_COMPONENTS 的真实取值【派生】: 它点名的每个槽位
-    都是查表查出来的, 编不出来也过不了期。
-    """
-
-    mapped = ", ".join(
-        f"{slot}={DETAIL_SLOT_COMPONENTS.get(slot)!r}" for slot in ELEVATED_PEDESTRIAN_SLOTS
-    )
-    return (
-        "scene plan exposes no elevated pedestrian topology: canary."
-        f"DETAIL_SLOT_COMPONENTS maps these slots to None ({mapped}), i.e. they are "
-        "texture slots with no geometry, and no walkway/terrace-top polyline exists. "
-        "Placing cameras at an arbitrary height above the ground route would fabricate "
-        "a pedestrian viewpoint that the scene does not contain."
-    )
-
-
-def _assert_elevated_pedestrian_is_really_absent() -> None:
-    """拒绝 48 台相机是【重大主张】, 所以它必须持续挣得。
-
-    一旦这些槽位长出几何, "场景里没有抬升人行拓扑"就成了假话 —— 此时继续
-    拿一句陈旧理由拒绝布点, 与 fail-closed 恰好相反。宁可硬失败让人来看。
-    """
-
-    grounded = {
-        slot: DETAIL_SLOT_COMPONENTS.get(slot)
-        for slot in ELEVATED_PEDESTRIAN_SLOTS
-        if DETAIL_SLOT_COMPONENTS.get(slot) is not None
-    }
-    if grounded:
-        raise ProductionProfileError(
-            "elevated pedestrian topology is no longer absent: these slots now carry "
-            f"geometry {grounded} — the stale unplaced-group reason must not be reused; "
-            "re-derive the elevated-pedestrian placement instead of refusing 48 cameras",
-        )
-
 
 class ProductionProfileError(ValueError):
     """生产档 profile 的稳定公开错误。"""
@@ -161,6 +116,26 @@ class PolylineTopologySource:
 
 
 @dataclass(frozen=True)
+class ElevatedPolylineTopologySource:
+    """One verified 3D walkable edge used by elevated production cameras."""
+
+    group_id: Literal["elevated-pedestrian"]
+    topology_ref: str
+    loop_id: LoopId
+    component_id: str
+    points: tuple[tuple[float, float, float], ...]
+    half_width_m: float
+    covered: bool
+
+    @property
+    def length_m(self) -> float:
+        return sum(
+            math.dist(start, end)
+            for start, end in zip(self.points, self.points[1:], strict=False)
+        )
+
+
+@dataclass(frozen=True)
 class HullTopologySource:
     """由真实建筑足迹凸包外扩得到的周边拓扑 (不是一个圆)。"""
 
@@ -172,7 +147,13 @@ class HullTopologySource:
 class GroupSpec(FrozenModel):
     group_id: CameraGroupId
     target_count: int = Field(ge=1)
-    topology_kind: Literal["path-network", "creek-corridor", "building-hull", "overview", "absent"]
+    topology_kind: Literal[
+        "path-network",
+        "elevated-walkable-graph",
+        "creek-corridor",
+        "building-hull",
+        "overview",
+    ]
     disclosure: str = Field(min_length=10)
 
 
@@ -186,8 +167,8 @@ GROUP_SPECS: tuple[GroupSpec, ...] = (
     GroupSpec(
         group_id="elevated-pedestrian",
         target_count=48,
-        topology_kind="absent",
-        disclosure="no-elevated-pedestrian-topology-in-scene",
+        topology_kind="elevated-walkable-graph",
+        disclosure="pedestrian-eye-height-on-verified-elevated-walkable-edge",
     ),
     GroupSpec(
         group_id="perimeter-inward",
@@ -206,6 +187,27 @@ GROUP_SPECS: tuple[GroupSpec, ...] = (
         target_count=12,
         topology_kind="overview",
         disclosure="audit-only-aerial-overview-not-a-pedestrian-viewpoint",
+    ),
+)
+
+_EXPECTED_ROUTE_LOOP_CONTRACT = (
+    (
+        "central-loop",
+        ("central-ground-east", "central-ground-west"),
+        (
+            "edge-central-gallery-001",
+            "edge-central-ramp-001",
+            "edge-central-stair-001",
+        ),
+    ),
+    (
+        "upper-loop",
+        ("upper-ground-east", "upper-ground-west"),
+        (
+            "edge-upper-ascent-001",
+            "edge-upper-descent-001",
+            "edge-upper-gallery-001",
+        ),
     ),
 )
 
@@ -251,6 +253,13 @@ class GroupCoverage(FrozenModel):
     topology_ref_count: int = Field(ge=1)
 
 
+class RouteLoopEvidence(FrozenModel):
+    loop_id: LoopId
+    ground_attachment_node_ids: tuple[str, str]
+    elevated_edge_ids: tuple[str, ...] = Field(min_length=3)
+    ground_connected: Literal[True]
+
+
 class UndeliveredRequirement(FrozenModel):
     """一条【没做到】的需求, 随 plan 一起落盘。
 
@@ -280,6 +289,7 @@ class ProductionCameraPlan(FrozenModel):
         PRODUCTION_JOURNAL_SCHEMA
     )
     scene_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    elevated_topology_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     coordinate_system: Literal["opencv-c2w-right-down-forward-meters"] = (
         "opencv-c2w-right-down-forward-meters"
     )
@@ -295,6 +305,7 @@ class ProductionCameraPlan(FrozenModel):
     cameras: tuple[ProductionCameraPose, ...]
     group_coverage: tuple[GroupCoverage, ...]
     unplaced_groups: tuple[UnplacedGroup, ...]
+    route_loops: tuple[RouteLoopEvidence, ...] = Field(min_length=2, max_length=2)
     #: 本轮【没做到】的需求, 逐条机器可读。空元组的含义是"全部交付", 所以它
     #: 不能被默认成空 —— 必须由 builder 显式给出。
     undelivered_requirements: tuple[UndeliveredRequirement, ...]
@@ -333,6 +344,42 @@ class ProductionCameraPlan(FrozenModel):
         # 但它【没有】也不可能有测试守着。
         if self.complete and self.unplaced_groups:
             raise ValueError("a complete plan must not declare unplaced groups")
+        route_contract = tuple(
+            (
+                row.loop_id,
+                row.ground_attachment_node_ids,
+                row.elevated_edge_ids,
+            )
+            for row in self.route_loops
+        )
+        if route_contract != _EXPECTED_ROUTE_LOOP_CONTRACT:
+            raise ValueError("route loop evidence must cover the stable two-loop topology")
+        unplaced_by_group = {
+            row.group_id: row.camera_count for row in self.unplaced_groups
+        }
+        if len(unplaced_by_group) != len(self.unplaced_groups):
+            raise ValueError("unplaced groups must be unique")
+        expected_coverage = []
+        for spec in GROUP_SPECS:
+            rows = [
+                camera for camera in self.cameras if camera.group_id == spec.group_id
+            ]
+            if len(rows) + unplaced_by_group.get(spec.group_id, 0) != spec.target_count:
+                raise ValueError(
+                    f"{spec.group_id} placed plus unplaced count must match its target",
+                )
+            if rows:
+                expected_coverage.append(
+                    GroupCoverage(
+                        group_id=spec.group_id,
+                        camera_count=len(rows),
+                        topology_ref_count=len(
+                            {camera.topology_ref for camera in rows},
+                        ),
+                    ),
+                )
+        if self.group_coverage != tuple(expected_coverage):
+            raise ValueError("group coverage must derive from the placed camera registry")
         return self
 
 
@@ -395,21 +442,101 @@ def _building_hull_source(scene: ScenePlan) -> HullTopologySource:
     )
 
 
+def _elevated_sources(
+    topology: ElevatedTopologyPlan,
+) -> list[ElevatedPolylineTopologySource]:
+    return [
+        ElevatedPolylineTopologySource(
+            group_id="elevated-pedestrian",
+            topology_ref=edge.edge_id,
+            loop_id=edge.loop_id,
+            component_id=edge.component_id,
+            points=tuple(point.position_m for point in edge.centerline),
+            half_width_m=edge.width_m / 2,
+            covered=edge.collision.covered,
+        )
+        for edge in topology.edges
+    ]
+
+
 def resolve_topology_sources(
     scene: ScenePlan | None = None,
+    elevated_topology: ElevatedTopologyPlan | None = None,
 ) -> dict[str, object]:
-    """把每个分组解析到【真实拓扑来源】; 没有来源的返回 UnavailableTopology。"""
+    """Resolve every group to scene-bound topology; mismatches fail closed."""
     scene = scene or build_scene_plan()
-    _assert_elevated_pedestrian_is_really_absent()
+    topology = elevated_topology or build_elevated_topology_plan(scene)
+    verify_elevated_topology_plan(topology, scene)
     return {
         "ground-route": _path_segments(scene),
-        "elevated-pedestrian": UnavailableTopology(
-            group_id="elevated-pedestrian", reason=_elevated_pedestrian_reason()
-        ),
+        "elevated-pedestrian": _elevated_sources(topology),
         "perimeter-inward": _building_hull_source(scene),
         "environment-corridor": _creek_source(scene),
         "audit-overview": "overview",
     }
+
+
+def _route_loop_evidence(
+    scene: ScenePlan,
+    topology: ElevatedTopologyPlan,
+) -> tuple[RouteLoopEvidence, ...]:
+    """Prove both elevated alternatives reconnect through the ground path graph."""
+
+    graph: dict[tuple[float, float], set[tuple[float, float]]] = {}
+    for item in scene.objects:
+        if item.semantic_class != "path":
+            continue
+        points = tuple((point.x_m, point.y_m) for point in item.polyline.points)
+        for start, end in zip(points, points[1:], strict=False):
+            graph.setdefault(start, set()).add(end)
+            graph.setdefault(end, set()).add(start)
+
+    nodes = {node.node_id: node for node in topology.nodes}
+    rows = []
+    for loop in topology.loops:
+        loop_nodes = {
+            node_id
+            for edge in topology.edges
+            if edge.loop_id == loop.loop_id
+            for node_id in (edge.start_node_id, edge.end_node_id)
+        }
+        attachments = tuple(
+            sorted(
+                node_id
+                for node_id in loop_nodes
+                if nodes[node_id].level == "ground"
+            )
+        )
+        if len(attachments) != 2:
+            raise ProductionProfileError(
+                f"{loop.loop_id} does not expose exactly two ground attachments",
+            )
+        start = tuple(nodes[attachments[0]].position_m[:2])
+        target = tuple(nodes[attachments[1]].position_m[:2])
+        if start not in graph or target not in graph:
+            raise ProductionProfileError(
+                f"{loop.loop_id} ground attachments are not path graph vertices",
+            )
+        visited = {start}
+        pending = [start]
+        while pending:
+            current = pending.pop()
+            for neighbor in graph[current] - visited:
+                visited.add(neighbor)
+                pending.append(neighbor)
+        if target not in visited:
+            raise ProductionProfileError(
+                f"{loop.loop_id} ground attachments are not connected by the path graph",
+            )
+        rows.append(
+            RouteLoopEvidence(
+                loop_id=loop.loop_id,
+                ground_attachment_node_ids=attachments,
+                elevated_edge_ids=loop.edge_ids,
+                ground_connected=True,
+            )
+        )
+    return tuple(rows)
 
 
 def _resample_polyline(
@@ -464,7 +591,74 @@ def _point_along(
     return points[-1]
 
 
-def _allocate(sources: list[PolylineTopologySource], total: int) -> list[int]:
+def _resample_elevated_polyline(
+    source: ElevatedPolylineTopologySource,
+    count: int,
+) -> list[
+    tuple[
+        float,
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ]
+]:
+    """Sample a verified 3D edge by arc length."""
+
+    cumulative = [0.0]
+    for start, end in zip(source.points, source.points[1:], strict=False):
+        cumulative.append(cumulative[-1] + math.dist(start, end))
+    total = cumulative[-1]
+    if total <= 0.0:
+        raise ProductionProfileError(
+            f"degenerate elevated topology: {source.topology_ref}",
+        )
+    samples = []
+    for index in range(count):
+        target = total * (index + 0.5) / count
+        segment_index = next(
+            row
+            for row in range(len(cumulative) - 1)
+            if cumulative[row] <= target <= cumulative[row + 1]
+        )
+        start = source.points[segment_index]
+        end = source.points[segment_index + 1]
+        span = cumulative[segment_index + 1] - cumulative[segment_index]
+        fraction = (target - cumulative[segment_index]) / span
+        point = tuple(
+            start[axis] + fraction * (end[axis] - start[axis])
+            for axis in range(3)
+        )
+        delta = tuple(end[axis] - start[axis] for axis in range(3))
+        norm = math.sqrt(sum(value * value for value in delta))
+        tangent = tuple(value / norm for value in delta)
+        samples.append((target, point, tangent))
+    return samples
+
+
+def _point_along_elevated(
+    source: ElevatedPolylineTopologySource,
+    arc_length: float,
+) -> tuple[float, float, float]:
+    cumulative = [0.0]
+    for start, end in zip(source.points, source.points[1:], strict=False):
+        cumulative.append(cumulative[-1] + math.dist(start, end))
+    target = max(0.0, min(cumulative[-1], arc_length))
+    for index in range(len(cumulative) - 1):
+        if cumulative[index] <= target <= cumulative[index + 1]:
+            span = cumulative[index + 1] - cumulative[index]
+            fraction = (target - cumulative[index]) / span
+            start = source.points[index]
+            end = source.points[index + 1]
+            return tuple(
+                start[axis] + fraction * (end[axis] - start[axis])
+                for axis in range(3)
+            )
+    return source.points[-1]
+
+
+def _allocate(
+    sources: list[PolylineTopologySource | ElevatedPolylineTopologySource],
+    total: int,
+) -> list[int]:
     """按弧长比例分配相机数 (最大余数法), 保证总和精确等于 total。"""
     lengths = [source.length_m for source in sources]
     overall = sum(lengths)
@@ -551,6 +745,64 @@ def _place_route_group(
     return poses
 
 
+def _place_elevated_group(
+    sources: list[ElevatedPolylineTopologySource],
+    total: int,
+    disclosure: str,
+    start_index: int,
+) -> list[ProductionCameraPose]:
+    counts = _allocate(sources, total)
+    if any(count < 2 for count in counts):
+        raise ProductionProfileError(
+            "each elevated edge needs at least two cameras for bidirectional coverage",
+        )
+    poses = []
+    sequence_index = start_index
+    camera_number = 1
+    for source, count in zip(sources, counts, strict=True):
+        for sample_index, (arc_length, deck_point, tangent) in enumerate(
+            _resample_elevated_polyline(source, count),
+        ):
+            direction = 1.0 if sample_index % 2 == 0 else -1.0
+            ahead = _point_along_elevated(
+                source,
+                arc_length + direction * ELEVATED_LOOKAHEAD_M,
+            )
+            if math.dist(deck_point, ahead) < 1.0:
+                ahead = tuple(
+                    deck_point[axis]
+                    + tangent[axis] * direction * ELEVATED_LOOKAHEAD_M
+                    for axis in range(3)
+                )
+            poses.append(
+                _pose(
+                    camera_id=(
+                        f"camera-elevated-pedestrian-{camera_number:03d}"
+                    ),
+                    group_id="elevated-pedestrian",
+                    sequence_index=sequence_index,
+                    topology_ref=source.topology_ref,
+                    arc_length_m=arc_length,
+                    position=(
+                        deck_point[0],
+                        deck_point[1],
+                        deck_point[2] + EYE_HEIGHT_M,
+                    ),
+                    look_at=(
+                        ahead[0],
+                        ahead[1],
+                        ahead[2] + EYE_HEIGHT_M,
+                    ),
+                    eye_height_m=EYE_HEIGHT_M,
+                    fov_x_deg=72.0,
+                    disclosure=disclosure,
+                ),
+            )
+            sequence_index += 1
+            camera_number += 1
+    return poses
+
+
 def _place_perimeter(
     source: HullTopologySource, total: int, scene: ScenePlan, start_index: int
 ) -> list[ProductionCameraPose]:
@@ -627,7 +879,6 @@ def _place_audit_overview(
 UNDELIVERED_REQUIREMENT_IDS: tuple[str, ...] = (
     "req-3-front-back-facade-coverage",
     "req-5-pose-quality-fail-closed",
-    "req-6-route-loop-closure",
 )
 
 
@@ -664,18 +915,6 @@ def _undelivered_requirements() -> tuple[UndeliveredRequirement, ...]:
                 "distribution is published by pose_separation_evidence(), but no "
                 "fail-closed threshold is declared because none is defensible on this "
                 "evidence — see that function's disclaimer."
-            ),
-        ),
-        UndeliveredRequirement(
-            requirement_id="req-6-route-loop-closure",
-            status="structurally-unreachable",
-            reason=(
-                "req 6 asks ground-route and elevated-pedestrian to jointly form at least "
-                "two closed loops for COLMAP loop closure. The elevated-pedestrian group "
-                "(48 cameras) is unplaced because the scene contains no elevated pedestrian "
-                "geometry, so the requirement cannot be met by rendering more frames — the "
-                "fail-closed decision on that group structurally voids it. No route_loops "
-                "quantity is computed or claimed anywhere in this profile."
             ),
         ),
     )
@@ -743,15 +982,20 @@ def _validate_route_spacing(cameras: list[ProductionCameraPose]) -> None:
                 )
 
 
-def build_production_camera_plan(scene: ScenePlan | None = None) -> ProductionCameraPlan:
+def build_production_camera_plan(
+    scene: ScenePlan | None = None,
+    elevated_topology: ElevatedTopologyPlan | None = None,
+) -> ProductionCameraPlan:
     """构造生产档相机计划。
 
-    fail-closed: 没有真实拓扑来源的分组【不放相机】, 并在 unplaced_groups 里
-    带机器可读理由。plan.camera_count 永远等于【真的放下的】相机数, 绝不
-    声称 180。
+    ``elevated-pedestrian`` 必须先通过场景摘要、碰撞和闭环验证；任何不一致
+    都在布点前失败。``camera_count`` 永远等于真正构造出的相机数，只有五组
+    精确达到各自目标时才允许成为 180/180 complete。
     """
     scene = scene or build_scene_plan()
-    resolved = resolve_topology_sources(scene)
+    topology = elevated_topology or build_elevated_topology_plan(scene)
+    verify_elevated_topology_plan(topology, scene)
+    resolved = resolve_topology_sources(scene, topology)
 
     cameras: list[ProductionCameraPose] = []
     unplaced: list[UnplacedGroup] = []
@@ -777,6 +1021,15 @@ def build_production_camera_plan(scene: ScenePlan | None = None) -> ProductionCa
                     "ground-route",
                     65.0,
                     ROUTE_LOOKAHEAD_M,
+                    spec.disclosure,
+                    start,
+                )
+            )
+        elif spec.group_id == "elevated-pedestrian":
+            cameras.extend(
+                _place_elevated_group(
+                    source,
+                    spec.target_count,
                     spec.disclosure,
                     start,
                 )
@@ -815,11 +1068,15 @@ def build_production_camera_plan(scene: ScenePlan | None = None) -> ProductionCa
 
     return ProductionCameraPlan(
         scene_plan_sha256=_scene_digest(scene),
+        elevated_topology_sha256=hashlib.sha256(
+            canonical_elevated_topology_bytes(topology),
+        ).hexdigest(),
         camera_count=len(cameras),
         complete=len(cameras) == TARGET_CAMERA_COUNT,
         cameras=tuple(cameras),
         group_coverage=tuple(coverage),
         unplaced_groups=tuple(unplaced),
+        route_loops=_route_loop_evidence(scene, topology),
         undelivered_requirements=_undelivered_requirements(),
     )
 
@@ -837,10 +1094,12 @@ def production_camera_registry_digest(plan: ProductionCameraPlan) -> str:
         "profile_id": plan.profile_id,
         "plan_schema": plan.plan_schema,
         "scene_plan_sha256": plan.scene_plan_sha256,
+        "elevated_topology_sha256": plan.elevated_topology_sha256,
         "cameras": [
             {
                 "camera_id": camera.camera_id,
                 "group_id": camera.group_id,
+                "topology_ref": camera.topology_ref,
                 "c2w_opencv": camera.c2w_opencv,
             }
             for camera in plan.cameras

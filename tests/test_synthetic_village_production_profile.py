@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -15,13 +16,17 @@ import pytest
 from pydantic import ValidationError
 
 from pipeline.synthetic_village import camera_plan as canary_camera_plan
+from pipeline.synthetic_village.elevated_topology import (
+    build_elevated_topology_plan,
+    canonical_elevated_topology_bytes,
+)
 from pipeline.synthetic_village.production_profile import (
     GROUP_SPECS,
     PRODUCTION_JOURNAL_SCHEMA,
     PRODUCTION_PROFILE_ID,
     TARGET_CAMERA_COUNT,
+    ElevatedPolylineTopologySource,
     ProductionProfileError,
-    UnavailableTopology,
     build_production_camera_plan,
     canonical_production_plan_bytes,
     production_batch_slice,
@@ -31,6 +36,30 @@ from pipeline.synthetic_village.production_profile import (
 from pipeline.synthetic_village.scene_plan import build_scene_plan, terrain_height_m
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _distance_to_polyline_3d(
+    point: tuple[float, float, float],
+    polyline: tuple[tuple[float, float, float], ...],
+) -> float:
+    best = math.inf
+    for start, end in zip(polyline, polyline[1:], strict=False):
+        delta = tuple(end[index] - start[index] for index in range(3))
+        length_sq = sum(value * value for value in delta)
+        offset = tuple(point[index] - start[index] for index in range(3))
+        fraction = (
+            0.0
+            if length_sq == 0.0
+            else max(
+                0.0,
+                min(1.0, sum(offset[index] * delta[index] for index in range(3)) / length_sq),
+            )
+        )
+        projected = tuple(
+            start[index] + delta[index] * fraction for index in range(3)
+        )
+        best = min(best, math.dist(point, projected))
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -81,74 +110,82 @@ def test_production_camera_ids_are_rejected_by_the_canary_render_contract() -> N
 # --------------------------------------------------------------------------
 
 
-def test_elevated_pedestrian_topology_is_absent_and_fails_closed() -> None:
-    """场景里【没有】任何抬升人行拓扑 (楼梯/阳台都只是贴图槽位, 无几何)。"""
+def test_elevated_pedestrian_resolves_all_real_walkable_edges() -> None:
     scene = build_scene_plan()
     resolved = resolve_topology_sources(scene)
-    assert isinstance(resolved["elevated-pedestrian"], UnavailableTopology)
-    assert resolved["elevated-pedestrian"].reason
+    elevated = resolved["elevated-pedestrian"]
+    assert all(isinstance(row, ElevatedPolylineTopologySource) for row in elevated)
+    topology = build_elevated_topology_plan(scene)
+    assert {row.topology_ref for row in elevated} == {
+        edge.edge_id for edge in topology.edges
+    }
+    assert {row.loop_id for row in elevated} == {"central-loop", "upper-loop"}
+    assert all(row.length_m > 0 and row.half_width_m >= 0.9 for row in elevated)
 
 
-def test_plan_never_claims_the_target_count_it_cannot_place() -> None:
-    """fail-closed: 放不下 180 就【绝不】声称 180。"""
+def test_plan_places_the_full_target_from_verified_topology() -> None:
     plan = build_production_camera_plan()
     assert plan.camera_count == len(plan.cameras)
     assert plan.declared_target_count == TARGET_CAMERA_COUNT
-    if plan.camera_count != TARGET_CAMERA_COUNT:
-        assert plan.unplaced_groups
-        assert plan.complete is False
+    assert plan.camera_count == TARGET_CAMERA_COUNT
+    assert plan.complete is True
+    assert plan.unplaced_groups == ()
+    topology = build_elevated_topology_plan()
+    assert plan.elevated_topology_sha256 == hashlib.sha256(
+        canonical_elevated_topology_bytes(topology)
+    ).hexdigest()
 
 
-def test_unplaced_groups_carry_machine_readable_reasons() -> None:
-    plan = build_production_camera_plan()
-    ids = {row.group_id for row in plan.unplaced_groups}
-    assert "elevated-pedestrian" in ids
-    for row in plan.unplaced_groups:
-        assert len(row.reason) >= 20
-        assert row.camera_count > 0
+def test_exactly_48_elevated_cameras_follow_real_3d_centerlines() -> None:
+    topology = build_elevated_topology_plan()
+    edges = {edge.edge_id: edge for edge in topology.edges}
+    cameras = [
+        camera
+        for camera in build_production_camera_plan().cameras
+        if camera.group_id == "elevated-pedestrian"
+    ]
+
+    assert len(cameras) == 48
+    assert [camera.camera_id for camera in cameras] == [
+        f"camera-elevated-pedestrian-{index:03d}"
+        for index in range(1, 49)
+    ]
+    assert {camera.topology_ref for camera in cameras} == set(edges)
+    for camera in cameras:
+        edge = edges[camera.topology_ref]
+        deck_point = (
+            camera.position_m[0],
+            camera.position_m[1],
+            camera.position_m[2] - camera.eye_height_m,
+        )
+        assert _distance_to_polyline_3d(
+            deck_point,
+            tuple(point.position_m for point in edge.centerline),
+        ) <= 0.005, camera.camera_id
 
 
-def test_unplaced_reason_names_evidence_that_actually_exists() -> None:
-    """"机器可读理由" 必须【真的机器可读】—— 量字符串长度守不住任何东西。
+def test_each_elevated_edge_is_observed_in_both_travel_directions() -> None:
+    topology = build_elevated_topology_plan()
+    edges = {edge.edge_id: edge for edge in topology.edges}
+    directions: dict[str, set[int]] = {edge_id: set() for edge_id in edges}
+    for camera in build_production_camera_plan().cameras:
+        if camera.group_id != "elevated-pedestrian":
+            continue
+        edge = edges[camera.topology_ref]
+        forward = (
+            edge.centerline[-1].position_m[0] - edge.centerline[0].position_m[0],
+            edge.centerline[-1].position_m[1] - edge.centerline[0].position_m[1],
+            edge.centerline[-1].position_m[2] - edge.centerline[0].position_m[2],
+        )
+        gaze = tuple(
+            camera.look_at_m[index] - camera.position_m[index]
+            for index in range(3)
+        )
+        dot = sum(forward[index] * gaze[index] for index in range(3))
+        assert abs(dot) > 1e-3
+        directions[camera.topology_ref].add(1 if dot > 0 else -1)
 
-    以前 UnplacedGroup.reason 的唯一约束是 min_length=20 / len(reason)>=20:
-    把那段实证 (哪两个槽位、在哪张表里、映射到什么) 换成一句 20 字的空话,
-    以 machine_readable 命名的测试照绿, 消费者拿到的"理由"不含任何理由。
-
-    这里改为逐条核对: 理由点名的每个符号都必须【在 canary 里真实存在, 且
-    真的映射到 None】。理由是编的 -> 红; 场景日后长出楼梯几何 -> 也红。
-    """
-
-    from pipeline.synthetic_village.canary import DETAIL_SLOT_COMPONENTS
-    from pipeline.synthetic_village.production_profile import ELEVATED_PEDESTRIAN_SLOTS
-
-    plan = build_production_camera_plan()
-    row = next(r for r in plan.unplaced_groups if r.group_id == "elevated-pedestrian")
-
-    assert "DETAIL_SLOT_COMPONENTS" in row.reason
-    assert ELEVATED_PEDESTRIAN_SLOTS, "拒绝布点必须点名【具体】槽位, 不能只说'没有拓扑'"
-    for slot in ELEVATED_PEDESTRIAN_SLOTS:
-        # (a) 理由必须点名它
-        assert slot in row.reason, f"理由未点名 {slot}"
-        # (b) 它必须在 canary 里【真实存在】—— 理由不是编的
-        assert slot in DETAIL_SLOT_COMPONENTS, f"理由引用了不存在的槽位: {slot}"
-        # (c) 它必须【真的】映射到 None —— 这才是"没有几何"的实证
-        assert DETAIL_SLOT_COMPONENTS[slot] is None, f"{slot} 已有几何, 拒绝布点的理由已失效"
-
-
-def test_absence_claim_fails_closed_when_the_scene_gains_geometry(monkeypatch) -> None:
-    """反向锁: 一旦那些槽位长出几何, "场景里没有抬升人行拓扑"就是【假话】。
-
-    此时必须硬失败, 绝不允许继续拿一句陈旧的理由拒绝 48 台相机。
-    """
-
-    from pipeline.synthetic_village import production_profile
-
-    patched = dict(production_profile.DETAIL_SLOT_COMPONENTS)
-    patched["detail-stone-stair-01"] = "stone-stair-geometry"
-    monkeypatch.setattr(production_profile, "DETAIL_SLOT_COMPONENTS", patched)
-    with pytest.raises(ProductionProfileError, match="no longer absent|stale"):
-        build_production_camera_plan()
+    assert directions and all(signs == {-1, 1} for signs in directions.values())
 
 
 def test_ground_route_cameras_lie_on_the_real_walkable_path_network() -> None:
@@ -396,8 +433,8 @@ def test_plan_declares_every_requirement_it_did_not_deliver() -> None:
     plan = build_production_camera_plan()
     declared = {row.requirement_id for row in plan.undelivered_requirements}
     assert declared == set(UNDELIVERED_REQUIREMENT_IDS)
-    # req 5 / req 6 必须在里面 —— 它们是本轮真实的两个缺口
-    assert {"req-5-pose-quality-fail-closed", "req-6-route-loop-closure"} <= declared
+    assert "req-5-pose-quality-fail-closed" in declared
+    assert "req-6-route-loop-closure" not in declared
     for row in plan.undelivered_requirements:
         assert row.status in {"not-implemented", "structurally-unreachable"}
         assert len(row.reason) >= 20
@@ -430,33 +467,44 @@ def test_req3_front_back_coverage_is_declared_undelivered() -> None:
 
 
 def test_undelivered_requirements_never_fake_a_delivered_scalar() -> None:
-    """绝不允许用 route_loops=0 / isolated_cameras=0 之类的 0 冒充"已检测"。
+    """绝不允许用未实现检测的 0 冒充"已检测"。
 
     一个恒 0 的标量读起来像"检测过, 没问题" —— 而实际是"根本没检测"。
     """
 
     plan = build_production_camera_plan()
     payload = json.loads(canonical_production_plan_bytes(plan))
-    for faked in ("route_loops", "isolated_cameras", "near_duplicate_pairs",
-                  "components_with_three_view_support"):
+    for faked in (
+        "isolated_cameras",
+        "near_duplicate_pairs",
+        "components_with_three_view_support",
+    ):
         assert faked not in payload, f"未实现的检测不得以标量形式出现: {faked}"
 
 
-def test_req6_loop_closure_is_declared_structurally_unreachable() -> None:
-    """req 6 要求 ground-route 与 elevated-pedestrian 【共同】构成 >=2 个闭环。
-
-    elevated-pedestrian 整组 48 台未布点, 所以这条无论渲染多少帧都无法达成 ——
-    fail-closed 连带废掉了它, 而交付报告只把 fail-closed 当头条成绩。
-    """
-
+def test_req6_loop_closure_is_backed_by_two_verified_route_loops() -> None:
     plan = build_production_camera_plan()
-    row = next(
-        r for r in plan.undelivered_requirements if r.requirement_id == "req-6-route-loop-closure"
-    )
-    assert row.status == "structurally-unreachable"
-    assert "elevated-pedestrian" in row.reason
-    unplaced = {g.group_id for g in plan.unplaced_groups}
-    assert "elevated-pedestrian" in unplaced, "理由与实际 unplaced_groups 必须一致"
+    assert {
+        row.loop_id for row in plan.route_loops
+    } == {"central-loop", "upper-loop"}
+    assert all(row.ground_connected for row in plan.route_loops)
+    assert all(len(row.ground_attachment_node_ids) == 2 for row in plan.route_loops)
+    assert all(len(row.elevated_edge_ids) >= 3 for row in plan.route_loops)
+    assert "req-6-route-loop-closure" not in {
+        row.requirement_id for row in plan.undelivered_requirements
+    }
+
+
+def test_route_loop_and_group_summaries_reject_external_mutation() -> None:
+    payload = _plan_payload()
+    payload["route_loops"][0]["elevated_edge_ids"][0] = "fabricated-edge"
+    with pytest.raises(ValidationError, match="route loop evidence"):
+        _reload(payload)
+
+    payload = _plan_payload()
+    payload["group_coverage"][1]["camera_count"] -= 1
+    with pytest.raises(ValidationError, match="group coverage"):
+        _reload(payload)
 
 
 def test_pose_separation_evidence_reports_the_distribution_without_inventing_a_threshold() -> None:
@@ -604,14 +652,20 @@ def test_duplicate_camera_centres_are_rejected_on_reload() -> None:
     ("mutate", "match"),
     [
         (lambda p: p.update(camera_count=p["camera_count"] + 1), "camera_count must equal"),
-        (lambda p: p.update(complete=True), "complete must be true only"),
+        (lambda p: p.update(complete=False), "complete must be true only"),
         (
             lambda p: p["cameras"][1].update(camera_id=p["cameras"][0]["camera_id"]),
             "camera IDs must be unique",
         ),
         (lambda p: p["cameras"][3].update(sequence_index=99), "dense and ordered"),
         (
-            lambda p: p["unplaced_groups"][0].update(camera_count=1),
+            lambda p: p["unplaced_groups"].append(
+                {
+                    "group_id": "elevated-pedestrian",
+                    "camera_count": 1,
+                    "reason": "contradictory externally injected unplaced camera",
+                }
+            ),
             "must equal the declared target",
         ),
         (
@@ -634,19 +688,13 @@ def test_plan_contracts_reject_externally_constructed_lies(mutate, match: str) -
         _reload(payload)
 
 
-def test_a_plan_cannot_claim_180_while_carrying_132_cameras() -> None:
-    """camera_count 与真实相机数【脱钩】必须被拒。
-
-    命名说明 (诚实): 这条测的是 camera_count<->len(cameras) 那道门, 【不是】
-    "complete 不得同时声明 unplaced_groups" 那道 —— 后者经推导【不可达】
-    (见 production_profile._validate_plan 里的注释), 构造不出触发它的输入,
-    因此本文件【没有】测试守着它, 也不假装有。
-    """
+def test_a_complete_plan_cannot_drop_a_camera() -> None:
+    """完整计划少一台相机必须 fail-closed，不能继续声称 180/180。"""
 
     payload = _plan_payload()
-    payload["camera_count"] = TARGET_CAMERA_COUNT
-    payload["complete"] = True
-    with pytest.raises(ValidationError, match="camera_count must equal"):
+    payload["cameras"].pop()
+    payload["camera_count"] -= 1
+    with pytest.raises(ValidationError, match="must equal the declared target"):
         _reload(payload)
 
 
@@ -658,8 +706,7 @@ def test_a_plan_cannot_claim_180_while_carrying_132_cameras() -> None:
 def test_cli_plan_production_surfaces_the_undelivered_requirements() -> None:
     """CLI 输出是 Codex 【实际会读】的东西 —— 没做的需求必须出现在这里。
 
-    只把它藏在 plan JSON 里等同于没说: 交接摘要读者看到 132/complete=false +
-    unplaced_groups 就会以为其余需求都落地了, 而 req 5/req 6 根本没有。
+    只把它藏在 plan JSON 里等同于没说。
     """
 
     import subprocess
@@ -673,9 +720,17 @@ def test_cli_plan_production_surfaces_the_undelivered_requirements() -> None:
         check=True,
     )
     summary = json.loads(proc.stdout)
+    assert summary["camera_count"] == TARGET_CAMERA_COUNT
+    assert summary["complete"] is True
+    assert re.fullmatch(r"[0-9a-f]{64}", summary["elevated_topology_sha256"])
+    assert {row["loop_id"] for row in summary["route_loops"]} == {
+        "central-loop",
+        "upper-loop",
+    }
     rows = summary["undelivered_requirements"]
     ids = {row["requirement_id"] for row in rows}
-    assert {"req-5-pose-quality-fail-closed", "req-6-route-loop-closure"} <= ids
+    assert "req-5-pose-quality-fail-closed" in ids
+    assert "req-6-route-loop-closure" not in ids
     for row in rows:
         assert row["status"] in {"not-implemented", "structurally-unreachable"}
         assert len(row["reason"]) >= 20
