@@ -8,6 +8,7 @@ import math
 
 import pytest
 
+from pipeline.synthetic_village.canary import VISUAL_MATERIAL_SLOT_IDS
 from pipeline.synthetic_village.elevated_topology import (
     ELEVATED_TOPOLOGY_SCHEMA,
     MIN_ELEVATED_CLEARANCE_M,
@@ -83,6 +84,11 @@ def test_four_components_have_stable_kinds_and_reserved_instance_ids() -> None:
     assert sum(len(component.edge_ids) for component in plan.components) == len(
         edge_ids
     )
+    assert {
+        material_id
+        for component in plan.components
+        for material_id in component.material_slot_ids
+    } <= set(VISUAL_MATERIAL_SLOT_IDS)
 
 
 def test_two_elevated_alternatives_form_two_explicit_ground_connected_loops() -> None:

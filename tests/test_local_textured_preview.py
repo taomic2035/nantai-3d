@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +40,7 @@ from tests.synthetic_material_fixtures import publish_material_fixture
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_BLENDER = Path("/Applications/Blender.app/Contents/MacOS/Blender")
 BLENDER_BUILDER = ROOT / "scripts/blender/build_synthetic_village.py"
+RUN_LOCAL_ELEVATED_BUILD = os.environ.get("NANTAI_RUN_LOCAL_ELEVATED_BUILD") == "1"
 
 
 def _sha256_file(path: Path) -> str:
@@ -172,6 +175,142 @@ def test_local_blender_rejects_readdressed_invalid_topology_before_staging(
         result.stdout + result.stderr
     )
     assert not staging.exists()
+
+
+@pytest.mark.skipif(
+    not RUN_LOCAL_ELEVATED_BUILD,
+    reason="set NANTAI_RUN_LOCAL_ELEVATED_BUILD=1 for the real local Blender build",
+)
+def test_local_blender_builds_four_registered_elevated_components(
+    tmp_path: Path,
+) -> None:
+    visual_root, bundle = publish_material_fixture(tmp_path / "bundle")
+    request = build_local_textured_preview_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+        tool_identity=LocalBlenderIdentity(
+            executable_sha256=_sha256_file(LOCAL_BLENDER),
+            version="4.5.11",
+            platform="macos-arm64",
+            runtime_build_hash="4db51e9d1e1e",
+            runtime_output_sha256=hashlib.sha256(b"runtime-probe").hexdigest(),
+        ),
+    )
+    request_path = tmp_path / "request.json"
+    request_path.write_bytes(
+        canonical_local_textured_preview_request_bytes(request),
+    )
+    invocation_root = tmp_path / "invocation"
+    invocation_root.mkdir()
+    canary.snapshot_material_inputs(
+        request=request,  # type: ignore[arg-type]
+        material_bundle_root=bundle.final_directory,
+        invocation_root=invocation_root,
+    )
+    staging = tmp_path / "staging"
+    result = subprocess.run(
+        [
+            str(LOCAL_BLENDER),
+            "--background",
+            "--factory-startup",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "17",
+            "--python",
+            str(BLENDER_BUILDER),
+            "--",
+            "--request",
+            str(request_path),
+            "--materials",
+            str(invocation_root / "material-inputs"),
+            "--staging",
+            str(staging),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(
+        (staging / "build-report.json").read_text("utf-8"),
+    )
+    assert report["counts"]["canonical_roots"] == 130
+    probe = tmp_path / "probe-elevated.py"
+    probe.write_text(
+        """
+import bpy
+
+expected = {
+    "elevated-switchback-stair-v1": {
+        "walkable-stair-treads",
+        "collision-side-rails",
+        "structural-supports",
+    },
+    "covered-timber-gallery-v1": {
+        "walkable-timber-deck",
+        "collision-side-rails",
+        "covered-roof",
+        "structural-supports",
+    },
+    "terrace-ramp-junction-v1": {
+        "walkable-ramp-deck",
+        "collision-side-rails",
+        "drainage-separation",
+        "structural-supports",
+    },
+    "cross-level-covered-passage-v1": {
+        "walkable-cross-level-decks",
+        "collision-side-rails",
+        "covered-roof",
+        "structural-supports",
+    },
+}
+for instance_id, (component_id, parts) in enumerate(expected.items(), 127):
+    root = bpy.data.objects.get(f"nv__{component_id}")
+    assert root is not None
+    assert root["nv_instance_id"] == instance_id
+    assert root["nv_semantic_id"] == 14
+    assert root["nv_semantic_class"] == "elevated-walkway"
+    actual = {
+        child["nv_part_id"]
+        for child in root.children
+        if child.type == "MESH"
+    }
+    assert actual == parts
+    assert all(child.data.polygons for child in root.children if child.type == "MESH")
+print("NANTAI_ELEVATED_COMPONENTS_OK", flush=True)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    probe_result = subprocess.run(
+        [
+            str(LOCAL_BLENDER),
+            "--background",
+            "--factory-startup",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "17",
+            str(staging / "village-canary.blend"),
+            "--python",
+            str(probe),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert probe_result.returncode == 0, probe_result.stdout + probe_result.stderr
+    assert "NANTAI_ELEVATED_COMPONENTS_OK" in probe_result.stdout
 
 
 def test_historical_local_request_omits_absent_geometry_profile(

@@ -64,6 +64,7 @@ SEMANTIC_CLASSES = (
     "courtyard",
     "retaining-wall",
     "prop",
+    "elevated-walkway",
 )
 
 
@@ -228,11 +229,11 @@ def _blender_c2w_to_opencv(matrix):
 
 
 def _validate_object_registry_contract(object_registry):
-    _expect_list(object_registry, 126, "object_registry")
-    expected_instances = list(range(1, 127))
+    _expect_list(object_registry, 130, "object_registry")
+    expected_instances = list(range(1, 131))
     actual_instances = [row.get("instance_id") for row in object_registry if isinstance(row, dict)]
     if actual_instances != expected_instances:
-        raise RuntimeRenderError("object registry instance IDs are not stable 1 through 126")
+        raise RuntimeRenderError("object registry instance IDs are not stable 1 through 130")
     stable_ids = []
     for row in object_registry:
         _expect_keys(
@@ -245,14 +246,14 @@ def _validate_object_registry_contract(object_registry):
             or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", row["object_id"]) is None
             or isinstance(row["semantic_id"], bool)
             or not isinstance(row["semantic_id"], int)
-            or not 3 <= row["semantic_id"] <= 13
+            or not 3 <= row["semantic_id"] < len(SEMANTIC_CLASSES)
             or isinstance(row["material_id"], bool)
             or not isinstance(row["material_id"], int)
             or not 1 <= row["material_id"] <= 255
         ):
             raise RuntimeRenderError("object registry row is invalid")
         stable_ids.append(row["object_id"])
-    if len(set(stable_ids)) != 126:
+    if len(set(stable_ids)) != 130:
         raise RuntimeRenderError("object registry stable IDs are not unique")
 
 
@@ -445,7 +446,7 @@ def _validate_request(request):
     auxiliary = request["auxiliary_registry"]
     _validate_auxiliary_registry_contract(auxiliary)
     semantics = request["semantic_registry"]
-    _expect_list(semantics, 14, "semantic_registry")
+    _expect_list(semantics, len(SEMANTIC_CLASSES), "semantic_registry")
     expected_semantics = [
         {
             "scope": (
@@ -1287,7 +1288,7 @@ def _validate_cross_layer_pixels(depth, normals, instances, semantics):
                 raise RuntimeRenderError(
                     "visible semantic pixel lacks positive depth and unit normal",
                 )
-        if instance_id > 0 and not 3 <= semantic_id <= 13:
+        if instance_id > 0 and not 3 <= semantic_id < len(SEMANTIC_CLASSES):
             raise RuntimeRenderError("canonical instance pixel has a non-canonical semantic ID")
 
 

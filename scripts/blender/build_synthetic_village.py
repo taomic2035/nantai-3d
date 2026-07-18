@@ -87,7 +87,7 @@ MAX_ADDED_VILLAGE_FACES = 15_400
 MAX_BUILDING_GLTF_TRIANGLES = 720
 MAX_GLTF_TRIANGLES = 100_000
 MAX_TEXTURED_GLB_BYTES = 150_000_000
-EXPECTED_TEXTURED_GLB_PRIMITIVES = 544
+EXPECTED_TEXTURED_GLB_PRIMITIVES = 559
 EXPECTED_BUILDING_MESH_OBJECTS = 421
 
 SEMANTIC_CLASSES = (
@@ -727,6 +727,10 @@ def _validate_elevated_topology(topology, scene, source_hashes, semantic_registr
             or not isinstance(component["material_slot_ids"], list)
             or not component["material_slot_ids"]
             or not all(_is_slug(value) for value in component["material_slot_ids"])
+            or any(
+                value not in VISUAL_MATERIALS
+                for value in component["material_slot_ids"]
+            )
         ):
             raise RuntimeBuildError("elevated topology component contract is invalid")
         actual_identities.append(identity)
@@ -968,7 +972,7 @@ def _validate_request(request, raw):
     scene_objects = scene.get("objects")
     _expect_list(scene_objects, 126, "scene_plan.objects")
     object_registry = request["object_registry"]
-    _expect_list(object_registry, 126, "object_registry")
+    _expect_list(object_registry, 130, "object_registry")
     semantic_ids = {row["semantic_class"]: row["semantic_id"] for row in semantic_registry}
     material_ids = {row["material_family"]: row["material_id"] for row in material_registry}
     expected_objects = []
@@ -996,8 +1000,26 @@ def _validate_request(request, raw):
                 "variant_id": variant,
             },
         )
+    elevated_material_family = {
+        "switchback-stair": "fieldstone",
+        "covered-timber-gallery": "weathered-timber",
+        "terrace-ramp-junction": "fieldstone",
+        "cross-level-covered-passage": "weathered-timber",
+    }
+    for component in request["elevated_topology"]["components"]:
+        expected_objects.append(
+            {
+                "instance_id": component["instance_id"],
+                "material_id": material_ids[
+                    elevated_material_family[component["component_kind"]]
+                ],
+                "object_id": component["component_id"],
+                "semantic_id": 14,
+                "variant_id": None,
+            },
+        )
     if object_registry != expected_objects:
-        raise RuntimeBuildError("object_registry does not match scene_plan")
+        raise RuntimeBuildError("object_registry does not match scene and elevated topology")
     expected_auxiliary = [
         {
             "auxiliary_id": "background-world",
@@ -3000,6 +3022,295 @@ def _build_prop(item, root, registry, materials, collection):
         _link_mesh(root, f"{variant}-accent", accent, materials[accent_slot], registry, collection)
 
 
+def _add_segment_prism(assembler, start, end, width, thickness, *, z_offset=0.0):
+    start_vector = Vector((start[0], start[1], start[2] + z_offset))
+    end_vector = Vector((end[0], end[1], end[2] + z_offset))
+    horizontal = Vector(
+        (
+            end_vector.x - start_vector.x,
+            end_vector.y - start_vector.y,
+            0.0,
+        ),
+    )
+    if horizontal.length <= 1e-6:
+        raise RuntimeBuildError("elevated geometry contains a zero-length segment")
+    side = Vector((-horizontal.y, horizontal.x, 0.0)).normalized() * (width / 2)
+    vertical = Vector((0.0, 0.0, thickness / 2))
+    vertices = (
+        start_vector - side - vertical,
+        start_vector + side - vertical,
+        end_vector + side - vertical,
+        end_vector - side - vertical,
+        start_vector - side + vertical,
+        start_vector + side + vertical,
+        end_vector + side + vertical,
+        end_vector - side + vertical,
+    )
+    assembler.add(
+        vertices,
+        (
+            (0, 3, 2, 1),
+            (4, 5, 6, 7),
+            (0, 1, 5, 4),
+            (3, 7, 6, 2),
+            (0, 4, 7, 3),
+            (1, 2, 6, 5),
+        ),
+    )
+
+
+def _add_side_rails(assembler, start, end, width, height):
+    horizontal = Vector((end[0] - start[0], end[1] - start[1], 0.0))
+    if horizontal.length <= 1e-6:
+        raise RuntimeBuildError("elevated rail contains a zero-length segment")
+    side = Vector((-horizontal.y, horizontal.x, 0.0)).normalized() * (width / 2)
+    for sign in (-1.0, 1.0):
+        offset = side * sign
+        rail_start = (
+            start[0] + offset.x,
+            start[1] + offset.y,
+            start[2] + height,
+        )
+        rail_end = (
+            end[0] + offset.x,
+            end[1] + offset.y,
+            end[2] + height,
+        )
+        _add_segment_prism(
+            assembler,
+            rail_start,
+            rail_end,
+            0.12,
+            0.12,
+        )
+        for point in (start, end):
+            assembler.add_box(
+                (
+                    point[0] + offset.x,
+                    point[1] + offset.y,
+                    point[2] + height / 2,
+                ),
+                (0.14, 0.14, height),
+            )
+
+
+def _add_supports(assembler, points, extent, deck_thickness):
+    for point in points:
+        terrain = _terrain_height(point[0], point[1], extent)
+        bottom = terrain + 0.08
+        top = point[2] - deck_thickness / 2
+        height = top - bottom
+        if height < 0.35:
+            continue
+        assembler.add_box(
+            (point[0], point[1], bottom + height / 2),
+            (0.30, 0.30, height),
+        )
+
+
+def _add_stair_treads(assembler, start, end, width):
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    horizontal_length = math.hypot(dx, dy)
+    if horizontal_length <= 1e-6:
+        raise RuntimeBuildError("elevated stair contains a zero-length segment")
+    step_count = max(2, math.ceil(horizontal_length / 0.85))
+    yaw = math.atan2(dy, dx)
+    tread_length = horizontal_length / step_count + 0.04
+    for index in range(step_count):
+        fraction = (index + 0.5) / step_count
+        top_z = start[2] + (end[2] - start[2]) * (index + 1) / step_count
+        assembler.add_box(
+            (
+                start[0] + dx * fraction,
+                start[1] + dy * fraction,
+                top_z - 0.11,
+            ),
+            (tread_length, width, 0.22),
+            yaw,
+        )
+
+
+def _new_elevated_root(component, topology, registry, collection):
+    identifier = component["component_id"]
+    root = bpy.data.objects.new(f"nv__{identifier}", None)
+    collection.objects.link(root)
+    root.empty_display_type = "PLAIN_AXES"
+    root.empty_display_size = 1.0
+    root["nv_root"] = True
+    root["nv_semantic_class"] = "elevated-walkway"
+    root["nv_component_kind"] = component["component_kind"]
+    root["nv_source_transform"] = json.dumps(
+        {
+            "coordinate_system": topology["coordinate_system"],
+            "scene_plan_sha256": topology["scene_plan_sha256"],
+        },
+        sort_keys=True,
+    )
+    root["nv_components"] = "[]"
+    root["nv_walkable_edge_ids"] = json.dumps(
+        component["edge_ids"],
+        separators=(",", ":"),
+    )
+    root["nv_collision_verified"] = True
+    _tag_object(
+        root,
+        identifier,
+        registry["semantic_id"],
+        registry["instance_id"],
+        registry["material_id"],
+        registry["variant_id"],
+    )
+    return root
+
+
+def _build_elevated_components(request, materials, collection):
+    topology = request["elevated_topology"]
+    registry_by_id = {row["object_id"]: row for row in request["object_registry"]}
+    edge_by_id = {edge["edge_id"]: edge for edge in topology["edges"]}
+    extent = request["scene_plan"]["extent"]
+    roots = []
+    for component in topology["components"]:
+        registry = registry_by_id[component["component_id"]]
+        root = _new_elevated_root(
+            component,
+            topology,
+            registry,
+            collection,
+        )
+        roots.append(root)
+        kind = component["component_kind"]
+        edges = [edge_by_id[edge_id] for edge_id in component["edge_ids"]]
+        deck = MeshAssembler()
+        rails = MeshAssembler()
+        supports = MeshAssembler()
+        roof = MeshAssembler()
+        drainage = MeshAssembler()
+        support_points = {}
+        for edge in edges:
+            points = [tuple(point["position_m"]) for point in edge["centerline"]]
+            for point in points:
+                support_points[point] = point
+            for start, end in zip(points, points[1:], strict=False):
+                if kind == "switchback-stair":
+                    _add_stair_treads(deck, start, end, edge["width_m"])
+                else:
+                    _add_segment_prism(
+                        deck,
+                        start,
+                        end,
+                        edge["width_m"],
+                        edge["collision"]["deck_thickness_m"],
+                        z_offset=-edge["collision"]["deck_thickness_m"] / 2,
+                    )
+                _add_side_rails(
+                    rails,
+                    start,
+                    end,
+                    edge["width_m"],
+                    edge["collision"]["railing_height_m"],
+                )
+                if edge["collision"]["covered"]:
+                    roof_height = edge["collision"]["head_clearance_m"] + 0.22
+                    _add_segment_prism(
+                        roof,
+                        start,
+                        end,
+                        edge["width_m"] + 0.9,
+                        0.20,
+                        z_offset=roof_height,
+                    )
+                if kind == "terrace-ramp-junction":
+                    horizontal = Vector(
+                        (end[0] - start[0], end[1] - start[1], 0.0),
+                    )
+                    side = (
+                        Vector((-horizontal.y, horizontal.x, 0.0)).normalized()
+                        * (edge["width_m"] / 2 + 0.24)
+                    )
+                    for sign in (-1.0, 1.0):
+                        _add_segment_prism(
+                            drainage,
+                            (
+                                start[0] + side.x * sign,
+                                start[1] + side.y * sign,
+                                start[2] + 0.10,
+                            ),
+                            (
+                                end[0] + side.x * sign,
+                                end[1] + side.y * sign,
+                                end[2] + 0.10,
+                            ),
+                            0.18,
+                            0.20,
+                        )
+        _add_supports(
+            supports,
+            tuple(sorted(support_points)),
+            extent,
+            0.24,
+        )
+
+        if kind == "switchback-stair":
+            deck_part = "walkable-stair-treads"
+            deck_material = "material-fieldstone-01"
+        elif kind == "covered-timber-gallery":
+            deck_part = "walkable-timber-deck"
+            deck_material = "material-weathered-timber-01"
+        elif kind == "terrace-ramp-junction":
+            deck_part = "walkable-ramp-deck"
+            deck_material = "material-packed-earth-01"
+        else:
+            deck_part = "walkable-cross-level-decks"
+            deck_material = "material-weathered-timber-01"
+        _link_mesh(
+            root,
+            deck_part,
+            deck,
+            materials[deck_material],
+            registry,
+            collection,
+        )
+        _link_mesh(
+            root,
+            "collision-side-rails",
+            rails,
+            materials[
+                "material-weathered-timber-01"
+                if kind in {"covered-timber-gallery", "cross-level-covered-passage"}
+                else "material-fieldstone-01"
+            ],
+            registry,
+            collection,
+        )
+        _link_mesh(
+            root,
+            "structural-supports",
+            supports,
+            materials["material-fieldstone-01"],
+            registry,
+            collection,
+        )
+        if roof.vertices:
+            _link_mesh(
+                root,
+                "covered-roof",
+                roof,
+                materials["material-gray-roof-tile-01"],
+                registry,
+                collection,
+            )
+        if drainage.vertices:
+            _link_mesh(
+                root,
+                "drainage-separation",
+                drainage,
+                materials["material-fieldstone-01"],
+                registry,
+                collection,
+            )
+    return roots
+
+
 def _build_canonical_objects(request, materials, canonical_collection):
     registry_by_id = {row["object_id"]: row for row in request["object_registry"]}
     roots = []
@@ -3041,6 +3352,13 @@ def _build_canonical_objects(request, materials, canonical_collection):
             _build_prop(item, root, registry, materials, canonical_collection)
         else:
             raise RuntimeBuildError(f"unsupported semantic class: {semantic}")
+    roots.extend(
+        _build_elevated_components(
+            request,
+            materials,
+            canonical_collection,
+        ),
+    )
     return roots
 
 
@@ -3375,18 +3693,129 @@ def _validate_visual_scene_evidence(request, roots, materials):
     )
 
 
+def _validate_elevated_scene_evidence(request, roots):
+    topology = request["elevated_topology"]
+    roots_by_id = {root["nv_stable_id"]: root for root in roots}
+    required_parts = {
+        "switchback-stair": {
+            "walkable-stair-treads",
+            "collision-side-rails",
+            "structural-supports",
+        },
+        "covered-timber-gallery": {
+            "walkable-timber-deck",
+            "collision-side-rails",
+            "covered-roof",
+            "structural-supports",
+        },
+        "terrace-ramp-junction": {
+            "walkable-ramp-deck",
+            "collision-side-rails",
+            "drainage-separation",
+            "structural-supports",
+        },
+        "cross-level-covered-passage": {
+            "walkable-cross-level-decks",
+            "collision-side-rails",
+            "covered-roof",
+            "structural-supports",
+        },
+    }
+    edges = {edge["edge_id"]: edge for edge in topology["edges"]}
+    evidence = []
+    for component in topology["components"]:
+        component_id = component["component_id"]
+        root = roots_by_id.get(component_id)
+        children = (
+            [child for child in root.children if child.type == "MESH"]
+            if root is not None
+            else []
+        )
+        parts = {child.get("nv_part_id") for child in children}
+        if (
+            root is None
+            or root.get("nv_semantic_class") != "elevated-walkway"
+            or root.get("nv_semantic_id") != topology["semantic_id"]
+            or root.get("nv_instance_id") != component["instance_id"]
+            or root.get("nv_component_kind") != component["component_kind"]
+            or root.get("nv_collision_verified") is not True
+            or _string_set_property(
+                root,
+                "nv_walkable_edge_ids",
+                component_id,
+            )
+            != set(component["edge_ids"])
+            or parts != required_parts[component["component_kind"]]
+            or any(not child.data.polygons for child in children)
+        ):
+            raise RuntimeBuildError(
+                f"elevated component structural evidence is invalid: {component_id}",
+            )
+        used_materials = {
+            child.data.materials[0].get("nv_slot_id")
+            for child in children
+            if child.data.materials
+        }
+        if (
+            None in used_materials
+            or not used_materials.issubset(set(component["material_slot_ids"]))
+        ):
+            raise RuntimeBuildError(
+                f"elevated component PBR materials are invalid: {component_id}",
+            )
+        world_vertices = [
+            child.matrix_world @ vertex.co
+            for child in children
+            for vertex in child.data.vertices
+        ]
+        minimum = tuple(min(vertex[index] for vertex in world_vertices) for index in range(3))
+        maximum = tuple(max(vertex[index] for vertex in world_vertices) for index in range(3))
+        centerline = [
+            point["position_m"]
+            for edge_id in component["edge_ids"]
+            for point in edges[edge_id]["centerline"]
+        ]
+        if any(
+            point[index] < minimum[index] - 1e-6
+            or point[index] > maximum[index] + 1e-6
+            for point in centerline
+            for index in range(3)
+        ):
+            raise RuntimeBuildError(
+                f"elevated component bounds do not contain centerline: {component_id}",
+            )
+        evidence.append(
+            {
+                "bounds_max_m": [round(float(value), 6) for value in maximum],
+                "bounds_min_m": [round(float(value), 6) for value in minimum],
+                "component_id": component_id,
+                "component_kind": component["component_kind"],
+                "edge_ids": component["edge_ids"],
+                "instance_id": component["instance_id"],
+                "material_slot_ids": sorted(used_materials),
+                "part_ids": sorted(parts),
+                "semantic_id": topology["semantic_id"],
+            },
+        )
+    bpy.context.scene["nv_elevated_geometry_evidence"] = json.dumps(
+        evidence,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def _validate_built_scene(request, roots, materials, camera_objects):
     expected_ids = [row["object_id"] for row in request["object_registry"]]
     actual_ids = [root["nv_stable_id"] for root in roots]
-    if actual_ids != expected_ids or len(set(actual_ids)) != 126:
+    if actual_ids != expected_ids or len(set(actual_ids)) != 130:
         raise RuntimeBuildError("canonical Blender root IDs do not match request")
     if len(materials) != 24 or set(materials) != set(VISUAL_MATERIALS):
         raise RuntimeBuildError("24 visual materials were not instantiated")
     if len(camera_objects) != 24:
         raise RuntimeBuildError("24 cameras were not instantiated")
     mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
-    if len(mesh_objects) < 126:
-        raise RuntimeBuildError("scene has fewer than 126 mesh objects")
+    if len(mesh_objects) < 130:
+        raise RuntimeBuildError("scene has fewer than 130 mesh objects")
     bpy.context.view_layer.update()
     maximum_canonical_edge = 0.0
     maximum_canonical_aspect = 0.0
@@ -3488,6 +3917,7 @@ def _validate_built_scene(request, roots, materials, camera_objects):
         "nv__aux-support-terrain-skirt",
     }:
         raise RuntimeBuildError("auxiliary semantic mesh set is not exactly stable v1")
+    _validate_elevated_scene_evidence(request, roots)
     _validate_visual_scene_evidence(request, roots, materials)
     building_geometry_profile = request.get(
         "building_geometry_profile_id",
@@ -3856,7 +4286,7 @@ def _build_report(
         "camera_registry": _camera_report_registry(request, camera_objects),
         "preview_registry": preview_registry,
         "counts": {
-            "canonical_roots": 126,
+            "canonical_roots": 130,
             "mesh_objects": len(mesh_objects),
             "scene_material_families": 11,
             "visual_materials": 24,
@@ -4033,7 +4463,7 @@ def _execute_build(request, staging_path, materials_path=None):
         work_dir.rename(staging_path)
         print(
             f"NANTAI_BUILD_OK content_id={content_id} "
-            f"roots=126 meshes={len(mesh_objects)} cameras=24 materials=24",
+            f"roots=130 meshes={len(mesh_objects)} cameras=24 materials=24",
             flush=True,
         )
     except Exception as exc:

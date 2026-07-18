@@ -563,7 +563,7 @@ def build_elevated_topology_plan(
             component_kind="switchback-stair",
             instance_id=127,
             edge_ids=("edge-central-stair-001",),
-            material_slot_ids=("material-fieldstone-wall-01", "material-moss-stone-01"),
+            material_slot_ids=("material-fieldstone-01", "material-moss-stone-01"),
         ),
         ElevatedComponent(
             component_id="covered-timber-gallery-v1",
@@ -572,7 +572,8 @@ def build_elevated_topology_plan(
             edge_ids=("edge-central-gallery-001",),
             material_slot_ids=(
                 "material-weathered-timber-01",
-                "material-charcoal-clay-roof-01",
+                "material-fieldstone-01",
+                "material-gray-roof-tile-01",
             ),
         ),
         ElevatedComponent(
@@ -580,7 +581,7 @@ def build_elevated_topology_plan(
             component_kind="terrace-ramp-junction",
             instance_id=129,
             edge_ids=("edge-central-ramp-001",),
-            material_slot_ids=("material-fieldstone-wall-01", "material-packed-earth-01"),
+            material_slot_ids=("material-fieldstone-01", "material-packed-earth-01"),
         ),
         ElevatedComponent(
             component_id="cross-level-covered-passage-v1",
@@ -593,8 +594,8 @@ def build_elevated_topology_plan(
             ),
             material_slot_ids=(
                 "material-weathered-timber-01",
-                "material-fieldstone-wall-01",
-                "material-charcoal-clay-roof-01",
+                "material-fieldstone-01",
+                "material-gray-roof-tile-01",
             ),
         ),
     )

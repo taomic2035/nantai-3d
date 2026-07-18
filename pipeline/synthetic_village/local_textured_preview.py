@@ -140,8 +140,8 @@ class LocalTexturedPreviewRequest(FrozenModel):
     camera_plan: CameraPlan
     source_hashes: canary.SourceHashes
     object_registry: tuple[canary.ObjectRegistryEntry, ...] = Field(
-        min_length=126,
-        max_length=126,
+        min_length=130,
+        max_length=130,
     )
     auxiliary_registry: tuple[canary.AuxiliaryRegistryEntry, ...] = Field(
         min_length=3,
@@ -224,8 +224,8 @@ class LocalTexturedBuildReport(FrozenModel):
     tool_identity: LocalBlenderIdentity
     source_hashes: canary.SourceHashes
     object_registry: tuple[canary.ObjectRegistryEntry, ...] = Field(
-        min_length=126,
-        max_length=126,
+        min_length=130,
+        max_length=130,
     )
     auxiliary_registry: tuple[canary.AuxiliaryRegistryEntry, ...] = Field(
         min_length=3,
@@ -283,8 +283,8 @@ class LocalTexturedBuildReport(FrozenModel):
             raise ValueError("local build material registry is not stable")
         if (
             tuple(row.instance_id for row in self.object_registry)
-            != tuple(range(1, 127))
-            or len({row.object_id for row in self.object_registry}) != 126
+            != tuple(range(1, 131))
+            or len({row.object_id for row in self.object_registry}) != 130
         ):
             raise ValueError("local build object registry is incomplete")
         slot_ids = tuple(row.slot_id for row in self.visual_slot_registry)
@@ -1131,7 +1131,12 @@ def build_local_textured_preview_request(
         )
     semantics = canary._semantic_registry()
     materials = canary._material_registry(active_scene)
-    objects = canary._object_registry(active_scene, semantics, materials)
+    objects = canary._object_registry(
+        active_scene,
+        active_topology,
+        semantics,
+        materials,
+    )
     source_hashes = canary.SourceHashes(
         default_recipe_sha256=hashlib.sha256(canonical_json_bytes(recipe)).hexdigest(),
         visual_catalog_sha256=hashlib.sha256(canonical_json_bytes(catalog)).hexdigest(),

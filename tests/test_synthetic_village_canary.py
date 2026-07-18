@@ -203,7 +203,16 @@ def test_build_request_is_frozen_complete_and_content_addressed() -> None:
     assert request.schema_version == "nantai.synthetic-village.blender-build-request.v1"
     assert request.synthetic is True
     assert request.verification_level == "L2"
-    assert len(request.object_registry) == 126
+    assert len(request.object_registry) == 130
+    assert [
+        (row.object_id, row.instance_id, row.semantic_id)
+        for row in request.object_registry[-4:]
+    ] == [
+        ("elevated-switchback-stair-v1", 127, 14),
+        ("covered-timber-gallery-v1", 128, 14),
+        ("terrace-ramp-junction-v1", 129, 14),
+        ("cross-level-covered-passage-v1", 130, 14),
+    ]
     assert request.auxiliary_registry == AUXILIARY_REGISTRY
     assert len(request.visual_slot_registry) == 68
     assert tuple(entry.semantic_class for entry in request.semantic_registry) == (
@@ -616,7 +625,7 @@ def test_artifact_request_registry_has_only_portable_exact_names() -> None:
 def test_build_counts_reject_unregistered_auxiliary_meshes() -> None:
     with pytest.raises(ValidationError):
         BuildCounts(
-            canonical_roots=126,
+            canonical_roots=130,
             mesh_objects=130,
             scene_material_families=11,
             visual_materials=24,
@@ -712,7 +721,7 @@ def _valid_report(request: BuildRequest, staging: Path) -> BuildReport:
             ),
         ),
         counts=BuildCounts(
-            canonical_roots=126,
+            canonical_roots=130,
             mesh_objects=130,
             scene_material_families=11,
             visual_materials=24,
@@ -834,7 +843,7 @@ def _valid_textured_report(
             ),
         ),
         counts=TexturedBuildCounts(
-            canonical_roots=126,
+            canonical_roots=130,
             mesh_objects=130,
             scene_material_families=11,
             visual_materials=24,
@@ -1384,6 +1393,10 @@ def test_blender_renderer_declares_separate_local_scene_provenance_path() -> Non
     assert "local-textured-render-frame-request.v1" in source
     assert 'scene.get("nv_preview_id")' in source
     assert 'scene.get("nv_authoritative") is not False' in source
+    assert '"elevated-walkway"' in source
+    assert "3 <= row[\"semantic_id\"] < len(SEMANTIC_CLASSES)" in source
+    assert "_expect_list(semantics, len(SEMANTIC_CLASSES), \"semantic_registry\")" in source
+    assert "3 <= semantic_id < len(SEMANTIC_CLASSES)" in source
 
 
 def _write_fake_frame(

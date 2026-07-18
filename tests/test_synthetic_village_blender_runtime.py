@@ -803,7 +803,7 @@ def test_runtime_builds_and_reports_the_complete_canary(tmp_path: Path) -> None:
     report = json.loads((staging / "build-report.json").read_text("utf-8"))
     assert report["build_id"] == request.build_id
     assert report["fidelity"] == "simplified-pbr-not-render-parity"
-    assert report["counts"]["canonical_roots"] == 126
+    assert report["counts"]["canonical_roots"] == 130
     assert report["counts"]["visual_materials"] == 24
     assert report["counts"]["cameras"] == 24
     assert report["counts"]["auxiliary_semantic_objects"] == 2

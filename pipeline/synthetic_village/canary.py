@@ -560,11 +560,18 @@ def _validate_common_request_contract(request) -> None:
     )
     if elevated_semantic.semantic_id != request.elevated_topology.semantic_id:
         raise ValueError("elevated topology semantic ID is not registered")
+    if any(
+        material_id not in VISUAL_MATERIAL_SLOT_IDS
+        for component in request.elevated_topology.components
+        for material_id in component.material_slot_ids
+    ):
+        raise ValueError("elevated topology references an unknown visual material slot")
     expected_materials = _material_registry(request.scene_plan)
     if request.material_registry != expected_materials:
         raise ValueError("material registry is not the stable v1 mapping")
     if request.object_registry != _object_registry(
         request.scene_plan,
+        request.elevated_topology,
         expected_semantics,
         expected_materials,
     ):
@@ -620,7 +627,7 @@ class BuildRequest(FrozenModel):
     camera_plan: CameraPlan
     source_hashes: SourceHashes
     tool_identity: ToolIdentity
-    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=130, max_length=130)
     auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(
         min_length=3,
         max_length=3,
@@ -669,7 +676,7 @@ class TexturedBuildRequest(FrozenModel):
     camera_plan: CameraPlan
     source_hashes: SourceHashes
     tool_identity: ToolIdentity
-    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=130, max_length=130)
     auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(
         min_length=3,
         max_length=3,
@@ -835,8 +842,8 @@ class ArtifactRecord(FrozenModel):
 
 
 class BuildCounts(FrozenModel):
-    canonical_roots: Literal[126]
-    mesh_objects: int = Field(ge=126)
+    canonical_roots: Literal[130]
+    mesh_objects: int = Field(ge=130)
     scene_material_families: Literal[11]
     visual_materials: Literal[24]
     cameras: Literal[24]
@@ -845,8 +852,8 @@ class BuildCounts(FrozenModel):
 
 
 class TexturedBuildCounts(FrozenModel):
-    canonical_roots: Literal[126]
-    mesh_objects: int = Field(ge=126)
+    canonical_roots: Literal[130]
+    mesh_objects: int = Field(ge=130)
     scene_material_families: Literal[11]
     visual_materials: Literal[24]
     cameras: Literal[24]
@@ -922,7 +929,7 @@ class BuildReport(FrozenModel):
     fidelity: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
     tool_identity: ToolIdentity
     source_hashes: SourceHashes
-    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=130, max_length=130)
     auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(
         min_length=3,
         max_length=3,
@@ -954,8 +961,8 @@ class BuildReport(FrozenModel):
             raise ValueError("report material registry is not the stable v1 mapping")
         instance_ids = tuple(item.instance_id for item in self.object_registry)
         object_ids = tuple(item.object_id for item in self.object_registry)
-        if instance_ids != tuple(range(1, 127)) or len(set(object_ids)) != 126:
-            raise ValueError("report object registry must contain 126 stable instances")
+        if instance_ids != tuple(range(1, 131)) or len(set(object_ids)) != 130:
+            raise ValueError("report object registry must contain 130 stable instances")
         if any(item.variant_id != _prop_variant(item.object_id) for item in self.object_registry):
             raise ValueError("report prop variants do not match the stable v1 mapping")
         slot_ids = tuple(item.slot_id for item in self.visual_slot_registry)
@@ -993,7 +1000,7 @@ class TexturedBuildReport(FrozenModel):
     geometry_usability: Literal["preview-only"] = "preview-only"
     tool_identity: ToolIdentity
     source_hashes: SourceHashes
-    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=130, max_length=130)
     auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(
         min_length=3,
         max_length=3,
@@ -1034,7 +1041,7 @@ class TexturedBuildReport(FrozenModel):
             raise ValueError("textured report material registry is not stable")
         instance_ids = tuple(item.instance_id for item in self.object_registry)
         object_ids = tuple(item.object_id for item in self.object_registry)
-        if instance_ids != tuple(range(1, 127)) or len(set(object_ids)) != 126:
+        if instance_ids != tuple(range(1, 131)) or len(set(object_ids)) != 130:
             raise ValueError("textured report object registry is incomplete")
         if any(item.variant_id != _prop_variant(item.object_id) for item in self.object_registry):
             raise ValueError("textured report prop variants are not stable")
@@ -1120,7 +1127,7 @@ class RenderFrameRequest(FrozenModel):
     settings: RenderSettings
     camera: CameraPose
     measured_c2w_blender: Matrix4
-    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
+    object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=130, max_length=130)
     auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(min_length=3, max_length=3)
     semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=15, max_length=15)
 
@@ -1133,7 +1140,7 @@ class RenderFrameRequest(FrozenModel):
             raise ValueError("render request schema and verification level disagree")
         if self.camera.camera_id not in RENDER_CAMERA_IDS:
             raise ValueError("render request camera is not canonical")
-        if tuple(item.instance_id for item in self.object_registry) != tuple(range(1, 127)):
+        if tuple(item.instance_id for item in self.object_registry) != tuple(range(1, 131)):
             raise ValueError("render request instance registry is not stable v1")
         if self.semantic_registry != _semantic_registry():
             raise ValueError("render request semantic registry is not stable v1")
@@ -1182,9 +1189,9 @@ class RenderStatistics(FrozenModel):
     @model_validator(mode="after")
     def _validate_ids(self) -> RenderStatistics:
         if self.instance_ids != tuple(sorted(set(self.instance_ids))) or any(
-            value < 0 or value > 126 for value in self.instance_ids
+            value < 0 or value > 130 for value in self.instance_ids
         ):
-            raise ValueError("observed instance IDs must be unique stable IDs from 0 through 126")
+            raise ValueError("observed instance IDs must be unique stable IDs from 0 through 130")
         if self.semantic_ids != tuple(sorted(set(self.semantic_ids))) or any(
             value < 0 or value > 14 for value in self.semantic_ids
         ):
@@ -1885,12 +1892,13 @@ def _visual_slot_build_evidence(
 
 def _object_registry(
     scene_plan: ScenePlan,
+    elevated_topology: ElevatedTopologyPlan,
     semantic_registry: tuple[SemanticRegistryEntry, ...],
     material_registry: tuple[MaterialRegistryEntry, ...],
 ) -> tuple[ObjectRegistryEntry, ...]:
     semantics = {item.semantic_class: item.semantic_id for item in semantic_registry}
     materials = {item.material_family: item.material_id for item in material_registry}
-    return tuple(
+    rows = [
         ObjectRegistryEntry(
             object_id=item.object_id,
             instance_id=item.instance_id,
@@ -1899,7 +1907,24 @@ def _object_registry(
             variant_id=_prop_variant(item.object_id),
         )
         for item in scene_plan.objects
+    ]
+    primary_material_family = {
+        "switchback-stair": "fieldstone",
+        "covered-timber-gallery": "weathered-timber",
+        "terrace-ramp-junction": "fieldstone",
+        "cross-level-covered-passage": "weathered-timber",
+    }
+    rows.extend(
+        ObjectRegistryEntry(
+            object_id=component.component_id,
+            instance_id=component.instance_id,
+            semantic_id=semantics["elevated-walkway"],
+            material_id=materials[primary_material_family[component.component_kind]],
+            variant_id=None,
+        )
+        for component in elevated_topology.components
     )
+    return tuple(rows)
 
 
 def _visual_slot_registry(
@@ -2099,7 +2124,7 @@ def build_canary_request(
     )
     semantics = _semantic_registry()
     materials = _material_registry(active_scene)
-    objects = _object_registry(active_scene, semantics, materials)
+    objects = _object_registry(active_scene, active_topology, semantics, materials)
     source_hashes = SourceHashes(
         default_recipe_sha256=hashlib.sha256(canonical_json_bytes(recipe)).hexdigest(),
         visual_catalog_sha256=hashlib.sha256(canonical_json_bytes(catalog)).hexdigest(),
@@ -2200,7 +2225,7 @@ def build_textured_canary_request(
     )
     semantics = _semantic_registry()
     materials = _material_registry(active_scene)
-    objects = _object_registry(active_scene, semantics, materials)
+    objects = _object_registry(active_scene, active_topology, semantics, materials)
     source_hashes = SourceHashes(
         default_recipe_sha256=hashlib.sha256(canonical_json_bytes(recipe)).hexdigest(),
         visual_catalog_sha256=hashlib.sha256(canonical_json_bytes(catalog)).hexdigest(),
