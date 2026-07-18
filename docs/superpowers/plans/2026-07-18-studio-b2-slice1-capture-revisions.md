@@ -36,8 +36,8 @@ It does not implement `SfmBundle`, training handoffs, import descriptors, scene 
 ## File Map
 
 - Modify `pipeline/studio_ledger.py`: schema migration, v2 records, append-only capture APIs.
-- Create `pipeline/studio_revisions.py`: capture manifest validation, bundle preparation, absent-only publisher, compatibility projection.
-- Modify `pipeline/studio_jobs.py`: managed directories and ingest publication orchestration.
+- Create `pipeline/studio_revisions.py`: capture manifest validation plus pure bundle preparation and verification.
+- Modify `pipeline/studio_jobs.py`: durability/lock-owning absent-only publisher, managed directories, and ingest publication orchestration.
 - Modify `pipeline/studio_server.py`: sanitized capture revision endpoints.
 - Modify `tests/test_studio_ledger.py`: migration, fingerprint, append-only ledger tests.
 - Create `tests/test_studio_capture_revisions.py`: manifest and immutable publication tests.
@@ -556,12 +556,20 @@ git push origin main
 
 **Files:**
 - Modify: `pipeline/studio_revisions.py`
+- Modify: `pipeline/studio_jobs.py`
 - Modify: `tests/test_studio_capture_revisions.py`
 - Modify: `tests/test_studio_publication.py`
 
 **Interfaces:**
 - Consumes: verified ingest stage, `WindowsNtfsDurabilityBackend`, held writer/publish locks.
-- Produces: `CaptureBundlePublisher.prepare()`, `CaptureBundlePublisher.publish()`, `PublishedCapture`.
+- Produces: pure `prepare_capture_bundle()` / `verify_capture_bundle()` primitives in
+  `studio_revisions.py`, plus durability-owning
+  `CaptureBundlePublisher.publish()` and `PublishedCapture` in `studio_jobs.py`.
+
+`studio_revisions.py` must not import `studio_jobs.py`. The latter already owns
+fixed managed paths, lock ordering, concurrency snapshots, and the verified
+Windows/NTFS durability backend; keeping the publisher there prevents Task 5
+from creating a `studio_jobs` ↔ `studio_revisions` circular import.
 
 - [ ] **Step 1: Write publication and fault-injection tests**
 
@@ -596,11 +604,23 @@ destination = root / ".nantai-studio/artifacts/capture" / revision_id
 quarantine = root / ".nantai-studio/quarantine" / f"{revision_id}-{uuid.uuid4().hex}"
 ```
 
-`prepare()` verifies the ingest stage, creates `payload/`, copies each declared output once, re-hashes source and copy, writes the private ingest manifest and canonical capture manifest, flushes every file and directory, and re-verifies the complete tree.
+`prepare_capture_bundle()` verifies the ingest stage, creates `payload/`, copies
+each declared output once, re-hashes source and copy, and writes the exact
+verified private ingest manifest plus canonical capture manifest.
+`verify_capture_bundle()` re-opens the complete tree, rejects links or undeclared
+entries, validates both manifests, and re-hashes every payload. These pure
+helpers perform no locking, durability calls, ledger writes, or publication.
 
 - [ ] **Step 4: Implement publication ordering**
 
-`publish()` requires the writer lock, acquires the publish lock, checks the original concurrency snapshot, calls `prepare_capture_publication()`, write-through moves the absent bundle directory, verifies every byte at the destination, and calls `commit_capture_publication()`. The run deliberately remains `running/publishing` until Task 5 refreshes the compatibility projection. The publisher returns:
+`CaptureBundlePublisher.publish()` in `studio_jobs.py` requires the writer lock,
+acquires the publish lock, checks the original concurrency snapshot, calls the
+pure bundle preparation helper, flushes every file and directory, re-verifies
+the staged tree, calls `prepare_capture_publication()`, write-through moves the
+absent bundle directory, flushes both parents, verifies every byte at the
+destination, and calls `commit_capture_publication()`. The run deliberately
+remains `running/publishing` until Task 5 refreshes the compatibility
+projection. The publisher returns:
 
 ```python
 @dataclass(frozen=True)
@@ -627,7 +647,8 @@ Expected: all selected tests pass.
 - [ ] **Step 6: Commit and push the publisher**
 
 ```bash
-git add pipeline/studio_revisions.py tests/test_studio_capture_revisions.py tests/test_studio_publication.py
+git add pipeline/studio_revisions.py pipeline/studio_jobs.py \
+  tests/test_studio_capture_revisions.py tests/test_studio_publication.py
 git commit -m "feat(studio): publish immutable capture bundles" \
   -m "Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>"
 git push origin main
@@ -902,5 +923,5 @@ git push origin main
 
 - Spec coverage: Slice 1 covers design sections 5, 6, 7, 9 publication primitives, 12 read-only capture routes, 13 privacy, 15 recovery, 19 L0/L1 gates, 21.1/21.2 tests, and delivery slice 1. Other sections remain explicitly outside this slice.
 - Placeholder scan: the plan contains no unresolved implementation placeholder; every task names files, interfaces, test command, expected RED/GREEN result, and commit boundary.
-- Type consistency: `CaptureRevisionManifest`, `CapturePayload`, `CaptureRevisionRecord`, `prepare_capture_publication()`, `commit_capture_publication()`, `commit_capture_run_success()`, `CaptureBundlePublisher`, `PublishedCapture`, and both API routes retain the same names and fields across tasks.
+- Type consistency: `CaptureRevisionManifest`, `CapturePayload`, `CaptureRevisionRecord`, `prepare_capture_bundle()`, `verify_capture_bundle()`, `prepare_capture_publication()`, `commit_capture_publication()`, `commit_capture_run_success()`, `CaptureBundlePublisher`, `PublishedCapture`, and both API routes retain the same names and fields across tasks.
 - Safety check: immutable bundle commit precedes compatibility projection; GET routes never open a client-supplied path; v1 migration validates its fingerprint before changing the database.
