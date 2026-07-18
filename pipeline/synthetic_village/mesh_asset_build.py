@@ -5,6 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
+import subprocess
+import uuid
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -17,8 +21,19 @@ from pydantic import (
     model_validator,
 )
 
-from pipeline.synthetic_village.canary import MaterialInputRecord
-from pipeline.synthetic_village.local_textured_preview import LocalBlenderIdentity
+from pipeline.studio_jobs import JobContractError, ProjectFileLock
+from pipeline.synthetic_village import canary
+from pipeline.synthetic_village.canary import CanaryBuildError, MaterialInputRecord
+from pipeline.synthetic_village.glb_material_audit import (
+    ExpectedGlbMaterial,
+    GlbMaterialAuditError,
+    audit_textured_glb,
+)
+from pipeline.synthetic_village.local_textured_preview import (
+    LocalBlenderIdentity,
+    LocalTexturedPreviewError,
+    probe_local_blender_identity,
+)
 from pipeline.synthetic_village.material_bundle import (
     MATERIAL_BUNDLE_MANIFEST,
     MaterialAlgorithmId,
@@ -30,6 +45,11 @@ from pipeline.synthetic_village.mesh_asset_bundle import (
     GLB_COORDINATE_ENCODING,
     MESH_TRIANGLE_BUDGETS,
     Bounds3,
+    MeshAssetBundleResult,
+    MeshAssetTemplateSource,
+    load_mesh_asset_bundle,
+    measure_mesh_template_enu_bounds,
+    publish_mesh_asset_bundle,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -40,6 +60,9 @@ MESH_ASSET_BUILD_REPORT_SCHEMA = (
     "nantai.synthetic-village.mesh-asset-build-report.v1"
 )
 MAX_BUILD_INPUT_BYTES = 64 * 1024 * 1024
+MAX_MESH_BUILD_REPORT_BYTES = 16 * 1024 * 1024
+MAX_MESH_BUILD_ARTIFACT_BYTES = 128 * 1024 * 1024
+DEFAULT_MESH_BUILD_TIMEOUT_SECONDS = 30 * 60
 
 ASSET_RECIPE_CONTRACTS: dict[
     str,
@@ -310,6 +333,15 @@ class MeshAssetBuildReport(FrozenModel):
         return self
 
 
+@dataclass(frozen=True)
+class MeshAssetBuildResult:
+    request: MeshAssetBuildRequest
+    report: MeshAssetBuildReport
+    bundle: MeshAssetBundleResult
+    stdout: str
+    stderr: str
+
+
 def _jsonable(value: object) -> object:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
@@ -370,7 +402,12 @@ def _real_directory(path: Path, *, label: str) -> Path:
     return path
 
 
-def _read_regular_file(path: Path, *, label: str) -> bytes:
+def _read_regular_file(
+    path: Path,
+    *,
+    label: str,
+    maximum_bytes: int = MAX_BUILD_INPUT_BYTES,
+) -> bytes:
     path = Path(path).expanduser().absolute()
     _real_directory(path.parent, label=f"{label} directory")
     try:
@@ -381,11 +418,11 @@ def _read_regular_file(path: Path, *, label: str) -> bytes:
             or not path.is_file()
             or resolved != path
             or before.st_size <= 0
-            or before.st_size > MAX_BUILD_INPUT_BYTES
+            or before.st_size > maximum_bytes
         ):
             raise MeshAssetBuildError(f"{label} is not a bounded regular file")
         with path.open("rb") as stream:
-            payload = stream.read(MAX_BUILD_INPUT_BYTES + 1)
+            payload = stream.read(maximum_bytes + 1)
         after = path.stat()
     except MeshAssetBuildError:
         raise
@@ -407,7 +444,7 @@ def _read_regular_file(path: Path, *, label: str) -> bytes:
     if (
         signatures[0] != signatures[1]
         or len(payload) != before.st_size
-        or len(payload) > MAX_BUILD_INPUT_BYTES
+        or len(payload) > maximum_bytes
     ):
         raise MeshAssetBuildError(f"{label} changed during bounded read")
     return payload
@@ -580,3 +617,474 @@ def build_mesh_asset_request(
             "material bundle manifest changed during request creation",
         )
     return request
+
+
+def load_mesh_asset_build_report(path: Path) -> MeshAssetBuildReport:
+    """Load one canonical path-free builder report with duplicate-key rejection."""
+
+    raw = _read_regular_file(
+        path,
+        label="mesh build report",
+        maximum_bytes=MAX_MESH_BUILD_REPORT_BYTES,
+    )
+    try:
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        report = MeshAssetBuildReport.model_validate_json(raw)
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+    ) as exc:
+        raise MeshAssetBuildError(f"mesh build report is invalid: {exc}") from exc
+    if raw != canonical_mesh_asset_build_report_bytes(report):
+        raise MeshAssetBuildError("mesh build report is not canonical")
+    return report
+
+
+def _prepare_real_directory(path: Path, *, label: str) -> Path:
+    path = Path(path).expanduser().absolute()
+    cursor = path
+    missing: list[Path] = []
+    while not cursor.exists():
+        if _is_linklike(cursor):
+            raise MeshAssetBuildError(f"{label} has a redirected ancestor")
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            raise MeshAssetBuildError(f"{label} has no real existing ancestor")
+        cursor = parent
+    _real_directory(cursor, label=f"{label} ancestor")
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(exist_ok=False)
+        except FileExistsError:
+            pass
+        _real_directory(directory, label=label)
+    return _real_directory(path, label=label)
+
+
+def _resolve_builder_script(repo_root: Path, builder_script: Path) -> Path:
+    selected = Path(builder_script)
+    if not selected.is_absolute():
+        selected = repo_root / selected
+    selected = selected.absolute()
+    try:
+        selected.relative_to(repo_root)
+    except ValueError as exc:
+        raise MeshAssetBuildError("mesh builder script escapes the repository") from exc
+    _read_regular_file(selected, label="mesh builder script")
+    return selected
+
+
+def _run_blender_process(
+    *,
+    repo_root: Path,
+    executable: Path,
+    builder_script: Path,
+    request_path: Path,
+    material_root: Path,
+    staging: Path,
+    invocation_root: Path,
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    argv = [
+        str(executable),
+        "--background",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--python-exit-code",
+        "17",
+        "--python",
+        builder_script.relative_to(repo_root).as_posix(),
+        "--",
+        "--request",
+        str(request_path),
+        "--materials",
+        str(material_root),
+        "--staging",
+        str(staging),
+    ]
+    try:
+        environment = canary._minimum_blender_environment(invocation_root)
+        timeout_error = None
+        with (
+            canary._BoundedPipeCapture("stdout") as stdout,
+            canary._BoundedPipeCapture("stderr") as stderr,
+        ):
+            try:
+                completed = subprocess.run(
+                    argv,
+                    check=False,
+                    shell=False,
+                    cwd=str(repo_root),
+                    env=environment,
+                    timeout=timeout_seconds,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout.writer,
+                    stderr=stderr.writer,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timeout_error = exc
+                completed = None
+        if timeout_error is not None:
+            raise MeshAssetBuildError(
+                f"Blender mesh build exceeded the {timeout_seconds}-second timeout",
+            ) from timeout_error
+        if completed is None:
+            raise MeshAssetBuildError(
+                "Blender mesh build returned no completion status",
+            )
+        return completed.returncode, stdout.text(), stderr.text()
+    except MeshAssetBuildError:
+        raise
+    except (OSError, canary.CanaryBuildError) as exc:
+        raise MeshAssetBuildError(
+            f"verified Blender mesh process could not run: {exc}",
+        ) from exc
+
+
+def _validate_staging_entries(
+    staging: Path,
+    report: MeshAssetBuildReport,
+) -> None:
+    staging = _real_directory(staging, label="mesh builder staging")
+    expected_files = {
+        "build-report.json",
+        *(row.artifact_path for row in report.artifacts),
+    }
+    expected_directories = {
+        "artifacts",
+        *(f"artifacts/{asset_id}" for asset_id in EXPECTED_ASSET_IDS),
+    }
+    try:
+        entries = tuple(staging.rglob("*"))
+    except OSError as exc:
+        raise MeshAssetBuildError("mesh builder staging cannot be enumerated") from exc
+    if any(_is_linklike(path) for path in entries):
+        raise MeshAssetBuildError("mesh builder staging contains redirected output")
+    actual_files = {
+        path.relative_to(staging).as_posix()
+        for path in entries
+        if path.is_file()
+    }
+    actual_directories = {
+        path.relative_to(staging).as_posix()
+        for path in entries
+        if path.is_dir()
+    }
+    if (
+        actual_files != expected_files
+        or actual_directories != expected_directories
+        or len(entries) != len(actual_files) + len(actual_directories)
+    ):
+        raise MeshAssetBuildError(
+            "mesh builder staging contains missing or unexpected outputs",
+        )
+
+
+def _report_sources(
+    *,
+    request: MeshAssetBuildRequest,
+    report: MeshAssetBuildReport,
+    staging: Path,
+) -> tuple[MeshAssetTemplateSource, ...]:
+    if (
+        report.build_id != request.build_id
+        or report.blender_identity != request.blender_identity
+        or report.builder_script_sha256 != request.builder_script_sha256
+    ):
+        raise MeshAssetBuildError(
+            "mesh build report identity disagrees with its request",
+        )
+    material_inputs = {
+        row.slot_id: row for row in request.material_input_registry
+    }
+    recipe_by_id = {recipe.asset_id: recipe for recipe in request.recipes}
+    rows_by_asset: dict[str, list[MeshAssetBuildReportRow]] = {
+        asset_id: [] for asset_id in request.asset_ids
+    }
+    for row in report.artifacts:
+        recipe = recipe_by_id[row.asset_id]
+        if row.material_slot_ids != recipe.material_slot_ids:
+            raise MeshAssetBuildError(
+                "mesh build report material evidence disagrees with its recipe",
+            )
+        expected_materials = tuple(
+            ExpectedGlbMaterial(
+                slot_id=slot_id,
+                source_sha256=material_inputs[slot_id].source_sha256,
+                bundle_id=request.material_bundle_id,
+                algorithm_id=request.material_algorithm_id,
+            )
+            for slot_id in recipe.material_slot_ids
+        )
+        artifact = staging / row.artifact_path
+        payload = _read_regular_file(
+            artifact,
+            label="mesh build GLB artifact",
+            maximum_bytes=MAX_MESH_BUILD_ARTIFACT_BYTES,
+        )
+        try:
+            audit = audit_textured_glb(
+                artifact,
+                expected_materials=expected_materials,
+            )
+        except GlbMaterialAuditError as exc:
+            raise MeshAssetBuildError(
+                "mesh build GLB material or geometry audit failed",
+            ) from exc
+        measured_bounds = measure_mesh_template_enu_bounds(payload)
+        if (
+            audit.glb_sha256 != row.glb_sha256
+            or audit.byte_count != row.glb_bytes
+            or audit.triangle_count != row.triangle_count
+            or audit.primitive_count != row.primitive_count
+            or audit.slot_ids != row.material_slot_ids
+            or any(
+                abs(measured - declared) > 1e-5
+                for measured, declared in zip(
+                    (
+                        *measured_bounds.min,
+                        *measured_bounds.max,
+                    ),
+                    (
+                        *row.local_enu_aabb.min,
+                        *row.local_enu_aabb.max,
+                    ),
+                    strict=True,
+                )
+            )
+        ):
+            raise MeshAssetBuildError(
+                "mesh build report evidence disagrees with independent GLB audit",
+            )
+        rows_by_asset[row.asset_id].append(row)
+    return tuple(
+        MeshAssetTemplateSource(
+            asset_id=recipe.asset_id,
+            kind=recipe.kind,
+            footprint_m=recipe.footprint_m,
+            lod_paths=tuple(
+                staging / row.artifact_path
+                for row in rows_by_asset[recipe.asset_id]
+            ),
+            material_slot_ids=tuple(
+                row.material_slot_ids
+                for row in rows_by_asset[recipe.asset_id]
+            ),
+        )
+        for recipe in request.recipes
+    )
+
+
+def _cleanup_owned_directory(
+    path: Path | None,
+    *,
+    work_root: Path,
+    prefix: str,
+) -> None:
+    if path is None:
+        return
+    candidate = Path(path).absolute()
+    if (
+        candidate.parent != work_root
+        or not candidate.name.startswith(prefix)
+        or _is_linklike(candidate)
+        or not candidate.exists()
+        or not candidate.is_dir()
+    ):
+        return
+    shutil.rmtree(candidate, ignore_errors=True)
+
+
+def run_mesh_asset_build(
+    *,
+    repo_root: Path,
+    material_bundle_root: Path,
+    blender_executable: Path,
+    builder_script: Path,
+    work_root: Path,
+    publication_root: Path,
+    timeout_seconds: int = DEFAULT_MESH_BUILD_TIMEOUT_SECONDS,
+) -> MeshAssetBuildResult:
+    """Snapshot, invoke, cross-check, and publish one exact mesh-template build."""
+
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or not 1 <= timeout_seconds <= 24 * 60 * 60
+    ):
+        raise MeshAssetBuildError(
+            "mesh build timeout must be an integer from 1 to 86400 seconds",
+        )
+    repo_root = _real_directory(Path(repo_root), label="repository root")
+    material_bundle_root = _real_directory(
+        Path(material_bundle_root),
+        label="material bundle root",
+    )
+    work_root = _prepare_real_directory(
+        Path(work_root),
+        label="mesh build work root",
+    )
+    publication_root = Path(publication_root).expanduser().absolute()
+    builder_path = _resolve_builder_script(repo_root, builder_script)
+    blender_path = Path(blender_executable).expanduser().absolute()
+    invocation_root: Path | None = None
+    staging: Path | None = None
+    try:
+        with ProjectFileLock(
+            work_root / ".mesh-build.lock",
+            role="writer",
+        ):
+            try:
+                blender_snapshot = canary._snapshot_regular_file(blender_path)
+                builder_snapshot = canary._snapshot_regular_file(builder_path)
+                registry_snapshot = canary._snapshot_regular_file(
+                    repo_root / "assets/registry.json",
+                )
+                material_snapshots = canary._collect_material_bundle_snapshots(
+                    material_bundle_root,
+                )
+                blender_identity = probe_local_blender_identity(blender_path)
+            except (
+                CanaryBuildError,
+                LocalTexturedPreviewError,
+            ) as exc:
+                raise MeshAssetBuildError(
+                    f"mesh build inputs cannot be snapshotted: {exc}",
+                ) from exc
+            if blender_identity.executable_sha256 != blender_snapshot.sha256:
+                raise MeshAssetBuildError(
+                    "local Blender identity disagrees with executable bytes",
+                )
+            request = build_mesh_asset_request(
+                repo_root=repo_root,
+                material_bundle_root=material_bundle_root,
+                builder_script=builder_path,
+                blender_identity=blender_identity,
+            )
+            try:
+                canary._verify_snapshots_unchanged(
+                    (
+                        blender_snapshot,
+                        builder_snapshot,
+                        registry_snapshot,
+                        *material_snapshots,
+                    ),
+                )
+            except CanaryBuildError as exc:
+                raise MeshAssetBuildError(str(exc)) from exc
+
+            nonce = uuid.uuid4().hex
+            invocation_root = work_root / f".mesh-invocation-{nonce}"
+            staging = work_root / f".mesh-builder-{nonce}"
+            invocation_root.mkdir(exist_ok=False)
+            if staging.exists() or _is_linklike(staging):
+                raise MeshAssetBuildError(
+                    "mesh builder staging destination must start absent",
+                )
+            request_path = invocation_root / "request.json"
+            try:
+                canary._write_new_file(
+                    request_path,
+                    canonical_mesh_asset_build_request_bytes(request),
+                )
+                request_snapshot = canary._snapshot_regular_file(request_path)
+                invocation_material_snapshots = canary.snapshot_material_inputs(
+                    request=request,
+                    material_bundle_root=material_bundle_root,
+                    invocation_root=invocation_root,
+                )
+            except CanaryBuildError as exc:
+                raise MeshAssetBuildError(
+                    f"mesh invocation snapshot failed: {exc}",
+                ) from exc
+            material_root = invocation_root / "material-inputs"
+            immutable_snapshots = (
+                blender_snapshot,
+                builder_snapshot,
+                registry_snapshot,
+                *material_snapshots,
+                request_snapshot,
+                *invocation_material_snapshots,
+            )
+            try:
+                canary._verify_snapshots_unchanged(immutable_snapshots)
+            except CanaryBuildError as exc:
+                raise MeshAssetBuildError(str(exc)) from exc
+
+            returncode, stdout, stderr = _run_blender_process(
+                repo_root=repo_root,
+                executable=blender_path,
+                builder_script=builder_path,
+                request_path=request_path,
+                material_root=material_root,
+                staging=staging,
+                invocation_root=invocation_root,
+                timeout_seconds=timeout_seconds,
+            )
+            try:
+                canary._verify_snapshots_unchanged(immutable_snapshots)
+            except CanaryBuildError as exc:
+                raise MeshAssetBuildError(str(exc)) from exc
+            if returncode != 0:
+                raise MeshAssetBuildError(
+                    f"Blender mesh build failed with exit code {returncode}",
+                )
+            report = load_mesh_asset_build_report(staging / "build-report.json")
+            _validate_staging_entries(staging, report)
+            sources = _report_sources(
+                request=request,
+                report=report,
+                staging=staging,
+            )
+            try:
+                canary._verify_snapshots_unchanged(immutable_snapshots)
+            except CanaryBuildError as exc:
+                raise MeshAssetBuildError(str(exc)) from exc
+            bundle = publish_mesh_asset_bundle(
+                material_bundle_root=material_bundle_root,
+                sources=sources,
+                publication_root=publication_root,
+                work_root=work_root,
+                build_tool_id=f"mesh-asset-build-{request.build_id}",
+                verification_level="L0",
+            )
+            published = load_mesh_asset_bundle(bundle.final_directory)
+            if (
+                published.bundle_id != bundle.bundle_id
+                or len(published.records) != bundle.record_count
+                or tuple(record.asset_id for record in published.records)
+                != request.asset_ids
+            ):
+                raise MeshAssetBuildError(
+                    "published mesh asset bundle disagrees with the build request",
+                )
+            return MeshAssetBuildResult(
+                request=request,
+                report=report,
+                bundle=bundle,
+                stdout=stdout,
+                stderr=stderr,
+            )
+    except MeshAssetBuildError:
+        raise
+    except JobContractError as exc:
+        raise MeshAssetBuildError(f"mesh build lock is unavailable: {exc}") from exc
+    except (OSError, RuntimeError, ValidationError, ValueError) as exc:
+        raise MeshAssetBuildError(f"mesh build failed safely: {exc}") from exc
+    finally:
+        _cleanup_owned_directory(
+            staging,
+            work_root=work_root,
+            prefix=".mesh-builder-",
+        )
+        _cleanup_owned_directory(
+            invocation_root,
+            work_root=work_root,
+            prefix=".mesh-invocation-",
+        )

@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -20,7 +22,9 @@ from pipeline.synthetic_village.mesh_asset_build import (
     build_mesh_asset_request,
     canonical_mesh_asset_build_report_bytes,
     canonical_mesh_asset_build_request_bytes,
+    run_mesh_asset_build,
 )
+from pipeline.synthetic_village.mesh_asset_bundle import Bounds3
 from tests.synthetic_material_fixtures import publish_material_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -236,3 +240,239 @@ def test_report_rejects_private_or_noncanonical_artifact_path(
 
     with pytest.raises(ValidationError, match="artifact"):
         MeshAssetBuildReport.model_validate(payload)
+
+
+def _successful_fake_blender(
+    calls: list[tuple[list[str], dict[str, object]]],
+    *,
+    triangle_offset: int = 0,
+):
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        request_path = Path(argv[argv.index("--request") + 1])
+        material_root = Path(argv[argv.index("--materials") + 1])
+        staging = Path(argv[argv.index("--staging") + 1])
+        request = MeshAssetBuildRequest.model_validate_json(
+            request_path.read_bytes(),
+        )
+        assert {path.name for path in material_root.iterdir()} == {
+            f"{digest}.png"
+            for row in request.material_input_registry
+            for digest in (
+                row.base_color_sha256,
+                row.normal_sha256,
+                row.orm_sha256,
+            )
+        }
+        assert not staging.exists()
+        rows = []
+        for recipe in request.recipes:
+            for lod, triangle_count in enumerate((1, 2, 3)):
+                relative = Path("artifacts") / recipe.asset_id / f"lod{lod}.glb"
+                artifact = staging / relative
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                payload = f"glb:{recipe.asset_id}:{lod}".encode()
+                artifact.write_bytes(payload)
+                rows.append(
+                    MeshAssetBuildReportRow(
+                        asset_id=recipe.asset_id,
+                        lod=lod,
+                        artifact_path=relative.as_posix(),
+                        glb_sha256=hashlib.sha256(payload).hexdigest(),
+                        glb_bytes=len(payload),
+                        triangle_count=triangle_count + triangle_offset,
+                        primitive_count=1,
+                        material_slot_ids=recipe.material_slot_ids,
+                        local_enu_aabb=Bounds3(
+                            min=(0.0, 0.0, 0.0),
+                            max=recipe.footprint_m,
+                        ),
+                    ),
+                )
+        report = MeshAssetBuildReport(
+            build_id=request.build_id,
+            blender_identity=request.blender_identity,
+            builder_script_sha256=request.builder_script_sha256,
+            artifacts=tuple(rows),
+        )
+        (staging / "build-report.json").write_bytes(
+            canonical_mesh_asset_build_report_bytes(report),
+        )
+        kwargs["stdout"].write(b"mesh builder stdout\n")
+        kwargs["stderr"].write(b"mesh builder stderr\n")
+        return subprocess.CompletedProcess(argv, 0)
+
+    return run
+
+
+def _install_fake_post_audits(
+    monkeypatch: pytest.MonkeyPatch,
+    material_bundle,
+):
+    material_manifest = mesh_asset_build.load_material_bundle(
+        material_bundle.final_directory,
+    )
+    source_by_slot = {
+        record.slot_id: record.source_sha256
+        for record in material_manifest.records
+    }
+
+    def audit(path, *, expected_materials):
+        payload = Path(path).read_bytes()
+        _prefix, _asset_id, lod_text = payload.decode().split(":")
+        assert all(
+            row.source_sha256 == source_by_slot[row.slot_id]
+            for row in expected_materials
+        )
+        return SimpleNamespace(
+            glb_sha256=hashlib.sha256(payload).hexdigest(),
+            byte_count=len(payload),
+            triangle_count=int(lod_text) + 1,
+            primitive_count=1,
+            slot_ids=tuple(row.slot_id for row in expected_materials),
+        )
+
+    def bounds(payload):
+        _prefix, asset_id, _lod_text = payload.decode().split(":")
+        footprint = next(
+            row.footprint_m
+            for row in mesh_asset_build._recipes_from_registry(
+                json.loads((ROOT / "assets/registry.json").read_text()),
+            )
+            if row.asset_id == asset_id
+        )
+        return Bounds3(min=(0.0, 0.0, 0.0), max=footprint)
+
+    monkeypatch.setattr(mesh_asset_build, "audit_textured_glb", audit)
+    monkeypatch.setattr(
+        mesh_asset_build,
+        "measure_mesh_template_enu_bounds",
+        bounds,
+    )
+
+
+def test_runner_snapshots_invokes_cross_checks_and_publishes(
+    material_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = _repo_fixture(tmp_path / "repo")
+    blender = repo_root / "blender"
+    blender.write_bytes(b"fake blender")
+    blender_identity = LOCAL_BLENDER.model_copy(
+        update={
+            "executable_sha256": hashlib.sha256(
+                blender.read_bytes(),
+            ).hexdigest(),
+        },
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    publications = []
+    monkeypatch.setattr(
+        mesh_asset_build,
+        "probe_local_blender_identity",
+        lambda executable: blender_identity,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _successful_fake_blender(calls),
+    )
+    _install_fake_post_audits(monkeypatch, material_bundle)
+
+    def publish(**kwargs):
+        publications.append(kwargs)
+        final = kwargs["publication_root"] / ("a" * 64)
+        return SimpleNamespace(
+            bundle_id="a" * 64,
+            final_directory=final,
+            record_count=11,
+            reused=False,
+        )
+
+    monkeypatch.setattr(mesh_asset_build, "publish_mesh_asset_bundle", publish)
+    monkeypatch.setattr(
+        mesh_asset_build,
+        "load_mesh_asset_bundle",
+        lambda path: SimpleNamespace(
+            bundle_id="a" * 64,
+            records=tuple(
+                SimpleNamespace(asset_id=asset_id)
+                for asset_id in sorted(mesh_asset_build.ASSET_RECIPE_CONTRACTS)
+            ),
+        ),
+    )
+
+    result = run_mesh_asset_build(
+        repo_root=repo_root,
+        material_bundle_root=material_bundle.final_directory,
+        blender_executable=blender,
+        builder_script=Path("scripts/blender/build_mesh_asset_bundle.py"),
+        work_root=tmp_path / "work",
+        publication_root=tmp_path / "published",
+        timeout_seconds=321,
+    )
+
+    assert result.stdout == "mesh builder stdout\n"
+    assert result.stderr == "mesh builder stderr\n"
+    assert len(publications) == 1
+    assert len(publications[0]["sources"]) == 11
+    argv, kwargs = calls[0]
+    assert argv[-6:] == [
+        "--request",
+        argv[-5],
+        "--materials",
+        argv[-3],
+        "--staging",
+        argv[-1],
+    ]
+    assert kwargs["shell"] is False
+    assert kwargs["cwd"] == str(repo_root)
+    assert kwargs["timeout"] == 321
+    assert not list((tmp_path / "work").glob(".mesh-invocation-*"))
+    assert not list((tmp_path / "work").glob(".mesh-builder-*"))
+
+
+def test_runner_rejects_report_audit_disagreement_without_publication(
+    material_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = _repo_fixture(tmp_path / "repo")
+    blender = repo_root / "blender"
+    blender.write_bytes(b"fake blender")
+    blender_identity = LOCAL_BLENDER.model_copy(
+        update={
+            "executable_sha256": hashlib.sha256(
+                blender.read_bytes(),
+            ).hexdigest(),
+        },
+    )
+    monkeypatch.setattr(
+        mesh_asset_build,
+        "probe_local_blender_identity",
+        lambda executable: blender_identity,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _successful_fake_blender([], triangle_offset=1),
+    )
+    _install_fake_post_audits(monkeypatch, material_bundle)
+    monkeypatch.setattr(
+        mesh_asset_build,
+        "publish_mesh_asset_bundle",
+        lambda **kwargs: pytest.fail("mismatched evidence must not publish"),
+    )
+
+    with pytest.raises(MeshAssetBuildError, match="triangle|evidence"):
+        run_mesh_asset_build(
+            repo_root=repo_root,
+            material_bundle_root=material_bundle.final_directory,
+            blender_executable=blender,
+            builder_script=Path("scripts/blender/build_mesh_asset_bundle.py"),
+            work_root=tmp_path / "work",
+            publication_root=tmp_path / "published",
+        )
+    assert not list((tmp_path / "work").glob(".mesh-invocation-*"))
+    assert not list((tmp_path / "work").glob(".mesh-builder-*"))
