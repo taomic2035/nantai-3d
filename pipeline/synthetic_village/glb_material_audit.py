@@ -19,6 +19,8 @@ from pydantic import (
     ValidationError,
 )
 
+from pipeline.synthetic_village.material_bundle import MaterialAlgorithmId
+
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 UvPolicy = Literal[
     "world-xy",
@@ -61,7 +63,7 @@ class ExpectedGlbMaterial(FrozenModel):
     slot_id: str = Field(pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$")
     source_sha256: Sha256
     bundle_id: Sha256
-    algorithm_id: Literal["mirror-sobel-orm-v1"]
+    algorithm_id: MaterialAlgorithmId
 
 
 class GlbMaterialAudit(FrozenModel):

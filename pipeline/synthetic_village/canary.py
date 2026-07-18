@@ -52,9 +52,9 @@ from pipeline.synthetic_village.glb_material_audit import (
     audit_textured_glb,
 )
 from pipeline.synthetic_village.material_bundle import (
-    ALGORITHM_ID,
     MATERIAL_BUNDLE_MANIFEST,
     DerivedMaterialBundle,
+    MaterialAlgorithmId,
     MaterialBundleError,
     load_material_bundle,
 )
@@ -637,6 +637,7 @@ class TexturedBuildRequest(FrozenModel):
     requested_artifacts: tuple[ArtifactRequest, ...] = Field(min_length=6, max_length=6)
     material_bundle_manifest_sha256: Sha256
     material_bundle_id: Sha256
+    material_algorithm_id: MaterialAlgorithmId
     material_input_registry: tuple[MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -958,6 +959,7 @@ class TexturedBuildReport(FrozenModel):
     )
     material_bundle_manifest_sha256: Sha256
     material_bundle_id: Sha256
+    material_algorithm_id: MaterialAlgorithmId = "mirror-sobel-orm-v1"
     material_input_registry: tuple[MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -1313,7 +1315,10 @@ def canonical_build_report_bytes(report: BuildReport) -> bytes:
 
 
 def canonical_textured_build_report_bytes(report: TexturedBuildReport) -> bytes:
-    return _canonical_json_bytes(report.model_dump(mode="json", by_alias=True))
+    payload = report.model_dump(mode="json", by_alias=True)
+    if "material_algorithm_id" not in report.model_fields_set:
+        payload.pop("material_algorithm_id")
+    return _canonical_json_bytes(payload)
 
 
 def canonical_render_request_bytes(request: RenderFrameRequest) -> bytes:
@@ -1624,6 +1629,7 @@ def verify_textured_build_report(
         "visual_slot_registry",
         "material_bundle_manifest_sha256",
         "material_bundle_id",
+        "material_algorithm_id",
         "material_input_registry",
     ):
         if getattr(report, label) != getattr(request, label):
@@ -2119,6 +2125,7 @@ def build_textured_canary_request(
         "requested_artifacts": ARTIFACT_REQUESTS,
         "material_bundle_manifest_sha256": bundle_manifest_sha256,
         "material_bundle_id": bundle.bundle_id,
+        "material_algorithm_id": bundle.algorithm_id,
         "material_input_registry": inputs,
     }
     build_id = hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
@@ -2785,7 +2792,7 @@ def _expected_glb_materials(
             slot_id=row.slot_id,
             source_sha256=row.source_sha256,
             bundle_id=request.material_bundle_id,
-            algorithm_id=ALGORITHM_ID,
+            algorithm_id=request.material_algorithm_id,
         )
         for row in request.material_input_registry
     )

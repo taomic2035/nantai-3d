@@ -94,6 +94,30 @@ def test_base_color_is_repeatable_without_a_hard_edge(prepared_bundle) -> None:
     assert np.array_equal(pixels[0, :, :], pixels[-1, :, :])
 
 
+def test_base_color_tiling_does_not_create_an_exact_mirror_kaleidoscope(
+    prepared_bundle,
+) -> None:
+    _, prepared = prepared_bundle
+    image = prepared.open_map(prepared.manifest.records[0].base_color)
+    pixels = np.asarray(image)
+
+    assert material_bundle.ALGORITHM_ID == "edge-feather-sobel-orm-v2"
+    assert not np.array_equal(pixels, pixels[:, ::-1, :])
+    assert not np.array_equal(pixels, pixels[::-1, :, :])
+
+
+def test_dark_timber_shadow_lift_keeps_the_material_dark_but_readable() -> None:
+    source = Image.new("RGB", (8, 8), (44, 34, 28))
+
+    lifted = np.asarray(material_bundle._lift_dark_timber_shadows(source))
+    luminance = material_bundle._luminance(lifted)
+
+    assert float(np.median(luminance)) >= 55.0
+    assert float(np.median(luminance)) < 100.0
+    assert np.all(lifted[..., 0] > lifted[..., 1])
+    assert np.all(lifted[..., 1] > lifted[..., 2])
+
+
 def test_normal_and_orm_maps_have_bounded_physical_channels(prepared_bundle) -> None:
     _, prepared = prepared_bundle
     record = prepared.manifest.records[0]

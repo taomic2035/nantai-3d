@@ -253,6 +253,7 @@ def test_textured_request_binds_exact_material_bundle_without_private_paths(
         for row in request.visual_slot_registry
         if row.category == "material"
     )
+    assert request.material_algorithm_id == "edge-feather-sobel-orm-v2"
     raw = canonical_textured_build_request_bytes(request)
     assert b".nantai-studio" not in raw
     assert str(Path.home()).encode() not in raw
@@ -285,6 +286,23 @@ def test_builder_source_contains_verified_texture_uv_and_tangent_path() -> None:
         "derived-pbr-material-v1",
     ):
         assert required in source
+
+
+def test_textured_builder_uses_baked_normal_strength_once_and_zones_terrain() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/blender/build_synthetic_village.py"
+    ).read_text("utf-8")
+
+    assert 'normal_map.inputs["Strength"].default_value = 1.0' in source
+    assert "TERRAIN_TEXTURE_SCALE = 3.0" in source
+    assert "_assign_textured_terrain_materials" in source
+    for slot_id in (
+        "material-moss-stone-01",
+        "material-packed-earth-01",
+        "material-terrace-soil-01",
+    ):
+        assert slot_id in source
 
 
 def test_textured_report_preserves_unfulfilled_critical_slot_evidence(
@@ -704,6 +722,7 @@ def _valid_textured_report(
         visual_slot_registry=request.visual_slot_registry,
         material_bundle_manifest_sha256=request.material_bundle_manifest_sha256,
         material_bundle_id=request.material_bundle_id,
+        material_algorithm_id=request.material_algorithm_id,
         material_input_registry=request.material_input_registry,
         camera_registry=tuple(
             CameraRegistryEntry(

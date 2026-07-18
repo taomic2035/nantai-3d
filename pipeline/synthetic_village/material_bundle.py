@@ -50,11 +50,16 @@ UvPolicy = Literal[
     "object-long-axis",
     "leaf-card",
 ]
+MaterialAlgorithmId = Literal[
+    "mirror-sobel-orm-v1",
+    "edge-feather-sobel-orm-v2",
+]
 
 MATERIAL_BUNDLE_SCHEMA = "nantai.synthetic-village.derived-material-bundle.v1"
 MATERIAL_BUNDLE_MANIFEST = "manifest.json"
-ALGORITHM_ID = "mirror-sobel-orm-v1"
+ALGORITHM_ID = "edge-feather-sobel-orm-v2"
 MAP_SIZE = 1024
+EDGE_FEATHER_PIXELS = MAP_SIZE // 8
 MAX_MATERIAL_BUNDLE_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_DERIVED_MAP_BYTES = 64 * 1024 * 1024
 
@@ -177,7 +182,7 @@ class DerivedMaterialBundle(FrozenModel):
     synthetic: Literal[True] = True
     source_pack_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     source_manifest_sha256: Sha256
-    algorithm_id: Literal["mirror-sobel-orm-v1"] = ALGORITHM_ID
+    algorithm_id: MaterialAlgorithmId = ALGORITHM_ID
     python_version: str = Field(min_length=1)
     pillow_version: str = Field(min_length=1)
     module_sha256: Sha256
@@ -255,23 +260,60 @@ def _png_bytes(image: Image.Image) -> bytes:
     return output.getvalue()
 
 
-def _mirror_tile(image: Image.Image) -> Image.Image:
+def _feather_opposite_edges(
+    pixels: np.ndarray,
+    *,
+    axis: Literal[0, 1],
+) -> np.ndarray:
+    """Blend opposite borders without mirroring the material's central features."""
+
+    source = pixels.astype(np.float64)
+    output = source.copy()
+    for offset in range(EDGE_FEATHER_PIXELS):
+        progress = offset / (EDGE_FEATHER_PIXELS - 1)
+        keep_original = progress * progress * (3.0 - 2.0 * progress)
+        if axis == 1:
+            low = source[:, offset, :]
+            high = source[:, -1 - offset, :]
+            midpoint = (low + high) * 0.5
+            output[:, offset, :] = (
+                midpoint * (1.0 - keep_original) + low * keep_original
+            )
+            output[:, -1 - offset, :] = (
+                midpoint * (1.0 - keep_original) + high * keep_original
+            )
+        else:
+            low = source[offset, :, :]
+            high = source[-1 - offset, :, :]
+            midpoint = (low + high) * 0.5
+            output[offset, :, :] = (
+                midpoint * (1.0 - keep_original) + low * keep_original
+            )
+            output[-1 - offset, :, :] = (
+                midpoint * (1.0 - keep_original) + high * keep_original
+            )
+    return np.clip(np.rint(output), 0, 255).astype(np.uint8)
+
+
+def _seamless_tile(image: Image.Image) -> Image.Image:
     square = ImageOps.fit(
         ImageOps.exif_transpose(image).convert("RGB"),
         (MAP_SIZE, MAP_SIZE),
         method=Image.Resampling.LANCZOS,
         centering=(0.5, 0.5),
     )
-    mosaic = Image.new("RGB", (MAP_SIZE * 2, MAP_SIZE * 2))
-    mosaic.paste(square, (0, 0))
-    mosaic.paste(ImageOps.mirror(square), (MAP_SIZE, 0))
-    mosaic.paste(ImageOps.flip(square), (0, MAP_SIZE))
-    mosaic.paste(
-        ImageOps.flip(ImageOps.mirror(square)),
-        (MAP_SIZE, MAP_SIZE),
-    )
-    offset = MAP_SIZE // 2
-    return mosaic.crop((offset, offset, offset + MAP_SIZE, offset + MAP_SIZE))
+    pixels = np.asarray(square, dtype=np.uint8)
+    horizontally_feathered = _feather_opposite_edges(pixels, axis=1)
+    fully_feathered = _feather_opposite_edges(horizontally_feathered, axis=0)
+    return Image.fromarray(fully_feathered, mode="RGB")
+
+
+def _lift_dark_timber_shadows(image: Image.Image) -> Image.Image:
+    """Retain dark-brown character while keeping source detail readable in-scene."""
+
+    values = np.asarray(image.convert("RGB"), dtype=np.float64) / 255.0
+    lifted = np.power(values, 0.78) * 255.0
+    return Image.fromarray(np.clip(np.rint(lifted), 0, 255).astype(np.uint8), mode="RGB")
 
 
 def _luminance(rgb: np.ndarray) -> np.ndarray:
@@ -529,7 +571,9 @@ def prepare_material_bundle(
         for slot_id in sorted(expected_slots):
             source_record = source_records[slot_id]
             parameters = MATERIAL_PARAMETERS[slot_id]
-            tiled = _mirror_tile(_source_image(source_record, visual_pack_root))
+            tiled = _seamless_tile(_source_image(source_record, visual_pack_root))
+            if slot_id == "material-dark-timber-01":
+                tiled = _lift_dark_timber_shadows(tiled)
             luminance = _luminance(np.asarray(tiled, dtype=np.uint8))
             base_payload = _png_bytes(tiled)
             normal_payload = _png_bytes(

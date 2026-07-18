@@ -45,6 +45,7 @@ def test_local_request_is_content_addressed_but_never_authoritative(
     assert request.authoritative is False
     assert request.release_channel == "local-preview-only"
     assert request.tool_identity.platform == "macos-arm64"
+    assert request.material_algorithm_id == "edge-feather-sobel-orm-v2"
     assert (
         hashlib.sha256(
             canonical_local_textured_preview_request_bytes(

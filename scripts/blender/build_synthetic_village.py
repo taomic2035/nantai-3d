@@ -40,7 +40,10 @@ LOCAL_TEXTURED_REPORT_SCHEMA = (
     "nantai.synthetic-village.local-textured-preview-build-report.v1"
 )
 FIDELITY = "simplified-pbr-not-render-parity"
-TEXTURED_ALGORITHM_ID = "mirror-sobel-orm-v1"
+SUPPORTED_TEXTURED_ALGORITHM_IDS = {
+    "mirror-sobel-orm-v1",
+    "edge-feather-sobel-orm-v2",
+}
 UV_POLICIES = {
     "world-xy",
     "dominant-axis-box",
@@ -53,6 +56,12 @@ UV_POLICIES = {
 WEATHER_PROFILE_SCHEMA = "nantai.synthetic-village.weather-profile.v1"
 # build 侧固定灯光角色 (overcast-world-background 校验要求; scene-graph token, 不随天气改)。
 WEATHER_LIGHT_ROLES = ("neutral-overcast-key", "neutral-sky-fill", "terrain-separation")
+TERRAIN_TEXTURE_SCALE = 3.0
+TERRAIN_TEXTURE_SLOTS = (
+    "material-moss-stone-01",
+    "material-packed-earth-01",
+    "material-terrace-soil-01",
+)
 
 SEMANTIC_CLASSES = (
     "background",
@@ -497,6 +506,7 @@ def _validate_request(request, raw):
             *common_top_keys,
             "material_bundle_manifest_sha256",
             "material_bundle_id",
+            "material_algorithm_id",
             "material_input_registry",
         )
         if textured
@@ -795,6 +805,7 @@ def _validate_request(request, raw):
         if (
             not _is_sha256(request["material_bundle_manifest_sha256"])
             or not _is_sha256(request["material_bundle_id"])
+            or request["material_algorithm_id"] not in SUPPORTED_TEXTURED_ALGORITHM_IDS
         ):
             raise RuntimeBuildError("textured material bundle identity is invalid")
         material_inputs = request["material_input_registry"]
@@ -1177,7 +1188,7 @@ def _create_textured_materials(request, material_paths):
         material["slot_id"] = slot_id
         material["source_sha256"] = row["source_sha256"]
         material["bundle_id"] = request["material_bundle_id"]
-        material["algorithm_id"] = TEXTURED_ALGORITHM_ID
+        material["algorithm_id"] = request["material_algorithm_id"]
         material["synthetic"] = True
         material["uv_policy"] = row["uv_policy"]
         material["nv_nominal_tile_m"] = row["nominal_tile_m"]
@@ -1196,7 +1207,10 @@ def _create_textured_materials(request, material_paths):
         orm.image = orm_image
         normal_map = nodes.new("ShaderNodeNormalMap")
         normal_map.name = f"nv__normal-map-{slot_id}"
-        normal_map.inputs["Strength"].default_value = row["normal_strength"]
+        # The derived tangent-space normal bytes already contain the declared
+        # material strength. Applying it again here attenuates sub-unity maps twice.
+        normal_map.inputs["Strength"].default_value = 1.0
+        material["nv_baked_normal_strength"] = row["normal_strength"]
         separate = nodes.new("ShaderNodeSeparateColor")
         separate.name = f"nv__orm-channels-{slot_id}"
         links.new(base.outputs["Color"], principled.inputs["Base Color"])
@@ -1384,6 +1398,14 @@ def _apply_textured_uvs_and_tangents(mesh_objects):
         mesh.update(calc_edges=True)
         if len(mesh.materials) <= 0:
             raise RuntimeBuildError(f"textured mesh has no material: {obj.name}")
+        tile_scale = obj.get("nv_uv_tile_scale", 1.0)
+        if (
+            isinstance(tile_scale, bool)
+            or not isinstance(tile_scale, (int, float))
+            or not math.isfinite(tile_scale)
+            or tile_scale <= 0
+        ):
+            raise RuntimeBuildError(f"textured mesh UV scale is invalid: {obj.name}")
         uv_layer = mesh.uv_layers.get("nv_uv0") or mesh.uv_layers.new(name="nv_uv0")
         for polygon in mesh.polygons:
             if len(polygon.vertices) != 3 or polygon.material_index >= len(mesh.materials):
@@ -1399,7 +1421,12 @@ def _apply_textured_uvs_and_tangents(mesh_objects):
                 or tile_m <= 0
             ):
                 raise RuntimeBuildError(f"textured material UV metadata is invalid: {obj.name}")
-            values = _project_polygon_uvs(obj, polygon, policy, float(tile_m))
+            values = _project_polygon_uvs(
+                obj,
+                polygon,
+                policy,
+                float(tile_m) * float(tile_scale),
+            )
             for loop_index, uv in zip(polygon.loop_indices, values, strict=True):
                 uv_layer.data[loop_index].uv = uv
         try:
@@ -1490,6 +1517,44 @@ def _terrain_height(x_m, y_m, extent):
     return round(extent["relief_m"] * t + interior, 3)
 
 
+def _assign_textured_terrain_materials(terrain_obj, materials):
+    moss = materials["material-moss-stone-01"]
+    if moss.get("nv_implementation") != "derived-pbr-material-v1":
+        return
+
+    mesh = terrain_obj.data
+    for slot_id in TERRAIN_TEXTURE_SLOTS[1:]:
+        mesh.materials.append(materials[slot_id])
+    counts = {slot_id: 0 for slot_id in TERRAIN_TEXTURE_SLOTS}
+    for polygon in mesh.polygons:
+        center = sum(
+            (mesh.vertices[index].co for index in polygon.vertices),
+            Vector((0.0, 0.0, 0.0)),
+        ) / len(polygon.vertices)
+        macro_patch = (
+            math.sin(center.x * 0.031)
+            + 0.72 * math.cos(center.y * 0.027)
+            + 0.38 * math.sin((center.x + center.y) * 0.017)
+        )
+        if abs(polygon.normal.z) < 0.965 or macro_patch > 0.92:
+            slot_id = "material-moss-stone-01"
+        elif macro_patch < -0.28:
+            slot_id = "material-packed-earth-01"
+        else:
+            slot_id = "material-terrace-soil-01"
+        polygon.material_index = TERRAIN_TEXTURE_SLOTS.index(slot_id)
+        counts[slot_id] += 1
+    if any(count <= 0 for count in counts.values()):
+        raise RuntimeBuildError("textured terrain material zoning is incomplete")
+    terrain_obj["nv_uv_tile_scale"] = TERRAIN_TEXTURE_SCALE
+    terrain_obj["nv_terrain_material_profile"] = "slope-macro-patch-v1"
+    terrain_obj["nv_terrain_material_counts"] = json.dumps(
+        counts,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _create_terrain(extent, materials, auxiliary_collection):
     width, depth = extent["width_m"], extent["depth_m"]
     columns = int(width / 5) + 1
@@ -1529,6 +1594,7 @@ def _create_terrain(extent, materials, auxiliary_collection):
     terrain_obj["nv_auxiliary"] = True
     for polygon in terrain_obj.data.polygons:
         polygon.use_smooth = True
+    _assign_textured_terrain_materials(terrain_obj, materials)
 
     skirt = MeshAssembler()
     perimeter = []
@@ -3057,6 +3123,7 @@ def _build_report(
             "material_bundle_manifest_sha256"
         ]
         report["material_bundle_id"] = request["material_bundle_id"]
+        report["material_algorithm_id"] = request["material_algorithm_id"]
         report["material_input_registry"] = request["material_input_registry"]
         report["counts"].update(glb_counts)
     if local:
