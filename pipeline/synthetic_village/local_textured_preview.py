@@ -529,7 +529,7 @@ def _expected_glb_materials(
     )
 
 
-def _load_local_manifest(path: Path) -> LocalTexturedPreviewManifest:
+def load_local_textured_preview_manifest(path: Path) -> LocalTexturedPreviewManifest:
     raw = _read_stable_file(
         path,
         maximum_bytes=canary.MAX_BUILD_REPORT_BYTES,
@@ -542,6 +542,26 @@ def _load_local_manifest(path: Path) -> LocalTexturedPreviewManifest:
     if raw != canonical_local_textured_preview_manifest_bytes(manifest):
         raise LocalTexturedPreviewError("local preview manifest is not canonical JSON")
     return manifest
+
+
+def read_verified_local_textured_preview_glb(
+    path: Path,
+    *,
+    manifest: LocalTexturedPreviewManifest,
+) -> bytes:
+    payload = _read_stable_file(
+        path,
+        maximum_bytes=2 * 1024 * 1024 * 1024,
+        label="local textured preview GLB",
+    )
+    if (
+        len(payload) != manifest.glb_bytes
+        or hashlib.sha256(payload).hexdigest() != manifest.glb_sha256
+    ):
+        raise LocalTexturedPreviewError(
+            "local textured preview GLB does not match its manifest",
+        )
+    return payload
 
 
 def verify_local_textured_preview_directory(
@@ -575,7 +595,7 @@ def verify_local_textured_preview_directory(
         raise LocalTexturedPreviewError(
             "local preview publication is not the exact four-file set",
         )
-    manifest = _load_local_manifest(directory / "manifest.json")
+    manifest = load_local_textured_preview_manifest(directory / "manifest.json")
     if expected_preview_id is not None and manifest.preview_id != expected_preview_id:
         raise LocalTexturedPreviewError("local preview identity does not match its directory")
     report = load_local_textured_build_report(directory / "build-report.json")

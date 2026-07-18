@@ -23,6 +23,11 @@ from pipeline.studio_server import (
     make_server,
     resolve_static_path,
 )
+from pipeline.synthetic_village.local_textured_preview import (
+    LOCAL_LIMITATIONS,
+    LocalTexturedPreviewManifest,
+    canonical_local_textured_preview_manifest_bytes,
+)
 
 
 def _symlink_or_skip(link: Path, target, *, target_is_directory: bool = False) -> None:
@@ -237,6 +242,37 @@ def _request(
     headers = {name.lower(): value for name, value in response.getheaders()}
     connection.close()
     return response.status, headers, payload
+
+
+def _write_local_textured_preview(
+    root: Path,
+    *,
+    preview_id: str = "a" * 64,
+    glb: bytes = b"glTF-local-preview",
+) -> tuple[Path, LocalTexturedPreviewManifest]:
+    directory = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/local-previews"
+        / preview_id
+    )
+    directory.mkdir(parents=True)
+    (directory / "village-canary.glb").write_bytes(glb)
+    manifest = LocalTexturedPreviewManifest(
+        preview_id=preview_id,
+        model_url=(
+            f"/api/local-textured-preview/{preview_id}/village-canary.glb"
+        ),
+        glb_sha256=hashlib.sha256(glb).hexdigest(),
+        glb_bytes=len(glb),
+        build_report_sha256="b" * 64,
+        audit_sha256="c" * 64,
+        material_bundle_id="d" * 64,
+        limitations=LOCAL_LIMITATIONS,
+    )
+    (directory / "manifest.json").write_bytes(
+        canonical_local_textured_preview_manifest_bytes(manifest),
+    )
+    return directory, manifest
 
 
 class TestProjectSnapshot:
@@ -876,6 +912,105 @@ class TestHttpContract:
             "uses_assets": uses_assets,
         }
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_local_textured_preview_is_exact_hash_verified_and_cacheable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _directory, manifest = _write_local_textured_preview(tmp_path)
+        manifest_path = (
+            f"/api/local-textured-preview/{manifest.preview_id}/manifest.json"
+        )
+        glb_path = manifest.model_url
+
+        with _running_server(tmp_path) as server:
+            manifest_status, manifest_headers, manifest_payload = _request(
+                server,
+                "GET",
+                manifest_path,
+            )
+            glb_status, glb_headers, glb_payload = _request(server, "GET", glb_path)
+            head_status, head_headers, head_payload = _request(
+                server,
+                "HEAD",
+                glb_path,
+            )
+            cached_status, cached_headers, cached_payload = _request(
+                server,
+                "GET",
+                glb_path,
+                headers={"If-None-Match": glb_headers["etag"]},
+            )
+
+        assert manifest_status == glb_status == head_status == 200
+        assert cached_status == 304
+        assert json.loads(manifest_payload) == manifest.model_dump(mode="json")
+        assert glb_payload == b"glTF-local-preview"
+        assert head_payload == cached_payload == b""
+        assert manifest_headers["content-type"] == "application/json; charset=utf-8"
+        assert manifest_headers["cache-control"] == "no-store"
+        assert glb_headers["content-type"] == "model/gltf-binary"
+        assert glb_headers["cache-control"] == "public, max-age=0, must-revalidate"
+        assert glb_headers["etag"] == head_headers["etag"] == cached_headers["etag"]
+        assert glb_headers["content-length"] == head_headers["content-length"]
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            "/api/local-textured-preview/../manifest.json",
+            "/api/local-textured-preview/%2e%2e/manifest.json",
+            f"/api/local-textured-preview/{'a' * 63}/manifest.json",
+            f"/api/local-textured-preview/{'a' * 64}/nested/manifest.json",
+            f"/api/local-textured-preview/{'f' * 64}/manifest.json",
+            f"/api/local-textured-preview/{'a' * 64}/build-report.json",
+        ),
+    )
+    def test_local_textured_preview_rejects_nonexact_routes(
+        self,
+        tmp_path: Path,
+        path: str,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _write_local_textured_preview(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(server, "GET", path)
+
+        assert status in {400, 403, 404}
+        assert b"glTF-local-preview" not in payload
+
+    @pytest.mark.parametrize("case", ("changed-glb", "noncanonical-manifest", "symlink-root"))
+    def test_local_textured_preview_fails_closed_on_private_byte_or_path_tampering(
+        self,
+        tmp_path: Path,
+        case: str,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        directory, manifest = _write_local_textured_preview(tmp_path)
+        if case == "changed-glb":
+            (directory / "village-canary.glb").write_bytes(b"tampered")
+        elif case == "noncanonical-manifest":
+            payload = manifest.model_dump(mode="json")
+            (directory / "manifest.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+        else:
+            previews = directory.parent
+            outside = tmp_path.parent / f"{tmp_path.name}-local-previews"
+            previews.rename(outside)
+            _symlink_or_skip(previews, outside, target_is_directory=True)
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(
+                server,
+                "GET",
+                manifest.model_url,
+            )
+
+        assert status in {403, 404, 409, 500}
+        assert b"glTF-local-preview" not in payload
 
     def test_on_demand_world_chunk_is_deterministic_lod_cacheable_and_stream_only(
         self, tmp_path,

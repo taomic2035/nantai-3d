@@ -47,6 +47,12 @@ from pipeline.studio_ledger import (
     RequestConflictError,
     RunRecord,
 )
+from pipeline.synthetic_village.local_textured_preview import (
+    LocalTexturedPreviewError,
+    canonical_local_textured_preview_manifest_bytes,
+    load_local_textured_preview_manifest,
+    read_verified_local_textured_preview_glb,
+)
 
 SNAPSHOT_SCHEMA_VERSION = 2
 RUN_LEDGER_SCHEMA_VERSION = 1
@@ -202,6 +208,42 @@ def _is_real_project_subtree(root: Path, subtree: Path) -> bool:
     except (OSError, RuntimeError):
         return False
     return resolved == subtree and _is_below(root, resolved) and resolved.is_dir()
+
+
+def _resolve_local_textured_preview_directory(
+    root: Path,
+    preview_id: str,
+) -> Path | None:
+    root = root.resolve()
+    boundary = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/local-previews"
+    )
+    cursor = root
+    for component in boundary.relative_to(root).parts:
+        cursor = cursor / component
+        if cursor.is_symlink():
+            return None
+        try:
+            resolved = cursor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if resolved != cursor or not resolved.is_dir():
+            return None
+    directory = boundary / preview_id
+    if directory.is_symlink():
+        return None
+    try:
+        resolved_directory = directory.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if (
+        resolved_directory != directory
+        or not _is_below(boundary, resolved_directory)
+        or not resolved_directory.is_dir()
+    ):
+        return None
+    return resolved_directory
 
 
 def _resolve_real_evidence_file(
@@ -1576,6 +1618,81 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     _load_runs(self.project_root),
                     head_only=head_only,
                 )
+            return
+        if request_path.startswith("/api/local-textured-preview/"):
+            match = re.fullmatch(
+                r"/api/local-textured-preview/([0-9a-f]{64})/"
+                r"(manifest\.json|village-canary\.glb)",
+                request_path,
+            )
+            if match is None or urlsplit(self.path).query:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "local_textured_preview_not_found",
+                    "Local textured preview not found.",
+                    head_only=head_only,
+                )
+                return
+            preview_id, filename = match.groups()
+            directory = _resolve_local_textured_preview_directory(
+                self.project_root,
+                preview_id,
+            )
+            if directory is None:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "local_textured_preview_not_found",
+                    "Local textured preview not found.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                manifest = load_local_textured_preview_manifest(
+                    directory / "manifest.json",
+                )
+                if manifest.preview_id != preview_id:
+                    raise LocalTexturedPreviewError(
+                        "local preview identity does not match its route",
+                    )
+                glb_payload = read_verified_local_textured_preview_glb(
+                    directory / "village-canary.glb",
+                    manifest=manifest,
+                )
+            except LocalTexturedPreviewError:
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "local_textured_preview_invalid",
+                    "Local textured preview evidence is invalid.",
+                    head_only=head_only,
+                )
+                return
+            if filename == "manifest.json":
+                payload = canonical_local_textured_preview_manifest_bytes(manifest)
+                content_type = "application/json; charset=utf-8"
+                cache_control = "no-store"
+                digest = hashlib.sha256(payload).hexdigest()
+            else:
+                payload = glb_payload
+                content_type = "model/gltf-binary"
+                cache_control = "public, max-age=0, must-revalidate"
+                digest = manifest.glb_sha256
+            etag = f'"sha256:{digest}"'
+            request_etags = {
+                candidate.strip()
+                for candidate in self.headers.get("If-None-Match", "").split(",")
+                if candidate.strip()
+            }
+            if "*" in request_etags or etag in request_etags:
+                self._send_not_modified(etag, cache_control=cache_control)
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                payload,
+                content_type=content_type,
+                cache_control=cache_control,
+                head_only=head_only,
+                extra_headers={"ETag": etag},
+            )
             return
         if request_path.startswith("/api/world/chunk/"):
             match = re.fullmatch(
