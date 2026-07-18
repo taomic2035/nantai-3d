@@ -7,6 +7,7 @@ import io
 import json
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -16,6 +17,7 @@ from pipeline.synthetic_village.mesh_asset_bundle import (
     MeshAssetBundleError,
     canonical_mesh_asset_bundle_bytes,
     load_mesh_asset_bundle,
+    measure_mesh_template_enu_bounds,
     read_verified_mesh_template_glb,
 )
 
@@ -42,7 +44,11 @@ def _png_bytes(color: tuple[int, int, int]) -> bytes:
     return output.getvalue()
 
 
-def _glb_payload() -> bytes:
+def _glb_payload(
+    *,
+    triangle_count: int = 1,
+    node_translation: tuple[float, float, float] | None = None,
+) -> bytes:
     binary = bytearray()
     views: list[dict[str, int]] = []
 
@@ -76,7 +82,10 @@ def _glb_payload() -> bytes:
         struct.pack("<12f", 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1),
         target=34962,
     )
-    index_view = append(struct.pack("<3H", 0, 1, 2), target=34963)
+    index_view = append(
+        struct.pack("<3H", 0, 1, 2) * triangle_count,
+        target=34963,
+    )
     base_view = append(_png_bytes((127, 91, 63)))
     normal_image_view = append(_png_bytes((128, 128, 255)))
     orm_view = append(_png_bytes((255, 192, 0)))
@@ -112,7 +121,7 @@ def _glb_payload() -> bytes:
             {
                 "bufferView": index_view,
                 "componentType": 5123,
-                "count": 3,
+                "count": triangle_count * 3,
                 "type": "SCALAR",
             },
         ],
@@ -156,7 +165,16 @@ def _glb_payload() -> bytes:
                 ],
             },
         ],
-        "nodes": [{"mesh": 0}],
+        "nodes": [
+            {
+                "mesh": 0,
+                **(
+                    {"translation": list(node_translation)}
+                    if node_translation is not None
+                    else {}
+                ),
+            },
+        ],
         "scenes": [{"nodes": [0]}],
         "scene": 0,
     }
@@ -183,31 +201,50 @@ def _glb_payload() -> bytes:
 def write_mesh_bundle_fixture(
     root: Path,
     *,
-    triangle_count: int = 1,
+    triangle_count: int | None = None,
+    triangle_counts: tuple[int, int, int] = (1, 2, 3),
+    asset_id: str = "house_wood_01",
+    kind: str = "building",
     material_bundle_id: str = MATERIAL_BUNDLE_ID,
+    gltf_node_translation: tuple[float, float, float] | None = None,
+    declared_aabb: dict[str, list[float]] | None = None,
+    coordinate_encoding: str = "three-east-up-negative-north",
 ) -> tuple[Path, bytes]:
     bundle_root = root / "mesh-bundle"
     object_root = bundle_root / "objects"
     object_root.mkdir(parents=True)
-    glb = _glb_payload()
-    digest = hashlib.sha256(glb).hexdigest()
-    object_path = f"objects/{digest}.glb"
-    (bundle_root / object_path).write_bytes(glb)
-    lod = {
-        str(level): {
+    lod = {}
+    expected_glb = b""
+    for level, measured_triangles in enumerate(triangle_counts):
+        glb = _glb_payload(
+            triangle_count=measured_triangles,
+            node_translation=gltf_node_translation,
+        )
+        digest = hashlib.sha256(glb).hexdigest()
+        object_path = f"objects/{digest}.glb"
+        (bundle_root / object_path).write_bytes(glb)
+        lod[str(level)] = {
             "glb_object_path": object_path,
             "glb_sha256": digest,
             "glb_bytes": len(glb),
-            "triangle_count": triangle_count,
+            "triangle_count": (
+                triangle_count
+                if level == 2 and triangle_count is not None
+                else measured_triangles
+            ),
             "primitive_count": 1,
             "material_slot_ids": [SLOT_ID],
-            "aabb": {"min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]},
+            "aabb": declared_aabb or {
+                "min": [0.0, 0.0, 0.0],
+                "max": [1.0, 0.0, 1.0],
+            },
         }
-        for level in range(3)
-    }
+        if level == 2:
+            expected_glb = glb
     payload = {
         "schema_version": MESH_ASSET_BUNDLE_SCHEMA,
         "bundle_id": "0" * 64,
+        "coordinate_encoding": coordinate_encoding,
         "material_bundle_id": material_bundle_id,
         "material_bundle_manifest_sha256": MATERIAL_MANIFEST_SHA256,
         "synthetic": True,
@@ -224,8 +261,8 @@ def write_mesh_bundle_fixture(
         ],
         "records": [
             {
-                "asset_id": "house_wood_01",
-                "kind": "building",
+                "asset_id": asset_id,
+                "kind": kind,
                 "mesh_algorithm_id": "synthetic-template-mesh-v1",
                 "footprint_m": [8.0, 6.0, 6.5],
                 "lod": lod,
@@ -238,7 +275,7 @@ def write_mesh_bundle_fixture(
     identity_payload.pop("bundle_id")
     payload["bundle_id"] = hashlib.sha256(_canonical(identity_payload)).hexdigest()
     (bundle_root / "manifest.json").write_bytes(_canonical(payload))
-    return bundle_root, glb
+    return bundle_root, expected_glb
 
 
 def test_bundle_identity_and_exact_template_read(tmp_path: Path) -> None:
@@ -247,9 +284,10 @@ def test_bundle_identity_and_exact_template_read(tmp_path: Path) -> None:
     bundle = load_mesh_asset_bundle(bundle_root)
 
     assert bundle.schema_version == MESH_ASSET_BUNDLE_SCHEMA
+    assert bundle.coordinate_encoding == "three-east-up-negative-north"
     assert bundle.asset_ids == ("house_wood_01",)
     descriptor = bundle.records[0].lod["2"]
-    assert descriptor.triangle_count == 1
+    assert descriptor.triangle_count == 3
     assert read_verified_mesh_template_glb(
         bundle_root,
         bundle=bundle,
@@ -286,9 +324,44 @@ def test_exact_read_rejects_template_changed_after_load(tmp_path: Path) -> None:
 
 
 def test_bundle_rejects_triangle_count_not_measured_from_glb(tmp_path: Path) -> None:
-    bundle_root, _glb = write_mesh_bundle_fixture(tmp_path, triangle_count=2)
+    bundle_root, _glb = write_mesh_bundle_fixture(tmp_path, triangle_count=4)
 
     with pytest.raises(MeshAssetBundleError, match="triangle"):
+        load_mesh_asset_bundle(bundle_root)
+
+
+@pytest.mark.parametrize(
+    ("asset_id", "kind", "limit"),
+    [
+        ("house_wood_01", "building", 720),
+        ("tree_pine_01", "vegetation", 1200),
+        ("stone_lamp_01", "prop", 600),
+    ],
+)
+def test_bundle_rejects_kind_lod_triangle_budget_overrun(
+    tmp_path: Path,
+    asset_id: str,
+    kind: str,
+    limit: int,
+) -> None:
+    bundle_root, _glb = write_mesh_bundle_fixture(
+        tmp_path,
+        asset_id=asset_id,
+        kind=kind,
+        triangle_counts=(1, 2, limit + 1),
+    )
+
+    with pytest.raises(MeshAssetBundleError, match="manifest"):
+        load_mesh_asset_bundle(bundle_root)
+
+
+def test_bundle_rejects_non_increasing_lod_triangles(tmp_path: Path) -> None:
+    bundle_root, _glb = write_mesh_bundle_fixture(
+        tmp_path,
+        triangle_counts=(1, 1, 3),
+    )
+
+    with pytest.raises(MeshAssetBundleError, match="manifest"):
         load_mesh_asset_bundle(bundle_root)
 
 
@@ -331,3 +404,62 @@ def test_bundle_rejects_unknown_asset_or_lod(tmp_path: Path) -> None:
             asset_id="house_wood_01",
             lod=4,
         )
+
+
+def test_bundle_measures_transformed_glb_bounds_in_enu(tmp_path: Path) -> None:
+    bundle_root, _glb = write_mesh_bundle_fixture(
+        tmp_path,
+        gltf_node_translation=(10.0, 3.0, -20.0),
+        declared_aabb={
+            "min": [10.0, 20.0, 3.0],
+            "max": [11.0, 20.0, 4.0],
+        },
+    )
+
+    bundle = load_mesh_asset_bundle(bundle_root)
+
+    assert bundle.records[0].lod["2"].aabb.model_dump() == {
+        "min": (10.0, 20.0, 3.0),
+        "max": (11.0, 20.0, 4.0),
+    }
+
+
+def test_bundle_rejects_declared_bounds_not_measured_from_glb(
+    tmp_path: Path,
+) -> None:
+    bundle_root, _glb = write_mesh_bundle_fixture(
+        tmp_path,
+        declared_aabb={
+            "min": [0.0, 0.0, 0.0],
+            "max": [2.0, 0.0, 1.0],
+        },
+    )
+
+    with pytest.raises(MeshAssetBundleError, match="bounds"):
+        load_mesh_asset_bundle(bundle_root)
+
+
+def test_bundle_rejects_unsupported_coordinate_encoding(tmp_path: Path) -> None:
+    bundle_root, _glb = write_mesh_bundle_fixture(
+        tmp_path,
+        coordinate_encoding="unknown-coordinate-encoding",
+    )
+
+    with pytest.raises(MeshAssetBundleError, match="manifest"):
+        load_mesh_asset_bundle(bundle_root)
+
+
+def test_measure_bounds_rejects_nonfinite_scene_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_scene = SimpleNamespace(
+        geometry={"mesh": object()},
+        bounds=((0.0, 0.0, 0.0), (float("nan"), 1.0, 1.0)),
+    )
+    monkeypatch.setattr(
+        "pipeline.synthetic_village.mesh_asset_bundle.trimesh.load_scene",
+        lambda *args, **kwargs: fake_scene,
+    )
+
+    with pytest.raises(MeshAssetBundleError, match="bounds"):
+        measure_mesh_template_enu_bounds(_glb_payload())

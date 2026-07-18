@@ -61,11 +61,19 @@ def _bundle(
     *,
     material_bundle_id: str = "2" * 64,
     asset_ids: tuple[str, ...] | None = None,
-    glb_sha256: str = "a" * 64,
-    glb_bytes: int = 1024,
-    triangle_count: int = 12,
+    lod_templates: tuple[
+        tuple[str, int, int],
+        tuple[str, int, int],
+        tuple[str, int, int],
+    ] | None = None,
+    descriptor_aabb: dict[str, list[float]] | None = None,
 ) -> MeshAssetBundle:
     asset_ids = asset_ids or tuple(sorted(FOOTPRINTS))
+    lod_templates = lod_templates or (
+        ("a" * 64, 1024, 12),
+        ("b" * 64, 2048, 24),
+        ("c" * 64, 4096, 48),
+    )
     material_registry = [
         {
             "slot_id": slot_id,
@@ -82,25 +90,29 @@ def _bundle(
     records = []
     for asset_id in sorted(asset_ids):
         width, depth, height = FOOTPRINTS[asset_id]
-        descriptor = {
-            "glb_object_path": f"objects/{glb_sha256}.glb",
-            "glb_sha256": glb_sha256,
-            "glb_bytes": glb_bytes,
-            "triangle_count": triangle_count,
-            "primitive_count": 1,
-            "material_slot_ids": ["material-fieldstone-01"],
-            "aabb": {
-                "min": [-width / 2, -depth / 2, 0.0],
-                "max": [width / 2, depth / 2, height],
-            },
-        }
+        lod = {}
+        for level, (glb_sha256, glb_bytes, triangle_count) in enumerate(
+            lod_templates,
+        ):
+            lod[str(level)] = {
+                "glb_object_path": f"objects/{glb_sha256}.glb",
+                "glb_sha256": glb_sha256,
+                "glb_bytes": glb_bytes,
+                "triangle_count": triangle_count,
+                "primitive_count": 1,
+                "material_slot_ids": ["material-fieldstone-01"],
+                "aabb": descriptor_aabb or {
+                    "min": [-width / 2, -depth / 2, 0.0],
+                    "max": [width / 2, depth / 2, height],
+                },
+            }
         records.append(
             {
                 "asset_id": asset_id,
                 "kind": _asset_kind(asset_id),
                 "mesh_algorithm_id": "synthetic-template-mesh-v1",
                 "footprint_m": [width, depth, height],
-                "lod": {str(level): descriptor for level in range(3)},
+                "lod": lod,
                 "synthetic": True,
                 "geometry_usability": "preview-only",
             },
@@ -108,6 +120,7 @@ def _bundle(
     payload = {
         "schema_version": MESH_ASSET_BUNDLE_SCHEMA,
         "bundle_id": "0" * 64,
+        "coordinate_encoding": "three-east-up-negative-north",
         "material_bundle_id": material_bundle_id,
         "material_bundle_manifest_sha256": "3" * 64,
         "synthetic": True,

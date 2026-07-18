@@ -281,12 +281,20 @@ def _write_local_textured_preview(
 
 
 def _write_mesh_world_bundle(root: Path):
-    glb = _glb_payload()
-    digest = hashlib.sha256(glb).hexdigest()
+    glbs = tuple(
+        _glb_payload(triangle_count=triangle_count)
+        for triangle_count in (1, 2, 3)
+    )
+    lod_templates = tuple(
+        (hashlib.sha256(glb).hexdigest(), len(glb), level + 1)
+        for level, glb in enumerate(glbs)
+    )
     bundle = _bundle(
-        glb_sha256=digest,
-        glb_bytes=len(glb),
-        triangle_count=1,
+        lod_templates=lod_templates,
+        descriptor_aabb={
+            "min": [0.0, 0.0, 0.0],
+            "max": [1.0, 0.0, 1.0],
+        },
     )
     directory = (
         root
@@ -295,7 +303,12 @@ def _write_mesh_world_bundle(root: Path):
     )
     object_root = directory / "objects"
     object_root.mkdir(parents=True)
-    (object_root / f"{digest}.glb").write_bytes(glb)
+    for glb, (digest, _byte_count, _triangle_count) in zip(
+        glbs,
+        lod_templates,
+        strict=True,
+    ):
+        (object_root / f"{digest}.glb").write_bytes(glb)
     (directory / "manifest.json").write_bytes(
         canonical_mesh_asset_bundle_bytes(bundle),
     )
@@ -314,7 +327,7 @@ def _write_mesh_world_bundle(root: Path):
         "material_bundle_id": bundle.material_bundle_id,
     }
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    return directory, bundle, glb
+    return directory, bundle, glbs[1]
 
 
 class TestProjectSnapshot:

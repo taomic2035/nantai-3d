@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
+import warnings
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
+import numpy as np
+import trimesh
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -29,6 +33,13 @@ MESH_ASSET_BUNDLE_SCHEMA = "nantai.synthetic-village.mesh-asset-bundle.v1"
 MESH_ASSET_BUNDLE_MANIFEST = "manifest.json"
 MAX_MESH_ASSET_BUNDLE_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_MESH_TEMPLATE_GLB_BYTES = 128 * 1024 * 1024
+GLB_COORDINATE_ENCODING = "three-east-up-negative-north"
+MESH_TRIANGLE_BUDGETS = {
+    "building": {0: 100, 1: 300, 2: 720},
+    "vegetation": {0: 160, 1: 500, 2: 1200},
+    "prop": {0: 80, 1: 240, 2: 600},
+}
+MESH_BOUNDS_TOLERANCE_M = 1e-5
 
 
 class MeshAssetBundleError(ValueError):
@@ -97,6 +108,18 @@ class MeshAssetRecord(FrozenModel):
             for value in self.footprint_m
         ):
             raise ValueError("mesh asset footprint must contain three positive values")
+        triangles = [
+            self.lod[str(level)].triangle_count
+            for level in (0, 1, 2)
+        ]
+        if not triangles[0] < triangles[1] < triangles[2]:
+            raise ValueError("mesh asset LOD triangles must increase strictly")
+        if any(
+            self.lod[str(level)].triangle_count
+            > MESH_TRIANGLE_BUDGETS[self.kind][level]
+            for level in (0, 1, 2)
+        ):
+            raise ValueError("mesh asset exceeds its kind/LOD triangle budget")
         return self
 
 
@@ -105,6 +128,9 @@ class MeshAssetBundle(FrozenModel):
         "nantai.synthetic-village.mesh-asset-bundle.v1"
     ] = MESH_ASSET_BUNDLE_SCHEMA
     bundle_id: Sha256
+    coordinate_encoding: Literal[
+        "three-east-up-negative-north"
+    ] = GLB_COORDINATE_ENCODING
     material_bundle_id: Sha256
     material_bundle_manifest_sha256: Sha256
     synthetic: Literal[True] = True
@@ -277,6 +303,56 @@ def _read_template_bytes(root: Path, descriptor: MeshTemplateLod) -> bytes:
     return payload
 
 
+def measure_mesh_template_enu_bounds(payload: bytes) -> Bounds3:
+    """Measure transformed GLB scene bounds and convert them to ENU Z-up."""
+
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            scene = trimesh.load_scene(
+                file_obj=io.BytesIO(payload),
+                file_type="glb",
+                resolver=None,
+                allow_remote=False,
+            )
+            bounds = np.asarray(scene.bounds, dtype=np.float64)
+    except Exception as exc:
+        raise MeshAssetBundleError(
+            "mesh template bounds could not be measured",
+        ) from exc
+    dangerous_warning_tokens = (
+        "fail",
+        "invalid",
+        "skip",
+        "unable",
+        "unsupported",
+    )
+    if any(
+        any(token in str(item.message).lower() for token in dangerous_warning_tokens)
+        for item in caught
+    ):
+        raise MeshAssetBundleError(
+            "mesh template bounds audit skipped or rejected geometry",
+        )
+    if not scene.geometry or bounds.shape != (2, 3) or not np.isfinite(bounds).all():
+        raise MeshAssetBundleError(
+            "mesh template bounds are empty or non-finite",
+        )
+    gltf_min, gltf_max = bounds
+    return Bounds3(
+        min=(
+            float(gltf_min[0]),
+            float(-gltf_max[2]),
+            float(gltf_min[1]),
+        ),
+        max=(
+            float(gltf_max[0]),
+            float(-gltf_min[2]),
+            float(gltf_max[1]),
+        ),
+    )
+
+
 def _verify_descriptor(
     root: Path,
     descriptor: MeshTemplateLod,
@@ -303,6 +379,24 @@ def _verify_descriptor(
         raise MeshAssetBundleError(
             "mesh template triangle, primitive, or material evidence disagrees",
         )
+    measured_bounds = measure_mesh_template_enu_bounds(payload)
+    if not (
+        np.allclose(
+            measured_bounds.min,
+            descriptor.aabb.min,
+            atol=MESH_BOUNDS_TOLERANCE_M,
+            rtol=0.0,
+        )
+        and np.allclose(
+            measured_bounds.max,
+            descriptor.aabb.max,
+            atol=MESH_BOUNDS_TOLERANCE_M,
+            rtol=0.0,
+        )
+    ):
+        raise MeshAssetBundleError(
+            "mesh template bounds disagree with measured GLB geometry",
+        )
     return payload
 
 
@@ -328,15 +422,25 @@ def load_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
     }
     verified: dict[
         tuple[str, tuple[str, ...]],
-        tuple[int, int, tuple[str, ...]],
+        tuple[
+            int,
+            int,
+            int,
+            tuple[str, ...],
+            tuple[float, float, float],
+            tuple[float, float, float],
+        ],
     ] = {}
     for record in bundle.records:
         for descriptor in record.lod.values():
             key = (descriptor.glb_sha256, descriptor.material_slot_ids)
             evidence = (
+                descriptor.glb_bytes,
                 descriptor.triangle_count,
                 descriptor.primitive_count,
                 descriptor.material_slot_ids,
+                descriptor.aabb.min,
+                descriptor.aabb.max,
             )
             if key in verified:
                 if verified[key] != evidence:
