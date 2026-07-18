@@ -31,6 +31,17 @@ test('six mesh weather responses are distinct, complete, and immutable', () => {
   assert.throws(() => meshWeatherResponse('storm'), /未知天气/);
 });
 
+test('night keeps textured mesh materials dark but readable', () => {
+  const night = meshWeatherResponse('night');
+  const darkestChannel = Math.min(...night.baseColorMultiplier);
+  const materialResponse = night.exposure * darkestChannel;
+
+  assert.ok(materialResponse >= 0.3);
+  assert.ok(materialResponse < 0.5);
+  assert.ok(night.keyIntensity >= 0.6);
+  assert.ok(night.baseColorMultiplier[2] > night.baseColorMultiplier[0]);
+});
+
 test('renderer notice distinguishes mesh relighting from 3DGS overlay', () => {
   assert.match(
     environmentNotice({

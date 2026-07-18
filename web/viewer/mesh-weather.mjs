@@ -42,10 +42,10 @@ export const MESH_WEATHER_RESPONSES = Object.freeze({
     roughnessMultiplier: 1.06,
   }),
   night: freezeResponse({
-    exposure: 0.32,
+    exposure: 0.48,
     keyColor: 0x9cb8e8,
-    keyIntensity: 0.32,
-    baseColorMultiplier: [0.32, 0.38, 0.48],
+    keyIntensity: 0.7,
+    baseColorMultiplier: [0.68, 0.76, 0.94],
     roughnessMultiplier: 0.92,
   }),
 });
