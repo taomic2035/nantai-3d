@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import io
 import json
 import math
+import os
+import shutil
+import sys
+import uuid
 import warnings
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -21,10 +28,20 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.studio_jobs import (
+    JobContractError,
+    ProjectFileLock,
+    WindowsNtfsDurabilityBackend,
+)
 from pipeline.synthetic_village.glb_material_audit import (
     ExpectedGlbMaterial,
     GlbMaterialAuditError,
     audit_textured_glb,
+)
+from pipeline.synthetic_village.material_bundle import (
+    MaterialBundleError,
+    canonical_material_bundle_bytes,
+    load_material_bundle,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -175,6 +192,35 @@ class MeshAssetBundle(FrozenModel):
         if digest != self.bundle_id:
             raise ValueError("mesh asset bundle ID does not match canonical content")
         return self
+
+
+@dataclass(frozen=True)
+class MeshAssetTemplateSource:
+    """Path-bearing builder output kept outside the canonical bundle manifest."""
+
+    asset_id: str
+    kind: Literal["building", "vegetation", "prop"]
+    footprint_m: tuple[float, float, float]
+    lod_paths: tuple[Path, Path, Path]
+    material_slot_ids: tuple[
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+    ]
+
+
+@dataclass(frozen=True)
+class PreparedMeshAssetBundle:
+    staging_root: Path
+    manifest: MeshAssetBundle
+
+
+@dataclass(frozen=True)
+class MeshAssetBundleResult:
+    bundle_id: str
+    final_directory: Path
+    record_count: int
+    reused: bool
 
 
 def _jsonable(value: object) -> object:
@@ -417,6 +463,32 @@ def load_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
     if raw != canonical_mesh_asset_bundle_bytes(bundle):
         raise MeshAssetBundleError("mesh asset bundle manifest is not canonical")
 
+    expected_objects = {
+        descriptor.glb_object_path
+        for record in bundle.records
+        for descriptor in record.lod.values()
+    }
+    object_root = _real_directory(bundle_root / "objects")
+    try:
+        entries = tuple(object_root.iterdir())
+    except OSError as exc:
+        raise MeshAssetBundleError(
+            "mesh asset bundle object set is unavailable",
+        ) from exc
+    if any(_is_linklike(path) for path in entries):
+        raise MeshAssetBundleError(
+            "mesh asset bundle object set contains a redirected entry",
+        )
+    actual_objects = {
+        path.relative_to(bundle_root).as_posix()
+        for path in entries
+        if path.is_file()
+    }
+    if actual_objects != expected_objects or len(entries) != len(actual_objects):
+        raise MeshAssetBundleError(
+            "mesh asset bundle object set is incomplete or unexpected",
+        )
+
     expected_by_slot = {
         material.slot_id: material for material in bundle.material_registry
     }
@@ -494,3 +566,425 @@ def read_verified_mesh_template_glb(
         raise MeshAssetBundleError("mesh asset is not present in the verified bundle")
     descriptor = record.lod[str(lod)]
     return _read_template_bytes(_real_directory(Path(root)), descriptor)
+
+
+def _prepare_real_directory(raw_path: Path, *, label: str) -> Path:
+    path = Path(raw_path).expanduser().absolute()
+    cursor = path
+    missing: list[Path] = []
+    while not cursor.exists():
+        if _is_linklike(cursor):
+            raise MeshAssetBundleError(f"{label} has a redirected ancestor")
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            raise MeshAssetBundleError(f"{label} has no real existing ancestor")
+        cursor = parent
+    _real_directory(cursor)
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(exist_ok=False)
+            _flush_directory(directory.parent)
+        except FileExistsError:
+            pass
+        _real_directory(directory)
+    return _real_directory(path)
+
+
+def _flush_file(path: Path) -> None:
+    if os.name == "nt":
+        WindowsNtfsDurabilityBackend.flush_file(path)
+        return
+    with path.open("rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def _flush_directory(path: Path) -> None:
+    if os.name == "nt":
+        WindowsNtfsDurabilityBackend.flush_directory(path)
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_mesh_object(root: Path, payload: bytes) -> Path:
+    digest = hashlib.sha256(payload).hexdigest()
+    path = root / f"objects/{digest}.glb"
+    if path.exists() or _is_linklike(path):
+        current = _read_stable_file(
+            path,
+            maximum_bytes=MAX_MESH_TEMPLATE_GLB_BYTES,
+            label="mesh staging object",
+        )
+        if current != payload:
+            raise MeshAssetBundleError(
+                "mesh staging object conflicts with its content address",
+            )
+        return path
+    try:
+        with path.open("xb") as stream:
+            stream.write(payload)
+    except OSError as exc:
+        raise MeshAssetBundleError("mesh staging object could not be written") from exc
+    return path
+
+
+def _expected_materials(
+    material_bundle,
+    slot_ids: tuple[str, ...],
+) -> tuple[ExpectedGlbMaterial, ...]:
+    if (
+        not slot_ids
+        or slot_ids != tuple(sorted(slot_ids))
+        or len(set(slot_ids)) != len(slot_ids)
+    ):
+        raise MeshAssetBundleError(
+            "mesh template material slots must be nonempty, sorted, and unique",
+        )
+    records = {record.slot_id: record for record in material_bundle.records}
+    try:
+        return tuple(
+            ExpectedGlbMaterial(
+                slot_id=slot_id,
+                source_sha256=records[slot_id].source_sha256,
+                bundle_id=material_bundle.bundle_id,
+                algorithm_id=material_bundle.algorithm_id,
+            )
+            for slot_id in slot_ids
+        )
+    except KeyError as exc:
+        raise MeshAssetBundleError(
+            "mesh template references an unknown material slot",
+        ) from exc
+
+
+def prepare_mesh_asset_bundle(
+    *,
+    material_bundle_root: Path,
+    sources: tuple[MeshAssetTemplateSource, ...],
+    staging_root: Path,
+    build_tool_id: str,
+    verification_level: Literal["L0", "L2"] = "L0",
+) -> PreparedMeshAssetBundle:
+    """Copy builder outputs into a path-free bundle after independent audits."""
+
+    staging_root = Path(staging_root).expanduser().absolute()
+    if staging_root.exists() or _is_linklike(staging_root):
+        raise MeshAssetBundleError("mesh staging root must start absent")
+    _real_directory(staging_root.parent)
+    try:
+        material_bundle = load_material_bundle(material_bundle_root)
+        if not sources or len(sources) > 11:
+            raise MeshAssetBundleError(
+                "mesh bundle sources must contain between one and eleven assets",
+            )
+        asset_ids = tuple(source.asset_id for source in sources)
+        if len(set(asset_ids)) != len(asset_ids):
+            raise MeshAssetBundleError("mesh bundle source asset IDs must be unique")
+
+        staging_root.mkdir(exist_ok=False)
+        (staging_root / "objects").mkdir()
+        records = []
+        used_materials: dict[str, ExpectedGlbMaterial] = {}
+        for source in sorted(sources, key=lambda item: item.asset_id):
+            if len(source.lod_paths) != 3 or len(source.material_slot_ids) != 3:
+                raise MeshAssetBundleError(
+                    "mesh source must provide exact LOD 0, 1, and 2 inputs",
+                )
+            lod = {}
+            for level, (source_path, slot_ids) in enumerate(
+                zip(
+                    source.lod_paths,
+                    source.material_slot_ids,
+                    strict=True,
+                ),
+            ):
+                expected = _expected_materials(material_bundle, slot_ids)
+                used_materials.update(
+                    (material.slot_id, material)
+                    for material in expected
+                )
+                payload = _read_stable_file(
+                    Path(source_path),
+                    maximum_bytes=MAX_MESH_TEMPLATE_GLB_BYTES,
+                    label="mesh builder output",
+                )
+                object_path = _write_mesh_object(staging_root, payload)
+                try:
+                    audit = audit_textured_glb(
+                        object_path,
+                        expected_materials=expected,
+                    )
+                except GlbMaterialAuditError as exc:
+                    raise MeshAssetBundleError(
+                        "mesh builder output material or geometry audit failed",
+                    ) from exc
+                bounds = measure_mesh_template_enu_bounds(payload)
+                lod[str(level)] = MeshTemplateLod(
+                    glb_object_path=object_path.relative_to(
+                        staging_root,
+                    ).as_posix(),
+                    glb_sha256=audit.glb_sha256,
+                    glb_bytes=audit.byte_count,
+                    triangle_count=audit.triangle_count,
+                    primitive_count=audit.primitive_count,
+                    material_slot_ids=audit.slot_ids,
+                    aabb=bounds,
+                )
+            records.append(
+                MeshAssetRecord(
+                    asset_id=source.asset_id,
+                    kind=source.kind,
+                    mesh_algorithm_id="synthetic-template-mesh-v1",
+                    footprint_m=source.footprint_m,
+                    lod=lod,
+                ),
+            )
+        material_manifest_sha256 = hashlib.sha256(
+            canonical_material_bundle_bytes(material_bundle),
+        ).hexdigest()
+        unsigned = {
+            "schema_version": MESH_ASSET_BUNDLE_SCHEMA,
+            "coordinate_encoding": GLB_COORDINATE_ENCODING,
+            "material_bundle_id": material_bundle.bundle_id,
+            "material_bundle_manifest_sha256": material_manifest_sha256,
+            "synthetic": True,
+            "real_photo_textures": False,
+            "build_tool_id": build_tool_id,
+            "verification_level": verification_level,
+            "material_registry": tuple(
+                used_materials[slot_id]
+                for slot_id in sorted(used_materials)
+            ),
+            "records": tuple(records),
+        }
+        bundle_id = hashlib.sha256(_canonical_json_bytes(unsigned)).hexdigest()
+        manifest = MeshAssetBundle(bundle_id=bundle_id, **unsigned)
+        (staging_root / MESH_ASSET_BUNDLE_MANIFEST).write_bytes(
+            canonical_mesh_asset_bundle_bytes(manifest),
+        )
+        if load_mesh_asset_bundle(staging_root) != manifest:
+            raise MeshAssetBundleError(
+                "prepared mesh asset bundle changed during verification",
+            )
+        return PreparedMeshAssetBundle(
+            staging_root=staging_root,
+            manifest=manifest,
+        )
+    except MeshAssetBundleError:
+        if staging_root.is_symlink():
+            staging_root.unlink(missing_ok=True)
+        elif staging_root.exists() and staging_root.is_dir():
+            shutil.rmtree(staging_root, ignore_errors=True)
+        raise
+    except (MaterialBundleError, OSError, ValidationError, ValueError) as exc:
+        if staging_root.is_symlink():
+            staging_root.unlink(missing_ok=True)
+        elif staging_root.exists() and staging_root.is_dir():
+            shutil.rmtree(staging_root, ignore_errors=True)
+        raise MeshAssetBundleError(
+            f"mesh asset bundle preparation failed: {exc}",
+        ) from exc
+
+
+def _durably_flush_mesh_bundle(staging: Path) -> None:
+    manifest = load_mesh_asset_bundle(staging)
+    object_paths = {
+        descriptor.glb_object_path
+        for record in manifest.records
+        for descriptor in record.lod.values()
+    }
+    for object_path in sorted(object_paths):
+        _flush_file(staging / object_path)
+    _flush_file(staging / MESH_ASSET_BUNDLE_MANIFEST)
+    _flush_directory(staging / "objects")
+    _flush_directory(staging)
+    if load_mesh_asset_bundle(staging) != manifest:
+        raise MeshAssetBundleError(
+            "mesh asset bundle changed during durability flush",
+        )
+
+
+def _move_mesh_directory_noreplace(source: Path, destination: Path) -> None:
+    if destination.exists() or _is_linklike(destination):
+        raise MeshAssetBundleError(
+            f"mesh asset bundle destination already exists: {destination.name}",
+        )
+    moved = False
+    try:
+        if os.name == "nt":
+            WindowsNtfsDurabilityBackend.move(source, destination)
+        elif sys.platform.startswith("linux"):
+            libc = ctypes.CDLL(None, use_errno=True)
+            renameat2 = libc.renameat2
+            renameat2.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renameat2.restype = ctypes.c_int
+            result = renameat2(
+                -100,
+                os.fsencode(source),
+                -100,
+                os.fsencode(destination),
+                1,
+            )
+            if result != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(destination))
+        elif sys.platform == "darwin":
+            libc = ctypes.CDLL(None, use_errno=True)
+            renamex_np = libc.renamex_np
+            renamex_np.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renamex_np.restype = ctypes.c_int
+            result = renamex_np(
+                os.fsencode(source),
+                os.fsencode(destination),
+                0x00000004,
+            )
+            if result != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(destination))
+        else:  # pragma: no cover - supported publication hosts are explicit
+            if destination.exists() or _is_linklike(destination):
+                raise FileExistsError(errno.EEXIST, "destination exists", destination)
+            os.rename(source, destination)
+        moved = True
+        _flush_directory(source.parent)
+        if destination.parent != source.parent:
+            _flush_directory(destination.parent)
+    except (JobContractError, OSError) as exc:
+        if moved:
+            raise MeshAssetBundleError(
+                "mesh asset bundle moved but parent durability flush failed; "
+                "retry to verify and reuse it",
+            ) from exc
+        if destination.exists() or _is_linklike(destination):
+            raise MeshAssetBundleError(
+                f"mesh asset bundle destination already exists: {destination.name}",
+            ) from exc
+        raise MeshAssetBundleError(
+            f"cannot publish mesh asset bundle: {exc}",
+        ) from exc
+
+
+def _cleanup_mesh_staging(staging: Path, *, work_root: Path) -> None:
+    if staging.parent != work_root or not staging.name.startswith(".mesh-"):
+        raise MeshAssetBundleError(
+            "refusing to clean an unowned mesh staging path",
+        )
+    if _is_linklike(staging):
+        staging.unlink(missing_ok=True)
+    elif staging.exists():
+        if not staging.is_dir():
+            raise MeshAssetBundleError(
+                "mesh staging path became irregular",
+            )
+        shutil.rmtree(staging)
+
+
+def publish_mesh_asset_bundle(
+    *,
+    material_bundle_root: Path,
+    sources: tuple[MeshAssetTemplateSource, ...],
+    publication_root: Path,
+    work_root: Path,
+    build_tool_id: str,
+    verification_level: Literal["L0", "L2"] = "L0",
+) -> MeshAssetBundleResult:
+    """Prepare and durably publish an immutable bundle only while absent."""
+
+    staging: Path | None = None
+    try:
+        material_bundle_root = _real_directory(Path(material_bundle_root))
+        publication_root = _prepare_real_directory(
+            Path(publication_root),
+            label="mesh publication root",
+        )
+        work_root = _prepare_real_directory(
+            Path(work_root),
+            label="mesh work root",
+        )
+        with ProjectFileLock(
+            work_root / ".mesh-asset-bundle.lock",
+            role="writer",
+        ):
+            material_before = load_material_bundle(material_bundle_root)
+            material_before_bytes = canonical_material_bundle_bytes(
+                material_before,
+            )
+            staging = work_root / f".mesh-{uuid.uuid4().hex}"
+            prepared = prepare_mesh_asset_bundle(
+                material_bundle_root=material_bundle_root,
+                sources=sources,
+                staging_root=staging,
+                build_tool_id=build_tool_id,
+                verification_level=verification_level,
+            )
+            material_after = load_material_bundle(material_bundle_root)
+            if (
+                canonical_material_bundle_bytes(material_after)
+                != material_before_bytes
+                or prepared.manifest.material_bundle_id
+                != material_before.bundle_id
+            ):
+                raise MeshAssetBundleError(
+                    "material bundle changed during mesh publication",
+                )
+            verified = load_mesh_asset_bundle(staging)
+            if verified != prepared.manifest:
+                raise MeshAssetBundleError(
+                    "prepared mesh asset bundle identity changed",
+                )
+            destination = publication_root / prepared.manifest.bundle_id
+            if destination.exists() or _is_linklike(destination):
+                existing = load_mesh_asset_bundle(destination)
+                if existing != prepared.manifest:
+                    raise MeshAssetBundleError(
+                        "existing mesh asset bundle does not match its content identity",
+                    )
+                _cleanup_mesh_staging(staging, work_root=work_root)
+                staging = None
+                return MeshAssetBundleResult(
+                    bundle_id=existing.bundle_id,
+                    final_directory=destination,
+                    record_count=len(existing.records),
+                    reused=True,
+                )
+            _durably_flush_mesh_bundle(staging)
+            _move_mesh_directory_noreplace(staging, destination)
+            staging = None
+            published = load_mesh_asset_bundle(destination)
+            if published != prepared.manifest:
+                raise MeshAssetBundleError(
+                    "published mesh asset bundle changed during atomic move",
+                )
+            return MeshAssetBundleResult(
+                bundle_id=published.bundle_id,
+                final_directory=destination,
+                record_count=len(published.records),
+                reused=False,
+            )
+    except MeshAssetBundleError:
+        raise
+    except (JobContractError, MaterialBundleError, OSError, ValidationError) as exc:
+        raise MeshAssetBundleError(
+            f"mesh asset bundle publication filesystem failure: {exc}",
+        ) from exc
+    finally:
+        if staging is not None:
+            try:
+                _cleanup_mesh_staging(staging, work_root=staging.parent)
+            except (MeshAssetBundleError, OSError):
+                pass

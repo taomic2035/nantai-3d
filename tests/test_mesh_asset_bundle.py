@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import struct
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,14 +13,19 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+from pipeline.synthetic_village.material_bundle import prepare_material_bundle
 from pipeline.synthetic_village.mesh_asset_bundle import (
     MESH_ASSET_BUNDLE_SCHEMA,
     MeshAssetBundleError,
+    MeshAssetTemplateSource,
     canonical_mesh_asset_bundle_bytes,
     load_mesh_asset_bundle,
     measure_mesh_template_enu_bounds,
+    prepare_mesh_asset_bundle,
+    publish_mesh_asset_bundle,
     read_verified_mesh_template_glb,
 )
+from tests.synthetic_material_fixtures import write_material_visual_pack
 
 SLOT_ID = "material-fieldstone-01"
 SOURCE_SHA256 = "1" * 64
@@ -48,6 +54,9 @@ def _glb_payload(
     *,
     triangle_count: int = 1,
     node_translation: tuple[float, float, float] | None = None,
+    source_sha256: str = SOURCE_SHA256,
+    material_bundle_id: str = MATERIAL_BUNDLE_ID,
+    material_algorithm_id: str = "mirror-sobel-orm-v1",
 ) -> bytes:
     binary = bytearray()
     views: list[dict[str, int]] = []
@@ -140,9 +149,9 @@ def _glb_payload(
                 "normalTexture": {"index": 1, "texCoord": 0},
                 "extras": {
                     "slot_id": SLOT_ID,
-                    "source_sha256": SOURCE_SHA256,
-                    "bundle_id": MATERIAL_BUNDLE_ID,
-                    "algorithm_id": "mirror-sobel-orm-v1",
+                    "source_sha256": source_sha256,
+                    "bundle_id": material_bundle_id,
+                    "algorithm_id": material_algorithm_id,
                     "synthetic": True,
                     "uv_policy": "dominant-axis-box",
                 },
@@ -463,3 +472,151 @@ def test_measure_bounds_rejects_nonfinite_scene_evidence(
 
     with pytest.raises(MeshAssetBundleError, match="bounds"):
         measure_mesh_template_enu_bounds(_glb_payload())
+
+
+@pytest.fixture(scope="module")
+def material_bundle_fixture(
+    tmp_path_factory: pytest.TempPathFactory,
+):
+    root = tmp_path_factory.mktemp("mesh-material-bundle")
+    visual_root = write_material_visual_pack(root / "visual")
+    return prepare_material_bundle(
+        visual_pack_root=visual_root,
+        staging_root=root / "material-bundle",
+    )
+
+
+def _write_mesh_template_source(
+    root: Path,
+    *,
+    material_bundle,
+) -> MeshAssetTemplateSource:
+    fieldstone = next(
+        record
+        for record in material_bundle.manifest.records
+        if record.slot_id == SLOT_ID
+    )
+    paths = []
+    for level, triangle_count in enumerate((1, 2, 3)):
+        payload = _glb_payload(
+            triangle_count=triangle_count,
+            source_sha256=fieldstone.source_sha256,
+            material_bundle_id=material_bundle.manifest.bundle_id,
+            material_algorithm_id=material_bundle.manifest.algorithm_id,
+        )
+        path = root / f"house-lod{level}.glb"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        paths.append(path)
+    return MeshAssetTemplateSource(
+        asset_id="house_wood_01",
+        kind="building",
+        footprint_m=(8.0, 6.0, 6.5),
+        lod_paths=tuple(paths),
+        material_slot_ids=((SLOT_ID,), (SLOT_ID,), (SLOT_ID,)),
+    )
+
+
+def _mesh_staging_directories(work_root: Path) -> list[Path]:
+    return [
+        path
+        for path in work_root.glob(".mesh-*")
+        if path.name != ".mesh-asset-bundle.lock"
+    ]
+
+
+def test_prepare_mesh_bundle_is_path_free_and_independently_verified(
+    material_bundle_fixture,
+    tmp_path: Path,
+) -> None:
+    source = _write_mesh_template_source(
+        tmp_path / "builder-output",
+        material_bundle=material_bundle_fixture,
+    )
+
+    prepared = prepare_mesh_asset_bundle(
+        material_bundle_root=material_bundle_fixture.staging_root,
+        sources=(source,),
+        staging_root=tmp_path / "staging",
+        build_tool_id="pytest-mesh-builder-v1",
+    )
+
+    assert load_mesh_asset_bundle(prepared.staging_root) == prepared.manifest
+    assert prepared.manifest.material_bundle_id == (
+        material_bundle_fixture.manifest.bundle_id
+    )
+    manifest_bytes = canonical_mesh_asset_bundle_bytes(prepared.manifest)
+    assert str(tmp_path).encode() not in manifest_bytes
+    assert {path.name for path in (prepared.staging_root / "objects").iterdir()} == {
+        f"{descriptor.glb_sha256}.glb"
+        for descriptor in prepared.manifest.records[0].lod.values()
+    }
+
+
+def test_prepared_mesh_bundle_rejects_unexpected_object(
+    material_bundle_fixture,
+    tmp_path: Path,
+) -> None:
+    source = _write_mesh_template_source(
+        tmp_path / "builder-output",
+        material_bundle=material_bundle_fixture,
+    )
+    prepared = prepare_mesh_asset_bundle(
+        material_bundle_root=material_bundle_fixture.staging_root,
+        sources=(source,),
+        staging_root=tmp_path / "staging",
+        build_tool_id="pytest-mesh-builder-v1",
+    )
+    shutil.copyfile(
+        source.lod_paths[0],
+        prepared.staging_root / "objects/unexpected.glb",
+    )
+
+    with pytest.raises(MeshAssetBundleError, match="object set"):
+        load_mesh_asset_bundle(prepared.staging_root)
+
+
+def test_publish_mesh_bundle_is_absent_only_and_rejects_tampering(
+    material_bundle_fixture,
+    tmp_path: Path,
+) -> None:
+    source = _write_mesh_template_source(
+        tmp_path / "builder-output",
+        material_bundle=material_bundle_fixture,
+    )
+    publication_root = tmp_path / "published"
+    work_root = tmp_path / "work"
+
+    first = publish_mesh_asset_bundle(
+        material_bundle_root=material_bundle_fixture.staging_root,
+        sources=(source,),
+        publication_root=publication_root,
+        work_root=work_root,
+        build_tool_id="pytest-mesh-builder-v1",
+    )
+    second = publish_mesh_asset_bundle(
+        material_bundle_root=material_bundle_fixture.staging_root,
+        sources=(source,),
+        publication_root=publication_root,
+        work_root=work_root,
+        build_tool_id="pytest-mesh-builder-v1",
+    )
+
+    assert first.reused is False
+    assert second.reused is True
+    assert second.final_directory == first.final_directory
+    assert not _mesh_staging_directories(work_root)
+
+    descriptor = load_mesh_asset_bundle(first.final_directory).records[0].lod["2"]
+    target = first.final_directory / descriptor.glb_object_path
+    target.write_bytes(target.read_bytes() + b"\0")
+
+    with pytest.raises(MeshAssetBundleError, match="template"):
+        publish_mesh_asset_bundle(
+            material_bundle_root=material_bundle_fixture.staging_root,
+            sources=(source,),
+            publication_root=publication_root,
+            work_root=work_root,
+            build_tool_id="pytest-mesh-builder-v1",
+        )
+    assert not _mesh_staging_directories(work_root)
