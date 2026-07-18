@@ -17,6 +17,13 @@ const VALID = {
 export function viewerCapabilityTokens(capabilities = {}) {
   const renderer = capabilities.renderer ?? {};
   if (Object.keys(renderer).length === 0) return [];
+  if (renderer.id === 'three-mesh') {
+    return (
+      renderer.fidelity === 'simplified-pbr-not-render-parity'
+      && renderer.photo_textures === false
+      && renderer.real_reconstruction === false
+    ) ? ['mesh-simplified-pbr'] : [];
+  }
   const tokens = ['dc-color'];
   if (renderer.anisotropic_covariance === true) tokens.push('anisotropic-covariance');
   if (renderer.alpha_composite === true) tokens.push('alpha-composite');
@@ -67,6 +74,12 @@ function deriveRenderFidelity(reconstruction = {}, diagnostics) {
     ? reconstruction.attributes : []);
   const capabilities = new Set(Array.isArray(reconstruction.renderer_capabilities)
     ? reconstruction.renderer_capabilities : []);
+  if (capabilities.has('mesh-simplified-pbr')) {
+    diagnostics.push(
+      'viewer is showing a separate synthetic model; reconstruction evidence is unchanged',
+    );
+    return 'synthetic-mesh-simplified-pbr';
+  }
   const hasCore = CORE_SPLAT_ATTRIBUTES.every((name) => attributes.has(name));
   const hasRenderer = capabilities.has('anisotropic-covariance')
     && capabilities.has('alpha-composite') && capabilities.has('dc-color');

@@ -86,6 +86,14 @@ test('capability factory only claims Gaussian rendering for an active Spark laye
   assert.equal(fallback.artifact_kinds.includes('3dgs-ply'), false);
   assert.equal(fallback.lod.reconstruction_tiers, true);
 
+  const mesh = createViewerCapabilities('mesh-preview');
+  assert.equal(mesh.renderer.id, 'three-mesh');
+  assert.equal(mesh.renderer.fidelity, 'simplified-pbr-not-render-parity');
+  assert.equal(mesh.renderer.anisotropic_covariance, false);
+  assert.equal(mesh.renderer.photo_textures, false);
+  assert.equal(mesh.renderer.real_reconstruction, false);
+  assert.equal(mesh.artifact_kinds.includes('synthetic-model-preview'), true);
+
   const spark = createViewerCapabilities('spark');
   assert.equal(spark.renderer.id, 'spark');
   assert.equal(spark.renderer.version, '2.1.0');

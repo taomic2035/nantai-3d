@@ -10,12 +10,14 @@ import { dirname, resolve, posix } from 'node:path';
 const VIEWER_DIR = dirname(fileURLToPath(import.meta.url));
 const read = (p) => readFileSync(resolve(VIEWER_DIR, p), 'utf8');
 
-// index.html 里 vendored 的 5 个文件 (相对 vendor/), 模块图闭合与 sha256 都以此为准。
+// index.html 里 vendored 的文件 (相对 vendor/), 模块图闭合与 sha256 都以此为准。
 const VENDORED = [
   'three/three.module.js',
   'three/three.core.js',
   'three/addons/controls/OrbitControls.js',
+  'three/addons/loaders/GLTFLoader.js',
   'three/addons/postprocessing/Pass.js',
+  'three/addons/utils/BufferGeometryUtils.js',
   'spark/spark.module.js',
 ];
 
@@ -97,7 +99,9 @@ test('模块图从入口起完全闭合在本地 (BFS, 无未 vendored 依赖)',
 
 test('无 vendored 文件残留 `from "http..."` / `import("http...")` 外部依赖', () => {
   for (const f of VENDORED) {
-    const src = read(`vendor/${f}`);
+    const src = read(`vendor/${f}`)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
     assert.ok(!/from\s*['"]https?:\/\//.test(src), `vendor/${f} 含外部 from 'http...'`);
     assert.ok(
       !/import\(\s*['"]https?:\/\//.test(src),

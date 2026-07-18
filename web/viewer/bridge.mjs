@@ -24,6 +24,9 @@ const POINT_ARTIFACT_KINDS = Object.freeze([
   'chunk-manifest', 'recon-manifest', 'simple-ply',
 ]);
 const SPARK_ARTIFACT_KINDS = Object.freeze([...POINT_ARTIFACT_KINDS, '3dgs-ply']);
+const MESH_ARTIFACT_KINDS = Object.freeze([
+  ...POINT_ARTIFACT_KINDS, 'synthetic-model-preview',
+]);
 const LOD_LEVELS = Object.freeze([0, 1, 2]);
 
 const DC_POINT_RENDERER = Object.freeze({
@@ -47,12 +50,29 @@ const SPARK_RENDERER = Object.freeze({
   max_sh_degree: 3,
 });
 
+const MESH_PREVIEW_RENDERER = Object.freeze({
+  id: 'three-mesh',
+  label: 'Synthetic mesh (simplified PBR)',
+  fidelity: 'simplified-pbr-not-render-parity',
+  anisotropic_covariance: false,
+  alpha_composite: false,
+  spherical_harmonics: false,
+  max_sh_degree: 0,
+  photo_textures: false,
+  real_reconstruction: false,
+});
+
 export function createViewerCapabilities(mode = 'dc-point-preview') {
   const sparkActive = mode === 'spark' || mode === 'spark-chunks';
+  const meshPreviewActive = mode === 'mesh-preview';
   return Object.freeze({
     ...BASE_CAPABILITIES,
-    renderer: sparkActive ? SPARK_RENDERER : DC_POINT_RENDERER,
-    artifact_kinds: sparkActive ? SPARK_ARTIFACT_KINDS : POINT_ARTIFACT_KINDS,
+    renderer: sparkActive
+      ? SPARK_RENDERER
+      : meshPreviewActive ? MESH_PREVIEW_RENDERER : DC_POINT_RENDERER,
+    artifact_kinds: sparkActive
+      ? SPARK_ARTIFACT_KINDS
+      : meshPreviewActive ? MESH_ARTIFACT_KINDS : POINT_ARTIFACT_KINDS,
     lod: Object.freeze({
       supported: true,
       levels: LOD_LEVELS,

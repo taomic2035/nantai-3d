@@ -11,14 +11,21 @@ SPARK="https://sparkjs.dev/releases/spark/${SPARK_VER}"
 SPARK_NPM="https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@${SPARK_VER}"
 
 cd "$(dirname "$0")"
-mkdir -p three/addons/controls three/addons/postprocessing spark
+mkdir -p \
+  three/addons/controls \
+  three/addons/loaders \
+  three/addons/postprocessing \
+  three/addons/utils \
+  spark
 
 dl() { echo "  ↓ $2"; curl -fsSL --max-time 60 -o "$2" "$1"; }
 
 dl "${JSDELIVR}/build/three.module.js"                         three/three.module.js
 dl "${JSDELIVR}/build/three.core.js"                           three/three.core.js
 dl "${JSDELIVR}/examples/jsm/controls/OrbitControls.js"        three/addons/controls/OrbitControls.js
+dl "${JSDELIVR}/examples/jsm/loaders/GLTFLoader.js"            three/addons/loaders/GLTFLoader.js
 dl "${JSDELIVR}/examples/jsm/postprocessing/Pass.js"           three/addons/postprocessing/Pass.js
+dl "${JSDELIVR}/examples/jsm/utils/BufferGeometryUtils.js"     three/addons/utils/BufferGeometryUtils.js
 dl "${SPARK}/spark.module.js"                                  spark/spark.module.js
 dl "${JSDELIVR}/LICENSE"                                       three/LICENSE
 dl "${SPARK_NPM}/LICENSE"                                      spark/LICENSE

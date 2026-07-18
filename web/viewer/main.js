@@ -9,6 +9,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   threeToChunk,
   threeToWorld,
@@ -61,10 +62,18 @@ import {
   coverageAuditViewModel,
   isCoverageAudit,
 } from './coverage-audit.mjs';
+import {
+  modelPreviewCameraPose,
+  modelPreviewDisclosure,
+  resolveModelPreviewUrl,
+  validateModelPreviewManifest,
+  verifyModelPreviewBytes,
+} from './model-preview.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
 const CHUNK_CACHE_MAX = 36;    // LRU 上限 (保留略多于视野)
+const VIEWER_FOV_DEG = 65;
 
 // ============ 全局状态 ============
 let scene, camera, renderer, controls;
@@ -92,6 +101,15 @@ let reconLodLoaded = -1;
 let reconVisible = true;
 let reconLoading = false;
 let worldVisible = true;
+let presentationMode = 'points';     // 'points' | 'model'，禁止未对齐图层叠加
+let modelPreviewManifest = null;
+let modelPreviewManifestUrl = new URL(
+  '../data/recon/model-preview/manifest.json',
+  import.meta.url,
+).href;
+let modelPreviewRoot = null;
+let modelPreviewBounds = null;
+let modelPreviewKeyLight = null;
 let viewerBridge = null;
 let splatLayer = null;
 let spatialSplatLayer = null;
@@ -315,7 +333,7 @@ async function loadChunk(cx, cy, wantLod = 2) {
 
     const mesh = makePointsMesh(parsed);
     mesh.name = `chunk_${key}`;
-    mesh.visible = worldVisible;
+    mesh.visible = presentationMode === 'points' && worldVisible;
 
     // 换级重载: 先摘旧网格再挂新的
     const old = chunkMeshes.get(key);
@@ -335,7 +353,7 @@ async function loadChunk(cx, cy, wantLod = 2) {
     // 加入 chunk 边界线 (供 debug 用)
     if (!chunkBorders.has(key)) {
       const border = makeChunkBorder(cx, cy);
-      border.visible = worldVisible && bordersVisible;
+      border.visible = presentationMode === 'points' && worldVisible && bordersVisible;
       scene.add(border);
       chunkBorders.set(key, border);
     }
@@ -571,8 +589,186 @@ function setupDisplayMode() {
   });
 }
 
+function syncPresentationVisibility() {
+  const pointsActive = presentationMode === 'points';
+  const worldActive = pointsActive && worldVisible;
+  const reconActive = pointsActive && reconVisible;
+
+  for (const mesh of chunkMeshes.values()) mesh.visible = worldActive;
+  for (const border of chunkBorders.values()) {
+    border.visible = worldActive && bordersVisible;
+  }
+  if (gridHelper) gridHelper.visible = worldActive;
+  if (axesHelper) axesHelper.visible = worldActive;
+  if (reconMesh) reconMesh.visible = reconActive;
+  splatLayer?.setVisible(reconActive);
+  spatialSplatLayer?.setVisible(reconActive);
+  spatialPointLayer?.setVisible(reconActive);
+  if (modelPreviewRoot) modelPreviewRoot.visible = presentationMode === 'model';
+  if (modelPreviewKeyLight) modelPreviewKeyLight.visible = presentationMode === 'model';
+
+  const toggle = document.getElementById('presentation-toggle');
+  const badge = document.getElementById('model-preview-badge');
+  if (toggle) {
+    toggle.hidden = !modelPreviewRoot;
+    toggle.textContent = presentationMode === 'model' ? '查看点云' : '查看模型';
+    toggle.setAttribute('aria-pressed', String(presentationMode === 'model'));
+  }
+  if (badge) badge.hidden = presentationMode !== 'model';
+}
+
+function applyModelPreviewFraming() {
+  if (!modelPreviewBounds || modelPreviewBounds.isEmpty()) return;
+  if (cameraMode === 'free') toggleCameraMode();
+
+  if (modelPreviewManifest) {
+    const {
+      positionThree,
+      targetThree,
+      verticalFovDeg,
+      near,
+      far,
+    } = modelPreviewCameraPose(modelPreviewManifest);
+    camera.fov = verticalFovDeg;
+    camera.near = near;
+    camera.far = far;
+    camera.position.set(...positionThree);
+    camera.lookAt(...targetThree);
+    camera.updateProjectionMatrix();
+    controls.target.set(...targetThree);
+    controls.maxDistance = 900;
+    controls.update();
+    applyZoom(DEFAULT_ZOOM);
+    return;
+  }
+
+  const center = modelPreviewBounds.getCenter(new THREE.Vector3());
+  const size = modelPreviewBounds.getSize(new THREE.Vector3());
+  const radius = Math.max(size.length() / 2, 1);
+  const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+  const distance = radius / Math.sin(verticalFov / 2) * 1.08;
+  const direction = new THREE.Vector3(1, 0.72, 1).normalize();
+
+  camera.near = Math.max(radius / 2000, 0.05);
+  camera.far = Math.max(distance + radius * 6, 1000);
+  camera.position.copy(center).addScaledVector(direction, distance);
+  camera.lookAt(center);
+  camera.updateProjectionMatrix();
+  controls.target.copy(center);
+  controls.maxDistance = radius * 8;
+  controls.update();
+  applyZoom(DEFAULT_ZOOM);
+}
+
+function reconstructionCapabilityMode() {
+  const mode = activeReconstructionState()?.mode;
+  return mode === 'spark' || mode === 'spark-chunks'
+    ? mode
+    : 'dc-point-preview';
+}
+
+function setPresentationMode(mode, { resetCamera = true } = {}) {
+  if (mode !== 'points' && mode !== 'model') {
+    throw new Error(`未知呈现模式: ${mode}`);
+  }
+  if (mode === 'model' && !modelPreviewRoot) {
+    throw new Error('合成模型预览尚未加载');
+  }
+  presentationMode = mode;
+  syncPresentationVisibility();
+  if (resetCamera) {
+    if (mode === 'model') {
+      applyModelPreviewFraming();
+    } else if (manifest && reconManifest !== undefined) {
+      applyFraming(computeFraming(manifest, reconManifest), true);
+      applyZoom(DEFAULT_ZOOM);
+      updateChunks(camera.position.x, camera.position.z);
+    }
+  }
+  viewerCapabilities = createViewerCapabilities(
+    mode === 'model' ? 'mesh-preview' : reconstructionCapabilityMode(),
+  );
+  viewerBridge?.announceCapabilities();
+  updateHUD();
+  return presentationMode;
+}
+
+function setupPresentationToggle() {
+  document.getElementById('presentation-toggle').addEventListener('click', () => {
+    try {
+      setPresentationMode(presentationMode === 'model' ? 'points' : 'model');
+    } catch (error) {
+      console.warn('呈现模式切换失败:', error);
+    }
+  });
+}
+
+async function loadModelPreview(url = modelPreviewManifestUrl) {
+  try {
+    const absoluteManifestUrl = new URL(url, window.location.href);
+    if (absoluteManifestUrl.origin !== window.location.origin) {
+      throw new Error('Model preview manifest must be same-origin');
+    }
+    const manifestResponse = await fetch(absoluteManifestUrl.href);
+    if (manifestResponse.status === 404) return { status: 'absent' };
+    if (!manifestResponse.ok) {
+      throw new Error(`Model preview manifest load failed: ${manifestResponse.status}`);
+    }
+    const nextManifest = validateModelPreviewManifest(await manifestResponse.json());
+    const modelUrl = resolveModelPreviewUrl(
+      absoluteManifestUrl.href,
+      nextManifest,
+      window.location.origin,
+    );
+    const modelResponse = await fetch(modelUrl);
+    if (!modelResponse.ok) {
+      throw new Error(`Model preview GLB load failed: ${modelResponse.status}`);
+    }
+    const bytes = await modelResponse.arrayBuffer();
+    await verifyModelPreviewBytes(bytes, nextManifest.model.sha256);
+
+    const loader = new GLTFLoader();
+    const gltf = await loader.parseAsync(bytes, new URL('./', modelUrl).href);
+    const root = gltf.scene;
+    root.name = 'verified_synthetic_model_preview';
+    root.visible = false;
+    root.traverse((object) => {
+      if (object.isLight) object.visible = false;
+    });
+    root.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(root);
+    if (bounds.isEmpty()) throw new Error('Model preview GLB has no renderable bounds');
+
+    if (modelPreviewRoot) scene.remove(modelPreviewRoot);
+    modelPreviewManifest = nextManifest;
+    modelPreviewManifestUrl = absoluteManifestUrl.href;
+    modelPreviewRoot = root;
+    modelPreviewBounds = bounds;
+    scene.add(root);
+
+    const badge = document.getElementById('model-preview-badge');
+    if (badge) badge.textContent = modelPreviewDisclosure(nextManifest);
+    const requestedMode = new URLSearchParams(window.location.search).get('presentation');
+    setPresentationMode(requestedMode === 'points' ? 'points' : 'model');
+    return {
+      status: 'loaded',
+      sha256: nextManifest.model.sha256,
+      mesh_count: nextManifest.counts?.mesh_objects ?? 'unknown',
+    };
+  } catch (error) {
+    modelPreviewManifest = null;
+    modelPreviewRoot = null;
+    modelPreviewBounds = null;
+    presentationMode = 'points';
+    syncPresentationVisibility();
+    console.warn('合成模型预览已拒绝，保留点云视图:', error);
+    return { status: 'rejected', reason: error.message };
+  }
+}
+
 function applyFraming(frame, resetCamera = true) {
   currentFrame = frame;
+  camera.fov = VIEWER_FOV_DEG;
   camera.near = frame.near;
   camera.far = frame.far;
   camera.updateProjectionMatrix();
@@ -599,7 +795,7 @@ function applyFraming(frame, resetCamera = true) {
   gridHelper.position.set(...frame.gridCenterThree);
   gridHelper.material.opacity = 0.25;
   gridHelper.material.transparent = true;
-  gridHelper.visible = worldVisible;
+  gridHelper.visible = presentationMode === 'points' && worldVisible;
   scene.add(gridHelper);
 
   if (axesHelper) {
@@ -608,7 +804,7 @@ function applyFraming(frame, resetCamera = true) {
     axesHelper.material.dispose();
   }
   axesHelper = new THREE.AxesHelper(Math.max(chunkSizeM / 4, 1));
-  axesHelper.visible = worldVisible;
+  axesHelper.visible = presentationMode === 'points' && worldVisible;
   scene.add(axesHelper);
   applyWeather(environmentState.weather);
 }
@@ -616,11 +812,12 @@ function applyFraming(frame, resetCamera = true) {
 // ============ 初始化 ============
 function init() {
   setupDisplayMode();
+  setupPresentationToggle();
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1a2228);
 
   camera = new THREE.PerspectiveCamera(
-    65, window.innerWidth / window.innerHeight, 0.1, 1,
+    VIEWER_FOV_DEG, window.innerWidth / window.innerHeight, 0.1, 1,
   );
   camera.position.set(0, 1, 1);
   camera.lookAt(0, 0, 0);
@@ -628,6 +825,9 @@ function init() {
   renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1;
   renderer.domElement.tabIndex = 0;
   renderer.domElement.setAttribute('aria-label', '3D 场景画布');
   document.getElementById('canvas-container').appendChild(renderer.domElement);
@@ -657,6 +857,11 @@ function init() {
 
   hemisphereLight = new THREE.HemisphereLight(0xbfd4ff, 0x404030, 0.6);
   scene.add(hemisphereLight);
+  modelPreviewKeyLight = new THREE.DirectionalLight(0xffe4c4, 2.2);
+  modelPreviewKeyLight.name = 'model_preview_key_light';
+  modelPreviewKeyLight.position.set(240, 420, 180);
+  modelPreviewKeyLight.visible = false;
+  scene.add(modelPreviewKeyLight);
   try {
     createPrecipitationRuntime();
   } catch (error) {
@@ -692,7 +897,9 @@ function onKeyDown(e) {
   // B 键切换 chunk 边界显示
   if (k === 'b') {
     bordersVisible = !bordersVisible;
-    for (const b of chunkBorders.values()) b.visible = worldVisible && bordersVisible;
+    for (const b of chunkBorders.values()) {
+      b.visible = presentationMode === 'points' && worldVisible && bordersVisible;
+    }
   }
   // 1/2/3 强制画质 (低/中/高), 0 恢复按距离自动
   if (k === '1') qualityOverride = 0;
@@ -702,10 +909,7 @@ function onKeyDown(e) {
   // R 键切换重建预览图层
   if (k === 'r' && reconManifest) {
     reconVisible = !reconVisible;
-    if (reconMesh) reconMesh.visible = reconVisible;
-    splatLayer?.setVisible(reconVisible);
-    spatialSplatLayer?.setVisible(reconVisible);
-    spatialPointLayer?.setVisible(reconVisible);
+    syncPresentationVisibility();
   }
   // F 键切换 自由/环绕 视角 (忽略长按重复与修饰键组合)
   if (k === 'f' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -944,7 +1148,7 @@ async function updateRecon() {
     transformPositionsInPlace(parsed.positions);
     const mesh = makePointsMesh(parsed);
     mesh.name = 'recon_layer';
-    mesh.visible = reconVisible;
+    mesh.visible = presentationMode === 'points' && reconVisible;
     if (reconMesh) {
       scene.remove(reconMesh);
       reconMesh.geometry.dispose();
@@ -1058,7 +1262,9 @@ function updateHUD() {
     )
       ? ` · ~${rendererState.active_estimated_points.toLocaleString()} splats`
       : '';
-    reconEl.textContent = !reconManifest ? '无'
+    reconEl.textContent = presentationMode === 'model'
+      ? '当前未展示（独立合成模型模式）'
+      : !reconManifest ? '无'
       : !reconVisible ? '已隐藏 (R 显示)'
       : spatial
         ? `${rendererState?.active ?? 0}/${reconManifest.chunks.length} chunks`
@@ -1069,11 +1275,19 @@ function updateHUD() {
         ? `LOD${reconLodLoaded} (${count} points, ${viewerCapabilities.renderer.label})`
       : '加载中...';
   }
+  const presentationEl = document.getElementById('hud-presentation');
+  if (presentationEl) {
+    presentationEl.textContent = presentationMode === 'model'
+      ? '合成 GLB 网格（简化 PBR）'
+      : '点云 / 高斯';
+  }
 
   const rendererReason = document.getElementById('hud-renderer-reason');
   if (rendererReason) {
     const rendererState = activeReconstructionState();
-    rendererReason.textContent = (
+    rendererReason.textContent = presentationMode === 'model'
+      ? '已校验 release GLB · 简化 PBR · 非照片纹理'
+      : (
       rendererState?.mode === 'spark'
       || rendererState?.mode === 'spark-chunks'
     )
@@ -1086,9 +1300,25 @@ function updateHUD() {
   }
 
   const title = document.getElementById('hud-title');
-  if (title) title.textContent = `Nantai Village · ${viewerCapabilities.renderer.label}`;
+  if (title) {
+    title.textContent = presentationMode === 'model'
+      ? 'Nantai Village · 合成网格模型预览'
+      : `Nantai Village · ${viewerCapabilities.renderer.label}`;
+  }
 
-  const provenance = artifactProvenance(reconManifest ?? {}, viewerCapabilities);
+  const provenance = presentationMode === 'model' && modelPreviewManifest
+    ? {
+      requested_engine: 'not-applicable',
+      actual_engine: 'verified-release-glb',
+      synthetic: true,
+      frame: modelPreviewManifest.coordinate_frame.frame_id,
+      units: modelPreviewManifest.coordinate_frame.units,
+      handedness: 'right-handed',
+      geometry_usability: modelPreviewManifest.geometry_usability,
+      artifact_fidelity: modelPreviewManifest.fidelity,
+      viewer_fidelity: viewerCapabilities.renderer.fidelity,
+    }
+    : artifactProvenance(reconManifest ?? {}, viewerCapabilities);
   const provenanceFields = {
     'hud-requested-engine': provenance.requested_engine,
     'hud-actual-engine': provenance.actual_engine,
@@ -1221,6 +1451,8 @@ async function main() {
   await loadReconManifest();
   applyFraming(computeFraming(manifest, reconManifest));
   await loadReconstructionLayer();
+  loadingText.textContent = '检查已校验的合成模型预览...';
+  const modelPreviewResult = await loadModelPreview();
 
   const xCount = new Set(manifest.chunks.map((chunk) => chunk.x)).size;
   const yCount = new Set(manifest.chunks.map((chunk) => chunk.y)).size;
@@ -1228,6 +1460,10 @@ async function main() {
   loadingText.textContent =
     `已索引 ${manifest.chunks.length} chunks (${xCount}×${yCount})`
     + `${onDemand ? '，按需无限扩展已启用' : ''}，启动调度器...`;
+  if (modelPreviewResult.status === 'loaded') {
+    loadingText.textContent =
+      `已校验合成模型 SHA-256，加载 ${modelPreviewResult.mesh_count} 个 mesh...`;
+  }
   const minimapTitle = document.getElementById('minimap-title');
   if (minimapTitle) {
     minimapTitle.textContent = `Mini-map (${xCount}×${yCount}${onDemand ? ' + on-demand' : ''})`;
@@ -1235,7 +1471,7 @@ async function main() {
 
   // 初始加载相机视野内 chunk
   const initPos = controls.target;
-  updateChunks(initPos.x, initPos.z);
+  if (presentationMode === 'points') updateChunks(initPos.x, initPos.z);
 
   // 等待初始加载 (轮询直到视野内所有 chunk 都加载完)
   const waitInit = () => new Promise(resolve => {
@@ -1256,7 +1492,7 @@ async function main() {
     };
     check();
   });
-  await waitInit();
+  if (presentationMode === 'points') await waitInit();
 
   document.getElementById('loading').style.display = 'none';
   document.getElementById('hud').style.display = 'block';
@@ -1272,8 +1508,24 @@ async function main() {
       renderer: viewerCapabilities.renderer,
       capabilities: viewerCapabilities,
       renderer_status: activeReconstructionState(),
+      presentation: {
+        mode: presentationMode,
+        model_preview: modelPreviewManifest
+          ? {
+            synthetic: true,
+            geometry_usability: modelPreviewManifest.geometry_usability,
+            fidelity: modelPreviewManifest.fidelity,
+            photo_textures: false,
+            sha256: modelPreviewManifest.model.sha256,
+          }
+          : null,
+      },
       lod: qualityOverride ?? 'auto',
-      layers: { world: worldVisible, reconstruction: reconVisible },
+      layers: {
+        world: worldVisible,
+        reconstruction: reconVisible,
+        model: presentationMode === 'model',
+      },
       chunk_size_m: chunkSizeM,
       bounds: currentFrame?.bounds ?? null,
       artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
@@ -1316,26 +1568,21 @@ async function main() {
         const nextVisible = visible !== false;
         if (layer === 'world') {
           worldVisible = nextVisible;
-          for (const mesh of chunkMeshes.values()) mesh.visible = worldVisible;
-          for (const border of chunkBorders.values()) {
-            border.visible = worldVisible && bordersVisible;
-          }
-          if (gridHelper) gridHelper.visible = worldVisible;
-          if (axesHelper) axesHelper.visible = worldVisible;
         } else if (layer === 'reconstruction') {
           reconVisible = nextVisible;
-          if (reconMesh) reconMesh.visible = reconVisible;
-          splatLayer?.setVisible(reconVisible);
-          spatialSplatLayer?.setVisible(reconVisible);
-          spatialPointLayer?.setVisible(reconVisible);
         } else {
           throw new Error(`未知图层: ${layer}`);
         }
+        syncPresentationVisibility();
         return readState();
       },
       resetCamera: () => {
-        if (currentFrame) applyFraming(currentFrame, true);
-        applyZoom(DEFAULT_ZOOM);
+        if (presentationMode === 'model') {
+          applyModelPreviewFraming();
+        } else {
+          if (currentFrame) applyFraming(currentFrame, true);
+          applyZoom(DEFAULT_ZOOM);
+        }
         return readState();
       },
       setBounds: ({ bounds }) => {
@@ -1409,8 +1656,14 @@ async function main() {
           throw new Error('loadArtifact 需要 url 或 manifest');
         }
 
-        applyFraming(computeFraming(manifest, reconManifest), false);
+        if (presentationMode === 'points') {
+          applyFraming(computeFraming(manifest, reconManifest), false);
+        }
         const rendererResult = await loadReconstructionLayer();
+        if (presentationMode === 'model') {
+          viewerCapabilities = createViewerCapabilities('mesh-preview');
+          viewerBridge?.announceCapabilities();
+        }
         return {
           kind,
           url: reconManifestUrl,
@@ -1437,8 +1690,10 @@ function animate() {
   const now = performance.now();
   if (!animate._lastCheck || now - animate._lastCheck > 50) {
     animate._lastCheck = now;
-    updateChunks(camera.position.x, camera.position.z);
-    updateRecon();
+    if (presentationMode === 'points') {
+      updateChunks(camera.position.x, camera.position.z);
+      updateRecon();
+    }
   }
 
   updateHUD();

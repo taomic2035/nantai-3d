@@ -15,9 +15,26 @@
     border: 1px solid rgba(127,209,255,0.45); border-radius: 7px;
     backdrop-filter: blur(6px); cursor: pointer;
   }
+  #presentation-toggle {
+    position: fixed; top: 12px; right: 318px; z-index: 12;
+    min-height: 34px; padding: 6px 11px; color: #f6eddc;
+    background: rgba(92, 58, 26, 0.9);
+    border: 1px solid rgba(242, 191, 117, 0.62); border-radius: 7px;
+    backdrop-filter: blur(6px); cursor: pointer;
+  }
   body.focus-mode #display-toggle { right: 12px; }
+  body.focus-mode #presentation-toggle { right: 110px; }
   body.focus-mode :is(#hud, #minimap-wrap, #environment-controls, #controls) {
     display: none !important;
+  }
+  #model-preview-badge {
+    position: fixed; left: 50%; bottom: 14px; z-index: 12;
+    transform: translateX(-50%); width: max-content;
+    max-width: calc(100vw - 28px); padding: 8px 12px;
+    color: #f7ead8; background: rgba(33, 26, 20, 0.9);
+    border: 1px solid rgba(242, 191, 117, 0.48); border-radius: 999px;
+    font-size: 12px; letter-spacing: 0.01em; text-align: center;
+    backdrop-filter: blur(8px);
   }
   #hud {
     position: fixed; top: 12px; left: 12px; padding: 14px 18px;
@@ -95,7 +112,11 @@
 </head>
 <body>
 <div id="canvas-container"></div>
+<button id="presentation-toggle" type="button" hidden>查看点云</button>
 <button id="display-toggle" aria-pressed="false" type="button">专注画面</button>
+<p id="model-preview-badge" aria-live="polite" hidden>
+  合成模型 · 简化 PBR · 非照片纹理 · 非真实重建
+</p>
 
 <div id="hud" style="display:none">
   <h1 id="hud-title">Nantai Village · DC point preview</h1>
@@ -107,6 +128,7 @@
   <div class="stat">当前 chunk: <b id="hud-current">(0,0)</b></div>
   <div class="stat">画质 LOD: <b id="hud-lod">自动</b></div>
   <div class="stat">重建预览: <b id="hud-recon">无</b></div>
+  <div class="stat">呈现模式: <b id="hud-presentation">点云 / 高斯</b></div>
   <div class="stat">大气叠加: <b id="hud-weather">晴</b></div>
   <div class="stat">缩放: <b id="hud-zoom">1.0×</b></div>
   <div class="provenance">

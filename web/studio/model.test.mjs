@@ -168,6 +168,26 @@ test('viewer capability tokens come from the live renderer handshake', () => {
       alpha_composite: false,
     },
   }), ['dc-color']);
+  assert.deepEqual(viewerCapabilityTokens({
+    renderer: {
+      id: 'three-mesh',
+      fidelity: 'simplified-pbr-not-render-parity',
+      photo_textures: false,
+      real_reconstruction: false,
+    },
+  }), ['mesh-simplified-pbr']);
+});
+
+test('synthetic mesh presentation never becomes reconstruction or metric evidence', () => {
+  const raw = baseSnapshot();
+  raw.reconstruction.geometry_usability = 'preview-only';
+  raw.reconstruction.renderer_capabilities = ['mesh-simplified-pbr'];
+  const model = normalizeSnapshot(raw);
+
+  assert.equal(model.derived.renderFidelity, 'synthetic-mesh-simplified-pbr');
+  assert.equal(model.derived.geometryUsability, 'preview-only');
+  assert.equal(model.derived.trust, 'proxy');
+  assert.ok(model.derived.diagnostics.some((item) => item.includes('separate synthetic model')));
 });
 
 test('high-order SH needs both coefficients and renderer capability', () => {

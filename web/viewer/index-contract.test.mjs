@@ -138,3 +138,22 @@ test('terminal world-envelope failures do not enter the chunk retry loop', () =>
   assert.match(main, /error\.apiCode\s*=/);
   assert.match(main, /terminalChunkFailures\.add\(key\)/);
 });
+
+test('verified synthetic mesh preview is visually distinct from point layers', () => {
+  assert.match(main, /GLTFLoader/);
+  assert.match(main, /from ['"]\.\/model-preview\.mjs['"]/);
+  assert.match(main, /verifyModelPreviewBytes/);
+  assert.match(main, /presentationMode/);
+  assert.match(html, /id="presentation-toggle"[^>]*hidden/);
+  assert.match(html, /id="model-preview-badge"[^>]*aria-live="polite"[^>]*hidden/);
+  assert.match(html, /非照片纹理/);
+  assert.match(html, /非真实重建/);
+});
+
+test('model preview neutralizes exported lights and uses an authored close camera', () => {
+  assert.match(main, /object\.isLight[\s\S]*object\.visible\s*=\s*false/);
+  assert.match(main, /modelPreviewKeyLight/);
+  assert.match(main, /modelPreviewCameraPose/);
+  assert.match(main, /positionThree/);
+  assert.match(main, /targetThree/);
+});
