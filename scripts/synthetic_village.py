@@ -11,6 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 DEFAULT_VISUAL_PACK_ROOT = ROOT / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources"
+DEFAULT_MATERIAL_PUBLICATION_ROOT = (
+    ROOT / ".nantai-studio/synthetic-village/hybrid-v3/material-bundles"
+)
+DEFAULT_MATERIAL_WORK_ROOT = (
+    ROOT / ".nantai-studio/synthetic-village/hybrid-v3/material-work"
+)
 
 
 def _import_visual_source():
@@ -19,6 +25,14 @@ def _import_visual_source():
     from pipeline.synthetic_village.visual_sources import import_visual_source
 
     return import_visual_source
+
+
+def _publish_material_bundle():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.material_bundle import publish_material_bundle
+
+    return publish_material_bundle
 
 
 def _run_canary_build():
@@ -103,6 +117,25 @@ def _parser() -> argparse.ArgumentParser:
     import_visual.add_argument("--slot", required=True)
     import_visual.add_argument("--source", type=Path, required=True)
     import_visual.add_argument("--source-manifest", type=Path, required=True)
+    build_materials = commands.add_parser(
+        "build-materials",
+        help="Derive and privately publish the complete 24-slot PBR material bundle.",
+    )
+    build_materials.add_argument(
+        "--visual-pack-root",
+        type=Path,
+        default=DEFAULT_VISUAL_PACK_ROOT,
+    )
+    build_materials.add_argument(
+        "--publication-root",
+        type=Path,
+        default=DEFAULT_MATERIAL_PUBLICATION_ROOT,
+    )
+    build_materials.add_argument(
+        "--work-root",
+        type=Path,
+        default=DEFAULT_MATERIAL_WORK_ROOT,
+    )
     build_canary = commands.add_parser(
         "build-canary",
         help="Build, verify, and privately publish the Blender foundation canary.",
@@ -190,6 +223,25 @@ def main(argv: list[str] | None = None) -> int:
             pack_root=DEFAULT_VISUAL_PACK_ROOT,
         )
         print(json.dumps(record.model_dump(mode="json"), ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "build-materials":
+        result = _publish_material_bundle()(
+            visual_pack_root=args.visual_pack_root,
+            publication_root=args.publication_root,
+            work_root=args.work_root,
+        )
+        print(
+            json.dumps(
+                {
+                    "bundle_id": result.bundle_id,
+                    "final_directory": str(result.final_directory),
+                    "record_count": result.record_count,
+                    "reused": result.reused,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         return 0
     if args.command == "build-canary":
         result = _run_canary_build()(

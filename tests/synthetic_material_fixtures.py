@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from pipeline.synthetic_village.defaults import load_default_visual_slots
+from pipeline.synthetic_village.material_bundle import publish_material_bundle
 from pipeline.synthetic_village.visual_sources import (
     VisualSourceManifest,
     VisualSourceRecord,
@@ -78,3 +79,16 @@ def write_material_visual_pack(root: Path) -> Path:
     )
     (root / "visual-sources.json").write_bytes(canonical_manifest_bytes(manifest))
     return root
+
+
+def publish_material_fixture(root: Path):
+    """Publish one complete material bundle for downstream hermetic tests."""
+
+    root = Path(root)
+    visual_root = write_material_visual_pack(root / "visual")
+    result = publish_material_bundle(
+        visual_pack_root=visual_root,
+        publication_root=root / "material-bundles",
+        work_root=root / "material-work",
+    )
+    return visual_root, result

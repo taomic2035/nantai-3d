@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import io
 import json
+import os
 import platform
 import shutil
+import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
@@ -21,6 +26,12 @@ from pydantic import (
     StringConstraints,
     ValidationError,
     model_validator,
+)
+
+from pipeline.studio_jobs import (
+    JobContractError,
+    ProjectFileLock,
+    WindowsNtfsDurabilityBackend,
 )
 
 from .defaults import load_default_visual_slots
@@ -198,6 +209,14 @@ class PreparedMaterialBundle:
             return image.copy()
 
 
+@dataclass(frozen=True)
+class MaterialBundleResult:
+    bundle_id: str
+    final_directory: Path
+    record_count: int
+    reused: bool
+
+
 def _jsonable(value: object) -> object:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
@@ -358,6 +377,96 @@ def _write_object(root: Path, descriptor: MaterialMapDescriptor, payload: bytes)
     path.write_bytes(payload)
 
 
+def _is_linklike(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(is_junction and is_junction())
+    except OSError:
+        return True
+
+
+def _require_real_directory(path: Path, *, label: str) -> Path:
+    path = Path(path).expanduser().absolute()
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise MaterialBundleError(f"{label} is not a real directory") from exc
+    if _is_linklike(path) or not path.is_dir() or resolved != path:
+        raise MaterialBundleError(f"{label} is redirected or not a real directory")
+    return path
+
+
+def _flush_file(path: Path) -> None:
+    if os.name == "nt":
+        WindowsNtfsDurabilityBackend.flush_file(path)
+        return
+    with path.open("rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def _flush_directory(path: Path) -> None:
+    if os.name == "nt":
+        WindowsNtfsDurabilityBackend.flush_directory(path)
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _prepare_real_directory(raw_path: Path, *, label: str) -> Path:
+    path = Path(raw_path).expanduser().absolute()
+    cursor = path
+    missing: list[Path] = []
+    while not cursor.exists():
+        if _is_linklike(cursor):
+            raise MaterialBundleError(f"{label} has a redirected ancestor")
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            raise MaterialBundleError(f"{label} has no real existing ancestor")
+        cursor = parent
+    _require_real_directory(cursor, label=f"{label} ancestor")
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(exist_ok=False)
+            _flush_directory(directory.parent)
+        except FileExistsError:
+            pass
+        _require_real_directory(directory, label=label)
+    return _require_real_directory(path, label=label)
+
+
+def _stat_signature(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def _read_stable_file(path: Path, *, maximum_bytes: int, label: str) -> bytes:
+    path = Path(path)
+    if _is_linklike(path) or not path.is_file():
+        raise MaterialBundleError(f"{label} is missing or redirected")
+    before = _stat_signature(path)
+    if before[2] <= 0 or before[2] > maximum_bytes:
+        raise MaterialBundleError(f"{label} size is invalid")
+    with path.open("rb") as stream:
+        payload = stream.read(maximum_bytes + 1)
+    after = _stat_signature(path)
+    if before != after or len(payload) != before[2] or len(payload) > maximum_bytes:
+        raise MaterialBundleError(f"{label} changed during bounded read")
+    return payload
+
+
 def _material_slot_contracts() -> dict[str, str]:
     return {
         slot.slot_id: slot.replacement_contract
@@ -502,14 +611,13 @@ def verify_prepared_material_bundle(root: Path) -> DerivedMaterialBundle:
 
     root = Path(root).absolute()
     try:
-        if root.is_symlink() or not root.is_dir():
-            raise MaterialBundleError("material bundle root is not a real directory")
+        _require_real_directory(root, label="material bundle root")
         manifest_path = root / MATERIAL_BUNDLE_MANIFEST
-        if manifest_path.is_symlink() or not manifest_path.is_file():
-            raise MaterialBundleError("material bundle manifest is missing or redirected")
-        raw = manifest_path.read_bytes()
-        if not raw or len(raw) > MAX_MATERIAL_BUNDLE_MANIFEST_BYTES:
-            raise MaterialBundleError("material bundle manifest size is invalid")
+        raw = _read_stable_file(
+            manifest_path,
+            maximum_bytes=MAX_MATERIAL_BUNDLE_MANIFEST_BYTES,
+            label="material bundle manifest",
+        )
         manifest = DerivedMaterialBundle.model_validate_json(raw)
         if raw != canonical_material_bundle_bytes(manifest):
             raise MaterialBundleError("material bundle manifest is not canonical JSON")
@@ -519,8 +627,7 @@ def verify_prepared_material_bundle(root: Path) -> DerivedMaterialBundle:
             for descriptor in (record.base_color, record.normal, record.orm)
         }
         object_root = root / "objects"
-        if object_root.is_symlink() or not object_root.is_dir():
-            raise MaterialBundleError("material bundle object root is missing or redirected")
+        _require_real_directory(object_root, label="material bundle object root")
         actual_objects = {
             path.relative_to(root).as_posix()
             for path in object_root.iterdir()
@@ -537,10 +644,13 @@ def verify_prepared_material_bundle(root: Path) -> DerivedMaterialBundle:
         }
         for object_path, descriptor in descriptors.items():
             path = root / object_path
-            payload = path.read_bytes()
+            payload = _read_stable_file(
+                path,
+                maximum_bytes=MAX_DERIVED_MAP_BYTES,
+                label=f"derived material object {object_path}",
+            )
             if (
                 len(payload) != descriptor.bytes
-                or len(payload) > MAX_DERIVED_MAP_BYTES
                 or hashlib.sha256(payload).hexdigest() != descriptor.sha256
             ):
                 raise MaterialBundleError(
@@ -560,3 +670,194 @@ def verify_prepared_material_bundle(root: Path) -> DerivedMaterialBundle:
         raise
     except (OSError, UnidentifiedImageError, ValidationError, ValueError) as exc:
         raise MaterialBundleError(f"material bundle verification failed: {exc}") from exc
+
+
+def load_material_bundle(root: Path) -> DerivedMaterialBundle:
+    """Load one canonical bundle only after verifying every declared byte."""
+
+    return verify_prepared_material_bundle(root)
+
+
+def _source_manifest_digest(visual_pack_root: Path) -> str:
+    manifest = load_visual_source_manifest(
+        visual_pack_root / VISUAL_MANIFEST_NAME,
+    )
+    return hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest()
+
+
+def _durably_flush_bundle(staging: Path) -> None:
+    manifest = verify_prepared_material_bundle(staging)
+    descriptors = {
+        descriptor.object_path
+        for record in manifest.records
+        for descriptor in (record.base_color, record.normal, record.orm)
+    }
+    for object_path in sorted(descriptors):
+        _flush_file(staging / object_path)
+    _flush_file(staging / MATERIAL_BUNDLE_MANIFEST)
+    _flush_directory(staging / "objects")
+    _flush_directory(staging)
+    if verify_prepared_material_bundle(staging) != manifest:
+        raise MaterialBundleError("material bundle changed during durability flush")
+
+
+def _move_directory_noreplace(source: Path, destination: Path) -> None:
+    if destination.exists() or _is_linklike(destination):
+        raise MaterialBundleError(
+            f"material bundle destination already exists: {destination.name}",
+        )
+    moved = False
+    try:
+        if os.name == "nt":
+            WindowsNtfsDurabilityBackend.move(source, destination)
+        elif sys.platform.startswith("linux"):
+            libc = ctypes.CDLL(None, use_errno=True)
+            renameat2 = libc.renameat2
+            renameat2.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renameat2.restype = ctypes.c_int
+            result = renameat2(
+                -100,
+                os.fsencode(source),
+                -100,
+                os.fsencode(destination),
+                1,
+            )
+            if result != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(destination))
+        elif sys.platform == "darwin":
+            libc = ctypes.CDLL(None, use_errno=True)
+            renamex_np = libc.renamex_np
+            renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            renamex_np.restype = ctypes.c_int
+            result = renamex_np(
+                os.fsencode(source),
+                os.fsencode(destination),
+                0x00000004,  # RENAME_EXCL
+            )
+            if result != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(destination))
+        else:  # pragma: no cover - official publication hosts are Windows/Linux/macOS
+            if destination.exists() or _is_linklike(destination):
+                raise FileExistsError(errno.EEXIST, "destination exists", destination)
+            os.rename(source, destination)
+        moved = True
+        _flush_directory(source.parent)
+        if destination.parent != source.parent:
+            _flush_directory(destination.parent)
+    except (JobContractError, OSError) as exc:
+        if moved:
+            raise MaterialBundleError(
+                "material bundle moved but parent durability flush failed; "
+                "retry to verify and reuse it",
+            ) from exc
+        if destination.exists() or _is_linklike(destination):
+            raise MaterialBundleError(
+                f"material bundle destination already exists: {destination.name}",
+            ) from exc
+        raise MaterialBundleError(f"cannot publish material bundle: {exc}") from exc
+
+
+def _cleanup_owned_staging(staging: Path, *, work_root: Path) -> None:
+    if staging.parent != work_root or not staging.name.startswith(".material-"):
+        raise MaterialBundleError("refusing to clean an unowned material staging path")
+    if _is_linklike(staging):
+        staging.unlink(missing_ok=True)
+    elif staging.exists():
+        if not staging.is_dir():
+            raise MaterialBundleError("material staging path became irregular")
+        shutil.rmtree(staging)
+
+
+def publish_material_bundle(
+    *,
+    visual_pack_root: Path,
+    publication_root: Path,
+    work_root: Path,
+) -> MaterialBundleResult:
+    """Prepare, verify, and durably publish one immutable private material bundle."""
+
+    staging: Path | None = None
+    try:
+        visual_pack_root = _require_real_directory(
+            Path(visual_pack_root),
+            label="visual pack root",
+        )
+        publication_root = _prepare_real_directory(
+            Path(publication_root),
+            label="material publication root",
+        )
+        work_root = _prepare_real_directory(
+            Path(work_root),
+            label="material work root",
+        )
+        with ProjectFileLock(visual_pack_root / ".pack.lock", role="writer"):
+            with ProjectFileLock(work_root / ".material-bundle.lock", role="writer"):
+                source_digest = _source_manifest_digest(visual_pack_root)
+                staging = work_root / f".material-{uuid.uuid4().hex}"
+                prepared = prepare_material_bundle(
+                    visual_pack_root=visual_pack_root,
+                    staging_root=staging,
+                )
+                try:
+                    current_source_digest = _source_manifest_digest(visual_pack_root)
+                except (OSError, VisualSourceError, ValidationError, ValueError) as exc:
+                    raise MaterialBundleError(
+                        "source visual pack changed during material publication",
+                    ) from exc
+                if (
+                    current_source_digest != source_digest
+                    or prepared.manifest.source_manifest_sha256 != source_digest
+                ):
+                    raise MaterialBundleError(
+                        "source visual pack changed during material publication",
+                    )
+                verified = verify_prepared_material_bundle(staging)
+                if verified != prepared.manifest:
+                    raise MaterialBundleError("prepared material bundle identity changed")
+                destination = publication_root / prepared.manifest.bundle_id
+                if destination.exists() or _is_linklike(destination):
+                    existing = load_material_bundle(destination)
+                    if existing != prepared.manifest:
+                        raise MaterialBundleError(
+                            "existing material bundle does not match its content identity",
+                        )
+                    _cleanup_owned_staging(staging, work_root=work_root)
+                    staging = None
+                    return MaterialBundleResult(
+                        bundle_id=existing.bundle_id,
+                        final_directory=destination,
+                        record_count=len(existing.records),
+                        reused=True,
+                    )
+                _durably_flush_bundle(staging)
+                _move_directory_noreplace(staging, destination)
+                staging = None
+                published = load_material_bundle(destination)
+                if published != prepared.manifest:
+                    raise MaterialBundleError(
+                        "published material bundle changed during atomic move",
+                    )
+                return MaterialBundleResult(
+                    bundle_id=published.bundle_id,
+                    final_directory=destination,
+                    record_count=len(published.records),
+                    reused=False,
+                )
+    except MaterialBundleError:
+        raise
+    except (JobContractError, OSError, VisualSourceError, ValidationError, ValueError) as exc:
+        raise MaterialBundleError(f"material bundle publication filesystem failure: {exc}") from exc
+    finally:
+        if staging is not None:
+            try:
+                _cleanup_owned_staging(staging, work_root=staging.parent)
+            except (MaterialBundleError, OSError):
+                pass

@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
+import pipeline.synthetic_village.material_bundle as material_bundle
 from pipeline.synthetic_village.defaults import load_default_visual_slots
 from pipeline.synthetic_village.material_bundle import (
     MATERIAL_PARAMETERS,
     MaterialBundleError,
+    PreparedMaterialBundle,
     canonical_material_bundle_bytes,
+    load_material_bundle,
     prepare_material_bundle,
+    publish_material_bundle,
     verify_prepared_material_bundle,
 )
 from pipeline.synthetic_village.visual_sources import (
@@ -201,3 +206,207 @@ def test_missing_material_source_fails_without_partial_bundle(tmp_path: Path) ->
         )
 
     assert not staging.exists()
+
+
+def _use_prepared_template(
+    monkeypatch: pytest.MonkeyPatch,
+    prepared: PreparedMaterialBundle,
+):
+    def copy_prepared(*, visual_pack_root: Path, staging_root: Path):
+        del visual_pack_root
+        shutil.copytree(prepared.staging_root, staging_root)
+        return PreparedMaterialBundle(
+            staging_root=Path(staging_root),
+            manifest=prepared.manifest,
+        )
+
+    monkeypatch.setattr(material_bundle, "prepare_material_bundle", copy_prepared)
+
+
+def _material_staging_directories(work_root: Path) -> list[Path]:
+    return [
+        path
+        for path in work_root.glob(".material-*")
+        if path.name != ".material-bundle.lock"
+    ]
+
+
+def test_publish_material_bundle_is_absent_only_and_idempotent(
+    prepared_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visual_root, prepared = prepared_bundle
+    _use_prepared_template(monkeypatch, prepared)
+    publication_root = tmp_path / ".nantai-studio/material-bundles"
+    work_root = tmp_path / ".nantai-studio/work"
+
+    first = publish_material_bundle(
+        visual_pack_root=visual_root,
+        publication_root=publication_root,
+        work_root=work_root,
+    )
+    second = publish_material_bundle(
+        visual_pack_root=visual_root,
+        publication_root=publication_root,
+        work_root=work_root,
+    )
+
+    assert second.final_directory == first.final_directory
+    assert second.reused is True
+    assert first.reused is False
+    assert first.record_count == 24
+    assert load_material_bundle(first.final_directory).bundle_id == first.bundle_id
+    assert not _material_staging_directories(work_root)
+
+
+def test_publish_rejects_altered_existing_bundle(
+    prepared_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visual_root, prepared = prepared_bundle
+    _use_prepared_template(monkeypatch, prepared)
+    publication_root = tmp_path / "material-bundles"
+    work_root = tmp_path / "work"
+    first = publish_material_bundle(
+        visual_pack_root=visual_root,
+        publication_root=publication_root,
+        work_root=work_root,
+    )
+    descriptor = load_material_bundle(first.final_directory).records[0].normal
+    (first.final_directory / descriptor.object_path).write_bytes(b"altered")
+
+    with pytest.raises(MaterialBundleError, match="does not match|verification"):
+        publish_material_bundle(
+            visual_pack_root=visual_root,
+            publication_root=publication_root,
+            work_root=work_root,
+        )
+
+    assert not _material_staging_directories(work_root)
+
+
+def test_publish_rejects_redirected_bundle_object(
+    prepared_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visual_root, prepared = prepared_bundle
+    _use_prepared_template(monkeypatch, prepared)
+    first = publish_material_bundle(
+        visual_pack_root=visual_root,
+        publication_root=tmp_path / "material-bundles",
+        work_root=tmp_path / "work",
+    )
+    descriptor = load_material_bundle(first.final_directory).records[0].base_color
+    target = first.final_directory / descriptor.object_path
+    target.unlink()
+    target.symlink_to(tmp_path / "outside.png")
+
+    with pytest.raises(MaterialBundleError, match="redirected|object set"):
+        load_material_bundle(first.final_directory)
+
+
+def test_publish_rejects_symlinked_root(
+    prepared_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visual_root, prepared = prepared_bundle
+    _use_prepared_template(monkeypatch, prepared)
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    redirected = tmp_path / "redirected"
+    redirected.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(MaterialBundleError, match="real directory|redirected"):
+        publish_material_bundle(
+            visual_pack_root=visual_root,
+            publication_root=redirected,
+            work_root=tmp_path / "work",
+        )
+
+
+def test_publish_rejects_source_change_after_snapshot_and_cleans_staging(
+    prepared_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template_visual_root, prepared = prepared_bundle
+    visual_root = tmp_path / "visual"
+    shutil.copytree(template_visual_root, visual_root)
+    source_manifest = visual_root / "visual-sources.json"
+
+    def mutate_source(*, visual_pack_root: Path, staging_root: Path):
+        assert Path(visual_pack_root) == visual_root
+        shutil.copytree(prepared.staging_root, staging_root)
+        source_manifest.write_bytes(source_manifest.read_bytes() + b" ")
+        return PreparedMaterialBundle(
+            staging_root=Path(staging_root),
+            manifest=prepared.manifest,
+        )
+
+    monkeypatch.setattr(material_bundle, "prepare_material_bundle", mutate_source)
+    work_root = tmp_path / "work"
+
+    with pytest.raises(MaterialBundleError, match="source visual pack changed"):
+        publish_material_bundle(
+            visual_pack_root=visual_root,
+            publication_root=tmp_path / "material-bundles",
+            work_root=work_root,
+        )
+
+    assert not _material_staging_directories(work_root)
+
+
+def test_publish_propagates_directory_flush_failure_and_cleans_staging(
+    prepared_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visual_root, prepared = prepared_bundle
+    _use_prepared_template(monkeypatch, prepared)
+    real_flush = material_bundle._flush_directory
+
+    def fail_staging_flush(path: Path):
+        if Path(path).name.startswith(".material-"):
+            raise OSError("injected directory flush failure")
+        return real_flush(path)
+
+    monkeypatch.setattr(material_bundle, "_flush_directory", fail_staging_flush)
+    work_root = tmp_path / "work"
+
+    with pytest.raises(MaterialBundleError, match="filesystem failure"):
+        publish_material_bundle(
+            visual_pack_root=visual_root,
+            publication_root=tmp_path / "material-bundles",
+            work_root=work_root,
+        )
+
+    assert not _material_staging_directories(work_root)
+
+
+def test_publish_cleans_owned_staging_after_interrupted_move(
+    prepared_bundle,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visual_root, prepared = prepared_bundle
+    _use_prepared_template(monkeypatch, prepared)
+
+    def interrupt_move(source: Path, destination: Path):
+        del source, destination
+        raise OSError("injected interrupted move")
+
+    monkeypatch.setattr(material_bundle, "_move_directory_noreplace", interrupt_move)
+    work_root = tmp_path / "work"
+
+    with pytest.raises(MaterialBundleError, match="filesystem failure"):
+        publish_material_bundle(
+            visual_pack_root=visual_root,
+            publication_root=tmp_path / "material-bundles",
+            work_root=work_root,
+        )
+
+    assert not _material_staging_directories(work_root)
