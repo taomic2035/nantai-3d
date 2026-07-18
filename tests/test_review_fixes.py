@@ -181,5 +181,5 @@ class TestDefensiveChecks:
         # 全部线段 < 0.1m → 空结果而非 IndexError
         road = Road(id="r0", type="main", width=4.0,
                     points=[[0, 0], [0.01, 0.01]])
-        arr = _emit_road(road, 0, 0)
+        arr = _emit_road(road, 0, 0, world_seed=42)
         assert len(arr) == 0
