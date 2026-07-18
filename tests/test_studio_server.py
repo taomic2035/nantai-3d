@@ -1277,7 +1277,7 @@ class TestHttpContract:
             assert "default-src 'self'" in actual["content-security-policy"]
             assert "https://cdn.jsdelivr.net" in actual["content-security-policy"]
             assert "'wasm-unsafe-eval'" in actual["content-security-policy"]
-            assert "connect-src 'self' data:" in actual["content-security-policy"]
+            assert "connect-src 'self' data: blob:" in actual["content-security-policy"]
 
     def test_static_files_are_root_relative_with_mime_and_no_directory_listing(self, tmp_path):
         _write_v2_project(tmp_path)

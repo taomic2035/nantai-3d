@@ -81,7 +81,7 @@ CONTENT_SECURITY_POLICY = (
     "https://cdn.jsdelivr.net https://sparkjs.dev; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; media-src 'self' blob:; "
-    "connect-src 'self' data: https://cdn.jsdelivr.net https://sparkjs.dev; "
+    "connect-src 'self' data: blob: https://cdn.jsdelivr.net https://sparkjs.dev; "
     "worker-src 'self' blob:; frame-src 'self'; "
     "object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
 )
