@@ -30,6 +30,15 @@ class RuntimeRenderError(RuntimeError):
 REQUEST_SCHEMA = "nantai.synthetic-village.render-frame-request.v1"
 REPORT_SCHEMA = "nantai.synthetic-village.render-frame-report.v1"
 CAMERA_SCHEMA = "nantai.synthetic-village.camera-metadata.v1"
+LOCAL_REQUEST_SCHEMA = (
+    "nantai.synthetic-village.local-textured-render-frame-request.v1"
+)
+LOCAL_REPORT_SCHEMA = (
+    "nantai.synthetic-village.local-textured-render-frame-report.v1"
+)
+LOCAL_CAMERA_SCHEMA = (
+    "nantai.synthetic-village.local-textured-camera-metadata.v1"
+)
 DEPTH_ENCODING = "euclidean-camera-center-range-m"
 NORMAL_ENCODING = "world-space-unit-vector"
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
@@ -297,10 +306,11 @@ def _validate_request(request):
         ),
         "request",
     )
+    local = request["schema_version"] == LOCAL_REQUEST_SCHEMA
     if (
-        request["schema_version"] != REQUEST_SCHEMA
+        request["schema_version"] not in {REQUEST_SCHEMA, LOCAL_REQUEST_SCHEMA}
         or request["synthetic"] is not True
-        or request["verification_level"] != "L2"
+        or request["verification_level"] != ("L0" if local else "L2")
         or request["fidelity"] != "simplified-pbr-not-render-parity"
     ):
         raise RuntimeRenderError("request provenance contract is invalid")
@@ -332,7 +342,16 @@ def _validate_request(request):
     ):
         raise RuntimeRenderError("executing Blender identity is not pinned 4.5.11 LTS")
     scene = bpy.context.scene
-    if scene.get("nv_build_id") != request["build_id"]:
+    if local:
+        if (
+            scene.get("nv_preview_id") != request["build_id"]
+            or scene.get("nv_authoritative") is not False
+            or scene.get("nv_release_channel") != "local-preview-only"
+        ):
+            raise RuntimeRenderError(
+                "loaded local Blender scene provenance does not match request",
+            )
+    elif scene.get("nv_build_id") != request["build_id"]:
         raise RuntimeRenderError("loaded Blender scene build ID does not match request")
     if scene.get("nv_fidelity") != request["fidelity"] or scene.get("nv_synthetic") is not True:
         raise RuntimeRenderError("loaded Blender scene provenance is invalid")
@@ -1281,11 +1300,15 @@ def _write_camera_metadata(request, path, measured_c2w_blender):
     if _matrix_error(measured_c2w_blender, request["measured_c2w_blender"]) > 1e-6:
         raise RuntimeRenderError("rendered camera pose diverged from measured build evidence")
     payload = {
-        "schema_version": CAMERA_SCHEMA,
+        "schema_version": (
+            LOCAL_CAMERA_SCHEMA
+            if request["schema_version"] == LOCAL_REQUEST_SCHEMA
+            else CAMERA_SCHEMA
+        ),
         "build_id": request["build_id"],
         "render_id": request["render_id"],
         "synthetic": True,
-        "verification_level": "L2",
+        "verification_level": request["verification_level"],
         "blender_executable_sha256": request["blender_executable_sha256"],
         "camera_id": camera["camera_id"],
         "category": camera["category"],
@@ -1410,11 +1433,15 @@ def _execute_render(request, staging_path):
 
         artifacts = _artifact_records(work_dir, camera_id)
         report = {
-            "schema_version": REPORT_SCHEMA,
+            "schema_version": (
+                LOCAL_REPORT_SCHEMA
+                if request["schema_version"] == LOCAL_REQUEST_SCHEMA
+                else REPORT_SCHEMA
+            ),
             "build_id": request["build_id"],
             "render_id": request["render_id"],
             "synthetic": True,
-            "verification_level": "L2",
+            "verification_level": request["verification_level"],
             "fidelity": "simplified-pbr-not-render-parity",
             "blender_executable_sha256": request["blender_executable_sha256"],
             "camera_id": camera_id,

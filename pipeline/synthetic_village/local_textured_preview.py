@@ -82,6 +82,9 @@ DEFAULT_LOCAL_PUBLICATION_ROOT = (
 DEFAULT_LOCAL_TRAINING_BUILD_ROOT = (
     ROOT / ".nantai-studio/synthetic-village/hybrid-v3/local-training-builds"
 )
+DEFAULT_LOCAL_TRAINING_RENDER_ROOT = (
+    ROOT / ".nantai-studio/synthetic-village/hybrid-v3/local-training-renders"
+)
 LOCAL_TRAINING_BUILD_ENTRIES = (
     "build-report.json",
     "glb-material-audit.json",
@@ -1050,6 +1053,17 @@ class LocalTexturedPreviewResult:
     training_build_directory: Path | None = None
 
 
+@dataclass(frozen=True)
+class LocalTexturedRenderResult:
+    render_root: Path
+    journal_path: Path
+    render_id: str
+    rendered_count: int
+    reused_count: int
+    stdout: str
+    stderr: str
+
+
 def build_local_textured_preview_request(
     *,
     material_bundle_root: Path,
@@ -1557,3 +1571,411 @@ def run_local_textured_preview(
                 work_root=active_work_root,
                 expected_name=invocation_root.name,
             )
+
+
+def run_local_textured_training_render(
+    *,
+    training_build_directory: Path,
+    material_bundle_root: Path,
+    repo_root: Path = ROOT,
+    visual_pack_root: Path | None = None,
+    executable: Path = DEFAULT_LOCAL_BLENDER,
+    render_root: Path | None = None,
+    camera_ids: tuple[str, ...] | None = None,
+    timeout_seconds: int = canary.DEFAULT_RENDER_TIMEOUT_SECONDS,
+) -> LocalTexturedRenderResult:
+    """Resume strict six-layer L0 renders from one verified local PBR build."""
+
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or not 1 <= timeout_seconds <= 24 * 60 * 60
+    ):
+        raise LocalTexturedPreviewError(
+            "local render timeout must be an integer from 1 to 86400 seconds",
+        )
+    try:
+        selected_ids = canary._normalize_render_camera_ids(camera_ids)
+        repo_root = canary._require_real_directory(
+            Path(repo_root).absolute(),
+            label="repository root",
+        )
+        training_build_directory = canary._require_real_directory(
+            Path(training_build_directory).absolute(),
+            label="local textured training build directory",
+        )
+        private_root = repo_root / ".nantai-studio"
+        training_build_directory.relative_to(private_root)
+        bundle_root = canary._require_real_directory(
+            Path(material_bundle_root).absolute(),
+            label="material bundle root",
+        )
+        pack_root = canary._require_real_directory(
+            Path(
+                visual_pack_root
+                or repo_root
+                / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources",
+            ).absolute(),
+            label="visual source pack",
+        )
+    except (ValueError, canary.CanaryBuildError) as exc:
+        raise LocalTexturedPreviewError(
+            "local render inputs must be real private project paths",
+        ) from exc
+
+    executable = Path(executable).absolute()
+    identity = probe_local_blender_identity(executable)
+    scene = build_scene_plan()
+    request = build_local_textured_preview_request(
+        repo_root=repo_root,
+        scene_plan=scene,
+        camera_plan=build_camera_plan(scene),
+        visual_pack_root=pack_root,
+        material_bundle_root=bundle_root,
+        tool_identity=identity,
+    )
+    report, _audit, _manifest = verify_local_textured_training_build_directory(
+        training_build_directory,
+        request=request,
+    )
+    try:
+        executable_snapshot = canary._snapshot_regular_file(executable)
+        renderer_snapshot = canary._snapshot_regular_file(
+            repo_root / "scripts/blender/render_synthetic_village.py",
+        )
+        report_snapshot = canary._snapshot_regular_file(
+            training_build_directory / "build-report.json",
+        )
+        build_snapshots = tuple(
+            canary._snapshot_regular_file(training_build_directory / name)
+            for name in LOCAL_TRAINING_BUILD_ENTRIES
+        )
+    except canary.CanaryBuildError as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
+    if (
+        executable_snapshot.sha256 != report.tool_identity.executable_sha256
+        or report_snapshot.sha256 != training_build_directory.name
+    ):
+        raise LocalTexturedPreviewError(
+            "local render runtime or build report identity disagrees",
+        )
+    blend_record = next(
+        row for row in report.artifacts if row.name == "village-canary.blend"
+    )
+    blend_path = training_build_directory / blend_record.name
+    blend_snapshot = next(
+        row for row in build_snapshots if row.path == blend_path
+    )
+    if (
+        blend_snapshot.sha256 != blend_record.sha256
+        or blend_snapshot.signature[2] != blend_record.size_bytes
+    ):
+        raise LocalTexturedPreviewError(
+            "local render Blender scene disagrees with build evidence",
+        )
+    immutable_snapshots = (
+        executable_snapshot,
+        renderer_snapshot,
+        *build_snapshots,
+    )
+    object_registry_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(
+            [row.model_dump(mode="json") for row in report.object_registry],
+        ),
+    ).hexdigest()
+    settings = canary.RenderSettings()
+    render_identity = {
+        "schema_version": canary.LOCAL_RENDER_JOURNAL_SCHEMA,
+        "build_id": request.preview_id,
+        "verification_level": "L0",
+        "blender_executable_sha256": executable_snapshot.sha256,
+        "renderer_script_sha256": renderer_snapshot.sha256,
+        "blend_sha256": blend_snapshot.sha256,
+        "build_report_sha256": report_snapshot.sha256,
+        "object_registry_sha256": object_registry_sha256,
+        "settings": settings,
+        "camera_ids": canary.RENDER_CAMERA_IDS,
+        "camera_plan_sha256": report.source_hashes.camera_plan_sha256,
+    }
+    render_id = hashlib.sha256(
+        canary._canonical_json_bytes(render_identity),
+    ).hexdigest()
+    try:
+        selected_render_root = (
+            Path(render_root).absolute()
+            if render_root is not None
+            else DEFAULT_LOCAL_TRAINING_RENDER_ROOT
+            / report_snapshot.sha256
+            / render_id
+        )
+        selected_render_root.relative_to(private_root)
+        canary._ensure_real_directory_tree(private_root, repo_root=repo_root)
+        selected_render_root = canary._ensure_real_directory_tree(
+            selected_render_root,
+            repo_root=repo_root,
+        )
+    except (ValueError, canary.CanaryBuildError) as exc:
+        raise LocalTexturedPreviewError(
+            "local render root must be a real directory below .nantai-studio",
+        ) from exc
+
+    journal_path = selected_render_root / "render-journal.json"
+    rendered_count = 0
+    reused_count = 0
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    try:
+        with ProjectFileLock(
+            selected_render_root / ".local-render.lock",
+            role="writer",
+        ):
+            if journal_path.exists() or canary._is_linklike(journal_path):
+                journal = canary.load_render_journal(journal_path)
+                immutable = (
+                    journal.schema_version,
+                    journal.verification_level,
+                    journal.render_id,
+                    journal.build_id,
+                    journal.blender_executable_sha256,
+                    journal.renderer_script_sha256,
+                    journal.blend_sha256,
+                    journal.build_report_sha256,
+                    journal.object_registry_sha256,
+                    journal.settings,
+                )
+                expected = (
+                    canary.LOCAL_RENDER_JOURNAL_SCHEMA,
+                    "L0",
+                    render_id,
+                    request.preview_id,
+                    executable_snapshot.sha256,
+                    renderer_snapshot.sha256,
+                    blend_snapshot.sha256,
+                    report_snapshot.sha256,
+                    object_registry_sha256,
+                    settings,
+                )
+                if immutable != expected:
+                    raise LocalTexturedPreviewError(
+                        "existing local render journal belongs to different inputs",
+                    )
+            else:
+                journal = canary._seal_render_journal(
+                    canary.RenderJournal(
+                        schema_version=canary.LOCAL_RENDER_JOURNAL_SCHEMA,
+                        render_id=render_id,
+                        journal_sha256="0" * 64,
+                        build_id=request.preview_id,
+                        verification_level="L0",
+                        blender_executable_sha256=executable_snapshot.sha256,
+                        renderer_script_sha256=renderer_snapshot.sha256,
+                        blend_sha256=blend_snapshot.sha256,
+                        build_report_sha256=report_snapshot.sha256,
+                        object_registry_sha256=object_registry_sha256,
+                        settings=settings,
+                        frames=tuple(
+                            canary.RenderFrameRecord(
+                                camera_id=camera_id,
+                                state="planned",
+                            )
+                            for camera_id in canary.RENDER_CAMERA_IDS
+                        ),
+                    ),
+                )
+                canary._write_render_journal(journal_path, journal)
+
+            cameras = {
+                row.camera_id: row for row in request.camera_plan.cameras
+            }
+            measured = {
+                row.camera_id: row.measured_c2w_blender
+                for row in report.camera_registry
+            }
+            for camera_id in selected_ids:
+                stage: Literal["prepare", "invoke", "validate", "publish"] = (
+                    "prepare"
+                )
+                nonce = uuid.uuid4().hex[:12]
+                temporary_root = selected_render_root.parent
+                invocation_root = temporary_root / f".lri-{nonce}"
+                staging = temporary_root / f".lrs-{nonce}"
+                runtime_work = staging.with_name(
+                    f".{staging.name}.tmp-{render_id[:12]}",
+                )
+                try:
+                    frame = next(
+                        row for row in journal.frames if row.camera_id == camera_id
+                    )
+                    if frame.state == "verified":
+                        try:
+                            canary._verify_published_frame(
+                                selected_render_root,
+                                frame,
+                            )
+                            reused_count += 1
+                            continue
+                        except canary.CanaryBuildError:
+                            canary._quarantine_frame_outputs(
+                                selected_render_root,
+                                camera_id,
+                            )
+                    elif canary._frame_has_any_output(
+                        selected_render_root,
+                        camera_id,
+                    ):
+                        canary._quarantine_frame_outputs(
+                            selected_render_root,
+                            camera_id,
+                        )
+                    journal = canary._replace_frame_record(
+                        journal,
+                        camera_id,
+                        canary.RenderFrameRecord(
+                            camera_id=camera_id,
+                            state="rendering",
+                        ),
+                    )
+                    canary._write_render_journal(journal_path, journal)
+
+                    invocation_root.mkdir(exist_ok=False)
+                    canary._flush_directory(temporary_root)
+                    frame_request = canary.RenderFrameRequest(
+                        schema_version=canary.LOCAL_RENDER_REQUEST_SCHEMA,
+                        render_id=render_id,
+                        build_id=request.preview_id,
+                        verification_level="L0",
+                        blender_executable_sha256=executable_snapshot.sha256,
+                        renderer_script_sha256=renderer_snapshot.sha256,
+                        blend_sha256=blend_snapshot.sha256,
+                        build_report_sha256=report_snapshot.sha256,
+                        object_registry_sha256=object_registry_sha256,
+                        settings=settings,
+                        camera=cameras[camera_id],
+                        measured_c2w_blender=measured[camera_id],
+                        object_registry=report.object_registry,
+                        auxiliary_registry=report.auxiliary_registry,
+                        semantic_registry=report.semantic_registry,
+                    )
+                    request_path = invocation_root / "render-request.json"
+                    canary._write_new_file(
+                        request_path,
+                        canary.canonical_render_request_bytes(frame_request),
+                    )
+                    request_snapshot = canary._snapshot_regular_file(request_path)
+                    stage = "invoke"
+                    try:
+                        returncode, stdout, stderr = (
+                            canary._run_blender_render_process(
+                                repo_root=repo_root,
+                                executable=executable_snapshot.path,
+                                blend_path=blend_path,
+                                request_path=request_path,
+                                staging=staging,
+                                invocation_root=invocation_root,
+                                timeout_seconds=timeout_seconds,
+                            )
+                        )
+                    finally:
+                        canary._verify_snapshots_unchanged(
+                            (*immutable_snapshots, request_snapshot),
+                        )
+                    stdout_parts.append(stdout)
+                    stderr_parts.append(stderr)
+                    if returncode != 0:
+                        runtime_error = next(
+                            (
+                                line.strip()
+                                for line in reversed(
+                                    (stdout + "\n" + stderr).splitlines(),
+                                )
+                                if line.strip().startswith(
+                                    "NANTAI_RENDER_ERROR ",
+                                )
+                            ),
+                            "",
+                        )
+                        suffix = (
+                            f": {canary._sanitize_render_error(RuntimeError(runtime_error))}"
+                            if runtime_error
+                            else ""
+                        )
+                        raise LocalTexturedPreviewError(
+                            "local Blender render failed with exit code "
+                            f"{returncode}{suffix}",
+                        )
+                    stage = "validate"
+                    frame_report, frame_report_sha256 = (
+                        canary._validate_frame_staging(staging, frame_request)
+                    )
+                    canary._durably_flush_frame_staging(staging)
+                    stage = "publish"
+                    canary._publish_frame(
+                        staging,
+                        selected_render_root,
+                        frame_report,
+                    )
+                    verified = canary.RenderFrameRecord(
+                        camera_id=camera_id,
+                        state="verified",
+                        artifacts=frame_report.artifacts,
+                        runtime_report_sha256=frame_report_sha256,
+                        statistics=frame_report.statistics,
+                    )
+                    canary._verify_published_frame(
+                        selected_render_root,
+                        verified,
+                    )
+                    canary._verify_snapshots_unchanged(immutable_snapshots)
+                    journal = canary._replace_frame_record(
+                        journal,
+                        camera_id,
+                        verified,
+                    )
+                    canary._write_render_journal(journal_path, journal)
+                    rendered_count += 1
+                except Exception as exc:
+                    error = (
+                        exc
+                        if isinstance(
+                            exc,
+                            (LocalTexturedPreviewError, canary.CanaryBuildError),
+                        )
+                        else LocalTexturedPreviewError(str(exc))
+                    )
+                    failed = canary.RenderFrameRecord(
+                        camera_id=camera_id,
+                        state="failed",
+                        error=canary.RenderFailure(
+                            stage=stage,
+                            message=canary._sanitize_render_error(error),
+                        ),
+                    )
+                    journal = canary._replace_frame_record(
+                        journal,
+                        camera_id,
+                        failed,
+                    )
+                    canary._write_render_journal(journal_path, journal)
+                    if error is exc:
+                        raise
+                    raise error from exc
+                finally:
+                    for owned in (runtime_work, staging, invocation_root):
+                        canary._cleanup_owned_directory(
+                            owned,
+                            work_root=temporary_root,
+                            expected_name=owned.name,
+                        )
+    except LocalTexturedPreviewError:
+        raise
+    except (canary.CanaryBuildError, JobContractError) as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
+    return LocalTexturedRenderResult(
+        render_root=selected_render_root,
+        journal_path=journal_path,
+        render_id=render_id,
+        rendered_count=rendered_count,
+        reused_count=reused_count,
+        stdout="".join(stdout_parts),
+        stderr="".join(stderr_parts),
+    )

@@ -90,6 +90,18 @@ RENDER_REQUEST_SCHEMA = "nantai.synthetic-village.render-frame-request.v1"
 RENDER_FRAME_REPORT_SCHEMA = "nantai.synthetic-village.render-frame-report.v1"
 RENDER_JOURNAL_SCHEMA = "nantai.synthetic-village.render-journal.v1"
 CAMERA_METADATA_SCHEMA = "nantai.synthetic-village.camera-metadata.v1"
+LOCAL_RENDER_REQUEST_SCHEMA = (
+    "nantai.synthetic-village.local-textured-render-frame-request.v1"
+)
+LOCAL_RENDER_FRAME_REPORT_SCHEMA = (
+    "nantai.synthetic-village.local-textured-render-frame-report.v1"
+)
+LOCAL_RENDER_JOURNAL_SCHEMA = (
+    "nantai.synthetic-village.local-textured-render-journal.v1"
+)
+LOCAL_CAMERA_METADATA_SCHEMA = (
+    "nantai.synthetic-village.local-textured-camera-metadata.v1"
+)
 DEPTH_ENCODING = "euclidean-camera-center-range-m"
 NORMAL_ENCODING = "world-space-unit-vector"
 JOURNAL_REPLACE_ATTEMPTS = 3
@@ -1063,13 +1075,14 @@ class RenderSettings(FrozenModel):
 
 
 class RenderFrameRequest(FrozenModel):
-    schema_version: Literal["nantai.synthetic-village.render-frame-request.v1"] = (
-        RENDER_REQUEST_SCHEMA
-    )
+    schema_version: Literal[
+        "nantai.synthetic-village.render-frame-request.v1",
+        "nantai.synthetic-village.local-textured-render-frame-request.v1",
+    ] = RENDER_REQUEST_SCHEMA
     render_id: Sha256
     build_id: Sha256
     synthetic: Literal[True] = True
-    verification_level: Literal["L2"] = "L2"
+    verification_level: Literal["L0", "L2"] = "L2"
     fidelity: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
     blender_executable_sha256: Sha256
     renderer_script_sha256: Sha256
@@ -1085,6 +1098,11 @@ class RenderFrameRequest(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_render_request(self) -> RenderFrameRequest:
+        expected_level = (
+            "L0" if self.schema_version == LOCAL_RENDER_REQUEST_SCHEMA else "L2"
+        )
+        if self.verification_level != expected_level:
+            raise ValueError("render request schema and verification level disagree")
         if self.camera.camera_id not in RENDER_CAMERA_IDS:
             raise ValueError("render request camera is not canonical")
         if tuple(item.instance_id for item in self.object_registry) != tuple(range(1, 127)):
@@ -1159,14 +1177,15 @@ class RenderValidation(FrozenModel):
 
 
 class RenderFrameReport(FrozenModel):
-    schema_version: Literal["nantai.synthetic-village.render-frame-report.v1"] = (
-        RENDER_FRAME_REPORT_SCHEMA
-    )
+    schema_version: Literal[
+        "nantai.synthetic-village.render-frame-report.v1",
+        "nantai.synthetic-village.local-textured-render-frame-report.v1",
+    ] = RENDER_FRAME_REPORT_SCHEMA
     build_id: Sha256
     render_id: Sha256
     content_sha256: Sha256
     synthetic: Literal[True] = True
-    verification_level: Literal["L2"] = "L2"
+    verification_level: Literal["L0", "L2"] = "L2"
     fidelity: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
     blender_executable_sha256: Sha256
     camera_id: str = Field(pattern=r"^camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}$")
@@ -1185,6 +1204,13 @@ class RenderFrameReport(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_artifact_contract(self) -> RenderFrameReport:
+        expected_level = (
+            "L0"
+            if self.schema_version == LOCAL_RENDER_FRAME_REPORT_SCHEMA
+            else "L2"
+        )
+        if self.verification_level != expected_level:
+            raise ValueError("render report schema and verification level disagree")
         if tuple((item.kind, item.path) for item in self.artifacts) != tuple(
             _expected_render_artifacts(self.camera_id)
         ):
@@ -1193,11 +1219,14 @@ class RenderFrameReport(FrozenModel):
 
 
 class CameraFrameMetadata(FrozenModel):
-    schema_version: Literal["nantai.synthetic-village.camera-metadata.v1"] = CAMERA_METADATA_SCHEMA
+    schema_version: Literal[
+        "nantai.synthetic-village.camera-metadata.v1",
+        "nantai.synthetic-village.local-textured-camera-metadata.v1",
+    ] = CAMERA_METADATA_SCHEMA
     build_id: Sha256
     render_id: Sha256
     synthetic: Literal[True]
-    verification_level: Literal["L2"]
+    verification_level: Literal["L0", "L2"]
     blender_executable_sha256: Sha256
     camera_id: str = Field(pattern=r"^camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}$")
     category: Literal["outer", "ground", "courtyard", "bridge"]
@@ -1227,6 +1256,15 @@ class CameraFrameMetadata(FrozenModel):
     measured_c2w_blender: Matrix4
     object_registry_sha256: Sha256
     semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+
+    @model_validator(mode="after")
+    def _validate_camera_metadata_provenance(self) -> CameraFrameMetadata:
+        expected_level = (
+            "L0" if self.schema_version == LOCAL_CAMERA_METADATA_SCHEMA else "L2"
+        )
+        if self.verification_level != expected_level:
+            raise ValueError("camera metadata schema and verification level disagree")
+        return self
 
 
 class RenderFailure(FrozenModel):
@@ -1273,12 +1311,15 @@ class RenderFrameRecord(FrozenModel):
 
 
 class RenderJournal(FrozenModel):
-    schema_version: Literal["nantai.synthetic-village.render-journal.v1"] = RENDER_JOURNAL_SCHEMA
+    schema_version: Literal[
+        "nantai.synthetic-village.render-journal.v1",
+        "nantai.synthetic-village.local-textured-render-journal.v1",
+    ] = RENDER_JOURNAL_SCHEMA
     render_id: Sha256
     journal_sha256: Sha256
     build_id: Sha256
     synthetic: Literal[True] = True
-    verification_level: Literal["L2"] = "L2"
+    verification_level: Literal["L0", "L2"] = "L2"
     fidelity: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
     blender_executable_sha256: Sha256
     renderer_script_sha256: Sha256
@@ -1290,6 +1331,11 @@ class RenderJournal(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_frame_order(self) -> RenderJournal:
+        expected_level = (
+            "L0" if self.schema_version == LOCAL_RENDER_JOURNAL_SCHEMA else "L2"
+        )
+        if self.verification_level != expected_level:
+            raise ValueError("render journal schema and verification level disagree")
         if tuple(item.camera_id for item in self.frames) != RENDER_CAMERA_IDS:
             raise ValueError("render journal camera registry is not stable v1")
         return self
@@ -3221,8 +3267,15 @@ def _validate_camera_metadata(
     request: RenderFrameRequest,
 ) -> None:
     camera = request.camera
+    expected_schema = (
+        LOCAL_CAMERA_METADATA_SCHEMA
+        if request.schema_version == LOCAL_RENDER_REQUEST_SCHEMA
+        else CAMERA_METADATA_SCHEMA
+    )
     if (
-        metadata.build_id != request.build_id
+        metadata.schema_version != expected_schema
+        or metadata.verification_level != request.verification_level
+        or metadata.build_id != request.build_id
         or metadata.render_id != request.render_id
         or metadata.blender_executable_sha256 != request.blender_executable_sha256
         or metadata.camera_id != camera.camera_id
@@ -3252,8 +3305,15 @@ def _validate_frame_staging(
     if not report_path.is_file() or _is_linklike(report_path):
         raise CanaryBuildError("render completed without a trusted frame report")
     report = _load_frame_report(report_path)
+    expected_schema = (
+        LOCAL_RENDER_FRAME_REPORT_SCHEMA
+        if request.schema_version == LOCAL_RENDER_REQUEST_SCHEMA
+        else RENDER_FRAME_REPORT_SCHEMA
+    )
     if (
-        report.build_id != request.build_id
+        report.schema_version != expected_schema
+        or report.verification_level != request.verification_level
+        or report.build_id != request.build_id
         or report.render_id != request.render_id
         or report.camera_id != request.camera.camera_id
         or report.blender_executable_sha256 != request.blender_executable_sha256

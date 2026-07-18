@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from pipeline.synthetic_village import tool_lock
+from pipeline.synthetic_village import canary, tool_lock
 from pipeline.synthetic_village.building_geometry import (
     BUILDING_GEOMETRY_V1,
     BUILDING_GEOMETRY_V2,
@@ -22,7 +22,9 @@ from pipeline.synthetic_village.camera_plan import build_camera_plan
 from pipeline.synthetic_village.canary import (
     ARTIFACT_REQUESTS,
     AUXILIARY_REGISTRY,
+    LOCAL_RENDER_REQUEST_SCHEMA,
     MATERIAL_FAMILIES,
+    RENDER_REQUEST_SCHEMA,
     ArtifactRecord,
     BuildCounts,
     BuildDeterminism,
@@ -32,6 +34,8 @@ from pipeline.synthetic_village.canary import (
     CameraRegistryEntry,
     CanaryBuildError,
     PreviewCameraRecord,
+    RenderFrameRequest,
+    RenderSettings,
     SemanticRegistryEntry,
     TexturedBuildCounts,
     TexturedBuildReport,
@@ -1283,6 +1287,64 @@ def _private_render_fixture() -> tuple[Path, Path, BuildRequest]:
     report = _valid_report(request, build_directory)
     (build_directory / "build-report.json").write_bytes(canonical_build_report_bytes(report))
     return container, build_directory, request
+
+
+def test_local_render_request_schema_is_l0_only_and_separate_from_l2() -> None:
+    build = build_canary_request(
+        repo_root=ROOT,
+        scene_plan=build_scene_plan(),
+        camera_plan=build_camera_plan(),
+        visual_pack_root=VISUAL_PACK_ROOT,
+    )
+    object_registry_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(  # noqa: SLF001 - tests the wire contract
+            [row.model_dump(mode="json") for row in build.object_registry],
+        ),
+    ).hexdigest()
+    payload = {
+        "schema_version": LOCAL_RENDER_REQUEST_SCHEMA,
+        "render_id": "1" * 64,
+        "build_id": build.build_id,
+        "synthetic": True,
+        "verification_level": "L0",
+        "fidelity": "simplified-pbr-not-render-parity",
+        "blender_executable_sha256": "2" * 64,
+        "renderer_script_sha256": "3" * 64,
+        "blend_sha256": "4" * 64,
+        "build_report_sha256": "5" * 64,
+        "object_registry_sha256": object_registry_sha256,
+        "settings": RenderSettings(),
+        "camera": build.camera_plan.cameras[0],
+        "measured_c2w_blender": build.camera_plan.cameras[0].c2w_blender,
+        "object_registry": build.object_registry,
+        "auxiliary_registry": build.auxiliary_registry,
+        "semantic_registry": build.semantic_registry,
+    }
+
+    local = RenderFrameRequest.model_validate(payload)
+    assert local.schema_version == LOCAL_RENDER_REQUEST_SCHEMA
+    assert local.verification_level == "L0"
+
+    with pytest.raises(ValidationError, match="schema.*verification"):
+        RenderFrameRequest.model_validate({**payload, "verification_level": "L2"})
+    with pytest.raises(ValidationError, match="schema.*verification"):
+        RenderFrameRequest.model_validate(
+            {
+                **payload,
+                "schema_version": RENDER_REQUEST_SCHEMA,
+                "verification_level": "L0",
+            },
+        )
+
+
+def test_blender_renderer_declares_separate_local_scene_provenance_path() -> None:
+    source = (ROOT / "scripts/blender/render_synthetic_village.py").read_text(
+        encoding="utf-8",
+    )
+
+    assert "local-textured-render-frame-request.v1" in source
+    assert 'scene.get("nv_preview_id")' in source
+    assert 'scene.get("nv_authoritative") is not False' in source
 
 
 def _write_fake_frame(
