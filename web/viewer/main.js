@@ -133,6 +133,7 @@ let modelPreviewKeyLight = null;
 const meshWorldChunks = new Map();
 const meshWorldLoading = new Map();
 const meshAssetCache = new Map();
+const meshMaterialTextureCache = new Map();
 const meshWorldRetryAt = new Map();
 const meshWorldTerminalFailures = new Set();
 const meshWorldStats = { loaded: 0, evicted: 0 };
@@ -438,29 +439,87 @@ function updateChunks(playerX, playerZ) {
 }
 
 // ============ Textured mesh world (verified GLB templates) ============
-function meshSurfaceMaterial(kind, featureType = '') {
-  if (kind === 'water') {
-    return new THREE.MeshStandardMaterial({
-      color: 0x3c8195,
-      roughness: 0.22,
-      metalness: 0.0,
-      transparent: true,
-      opacity: 0.78,
-      side: THREE.DoubleSide,
-    });
+async function loadVerifiedMaterialMap(descriptor, nominalTileM) {
+  const cacheKey = [
+    descriptor.url,
+    descriptor.sha256,
+    descriptor.bytes,
+    descriptor.color_space,
+    nominalTileM,
+  ].join(':');
+  if (meshMaterialTextureCache.has(cacheKey)) {
+    return meshMaterialTextureCache.get(cacheKey);
   }
-  if (kind === 'road') {
-    return new THREE.MeshStandardMaterial({
-      color: featureType === 'main' ? 0x555d62 : 0x8a6b4d,
-      roughness: 0.9,
-      metalness: 0.0,
-      side: THREE.DoubleSide,
-    });
-  }
+  const promise = (async () => {
+    const response = await fetch(descriptor.url);
+    if (!response.ok) {
+      throw new Error(`Mesh material map load failed: ${response.status}`);
+    }
+    if (!response.headers.get('content-type')?.startsWith('image/png')) {
+      throw new Error('Mesh material map is not a PNG response');
+    }
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength !== descriptor.bytes) {
+      throw new Error('Mesh material map byte count disagrees with its descriptor');
+    }
+    const actualSha256 = await sha256Hex(bytes);
+    if (actualSha256 !== descriptor.sha256) {
+      throw new Error('Mesh material map SHA-256 disagrees with its descriptor');
+    }
+    const image = await createImageBitmap(
+      new Blob([bytes], { type: 'image/png' }),
+      {
+        imageOrientation: 'flipY',
+        colorSpaceConversion: 'none',
+        premultiplyAlpha: 'none',
+      },
+    );
+    const texture = new THREE.Texture(image);
+    texture.flipY = false;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(1 / nominalTileM, 1 / nominalTileM);
+    texture.colorSpace = descriptor.color_space === 'srgb'
+      ? THREE.SRGBColorSpace
+      : THREE.NoColorSpace;
+    texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    texture.needsUpdate = true;
+    return texture;
+  })();
+  meshMaterialTextureCache.set(cacheKey, promise);
+  promise.catch(() => meshMaterialTextureCache.delete(cacheKey));
+  return promise;
+}
+
+async function loadVerifiedSurfaceTextures(descriptor) {
+  const [map, normalMap, ormMap] = await Promise.all([
+    loadVerifiedMaterialMap(descriptor.base_color, descriptor.nominal_tile_m),
+    loadVerifiedMaterialMap(descriptor.normal, descriptor.nominal_tile_m),
+    loadVerifiedMaterialMap(descriptor.orm, descriptor.nominal_tile_m),
+  ]);
+  return { map, normalMap, ormMap };
+}
+
+async function meshSurfaceMaterial(descriptor, kind) {
+  const { map, normalMap, ormMap } = await loadVerifiedSurfaceTextures(descriptor);
+  const water = kind === 'water';
   return new THREE.MeshStandardMaterial({
-    color: 0x657047,
-    roughness: 0.96,
-    metalness: 0.0,
+    color: 0xffffff,
+    map,
+    normalMap,
+    normalScale: new THREE.Vector2(
+      descriptor.normal_strength,
+      descriptor.normal_strength,
+    ),
+    aoMap: ormMap,
+    aoMapIntensity: water ? 0.35 : 0.85,
+    roughnessMap: ormMap,
+    roughness: 1,
+    metalnessMap: ormMap,
+    metalness: 1,
+    transparent: water,
+    opacity: water ? 0.82 : 1,
+    depthWrite: !water,
     side: THREE.DoubleSide,
   });
 }
@@ -468,7 +527,10 @@ function meshSurfaceMaterial(kind, featureType = '') {
 function meshFromGeometryData(data, material, name) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-  geometry.setAttribute('uv', new THREE.BufferAttribute(data.uvs, 2));
+  const uv = new THREE.BufferAttribute(data.uvs, 2);
+  geometry.setAttribute('uv', uv);
+  geometry.setAttribute('uv1', uv.clone());
+  geometry.setAttribute('uv2', uv.clone());
   geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
@@ -528,8 +590,15 @@ function disposeMeshWorldRecord(record) {
 }
 
 async function buildMeshWorldGroup(runtime) {
-  const { chunk, asset_urls: assetUrls } = runtime;
+  const {
+    chunk,
+    asset_urls: assetUrls,
+    surface_materials: surfaceMaterials,
+  } = runtime;
   const descriptors = new Map(assetUrls.map((row) => [row.asset_id, row]));
+  const materialDescriptors = new Map(
+    surfaceMaterials.map((row) => [row.slot_id, row]),
+  );
   const templates = new Map(await Promise.all(
     assetUrls.map(async (descriptor) => [
       descriptor.asset_id,
@@ -540,7 +609,10 @@ async function buildMeshWorldGroup(runtime) {
   const ownedResources = [];
   group.name = `mesh_world_${chunk.chunk_id.x}_${chunk.chunk_id.y}_lod${chunk.selected_lod}`;
 
-  const terrainMaterial = meshSurfaceMaterial('terrain');
+  await Promise.all(surfaceMaterials.map(loadVerifiedSurfaceTextures));
+  const terrainDescriptor = materialDescriptors.get(chunk.terrain.material_slot_id);
+  if (!terrainDescriptor) throw new Error('Mesh terrain lacks its surface material');
+  const terrainMaterial = await meshSurfaceMaterial(terrainDescriptor, 'terrain');
   const terrain = meshFromGeometryData(
     terrainGeometryThree(chunk),
     terrainMaterial,
@@ -550,7 +622,11 @@ async function buildMeshWorldGroup(runtime) {
   ownedResources.push(terrain.geometry, terrainMaterial);
 
   for (const ribbon of [...chunk.roads, ...chunk.water]) {
-    const material = meshSurfaceMaterial(ribbon.kind, ribbon.feature_type);
+    const materialDescriptor = materialDescriptors.get(ribbon.material_slot_id);
+    if (!materialDescriptor) {
+      throw new Error('Mesh ribbon lacks its surface material');
+    }
+    const material = await meshSurfaceMaterial(materialDescriptor, ribbon.kind);
     const mesh = meshFromGeometryData(
       ribbonGeometryThree(chunk, ribbon),
       material,
@@ -939,7 +1015,7 @@ function syncPresentationVisibility() {
     badge.hidden = presentationMode === 'points';
     if (presentationMode === 'mesh') {
       badge.textContent =
-        '合成模板网格 · 源材质派生 PBR · 地面/道路/水体暂为占位色 · 非真实重建';
+        '合成模板网格 · 模板与地表均为源材质派生 PBR · 非真实重建';
     } else if (modelPreviewManifest) {
       badge.textContent = modelPreviewDisclosure(modelPreviewManifest);
     }
@@ -1765,7 +1841,7 @@ function updateHUD() {
     rendererReason.textContent = presentationMode === 'model'
       ? modelPreviewDisclosure(modelPreviewManifest)
       : presentationMode === 'mesh'
-        ? 'verified mesh chunks · 模板 PBR · 地表占位色'
+        ? 'verified mesh chunks · 模板与地表 PBR · 浏览器逐字节校验'
       : (
       rendererState?.mode === 'spark'
       || rendererState?.mode === 'spark-chunks'

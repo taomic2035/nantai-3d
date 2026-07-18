@@ -20,6 +20,7 @@ function subject() {
 const BUNDLE_ID = '1'.repeat(64);
 const MATERIAL_ID = '2'.repeat(64);
 const GLB_SHA = '3'.repeat(64);
+const MAP_SHA = '6'.repeat(64);
 const WORLD = {
   mesh_grid: {
     on_demand: true,
@@ -91,6 +92,35 @@ function runtime() {
       glb_sha256: GLB_SHA,
       glb_bytes: 1024,
     }],
+    surface_materials: [{
+      slot_id: 'material-terrace-soil-01',
+      uv_policy: 'world-xy',
+      nominal_tile_m: 4,
+      normal_strength: 0.75,
+      roughness_center: 0.97,
+      metallic: 0,
+      base_color: {
+        role: 'base_color',
+        url: `/api/world/material-maps/${MATERIAL_ID}/material-terrace-soil-01/base_color.png`,
+        sha256: MAP_SHA,
+        bytes: 4096,
+        color_space: 'srgb',
+      },
+      normal: {
+        role: 'normal',
+        url: `/api/world/material-maps/${MATERIAL_ID}/material-terrace-soil-01/normal.png`,
+        sha256: MAP_SHA,
+        bytes: 4096,
+        color_space: 'non-color',
+      },
+      orm: {
+        role: 'orm',
+        url: `/api/world/material-maps/${MATERIAL_ID}/material-terrace-soil-01/orm.png`,
+        sha256: MAP_SHA,
+        bytes: 4096,
+        color_space: 'non-color',
+      },
+    }],
   };
 }
 
@@ -147,11 +177,36 @@ test('runtime validation binds chunk, bundle, LOD, assets, and exact same-origin
     }),
     /asset route/,
   );
+
+  const escapedMap = structuredClone(payload);
+  escapedMap.surface_materials[0].normal.url = 'https://evil.test/normal.png';
+  assert.throws(
+    () => validateMeshChunkRuntime(escapedMap, {
+      worldManifest: WORLD,
+      chunkX: -1,
+      chunkY: 2,
+      lod: 0,
+    }),
+    /surface material/,
+  );
+
+  const wrongClosure = structuredClone(payload);
+  wrongClosure.surface_materials[0].slot_id = 'material-packed-earth-01';
+  assert.throws(
+    () => validateMeshChunkRuntime(wrongClosure, {
+      worldManifest: WORLD,
+      chunkX: -1,
+      chunkY: 2,
+      lod: 0,
+    }),
+    /surface material/,
+  );
 });
 
 test('instance and terrain conversion preserve ENU while mapping to Three axes', () => {
   const {
     meshInstanceThreeTransform,
+    ribbonGeometryThree,
     terrainGeometryThree,
   } = subject();
   const payload = runtime();
@@ -189,4 +244,15 @@ test('instance and terrain conversion preserve ENU while mapping to Three axes',
     -200, 500, -100, 500, 0, 500,
     -200, 600, -100, 600, 0, 600,
   ]);
+
+  const ribbon = ribbonGeometryThree(payload.chunk, {
+    ribbon_id: 'test-road',
+    kind: 'road',
+    feature_type: 'main',
+    width: 2,
+    z_offset: 0,
+    material_slot_id: 'material-wet-stone-paving-01',
+    points: [[0, 0, 0], [3, 4, 0]],
+  });
+  assert.deepEqual(Array.from(ribbon.uvs), [0, 0, 0, 2, 5, 0, 5, 2]);
 });

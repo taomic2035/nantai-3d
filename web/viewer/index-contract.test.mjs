@@ -171,6 +171,18 @@ test('verified synthetic mesh preview is visually distinct from point layers', (
   assert.match(html, /非真实重建/);
 });
 
+test('mesh world surfaces use byte-verified PBR maps with metre-scaled UVs', () => {
+  assert.match(main, /meshMaterialTextureCache/);
+  assert.match(main, /Mesh material map byte count disagrees/);
+  assert.match(main, /Mesh material map SHA-256 disagrees/);
+  assert.match(main, /createImageBitmap/);
+  assert.match(main, /texture\.repeat\.set\(1 \/ nominalTileM,\s*1 \/ nominalTileM\)/);
+  assert.match(main, /texture\.colorSpace\s*=\s*descriptor\.color_space/);
+  assert.match(main, /map,\s*normalMap,[\s\S]*aoMap:\s*ormMap/);
+  assert.match(main, /roughnessMap:\s*ormMap/);
+  assert.match(main, /metalnessMap:\s*ormMap/);
+});
+
 test('model preview neutralizes exported lights and uses an authored close camera', () => {
   assert.match(main, /object\.isLight[\s\S]*object\.visible\s*=\s*false/);
   assert.match(main, /modelPreviewKeyLight/);

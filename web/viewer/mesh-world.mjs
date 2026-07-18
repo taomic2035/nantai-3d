@@ -3,7 +3,33 @@ const ASSET_TEMPLATE =
   '/api/world/mesh-assets/{bundle_id}/{asset_id}/lod{lod}.glb';
 const SHA256 = /^[0-9a-f]{64}$/;
 const ASSET_ID = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
+const MATERIAL_SLOT_ID = /^material-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LOD_RESOLUTION = [3, 5, 9];
+const UV_POLICIES = new Set([
+  'world-xy',
+  'dominant-axis-box',
+  'roof-slope',
+  'object-long-axis',
+  'leaf-card',
+]);
+const SURFACE_MATERIAL_KEYS = new Set([
+  'slot_id',
+  'uv_policy',
+  'nominal_tile_m',
+  'normal_strength',
+  'roughness_center',
+  'metallic',
+  'base_color',
+  'normal',
+  'orm',
+]);
+const MATERIAL_MAP_KEYS = new Set([
+  'role',
+  'url',
+  'sha256',
+  'bytes',
+  'color_space',
+]);
 const GRID_KEYS = new Set([
   'on_demand',
   'url_template',
@@ -59,6 +85,10 @@ function validGrid(manifest) {
 
 function expectedAssetPath(grid, assetId, lod) {
   return `/api/world/mesh-assets/${grid.mesh_asset_bundle_id}/${assetId}/lod${lod}.glb`;
+}
+
+function expectedMaterialMapPath(grid, slotId, role) {
+  return `/api/world/material-maps/${grid.material_bundle_id}/${slotId}/${role}.png`;
 }
 
 function validateTerrain(chunk) {
@@ -143,6 +173,63 @@ function validateInstances(chunk) {
   }
 }
 
+function validateSurfaceMaterials(payload, chunk, grid) {
+  if (!Array.isArray(payload.surface_materials)) {
+    throw new TypeError('mesh surface material registry is invalid');
+  }
+  const expectedSlots = [...new Set([
+    chunk.terrain.material_slot_id,
+    ...chunk.roads.map((ribbon) => ribbon.material_slot_id),
+    ...chunk.water.map((ribbon) => ribbon.material_slot_id),
+  ])].sort();
+  if (
+    payload.surface_materials.length !== expectedSlots.length
+    || payload.surface_materials.some(
+      (material, index) => material?.slot_id !== expectedSlots[index],
+    )
+  ) {
+    throw new TypeError('mesh surface material closure is invalid');
+  }
+  for (const material of payload.surface_materials) {
+    if (
+      !exactKeys(material, SURFACE_MATERIAL_KEYS)
+      || !MATERIAL_SLOT_ID.test(material.slot_id)
+      || !UV_POLICIES.has(material.uv_policy)
+      || !Number.isFinite(material.nominal_tile_m)
+      || material.nominal_tile_m <= 0
+      || !Number.isFinite(material.normal_strength)
+      || material.normal_strength <= 0
+      || !Number.isFinite(material.roughness_center)
+      || material.roughness_center < 0
+      || material.roughness_center > 1
+      || !Number.isFinite(material.metallic)
+      || material.metallic < 0
+      || material.metallic > 1
+    ) {
+      throw new TypeError('mesh surface material contract is invalid');
+    }
+    for (const role of ['base_color', 'normal', 'orm']) {
+      const descriptor = material[role];
+      const expectedColorSpace = role === 'base_color' ? 'srgb' : 'non-color';
+      if (
+        !exactKeys(descriptor, MATERIAL_MAP_KEYS)
+        || descriptor.role !== role
+        || descriptor.url !== expectedMaterialMapPath(
+          grid,
+          material.slot_id,
+          role,
+        )
+        || !SHA256.test(descriptor.sha256)
+        || !Number.isSafeInteger(descriptor.bytes)
+        || descriptor.bytes <= 0
+        || descriptor.color_space !== expectedColorSpace
+      ) {
+        throw new TypeError('mesh surface material map contract is invalid');
+      }
+    }
+  }
+}
+
 export function meshWorldAvailable(manifest) {
   return validGrid(manifest);
 }
@@ -207,6 +294,7 @@ export function validateMeshChunkRuntime(
   validateRibbons(chunk.roads, 'road');
   validateRibbons(chunk.water, 'water');
   validateInstances(chunk);
+  validateSurfaceMaterials(payload, chunk, grid);
 
   if (!Array.isArray(payload.asset_urls)) {
     throw new TypeError('mesh asset route registry is invalid');
@@ -320,8 +408,8 @@ export function ribbonGeometryThree(chunk, ribbon) {
     const up = chunk.world_offset[2] + point[2];
     positions.set([east + normalX, up, -(north + normalY)], index * 6);
     positions.set([east - normalX, up, -(north - normalY)], index * 6 + 3);
-    uvs.set([distance / ribbon.width, 0], index * 4);
-    uvs.set([distance / ribbon.width, 1], index * 4 + 2);
+    uvs.set([distance, 0], index * 4);
+    uvs.set([distance, ribbon.width], index * 4 + 2);
   }
   const indices = new Uint32Array((ribbon.points.length - 1) * 6);
   for (let index = 0; index < ribbon.points.length - 1; index += 1) {
