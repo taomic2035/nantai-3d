@@ -85,6 +85,22 @@ def _audit_render_coverage():
     return audit_render_coverage
 
 
+def _audit_render_view_overlap():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.view_overlap import audit_render_view_overlap
+
+    return audit_render_view_overlap
+
+
+def _write_view_overlap_audit():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.view_overlap import write_view_overlap_audit
+
+    return write_view_overlap_audit
+
+
 def _coverage_threshold(min_pixels: int, min_cameras: int):
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -168,6 +184,36 @@ def _parser() -> argparse.ArgumentParser:
     )
     audit_coverage.add_argument("--min-cameras", type=int, required=True)
     audit_coverage.add_argument("--report", type=Path)
+    audit_view_overlap = commands.add_parser(
+        "audit-view-overlap",
+        help=(
+            "Measure each verified camera's best symmetric depth-visible surface "
+            "overlap. This is not a feature-match, SfM, or reconstructability claim."
+        ),
+    )
+    audit_view_overlap.add_argument("--render-root", type=Path, required=True)
+    audit_view_overlap.add_argument(
+        "--sample-stride",
+        type=int,
+        default=16,
+        help="Depth sampling stride in pixels (default: 16).",
+    )
+    audit_view_overlap.add_argument(
+        "--depth-relative-tolerance",
+        type=float,
+        default=0.05,
+        help="Maximum relative depth disagreement for one shared sample (default: 0.05).",
+    )
+    audit_view_overlap.add_argument(
+        "--min-symmetric-overlap",
+        type=float,
+        default=0.65,
+        help=(
+            "Required minimum of both directional overlap ratios. The default 0.65 "
+            "is the approved synthetic-village camera target."
+        ),
+    )
+    audit_view_overlap.add_argument("--report", type=Path)
     plan_production = commands.add_parser(
         "plan-production",
         help=(
@@ -311,6 +357,34 @@ def main(argv: list[str] | None = None) -> int:
             summary["report_path"] = str(write_coverage_report(report, args.report))
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
+    if args.command == "audit-view-overlap":
+        report = _audit_render_view_overlap()(
+            args.render_root,
+            sample_stride_px=args.sample_stride,
+            depth_relative_tolerance=args.depth_relative_tolerance,
+            minimum_symmetric_overlap_ratio=args.min_symmetric_overlap,
+        )
+        summary = {
+            "camera_count": report.summary.camera_count,
+            "passing_camera_count": report.summary.passing_camera_count,
+            "failing_camera_ids": list(report.summary.failing_camera_ids),
+            "minimum_best_overlap_ratio": report.summary.minimum_best_overlap_ratio,
+            "median_best_overlap_ratio": report.summary.median_best_overlap_ratio,
+            "maximum_best_overlap_ratio": report.summary.maximum_best_overlap_ratio,
+            "minimum_symmetric_overlap_ratio": (
+                report.parameters.minimum_symmetric_overlap_ratio
+            ),
+            "overlap_semantics": report.overlap_semantics,
+            "passes": report.summary.passes,
+            "render_id": report.source_render_id,
+            "trust_effect": report.trust_effect,
+        }
+        if args.report is not None:
+            summary["report_path"] = str(
+                _write_view_overlap_audit()(report, args.report),
+            )
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return 0 if report.summary.passes else 2
     if args.command == "plan-production":
         build_plan, batch_slice, registry_digest, plan_bytes = _import_production_profile()
         plan = build_plan()

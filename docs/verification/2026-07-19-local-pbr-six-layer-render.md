@@ -70,6 +70,22 @@ Two adjacent-camera depth consistency probes measured median relative errors of
 `0.0011` and `0.0008`. These checks validate the local camera/depth conversion;
 they do not validate scene realism or guarantee enough views for 3DGS training.
 
+The subsequent symmetric depth-visible-surface overlap audit measured every
+camera against every possible neighbor. It takes the smaller of the two
+directional overlap ratios so that a narrow view contained by a distant wide
+view cannot report a false 100% pair:
+
+- target: at least `0.65` best symmetric overlap per camera;
+- passing cameras: 12/24;
+- minimum / median / maximum best overlap:
+  `0.002047782` / `0.640190972` / `0.841929002`;
+- all eight outer cameras passed;
+- four bridge, four courtyard, and four ground cameras failed;
+- the command exited `2` and published a private canonical audit report.
+
+This is depth-visible rendered-surface evidence only. It does not prove feature
+matches, SfM registration, or reconstructability, and it has no trust effect.
+
 ## 3DGS visual-quality gate: failed
 
 Brush trained the converted dataset for 2,000 steps and exported 106,016
