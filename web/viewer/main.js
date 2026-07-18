@@ -63,6 +63,11 @@ import {
   isCoverageAudit,
 } from './coverage-audit.mjs';
 import {
+  atmosphereLightForRenderer,
+  environmentNotice,
+  meshWeatherResponse,
+} from './mesh-weather.mjs';
+import {
   modelPreviewCameraPose,
   modelPreviewDisclosure,
   modelPreviewSha256,
@@ -114,6 +119,7 @@ let modelPreviewManifestUrl = new URL(
 let modelPreviewRoot = null;
 let modelPreviewBounds = null;
 let modelPreviewEmbeddedCamera = null;
+let modelPreviewWeatherMaterials = [];
 let modelPreviewKeyLight = null;
 let viewerBridge = null;
 let splatLayer = null;
@@ -135,8 +141,6 @@ const environmentState = {
   ...ENVIRONMENT_EFFECT_IDENTITY,
   precipitation_status: 'ready',
 };
-const ENVIRONMENT_EFFECT_NOTICE =
-  '大气叠加 atmospheric overlay · 非重光照 not relighting';
 let hemisphereLight = null;
 let precipitationPoints = null;
 let precipitationEffect = null;
@@ -472,15 +476,22 @@ function createPrecipitationRuntime() {
 function syncEnvironmentUI() {
   const preset = getWeatherPreset(environmentState.weather);
   const zoomText = `${environmentState.zoom.toFixed(1)}×`;
+  const meshRelighting = viewerCapabilities.renderer.dynamic_mesh_relighting === true;
   document.getElementById('weather-control').value = environmentState.weather;
+  document.getElementById('weather-label').textContent = meshRelighting
+    ? '天气（网格重光照 + 大气）'
+    : '视觉天气（叠加）';
   document.getElementById('zoom-control').value = String(environmentState.zoom);
   document.getElementById('zoom-value').textContent = zoomText;
   document.getElementById('hud-weather').textContent = preset.label;
   document.getElementById('hud-zoom').textContent = zoomText;
+  const notice = environmentNotice(viewerCapabilities.renderer);
   document.getElementById('environment-status').textContent =
     environmentState.precipitation_status === 'degraded'
-      ? `${ENVIRONMENT_EFFECT_NOTICE} · 降水粒子已降级，背景/雾仍生效`
-      : `${ENVIRONMENT_EFFECT_NOTICE} · 不改变 3DGS 已烘焙光照`;
+      ? `${notice} · 降水粒子已降级，背景/雾仍生效`
+      : meshRelighting
+        ? `${notice} · 仅改变合成网格材质与灯光`
+        : `${notice} · 不改变 3DGS 已烘焙光照`;
 }
 
 function configurePrecipitation(effect) {
@@ -544,6 +555,47 @@ function applyZoom(value) {
   return environmentState.zoom;
 }
 
+function resetModelWeatherMaterials() {
+  for (const material of modelPreviewWeatherMaterials) {
+    const baseColor = material.userData.nvBaseColor;
+    const baseRoughness = material.userData.nvBaseRoughness;
+    material.color.copy(baseColor);
+    material.roughness = baseRoughness;
+  }
+}
+
+function applyModelWeather() {
+  resetModelWeatherMaterials();
+  const active = (
+    presentationMode === 'model'
+    && viewerCapabilities.renderer.dynamic_mesh_relighting === true
+    && modelPreviewWeatherMaterials.length > 0
+  );
+  if (!active) {
+    renderer.toneMappingExposure = 1;
+    modelPreviewKeyLight.color.setHex(0xffe4c4);
+    modelPreviewKeyLight.intensity = 2.2;
+    return false;
+  }
+
+  const response = meshWeatherResponse(environmentState.weather);
+  const multiplier = new THREE.Color(...response.baseColorMultiplier);
+  for (const material of modelPreviewWeatherMaterials) {
+    material.color
+      .copy(material.userData.nvBaseColor)
+      .multiply(multiplier);
+    material.roughness = THREE.MathUtils.clamp(
+      material.userData.nvBaseRoughness * response.roughnessMultiplier,
+      0,
+      1,
+    );
+  }
+  renderer.toneMappingExposure = response.exposure;
+  modelPreviewKeyLight.color.setHex(response.keyColor);
+  modelPreviewKeyLight.intensity = response.keyIntensity;
+  return true;
+}
+
 function applyWeather(value) {
   environmentState.weather = normalizeWeather(value);
   const preset = getWeatherPreset(environmentState.weather);
@@ -554,10 +606,16 @@ function applyWeather(value) {
     (currentFrame?.fogFar ?? 500) * preset.fog.farScale,
   );
   scene.fog = new THREE.Fog(preset.fog.color, fogNear, fogFar);
-  hemisphereLight.color.setHex(preset.light.sky);
-  hemisphereLight.groundColor.setHex(preset.light.ground);
-  hemisphereLight.intensity = preset.light.intensity;
+  const atmosphereLight = atmosphereLightForRenderer(
+    viewerCapabilities.renderer,
+    preset.light,
+    getWeatherPreset(DEFAULT_WEATHER).light,
+  );
+  hemisphereLight.color.setHex(atmosphereLight.sky);
+  hemisphereLight.groundColor.setHex(atmosphereLight.ground);
+  hemisphereLight.intensity = atmosphereLight.intensity;
   configurePrecipitation(preset.precipitation);
+  applyModelWeather();
   syncEnvironmentUI();
   return environmentState.weather;
 }
@@ -719,9 +777,13 @@ function setPresentationMode(mode, { resetCamera = true } = {}) {
       updateChunks(camera.position.x, camera.position.z);
     }
   }
+  const modelMode = modelPreviewManifest?.schema_version === 2
+    ? 'textured-mesh-preview'
+    : 'mesh-preview';
   viewerCapabilities = createViewerCapabilities(
-    mode === 'model' ? 'mesh-preview' : reconstructionCapabilityMode(),
+    mode === 'model' ? modelMode : reconstructionCapabilityMode(),
   );
+  applyWeather(environmentState.weather);
   viewerBridge?.announceCapabilities();
   updateHUD();
   return presentationMode;
@@ -775,6 +837,7 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
     root.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(root);
     if (bounds.isEmpty()) throw new Error('Model preview GLB has no renderable bounds');
+    const weatherMaterials = cloneModelWeatherMaterials(root, nextManifest);
     const embeddedCamera = selectEmbeddedModelPreviewCamera(
       nextManifest,
       gltf.cameras,
@@ -786,6 +849,7 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
     modelPreviewRoot = root;
     modelPreviewBounds = bounds;
     modelPreviewEmbeddedCamera = embeddedCamera;
+    modelPreviewWeatherMaterials = weatherMaterials;
     scene.add(root);
 
     const badge = document.getElementById('model-preview-badge');
@@ -802,11 +866,49 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
     modelPreviewRoot = null;
     modelPreviewBounds = null;
     modelPreviewEmbeddedCamera = null;
+    modelPreviewWeatherMaterials = [];
     presentationMode = 'points';
     syncPresentationVisibility();
     console.warn('合成模型预览已拒绝，保留点云视图:', error);
     return { status: 'rejected', reason: error.message };
   }
+}
+
+function cloneModelWeatherMaterials(root, previewManifest) {
+  if (
+    previewManifest.schema_version !== 2
+    || previewManifest.dynamic_mesh_relighting !== true
+  ) return [];
+
+  const clones = new Map();
+  const cloneMaterial = (material) => {
+    if (
+      !material?.isMeshStandardMaterial
+      || !material.color
+      || !Number.isFinite(material.roughness)
+    ) {
+      throw new Error('Textured model relighting requires MeshStandardMaterial');
+    }
+    if (clones.has(material)) return clones.get(material);
+    const clone = material.clone();
+    clone.userData.nvBaseColor = clone.color.clone();
+    clone.userData.nvBaseRoughness = clone.roughness;
+    clones.set(material, clone);
+    return clone;
+  };
+
+  root.traverse((object) => {
+    if (!object.isMesh) return;
+    if (Array.isArray(object.material)) {
+      object.material = object.material.map(cloneMaterial);
+    } else {
+      object.material = cloneMaterial(object.material);
+    }
+  });
+  if (clones.size === 0) {
+    throw new Error('Textured model relighting requires renderable PBR materials');
+  }
+  return [...clones.values()];
 }
 
 function applyFraming(frame, resetCamera = true) {
@@ -1593,7 +1695,11 @@ async function main() {
       artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
       coverage: coverageAuditViewModel(coverageAudit),
       camera: { position: { east, north, up }, mode: cameraMode },
-      environment: { ...environmentState },
+      environment: {
+        ...environmentState,
+        mesh_relighting: viewerCapabilities.renderer.dynamic_mesh_relighting === true,
+        splat_relighting: viewerCapabilities.renderer.splat_relighting === true,
+      },
     };
   };
 

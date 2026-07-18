@@ -37,6 +37,8 @@ const DC_POINT_RENDERER = Object.freeze({
   alpha_composite: false,
   spherical_harmonics: false,
   max_sh_degree: 0,
+  dynamic_mesh_relighting: false,
+  splat_relighting: false,
 });
 
 const SPARK_RENDERER = Object.freeze({
@@ -48,6 +50,8 @@ const SPARK_RENDERER = Object.freeze({
   alpha_composite: true,
   spherical_harmonics: true,
   max_sh_degree: 3,
+  dynamic_mesh_relighting: false,
+  splat_relighting: false,
 });
 
 const MESH_PREVIEW_RENDERER = Object.freeze({
@@ -59,17 +63,33 @@ const MESH_PREVIEW_RENDERER = Object.freeze({
   spherical_harmonics: false,
   max_sh_degree: 0,
   photo_textures: false,
+  dynamic_mesh_relighting: false,
+  splat_relighting: false,
   real_reconstruction: false,
+});
+
+const TEXTURED_MESH_PREVIEW_RENDERER = Object.freeze({
+  ...MESH_PREVIEW_RENDERER,
+  label: 'Synthetic mesh (embedded PBR)',
+  fidelity: 'synthetic-pbr-textured-mesh',
+  material_fidelity: 'synthetic-derived-pbr',
+  synthetic_pbr_textures: true,
+  real_photo_textures: false,
+  dynamic_mesh_relighting: true,
+  splat_relighting: false,
 });
 
 export function createViewerCapabilities(mode = 'dc-point-preview') {
   const sparkActive = mode === 'spark' || mode === 'spark-chunks';
-  const meshPreviewActive = mode === 'mesh-preview';
+  const texturedMeshActive = mode === 'textured-mesh-preview';
+  const meshPreviewActive = mode === 'mesh-preview' || texturedMeshActive;
   return Object.freeze({
     ...BASE_CAPABILITIES,
     renderer: sparkActive
       ? SPARK_RENDERER
-      : meshPreviewActive ? MESH_PREVIEW_RENDERER : DC_POINT_RENDERER,
+      : texturedMeshActive
+        ? TEXTURED_MESH_PREVIEW_RENDERER
+        : meshPreviewActive ? MESH_PREVIEW_RENDERER : DC_POINT_RENDERER,
     artifact_kinds: sparkActive
       ? SPARK_ARTIFACT_KINDS
       : meshPreviewActive ? MESH_ARTIFACT_KINDS : POINT_ARTIFACT_KINDS,

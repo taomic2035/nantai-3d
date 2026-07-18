@@ -34,7 +34,7 @@ test('environment status and HUD values are visible but separate from provenance
 test('runtime weather is visibly an overlay and never claims relighting', () => {
   assert.match(
     html,
-    /<label[^>]*for="weather-control"[^>]*>视觉天气（叠加）<\/label>/,
+    /<label[^>]*id="weather-label"[^>]*for="weather-control"[^>]*>视觉天气（叠加）<\/label>/,
   );
   assert.match(html, /<div class="stat">大气叠加: <b id="hud-weather">/);
   assert.match(
@@ -44,8 +44,22 @@ test('runtime weather is visibly an overlay and never claims relighting', () => 
   assert.doesNotMatch(html, /<div class="stat">天气:/);
   assert.match(main, /ENVIRONMENT_EFFECT_IDENTITY/);
   assert.match(main, /\.\.\.ENVIRONMENT_EFFECT_IDENTITY/);
-  assert.match(main, /atmospheric overlay/);
-  assert.match(main, /not relighting/);
+  assert.match(main, /environmentNotice\(viewerCapabilities\.renderer\)/);
+  assert.doesNotMatch(main, /splat_relighting\s*=\s*true/);
+});
+
+test('textured mesh weather relighting is mode-specific and reversible', () => {
+  assert.match(main, /from ['"]\.\/mesh-weather\.mjs['"]/);
+  assert.match(main, /meshWeatherResponse/);
+  assert.match(main, /environmentNotice/);
+  assert.match(main, /nvBaseColor/);
+  assert.match(main, /nvBaseRoughness/);
+  assert.match(main, /material\.clone\(\)/);
+  assert.match(main, /renderer\.toneMappingExposure/);
+  assert.match(main, /dynamic_mesh_relighting/);
+  assert.match(main, /textured-mesh-preview/);
+  assert.match(main, /weather-label/);
+  assert.match(main, /天气（网格重光照 \+ 大气）/);
 });
 
 test('viewer runtime wires environment state without mutating provenance', () => {

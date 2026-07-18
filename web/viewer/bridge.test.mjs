@@ -94,6 +94,19 @@ test('capability factory only claims Gaussian rendering for an active Spark laye
   assert.equal(mesh.renderer.real_reconstruction, false);
   assert.equal(mesh.artifact_kinds.includes('synthetic-model-preview'), true);
 
+  const texturedMesh = createViewerCapabilities('textured-mesh-preview');
+  assert.equal(texturedMesh.renderer.id, 'three-mesh');
+  assert.equal(texturedMesh.renderer.material_fidelity, 'synthetic-derived-pbr');
+  assert.equal(texturedMesh.renderer.synthetic_pbr_textures, true);
+  assert.equal(texturedMesh.renderer.real_photo_textures, false);
+  assert.equal(texturedMesh.renderer.dynamic_mesh_relighting, true);
+  assert.equal(texturedMesh.renderer.splat_relighting, false);
+  assert.equal(texturedMesh.renderer.real_reconstruction, false);
+  assert.equal(
+    texturedMesh.artifact_kinds.includes('synthetic-model-preview'),
+    true,
+  );
+
   const spark = createViewerCapabilities('spark');
   assert.equal(spark.renderer.id, 'spark');
   assert.equal(spark.renderer.version, '2.1.0');
@@ -103,6 +116,8 @@ test('capability factory only claims Gaussian rendering for an active Spark laye
   assert.equal(spark.renderer.spherical_harmonics, true);
   assert.equal(spark.renderer.max_sh_degree, 3);
   assert.equal(spark.artifact_kinds.includes('3dgs-ply'), true);
+  assert.equal(spark.renderer.dynamic_mesh_relighting, false);
+  assert.equal(spark.renderer.splat_relighting, false);
   assert.equal(spark.lod.reconstruction_tiers, false);
   assert.deepEqual(spark.three_dgs_properties.consumed, [
     'f_dc_*', 'f_rest_* (SH0-SH3)', 'opacity', 'scale_*', 'rot_*',
