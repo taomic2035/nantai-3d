@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import uuid
@@ -77,6 +78,20 @@ DEFAULT_LOCAL_WORK_ROOT = (
 )
 DEFAULT_LOCAL_PUBLICATION_ROOT = (
     ROOT / ".nantai-studio/synthetic-village/hybrid-v3/local-previews"
+)
+DEFAULT_LOCAL_TRAINING_BUILD_ROOT = (
+    ROOT / ".nantai-studio/synthetic-village/hybrid-v3/local-training-builds"
+)
+LOCAL_TRAINING_BUILD_ENTRIES = (
+    "build-report.json",
+    "glb-material-audit.json",
+    "manifest.json",
+    "preview-bridge.png",
+    "preview-central.png",
+    "preview-outer.png",
+    "preview-upper.png",
+    "village-canary.blend",
+    "village-canary.glb",
 )
 MAX_RUNTIME_OUTPUT_BYTES = 64 * 1024
 
@@ -828,6 +843,200 @@ def verify_local_textured_preview_directory(
     return manifest, report, audit
 
 
+def verify_local_textured_training_build_layout(
+    directory: Path,
+    *,
+    expected_report_sha256: str | None = None,
+) -> Path:
+    """Verify the exact file layout and report content identity of a build snapshot."""
+
+    try:
+        directory = canary._require_real_directory(
+            Path(directory).absolute(),
+            label="local textured training build directory",
+        )
+    except canary.CanaryBuildError as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
+    report_sha256 = directory.name
+    if (
+        len(report_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in report_sha256)
+        or (
+            expected_report_sha256 is not None
+            and report_sha256 != expected_report_sha256
+        )
+    ):
+        raise LocalTexturedPreviewError(
+            "local textured training build identity does not match its directory",
+        )
+    entries = tuple(directory.iterdir())
+    if {entry.name for entry in entries} != set(LOCAL_TRAINING_BUILD_ENTRIES) or any(
+        canary._is_linklike(entry) or not entry.is_file() for entry in entries
+    ):
+        raise LocalTexturedPreviewError(
+            "local textured training build is not the exact nine-file set",
+        )
+    try:
+        measured_report_sha256, _ = canary._sha256_stable_artifact(
+            directory / "build-report.json",
+        )
+    except canary.CanaryBuildError as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
+    if measured_report_sha256 != report_sha256:
+        raise LocalTexturedPreviewError(
+            "local textured training build report digest disagrees with its identity",
+        )
+    return directory
+
+
+def verify_local_textured_training_build_directory(
+    directory: Path,
+    *,
+    request: LocalTexturedPreviewRequest,
+) -> tuple[
+    LocalTexturedBuildReport,
+    GlbMaterialAudit,
+    LocalTexturedPreviewManifest,
+]:
+    """Revalidate a complete training build from its current private bytes."""
+
+    directory = verify_local_textured_training_build_layout(directory)
+    report = load_local_textured_build_report(directory / "build-report.json")
+    verify_local_textured_build_report(
+        report,
+        request=request,
+        staging=directory,
+    )
+    try:
+        measured_audit = audit_textured_glb(
+            directory / "village-canary.glb",
+            _expected_glb_materials(request),
+            expected_building_geometry=_expected_building_geometry(report),
+        )
+    except ValueError as exc:
+        raise LocalTexturedPreviewError(
+            f"local training GLB audit failed: {exc}",
+        ) from exc
+    audit = verify_stored_local_glb_audit(
+        directory / "glb-material-audit.json",
+        measured_audit=measured_audit,
+    )
+    _verify_building_geometry_audit_agreement(report, audit)
+    try:
+        report_sha256, _ = canary._sha256_stable_artifact(
+            directory / "build-report.json",
+        )
+        audit_sha256, _ = canary._sha256_stable_artifact(
+            directory / "glb-material-audit.json",
+        )
+    except canary.CanaryBuildError as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
+    expected_manifest = build_local_textured_preview_manifest(
+        request=request,
+        glb_sha256=audit.glb_sha256,
+        glb_bytes=audit.byte_count,
+        build_report_sha256=report_sha256,
+        audit_sha256=audit_sha256,
+    )
+    manifest = load_local_textured_preview_manifest(directory / "manifest.json")
+    if manifest != expected_manifest:
+        raise LocalTexturedPreviewError(
+            "local textured training build manifest disagrees with current bytes",
+        )
+    return report, audit, manifest
+
+
+def _publish_local_textured_training_build(
+    *,
+    staging: Path,
+    training_root: Path,
+    build_report_sha256: str,
+) -> Path:
+    """Copy one fully verified nine-file staging tree into immutable private storage."""
+
+    try:
+        staging = canary._require_real_directory(
+            Path(staging).absolute(),
+            label="local textured training source staging",
+        )
+        training_root = canary._require_real_directory(
+            Path(training_root).absolute(),
+            label="local textured training build root",
+        )
+    except canary.CanaryBuildError as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
+    entries = tuple(staging.iterdir())
+    if {entry.name for entry in entries} != set(LOCAL_TRAINING_BUILD_ENTRIES) or any(
+        canary._is_linklike(entry) or not entry.is_file() for entry in entries
+    ):
+        raise LocalTexturedPreviewError(
+            "local textured training source is not the exact nine-file set",
+        )
+    snapshots = {
+        entry.name: canary._snapshot_regular_file(entry) for entry in entries
+    }
+    if snapshots["build-report.json"].sha256 != build_report_sha256:
+        raise LocalTexturedPreviewError(
+            "local textured training source report digest is invalid",
+        )
+
+    final_directory = training_root / build_report_sha256
+    if final_directory.exists() or canary._is_linklike(final_directory):
+        verified = verify_local_textured_training_build_layout(
+            final_directory,
+            expected_report_sha256=build_report_sha256,
+        )
+        for name, source_snapshot in snapshots.items():
+            destination_snapshot = canary._snapshot_regular_file(verified / name)
+            if (
+                destination_snapshot.sha256 != source_snapshot.sha256
+                or destination_snapshot.signature[2] != source_snapshot.signature[2]
+            ):
+                raise LocalTexturedPreviewError(
+                    "existing local textured training build bytes disagree",
+                )
+        return verified
+
+    publication_staging = training_root / f".training-staging-{uuid.uuid4().hex}"
+    try:
+        publication_staging.mkdir(exist_ok=False)
+        canary._flush_directory(training_root)
+        for name in LOCAL_TRAINING_BUILD_ENTRIES:
+            source = staging / name
+            destination = publication_staging / name
+            shutil.copyfile(source, destination)
+            canary._flush_file(destination)
+            source_after = canary._snapshot_regular_file(source)
+            copied = canary._snapshot_regular_file(destination)
+            expected = snapshots[name]
+            if (
+                source_after != expected
+                or copied.sha256 != expected.sha256
+                or copied.signature[2] != expected.signature[2]
+            ):
+                raise LocalTexturedPreviewError(
+                    "local textured training build changed during snapshot copy",
+                )
+        canary._flush_directory(publication_staging)
+        try:
+            _move_directory_noreplace(publication_staging, final_directory)
+        except MaterialBundleError as exc:
+            raise LocalTexturedPreviewError(str(exc)) from exc
+        return verify_local_textured_training_build_layout(
+            final_directory,
+            expected_report_sha256=build_report_sha256,
+        )
+    finally:
+        if publication_staging.exists() and not canary._is_linklike(
+            publication_staging,
+        ):
+            canary._cleanup_owned_directory(
+                publication_staging,
+                work_root=training_root,
+                expected_name=publication_staging.name,
+            )
+
+
 @dataclass(frozen=True)
 class LocalTexturedPreviewResult:
     final_directory: Path
@@ -838,6 +1047,7 @@ class LocalTexturedPreviewResult:
     stdout: str
     stderr: str
     reused: bool
+    training_build_directory: Path | None = None
 
 
 def build_local_textured_preview_request(
@@ -1032,6 +1242,25 @@ def _prepare_local_roots(
     return active_work_root, active_publication_root
 
 
+def _prepare_training_build_root(
+    *,
+    repo_root: Path,
+    training_build_root: Path | None,
+) -> Path | None:
+    if training_build_root is None:
+        return None
+    try:
+        selected = Path(training_build_root).absolute()
+        private_root = repo_root / ".nantai-studio"
+        selected.relative_to(private_root)
+        canary._ensure_real_directory_tree(private_root, repo_root=repo_root)
+        return canary._ensure_real_directory_tree(selected, repo_root=repo_root)
+    except (ValueError, canary.CanaryBuildError) as exc:
+        raise LocalTexturedPreviewError(
+            "local training build root must be a real directory below .nantai-studio",
+        ) from exc
+
+
 def run_local_textured_preview(
     *,
     material_bundle_root: Path,
@@ -1040,9 +1269,15 @@ def run_local_textured_preview(
     executable: Path = DEFAULT_LOCAL_BLENDER,
     work_root: Path | None = None,
     publication_root: Path | None = None,
+    training_build_root: Path | None = None,
     timeout_seconds: int = 60 * 60,
 ) -> LocalTexturedPreviewResult:
-    """Build, audit, prune, and absent-publish one truthful Mac L0 preview."""
+    """Build, audit, prune, and absent-publish one truthful Mac L0 preview.
+
+    Supplying ``training_build_root`` intentionally forces a fresh Blender build
+    and retains its complete nine-file evidence set even when the four-file
+    Viewer publication already exists.
+    """
 
     if (
         not isinstance(timeout_seconds, int)
@@ -1077,6 +1312,10 @@ def run_local_textured_preview(
         work_root=work_root,
         publication_root=publication_root,
     )
+    active_training_root = _prepare_training_build_root(
+        repo_root=repo_root,
+        training_build_root=training_build_root,
+    )
     invocation_root: Path | None = None
     staging: Path | None = None
     try:
@@ -1105,21 +1344,28 @@ def run_local_textured_preview(
             except canary.CanaryBuildError as exc:
                 raise LocalTexturedPreviewError(str(exc)) from exc
             final_directory = active_publication_root / request.preview_id
+            existing_publication: tuple[
+                LocalTexturedPreviewManifest,
+                LocalTexturedBuildReport,
+                GlbMaterialAudit,
+            ] | None = None
             if final_directory.exists() or canary._is_linklike(final_directory):
                 manifest, report, audit = verify_local_textured_preview_directory(
                     final_directory,
                     expected_preview_id=request.preview_id,
                 )
-                return LocalTexturedPreviewResult(
-                    final_directory=final_directory,
-                    request=request,
-                    manifest=manifest,
-                    report=report,
-                    audit=audit,
-                    stdout="",
-                    stderr="",
-                    reused=True,
-                )
+                if active_training_root is None:
+                    return LocalTexturedPreviewResult(
+                        final_directory=final_directory,
+                        request=request,
+                        manifest=manifest,
+                        report=report,
+                        audit=audit,
+                        stdout="",
+                        stderr="",
+                        reused=True,
+                    )
+                existing_publication = (manifest, report, audit)
 
             nonce = uuid.uuid4().hex
             invocation_root = active_work_root / f".local-invocation-{nonce}"
@@ -1226,6 +1472,34 @@ def run_local_textured_preview(
                 staging / "manifest.json",
                 canonical_local_textured_preview_manifest_bytes(manifest),
             )
+            training_build_directory = None
+            if active_training_root is not None:
+                training_build_directory = (
+                    _publish_local_textured_training_build(
+                        staging=staging,
+                        training_root=active_training_root,
+                        build_report_sha256=build_report_sha256,
+                    )
+                )
+                verify_local_textured_training_build_directory(
+                    training_build_directory,
+                    request=request,
+                )
+            if existing_publication is not None:
+                existing_manifest, existing_report, existing_audit = (
+                    existing_publication
+                )
+                return LocalTexturedPreviewResult(
+                    final_directory=final_directory,
+                    request=request,
+                    manifest=existing_manifest,
+                    report=existing_report,
+                    audit=existing_audit,
+                    stdout=stdout,
+                    stderr=stderr,
+                    reused=True,
+                    training_build_directory=training_build_directory,
+                )
             for name in (
                 "preview-bridge.png",
                 "preview-central.png",
@@ -1258,6 +1532,7 @@ def run_local_textured_preview(
                 stdout=stdout,
                 stderr=stderr,
                 reused=False,
+                training_build_directory=training_build_directory,
             )
     except LocalTexturedPreviewError:
         raise

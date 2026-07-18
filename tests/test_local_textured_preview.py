@@ -15,14 +15,17 @@ from pipeline.synthetic_village.building_geometry import (
 from pipeline.synthetic_village.canary import TexturedBuildRequest
 from pipeline.synthetic_village.glb_material_audit import GlbMaterialAudit
 from pipeline.synthetic_village.local_textured_preview import (
+    LOCAL_TRAINING_BUILD_ENTRIES,
     LocalBlenderIdentity,
     LocalTexturedPreviewError,
     LocalTexturedPreviewRequest,
     _expected_building_geometry,
+    _publish_local_textured_training_build,
     build_local_textured_preview_manifest,
     build_local_textured_preview_request,
     canonical_local_glb_audit_bytes,
     canonical_local_textured_preview_request_bytes,
+    verify_local_textured_training_build_layout,
     verify_stored_local_glb_audit,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
@@ -263,6 +266,71 @@ def test_local_models_reject_trust_or_texture_upgrades(tmp_path: Path) -> None:
         payload[key] = value
         with pytest.raises(ValidationError):
             type(manifest).model_validate(payload)
+
+
+def test_training_build_layout_is_report_content_addressed_and_exact(
+    tmp_path: Path,
+) -> None:
+    report_bytes = b"canonical-build-report\n"
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    directory = tmp_path / report_sha256
+    directory.mkdir()
+    for name in LOCAL_TRAINING_BUILD_ENTRIES:
+        (directory / name).write_bytes(
+            report_bytes if name == "build-report.json" else name.encode("utf-8"),
+        )
+
+    assert (
+        verify_local_textured_training_build_layout(
+            directory,
+            expected_report_sha256=report_sha256,
+        )
+        == directory
+    )
+
+    (directory / "unexpected.bin").write_bytes(b"no")
+    with pytest.raises(LocalTexturedPreviewError, match="exact nine-file set"):
+        verify_local_textured_training_build_layout(
+            directory,
+            expected_report_sha256=report_sha256,
+        )
+
+
+def test_training_build_publication_copies_exact_snapshot_once(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "verified-staging"
+    source.mkdir()
+    report_bytes = b"verified-report\n"
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    for name in LOCAL_TRAINING_BUILD_ENTRIES:
+        (source / name).write_bytes(
+            report_bytes if name == "build-report.json" else name.encode("utf-8"),
+        )
+    root = tmp_path / "training-builds"
+    root.mkdir()
+
+    published = _publish_local_textured_training_build(
+        staging=source,
+        training_root=root,
+        build_report_sha256=report_sha256,
+    )
+
+    assert published == root / report_sha256
+    assert source.is_dir()
+    assert {
+        path.name: path.read_bytes() for path in published.iterdir()
+    } == {
+        path.name: path.read_bytes() for path in source.iterdir()
+    }
+    assert (
+        _publish_local_textured_training_build(
+            staging=source,
+            training_root=root,
+            build_report_sha256=report_sha256,
+        )
+        == published
+    )
 
 
 def test_builder_keeps_local_schema_and_authoritative_schema_separate() -> None:
