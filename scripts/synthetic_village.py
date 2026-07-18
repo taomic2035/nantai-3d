@@ -35,6 +35,14 @@ def _publish_material_bundle():
     return publish_material_bundle
 
 
+def _revise_visual_source_pack():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.visual_sources import revise_visual_source_pack
+
+    return revise_visual_source_pack
+
+
 def _run_canary_build():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -143,6 +151,18 @@ def _parser() -> argparse.ArgumentParser:
     import_visual.add_argument("--slot", required=True)
     import_visual.add_argument("--source", type=Path, required=True)
     import_visual.add_argument("--source-manifest", type=Path, required=True)
+    revise_visual = commands.add_parser(
+        "revise-visual",
+        help=(
+            "Create an absent immutable visual-source pack revision with exactly "
+            "one slot replaced; the source pack remains byte-unchanged."
+        ),
+    )
+    revise_visual.add_argument("--from-pack-root", type=Path, required=True)
+    revise_visual.add_argument("--to-pack-root", type=Path, required=True)
+    revise_visual.add_argument("--slot", required=True)
+    revise_visual.add_argument("--source", type=Path, required=True)
+    revise_visual.add_argument("--source-manifest", type=Path, required=True)
     build_materials = commands.add_parser(
         "build-materials",
         help="Derive and privately publish the complete 24-slot PBR material bundle.",
@@ -262,6 +282,14 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     render_production_local.add_argument(
+        "--visual-pack-root",
+        type=Path,
+        help=(
+            "Verified visual-source pack bound to the selected build. Omit only "
+            "when the build uses the default private pack."
+        ),
+    )
+    render_production_local.add_argument(
         "--camera",
         action="append",
         help="Production camera ID; repeat for a bounded subset. Omit for all 180.",
@@ -317,6 +345,30 @@ def main(argv: list[str] | None = None) -> int:
             pack_root=DEFAULT_VISUAL_PACK_ROOT,
         )
         print(json.dumps(record.model_dump(mode="json"), ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "revise-visual":
+        manifest = _revise_visual_source_pack()(
+            source_pack_root=args.from_pack_root,
+            revision_pack_root=args.to_pack_root,
+            slot_id=args.slot,
+            source=args.source,
+            source_manifest=args.source_manifest,
+        )
+        record = next(row for row in manifest.records if row.slot_id == args.slot)
+        print(
+            json.dumps(
+                {
+                    "pack_id": manifest.pack_id,
+                    "record_count": len(manifest.records),
+                    "revision_pack_root": str(args.to_pack_root.absolute()),
+                    "slot_id": record.slot_id,
+                    "source_sha256": record.sha256,
+                    "synthetic": manifest.synthetic,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         return 0
     if args.command == "build-materials":
         result = _publish_material_bundle()(
@@ -480,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
         result = _run_local_production_render()(
             training_build_directory=args.build_directory,
             material_bundle_root=args.material_bundle_root,
+            visual_pack_root=args.visual_pack_root,
             minimum_valid_pixel_ratio=args.min_valid_pixel_ratio,
             camera_ids=tuple(args.camera) if args.camera else None,
             timeout_seconds=args.timeout_seconds,

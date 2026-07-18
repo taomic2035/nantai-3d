@@ -153,4 +153,5 @@ def test_cli_requires_an_explicit_quality_threshold() -> None:
 
     assert completed.returncode == 0
     assert "--min-valid-pixel-ratio" in completed.stdout
+    assert "--visual-pack-root" in completed.stdout
     assert "required" not in completed.stderr

@@ -541,3 +541,90 @@ def import_visual_source(
         raise VisualSourceError(f"visual source validation failed: {exc}") from exc
     except OSError as exc:
         raise VisualSourceError(f"visual source filesystem failure: {exc}") from exc
+
+
+def revise_visual_source_pack(
+    *,
+    source_pack_root: Path,
+    revision_pack_root: Path,
+    slot_id: str,
+    source: Path,
+    source_manifest: Path,
+) -> VisualSourceManifest:
+    """Create one absent immutable pack revision with exactly one slot replaced.
+
+    The source pack is verified before any output is created.  Only objects
+    referenced by its current manifest are copied, so historical unreferenced
+    payloads do not leak into the new revision.
+    """
+
+    source_root = Path(source_pack_root).expanduser().absolute()
+    revision_root = Path(revision_pack_root).expanduser().absolute()
+    if (
+        revision_root.exists()
+        or _is_linklike(revision_root)
+    ):
+        raise VisualSourceError("visual pack revision destination must start absent")
+    if revision_root == source_root or source_root in revision_root.parents:
+        raise VisualSourceError(
+            "visual pack revision must not be created inside its source pack",
+        )
+    source_pack = load_visual_source_manifest(
+        source_root / VISUAL_MANIFEST_NAME,
+    )
+    current_by_slot = {row.slot_id: row for row in source_pack.records}
+    existing = current_by_slot.get(slot_id)
+    if existing is None:
+        raise VisualSourceError(
+            f"visual source slot is not present in the source pack: {slot_id}",
+        )
+
+    try:
+        replacement = import_visual_source(
+            slot_id=slot_id,
+            source=source,
+            source_manifest=source_manifest,
+            pack_root=revision_root,
+        )
+        if replacement.sha256 == existing.sha256:
+            raise VisualSourceError(
+                "visual source revision does not change the selected payload",
+            )
+        objects_root = revision_root / "objects"
+        for row in source_pack.records:
+            if row.slot_id == slot_id:
+                continue
+            _publish_object(
+                source_root / Path(row.object_path),
+                objects_root / Path(row.object_path).name,
+                row.sha256,
+            )
+        revised = VisualSourceManifest(
+            pack_id=source_pack.pack_id,
+            synthetic=True,
+            records=tuple(
+                sorted(
+                    (
+                        replacement if row.slot_id == slot_id else row
+                        for row in source_pack.records
+                    ),
+                    key=lambda row: row.slot_id,
+                ),
+            ),
+        )
+        _write_manifest(
+            revision_root / VISUAL_MANIFEST_NAME,
+            revised,
+        )
+        verified = load_visual_source_manifest(
+            revision_root / VISUAL_MANIFEST_NAME,
+        )
+        if verified != revised:
+            raise VisualSourceError(
+                "visual source revision changed during publication",
+            )
+        return verified
+    except Exception:
+        if revision_root.exists() and not _is_linklike(revision_root):
+            shutil.rmtree(revision_root)
+        raise

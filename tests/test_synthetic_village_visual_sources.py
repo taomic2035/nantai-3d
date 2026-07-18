@@ -19,6 +19,7 @@ from pipeline.synthetic_village.visual_sources import (
     canonical_manifest_bytes,
     import_visual_source,
     load_visual_source_manifest,
+    revise_visual_source_pack,
 )
 from scripts import synthetic_village as synthetic_village_cli
 
@@ -193,6 +194,85 @@ def test_import_rejects_corrupt_existing_object_and_slot_replacement(tmp_path):
         )
 
 
+def test_revision_replaces_one_slot_without_mutating_the_source_pack(tmp_path):
+    base_root = tmp_path / "base-pack"
+    first = _source(tmp_path, "first.png", (10, 20, 30))
+    second = _source(tmp_path, "second.png", (40, 50, 60))
+    first_record = import_visual_source(
+        slot_id="key-view-establishing-small-01",
+        source=first,
+        source_manifest=_source_manifest(tmp_path, first),
+        pack_root=base_root,
+    )
+    second_record = import_visual_source(
+        slot_id="key-view-establishing-expanded-01",
+        source=second,
+        source_manifest=_source_manifest(tmp_path, second),
+        pack_root=base_root,
+    )
+    base_manifest_before = (base_root / "visual-sources.json").read_bytes()
+    replacement = _source(tmp_path, "replacement.png", (90, 80, 70))
+    revision_root = tmp_path / "revision-pack"
+
+    revised = revise_visual_source_pack(
+        source_pack_root=base_root,
+        revision_pack_root=revision_root,
+        slot_id=first_record.slot_id,
+        source=replacement,
+        source_manifest=_source_manifest(tmp_path, replacement),
+    )
+
+    assert (base_root / "visual-sources.json").read_bytes() == base_manifest_before
+    records = {row.slot_id: row for row in revised.records}
+    assert records[first_record.slot_id].sha256 == _sha256(replacement)
+    assert records[second_record.slot_id] == second_record
+    assert first_record.sha256 not in {
+        path.stem for path in (revision_root / "objects").iterdir()
+    }
+    assert {
+        path.name for path in (revision_root / "objects").iterdir()
+    } == {
+        Path(records[first_record.slot_id].object_path).name,
+        Path(second_record.object_path).name,
+    }
+    assert load_visual_source_manifest(
+        revision_root / "visual-sources.json",
+    ) == revised
+
+
+def test_revision_requires_absent_destination_and_existing_slot(tmp_path):
+    base_root = tmp_path / "base-pack"
+    first = _source(tmp_path, "first.png", (10, 20, 30))
+    import_visual_source(
+        slot_id="key-view-establishing-small-01",
+        source=first,
+        source_manifest=_source_manifest(tmp_path, first),
+        pack_root=base_root,
+    )
+    replacement = _source(tmp_path, "replacement.png", (90, 80, 70))
+    replacement_manifest = _source_manifest(tmp_path, replacement)
+
+    with pytest.raises(VisualSourceError, match="not present"):
+        revise_visual_source_pack(
+            source_pack_root=base_root,
+            revision_pack_root=tmp_path / "unknown-slot-revision",
+            slot_id="key-view-establishing-expanded-01",
+            source=replacement,
+            source_manifest=replacement_manifest,
+        )
+
+    occupied = tmp_path / "occupied"
+    occupied.mkdir()
+    with pytest.raises(VisualSourceError, match="start absent"):
+        revise_visual_source_pack(
+            source_pack_root=base_root,
+            revision_pack_root=occupied,
+            slot_id="key-view-establishing-small-01",
+            source=replacement,
+            source_manifest=replacement_manifest,
+        )
+
+
 def test_manifest_records_are_sorted_by_slot_id(tmp_path):
     pack_root = tmp_path / "pack"
     expanded = _source(tmp_path, "expanded.png", (2, 4, 6))
@@ -353,6 +433,40 @@ def test_import_visual_cli_uses_fixed_private_pack_root(tmp_path, monkeypatch, c
     assert result == 0
     assert payload["slot_id"] == "key-view-establishing-small-01"
     assert (pack_root / "visual-sources.json").is_file()
+
+
+def test_revise_visual_cli_creates_a_separate_pack(tmp_path, capsys):
+    base_root = tmp_path / "base-pack"
+    first = _source(tmp_path, "first.png", (10, 20, 30))
+    import_visual_source(
+        slot_id="key-view-establishing-small-01",
+        source=first,
+        source_manifest=_source_manifest(tmp_path, first),
+        pack_root=base_root,
+    )
+    replacement = _source(tmp_path, "replacement.png", (90, 80, 70))
+    revision_root = tmp_path / "revision-pack"
+
+    result = synthetic_village_cli.main([
+        "revise-visual",
+        "--from-pack-root",
+        str(base_root),
+        "--to-pack-root",
+        str(revision_root),
+        "--slot",
+        "key-view-establishing-small-01",
+        "--source",
+        str(replacement),
+        "--source-manifest",
+        str(_source_manifest(tmp_path, replacement)),
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["record_count"] == 1
+    assert payload["source_sha256"] == _sha256(replacement)
+    assert payload["revision_pack_root"] == str(revision_root)
+    assert (revision_root / "visual-sources.json").is_file()
 
 
 def test_object_durability_failure_never_publishes_manifest(tmp_path, monkeypatch):
