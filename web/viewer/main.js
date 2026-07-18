@@ -68,6 +68,11 @@ import {
   meshWeatherResponse,
 } from './mesh-weather.mjs';
 import {
+  applySkyDomePreset,
+  createSkyDome,
+  updateSkyDome,
+} from './sky-dome.mjs';
+import {
   modelPreviewCameraPose,
   modelPreviewDisclosure,
   modelPreviewSha256,
@@ -156,10 +161,12 @@ const environmentState = {
   zoom: DEFAULT_ZOOM,
   ...ENVIRONMENT_EFFECT_IDENTITY,
   precipitation_status: 'ready',
+  sky_status: 'ready',
 };
 let hemisphereLight = null;
 let precipitationPoints = null;
 let precipitationEffect = null;
+let skyDome = null;
 
 // ============ PLY Loader ============
 function parsePly(buffer) {
@@ -828,6 +835,8 @@ function syncEnvironmentUI() {
   document.getElementById('environment-status').textContent =
     environmentState.precipitation_status === 'degraded'
       ? `${notice} · 降水粒子已降级，背景/雾仍生效`
+      : environmentState.sky_status === 'degraded'
+        ? `${notice} · 程序化天空已降级为纯色背景`
       : meshRelighting
         ? `${notice} · 仅改变合成网格材质与灯光`
         : `${notice} · 不改变 3DGS 已烘焙光照`;
@@ -939,6 +948,17 @@ function applyWeather(value) {
   environmentState.weather = normalizeWeather(value);
   const preset = getWeatherPreset(environmentState.weather);
   scene.background.setHex(preset.background);
+  if (skyDome) {
+    try {
+      applySkyDomePreset(skyDome, preset);
+      skyDome.visible = true;
+      environmentState.sky_status = 'ready';
+    } catch (error) {
+      environmentState.sky_status = 'degraded';
+      skyDome.visible = false;
+      console.warn('程序化天气天空降级:', error);
+    }
+  }
   const fogNear = (currentFrame?.fogNear ?? 50) * preset.fog.nearScale;
   const fogFar = Math.max(
     fogNear + 1,
@@ -1416,6 +1436,13 @@ function init() {
   modelPreviewKeyLight.position.set(240, 420, 180);
   modelPreviewKeyLight.visible = false;
   scene.add(modelPreviewKeyLight);
+  try {
+    skyDome = createSkyDome({ THREE, scene });
+  } catch (error) {
+    skyDome = null;
+    environmentState.sky_status = 'degraded';
+    console.warn('程序化天空初始化失败:', error);
+  }
   try {
     createPrecipitationRuntime();
   } catch (error) {
@@ -2328,6 +2355,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.1);
   updateCamera(dt);
   if (cameraMode === 'orbit') controls.update();
+  updateSkyDome(skyDome, camera, clock.elapsedTime);
   updatePrecipitation(dt);
 
   // 每 50ms 调度一次 chunk (避免每帧都触发)

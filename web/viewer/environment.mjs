@@ -15,6 +15,10 @@ export const ENVIRONMENT_EFFECT_IDENTITY = Object.freeze({
 function freezePreset(preset) {
   if (preset.fog) Object.freeze(preset.fog);
   if (preset.light) Object.freeze(preset.light);
+  if (preset.sky) {
+    Object.freeze(preset.sky.sunDirection);
+    Object.freeze(preset.sky);
+  }
   if (preset.precipitation) {
     Object.freeze(preset.precipitation.volume);
     Object.freeze(preset.precipitation);
@@ -28,6 +32,18 @@ export const WEATHER_PRESETS = Object.freeze({
     background: 0x8fc5e8,
     fog: { color: 0x8fc5e8, nearScale: 1.15, farScale: 1.35 },
     light: { sky: 0xd8efff, ground: 0x4b5035, intensity: 0.9 },
+    sky: {
+      zenith: 0x398ccc,
+      horizon: 0xd4e7ee,
+      lower: 0x9fb5b5,
+      sunColor: 0xffefbf,
+      sunDirection: [0.46, 0.74, -0.49],
+      sunSharpness: 720,
+      cloudCoverage: 0.72,
+      cloudOpacity: 0.2,
+      haze: 0.14,
+      stars: 0,
+    },
     precipitation: null,
   }),
   overcast: freezePreset({
@@ -35,6 +51,18 @@ export const WEATHER_PRESETS = Object.freeze({
     background: 0x667582,
     fog: { color: 0x667582, nearScale: 0.8, farScale: 1.0 },
     light: { sky: 0xaeb9c2, ground: 0x3e423d, intensity: 0.62 },
+    sky: {
+      zenith: 0x5d6e7c,
+      horizon: 0xb2bdc2,
+      lower: 0x7c898b,
+      sunColor: 0xdde3df,
+      sunDirection: [-0.38, 0.62, -0.69],
+      sunSharpness: 28,
+      cloudCoverage: 0.3,
+      cloudOpacity: 0.72,
+      haze: 0.38,
+      stars: 0,
+    },
     precipitation: null,
   }),
   rain: freezePreset({
@@ -42,6 +70,18 @@ export const WEATHER_PRESETS = Object.freeze({
     background: 0x394b5b,
     fog: { color: 0x465867, nearScale: 0.55, farScale: 0.78 },
     light: { sky: 0x8599aa, ground: 0x303734, intensity: 0.48 },
+    sky: {
+      zenith: 0x263b4d,
+      horizon: 0x738493,
+      lower: 0x38494e,
+      sunColor: 0xaebac2,
+      sunDirection: [-0.4, 0.55, -0.73],
+      sunSharpness: 18,
+      cloudCoverage: 0.18,
+      cloudOpacity: 0.9,
+      haze: 0.55,
+      stars: 0,
+    },
     precipitation: {
       kind: 'rain',
       count: 1200,
@@ -58,6 +98,18 @@ export const WEATHER_PRESETS = Object.freeze({
     background: 0xa9b8c3,
     fog: { color: 0xb8c4cc, nearScale: 0.5, farScale: 0.72 },
     light: { sky: 0xe8f0f5, ground: 0x68716d, intensity: 0.72 },
+    sky: {
+      zenith: 0x93a9ba,
+      horizon: 0xe0e7e8,
+      lower: 0xc5cfd0,
+      sunColor: 0xf5f1df,
+      sunDirection: [0.25, 0.66, -0.71],
+      sunSharpness: 42,
+      cloudCoverage: 0.26,
+      cloudOpacity: 0.65,
+      haze: 0.48,
+      stars: 0,
+    },
     precipitation: {
       kind: 'snow',
       count: 800,
@@ -74,6 +126,18 @@ export const WEATHER_PRESETS = Object.freeze({
     background: 0x899497,
     fog: { color: 0x899497, nearScale: 0.12, farScale: 0.32 },
     light: { sky: 0xc4cbca, ground: 0x5c605b, intensity: 0.5 },
+    sky: {
+      zenith: 0x879396,
+      horizon: 0xc0c5c3,
+      lower: 0xa3aaa7,
+      sunColor: 0xd8d8cd,
+      sunDirection: [0.2, 0.58, -0.79],
+      sunSharpness: 12,
+      cloudCoverage: 0.42,
+      cloudOpacity: 0.36,
+      haze: 0.88,
+      stars: 0,
+    },
     precipitation: null,
   }),
   night: freezePreset({
@@ -81,6 +145,18 @@ export const WEATHER_PRESETS = Object.freeze({
     background: 0x07111f,
     fog: { color: 0x0b1725, nearScale: 0.65, farScale: 0.95 },
     light: { sky: 0x354e72, ground: 0x111821, intensity: 0.28 },
+    sky: {
+      zenith: 0x020916,
+      horizon: 0x142943,
+      lower: 0x07111c,
+      sunColor: 0xd9e7ff,
+      sunDirection: [-0.52, 0.6, -0.61],
+      sunSharpness: 1050,
+      cloudCoverage: 0.58,
+      cloudOpacity: 0.3,
+      haze: 0.12,
+      stars: 0.72,
+    },
     precipitation: null,
   }),
 });

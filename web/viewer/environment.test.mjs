@@ -34,7 +34,28 @@ test('weather ids and defaults are stable', () => {
     assert.equal(normalizeWeather(id), id);
     assert.equal(getWeatherPreset(id), WEATHER_PRESETS[id]);
     assert.equal(Object.isFrozen(WEATHER_PRESETS[id]), true);
+    assert.equal(Object.isFrozen(WEATHER_PRESETS[id].sky), true);
   }
+});
+
+test('every weather declares a distinct bounded procedural sky response', () => {
+  const signatures = new Set();
+  for (const id of WEATHER_IDS) {
+    const sky = WEATHER_PRESETS[id].sky;
+    assert.equal(typeof sky.zenith, 'number');
+    assert.equal(typeof sky.horizon, 'number');
+    assert.equal(typeof sky.lower, 'number');
+    assert.equal(typeof sky.sunColor, 'number');
+    assert.equal(sky.sunDirection.length, 3);
+    assert.ok(sky.sunDirection.every(Number.isFinite));
+    assert.ok(sky.sunSharpness >= 1 && sky.sunSharpness <= 2048);
+    assert.ok(sky.cloudCoverage >= 0 && sky.cloudCoverage <= 1);
+    assert.ok(sky.cloudOpacity >= 0 && sky.cloudOpacity <= 1);
+    assert.ok(sky.haze >= 0 && sky.haze <= 1);
+    assert.ok(sky.stars >= 0 && sky.stars <= 1);
+    signatures.add(JSON.stringify(sky));
+  }
+  assert.equal(signatures.size, WEATHER_IDS.length);
 });
 
 test('unknown weather ids fail instead of silently falling back', () => {

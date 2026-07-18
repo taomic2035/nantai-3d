@@ -78,6 +78,17 @@ test('viewer runtime wires environment state without mutating provenance', () =>
   assert.doesNotMatch(main, /manifest\.environment\s*=/);
 });
 
+test('weather atmosphere includes a procedural sky with a solid-color fallback', () => {
+  assert.match(main, /from ['"]\.\/sky-dome\.mjs['"]/);
+  assert.match(main, /createSkyDome\(\{\s*THREE,\s*scene\s*\}\)/);
+  assert.match(main, /applySkyDomePreset\(skyDome,\s*preset\)/);
+  assert.match(main, /applySkyDomePreset\(skyDome,\s*preset\);[\s\S]*skyDome\.visible\s*=\s*true/);
+  assert.match(main, /updateSkyDome\(skyDome,\s*camera,\s*clock\.elapsedTime\)/);
+  assert.match(main, /scene\.background\.setHex\(preset\.background\)/);
+  assert.match(main, /sky_status:\s*'ready'/);
+  assert.match(main, /程序化天空已降级为纯色背景/);
+});
+
 test('viewer runtime accepts static spatial reconstruction chunks without world offsets', () => {
   assert.match(main, /from ['"]\.\/spatial-reconstruction\.mjs['"]/);
   assert.match(main, /from ['"]\.\/splat-chunks-layer\.mjs['"]/);
