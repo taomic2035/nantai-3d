@@ -1,7 +1,7 @@
 # Nantai Studio B2 immutable reconstruction revisions
 
 Date: 2026-07-15
-Status: user-approved design, awaiting written-spec review before implementation planning
+Status: user-approved design, written specification confirmed, slice planning active
 
 ## 1. Decision summary
 
