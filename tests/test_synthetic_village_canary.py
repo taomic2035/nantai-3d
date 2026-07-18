@@ -58,6 +58,11 @@ from pipeline.synthetic_village.defaults import (
     DEFAULT_RECIPE_PATH,
     DEFAULT_VISUAL_SLOTS_PATH,
 )
+from pipeline.synthetic_village.elevated_topology import (
+    ElevatedTopologyPlan,
+    build_elevated_topology_plan,
+    canonical_elevated_topology_bytes,
+)
 from pipeline.synthetic_village.scene_plan import SEMANTIC_ORDER, build_scene_plan
 from pipeline.synthetic_village.visual_sources import (
     VisualSourceManifest,
@@ -234,6 +239,39 @@ def test_build_request_is_frozen_complete_and_content_addressed() -> None:
     assert b".nantai-studio" not in canonical_build_request_bytes(request)
     with pytest.raises(ValidationError):
         request.build_id = "0" * 64
+
+
+def test_build_request_identity_binds_exact_elevated_topology() -> None:
+    scene = build_scene_plan()
+    topology = build_elevated_topology_plan(scene)
+    payload = topology.model_dump(mode="json")
+    payload["edges"][0]["collision"]["deck_thickness_m"] = 0.25
+    changed_topology = ElevatedTopologyPlan.model_validate_json(
+        json.dumps(payload),
+    )
+
+    request = build_canary_request(
+        repo_root=ROOT,
+        scene_plan=scene,
+        elevated_topology=topology,
+        visual_pack_root=VISUAL_PACK_ROOT,
+    )
+    changed = build_canary_request(
+        repo_root=ROOT,
+        scene_plan=scene,
+        elevated_topology=changed_topology,
+        visual_pack_root=VISUAL_PACK_ROOT,
+    )
+
+    topology_bytes = canonical_elevated_topology_bytes(topology)
+    assert request.elevated_topology == topology
+    assert request.source_hashes.elevated_topology_sha256 == hashlib.sha256(
+        topology_bytes,
+    ).hexdigest()
+    assert request.build_id != changed.build_id
+    assert b"component-elevated-switchback-stair-01.png" not in (
+        canonical_build_request_bytes(request)
+    )
 
 
 @pytest.fixture(scope="module")

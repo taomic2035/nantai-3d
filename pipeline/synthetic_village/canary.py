@@ -53,6 +53,13 @@ from pipeline.synthetic_village.defaults import (
     load_default_recipe,
     load_default_visual_slots,
 )
+from pipeline.synthetic_village.elevated_topology import (
+    ElevatedTopologyError,
+    ElevatedTopologyPlan,
+    build_elevated_topology_plan,
+    canonical_elevated_topology_bytes,
+    verify_elevated_topology_plan,
+)
 from pipeline.synthetic_village.glb_material_audit import (
     ExpectedGlbMaterial,
     audit_textured_glb,
@@ -279,6 +286,7 @@ class SourceHashes(FrozenModel):
     visual_catalog_sha256: Sha256
     visual_source_manifest_sha256: Sha256
     scene_plan_sha256: Sha256
+    elevated_topology_sha256: Sha256
     camera_plan_sha256: Sha256
     tool_lock_sha256: Sha256
     builder_script_sha256: Sha256
@@ -528,13 +536,30 @@ def _validate_common_request_contract(request) -> None:
     expected_camera_sha = hashlib.sha256(
         canonical_camera_plan_bytes(request.camera_plan),
     ).hexdigest()
+    expected_topology_sha = hashlib.sha256(
+        canonical_elevated_topology_bytes(request.elevated_topology),
+    ).hexdigest()
     if request.source_hashes.scene_plan_sha256 != expected_scene_sha:
         raise ValueError("scene plan SHA-256 is not canonical")
     if request.source_hashes.camera_plan_sha256 != expected_camera_sha:
         raise ValueError("camera plan SHA-256 is not canonical")
+    if request.source_hashes.elevated_topology_sha256 != expected_topology_sha:
+        raise ValueError("elevated topology SHA-256 is not canonical")
+    try:
+        verify_elevated_topology_plan(
+            request.elevated_topology,
+            request.scene_plan,
+        )
+    except ElevatedTopologyError as exc:
+        raise ValueError(f"elevated topology does not match scene: {exc}") from exc
     expected_semantics = _semantic_registry()
     if request.semantic_registry != expected_semantics:
         raise ValueError("semantic registry is not the stable v1 taxonomy")
+    elevated_semantic = next(
+        row for row in request.semantic_registry if row.semantic_class == "elevated-walkway"
+    )
+    if elevated_semantic.semantic_id != request.elevated_topology.semantic_id:
+        raise ValueError("elevated topology semantic ID is not registered")
     expected_materials = _material_registry(request.scene_plan)
     if request.material_registry != expected_materials:
         raise ValueError("material registry is not the stable v1 mapping")
@@ -591,6 +616,7 @@ class BuildRequest(FrozenModel):
     synthetic: Literal[True] = True
     verification_level: Literal["L2"] = "L2"
     scene_plan: ScenePlan
+    elevated_topology: ElevatedTopologyPlan
     camera_plan: CameraPlan
     source_hashes: SourceHashes
     tool_identity: ToolIdentity
@@ -639,6 +665,7 @@ class TexturedBuildRequest(FrozenModel):
     synthetic: Literal[True] = True
     verification_level: Literal["L2"] = "L2"
     scene_plan: ScenePlan
+    elevated_topology: ElevatedTopologyPlan
     camera_plan: CameraPlan
     source_hashes: SourceHashes
     tool_identity: ToolIdentity
@@ -2040,6 +2067,7 @@ def build_canary_request(
     *,
     repo_root: Path = ROOT,
     scene_plan: ScenePlan | None = None,
+    elevated_topology: ElevatedTopologyPlan | None = None,
     camera_plan: CameraPlan | None = None,
     visual_pack_root: Path | None = None,
 ) -> BuildRequest:
@@ -2047,6 +2075,7 @@ def build_canary_request(
 
     repo_root = Path(repo_root).absolute()
     active_scene = scene_plan or build_scene_plan()
+    active_topology = elevated_topology or build_elevated_topology_plan(active_scene)
     active_camera = camera_plan or build_camera_plan(active_scene)
     recipe_path = repo_root / "assets/default-resources/synthetic-mountain-village-v1.json"
     lock_path = repo_root / "tools.lock.json"
@@ -2080,6 +2109,9 @@ def build_canary_request(
         scene_plan_sha256=hashlib.sha256(
             canonical_scene_plan_bytes(active_scene),
         ).hexdigest(),
+        elevated_topology_sha256=hashlib.sha256(
+            canonical_elevated_topology_bytes(active_topology),
+        ).hexdigest(),
         camera_plan_sha256=hashlib.sha256(
             canonical_camera_plan_bytes(active_camera),
         ).hexdigest(),
@@ -2091,6 +2123,7 @@ def build_canary_request(
         "synthetic": True,
         "verification_level": "L2",
         "scene_plan": active_scene,
+        "elevated_topology": active_topology,
         "camera_plan": active_camera,
         "source_hashes": source_hashes,
         "tool_identity": _tool_identity(
@@ -2113,6 +2146,7 @@ def build_textured_canary_request(
     repo_root: Path = ROOT,
     material_bundle_root: Path,
     scene_plan: ScenePlan | None = None,
+    elevated_topology: ElevatedTopologyPlan | None = None,
     camera_plan: CameraPlan | None = None,
     visual_pack_root: Path | None = None,
 ) -> TexturedBuildRequest:
@@ -2120,6 +2154,7 @@ def build_textured_canary_request(
 
     repo_root = Path(repo_root).absolute()
     active_scene = scene_plan or build_scene_plan()
+    active_topology = elevated_topology or build_elevated_topology_plan(active_scene)
     active_camera = camera_plan or build_camera_plan(active_scene)
     recipe_path = repo_root / "assets/default-resources/synthetic-mountain-village-v1.json"
     lock_path = repo_root / "tools.lock.json"
@@ -2173,6 +2208,9 @@ def build_textured_canary_request(
         scene_plan_sha256=hashlib.sha256(
             canonical_scene_plan_bytes(active_scene),
         ).hexdigest(),
+        elevated_topology_sha256=hashlib.sha256(
+            canonical_elevated_topology_bytes(active_topology),
+        ).hexdigest(),
         camera_plan_sha256=hashlib.sha256(
             canonical_camera_plan_bytes(active_camera),
         ).hexdigest(),
@@ -2187,6 +2225,7 @@ def build_textured_canary_request(
         "synthetic": True,
         "verification_level": "L2",
         "scene_plan": active_scene,
+        "elevated_topology": active_topology,
         "camera_plan": active_camera,
         "source_hashes": source_hashes,
         "tool_identity": _tool_identity(

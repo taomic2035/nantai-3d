@@ -37,6 +37,11 @@ from pipeline.synthetic_village.camera_plan import (
     canonical_camera_plan_bytes,
 )
 from pipeline.synthetic_village.defaults import canonical_json_bytes, load_default_recipe
+from pipeline.synthetic_village.elevated_topology import (
+    ElevatedTopologyPlan,
+    build_elevated_topology_plan,
+    canonical_elevated_topology_bytes,
+)
 from pipeline.synthetic_village.glb_material_audit import (
     ExpectedBuildingGeometry,
     ExpectedGlbMaterial,
@@ -131,6 +136,7 @@ class LocalTexturedPreviewRequest(FrozenModel):
     release_channel: Literal["local-preview-only"] = LOCAL_RELEASE_CHANNEL
     tool_identity: LocalBlenderIdentity
     scene_plan: ScenePlan
+    elevated_topology: ElevatedTopologyPlan
     camera_plan: CameraPlan
     source_hashes: canary.SourceHashes
     object_registry: tuple[canary.ObjectRegistryEntry, ...] = Field(
@@ -1070,6 +1076,7 @@ def build_local_textured_preview_request(
     tool_identity: LocalBlenderIdentity,
     repo_root: Path = ROOT,
     scene_plan: ScenePlan | None = None,
+    elevated_topology: ElevatedTopologyPlan | None = None,
     camera_plan: CameraPlan | None = None,
     visual_pack_root: Path | None = None,
 ) -> LocalTexturedPreviewRequest:
@@ -1077,6 +1084,7 @@ def build_local_textured_preview_request(
 
     repo_root = Path(repo_root).absolute()
     active_scene = scene_plan or build_scene_plan()
+    active_topology = elevated_topology or build_elevated_topology_plan(active_scene)
     active_camera = camera_plan or build_camera_plan(active_scene)
     recipe_path = repo_root / "assets/default-resources/synthetic-mountain-village-v1.json"
     lock_path = repo_root / "tools.lock.json"
@@ -1131,6 +1139,9 @@ def build_local_textured_preview_request(
         scene_plan_sha256=hashlib.sha256(
             canonical_scene_plan_bytes(active_scene),
         ).hexdigest(),
+        elevated_topology_sha256=hashlib.sha256(
+            canonical_elevated_topology_bytes(active_topology),
+        ).hexdigest(),
         camera_plan_sha256=hashlib.sha256(
             canonical_camera_plan_bytes(active_camera),
         ).hexdigest(),
@@ -1145,6 +1156,7 @@ def build_local_textured_preview_request(
         "release_channel": LOCAL_RELEASE_CHANNEL,
         "tool_identity": tool_identity,
         "scene_plan": active_scene,
+        "elevated_topology": active_topology,
         "camera_plan": active_camera,
         "source_hashes": source_hashes,
         "object_registry": objects,

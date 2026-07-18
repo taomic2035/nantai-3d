@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,9 @@ from pipeline.synthetic_village.building_geometry import (
     expected_variant_counts,
 )
 from pipeline.synthetic_village.canary import TexturedBuildRequest
+from pipeline.synthetic_village.elevated_topology import (
+    canonical_elevated_topology_bytes,
+)
 from pipeline.synthetic_village.glb_material_audit import GlbMaterialAudit
 from pipeline.synthetic_village.local_textured_preview import (
     LOCAL_TRAINING_BUILD_ENTRIES,
@@ -32,6 +36,16 @@ from pipeline.synthetic_village.scene_plan import build_scene_plan
 from tests.synthetic_material_fixtures import publish_material_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCAL_BLENDER = Path("/Applications/Blender.app/Contents/MacOS/Blender")
+BLENDER_BUILDER = ROOT / "scripts/blender/build_synthetic_village.py"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _local_request(tmp_path: Path) -> LocalTexturedPreviewRequest:
@@ -62,6 +76,12 @@ def test_local_request_is_content_addressed_but_never_authoritative(
     assert request.tool_identity.platform == "macos-arm64"
     assert request.material_algorithm_id == "edge-feather-sobel-orm-v2"
     assert request.building_geometry_profile_id == BUILDING_GEOMETRY_V2
+    assert request.elevated_topology.scene_plan_sha256 == (
+        request.source_hashes.scene_plan_sha256
+    )
+    assert request.source_hashes.elevated_topology_sha256 == hashlib.sha256(
+        canonical_elevated_topology_bytes(request.elevated_topology),
+    ).hexdigest()
     assert (
         hashlib.sha256(
             canonical_local_textured_preview_request_bytes(
@@ -86,6 +106,72 @@ def test_local_request_cannot_validate_as_authoritative_request(tmp_path: Path) 
 
     with pytest.raises(ValidationError):
         TexturedBuildRequest.model_validate(request.model_dump())
+
+
+def test_local_blender_rejects_readdressed_invalid_topology_before_staging(
+    tmp_path: Path,
+) -> None:
+    if not LOCAL_BLENDER.is_file():
+        pytest.skip("local Blender runtime is not installed")
+    visual_root, bundle = publish_material_fixture(tmp_path / "bundle")
+    request = build_local_textured_preview_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+        tool_identity=LocalBlenderIdentity(
+            executable_sha256=_sha256_file(LOCAL_BLENDER),
+            version="4.5.11",
+            platform="macos-arm64",
+            runtime_build_hash="4db51e9d1e1e",
+            runtime_output_sha256=hashlib.sha256(b"runtime-probe").hexdigest(),
+        ),
+    )
+    payload = request.model_dump(mode="json")
+    payload["elevated_topology"]["semantic_id"] = 13
+    payload["source_hashes"]["elevated_topology_sha256"] = hashlib.sha256(
+        canary._canonical_json_bytes(payload["elevated_topology"]),
+    ).hexdigest()
+    unsigned = dict(payload)
+    unsigned.pop("preview_id")
+    payload["preview_id"] = hashlib.sha256(
+        canary._canonical_json_bytes(unsigned),
+    ).hexdigest()
+    request_path = tmp_path / "invalid-topology-request.json"
+    request_path.write_bytes(canary._canonical_json_bytes(payload))
+    staging = tmp_path / "staging"
+
+    result = subprocess.run(
+        [
+            str(LOCAL_BLENDER),
+            "--background",
+            "--factory-startup",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "17",
+            "--python",
+            str(BLENDER_BUILDER),
+            "--",
+            "--request",
+            str(request_path),
+            "--materials",
+            str(bundle.final_directory),
+            "--staging",
+            str(staging),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert result.returncode == 17
+    assert "elevated topology provenance or scene binding is invalid" in (
+        result.stdout + result.stderr
+    )
+    assert not staging.exists()
 
 
 def test_historical_local_request_omits_absent_geometry_profile(

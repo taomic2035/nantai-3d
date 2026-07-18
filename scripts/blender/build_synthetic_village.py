@@ -56,6 +56,13 @@ UV_POLICIES = {
 WEATHER_PROFILE_SCHEMA = "nantai.synthetic-village.weather-profile.v1"
 # build 侧固定灯光角色 (overcast-world-background 校验要求; scene-graph token, 不随天气改)。
 WEATHER_LIGHT_ROLES = ("neutral-overcast-key", "neutral-sky-fill", "terrain-separation")
+ELEVATED_TOPOLOGY_SCHEMA = "nantai.synthetic-village.elevated-topology.v1"
+ELEVATED_COMPONENT_IDENTITIES = (
+    ("elevated-switchback-stair-v1", "switchback-stair", 127),
+    ("covered-timber-gallery-v1", "covered-timber-gallery", 128),
+    ("terrace-ramp-junction-v1", "terrace-ramp-junction", 129),
+    ("cross-level-covered-passage-v1", "cross-level-covered-passage", 130),
+)
 TERRAIN_TEXTURE_SCALE = 3.0
 TERRAIN_TEXTURE_SLOTS = (
     "material-moss-stone-01",
@@ -271,6 +278,14 @@ def _is_sha256(value):
         isinstance(value, str)
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_finite_number(value):
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
     )
 
 
@@ -510,6 +525,263 @@ def _validate_weather_block(weather):
         raise RuntimeBuildError("weather lighting_digest does not match lighting bytes")
 
 
+def _validate_elevated_topology(topology, scene, source_hashes, semantic_registry):
+    """Independently validate the scene-bound topology before any staging exists."""
+
+    _expect_keys(
+        topology,
+        (
+            "schema_version",
+            "scene_plan_id",
+            "scene_plan_sha256",
+            "coordinate_system",
+            "synthetic",
+            "verification_level",
+            "geometry_trust",
+            "semantic_id",
+            "nodes",
+            "edges",
+            "components",
+            "loops",
+            "summary",
+        ),
+        "elevated_topology",
+    )
+    if (
+        topology["schema_version"] != ELEVATED_TOPOLOGY_SCHEMA
+        or topology["scene_plan_id"] != scene.get("plan_id")
+        or topology["scene_plan_sha256"] != source_hashes["scene_plan_sha256"]
+        or topology["coordinate_system"] != scene.get("coordinate_system")
+        or topology["synthetic"] is not True
+        or topology["verification_level"] != "L2"
+        or topology["geometry_trust"] != "simplified-pbr-not-render-parity"
+        or topology["semantic_id"] != 14
+    ):
+        raise RuntimeBuildError("elevated topology provenance or scene binding is invalid")
+    if source_hashes["elevated_topology_sha256"] != _sha256_bytes(
+        _canonical_bytes(topology),
+    ):
+        raise RuntimeBuildError("elevated topology digest does not match request")
+    if not any(
+        row == {
+            "scope": "canonical-object",
+            "semantic_class": "elevated-walkway",
+            "semantic_id": 14,
+        }
+        for row in semantic_registry
+    ):
+        raise RuntimeBuildError("elevated topology semantic ID is not registered")
+
+    nodes = topology["nodes"]
+    edges = topology["edges"]
+    components = topology["components"]
+    loops = topology["loops"]
+    _expect_list(nodes, 8, "elevated_topology.nodes")
+    _expect_list(edges, 6, "elevated_topology.edges")
+    _expect_list(components, 4, "elevated_topology.components")
+    _expect_list(loops, 2, "elevated_topology.loops")
+    node_ids = []
+    node_positions = {}
+    for node in nodes:
+        _expect_keys(
+            node,
+            ("node_id", "position_m", "level", "ground_route_ref"),
+            "elevated topology node",
+        )
+        position = node["position_m"]
+        if (
+            not _is_slug(node["node_id"])
+            or not isinstance(position, list)
+            or len(position) != 3
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or abs(value * 1000 - round(value * 1000)) > 1e-7
+                for value in position
+            )
+            or node["level"] not in {"ground", "elevated"}
+            or (
+                node["level"] == "ground"
+                and not _is_slug(node["ground_route_ref"])
+            )
+            or (
+                node["level"] == "elevated"
+                and node["ground_route_ref"] is not None
+            )
+        ):
+            raise RuntimeBuildError("elevated topology node contract is invalid")
+        node_ids.append(node["node_id"])
+        node_positions[node["node_id"]] = position
+    if node_ids != sorted(set(node_ids)):
+        raise RuntimeBuildError("elevated topology node IDs are not unique and stable")
+
+    edge_ids = []
+    for edge in edges:
+        _expect_keys(
+            edge,
+            (
+                "edge_id",
+                "component_id",
+                "component_kind",
+                "loop_id",
+                "start_node_id",
+                "end_node_id",
+                "width_m",
+                "centerline",
+                "collision",
+            ),
+            "elevated topology edge",
+        )
+        centerline = edge["centerline"]
+        collision = edge["collision"]
+        _expect_keys(
+            collision,
+            (
+                "deck_thickness_m",
+                "railing_height_m",
+                "covered",
+                "head_clearance_m",
+                "drainage_clearance_m",
+            ),
+            "elevated topology collision envelope",
+        )
+        if (
+            not _is_slug(edge["edge_id"])
+            or not _is_slug(edge["component_id"])
+            or edge["component_kind"]
+            not in {row[1] for row in ELEVATED_COMPONENT_IDENTITIES}
+            or edge["loop_id"] not in {"central-loop", "upper-loop"}
+            or edge["start_node_id"] not in node_positions
+            or edge["end_node_id"] not in node_positions
+            or not _is_finite_number(edge["width_m"])
+            or edge["width_m"] < 1.8
+            or not isinstance(centerline, list)
+            or len(centerline) < 2
+            or not isinstance(collision["covered"], bool)
+            or not _is_finite_number(collision["deck_thickness_m"])
+            or collision["deck_thickness_m"] <= 0
+            or not _is_finite_number(collision["railing_height_m"])
+            or collision["railing_height_m"] < 1.0
+            or not _is_finite_number(collision["drainage_clearance_m"])
+            or collision["drainage_clearance_m"] < 1.5
+            or (
+                collision["covered"]
+                and (
+                    not _is_finite_number(collision["head_clearance_m"])
+                    or collision["head_clearance_m"] < 2.1
+                )
+            )
+            or (not collision["covered"] and collision["head_clearance_m"] is not None)
+        ):
+            raise RuntimeBuildError("elevated topology edge contract is invalid")
+        positions = []
+        for point in centerline:
+            _expect_keys(point, ("position_m",), "elevated topology point")
+            position = point["position_m"]
+            if (
+                not isinstance(position, list)
+                or len(position) != 3
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or abs(value * 1000 - round(value * 1000)) > 1e-7
+                    for value in position
+                )
+            ):
+                raise RuntimeBuildError("elevated topology point contract is invalid")
+            positions.append(position)
+        if (
+            positions[0] != node_positions[edge["start_node_id"]]
+            or positions[-1] != node_positions[edge["end_node_id"]]
+        ):
+            raise RuntimeBuildError("elevated topology edge endpoints are invalid")
+        edge_ids.append(edge["edge_id"])
+    if edge_ids != sorted(set(edge_ids)):
+        raise RuntimeBuildError("elevated topology edge IDs are not unique and stable")
+
+    owned_edge_ids = []
+    actual_identities = []
+    for component in components:
+        _expect_keys(
+            component,
+            (
+                "component_id",
+                "component_kind",
+                "instance_id",
+                "edge_ids",
+                "material_slot_ids",
+            ),
+            "elevated topology component",
+        )
+        identity = (
+            component["component_id"],
+            component["component_kind"],
+            component["instance_id"],
+        )
+        if (
+            not isinstance(component["edge_ids"], list)
+            or not all(_is_slug(value) for value in component["edge_ids"])
+            or component["edge_ids"] != sorted(set(component["edge_ids"]))
+            or not isinstance(component["material_slot_ids"], list)
+            or not component["material_slot_ids"]
+            or not all(_is_slug(value) for value in component["material_slot_ids"])
+        ):
+            raise RuntimeBuildError("elevated topology component contract is invalid")
+        actual_identities.append(identity)
+        owned_edge_ids.extend(component["edge_ids"])
+    if tuple(actual_identities) != ELEVATED_COMPONENT_IDENTITIES:
+        raise RuntimeBuildError("elevated topology component identities are invalid")
+    if sorted(owned_edge_ids) != edge_ids or len(set(owned_edge_ids)) != len(
+        owned_edge_ids
+    ):
+        raise RuntimeBuildError("elevated topology edge ownership is invalid")
+    edge_by_id = {edge["edge_id"]: edge for edge in edges}
+    for component in components:
+        if any(
+            edge_by_id[edge_id]["component_id"] != component["component_id"]
+            or edge_by_id[edge_id]["component_kind"] != component["component_kind"]
+            for edge_id in component["edge_ids"]
+        ):
+            raise RuntimeBuildError("elevated topology component metadata is inconsistent")
+
+    expected_loop_ids = ("central-loop", "upper-loop")
+    for loop, loop_id in zip(loops, expected_loop_ids, strict=True):
+        _expect_keys(
+            loop,
+            (
+                "loop_id",
+                "connected",
+                "ground_attachment_count",
+                "edge_count",
+                "edge_ids",
+            ),
+            "elevated topology loop",
+        )
+        if (
+            loop["loop_id"] != loop_id
+            or loop["connected"] is not True
+            or loop["ground_attachment_count"] != 2
+            or loop["edge_count"] != 3
+            or not isinstance(loop["edge_ids"], list)
+            or len(loop["edge_ids"]) != 3
+            or loop["edge_ids"]
+            != [
+                edge["edge_id"]
+                for edge in edges
+                if edge["loop_id"] == loop_id
+            ]
+        ):
+            raise RuntimeBuildError("elevated topology loop contract is invalid")
+    if topology["summary"] != {
+        "component_count": 4,
+        "ground_attachment_count": 4,
+        "loop_count": 2,
+    }:
+        raise RuntimeBuildError("elevated topology summary is invalid")
+
+
 def _validate_request(request, raw):
     local = request.get("schema_version") == LOCAL_TEXTURED_REQUEST_SCHEMA
     textured = request.get("schema_version") in {
@@ -523,6 +795,7 @@ def _validate_request(request, raw):
         "verification_level",
         *(("authoritative", "release_channel") if local else ()),
         "scene_plan",
+        "elevated_topology",
         "camera_plan",
         "source_hashes",
         "tool_identity",
@@ -587,6 +860,7 @@ def _validate_request(request, raw):
         "visual_catalog_sha256",
         "visual_source_manifest_sha256",
         "scene_plan_sha256",
+        "elevated_topology_sha256",
         "camera_plan_sha256",
         "tool_lock_sha256",
         "builder_script_sha256",
@@ -598,6 +872,10 @@ def _validate_request(request, raw):
         _canonical_bytes(request["scene_plan"]),
     ):
         raise RuntimeBuildError("scene plan digest does not match request")
+    if source_hashes["elevated_topology_sha256"] != _sha256_bytes(
+        _canonical_bytes(request["elevated_topology"]),
+    ):
+        raise RuntimeBuildError("elevated topology digest does not match request")
     if source_hashes["camera_plan_sha256"] != _sha256_bytes(
         _canonical_bytes(request["camera_plan"]),
     ):
@@ -681,6 +959,12 @@ def _validate_request(request, raw):
         "synthetic-mountain-village-scene-v1"
     ):
         raise RuntimeBuildError("scene_plan identity is invalid")
+    _validate_elevated_topology(
+        request["elevated_topology"],
+        scene,
+        source_hashes,
+        semantic_registry,
+    )
     scene_objects = scene.get("objects")
     _expect_list(scene_objects, 126, "scene_plan.objects")
     object_registry = request["object_registry"]

@@ -137,6 +137,8 @@ git diff --check -- \
 **Files:**
 - Modify: `pipeline/synthetic_village/canary.py`
 - Modify: `tests/test_synthetic_village_canary.py`
+- Modify: `pipeline/synthetic_village/local_textured_preview.py`
+- Modify: `tests/test_local_textured_preview.py`
 - Modify: `scripts/blender/build_synthetic_village.py`
 - Modify: `tests/test_synthetic_village_blender_runtime.py`
 
