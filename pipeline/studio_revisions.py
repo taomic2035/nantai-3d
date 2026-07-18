@@ -282,7 +282,11 @@ def _read_stable_bytes(
     if (
         len(payload) > maximum
         or _stat_signature(before) != _stat_signature(after)
-        or _stat_signature(after) != _stat_signature(path_after)
+        # Windows can expose different ctime precision or semantics through
+        # an open handle and a path lookup. Keep ctime in the same-handle
+        # mutation check above, but compare only portable identity, size, and
+        # mtime evidence across the two APIs.
+        or _stat_signature(after)[:-1] != _stat_signature(path_after)[:-1]
         or _is_linklike(path)
     ):
         raise CaptureBundleError(f"{label} changed while being read")

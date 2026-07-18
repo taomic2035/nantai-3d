@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -218,6 +219,65 @@ def _real_ingest_stage(tmp_path):
     (input_dir / "photo.jpg").write_bytes(b"capture-photo")
     ingest_all(input_dir, stage_dir, blur_threshold=0)
     return input_dir, stage_dir
+
+
+class _StatWithDrift:
+    def __init__(self, raw, *, field):
+        self._raw = raw
+        self._field = field
+
+    def __getattr__(self, name):
+        value = getattr(self._raw, name)
+        if name == self._field:
+            return value + 1
+        return value
+
+
+def _drift_target_path_stat(monkeypatch, target, *, field):
+    real_stat = Path.stat
+
+    def drifted_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == target:
+            return _StatWithDrift(result, field=field)
+        return result
+
+    monkeypatch.setattr(Path, "stat", drifted_stat)
+
+
+def test_stable_read_accepts_cross_api_ctime_precision_drift(
+    tmp_path,
+    monkeypatch,
+):
+    from pipeline.studio_revisions import _read_stable_bytes
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(b'{"kind":"capture"}\n')
+    _drift_target_path_stat(monkeypatch, manifest, field="st_ctime_ns")
+
+    assert _read_stable_bytes(
+        manifest,
+        label="capture manifest",
+        maximum=1024,
+    ) == b'{"kind":"capture"}\n'
+
+
+def test_stable_read_rejects_cross_api_mtime_drift(
+    tmp_path,
+    monkeypatch,
+):
+    from pipeline.studio_revisions import CaptureBundleError, _read_stable_bytes
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(b'{"kind":"capture"}\n')
+    _drift_target_path_stat(monkeypatch, manifest, field="st_mtime_ns")
+
+    with pytest.raises(CaptureBundleError, match="changed while being read"):
+        _read_stable_bytes(
+            manifest,
+            label="capture manifest",
+            maximum=1024,
+        )
 
 
 def test_prepare_and_verify_capture_bundle_preserves_exact_private_evidence(
