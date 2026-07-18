@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -24,6 +25,9 @@ ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled"})
 RUNNING_PHASES = ("executing", "validating", "publishing")
 _SQLITE_WRITE_DEPTH: ContextVar[int] = ContextVar("studio_sqlite_write_depth", default=0)
+_CAPTURE_REVISION_RE = re.compile(r"^capture-[0-9a-f]{32}$")
+_CAPTURE_PUBLICATION_RE = re.compile(r"^capture-publication-[0-9a-f]{32}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LedgerError(RuntimeError):
@@ -50,6 +54,10 @@ class FencingError(LedgerError):
     """A stale or foreign worker attempted to mutate a run."""
 
 
+class RevisionConflictError(LedgerError):
+    """An immutable revision identity was reused with different evidence."""
+
+
 def canonical_json(value: Any) -> str:
     """Serialize JSON deterministically and reject NaN/Infinity."""
 
@@ -69,6 +77,26 @@ def _utc_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
         raise ValueError("ledger timestamps must be timezone-aware UTC")
     return value.isoformat(timespec="microseconds")
+
+
+def _validate_capture_identity(
+    *,
+    revision_id: str,
+    manifest_digest: str,
+    bundle_relpath: str,
+) -> None:
+    if _CAPTURE_REVISION_RE.fullmatch(revision_id) is None:
+        raise ValueError("capture revision ID is invalid")
+    if _SHA256_RE.fullmatch(manifest_digest) is None:
+        raise ValueError("capture manifest digest is invalid")
+    expected_bundle = f".nantai-studio/artifacts/capture/{revision_id}"
+    if bundle_relpath != expected_bundle:
+        raise ValueError("capture bundle path is not the fixed managed path")
+
+
+def _validate_capture_publication_id(intent_id: str) -> None:
+    if _CAPTURE_PUBLICATION_RE.fullmatch(intent_id) is None:
+        raise ValueError("capture publication intent ID is invalid")
 
 
 def sqlite_write_transaction_active() -> bool:
@@ -116,6 +144,18 @@ class EventRecord:
 class CreateRunResult:
     run: RunRecord
     created: bool
+
+
+@dataclass(frozen=True)
+class CaptureRevisionRecord:
+    id: str
+    manifest_digest: str
+    bundle_relpath: str
+    provenance: str
+    source_count: int
+    output_count: int
+    created_by_run: str
+    created_utc: str
 
 
 @dataclass(frozen=True)
@@ -719,6 +759,19 @@ class StudioLedger:
         )
 
     @staticmethod
+    def _capture_from_row(row: sqlite3.Row) -> CaptureRevisionRecord:
+        return CaptureRevisionRecord(
+            id=row["id"],
+            manifest_digest=row["manifest_digest"],
+            bundle_relpath=row["bundle_relpath"],
+            provenance=row["provenance"],
+            source_count=row["source_count"],
+            output_count=row["output_count"],
+            created_by_run=row["created_by_run"],
+            created_utc=row["created_utc"],
+        )
+
+    @staticmethod
     def _next_seq(connection: sqlite3.Connection, run_id: str) -> int:
         row = connection.execute(
             "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?",
@@ -899,6 +952,355 @@ class StudioLedger:
                 (limit,),
             ).fetchall()
         return [self._run_from_row(row) for row in rows]
+
+    def prepare_capture_publication(
+        self,
+        *,
+        intent_id: str,
+        run_id: str,
+        revision_id: str,
+        manifest_digest: str,
+        bundle_relpath: str,
+        owner: str,
+        lease_generation: int,
+        created_utc: datetime,
+    ) -> None:
+        """Journal an absent-only capture destination before its durable move."""
+
+        _validate_capture_publication_id(intent_id)
+        _validate_capture_identity(
+            revision_id=revision_id,
+            manifest_digest=manifest_digest,
+            bundle_relpath=bundle_relpath,
+        )
+        created_text = _utc_text(created_utc)
+        expected = {
+            "run_id": run_id,
+            "subject_kind": "capture",
+            "subject_id": revision_id,
+            "manifest_digest": manifest_digest,
+            "destination_relpath": bundle_relpath,
+            "created_utc": created_text,
+        }
+        with self._transaction(synchronous_full=True) as connection:
+            run = connection.execute(
+                "SELECT * FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            self._require_fence(
+                run,
+                owner=owner,
+                lease_generation=lease_generation,
+            )
+            if (
+                run["command"] != "ingest"
+                or run["status"] != "running"
+                or run["phase"] != "publishing"
+            ):
+                raise TransitionError(
+                    "capture publication requires a running/publishing ingest",
+                )
+            existing = connection.execute(
+                "SELECT * FROM publication_intents WHERE id=?",
+                (intent_id,),
+            ).fetchone()
+            if existing is not None:
+                if any(existing[key] != value for key, value in expected.items()):
+                    raise RevisionConflictError(
+                        "capture publication intent conflicts with immutable evidence",
+                    )
+                return
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO publication_intents(
+                        id,run_id,subject_kind,subject_id,manifest_digest,
+                        destination_relpath,status,created_utc,finished_utc
+                    ) VALUES(?,?,?,?,?,?,'prepared',?,NULL)
+                    """,
+                    (
+                        intent_id,
+                        run_id,
+                        "capture",
+                        revision_id,
+                        manifest_digest,
+                        bundle_relpath,
+                        created_text,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise RevisionConflictError(
+                    "capture publication destination or identity already exists",
+                ) from exc
+
+    def commit_capture_publication(
+        self,
+        *,
+        intent_id: str,
+        revision_id: str,
+        manifest_digest: str,
+        bundle_relpath: str,
+        provenance: Literal["measured", "synthetic", "unknown"],
+        source_count: int,
+        output_count: int,
+        created_by_run: str,
+        owner: str,
+        lease_generation: int,
+        created_utc: datetime,
+    ) -> CaptureRevisionRecord:
+        """Commit a verified, already durable capture bundle to SQLite truth."""
+
+        _validate_capture_publication_id(intent_id)
+        _validate_capture_identity(
+            revision_id=revision_id,
+            manifest_digest=manifest_digest,
+            bundle_relpath=bundle_relpath,
+        )
+        if provenance not in {"measured", "synthetic", "unknown"}:
+            raise ValueError("capture provenance is invalid")
+        if (
+            type(source_count) is not int
+            or source_count < 1
+            or type(output_count) is not int
+            or output_count < 1
+        ):
+            raise ValueError("capture source and output counts must be positive")
+        created_text = _utc_text(created_utc)
+        expected_record = CaptureRevisionRecord(
+            id=revision_id,
+            manifest_digest=manifest_digest,
+            bundle_relpath=bundle_relpath,
+            provenance=provenance,
+            source_count=source_count,
+            output_count=output_count,
+            created_by_run=created_by_run,
+            created_utc=created_text,
+        )
+        with self._transaction(synchronous_full=True) as connection:
+            run = connection.execute(
+                "SELECT * FROM runs WHERE id=?",
+                (created_by_run,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(created_by_run)
+            self._require_fence(
+                run,
+                owner=owner,
+                lease_generation=lease_generation,
+            )
+            if (
+                run["command"] != "ingest"
+                or run["status"] != "running"
+                or run["phase"] != "publishing"
+            ):
+                raise TransitionError(
+                    "capture commit requires a running/publishing ingest",
+                )
+            intent = connection.execute(
+                "SELECT * FROM publication_intents WHERE id=?",
+                (intent_id,),
+            ).fetchone()
+            if intent is None:
+                raise TransitionError("capture publication intent is missing")
+            if (
+                intent["run_id"] != created_by_run
+                or intent["subject_kind"] != "capture"
+                or intent["subject_id"] != revision_id
+                or intent["manifest_digest"] != manifest_digest
+                or intent["destination_relpath"] != bundle_relpath
+            ):
+                raise RevisionConflictError(
+                    "capture publication intent conflicts with commit evidence",
+                )
+            existing = connection.execute(
+                "SELECT * FROM capture_revisions WHERE id=?",
+                (revision_id,),
+            ).fetchone()
+            if existing is not None:
+                record = self._capture_from_row(existing)
+                if record != expected_record or intent["status"] != "committed":
+                    raise RevisionConflictError(
+                        "capture revision conflicts with immutable evidence",
+                    )
+                return record
+            if intent["status"] != "prepared":
+                raise TransitionError(
+                    "capture publication intent is not prepared",
+                )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO capture_revisions(
+                        id,manifest_digest,bundle_relpath,provenance,
+                        source_count,output_count,created_by_run,created_utc
+                    ) VALUES(?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        revision_id,
+                        manifest_digest,
+                        bundle_relpath,
+                        provenance,
+                        source_count,
+                        output_count,
+                        created_by_run,
+                        created_text,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise RevisionConflictError(
+                    "capture revision run, path, or identity already exists",
+                ) from exc
+            updated = connection.execute(
+                """
+                UPDATE publication_intents
+                SET status='committed',finished_utc=?
+                WHERE id=? AND status='prepared'
+                """,
+                (created_text, intent_id),
+            )
+            if updated.rowcount != 1:
+                raise FencingError(
+                    "capture publication intent changed before commit",
+                )
+            row = connection.execute(
+                "SELECT * FROM capture_revisions WHERE id=?",
+                (revision_id,),
+            ).fetchone()
+            return self._capture_from_row(row)
+
+    def commit_capture_run_success(
+        self,
+        *,
+        run_id: str,
+        revision_id: str,
+        owner: str,
+        lease_generation: int,
+        message: str,
+        occurred_utc: datetime,
+    ) -> RunRecord:
+        """Finish an ingest only after its capture and projection are complete."""
+
+        if _CAPTURE_REVISION_RE.fullmatch(revision_id) is None:
+            raise ValueError("capture revision ID is invalid")
+        if not message or len(message) > 4_096:
+            raise ValueError("capture success message must be bounded")
+        occurred_text = _utc_text(occurred_utc)
+        artifact_ids_json = canonical_json([revision_id])
+        with self._transaction(synchronous_full=True) as connection:
+            run = connection.execute(
+                "SELECT * FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            self._require_fence(
+                run,
+                owner=owner,
+                lease_generation=lease_generation,
+            )
+            if run["status"] == "succeeded":
+                if (
+                    run["command"] != "ingest"
+                    or run["artifact_ids_json"] != artifact_ids_json
+                ):
+                    raise RevisionConflictError(
+                        "succeeded run references different capture evidence",
+                    )
+                return self._run_from_row(run)
+            if (
+                run["command"] != "ingest"
+                or run["status"] != "running"
+                or run["phase"] != "publishing"
+            ):
+                raise TransitionError(
+                    "capture success requires a running/publishing ingest",
+                )
+            capture = connection.execute(
+                """
+                SELECT id FROM capture_revisions
+                WHERE id=? AND created_by_run=?
+                """,
+                (revision_id, run_id),
+            ).fetchone()
+            intent = connection.execute(
+                """
+                SELECT id FROM publication_intents
+                WHERE run_id=? AND subject_kind='capture' AND subject_id=?
+                  AND status='committed'
+                """,
+                (run_id, revision_id),
+            ).fetchone()
+            if capture is None or intent is None:
+                raise TransitionError(
+                    "capture revision and committed intent are required",
+                )
+            result = connection.execute(
+                """
+                UPDATE runs
+                SET status='succeeded',updated_utc=?,finished_utc=?,
+                    artifact_ids_json=?
+                WHERE id=? AND status='running' AND phase='publishing'
+                  AND owner=? AND lease_generation=?
+                """,
+                (
+                    occurred_text,
+                    occurred_text,
+                    artifact_ids_json,
+                    run_id,
+                    owner,
+                    lease_generation,
+                ),
+            )
+            if result.rowcount != 1:
+                raise FencingError(
+                    "run changed before capture publication success",
+                )
+            self._append_event(
+                connection,
+                run_id=run_id,
+                phase="publishing",
+                progress=1,
+                level="info",
+                code=None,
+                message=message,
+                occurred_utc=occurred_text,
+            )
+            updated = connection.execute(
+                "SELECT * FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            return self._run_from_row(updated)
+
+    def get_capture_revision(self, revision_id: str) -> CaptureRevisionRecord:
+        if _CAPTURE_REVISION_RE.fullmatch(revision_id) is None:
+            raise KeyError(revision_id)
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM capture_revisions WHERE id=?",
+                (revision_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(revision_id)
+        return self._capture_from_row(row)
+
+    def list_capture_revisions(
+        self,
+        *,
+        limit: int = 1_000,
+    ) -> list[CaptureRevisionRecord]:
+        if not 1 <= limit <= 10_000:
+            raise ValueError("invalid capture revision limit")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM capture_revisions
+                ORDER BY created_utc DESC,id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._capture_from_row(row) for row in rows]
 
     def record_child_process(
         self,

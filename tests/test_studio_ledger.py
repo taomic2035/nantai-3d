@@ -74,6 +74,23 @@ def _create_run(
     )
 
 
+def _advance_to_publishing(ledger: StudioLedger) -> None:
+    for status, phase, message in (
+        ("running", "executing", "Started."),
+        ("running", "validating", "Validated."),
+        ("running", "publishing", "Publishing."),
+    ):
+        ledger.transition_run(
+            "run-001",
+            status=status,
+            phase=phase,
+            owner="owner-a",
+            lease_generation=1,
+            message=message,
+            occurred_utc=_now(),
+        )
+
+
 def test_initialize_configures_sqlite_and_expected_tables(tmp_path):
     ledger = _ledger(tmp_path)
 
@@ -199,6 +216,220 @@ def test_declared_v2_with_weakened_schema_fails_closed(tmp_path):
 
     with pytest.raises(LedgerSchemaError, match="fingerprint|schema"):
         StudioLedger(database).initialize()
+
+
+def test_capture_publication_commits_revision_before_run_success(tmp_path):
+    ledger = _ledger(tmp_path)
+    _create_run(ledger)
+    _advance_to_publishing(ledger)
+    revision_id = "capture-" + "a" * 32
+    intent_id = "capture-publication-" + "b" * 32
+    bundle = f".nantai-studio/artifacts/capture/{revision_id}"
+
+    ledger.prepare_capture_publication(
+        intent_id=intent_id,
+        run_id="run-001",
+        revision_id=revision_id,
+        manifest_digest="c" * 64,
+        bundle_relpath=bundle,
+        owner="owner-a",
+        lease_generation=1,
+        created_utc=_now(),
+    )
+    record = ledger.commit_capture_publication(
+        intent_id=intent_id,
+        revision_id=revision_id,
+        manifest_digest="c" * 64,
+        bundle_relpath=bundle,
+        provenance="synthetic",
+        source_count=6,
+        output_count=11,
+        created_by_run="run-001",
+        owner="owner-a",
+        lease_generation=1,
+        created_utc=_now(),
+    )
+
+    assert record.id == revision_id
+    assert record.bundle_relpath == bundle
+    assert ledger.get_capture_revision(revision_id) == record
+    assert ledger.list_capture_revisions() == [record]
+    assert ledger.get_run("run-001").status == "running"
+
+    finished = ledger.commit_capture_run_success(
+        run_id="run-001",
+        revision_id=revision_id,
+        owner="owner-a",
+        lease_generation=1,
+        message="Immutable capture and compatibility projection published.",
+        occurred_utc=_now(),
+    )
+
+    assert finished.status == "succeeded"
+    assert finished.artifact_ids == (revision_id,)
+    assert ledger.commit_capture_run_success(
+        run_id="run-001",
+        revision_id=revision_id,
+        owner="owner-a",
+        lease_generation=1,
+        message="Immutable capture and compatibility projection published.",
+        occurred_utc=_now(),
+    ) == finished
+
+
+def test_capture_publication_recovery_calls_are_idempotent(tmp_path):
+    ledger = _ledger(tmp_path)
+    _create_run(ledger)
+    _advance_to_publishing(ledger)
+    revision_id = "capture-" + "d" * 32
+    intent_id = "capture-publication-" + "e" * 32
+    bundle = f".nantai-studio/artifacts/capture/{revision_id}"
+    prepare = {
+        "intent_id": intent_id,
+        "run_id": "run-001",
+        "revision_id": revision_id,
+        "manifest_digest": "f" * 64,
+        "bundle_relpath": bundle,
+        "owner": "owner-a",
+        "lease_generation": 1,
+        "created_utc": _now(),
+    }
+    commit = {
+        "intent_id": intent_id,
+        "revision_id": revision_id,
+        "manifest_digest": "f" * 64,
+        "bundle_relpath": bundle,
+        "provenance": "measured",
+        "source_count": 2,
+        "output_count": 3,
+        "created_by_run": "run-001",
+        "owner": "owner-a",
+        "lease_generation": 1,
+        "created_utc": _now(),
+    }
+
+    ledger.prepare_capture_publication(**prepare)
+    ledger.prepare_capture_publication(**prepare)
+    first = ledger.commit_capture_publication(**commit)
+    second = ledger.commit_capture_publication(**commit)
+
+    assert second == first
+    with ledger.connection() as connection:
+        assert connection.execute(
+            "SELECT status FROM publication_intents WHERE id=?",
+            (intent_id,),
+        ).fetchone()[0] == "committed"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM capture_revisions",
+        ).fetchone()[0] == 1
+
+
+def test_capture_publication_rejects_conflicts_and_unsafe_identity(tmp_path):
+    ledger = _ledger(tmp_path)
+    _create_run(ledger)
+    _advance_to_publishing(ledger)
+    revision_id = "capture-" + "1" * 32
+    intent_id = "capture-publication-" + "2" * 32
+    bundle = f".nantai-studio/artifacts/capture/{revision_id}"
+    values = {
+        "intent_id": intent_id,
+        "run_id": "run-001",
+        "revision_id": revision_id,
+        "manifest_digest": "3" * 64,
+        "bundle_relpath": bundle,
+        "owner": "owner-a",
+        "lease_generation": 1,
+        "created_utc": _now(),
+    }
+    ledger.prepare_capture_publication(**values)
+
+    conflict = dict(values)
+    conflict["manifest_digest"] = "4" * 64
+    with pytest.raises(ledger_module.RevisionConflictError, match="intent"):
+        ledger.prepare_capture_publication(**conflict)
+
+    unsafe = dict(values)
+    unsafe["intent_id"] = "capture-publication-" + "5" * 32
+    unsafe["bundle_relpath"] = "/absolute/capture"
+    with pytest.raises(ValueError, match="bundle|path"):
+        ledger.prepare_capture_publication(**unsafe)
+
+    with pytest.raises(FencingError):
+        ledger.commit_capture_publication(
+            intent_id=intent_id,
+            revision_id=revision_id,
+            manifest_digest="3" * 64,
+            bundle_relpath=bundle,
+            provenance="synthetic",
+            source_count=1,
+            output_count=1,
+            created_by_run="run-001",
+            owner="other-owner",
+            lease_generation=1,
+            created_utc=_now(),
+        )
+
+
+def test_capture_success_requires_a_committed_matching_revision(tmp_path):
+    ledger = _ledger(tmp_path)
+    _create_run(ledger)
+    _advance_to_publishing(ledger)
+
+    with pytest.raises(TransitionError, match="capture|revision|intent"):
+        ledger.commit_capture_run_success(
+            run_id="run-001",
+            revision_id="capture-" + "6" * 32,
+            owner="owner-a",
+            lease_generation=1,
+            message="Forged success.",
+            occurred_utc=_now(),
+        )
+
+    assert ledger.get_run("run-001").status == "running"
+
+
+def test_capture_revision_rows_are_append_only(tmp_path):
+    ledger = _ledger(tmp_path)
+    _create_run(ledger)
+    _advance_to_publishing(ledger)
+    revision_id = "capture-" + "7" * 32
+    intent_id = "capture-publication-" + "8" * 32
+    bundle = f".nantai-studio/artifacts/capture/{revision_id}"
+    ledger.prepare_capture_publication(
+        intent_id=intent_id,
+        run_id="run-001",
+        revision_id=revision_id,
+        manifest_digest="9" * 64,
+        bundle_relpath=bundle,
+        owner="owner-a",
+        lease_generation=1,
+        created_utc=_now(),
+    )
+    ledger.commit_capture_publication(
+        intent_id=intent_id,
+        revision_id=revision_id,
+        manifest_digest="9" * 64,
+        bundle_relpath=bundle,
+        provenance="synthetic",
+        source_count=1,
+        output_count=1,
+        created_by_run="run-001",
+        owner="owner-a",
+        lease_generation=1,
+        created_utc=_now(),
+    )
+
+    with ledger.connection() as connection:
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            connection.execute(
+                "UPDATE capture_revisions SET source_count=2 WHERE id=?",
+                (revision_id,),
+            )
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            connection.execute(
+                "DELETE FROM capture_revisions WHERE id=?",
+                (revision_id,),
+            )
 
 
 def test_unknown_newer_schema_fails_closed(tmp_path):
