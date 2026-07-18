@@ -23,6 +23,7 @@ from pipeline.synthetic_village.local_textured_preview import (
     build_local_textured_preview_request,
     canonical_local_glb_audit_bytes,
     canonical_local_textured_preview_request_bytes,
+    verify_stored_local_glb_audit,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
 from tests.synthetic_material_fixtures import publish_material_fixture
@@ -152,6 +153,46 @@ def test_historical_local_glb_audit_omits_absent_geometry_evidence() -> None:
 
     assert audit.building_geometry is None
     assert b"building_geometry" not in raw
+
+
+def test_historical_local_glb_audit_remeasures_new_triangle_evidence(
+    tmp_path: Path,
+) -> None:
+    measured = GlbMaterialAudit(
+        glb_sha256="3" * 64,
+        byte_count=1024,
+        mesh_count=1,
+        primitive_count=1,
+        triangle_count=7,
+        material_count=1,
+        texture_count=3,
+        embedded_image_count=3,
+        textured_primitive_count=1,
+        uv_primitive_count=1,
+        tangent_primitive_count=1,
+        slot_ids=("material-fieldstone-01",),
+    )
+    historical_payload = measured.model_dump(mode="json")
+    historical_payload.pop("triangle_count")
+    historical_payload.pop("building_geometry")
+    audit_path = tmp_path / "glb-material-audit.json"
+    audit_path.write_bytes(canary._canonical_json_bytes(historical_payload))
+
+    assert (
+        verify_stored_local_glb_audit(
+            audit_path,
+            measured_audit=measured,
+        )
+        == measured
+    )
+
+    historical_payload["primitive_count"] = 2
+    audit_path.write_bytes(canary._canonical_json_bytes(historical_payload))
+    with pytest.raises(LocalTexturedPreviewError, match="current GLB bytes"):
+        verify_stored_local_glb_audit(
+            audit_path,
+            measured_audit=measured,
+        )
 
 
 def test_local_v2_report_derives_exact_glb_geometry_expectation() -> None:

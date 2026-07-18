@@ -39,6 +39,7 @@ from pipeline.synthetic_village.defaults import canonical_json_bytes, load_defau
 from pipeline.synthetic_village.glb_material_audit import (
     ExpectedBuildingGeometry,
     ExpectedGlbMaterial,
+    GlbBuildingGeometryEvidence,
     GlbMaterialAudit,
     audit_textured_glb,
 )
@@ -335,6 +336,24 @@ class LocalTexturedPreviewManifest(FrozenModel):
         return self
 
 
+class HistoricalLocalGlbMaterialAudit(FrozenModel):
+    """Pre-triangle-count audit bytes retained by existing local publications."""
+
+    glb_sha256: Sha256
+    byte_count: int = Field(ge=1)
+    mesh_count: int = Field(ge=1)
+    primitive_count: int = Field(ge=1)
+    material_count: int = Field(ge=1)
+    texture_count: int = Field(ge=3)
+    embedded_image_count: int = Field(ge=3)
+    textured_primitive_count: int = Field(ge=1)
+    uv_primitive_count: int = Field(ge=1)
+    tangent_primitive_count: int = Field(ge=1)
+    external_uri_count: Literal[0] = 0
+    slot_ids: tuple[str, ...] = Field(min_length=1)
+    building_geometry: GlbBuildingGeometryEvidence | None = None
+
+
 def _canonical_bytes(value: object) -> bytes:
     return canary._canonical_json_bytes(value)
 
@@ -377,6 +396,15 @@ def canonical_local_glb_audit_bytes(audit: GlbMaterialAudit) -> bytes:
     return _canonical_bytes(payload)
 
 
+def _canonical_historical_local_glb_audit_bytes(
+    audit: HistoricalLocalGlbMaterialAudit,
+) -> bytes:
+    payload = audit.model_dump(mode="json")
+    if "building_geometry" not in audit.model_fields_set:
+        payload.pop("building_geometry")
+    return _canonical_bytes(payload)
+
+
 def _read_stable_file(path: Path, *, maximum_bytes: int, label: str) -> bytes:
     path = Path(path).absolute()
     if canary._is_linklike(path) or not path.is_file():
@@ -404,6 +432,59 @@ def _read_stable_file(path: Path, *, maximum_bytes: int, label: str) -> bytes:
     ):
         raise LocalTexturedPreviewError(f"{label} changed during bounded read")
     return payload
+
+
+def verify_stored_local_glb_audit(
+    path: Path,
+    *,
+    measured_audit: GlbMaterialAudit,
+) -> GlbMaterialAudit:
+    """Verify current or historical stored evidence against a fresh GLB audit."""
+
+    raw = _read_stable_file(
+        path,
+        maximum_bytes=canary.MAX_BUILD_REPORT_BYTES,
+        label="local GLB audit",
+    )
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,
+        )
+        if not isinstance(payload, dict):
+            raise LocalTexturedPreviewError("local GLB audit is not an object")
+        if "triangle_count" in payload:
+            stored = GlbMaterialAudit.model_validate_json(raw)
+            if raw != canonical_local_glb_audit_bytes(stored):
+                raise LocalTexturedPreviewError(
+                    "local GLB audit is not canonical JSON",
+                )
+            if stored != measured_audit:
+                raise LocalTexturedPreviewError(
+                    "local GLB audit does not match current GLB bytes",
+                )
+            return measured_audit
+
+        historical = HistoricalLocalGlbMaterialAudit.model_validate_json(raw)
+        if raw != _canonical_historical_local_glb_audit_bytes(historical):
+            raise LocalTexturedPreviewError(
+                "historical local GLB audit is not canonical JSON",
+            )
+        measured_payload = measured_audit.model_dump(mode="json")
+        measured_payload.pop("triangle_count")
+        historical_payload = historical.model_dump(mode="json")
+        if "building_geometry" not in historical.model_fields_set:
+            measured_payload.pop("building_geometry")
+            historical_payload.pop("building_geometry")
+        if historical_payload != measured_payload:
+            raise LocalTexturedPreviewError(
+                "historical local GLB audit does not match current GLB bytes",
+            )
+        return measured_audit
+    except LocalTexturedPreviewError:
+        raise
+    except (UnicodeError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise LocalTexturedPreviewError(f"local GLB audit is invalid: {exc}") from exc
 
 
 def probe_local_blender_identity(
@@ -709,17 +790,6 @@ def verify_local_textured_preview_directory(
     if expected_preview_id is not None and manifest.preview_id != expected_preview_id:
         raise LocalTexturedPreviewError("local preview identity does not match its directory")
     report = load_local_textured_build_report(directory / "build-report.json")
-    audit_raw = _read_stable_file(
-        directory / "glb-material-audit.json",
-        maximum_bytes=canary.MAX_BUILD_REPORT_BYTES,
-        label="local GLB audit",
-    )
-    try:
-        audit = GlbMaterialAudit.model_validate_json(audit_raw)
-    except ValidationError as exc:
-        raise LocalTexturedPreviewError(f"local GLB audit is invalid: {exc}") from exc
-    if audit_raw != canonical_local_glb_audit_bytes(audit):
-        raise LocalTexturedPreviewError("local GLB audit is not canonical JSON")
     try:
         measured_audit = audit_textured_glb(
             directory / "village-canary.glb",
@@ -728,9 +798,11 @@ def verify_local_textured_preview_directory(
         )
     except ValueError as exc:
         raise LocalTexturedPreviewError(f"local GLB audit failed: {exc}") from exc
+    audit = verify_stored_local_glb_audit(
+        directory / "glb-material-audit.json",
+        measured_audit=measured_audit,
+    )
     _verify_building_geometry_audit_agreement(report, measured_audit)
-    if measured_audit != audit:
-        raise LocalTexturedPreviewError("local GLB audit does not match current GLB bytes")
     try:
         glb_sha256, glb_bytes = canary._sha256_stable_artifact(
             directory / "village-canary.glb",
