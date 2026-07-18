@@ -9,15 +9,20 @@ import pytest
 from pydantic import ValidationError
 
 from pipeline.mock_layout import DEFAULT_ASSETS
-from pipeline.synthetic_village.mesh_asset_bundle import (
-    MESH_ASSET_BUNDLE_SCHEMA,
-    MeshAssetBundle,
+from pipeline.synthetic_village.infinite_terrain import (
+    TERRAIN_ALGORITHM_ID,
+    terrain_height_m,
+    terrain_macro_tint,
 )
 from pipeline.synthetic_village.material_bundle import (
     MATERIAL_PARAMETERS,
     DerivedMaterialBundle,
     DerivedMaterialRecord,
     MaterialMapDescriptor,
+)
+from pipeline.synthetic_village.mesh_asset_bundle import (
+    MESH_ASSET_BUNDLE_SCHEMA,
+    MeshAssetBundle,
 )
 from pipeline.synthetic_village.mesh_chunk import (
     MeshChunkError,
@@ -240,6 +245,55 @@ def test_adjacent_chunks_share_exact_world_anchored_terrain_edge() -> None:
         (row.world_u, row.world_v, row.z) for row in east_edge
     )
     assert {row.world_u for row in west_edge} == {200.0}
+    assert len({row.z for row in west.terrain.vertices}) > 1
+
+
+def test_relief_is_shared_by_terrain_ribbons_instances_and_bounds() -> None:
+    bundle = _bundle()
+    manifests = [
+        build_mesh_chunk_manifest(1, -1, world_seed=42, bundle=bundle, lod=lod)
+        for lod in (0, 1, 2)
+    ]
+
+    assert {manifest.terrain.resolution for manifest in manifests} == {9}
+    manifest = manifests[-1]
+    assert manifest.terrain_algorithm_id == TERRAIN_ALGORITHM_ID
+    assert manifest.terrain.algorithm_id == TERRAIN_ALGORITHM_ID
+
+    for vertex in manifest.terrain.vertices:
+        assert vertex.z == terrain_height_m(
+            vertex.world_u,
+            vertex.world_v,
+            world_seed=manifest.world_seed,
+        )
+        assert vertex.macro_tint == terrain_macro_tint(
+            vertex.world_u,
+            vertex.world_v,
+            world_seed=manifest.world_seed,
+        )
+
+    world_x, world_y, _ = manifest.world_offset
+    for ribbon in (*manifest.roads, *manifest.water):
+        for local_x, local_y, local_z in ribbon.points:
+            assert local_z == pytest.approx(
+                terrain_height_m(
+                    world_x + local_x,
+                    world_y + local_y,
+                    world_seed=manifest.world_seed,
+                )
+                + ribbon.z_offset,
+            )
+    for instance in manifest.instances:
+        local_x, local_y, local_z = instance.local_position
+        assert local_z == terrain_height_m(
+            world_x + local_x,
+            world_y + local_y,
+            world_seed=manifest.world_seed,
+        )
+
+    terrain_z = [vertex.z for vertex in manifest.terrain.vertices]
+    assert manifest.aabb.min[2] <= min(terrain_z)
+    assert manifest.aabb.max[2] >= max(terrain_z)
 
 
 def test_bundle_or_material_replacement_changes_chunk_identity() -> None:

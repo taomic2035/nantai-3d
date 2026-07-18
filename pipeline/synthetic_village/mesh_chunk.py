@@ -17,15 +17,20 @@ from pydantic import (
 )
 
 from pipeline.mock_layout import MockLayoutGenerator
-from pipeline.synthetic_village.mesh_asset_bundle import (
-    Bounds3,
-    MeshAssetBundle,
-    MeshAssetRecord,
+from pipeline.synthetic_village.infinite_terrain import (
+    TERRAIN_ALGORITHM_ID,
+    terrain_height_m,
+    terrain_macro_tint,
 )
 from pipeline.synthetic_village.material_bundle import (
     DerivedMaterialBundle,
     DerivedMaterialRecord,
     UvPolicy,
+)
+from pipeline.synthetic_village.mesh_asset_bundle import (
+    Bounds3,
+    MeshAssetBundle,
+    MeshAssetRecord,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -33,11 +38,10 @@ Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 MESH_CHUNK_SCHEMA = "nantai.synthetic-village.mesh-chunk.v1"
 MESH_CHUNK_RUNTIME_SCHEMA = "nantai.synthetic-village.mesh-chunk-runtime.v1"
 LAYOUT_ALGORITHM_ID = "mock-layout-v1"
-TERRAIN_ALGORITHM_ID = "mock-flat-ground-v1"
 RENDERER_CAPABILITY = "synthetic-textured-mesh-grid"
 CHUNK_SIZE_M = 200
 MAX_SAFE_INTEGER = 2**53 - 1
-TERRAIN_RESOLUTION = {0: 3, 1: 5, 2: 9}
+TERRAIN_RESOLUTION = {0: 9, 1: 9, 2: 9}
 VEGETATION_LIMIT = {0: 2, 1: 5, 2: 12}
 
 TERRAIN_MATERIAL_SLOT = "material-terrace-soil-01"
@@ -68,11 +72,14 @@ class TerrainVertex(FrozenModel):
     z: float
     world_u: float
     world_v: float
+    macro_tint: float = Field(ge=0.9, le=1.1, allow_inf_nan=False)
 
 
 class TerrainGrid(FrozenModel):
-    algorithm_id: Literal["mock-flat-ground-v1"] = TERRAIN_ALGORITHM_ID
-    resolution: Literal[3, 5, 9]
+    algorithm_id: Literal[
+        "synthetic-multiscale-relief-v1"
+    ] = TERRAIN_ALGORITHM_ID
+    resolution: Literal[9]
     material_slot_id: Literal[
         "material-terrace-soil-01"
     ] = TERRAIN_MATERIAL_SLOT
@@ -122,7 +129,7 @@ class MeshChunkManifest(FrozenModel):
     layout_algorithm_id: Literal["mock-layout-v1"] = LAYOUT_ALGORITHM_ID
     layout_sha256: Sha256
     terrain_algorithm_id: Literal[
-        "mock-flat-ground-v1"
+        "synthetic-multiscale-relief-v1"
     ] = TERRAIN_ALGORITHM_ID
     mesh_asset_bundle_id: Sha256
     material_bundle_id: Sha256
@@ -292,7 +299,12 @@ def _layout_bytes(layout: BaseModel) -> bytes:
     return _canonical_json_bytes(layout.model_dump(mode="json"))
 
 
-def _terrain_grid(chunk_x: int, chunk_y: int, lod: int) -> TerrainGrid:
+def _terrain_grid(
+    chunk_x: int,
+    chunk_y: int,
+    world_seed: int,
+    lod: int,
+) -> TerrainGrid:
     resolution = TERRAIN_RESOLUTION[lod]
     step = CHUNK_SIZE_M / (resolution - 1)
     vertices = []
@@ -300,13 +312,24 @@ def _terrain_grid(chunk_x: int, chunk_y: int, lod: int) -> TerrainGrid:
         local_y = y_index * step
         for x_index in range(resolution):
             local_x = x_index * step
+            world_u = float(chunk_x * CHUNK_SIZE_M + local_x)
+            world_v = float(chunk_y * CHUNK_SIZE_M + local_y)
             vertices.append(
                 TerrainVertex(
                     x=float(local_x),
                     y=float(local_y),
-                    z=0.0,
-                    world_u=float(chunk_x * CHUNK_SIZE_M + local_x),
-                    world_v=float(chunk_y * CHUNK_SIZE_M + local_y),
+                    z=terrain_height_m(
+                        world_u,
+                        world_v,
+                        world_seed=world_seed,
+                    ),
+                    world_u=world_u,
+                    world_v=world_v,
+                    macro_tint=terrain_macro_tint(
+                        world_u,
+                        world_v,
+                        world_seed=world_seed,
+                    ),
                 ),
             )
     return TerrainGrid(
@@ -316,6 +339,8 @@ def _terrain_grid(chunk_x: int, chunk_y: int, lod: int) -> TerrainGrid:
 
 
 def _road_ribbons(layout) -> tuple[Ribbon, ...]:
+    world_x = layout.chunk_id.x * CHUNK_SIZE_M
+    world_y = layout.chunk_id.y * CHUNK_SIZE_M
     return tuple(
         Ribbon(
             ribbon_id=road.id,
@@ -325,7 +350,16 @@ def _road_ribbons(layout) -> tuple[Ribbon, ...]:
             z_offset=0.04,
             material_slot_id=ROAD_MATERIAL_SLOTS[road.type],
             points=tuple(
-                (float(point[0]), float(point[1]), 0.04)
+                (
+                    float(point[0]),
+                    float(point[1]),
+                    terrain_height_m(
+                        world_x + point[0],
+                        world_y + point[1],
+                        world_seed=layout.world_seed,
+                    )
+                    + 0.04,
+                )
                 for point in road.points
             ),
         )
@@ -334,6 +368,8 @@ def _road_ribbons(layout) -> tuple[Ribbon, ...]:
 
 
 def _water_ribbons(layout) -> tuple[Ribbon, ...]:
+    world_x = layout.chunk_id.x * CHUNK_SIZE_M
+    world_y = layout.chunk_id.y * CHUNK_SIZE_M
     return tuple(
         Ribbon(
             ribbon_id=feature.id,
@@ -343,7 +379,16 @@ def _water_ribbons(layout) -> tuple[Ribbon, ...]:
             z_offset=0.02,
             material_slot_id=WATER_MATERIAL_SLOT,
             points=tuple(
-                (float(point[0]), float(point[1]), 0.02)
+                (
+                    float(point[0]),
+                    float(point[1]),
+                    terrain_height_m(
+                        world_x + point[0],
+                        world_y + point[1],
+                        world_seed=layout.world_seed,
+                    )
+                    + 0.02,
+                )
                 for point in feature.points
             ),
         )
@@ -372,6 +417,8 @@ def _asset_record(
 def _mesh_instances(layout, bundle: MeshAssetBundle, lod: int) -> tuple[MeshInstance, ...]:
     records = {record.asset_id: record for record in bundle.records}
     instances: list[MeshInstance] = []
+    world_x = layout.chunk_id.x * CHUNK_SIZE_M
+    world_y = layout.chunk_id.y * CHUNK_SIZE_M
     for building in layout.buildings:
         _asset_record(records, building.asset_id, expected_kind="building")
         instances.append(
@@ -382,7 +429,11 @@ def _mesh_instances(layout, bundle: MeshAssetBundle, lod: int) -> tuple[MeshInst
                 local_position=(
                     float(building.pos[0]),
                     float(building.pos[1]),
-                    0.0,
+                    terrain_height_m(
+                        world_x + building.pos[0],
+                        world_y + building.pos[1],
+                        world_seed=layout.world_seed,
+                    ),
                 ),
                 rotation_z_degrees=float(building.rot_z % 360),
                 scale=float(building.scale),
@@ -396,7 +447,15 @@ def _mesh_instances(layout, bundle: MeshAssetBundle, lod: int) -> tuple[MeshInst
                 instance_id=f"prop:{prop.id}",
                 asset_id=prop.asset_id,
                 kind="prop",
-                local_position=(float(prop.pos[0]), float(prop.pos[1]), 0.0),
+                local_position=(
+                    float(prop.pos[0]),
+                    float(prop.pos[1]),
+                    terrain_height_m(
+                        world_x + prop.pos[0],
+                        world_y + prop.pos[1],
+                        world_seed=layout.world_seed,
+                    ),
+                ),
                 rotation_z_degrees=float(prop.rot_z % 360),
                 scale=1.0,
                 template_lod=lod,
@@ -425,15 +484,21 @@ def _mesh_instances(layout, bundle: MeshAssetBundle, lod: int) -> tuple[MeshInst
                 CHUNK_SIZE_M,
                 max(0.0, cluster.center[1] + radius * math.sin(angle)),
             )
+            local_x = round(float(local_x), 6)
+            local_y = round(float(local_y), 6)
             instances.append(
                 MeshInstance(
                     instance_id=f"vegetation:{cluster.id}:{index:02d}",
                     asset_id=asset_id,
                     kind="vegetation",
                     local_position=(
-                        round(float(local_x), 6),
-                        round(float(local_y), 6),
-                        0.0,
+                        local_x,
+                        local_y,
+                        terrain_height_m(
+                            world_x + local_x,
+                            world_y + local_y,
+                            world_seed=layout.world_seed,
+                        ),
                     ),
                     rotation_z_degrees=round(rng.random() * 359.999999, 6),
                     scale=round(0.8 + rng.random() * 0.4, 6),
@@ -485,17 +550,28 @@ def _instance_bounds(
 def _chunk_bounds(
     *,
     world_offset: tuple[float, float, float],
+    terrain: TerrainGrid,
     roads: tuple[Ribbon, ...],
     water: tuple[Ribbon, ...],
     instances: tuple[MeshInstance, ...],
     bundle: MeshAssetBundle,
 ) -> Bounds3:
-    lower = [world_offset[0], world_offset[1], world_offset[2]]
+    lower = [world_offset[0], world_offset[1], float("inf")]
     upper = [
         world_offset[0] + CHUNK_SIZE_M,
         world_offset[1] + CHUNK_SIZE_M,
-        world_offset[2],
+        float("-inf"),
     ]
+    for vertex in terrain.vertices:
+        _expand_bounds(
+            lower,
+            upper,
+            (
+                world_offset[0] + vertex.x,
+                world_offset[1] + vertex.y,
+                world_offset[2] + vertex.z,
+            ),
+        )
     for ribbon in (*roads, *water):
         half_width = ribbon.width / 2
         for x, y, z in ribbon.points:
@@ -554,7 +630,7 @@ def build_mesh_chunk_manifest(
         raise MeshChunkError("mesh chunk LOD must be 0, 1, or 2")
 
     layout = MockLayoutGenerator(world_seed).generate_chunk(chunk_x, chunk_y)
-    terrain = _terrain_grid(chunk_x, chunk_y, lod)
+    terrain = _terrain_grid(chunk_x, chunk_y, world_seed, lod)
     roads = _road_ribbons(layout)
     water = _water_ribbons(layout)
     instances = _mesh_instances(layout, bundle, lod)
@@ -594,6 +670,7 @@ def build_mesh_chunk_manifest(
         "instances": instances,
         "aabb": _chunk_bounds(
             world_offset=world_offset,
+            terrain=terrain,
             roads=roads,
             water=water,
             instances=instances,

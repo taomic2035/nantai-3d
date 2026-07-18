@@ -527,6 +527,11 @@ async function meshSurfaceMaterial(descriptor, kind) {
 function meshFromGeometryData(data, material, name) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+  if (data.colors) {
+    geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+    material.vertexColors = true;
+    material.needsUpdate = true;
+  }
   const uv = new THREE.BufferAttribute(data.uvs, 2);
   geometry.setAttribute('uv', uv);
   geometry.setAttribute('uv1', uv.clone());

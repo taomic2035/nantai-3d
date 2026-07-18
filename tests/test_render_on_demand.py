@@ -26,6 +26,10 @@ from pipeline.render_chunk_to_ply import (
     render_chunkset,
     render_single_chunk,
 )
+from pipeline.synthetic_village.infinite_terrain import (
+    TERRAIN_ALGORITHM_ID,
+    terrain_height_m,
+)
 
 
 def _ply_count(data: bytes) -> int:
@@ -80,6 +84,24 @@ def test_negative_index_chunk_renders_and_is_deterministic():
     second = build_chunk_array(layout, registry=None)
     assert len(first) > 0
     assert _sha_of_array(first) == _sha_of_array(second)
+
+
+def test_gaussian_ground_uses_the_shared_world_relief() -> None:
+    layout = MockLayoutGenerator(world_seed=42).generate_chunk(-1, 2)
+    rendered = build_chunk_array(layout, registry=None)
+    ground = rendered[:4000]
+    terrain = np.array(
+        [
+            terrain_height_m(float(x), float(y), world_seed=layout.world_seed)
+            for x, y in zip(ground["x"], ground["y"], strict=True)
+        ],
+        dtype=np.float32,
+    )
+    offset = ground["z"] - terrain
+
+    assert float(offset.min()) >= -1e-5
+    assert float(offset.max()) <= 0.30001
+    assert float(np.ptp(terrain)) > 1.0
 
 
 def test_ground_seed_stays_byte_stable_for_nonnegative_offsets():
@@ -192,6 +214,10 @@ class TestOnDemandGridRecipe:
         )
         assert manifest["grid"]["layout_engine"] == "mock"
         assert manifest["grid"]["uses_assets"] is False
+        assert (
+            manifest["grid"]["terrain_algorithm_id"]
+            == TERRAIN_ALGORITHM_ID
+        )
 
     def test_multi_seed_world_disables_on_demand(self, tmp_path):
         """混 seed 烘焙 → world_seed 无单一值 → 端点无法确定按需 seed → fail-closed

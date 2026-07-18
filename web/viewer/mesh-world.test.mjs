@@ -21,6 +21,8 @@ const BUNDLE_ID = '1'.repeat(64);
 const MATERIAL_ID = '2'.repeat(64);
 const GLB_SHA = '3'.repeat(64);
 const MAP_SHA = '6'.repeat(64);
+const TERRAIN_ALGORITHM_ID = 'synthetic-multiscale-relief-v1';
+const TERRAIN_RESOLUTION = 9;
 const WORLD = {
   mesh_grid: {
     on_demand: true,
@@ -28,7 +30,7 @@ const WORLD = {
     asset_url_template: '/api/world/mesh-assets/{bundle_id}/{asset_id}/lod{lod}.glb',
     world_seed: 42,
     layout_engine: 'mock',
-    terrain_algorithm_id: 'mock-flat-ground-v1',
+    terrain_algorithm_id: TERRAIN_ALGORITHM_ID,
     mesh_asset_bundle_id: BUNDLE_ID,
     material_bundle_id: MATERIAL_ID,
   },
@@ -47,25 +49,31 @@ function runtime() {
       world_offset: [-200, 400, 0],
       layout_algorithm_id: 'mock-layout-v1',
       layout_sha256: '5'.repeat(64),
-      terrain_algorithm_id: 'mock-flat-ground-v1',
+      terrain_algorithm_id: TERRAIN_ALGORITHM_ID,
       mesh_asset_bundle_id: BUNDLE_ID,
       material_bundle_id: MATERIAL_ID,
       selected_lod: 0,
       terrain: {
-        algorithm_id: 'mock-flat-ground-v1',
-        resolution: 3,
+        algorithm_id: TERRAIN_ALGORITHM_ID,
+        resolution: TERRAIN_RESOLUTION,
         material_slot_id: 'material-terrace-soil-01',
-        vertices: [
-          { x: 0, y: 0, z: 0, world_u: -200, world_v: 400 },
-          { x: 100, y: 0, z: 0, world_u: -100, world_v: 400 },
-          { x: 200, y: 0, z: 0, world_u: 0, world_v: 400 },
-          { x: 0, y: 100, z: 0, world_u: -200, world_v: 500 },
-          { x: 100, y: 100, z: 0, world_u: -100, world_v: 500 },
-          { x: 200, y: 100, z: 0, world_u: 0, world_v: 500 },
-          { x: 0, y: 200, z: 0, world_u: -200, world_v: 600 },
-          { x: 100, y: 200, z: 0, world_u: -100, world_v: 600 },
-          { x: 200, y: 200, z: 0, world_u: 0, world_v: 600 },
-        ],
+        vertices: Array.from(
+          { length: TERRAIN_RESOLUTION ** 2 },
+          (_, index) => {
+            const row = Math.floor(index / TERRAIN_RESOLUTION);
+            const column = index % TERRAIN_RESOLUTION;
+            const x = column * 25;
+            const y = row * 25;
+            return {
+              x,
+              y,
+              z: (row - column) * 0.25,
+              world_u: -200 + x,
+              world_v: 400 + y,
+              macro_tint: 0.95 + ((row + column) % 3) * 0.025,
+            };
+          },
+        ),
       },
       roads: [],
       water: [],
@@ -224,26 +232,26 @@ test('instance and terrain conversion preserve ENU while mapping to Three axes',
   );
 
   const geometry = terrainGeometryThree(payload.chunk);
-  assert.deepEqual(Array.from(geometry.positions), [
+  assert.deepEqual(Array.from(geometry.positions.slice(0, 6)), [
     -200, 0, -400,
-    -100, 0, -400,
-    0, 0, -400,
-    -200, 0, -500,
-    -100, 0, -500,
-    0, 0, -500,
-    -200, 0, -600,
-    -100, 0, -600,
-    0, 0, -600,
+    -175, -0.25, -400,
   ]);
   assert.deepEqual(
-    Array.from(geometry.indices),
-    [0, 3, 1, 1, 3, 4, 1, 4, 2, 2, 4, 5, 3, 6, 4, 4, 6, 7, 4, 7, 5, 5, 7, 8],
+    Array.from(geometry.positions.slice(-3)),
+    [0, 0, -600],
   );
-  assert.deepEqual(Array.from(geometry.uvs), [
-    -200, 400, -100, 400, 0, 400,
-    -200, 500, -100, 500, 0, 500,
-    -200, 600, -100, 600, 0, 600,
-  ]);
+  assert.equal(geometry.indices.length, 8 * 8 * 6);
+  assert.deepEqual(
+    Array.from(geometry.indices.slice(0, 6)),
+    [0, 9, 1, 1, 9, 10],
+  );
+  assert.deepEqual(
+    Array.from(geometry.uvs.slice(0, 4)),
+    [-200, 400, -175, 400],
+  );
+  assert.equal(geometry.colors.length, TERRAIN_RESOLUTION ** 2 * 3);
+  assert.ok(Math.abs(geometry.colors[0] - 0.95) < 1e-6);
+  assert.ok(Math.abs(geometry.colors[3] - 0.975) < 1e-6);
 
   const ribbon = ribbonGeometryThree(payload.chunk, {
     ribbon_id: 'test-road',

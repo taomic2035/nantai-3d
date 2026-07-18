@@ -25,19 +25,20 @@ from pipeline.studio_server import (
     make_server,
     resolve_static_path,
 )
+from pipeline.synthetic_village.infinite_terrain import TERRAIN_ALGORITHM_ID
 from pipeline.synthetic_village.local_textured_preview import (
     LOCAL_LIMITATIONS,
     LocalTexturedPreviewManifest,
     canonical_local_textured_preview_manifest_bytes,
-)
-from pipeline.synthetic_village.mesh_asset_bundle import (
-    canonical_mesh_asset_bundle_bytes,
 )
 from pipeline.synthetic_village.material_bundle import (
     ALGORITHM_ID,
     MATERIAL_PARAMETERS,
     DerivedMaterialBundle,
     canonical_material_bundle_bytes,
+)
+from pipeline.synthetic_village.mesh_asset_bundle import (
+    canonical_mesh_asset_bundle_bytes,
 )
 from tests.test_mesh_asset_bundle import _glb_payload
 from tests.test_mesh_chunk import _bundle
@@ -435,7 +436,7 @@ def _write_mesh_world_bundle(root: Path):
         ),
         "world_seed": 42,
         "layout_engine": "mock",
-        "terrain_algorithm_id": "mock-flat-ground-v1",
+        "terrain_algorithm_id": TERRAIN_ALGORITHM_ID,
         "mesh_asset_bundle_id": bundle.bundle_id,
         "material_bundle_id": bundle.material_bundle_id,
     }
@@ -1078,6 +1079,7 @@ class TestHttpContract:
             "world_seed": world_seed,
             "layout_engine": layout_engine,
             "uses_assets": uses_assets,
+            "terrain_algorithm_id": TERRAIN_ALGORITHM_ID,
         }
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -1476,6 +1478,7 @@ class TestHttpContract:
             "world_seed": 42,
             "layout_engine": "mock",
             "uses_assets": False,
+            "terrain_algorithm_id": TERRAIN_ALGORITHM_ID,
         }
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -1583,6 +1586,15 @@ class TestHttpContract:
                 "world_seed": 42,
                 "layout_engine": "glm",
                 "uses_assets": False,
+                "terrain_algorithm_id": TERRAIN_ALGORITHM_ID,
+            },
+            {
+                "on_demand": False,
+                "url_template": "/api/world/chunk/{x}/{y}.ply",
+                "world_seed": 42,
+                "layout_engine": "mock",
+                "uses_assets": False,
+                "terrain_algorithm_id": "mock-flat-ground-v1",
             },
         ],
     )

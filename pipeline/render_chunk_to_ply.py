@@ -20,6 +20,10 @@ from loguru import logger
 from plyfile import PlyData, PlyElement
 
 from pipeline.schema import ChunkLayout
+from pipeline.synthetic_village.infinite_terrain import (
+    TERRAIN_ALGORITHM_ID,
+    terrain_height_m,
+)
 
 VEGETATION_POINT_BUDGET = 6000
 VEGETATION_MAX_INSTANCES = 12
@@ -102,7 +106,29 @@ COLOR_TREE = (40, 110, 35)       # 深绿
 COLOR_WATER = (60, 110, 180)     # 蓝色
 
 
-def _emit_ground(x_offset: int, y_offset: int, n: int = 4000) -> np.ndarray:
+def _terrain_heights(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    world_seed: int,
+) -> np.ndarray:
+    return np.fromiter(
+        (
+            terrain_height_m(float(x), float(y), world_seed=world_seed)
+            for x, y in zip(x_values, y_values, strict=True)
+        ),
+        dtype=np.float32,
+        count=len(x_values),
+    )
+
+
+def _emit_ground(
+    x_offset: int,
+    y_offset: int,
+    *,
+    world_seed: int,
+    n: int = 4000,
+) -> np.ndarray:
     """地面基础层 (草色稀疏点)"""
     # 掩码为非负种子: 负象限 chunk 的 world_offset 为负会让原算术种子变负,
     # numpy SeedSequence 拒绝负数 -> 崩溃。掩码与 mock_layout._rng 惯例一致,
@@ -115,13 +141,22 @@ def _emit_ground(x_offset: int, y_offset: int, n: int = 4000) -> np.ndarray:
     ])
     pts['x'] = x_offset + rng.uniform(0, 200, n)
     pts['y'] = y_offset + rng.uniform(0, 200, n)
-    pts['z'] = rng.uniform(0, 0.3, n)  # 贴地
+    pts['z'] = (
+        _terrain_heights(pts['x'], pts['y'], world_seed=world_seed)
+        + rng.uniform(0, 0.3, n)
+    )
     pts['r'], pts['g'], pts['b'] = COLOR_GROUND
     pts['scale'] = rng.uniform(0.5, 1.2, n)
     return pts
 
 
-def _emit_road(road, x_offset: int, y_offset: int) -> np.ndarray:
+def _emit_road(
+    road,
+    x_offset: int,
+    y_offset: int,
+    *,
+    world_seed: int,
+) -> np.ndarray:
     """道路: 沿 points 连线生成平铺高斯"""
     # 噪声/scale 用 road.id 派生的本地确定性 RNG (不用进程级全局 np.random,
     # 否则同一 chunk 跨渲染发散、并发服务器互相污染)。
@@ -156,7 +191,10 @@ def _emit_road(road, x_offset: int, y_offset: int) -> np.ndarray:
         ])
         pts['x'] = x_offset + pos[:, 0]
         pts['y'] = y_offset + pos[:, 1]
-        pts['z'] = noise.uniform(0.05, 0.2, n)
+        pts['z'] = (
+            _terrain_heights(pts['x'], pts['y'], world_seed=world_seed)
+            + noise.uniform(0.05, 0.2, n)
+        )
         pts['r'], pts['g'], pts['b'] = color
         pts['scale'] = noise.uniform(0.8, 1.5, n)
         pts_list.append(pts)
@@ -169,19 +207,23 @@ def _emit_building(
     b,
     x_offset: int,
     y_offset: int,
+    *,
     registry=None,
     consumption: list[dict] | None = None,
     chunk_id: str = "",
+    world_seed: int,
 ) -> np.ndarray:
     """建筑: 注册表有对应素材时实例化真实/GPT 泼溅, 否则合成盒子墙 + 屋顶"""
     bx, by = b.pos
     bx += x_offset
     by += y_offset
+    ground_z = terrain_height_m(bx, by, world_seed=world_seed)
 
     if registry is not None:
         inst = registry.instantiate(b.asset_id, (bx, by), b.rot_z, b.scale)
         if inst is not None and len(inst) > 0:
             arr = _scene_to_simple(inst)
+            arr['z'] += ground_z
             _record_asset_consumption(
                 consumption,
                 registry,
@@ -239,7 +281,7 @@ def _emit_building(
     wall_arr = np.zeros(len(wall_pts_xyz), dtype=wall_dtype)
     wall_arr['x'] = wall_pts_xyz[:, 0]
     wall_arr['y'] = wall_pts_xyz[:, 1]
-    wall_arr['z'] = wall_pts_xyz[:, 2]
+    wall_arr['z'] = wall_pts_xyz[:, 2] + ground_z
     wall_arr['r'], wall_arr['g'], wall_arr['b'] = COLOR_BUILDING_WALL
     wall_arr['scale'] = noise.uniform(0.4, 0.8, len(wall_pts_xyz))
 
@@ -257,18 +299,25 @@ def _emit_building(
     roof_arr = np.zeros(n_roof, dtype=wall_dtype)
     roof_arr['x'] = roof_pts[:, 0]
     roof_arr['y'] = roof_pts[:, 1]
-    roof_arr['z'] = roof_pts[:, 2]
+    roof_arr['z'] = roof_pts[:, 2] + ground_z
     roof_arr['r'], roof_arr['g'], roof_arr['b'] = COLOR_BUILDING_ROOF
     roof_arr['scale'] = noise.uniform(0.5, 1.0, n_roof)
 
     return np.concatenate([wall_arr, roof_arr])
 
 
-def _emit_proxy_vegetation(veg, x_offset: int, y_offset: int) -> np.ndarray:
+def _emit_proxy_vegetation(
+    veg,
+    x_offset: int,
+    y_offset: int,
+    *,
+    world_seed: int,
+) -> np.ndarray:
     """Missing-asset fallback: deterministic green volume proxy."""
     cx, cy = veg.center
     cx += x_offset
     cy += y_offset
+    ground_z = terrain_height_m(cx, cy, world_seed=world_seed)
     r = veg.radius
     n = int(50 * veg.density * r)
 
@@ -283,7 +332,7 @@ def _emit_proxy_vegetation(veg, x_offset: int, y_offset: int) -> np.ndarray:
     ])
     pts['x'] = cx + rad * np.sin(phi) * np.cos(theta)
     pts['y'] = cy + rad * np.sin(phi) * np.sin(theta)
-    pts['z'] = 1.5 + rad * np.cos(phi)  # 树高起步 1.5m
+    pts['z'] = ground_z + 1.5 + rad * np.cos(phi)  # 树高起步 1.5m
     pts['r'], pts['g'], pts['b'] = COLOR_TREE
     pts['scale'] = t.uniform(0.6, 1.4, n)
     return pts
@@ -300,18 +349,30 @@ def _emit_vegetation(
     veg,
     x_offset: int,
     y_offset: int,
+    *,
     registry=None,
     consumption: list[dict] | None = None,
     chunk_id: str = "",
+    world_seed: int,
 ) -> np.ndarray:
     """Instantiate declared tree assets with deterministic placement and a point cap."""
     if registry is None:
-        return _emit_proxy_vegetation(veg, x_offset, y_offset)
+        return _emit_proxy_vegetation(
+            veg,
+            x_offset,
+            y_offset,
+            world_seed=world_seed,
+        )
 
     available = [asset_id for asset_id in veg.asset_ids if registry.resolve(asset_id)]
     instance_count = _vegetation_instance_count(veg.radius, veg.density)
     if not available or instance_count == 0:
-        return _emit_proxy_vegetation(veg, x_offset, y_offset)
+        return _emit_proxy_vegetation(
+            veg,
+            x_offset,
+            y_offset,
+            world_seed=world_seed,
+        )
 
     rng = np.random.default_rng(
         _stable_seed(f"{veg.id}:{x_offset}:{y_offset}:asset-vegetation")
@@ -334,6 +395,7 @@ def _emit_vegetation(
         if inst is None or len(inst) == 0:
             continue
         arr = _scene_to_simple(inst)
+        arr['z'] += terrain_height_m(*pos, world_seed=world_seed)
         if len(arr) > points_per_instance:
             order = np.argsort(-arr["scale"], kind="stable")[:points_per_instance]
             arr = arr[np.sort(order)]
@@ -349,11 +411,22 @@ def _emit_vegetation(
         )
 
     if not layers:
-        return _emit_proxy_vegetation(veg, x_offset, y_offset)
+        return _emit_proxy_vegetation(
+            veg,
+            x_offset,
+            y_offset,
+            world_seed=world_seed,
+        )
     return np.concatenate(layers)
 
 
-def _emit_water(water, x_offset: int, y_offset: int) -> np.ndarray:
+def _emit_water(
+    water,
+    x_offset: int,
+    y_offset: int,
+    *,
+    world_seed: int,
+) -> np.ndarray:
     """水系: 沿 points 生成蓝色平铺"""
     pts_list = []
     w = water.width
@@ -382,7 +455,10 @@ def _emit_water(water, x_offset: int, y_offset: int) -> np.ndarray:
         ])
         pts['x'] = x_offset + pos[:, 0]
         pts['y'] = y_offset + pos[:, 1]
-        pts['z'] = 0.1
+        pts['z'] = (
+            _terrain_heights(pts['x'], pts['y'], world_seed=world_seed)
+            + 0.1
+        )
         pts['r'], pts['g'], pts['b'] = COLOR_WATER
         pts['scale'] = t.uniform(0.8, 1.5, n)
         pts_list.append(pts)
@@ -398,19 +474,23 @@ def _emit_prop(
     p,
     x_offset: int,
     y_offset: int,
+    *,
     registry=None,
     consumption: list[dict] | None = None,
     chunk_id: str = "",
+    world_seed: int,
 ) -> np.ndarray:
     """道具: 注册素材实例化, 无素材时给一个小型棕色聚簇占位"""
     px, py = p.pos
     px += x_offset
     py += y_offset
+    ground_z = terrain_height_m(px, py, world_seed=world_seed)
 
     if registry is not None:
         inst = registry.instantiate(p.asset_id, (px, py), p.rot_z, 1.0)
         if inst is not None and len(inst) > 0:
             arr = _scene_to_simple(inst)
+            arr['z'] += ground_z
             _record_asset_consumption(
                 consumption,
                 registry,
@@ -427,7 +507,7 @@ def _emit_prop(
     pts = np.zeros(n, dtype=SIMPLE_DTYPE)
     pts['x'] = px + t.normal(0, 0.4, n)
     pts['y'] = py + t.normal(0, 0.4, n)
-    pts['z'] = np.abs(t.normal(0.5, 0.3, n))
+    pts['z'] = ground_z + np.abs(t.normal(0.5, 0.3, n))
     pts['r'], pts['g'], pts['b'] = (120, 90, 60)
     pts['scale'] = t.uniform(0.2, 0.5, n)
     return pts
@@ -443,10 +523,23 @@ def build_chunk_array(
     y_offset = layout.chunk_id.y * 200
     chunk_id = f"{layout.chunk_id.x}_{layout.chunk_id.y}"
 
-    layers = [_emit_ground(x_offset, y_offset)]
+    layers = [
+        _emit_ground(
+            x_offset,
+            y_offset,
+            world_seed=layout.world_seed,
+        ),
+    ]
 
     for road in layout.roads:
-        layers.append(_emit_road(road, x_offset, y_offset))
+        layers.append(
+            _emit_road(
+                road,
+                x_offset,
+                y_offset,
+                world_seed=layout.world_seed,
+            ),
+        )
     for b in layout.buildings:
         layers.append(
             _emit_building(
@@ -456,6 +549,7 @@ def build_chunk_array(
                 registry=registry,
                 consumption=consumption,
                 chunk_id=chunk_id,
+                world_seed=layout.world_seed,
             )
         )
     for v in layout.vegetation:
@@ -467,10 +561,18 @@ def build_chunk_array(
                 registry=registry,
                 consumption=consumption,
                 chunk_id=chunk_id,
+                world_seed=layout.world_seed,
             )
         )
     for w in layout.water:
-        layers.append(_emit_water(w, x_offset, y_offset))
+        layers.append(
+            _emit_water(
+                w,
+                x_offset,
+                y_offset,
+                world_seed=layout.world_seed,
+            ),
+        )
     for p in layout.props:
         layers.append(
             _emit_prop(
@@ -480,6 +582,7 @@ def build_chunk_array(
                 registry=registry,
                 consumption=consumption,
                 chunk_id=chunk_id,
+                world_seed=layout.world_seed,
             )
         )
 
@@ -547,7 +650,8 @@ def chunk_content_key(
 
     chunk_x, chunk_y = _require_int_coords(chunk_x, chunk_y)
     parts = [
-        "chunk.content.v1",
+        "chunk.content.v2",
+        f"terrain_algorithm_id={TERRAIN_ALGORITHM_ID}",
         f"world_seed={world_seed}",
         f"cx={chunk_x}",
         f"cy={chunk_y}",
@@ -726,6 +830,7 @@ def render_chunkset(
         # uses_assets: 端点须用与预烘相同的 registry 设定 (真实素材 vs 合成代理是密度断崖);
         #   为真时端点应传 AssetRegistry(<project>/assets), 缓存键用 chunk_content_key。
         "uses_assets": registry is not None,
+        "terrain_algorithm_id": TERRAIN_ALGORITHM_ID,
     }
     manifest_path = output_dir / "manifest.json"
     # newline="\n": 与 trust root (recon_manifest/registration) 惯例统一, 让 world

@@ -4,7 +4,8 @@ const ASSET_TEMPLATE =
 const SHA256 = /^[0-9a-f]{64}$/;
 const ASSET_ID = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
 const MATERIAL_SLOT_ID = /^material-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const LOD_RESOLUTION = [3, 5, 9];
+const TERRAIN_ALGORITHM_ID = 'synthetic-multiscale-relief-v1';
+const TERRAIN_RESOLUTION = 9;
 const UV_POLICIES = new Set([
   'world-xy',
   'dominant-axis-box',
@@ -77,7 +78,7 @@ function validGrid(manifest) {
     && grid.asset_url_template === ASSET_TEMPLATE
     && Number.isSafeInteger(grid.world_seed)
     && grid.layout_engine === 'mock'
-    && grid.terrain_algorithm_id === 'mock-flat-ground-v1'
+    && grid.terrain_algorithm_id === TERRAIN_ALGORITHM_ID
     && SHA256.test(grid.mesh_asset_bundle_id)
     && SHA256.test(grid.material_bundle_id)
   );
@@ -93,10 +94,10 @@ function expectedMaterialMapPath(grid, slotId, role) {
 
 function validateTerrain(chunk) {
   const terrain = chunk.terrain;
-  const resolution = LOD_RESOLUTION[chunk.selected_lod];
+  const resolution = TERRAIN_RESOLUTION;
   if (
     !isObject(terrain)
-    || terrain.algorithm_id !== 'mock-flat-ground-v1'
+    || terrain.algorithm_id !== TERRAIN_ALGORITHM_ID
     || terrain.material_slot_id !== 'material-terrace-soil-01'
     || terrain.resolution !== resolution
     || !Array.isArray(terrain.vertices)
@@ -107,9 +108,11 @@ function validateTerrain(chunk) {
   for (const vertex of terrain.vertices) {
     if (
       !isObject(vertex)
-      || !['x', 'y', 'z', 'world_u', 'world_v'].every(
+      || !['x', 'y', 'z', 'world_u', 'world_v', 'macro_tint'].every(
         (key) => Number.isFinite(vertex[key]),
       )
+      || vertex.macro_tint < 0.9
+      || vertex.macro_tint > 1.1
       || Math.abs(vertex.world_u - (chunk.world_offset[0] + vertex.x)) > 1e-6
       || Math.abs(vertex.world_v - (chunk.world_offset[1] + vertex.y)) > 1e-6
     ) {
@@ -356,10 +359,15 @@ export function terrainGeometryThree(chunk) {
   const { resolution, vertices } = chunk.terrain;
   const positions = new Float32Array(vertices.length * 3);
   const uvs = new Float32Array(vertices.length * 2);
+  const colors = new Float32Array(vertices.length * 3);
   for (let index = 0; index < vertices.length; index += 1) {
     const vertex = vertices[index];
     positions.set([vertex.world_u, vertex.z, -vertex.world_v], index * 3);
     uvs.set([vertex.world_u, vertex.world_v], index * 2);
+    colors.set(
+      [vertex.macro_tint, vertex.macro_tint, vertex.macro_tint],
+      index * 3,
+    );
   }
   const indices = new Uint32Array((resolution - 1) ** 2 * 6);
   let cursor = 0;
@@ -376,7 +384,7 @@ export function terrainGeometryThree(chunk) {
       cursor += 6;
     }
   }
-  return { positions, uvs, indices };
+  return { positions, uvs, colors, indices };
 }
 
 export function ribbonGeometryThree(chunk, ribbon) {

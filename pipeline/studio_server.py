@@ -51,11 +51,19 @@ from pipeline.studio_ledger import (
     RequestConflictError,
     RunRecord,
 )
+from pipeline.synthetic_village.infinite_terrain import TERRAIN_ALGORITHM_ID
 from pipeline.synthetic_village.local_textured_preview import (
     LocalTexturedPreviewError,
     canonical_local_textured_preview_manifest_bytes,
     load_local_textured_preview_manifest,
     read_verified_local_textured_preview_glb,
+)
+from pipeline.synthetic_village.material_bundle import (
+    DerivedMaterialBundle,
+    MaterialBundleError,
+    canonical_material_bundle_bytes,
+    load_material_bundle,
+    read_verified_material_map,
 )
 from pipeline.synthetic_village.mesh_asset_bundle import (
     MeshAssetBundle,
@@ -69,13 +77,6 @@ from pipeline.synthetic_village.mesh_chunk import (
     build_mesh_chunk_manifest,
     canonical_mesh_chunk_runtime_bytes,
     project_mesh_chunk_runtime,
-)
-from pipeline.synthetic_village.material_bundle import (
-    DerivedMaterialBundle,
-    MaterialBundleError,
-    canonical_material_bundle_bytes,
-    load_material_bundle,
-    read_verified_material_map,
 )
 
 SNAPSHOT_SCHEMA_VERSION = 2
@@ -1472,6 +1473,8 @@ def _valid_on_demand_world_manifest(
         return None
     if type(grid.get("uses_assets")) is not bool:
         return None
+    if grid.get("terrain_algorithm_id") != TERRAIN_ALGORITHM_ID:
+        return None
     return manifest
 
 
@@ -1518,7 +1521,7 @@ def _valid_on_demand_mesh_manifest(
         return None
     if grid.get("layout_engine") != "mock":
         return None
-    if grid.get("terrain_algorithm_id") != "mock-flat-ground-v1":
+    if grid.get("terrain_algorithm_id") != TERRAIN_ALGORITHM_ID:
         return None
     for field in ("mesh_asset_bundle_id", "material_bundle_id"):
         value = grid.get(field)
