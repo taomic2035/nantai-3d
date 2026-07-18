@@ -545,6 +545,13 @@ def test_prepare_mesh_bundle_is_path_free_and_independently_verified(
     assert prepared.manifest.material_bundle_id == (
         material_bundle_fixture.manifest.bundle_id
     )
+    assert tuple(
+        material.slot_id
+        for material in prepared.manifest.material_registry
+    ) == tuple(
+        record.slot_id
+        for record in material_bundle_fixture.manifest.records
+    )
     manifest_bytes = canonical_mesh_asset_bundle_bytes(prepared.manifest)
     assert str(tmp_path).encode() not in manifest_bytes
     assert {path.name for path in (prepared.staging_root / "objects").iterdir()} == {

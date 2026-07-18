@@ -689,7 +689,6 @@ def prepare_mesh_asset_bundle(
         staging_root.mkdir(exist_ok=False)
         (staging_root / "objects").mkdir()
         records = []
-        used_materials: dict[str, ExpectedGlbMaterial] = {}
         for source in sorted(sources, key=lambda item: item.asset_id):
             if len(source.lod_paths) != 3 or len(source.material_slot_ids) != 3:
                 raise MeshAssetBundleError(
@@ -704,10 +703,6 @@ def prepare_mesh_asset_bundle(
                 ),
             ):
                 expected = _expected_materials(material_bundle, slot_ids)
-                used_materials.update(
-                    (material.slot_id, material)
-                    for material in expected
-                )
                 payload = _read_stable_file(
                     Path(source_path),
                     maximum_bytes=MAX_MESH_TEMPLATE_GLB_BYTES,
@@ -757,8 +752,13 @@ def prepare_mesh_asset_bundle(
             "build_tool_id": build_tool_id,
             "verification_level": verification_level,
             "material_registry": tuple(
-                used_materials[slot_id]
-                for slot_id in sorted(used_materials)
+                ExpectedGlbMaterial(
+                    slot_id=record.slot_id,
+                    source_sha256=record.source_sha256,
+                    bundle_id=material_bundle.bundle_id,
+                    algorithm_id=material_bundle.algorithm_id,
+                )
+                for record in material_bundle.records
             ),
             "records": tuple(records),
         }
