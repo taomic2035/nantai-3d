@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from pipeline.ingest import ingest_all
 from pipeline.ingest_manifest import (
     FrameMapping,
     IngestParams,
@@ -207,3 +208,84 @@ def test_capture_payload_kind_and_frame_index_must_agree():
             source_ordinal=0,
             frame_index=None,
         )
+
+
+def _real_ingest_stage(tmp_path):
+    root = tmp_path / "project"
+    input_dir = root / "input"
+    stage_dir = root / ".nantai-studio/work/run-001/photos"
+    input_dir.mkdir(parents=True)
+    (input_dir / "photo.jpg").write_bytes(b"capture-photo")
+    ingest_all(input_dir, stage_dir, blur_threshold=0)
+    return input_dir, stage_dir
+
+
+def test_prepare_and_verify_capture_bundle_preserves_exact_private_evidence(
+    tmp_path,
+):
+    from pipeline.studio_revisions import (
+        prepare_capture_bundle,
+        verify_capture_bundle,
+    )
+
+    input_dir, stage_dir = _real_ingest_stage(tmp_path)
+    bundle = stage_dir.parent / "capture-bundle"
+    prepared = prepare_capture_bundle(
+        stage_dir=stage_dir,
+        input_dir=input_dir,
+        bundle_dir=bundle,
+        revision_id="capture-" + "3" * 32,
+        synthetic=False,
+        created_utc=datetime(2026, 7, 18, 8, 1, tzinfo=UTC),
+    )
+
+    assert {
+        path.relative_to(bundle).as_posix()
+        for path in bundle.rglob("*")
+        if path.is_file()
+    } == {
+        "manifest.json",
+        "ingest_manifest.json",
+        "payload/photo.jpg",
+    }
+    assert (bundle / "ingest_manifest.json").read_bytes() == (
+        stage_dir / "ingest_manifest.json"
+    ).read_bytes()
+    assert (bundle / "payload/photo.jpg").read_bytes() == b"capture-photo"
+    assert prepared == verify_capture_bundle(bundle)
+    assert prepared.manifest_digest == hashlib.sha256(
+        (bundle / "manifest.json").read_bytes(),
+    ).hexdigest()
+    assert prepared.manifest.ingest_manifest_sha256 == hashlib.sha256(
+        (bundle / "ingest_manifest.json").read_bytes(),
+    ).hexdigest()
+
+
+@pytest.mark.parametrize("damage", ("payload", "extra"))
+def test_verify_capture_bundle_rejects_changed_or_undeclared_bytes(
+    tmp_path,
+    damage,
+):
+    from pipeline.studio_revisions import (
+        CaptureBundleError,
+        prepare_capture_bundle,
+        verify_capture_bundle,
+    )
+
+    input_dir, stage_dir = _real_ingest_stage(tmp_path)
+    bundle = stage_dir.parent / "capture-bundle"
+    prepare_capture_bundle(
+        stage_dir=stage_dir,
+        input_dir=input_dir,
+        bundle_dir=bundle,
+        revision_id="capture-" + "4" * 32,
+        synthetic=False,
+        created_utc=datetime(2026, 7, 18, 8, 1, tzinfo=UTC),
+    )
+    if damage == "payload":
+        (bundle / "payload/photo.jpg").write_bytes(b"changed")
+    else:
+        (bundle / "undeclared.txt").write_text("extra", encoding="utf-8")
+
+    with pytest.raises(CaptureBundleError, match="hash|size|undeclared"):
+        verify_capture_bundle(bundle)

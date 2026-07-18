@@ -159,6 +159,18 @@ class CaptureRevisionRecord:
 
 
 @dataclass(frozen=True)
+class CapturePublicationIntentRecord:
+    id: str
+    run_id: str
+    revision_id: str
+    manifest_digest: str
+    bundle_relpath: str
+    status: str
+    created_utc: str
+    finished_utc: str | None
+
+
+@dataclass(frozen=True)
 class PublicationTargetRecord:
     publication_id: str
     ordinal: int
@@ -772,6 +784,21 @@ class StudioLedger:
         )
 
     @staticmethod
+    def _capture_intent_from_row(
+        row: sqlite3.Row,
+    ) -> CapturePublicationIntentRecord:
+        return CapturePublicationIntentRecord(
+            id=row["id"],
+            run_id=row["run_id"],
+            revision_id=row["subject_id"],
+            manifest_digest=row["manifest_digest"],
+            bundle_relpath=row["destination_relpath"],
+            status=row["status"],
+            created_utc=row["created_utc"],
+            finished_utc=row["finished_utc"],
+        )
+
+    @staticmethod
     def _next_seq(connection: sqlite3.Connection, run_id: str) -> int:
         row = connection.execute(
             "SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=?",
@@ -1301,6 +1328,23 @@ class StudioLedger:
                 (limit,),
             ).fetchall()
         return [self._capture_from_row(row) for row in rows]
+
+    def get_capture_publication_intent(
+        self,
+        intent_id: str,
+    ) -> CapturePublicationIntentRecord:
+        _validate_capture_publication_id(intent_id)
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM publication_intents
+                WHERE id=? AND subject_kind='capture'
+                """,
+                (intent_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(intent_id)
+        return self._capture_intent_from_row(row)
 
     def record_child_process(
         self,

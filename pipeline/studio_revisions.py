@@ -8,8 +8,11 @@ bundles, expose private source metadata, or infer trust from names.
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import (
@@ -20,8 +23,31 @@ from pydantic import (
     model_validator,
 )
 
-from pipeline.ingest_manifest import IngestManifest, IngestParams, Sha256
+from pipeline.ingest_manifest import (
+    IngestManifest,
+    IngestParams,
+    Sha256,
+    sha256_file,
+    verify_ingest_artifact,
+)
 from pipeline.studio_ledger import canonical_json
+
+CAPTURE_MANIFEST_FILENAME = "manifest.json"
+PRIVATE_INGEST_MANIFEST_FILENAME = "ingest_manifest.json"
+MAX_PRIVATE_MANIFEST_BYTES = 4 * 1024 * 1024
+
+
+class CaptureBundleError(ValueError):
+    """A private capture bundle is incomplete, unsafe, or hash-damaged."""
+
+
+@dataclass(frozen=True)
+class PreparedCaptureBundle:
+    """Verified immutable capture bytes before or after publication."""
+
+    manifest: CaptureRevisionManifest
+    manifest_digest: str
+    bundle: Path
 
 
 def _portable_capture_path(value: str) -> str:
@@ -202,3 +228,277 @@ def capture_manifest_digest(manifest: CaptureRevisionManifest) -> str:
     """Return the content identity of the canonical private manifest."""
 
     return hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest()
+
+
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)(),
+    )
+
+
+def _require_real_directory(path: Path, *, label: str) -> Path:
+    absolute = path.expanduser().absolute()
+    if _is_linklike(absolute):
+        raise CaptureBundleError(f"{label} must not be a symlink or junction")
+    try:
+        resolved = absolute.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise CaptureBundleError(f"{label} directory is missing") from exc
+    if resolved != absolute or not absolute.is_dir():
+        raise CaptureBundleError(f"{label} must be a real directory")
+    return absolute
+
+
+def _stat_signature(result: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+    )
+
+
+def _read_stable_bytes(
+    path: Path,
+    *,
+    label: str,
+    maximum: int,
+) -> bytes:
+    try:
+        if _is_linklike(path) or not path.is_file():
+            raise CaptureBundleError(f"{label} is missing or link-like")
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if before.st_size > maximum:
+                raise CaptureBundleError(f"{label} is too large")
+            payload = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+        path_after = path.stat()
+    except CaptureBundleError:
+        raise
+    except OSError as exc:
+        raise CaptureBundleError(f"{label} cannot be read") from exc
+    if (
+        len(payload) > maximum
+        or _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(after) != _stat_signature(path_after)
+        or _is_linklike(path)
+    ):
+        raise CaptureBundleError(f"{label} changed while being read")
+    return payload
+
+
+def _verify_regular_file(
+    path: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+    label: str,
+) -> None:
+    try:
+        if _is_linklike(path) or not path.is_file():
+            raise CaptureBundleError(f"{label} is missing or link-like")
+        before = path.stat()
+        digest = sha256_file(path)
+        after = path.stat()
+    except CaptureBundleError:
+        raise
+    except OSError as exc:
+        raise CaptureBundleError(f"{label} cannot be read") from exc
+    if _stat_signature(before) != _stat_signature(after) or _is_linklike(path):
+        raise CaptureBundleError(f"{label} changed while being hashed")
+    if after.st_size != expected_size:
+        raise CaptureBundleError(f"{label} size does not match its manifest")
+    if digest != expected_sha256:
+        raise CaptureBundleError(f"{label} hash does not match its manifest")
+
+
+def _scan_bundle_files(root: Path) -> dict[str, Path]:
+    files: dict[str, Path] = {}
+
+    def scan_error(error: OSError) -> None:
+        raise CaptureBundleError("capture bundle recursive scan failed") from error
+
+    for directory, directory_names, file_names in os.walk(
+        root,
+        followlinks=False,
+        onerror=scan_error,
+    ):
+        parent = Path(directory)
+        for name in [*directory_names, *file_names]:
+            candidate = parent / name
+            if _is_linklike(candidate):
+                raise CaptureBundleError(
+                    "capture bundle contains a symlink or junction",
+                )
+        for name in file_names:
+            candidate = parent / name
+            if not candidate.is_file():
+                raise CaptureBundleError(
+                    "capture bundle contains a non-regular file",
+                )
+            files[candidate.relative_to(root).as_posix()] = candidate
+    return files
+
+
+def prepare_capture_bundle(
+    *,
+    stage_dir: str | Path,
+    input_dir: str | Path,
+    bundle_dir: str | Path,
+    revision_id: str,
+    synthetic: bool,
+    created_utc: datetime,
+) -> PreparedCaptureBundle:
+    """Build one absent-only private bundle from a verified ingest stage."""
+
+    stage = _require_real_directory(Path(stage_dir), label="ingest stage")
+    bundle = Path(bundle_dir).expanduser().absolute()
+    _require_real_directory(bundle.parent, label="capture work parent")
+    if bundle.exists() or _is_linklike(bundle):
+        raise CaptureBundleError("capture work bundle must be absent")
+
+    try:
+        ingest = verify_ingest_artifact(stage, input_dir=input_dir)
+    except Exception as exc:
+        raise CaptureBundleError("ingest stage verification failed") from exc
+    ingest_path = stage / PRIVATE_INGEST_MANIFEST_FILENAME
+    ingest_bytes = _read_stable_bytes(
+        ingest_path,
+        label="verified ingest manifest",
+        maximum=MAX_PRIVATE_MANIFEST_BYTES,
+    )
+    try:
+        exact_ingest = IngestManifest.model_validate_json(ingest_bytes)
+    except ValueError as exc:
+        raise CaptureBundleError("verified ingest manifest is invalid") from exc
+    if exact_ingest != ingest:
+        raise CaptureBundleError(
+            "verified ingest manifest changed after stage verification",
+        )
+
+    bundle.mkdir(exist_ok=False)
+    payload_root = bundle / "payload"
+    payload_root.mkdir(exist_ok=False)
+    (bundle / PRIVATE_INGEST_MANIFEST_FILENAME).write_bytes(ingest_bytes)
+    for source in ingest.sources:
+        for output in source.outputs:
+            source_path = stage / PurePosixPath(output.output_path)
+            destination = payload_root / PurePosixPath(output.output_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _verify_regular_file(
+                source_path,
+                expected_size=output.output_bytes,
+                expected_sha256=output.output_sha256,
+                label=f"staged payload {output.output_path}",
+            )
+            shutil.copyfile(source_path, destination, follow_symlinks=False)
+            _verify_regular_file(
+                destination,
+                expected_size=output.output_bytes,
+                expected_sha256=output.output_sha256,
+                label=f"copied payload {output.output_path}",
+            )
+
+    manifest = build_capture_manifest(
+        revision_id=revision_id,
+        ingest=ingest,
+        ingest_manifest_sha256=hashlib.sha256(ingest_bytes).hexdigest(),
+        synthetic=synthetic,
+        created_utc=created_utc,
+    )
+    (bundle / CAPTURE_MANIFEST_FILENAME).write_bytes(
+        canonical_manifest_bytes(manifest),
+    )
+    return verify_capture_bundle(bundle)
+
+
+def verify_capture_bundle(
+    bundle_dir: str | Path,
+) -> PreparedCaptureBundle:
+    """Verify every declared byte of an immutable private capture bundle."""
+
+    bundle = _require_real_directory(
+        Path(bundle_dir),
+        label="capture bundle",
+    )
+    files = _scan_bundle_files(bundle)
+    manifest_bytes = _read_stable_bytes(
+        bundle / CAPTURE_MANIFEST_FILENAME,
+        label="capture manifest",
+        maximum=MAX_PRIVATE_MANIFEST_BYTES,
+    )
+    try:
+        manifest = CaptureRevisionManifest.model_validate_json(manifest_bytes)
+    except ValueError as exc:
+        raise CaptureBundleError("capture manifest is invalid") from exc
+    if manifest_bytes != canonical_manifest_bytes(manifest):
+        raise CaptureBundleError("capture manifest is not canonical")
+
+    ingest_bytes = _read_stable_bytes(
+        bundle / PRIVATE_INGEST_MANIFEST_FILENAME,
+        label="private ingest manifest",
+        maximum=MAX_PRIVATE_MANIFEST_BYTES,
+    )
+    if hashlib.sha256(ingest_bytes).hexdigest() != (
+        manifest.ingest_manifest_sha256
+    ):
+        raise CaptureBundleError("private ingest manifest hash does not match")
+    try:
+        ingest = IngestManifest.model_validate_json(ingest_bytes)
+    except ValueError as exc:
+        raise CaptureBundleError("private ingest manifest is invalid") from exc
+    expected_manifest = build_capture_manifest(
+        revision_id=manifest.revision_id,
+        ingest=ingest,
+        ingest_manifest_sha256=manifest.ingest_manifest_sha256,
+        synthetic=manifest.synthetic,
+        created_utc=manifest.created_utc,
+    )
+    if expected_manifest != manifest:
+        raise CaptureBundleError(
+            "capture manifest does not match embedded ingest evidence",
+        )
+
+    declared = {
+        CAPTURE_MANIFEST_FILENAME,
+        PRIVATE_INGEST_MANIFEST_FILENAME,
+        *(
+            f"payload/{payload.logical_path}"
+            for payload in manifest.payloads
+        ),
+    }
+    actual = set(files)
+    if actual != declared:
+        raise CaptureBundleError(
+            "capture bundle contains missing or undeclared files",
+        )
+    for payload in manifest.payloads:
+        _verify_regular_file(
+            files[f"payload/{payload.logical_path}"],
+            expected_size=payload.byte_length,
+            expected_sha256=payload.sha256,
+            label=f"capture payload {payload.logical_path}",
+        )
+    if _read_stable_bytes(
+        bundle / CAPTURE_MANIFEST_FILENAME,
+        label="capture manifest",
+        maximum=MAX_PRIVATE_MANIFEST_BYTES,
+    ) != manifest_bytes:
+        raise CaptureBundleError(
+            "capture manifest changed during bundle verification",
+        )
+    if _read_stable_bytes(
+        bundle / PRIVATE_INGEST_MANIFEST_FILENAME,
+        label="private ingest manifest",
+        maximum=MAX_PRIVATE_MANIFEST_BYTES,
+    ) != ingest_bytes:
+        raise CaptureBundleError(
+            "private ingest manifest changed during bundle verification",
+        )
+    return PreparedCaptureBundle(
+        manifest=manifest,
+        manifest_digest=hashlib.sha256(manifest_bytes).hexdigest(),
+        bundle=bundle,
+    )

@@ -79,13 +79,13 @@ def _promoter(root, ledger, *, fault=None):
 class RecordingDurability:
     def __init__(self):
         self.flushed_files = []
+        self.flushed_directories = []
 
     def flush_file(self, path):
         self.flushed_files.append(path)
 
-    @staticmethod
-    def flush_directory(_path):
-        return None
+    def flush_directory(self, path):
+        self.flushed_directories.append(path)
 
     @staticmethod
     def move(source, destination):
@@ -358,6 +358,218 @@ def test_path_replacement_race_cannot_move_into_an_external_target(tmp_path):
             occurred_utc=_now(),
         )
     assert list(outside.iterdir()) == []
+
+
+def _capture_publish_values():
+    return {
+        "revision_id": "capture-" + "a" * 32,
+        "intent_id": "capture-publication-" + "b" * 32,
+        "run_id": "run-001",
+        "owner": "owner-a",
+        "lease_generation": 1,
+        "synthetic": False,
+        "occurred_utc": _now(),
+    }
+
+
+def _capture_publisher(root, ledger, *, durability=None, fault=None):
+    from pipeline.studio_jobs import CaptureBundlePublisher
+
+    (root / ".nantai-studio/artifacts/capture").mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    (root / ".nantai-studio/quarantine").mkdir(exist_ok=True)
+    return CaptureBundlePublisher(
+        root,
+        ledger=ledger,
+        durability=durability or RecordingDurability(),
+        fault_injector=fault,
+    )
+
+
+def test_capture_publisher_moves_absent_bundle_then_commits_revision(tmp_path):
+    root, expected, invocation, ledger = _setup_publishable_run(tmp_path)
+    durability = RecordingDurability()
+    publisher = _capture_publisher(
+        root,
+        ledger,
+        durability=durability,
+    )
+    writer = ProjectFileLock(root / ".nantai-studio/writer.lock", role="writer")
+
+    with writer:
+        published = publisher.publish(
+            expected_snapshot=expected,
+            invocation=invocation,
+            **_capture_publish_values(),
+        )
+
+    destination = (
+        root / ".nantai-studio/artifacts/capture" / published.revision.id
+    )
+    assert published.destination == destination
+    assert published.revision == ledger.get_capture_revision(
+        published.revision.id,
+    )
+    assert ledger.get_run("run-001").status == "running"
+    assert (destination / "payload/photo.jpg").read_bytes() == b"new-photo"
+    assert {path.name for path in durability.flushed_files} == {
+        "manifest.json",
+        "ingest_manifest.json",
+        "photo.jpg",
+    }
+    assert destination.parent in durability.flushed_directories
+    assert invocation.stage_dir.parent in durability.flushed_directories
+
+
+def test_capture_publisher_fault_before_move_exposes_no_revision(tmp_path):
+    root, expected, invocation, ledger = _setup_publishable_run(tmp_path)
+
+    def crash(point):
+        if point == "before_capture_move":
+            raise RuntimeError("simulated pre-move crash")
+
+    publisher = _capture_publisher(root, ledger, fault=crash)
+    writer = ProjectFileLock(root / ".nantai-studio/writer.lock", role="writer")
+
+    with writer, pytest.raises(RuntimeError, match="pre-move"):
+        publisher.publish(
+            expected_snapshot=expected,
+            invocation=invocation,
+            **_capture_publish_values(),
+        )
+
+    destination = (
+        root / ".nantai-studio/artifacts/capture"
+        / _capture_publish_values()["revision_id"]
+    )
+    assert not destination.exists()
+    assert not ledger.list_capture_revisions()
+
+
+def test_capture_publisher_rolls_forward_complete_post_move_orphan(tmp_path):
+    root, expected, invocation, ledger = _setup_publishable_run(tmp_path)
+
+    def crash(point):
+        if point == "after_capture_move":
+            raise RuntimeError("simulated post-move crash")
+
+    publisher = _capture_publisher(root, ledger, fault=crash)
+    writer = ProjectFileLock(root / ".nantai-studio/writer.lock", role="writer")
+    values = _capture_publish_values()
+    with writer:
+        with pytest.raises(RuntimeError, match="post-move"):
+            publisher.publish(
+                expected_snapshot=expected,
+                invocation=invocation,
+                **values,
+            )
+        recovered = _capture_publisher(root, ledger).publish(
+            expected_snapshot=expected,
+            invocation=invocation,
+            **values,
+        )
+
+    assert recovered.revision.id == values["revision_id"]
+    assert ledger.get_run("run-001").status == "running"
+    assert recovered.destination.is_dir()
+
+
+def test_capture_publisher_quarantines_hash_damaged_post_move_orphan(tmp_path):
+    root, expected, invocation, ledger = _setup_publishable_run(tmp_path)
+
+    def crash(point):
+        if point == "after_capture_move":
+            raise RuntimeError("simulated post-move crash")
+
+    publisher = _capture_publisher(root, ledger, fault=crash)
+    writer = ProjectFileLock(root / ".nantai-studio/writer.lock", role="writer")
+    values = _capture_publish_values()
+    destination = (
+        root / ".nantai-studio/artifacts/capture" / values["revision_id"]
+    )
+    with writer:
+        with pytest.raises(RuntimeError, match="post-move"):
+            publisher.publish(
+                expected_snapshot=expected,
+                invocation=invocation,
+                **values,
+            )
+        (destination / "payload/photo.jpg").write_bytes(b"corrupt")
+        with pytest.raises(JobContractError, match="quarantined|invalid"):
+            _capture_publisher(root, ledger).publish(
+                expected_snapshot=expected,
+                invocation=invocation,
+                **values,
+            )
+
+    assert not destination.exists()
+    quarantined = list(
+        (root / ".nantai-studio/quarantine").glob(
+            f"{values['revision_id']}-*",
+        ),
+    )
+    assert len(quarantined) == 1
+    assert (quarantined[0] / "payload/photo.jpg").read_bytes() == b"corrupt"
+    assert not ledger.list_capture_revisions()
+
+
+def test_capture_publisher_never_replaces_unjournaled_destination(tmp_path):
+    root, expected, invocation, ledger = _setup_publishable_run(tmp_path)
+    publisher = _capture_publisher(root, ledger)
+    values = _capture_publish_values()
+    destination = (
+        root / ".nantai-studio/artifacts/capture" / values["revision_id"]
+    )
+    destination.mkdir()
+    (destination / "owner.txt").write_text("existing", encoding="utf-8")
+    writer = ProjectFileLock(root / ".nantai-studio/writer.lock", role="writer")
+
+    with writer, pytest.raises(JobContractError, match="already exists|absent"):
+        publisher.publish(
+            expected_snapshot=expected,
+            invocation=invocation,
+            **values,
+        )
+
+    assert (destination / "owner.txt").read_text(encoding="utf-8") == "existing"
+    assert not ledger.list_capture_revisions()
+
+
+def test_capture_path_replacement_race_cannot_publish_outside_project(
+    tmp_path,
+):
+    root, expected, invocation, ledger = _setup_publishable_run(tmp_path)
+    outside = tmp_path / "outside-captures"
+    outside.mkdir()
+    capture_root = root / ".nantai-studio/artifacts/capture"
+
+    def replace_capture_root_with_link(point):
+        if point != "before_capture_move":
+            return
+        capture_root.rmdir()
+        try:
+            os.symlink(outside, capture_root, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"directory symlink unavailable: {exc}")
+
+    publisher = _capture_publisher(
+        root,
+        ledger,
+        fault=replace_capture_root_with_link,
+    )
+    writer = ProjectFileLock(root / ".nantai-studio/writer.lock", role="writer")
+
+    with writer, pytest.raises(JobContractError, match="link|junction|path"):
+        publisher.publish(
+            expected_snapshot=expected,
+            invocation=invocation,
+            **_capture_publish_values(),
+        )
+
+    assert list(outside.iterdir()) == []
+    assert not ledger.list_capture_revisions()
 
 
 def test_replaced_backup_root_cannot_create_a_transaction_outside_project(tmp_path):

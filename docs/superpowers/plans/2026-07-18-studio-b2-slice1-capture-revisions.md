@@ -557,6 +557,7 @@ git push origin main
 **Files:**
 - Modify: `pipeline/studio_revisions.py`
 - Modify: `pipeline/studio_jobs.py`
+- Modify: `pipeline/studio_ledger.py`
 - Modify: `tests/test_studio_capture_revisions.py`
 - Modify: `tests/test_studio_publication.py`
 
@@ -564,7 +565,9 @@ git push origin main
 - Consumes: verified ingest stage, `WindowsNtfsDurabilityBackend`, held writer/publish locks.
 - Produces: pure `prepare_capture_bundle()` / `verify_capture_bundle()` primitives in
   `studio_revisions.py`, plus durability-owning
-  `CaptureBundlePublisher.publish()` and `PublishedCapture` in `studio_jobs.py`.
+  `CaptureBundlePublisher.publish()` and `PublishedCapture` in `studio_jobs.py`,
+  and the bounded `get_capture_publication_intent()` recovery read in
+  `studio_ledger.py`.
 
 `studio_revisions.py` must not import `studio_jobs.py`. The latter already owns
 fixed managed paths, lock ordering, concurrency snapshots, and the verified
@@ -620,7 +623,9 @@ the staged tree, calls `prepare_capture_publication()`, write-through moves the
 absent bundle directory, flushes both parents, verifies every byte at the
 destination, and calls `commit_capture_publication()`. The run deliberately
 remains `running/publishing` until Task 5 refreshes the compatibility
-projection. The publisher returns:
+projection. Recovery first reads the exact intent by ID; an unjournaled existing
+destination is never claimed, while only a matching prepared intent may roll a
+complete orphan forward or quarantine a damaged orphan. The publisher returns:
 
 ```python
 @dataclass(frozen=True)
@@ -648,6 +653,7 @@ Expected: all selected tests pass.
 
 ```bash
 git add pipeline/studio_revisions.py pipeline/studio_jobs.py \
+  pipeline/studio_ledger.py \
   tests/test_studio_capture_revisions.py tests/test_studio_publication.py
 git commit -m "feat(studio): publish immutable capture bundles" \
   -m "Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>"

@@ -34,10 +34,17 @@ from pipeline.ingest_manifest import (
     verify_ingest_artifact,
 )
 from pipeline.studio_ledger import (
+    CaptureRevisionRecord,
     CreateRunResult,
     StudioLedger,
     canonical_json,
     sqlite_write_transaction_active,
+)
+from pipeline.studio_revisions import (
+    CaptureBundleError,
+    PreparedCaptureBundle,
+    prepare_capture_bundle,
+    verify_capture_bundle,
 )
 
 _LOCK_STATE_GUARD = threading.RLock()
@@ -288,6 +295,12 @@ class DurabilityReadiness:
 class PublicationResult:
     publication_id: str
     artifact_id: str
+
+
+@dataclass(frozen=True)
+class PublishedCapture:
+    revision: CaptureRevisionRecord
+    destination: Path
 
 
 @dataclass(frozen=True)
@@ -978,6 +991,427 @@ def _writer_lock_is_held(project_root: Path) -> bool:
     with _LOCK_STATE_GUARD:
         locks = _HELD_LOCKS.get(domain, [])
         return bool(locks and locks[0].role == "writer")
+
+
+class CaptureBundlePublisher:
+    """Publish one immutable capture bundle without replacing existing bytes."""
+
+    def __init__(
+        self,
+        project_root: str | Path,
+        *,
+        ledger: StudioLedger,
+        durability: WindowsNtfsDurabilityBackend,
+        fault_injector=None,
+    ):
+        self.project_root = _require_real_directory(
+            project_root,
+            label="project root",
+        )
+        self.ledger = ledger
+        self.durability = durability
+        self.fault_injector = fault_injector or (lambda _point: None)
+
+    def _fault(self, point: str) -> None:
+        self.fault_injector(point)
+
+    def _paths(
+        self,
+        *,
+        run_id: str,
+        revision_id: str,
+    ) -> tuple[Path, Path]:
+        if (
+            _RUN_ID_RE.fullmatch(run_id) is None
+            or re.fullmatch(r"capture-[0-9a-f]{32}", revision_id) is None
+        ):
+            raise JobContractError("capture publication IDs are not path safe")
+        return (
+            self.project_root
+            / ".nantai-studio/work"
+            / run_id
+            / "capture-bundle",
+            self.project_root
+            / ".nantai-studio/artifacts/capture"
+            / revision_id,
+        )
+
+    def _require_roots(self) -> tuple[Path, Path]:
+        state_root = _require_real_directory(
+            self.project_root / ".nantai-studio",
+            label="Studio state root",
+        )
+        capture_root = _require_real_directory(
+            state_root / "artifacts/capture",
+            label="capture artifact root",
+        )
+        quarantine_root = _require_real_directory(
+            state_root / "quarantine",
+            label="capture quarantine root",
+        )
+        return capture_root, quarantine_root
+
+    @staticmethod
+    def _matches_requested_bundle(
+        prepared: PreparedCaptureBundle,
+        *,
+        revision_id: str,
+        synthetic: bool,
+        occurred_utc: datetime,
+    ) -> bool:
+        manifest = prepared.manifest
+        return (
+            manifest.revision_id == revision_id
+            and manifest.synthetic is synthetic
+            and manifest.created_utc == occurred_utc
+        )
+
+    @staticmethod
+    def _intent_matches(intent, prepared: PreparedCaptureBundle, run_id: str) -> bool:
+        manifest = prepared.manifest
+        return (
+            intent.run_id == run_id
+            and intent.revision_id == manifest.revision_id
+            and intent.manifest_digest == prepared.manifest_digest
+            and intent.bundle_relpath
+            == (
+                ".nantai-studio/artifacts/capture/"
+                f"{manifest.revision_id}"
+            )
+        )
+
+    def _flush_bundle(self, prepared: PreparedCaptureBundle) -> None:
+        bundle = prepared.bundle
+        evidence = _tree_target_evidence(
+            bundle,
+            label="capture publication bundle",
+        )
+        for item in evidence.files:
+            path = bundle / PurePosixPath(item.path)
+            current = _stable_evidence(
+                path,
+                relative=item.path,
+                kind="file",
+            )
+            if current != item:
+                raise ConcurrentChangeError(
+                    "capture bundle changed before durability flush",
+                )
+            self.durability.flush_file(path)
+        directories = {bundle}
+        for item in evidence.files:
+            parent = (bundle / PurePosixPath(item.path)).parent
+            while parent != bundle:
+                directories.add(parent)
+                parent = parent.parent
+        for directory in sorted(
+            directories,
+            key=lambda value: len(value.parts),
+            reverse=True,
+        ):
+            self.durability.flush_directory(directory)
+        self.durability.flush_directory(bundle.parent)
+        verified = verify_capture_bundle(bundle)
+        if (
+            verified.manifest_digest != prepared.manifest_digest
+            or _tree_target_evidence(
+                bundle,
+                label="flushed capture publication bundle",
+            )
+            != evidence
+        ):
+            raise ConcurrentChangeError(
+                "capture bundle changed during durability flush",
+            )
+
+    def _commit(
+        self,
+        *,
+        intent_id: str,
+        run_id: str,
+        owner: str,
+        lease_generation: int,
+        prepared: PreparedCaptureBundle,
+    ) -> PublishedCapture:
+        manifest = prepared.manifest
+        record = self.ledger.commit_capture_publication(
+            intent_id=intent_id,
+            revision_id=manifest.revision_id,
+            manifest_digest=prepared.manifest_digest,
+            bundle_relpath=(
+                ".nantai-studio/artifacts/capture/"
+                f"{manifest.revision_id}"
+            ),
+            provenance=manifest.provenance,
+            source_count=manifest.source_count,
+            output_count=manifest.output_count,
+            created_by_run=run_id,
+            owner=owner,
+            lease_generation=lease_generation,
+            created_utc=manifest.created_utc,
+        )
+        return PublishedCapture(
+            revision=record,
+            destination=prepared.bundle,
+        )
+
+    def _quarantine_orphan(
+        self,
+        destination: Path,
+        *,
+        revision_id: str,
+        quarantine_root: Path,
+    ) -> Path:
+        _require_real_directory(
+            quarantine_root,
+            label="capture quarantine root",
+        )
+        quarantine = (
+            quarantine_root / f"{revision_id}-{uuid.uuid4().hex}"
+        )
+        if _path_exists(quarantine):
+            raise JobContractError("capture quarantine destination exists")
+        self.durability.move(destination, quarantine)
+        self.durability.flush_directory(destination.parent)
+        self.durability.flush_directory(quarantine.parent)
+        return quarantine
+
+    def _recover_visible_destination(
+        self,
+        *,
+        intent,
+        intent_id: str,
+        run_id: str,
+        revision_id: str,
+        owner: str,
+        lease_generation: int,
+        synthetic: bool,
+        occurred_utc: datetime,
+        destination: Path,
+        work_bundle: Path,
+        quarantine_root: Path,
+    ) -> PublishedCapture:
+        if intent is None:
+            raise JobContractError(
+                "capture destination already exists without a journal intent",
+            )
+        try:
+            prepared = verify_capture_bundle(destination)
+        except CaptureBundleError as exc:
+            if intent.status == "prepared":
+                self._quarantine_orphan(
+                    destination,
+                    revision_id=revision_id,
+                    quarantine_root=quarantine_root,
+                )
+                raise JobContractError(
+                    "invalid capture orphan was quarantined",
+                ) from exc
+            raise JobContractError(
+                "committed capture destination is invalid",
+            ) from exc
+        if (
+            not self._matches_requested_bundle(
+                prepared,
+                revision_id=revision_id,
+                synthetic=synthetic,
+                occurred_utc=occurred_utc,
+            )
+            or not self._intent_matches(intent, prepared, run_id)
+        ):
+            raise JobContractError(
+                "capture destination conflicts with its journal intent",
+            )
+        if intent.status == "committed":
+            try:
+                record = self.ledger.get_capture_revision(revision_id)
+            except KeyError as exc:
+                raise JobContractError(
+                    "committed capture intent has no revision record",
+                ) from exc
+            if (
+                record.manifest_digest != prepared.manifest_digest
+                or record.bundle_relpath != intent.bundle_relpath
+                or record.created_by_run != run_id
+            ):
+                raise JobContractError(
+                    "committed capture record conflicts with bundle evidence",
+                )
+            return PublishedCapture(record, destination)
+        if intent.status != "prepared":
+            raise JobContractError("capture intent cannot be recovered")
+        self._flush_bundle(prepared)
+        self.durability.flush_directory(work_bundle.parent)
+        self.durability.flush_directory(destination.parent)
+        self._fault("before_capture_commit")
+        published = self._commit(
+            intent_id=intent_id,
+            run_id=run_id,
+            owner=owner,
+            lease_generation=lease_generation,
+            prepared=prepared,
+        )
+        self._fault("after_capture_commit")
+        return published
+
+    def publish(
+        self,
+        *,
+        revision_id: str,
+        intent_id: str,
+        run_id: str,
+        owner: str,
+        lease_generation: int,
+        expected_snapshot: ConcurrencySnapshot,
+        invocation: JobInvocation,
+        synthetic: bool,
+        occurred_utc: datetime,
+    ) -> PublishedCapture:
+        """Build, durably move, verify, and commit one capture revision."""
+
+        if not _writer_lock_is_held(self.project_root):
+            raise LockOrderError(
+                "capture publication requires the held writer lock",
+            )
+        work_bundle, destination = self._paths(
+            run_id=run_id,
+            revision_id=revision_id,
+        )
+        capture_root, quarantine_root = self._require_roots()
+        if destination.parent != capture_root:
+            raise JobContractError(
+                "capture destination is not below the fixed artifact root",
+            )
+        try:
+            intent = self.ledger.get_capture_publication_intent(intent_id)
+        except KeyError:
+            intent = None
+
+        with ProjectFileLock(
+            self.project_root / ".nantai-studio/publish.lock",
+            role="publish",
+        ):
+            if _path_exists(destination):
+                return self._recover_visible_destination(
+                    intent=intent,
+                    intent_id=intent_id,
+                    run_id=run_id,
+                    revision_id=revision_id,
+                    owner=owner,
+                    lease_generation=lease_generation,
+                    synthetic=synthetic,
+                    occurred_utc=occurred_utc,
+                    destination=destination,
+                    work_bundle=work_bundle,
+                    quarantine_root=quarantine_root,
+                )
+            if intent is not None and intent.status != "prepared":
+                raise JobContractError(
+                    "capture intent is committed but its bundle is missing",
+                )
+            if build_concurrency_snapshot(self.project_root) != expected_snapshot:
+                raise ConcurrentChangeError(
+                    "input or formal target changed before capture preparation",
+                )
+            if _path_exists(work_bundle):
+                try:
+                    prepared = verify_capture_bundle(work_bundle)
+                except CaptureBundleError as exc:
+                    raise JobContractError(
+                        "existing capture work bundle is invalid",
+                    ) from exc
+            else:
+                try:
+                    prepared = prepare_capture_bundle(
+                        stage_dir=invocation.stage_dir,
+                        input_dir=invocation.input_dir,
+                        bundle_dir=work_bundle,
+                        revision_id=revision_id,
+                        synthetic=synthetic,
+                        created_utc=occurred_utc,
+                    )
+                except CaptureBundleError as exc:
+                    raise JobContractError(
+                        "capture bundle preparation failed",
+                    ) from exc
+            if not self._matches_requested_bundle(
+                prepared,
+                revision_id=revision_id,
+                synthetic=synthetic,
+                occurred_utc=occurred_utc,
+            ):
+                raise JobContractError(
+                    "capture work bundle conflicts with the request",
+                )
+            if intent is not None and not self._intent_matches(
+                intent,
+                prepared,
+                run_id,
+            ):
+                raise JobContractError(
+                    "capture work bundle conflicts with its journal intent",
+                )
+            self._flush_bundle(prepared)
+            if build_concurrency_snapshot(self.project_root) != expected_snapshot:
+                raise ConcurrentChangeError(
+                    "input or formal target changed during capture preparation",
+                )
+            bundle_relpath = (
+                ".nantai-studio/artifacts/capture/"
+                f"{revision_id}"
+            )
+            if intent is None:
+                self.ledger.prepare_capture_publication(
+                    intent_id=intent_id,
+                    run_id=run_id,
+                    revision_id=revision_id,
+                    manifest_digest=prepared.manifest_digest,
+                    bundle_relpath=bundle_relpath,
+                    owner=owner,
+                    lease_generation=lease_generation,
+                    created_utc=occurred_utc,
+                )
+
+            self._fault("before_capture_move")
+            _require_real_directory(
+                capture_root,
+                label="capture artifact root",
+            )
+            _require_fixed_managed_path(
+                self.project_root,
+                work_bundle,
+                (
+                    self.project_root
+                    / ".nantai-studio/work"
+                    / run_id
+                    / "capture-bundle"
+                ),
+                state="directory",
+                label="capture work bundle",
+            )
+            if _path_exists(destination):
+                raise JobContractError(
+                    "capture destination must remain absent before publication",
+                )
+            self.durability.move(work_bundle, destination)
+            self._fault("after_capture_move")
+            self.durability.flush_directory(work_bundle.parent)
+            self.durability.flush_directory(destination.parent)
+            moved = verify_capture_bundle(destination)
+            if moved.manifest_digest != prepared.manifest_digest:
+                raise ConcurrentChangeError(
+                    "capture bundle changed during durable move",
+                )
+            self._fault("before_capture_commit")
+            published = self._commit(
+                intent_id=intent_id,
+                run_id=run_id,
+                owner=owner,
+                lease_generation=lease_generation,
+                prepared=moved,
+            )
+            self._fault("after_capture_commit")
+            return published
 
 
 class ArtifactPromoter:
