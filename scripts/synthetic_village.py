@@ -77,6 +77,16 @@ def _run_canary_render():
     return run_canary_render
 
 
+def _run_local_production_render():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.local_production_runner import (
+        run_local_production_render,
+    )
+
+    return run_local_production_render
+
+
 def _audit_render_coverage():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -233,6 +243,44 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="Print only this batch's camera IDs (requires --batch-count).",
     )
+    render_production_local = commands.add_parser(
+        "render-production-local",
+        help=(
+            "Resume an explicitly selected L0 production-camera subset from one "
+            "verified local Blender build. Frames below the required valid-pixel "
+            "ratio are retained for inspection but rejected from training."
+        ),
+    )
+    render_production_local.add_argument(
+        "--build-directory",
+        type=Path,
+        required=True,
+    )
+    render_production_local.add_argument(
+        "--material-bundle-root",
+        type=Path,
+        required=True,
+    )
+    render_production_local.add_argument(
+        "--camera",
+        action="append",
+        help="Production camera ID; repeat for a bounded subset. Omit for all 180.",
+    )
+    render_production_local.add_argument(
+        "--min-valid-pixel-ratio",
+        type=float,
+        required=True,
+        help=(
+            "Operator-selected inclusive training-quality threshold in (0, 1]. "
+            "This filters frames and never upgrades geometry trust."
+        ),
+    )
+    render_production_local.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=15 * 60,
+    )
+    render_production_local.add_argument("--render-root", type=Path)
     weather_variants = commands.add_parser(
         "weather-variants",
         help=(
@@ -427,6 +475,33 @@ def main(argv: list[str] | None = None) -> int:
             args.plan.write_bytes(plan_bytes(plan))
             summary["plan_path"] = str(args.plan)
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "render-production-local":
+        result = _run_local_production_render()(
+            training_build_directory=args.build_directory,
+            material_bundle_root=args.material_bundle_root,
+            minimum_valid_pixel_ratio=args.min_valid_pixel_ratio,
+            camera_ids=tuple(args.camera) if args.camera else None,
+            timeout_seconds=args.timeout_seconds,
+            render_root=args.render_root,
+            repo_root=ROOT,
+        )
+        print(
+            json.dumps(
+                {
+                    "journal_path": str(result.journal_path),
+                    "render_id": result.render_id,
+                    "render_root": str(result.render_root),
+                    "rendered_count": result.rendered_count,
+                    "rejected_count": result.rejected_count,
+                    "reused_count": result.reused_count,
+                    "verification_level": "L0",
+                    "trust_effect": "none-quality-filter-only",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         return 0
     if args.command == "weather-variants":
         weather = _import_weather_profile()
