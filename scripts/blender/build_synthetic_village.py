@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import stat
@@ -32,6 +33,12 @@ REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v1"
 REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v1"
 TEXTURED_REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v2"
 TEXTURED_REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v2"
+LOCAL_TEXTURED_REQUEST_SCHEMA = (
+    "nantai.synthetic-village.local-textured-preview-request.v1"
+)
+LOCAL_TEXTURED_REPORT_SCHEMA = (
+    "nantai.synthetic-village.local-textured-preview-build-report.v1"
+)
 FIDELITY = "simplified-pbr-not-render-parity"
 TEXTURED_ALGORITHM_ID = "mirror-sobel-orm-v1"
 UV_POLICIES = {
@@ -463,12 +470,17 @@ def _validate_weather_block(weather):
 
 
 def _validate_request(request, raw):
-    textured = request.get("schema_version") == TEXTURED_REQUEST_SCHEMA
+    local = request.get("schema_version") == LOCAL_TEXTURED_REQUEST_SCHEMA
+    textured = request.get("schema_version") in {
+        TEXTURED_REQUEST_SCHEMA,
+        LOCAL_TEXTURED_REQUEST_SCHEMA,
+    }
     common_top_keys = (
         "schema_version",
-        "build_id",
+        "preview_id" if local else "build_id",
         "synthetic",
         "verification_level",
+        *(("authoritative", "release_channel") if local else ()),
         "scene_plan",
         "camera_plan",
         "source_hashes",
@@ -500,17 +512,25 @@ def _validate_request(request, raw):
     if raw != _canonical_bytes(request):
         raise RuntimeBuildError("request must be canonical JSON")
     if (
-        request["schema_version"] not in {REQUEST_SCHEMA, TEXTURED_REQUEST_SCHEMA}
+        request["schema_version"]
+        not in {
+            REQUEST_SCHEMA,
+            TEXTURED_REQUEST_SCHEMA,
+            LOCAL_TEXTURED_REQUEST_SCHEMA,
+        }
         or request["synthetic"] is not True
-        or request["verification_level"] != "L2"
+        or request["verification_level"] != ("L0" if local else "L2")
+        or (local and request["authoritative"] is not False)
+        or (local and request["release_channel"] != "local-preview-only")
     ):
         raise RuntimeBuildError("request provenance contract is invalid")
-    if not _is_sha256(request["build_id"]):
-        raise RuntimeBuildError("request build_id is invalid")
-    without_build_id = dict(request)
-    without_build_id.pop("build_id")
-    if _sha256_bytes(_canonical_bytes(without_build_id)) != request["build_id"]:
-        raise RuntimeBuildError("request build_id does not match canonical inputs")
+    identity_key = "preview_id" if local else "build_id"
+    if not _is_sha256(request[identity_key]):
+        raise RuntimeBuildError("request content identity is invalid")
+    without_identity = dict(request)
+    without_identity.pop(identity_key)
+    if _sha256_bytes(_canonical_bytes(without_identity)) != request[identity_key]:
+        raise RuntimeBuildError("request content identity does not match canonical inputs")
 
     source_hashes = request["source_hashes"]
     source_keys = (
@@ -537,41 +557,45 @@ def _validate_request(request, raw):
         raise RuntimeBuildError("builder script digest does not match executing script")
 
     tool = request["tool_identity"]
+    tool_keys = (
+        "tool_id",
+        "version",
+        "platform",
+        "executable_sha256",
+        "runtime_build_hash",
+        "runtime_output_sha256",
+        "engine",
+        "view_transform",
+    )
+    if not local:
+        tool_keys = (*tool_keys[:3], "archive_sha256", *tool_keys[3:])
     _expect_keys(
         tool,
-        (
-            "tool_id",
-            "version",
-            "platform",
-            "archive_sha256",
-            "executable_sha256",
-            "runtime_build_hash",
-            "runtime_output_sha256",
-            "engine",
-            "view_transform",
-        ),
+        tool_keys,
         "tool_identity",
     )
     if (
         tool["tool_id"] != "blender"
         or tool["version"] != "4.5.11"
-        or tool["platform"] != "windows-x64"
+        or tool["platform"] != ("macos-arm64" if local else "windows-x64")
         or tool["runtime_build_hash"] != "4db51e9d1e1e"
         or tool["engine"] != "BLENDER_EEVEE_NEXT"
         or tool["view_transform"] != "AgX"
         or bpy.app.version_string != "4.5.11 LTS"
         or bpy.app.build_hash.decode("ascii") != "4db51e9d1e1e"
+        or (local and sys.platform != "darwin")
+        or (local and platform.machine() != "arm64")
     ):
         raise RuntimeBuildError("executing Blender identity does not match request")
-    if not all(
-        _is_sha256(tool[key])
-        for key in (
-            "archive_sha256",
-            "executable_sha256",
-            "runtime_output_sha256",
-        )
-    ):
+    digest_keys = (
+        ("executable_sha256", "runtime_output_sha256")
+        if local
+        else ("archive_sha256", "executable_sha256", "runtime_output_sha256")
+    )
+    if not all(_is_sha256(tool[key]) for key in digest_keys):
         raise RuntimeBuildError("tool_identity contains an invalid SHA-256")
+    if local and _sha256_file(Path(bpy.app.binary_path)) != tool["executable_sha256"]:
+        raise RuntimeBuildError("executing local Blender bytes do not match request")
 
     semantic_registry = request["semantic_registry"]
     _expect_list(semantic_registry, 14, "semantic_registry")
@@ -2254,7 +2278,12 @@ def _configure_scene(request, materials):
     scene.view_settings.look = "AgX - Medium High Contrast"
     scene.view_settings.exposure = 0.0
     scene.view_settings.gamma = 1.0
-    scene["nv_build_id"] = request["build_id"]
+    if request["schema_version"] == LOCAL_TEXTURED_REQUEST_SCHEMA:
+        scene["nv_preview_id"] = request["preview_id"]
+        scene["nv_authoritative"] = False
+        scene["nv_release_channel"] = "local-preview-only"
+    else:
+        scene["nv_build_id"] = request["build_id"]
     scene["nv_fidelity"] = FIDELITY
     scene["nv_synthetic"] = True
 
@@ -2406,7 +2435,10 @@ def _require_root_component(root, component_tag, slot_id):
 
 
 def _validate_visual_scene_evidence(request, roots, materials):
-    textured = request["schema_version"] == TEXTURED_REQUEST_SCHEMA
+    textured = request["schema_version"] in {
+        TEXTURED_REQUEST_SCHEMA,
+        LOCAL_TEXTURED_REQUEST_SCHEMA,
+    }
     expected_material_implementation = (
         "derived-pbr-material-v1" if textured else "pbr-material-v1"
     )
@@ -2948,7 +2980,11 @@ def _build_report(
     artifacts,
     glb_counts=None,
 ):
-    textured = request["schema_version"] == TEXTURED_REQUEST_SCHEMA
+    local = request["schema_version"] == LOCAL_TEXTURED_REQUEST_SCHEMA
+    textured = request["schema_version"] in {
+        TEXTURED_REQUEST_SCHEMA,
+        LOCAL_TEXTURED_REQUEST_SCHEMA,
+    }
     semantic_ids = [row["semantic_id"] for row in request["semantic_registry"]]
     material_ids = [row["material_id"] for row in request["material_registry"]]
     critical_ok = all(
@@ -2958,10 +2994,18 @@ def _build_report(
         for row in request["visual_slot_registry"]
     )
     report = {
-        "schema_version": TEXTURED_REPORT_SCHEMA if textured else REPORT_SCHEMA,
-        "build_id": request["build_id"],
+        "schema_version": (
+            LOCAL_TEXTURED_REPORT_SCHEMA
+            if local
+            else TEXTURED_REPORT_SCHEMA
+            if textured
+            else REPORT_SCHEMA
+        ),
+        "preview_id" if local else "build_id": (
+            request["preview_id"] if local else request["build_id"]
+        ),
         "synthetic": True,
-        "verification_level": "L2",
+        "verification_level": "L0" if local else "L2",
         "fidelity": FIDELITY,
         "tool_identity": request["tool_identity"],
         "source_hashes": request["source_hashes"],
@@ -3015,6 +3059,9 @@ def _build_report(
         report["material_bundle_id"] = request["material_bundle_id"]
         report["material_input_registry"] = request["material_input_registry"]
         report["counts"].update(glb_counts)
+    if local:
+        report["authoritative"] = False
+        report["release_channel"] = "local-preview-only"
     return report
 
 
@@ -3046,7 +3093,12 @@ def _camera_report_registry(request, camera_objects):
 
 
 def _execute_build(request, staging_path, materials_path=None):
-    textured = request["schema_version"] == TEXTURED_REQUEST_SCHEMA
+    local = request["schema_version"] == LOCAL_TEXTURED_REQUEST_SCHEMA
+    textured = request["schema_version"] in {
+        TEXTURED_REQUEST_SCHEMA,
+        LOCAL_TEXTURED_REQUEST_SCHEMA,
+    }
+    content_id = request["preview_id"] if local else request["build_id"]
     material_paths = (
         _validate_material_directory(materials_path, request) if textured else None
     )
@@ -3057,7 +3109,7 @@ def _execute_build(request, staging_path, materials_path=None):
     if not staging_path.parent.is_dir():
         raise RuntimeBuildError("staging parent directory does not exist")
     work_dir = staging_path.with_name(
-        f".{staging_path.name}.nvtmp-{request['build_id'][:12]}",
+        f".{staging_path.name}.nvtmp-{content_id[:12]}",
     )
     if work_dir.exists():
         raise RuntimeBuildError("deterministic temporary build directory already exists")
@@ -3116,7 +3168,7 @@ def _execute_build(request, staging_path, materials_path=None):
             os.fsync(stream.fileno())
         work_dir.rename(staging_path)
         print(
-            f"NANTAI_BUILD_OK build_id={request['build_id']} "
+            f"NANTAI_BUILD_OK content_id={content_id} "
             f"roots=126 meshes={len(mesh_objects)} cameras=24 materials=24",
             flush=True,
         )
