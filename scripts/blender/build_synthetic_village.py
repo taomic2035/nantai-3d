@@ -62,6 +62,26 @@ TERRAIN_TEXTURE_SLOTS = (
     "material-packed-earth-01",
     "material-terrace-soil-01",
 )
+BUILDING_GEOMETRY_V1 = "front-facade-box-v1"
+BUILDING_GEOMETRY_V2 = "four-sided-rural-building-v2"
+BUILDING_ELEVATIONS = ("front", "left", "rear", "right")
+BUILDING_VARIANTS = (
+    "balanced-residence",
+    "side-entry-workshop",
+    "rear-service-house",
+)
+EXPECTED_BUILDING_VARIANT_COUNTS = {
+    "balanced-residence": 21,
+    "rear-service-house": 20,
+    "side-entry-workshop": 29,
+}
+MAX_ADDED_BUILDING_FACES = 220
+MAX_ADDED_VILLAGE_FACES = 15_400
+MAX_BUILDING_GLTF_TRIANGLES = 720
+MAX_GLTF_TRIANGLES = 100_000
+MAX_TEXTURED_GLB_BYTES = 150_000_000
+EXPECTED_TEXTURED_GLB_PRIMITIVES = 544
+EXPECTED_BUILDING_MESH_OBJECTS = 421
 
 SEMANTIC_CLASSES = (
     "background",
@@ -295,6 +315,17 @@ def _prop_variant(object_id):
         return None
 
 
+def _building_variant(object_id, profile_id):
+    if profile_id == BUILDING_GEOMETRY_V1:
+        return None
+    if profile_id != BUILDING_GEOMETRY_V2:
+        raise RuntimeBuildError(f"unknown building geometry profile: {profile_id!r}")
+    digest = hashlib.sha256(
+        f"{BUILDING_GEOMETRY_V2}\0{object_id}".encode(),
+    ).digest()
+    return BUILDING_VARIANTS[digest[0] % len(BUILDING_VARIANTS)]
+
+
 def _visual_slot_categories():
     categories = {}
     for category, slot_ids in (
@@ -512,6 +543,13 @@ def _validate_request(request, raw):
         if textured
         else common_top_keys
     )
+    has_building_profile = "building_geometry_profile_id" in request
+    if local and not has_building_profile:
+        raise RuntimeBuildError("local textured request requires a building geometry profile")
+    if has_building_profile:
+        if not textured:
+            raise RuntimeBuildError("legacy request cannot select a building geometry profile")
+        top_keys = (*top_keys, "building_geometry_profile_id")
     # weather 是【可选】top key: 缺席 -> canary 14 键契约原样不变; 出现 -> 天气变体,
     # 该块进入 canonical payload 故 build_id 自动按天气分叉。
     if "weather" in request and not textured:
@@ -808,6 +846,12 @@ def _validate_request(request, raw):
             or request["material_algorithm_id"] not in SUPPORTED_TEXTURED_ALGORITHM_IDS
         ):
             raise RuntimeBuildError("textured material bundle identity is invalid")
+        building_profile = request.get(
+            "building_geometry_profile_id",
+            BUILDING_GEOMETRY_V1,
+        )
+        if building_profile not in {BUILDING_GEOMETRY_V1, BUILDING_GEOMETRY_V2}:
+            raise RuntimeBuildError("building geometry profile is invalid")
         material_inputs = request["material_input_registry"]
         _expect_list(material_inputs, 24, "material_input_registry")
         expected_input_keys = {
@@ -1756,7 +1800,243 @@ def _polygon_surface(ring, extent, lift=0.08):
     return assembler
 
 
-def _build_building(item, root, registry, materials, collection):
+def _facade_box(
+    assembler,
+    elevation,
+    wall_width,
+    wall_depth,
+    center_u,
+    center_z,
+    size_u,
+    size_z,
+    thickness,
+    offset,
+):
+    if elevation == "front":
+        center = (center_u, -wall_depth / 2 - offset, center_z)
+        size = (size_u, thickness, size_z)
+    elif elevation == "rear":
+        center = (center_u, wall_depth / 2 + offset, center_z)
+        size = (size_u, thickness, size_z)
+    elif elevation == "left":
+        center = (-wall_width / 2 - offset, center_u, center_z)
+        size = (thickness, size_u, size_z)
+    elif elevation == "right":
+        center = (wall_width / 2 + offset, center_u, center_z)
+        size = (thickness, size_u, size_z)
+    else:
+        raise RuntimeBuildError(f"unsupported building elevation: {elevation}")
+    assembler.add_box(center, size)
+
+
+def _facade_quad(
+    assembler,
+    elevation,
+    wall_width,
+    wall_depth,
+    center_u,
+    center_z,
+    size_u,
+    size_z,
+    offset,
+):
+    u0, u1 = center_u - size_u / 2, center_u + size_u / 2
+    z0, z1 = center_z - size_z / 2, center_z + size_z / 2
+    if elevation == "front":
+        y = -wall_depth / 2 - offset
+        vertices = ((u0, y, z0), (u1, y, z0), (u1, y, z1), (u0, y, z1))
+    elif elevation == "rear":
+        y = wall_depth / 2 + offset
+        vertices = ((u0, y, z0), (u0, y, z1), (u1, y, z1), (u1, y, z0))
+    elif elevation == "left":
+        x = -wall_width / 2 - offset
+        vertices = ((x, u0, z0), (x, u0, z1), (x, u1, z1), (x, u1, z0))
+    elif elevation == "right":
+        x = wall_width / 2 + offset
+        vertices = ((x, u0, z0), (x, u1, z0), (x, u1, z1), (x, u0, z1))
+    else:
+        raise RuntimeBuildError(f"unsupported building elevation: {elevation}")
+    assembler.add(vertices, ((0, 1, 2, 3),))
+
+
+def _add_window_assembly(
+    assembler,
+    elevation,
+    wall_width,
+    wall_depth,
+    center_u,
+    center_z,
+    *,
+    include_panel=True,
+    include_muntins=True,
+):
+    start = len(assembler.faces)
+    window_width, window_height, rail = 1.05, 1.15, 0.10
+    if include_panel:
+        _facade_box(
+            assembler,
+            elevation,
+            wall_width,
+            wall_depth,
+            center_u,
+            center_z,
+            window_width,
+            window_height,
+            0.04,
+            0.03,
+        )
+    frame_offset = 0.085 if include_panel else 0.22
+    verticals = [
+        center_u - window_width / 2 + rail / 2,
+        center_u + window_width / 2 - rail / 2,
+    ]
+    horizontals = [
+        center_z - window_height / 2 + rail / 2,
+        center_z + window_height / 2 - rail / 2,
+    ]
+    if include_muntins:
+        verticals.append(center_u)
+        horizontals.append(center_z)
+    for u_value in verticals:
+        _facade_quad(
+            assembler,
+            elevation,
+            wall_width,
+            wall_depth,
+            u_value,
+            center_z,
+            rail,
+            window_height,
+            frame_offset,
+        )
+    for z_value in horizontals:
+        _facade_quad(
+            assembler,
+            elevation,
+            wall_width,
+            wall_depth,
+            center_u,
+            z_value,
+            window_width,
+            rail,
+            frame_offset,
+        )
+    return len(assembler.faces) - start
+
+
+def _add_door_assembly(
+    assembler,
+    elevation,
+    wall_width,
+    wall_depth,
+    center_u,
+    base_z,
+    *,
+    width=1.35,
+    include_panel=True,
+):
+    start = len(assembler.faces)
+    height, rail = 2.30, 0.10
+    center_z = base_z + height / 2
+    if include_panel:
+        _facade_box(
+            assembler,
+            elevation,
+            wall_width,
+            wall_depth,
+            center_u,
+            center_z,
+            width,
+            height,
+            0.05,
+            0.035,
+        )
+    frame_offset = 0.095 if include_panel else 0.16
+    for u_value in (
+        center_u - width / 2 + rail / 2,
+        center_u + width / 2 - rail / 2,
+        center_u - width / 6,
+        center_u + width / 6,
+    ):
+        _facade_quad(
+            assembler,
+            elevation,
+            wall_width,
+            wall_depth,
+            u_value,
+            center_z,
+            rail,
+            height,
+            frame_offset,
+        )
+    for z_value in (
+        base_z + rail / 2,
+        base_z + height - rail / 2,
+        base_z + height * 0.58,
+    ):
+        _facade_quad(
+            assembler,
+            elevation,
+            wall_width,
+            wall_depth,
+            center_u,
+            z_value,
+            width,
+            rail,
+            frame_offset,
+        )
+    return len(assembler.faces) - start
+
+
+def _add_sloped_roof_board(
+    assembler,
+    *,
+    x_center,
+    y_start,
+    z_start,
+    y_end,
+    z_end,
+    width_x=0.16,
+    thickness=0.14,
+):
+    dy, dz = y_end - y_start, z_end - z_start
+    length = math.hypot(dy, dz)
+    if length <= 1e-9:
+        raise RuntimeBuildError("roof edge board has zero length")
+    px = width_x / 2
+    py = -dz / length * thickness / 2
+    pz = dy / length * thickness / 2
+    vertices = (
+        (x_center - px, y_start - py, z_start - pz),
+        (x_center + px, y_start - py, z_start - pz),
+        (x_center + px, y_start + py, z_start + pz),
+        (x_center - px, y_start + py, z_start + pz),
+        (x_center - px, y_end - py, z_end - pz),
+        (x_center + px, y_end - py, z_end - pz),
+        (x_center + px, y_end + py, z_end + pz),
+        (x_center - px, y_end + py, z_end + pz),
+    )
+    assembler.add(
+        vertices,
+        (
+            (0, 1, 2, 3),
+            (4, 7, 6, 5),
+            (0, 4, 5, 1),
+            (1, 5, 6, 2),
+            (2, 6, 7, 3),
+            (3, 7, 4, 0),
+        ),
+    )
+
+
+def _build_building(
+    item,
+    root,
+    registry,
+    materials,
+    collection,
+    building_geometry_profile,
+):
     dimensions = item["dimensions"]
     width = dimensions["width_m"]
     depth = dimensions["depth_m"]
@@ -1765,9 +2045,22 @@ def _build_building(item, root, registry, materials, collection):
     wall_height = max(3.2, height * 0.70)
     eave_z = base_z + wall_height
     ridge_z = base_z + height
+    building_variant = _building_variant(
+        item["object_id"],
+        building_geometry_profile,
+    )
+    is_v2 = building_geometry_profile == BUILDING_GEOMETRY_V2
+    added_faces = 0
 
     base = MeshAssembler()
     base.add_box((0.0, 0.0, base_z + 0.28), (width + 0.7, depth + 0.7, 0.56))
+    if is_v2:
+        before = len(base.faces)
+        base.add_box(
+            (0.0, 0.0, base_z + 0.42),
+            (width + 0.18, depth + 0.18, 0.84),
+        )
+        added_faces += len(base.faces) - before
     _link_mesh(
         root,
         "stone-platform",
@@ -1793,6 +2086,33 @@ def _build_building(item, root, registry, materials, collection):
     roof.add_cylinder((0.0, 0.0, ridge_z + 0.10), 0.13, width + 1.2, 8, axis="x")
     for y_value in (-depth / 2 - 0.44, depth / 2 + 0.44):
         roof.add_box((0.0, y_value, eave_z - 0.04), (width + 1.15, 0.16, 0.20))
+    if is_v2:
+        before = len(roof.faces)
+        for y_value in (-depth / 2 - 0.36, depth / 2 + 0.36):
+            roof.add_box(
+                (0.0, y_value, eave_z - 0.17),
+                (width + 1.05, 0.42, 0.10),
+            )
+        half_width = width / 2 + 0.56
+        half_depth = depth / 2 + 0.55
+        for x_value in (-half_width, half_width):
+            _add_sloped_roof_board(
+                roof,
+                x_center=x_value,
+                y_start=-half_depth,
+                z_start=eave_z,
+                y_end=0.0,
+                z_end=ridge_z,
+            )
+            _add_sloped_roof_board(
+                roof,
+                x_center=x_value,
+                y_start=0.0,
+                z_start=ridge_z,
+                y_end=half_depth,
+                z_end=eave_z,
+            )
+        added_faces += len(roof.faces) - before
     _link_mesh(
         root,
         "tiled-gabled-roof-ridge-eaves",
@@ -1813,6 +2133,23 @@ def _build_building(item, root, registry, materials, collection):
         (0.0, -depth / 2 - 0.05, eave_z - 0.25),
         (width - 0.3, 0.20, 0.20),
     )
+    if is_v2:
+        before = len(timber.faces)
+        for x_value in (-width / 2 + beam, width / 2 - beam):
+            timber.add_box(
+                (x_value, depth / 2 + 0.04, base_z + wall_height / 2),
+                (beam, 0.18, wall_height),
+            )
+        timber.add_box(
+            (0.0, depth / 2 + 0.05, eave_z - 0.25),
+            (width - 0.3, 0.20, 0.20),
+        )
+        for x_value in (-width / 2 - 0.05, width / 2 + 0.05):
+            timber.add_box(
+                (x_value, 0.0, eave_z - 0.25),
+                (0.20, depth - 0.3, 0.20),
+            )
+        added_faces += len(timber.faces) - before
     _link_mesh(
         root,
         "timber-frame",
@@ -1828,6 +2165,37 @@ def _build_building(item, root, registry, materials, collection):
         (0.0, -depth / 2 - 0.075, base_z + 1.15),
         (door_width, 0.14, 2.30),
     )
+    if is_v2:
+        added_faces += _add_door_assembly(
+            door,
+            "front",
+            width,
+            depth,
+            0.0,
+            base_z,
+            width=door_width,
+            include_panel=False,
+        )
+        if building_variant == "side-entry-workshop":
+            added_faces += _add_door_assembly(
+                door,
+                "left",
+                width,
+                depth,
+                0.0,
+                base_z,
+                width=door_width,
+            )
+        elif building_variant == "rear-service-house":
+            added_faces += _add_door_assembly(
+                door,
+                "rear",
+                width,
+                depth,
+                0.0,
+                base_z,
+                width=door_width,
+            )
     _link_mesh(
         root,
         "timber-door",
@@ -1852,6 +2220,45 @@ def _build_building(item, root, registry, materials, collection):
             (x_value, -depth / 2 - 0.17, base_z + wall_height * 0.56),
             (1.10, 0.08, 0.10),
         )
+    if is_v2:
+        window_z = base_z + wall_height * 0.56
+        for x_value in (-window_offset, window_offset):
+            added_faces += _add_window_assembly(
+                windows,
+                "front",
+                width,
+                depth,
+                x_value,
+                window_z,
+                include_panel=False,
+                include_muntins=False,
+            )
+        if building_variant in {"balanced-residence", "side-entry-workshop"}:
+            added_faces += _add_window_assembly(
+                windows,
+                "rear",
+                width,
+                depth,
+                0.0,
+                window_z,
+            )
+        if building_variant in {"balanced-residence", "rear-service-house"}:
+            added_faces += _add_window_assembly(
+                windows,
+                "left",
+                width,
+                depth,
+                0.0,
+                window_z,
+            )
+        added_faces += _add_window_assembly(
+            windows,
+            "right",
+            width,
+            depth,
+            0.0,
+            window_z,
+        )
     _link_mesh(
         root,
         "two-latticed-windows",
@@ -1860,6 +2267,21 @@ def _build_building(item, root, registry, materials, collection):
         registry,
         collection,
     )
+
+    if is_v2:
+        if building_variant not in BUILDING_VARIANTS:
+            raise RuntimeBuildError("v2 building variant was not derived")
+        if not 1 <= added_faces <= MAX_ADDED_BUILDING_FACES:
+            raise RuntimeBuildError(
+                f"building geometry face budget exceeded: {item['object_id']}",
+            )
+        root["nv_building_geometry_profile"] = BUILDING_GEOMETRY_V2
+        root["nv_building_variant"] = building_variant
+        root["nv_facade_elevations"] = json.dumps(
+            BUILDING_ELEVATIONS,
+            separators=(",", ":"),
+        )
+        root["nv_added_face_count"] = added_faces
 
     if item.get("building_role") == "community-hall":
         porch = MeshAssembler()
@@ -2302,7 +2724,14 @@ def _build_canonical_objects(request, materials, canonical_collection):
         roots.append(root)
         semantic = item["semantic_class"]
         if semantic == "building":
-            _build_building(item, root, registry, materials, canonical_collection)
+            _build_building(
+                item,
+                root,
+                registry,
+                materials,
+                canonical_collection,
+                request.get("building_geometry_profile_id", BUILDING_GEOMETRY_V1),
+            )
         elif semantic == "bridge":
             _build_bridge(item, root, registry, materials, canonical_collection)
         elif semantic in {"creek", "path", "retaining-wall"}:
@@ -2775,6 +3204,65 @@ def _validate_built_scene(request, roots, materials, camera_objects):
     }:
         raise RuntimeBuildError("auxiliary semantic mesh set is not exactly stable v1")
     _validate_visual_scene_evidence(request, roots, materials)
+    building_geometry_profile = request.get(
+        "building_geometry_profile_id",
+        BUILDING_GEOMETRY_V1,
+    )
+    if building_geometry_profile == BUILDING_GEOMETRY_V2:
+        building_roots = [
+            root
+            for root in roots
+            if root.get("nv_semantic_class") == "building"
+        ]
+        building_mesh_count = sum(
+            child.type == "MESH"
+            for root in building_roots
+            for child in root.children
+        )
+        variant_counts = {variant: 0 for variant in BUILDING_VARIANTS}
+        added_face_counts = []
+        expected_elevations = json.dumps(
+            BUILDING_ELEVATIONS,
+            separators=(",", ":"),
+        )
+        for root in building_roots:
+            object_id = root.get("nv_stable_id")
+            expected_variant = _building_variant(object_id, building_geometry_profile)
+            added_faces = root.get("nv_added_face_count")
+            if (
+                root.get("nv_building_geometry_profile") != BUILDING_GEOMETRY_V2
+                or root.get("nv_building_variant") != expected_variant
+                or root.get("nv_facade_elevations") != expected_elevations
+                or isinstance(added_faces, bool)
+                or not isinstance(added_faces, int)
+                or not 1 <= added_faces <= MAX_ADDED_BUILDING_FACES
+            ):
+                raise RuntimeBuildError(
+                    f"building geometry evidence is invalid: {object_id}",
+                )
+            variant_counts[expected_variant] += 1
+            added_face_counts.append(added_faces)
+        added_face_count = sum(added_face_counts)
+        if (
+            len(building_roots) != 70
+            or building_mesh_count != EXPECTED_BUILDING_MESH_OBJECTS
+            or variant_counts != EXPECTED_BUILDING_VARIANT_COUNTS
+            or not 1 <= added_face_count <= MAX_ADDED_VILLAGE_FACES
+        ):
+            raise RuntimeBuildError("v2 building geometry aggregate evidence is invalid")
+        bpy.context.scene["nv_building_geometry_evidence"] = json.dumps(
+            {
+                "added_face_count": added_face_count,
+                "building_count": len(building_roots),
+                "covered_elevations": list(BUILDING_ELEVATIONS),
+                "maximum_added_faces_per_building": max(added_face_counts),
+                "new_mesh_object_count": 0,
+                "profile_id": BUILDING_GEOMETRY_V2,
+                "variant_counts": variant_counts,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     prop_counts = {variant: 0 for variant in PROP_VARIANTS}
     for row in request["object_registry"]:
         if row["variant_id"]:
@@ -3125,6 +3613,21 @@ def _build_report(
         report["material_bundle_id"] = request["material_bundle_id"]
         report["material_algorithm_id"] = request["material_algorithm_id"]
         report["material_input_registry"] = request["material_input_registry"]
+        if "building_geometry_profile_id" in request:
+            building_profile = request["building_geometry_profile_id"]
+            report["building_geometry_profile_id"] = building_profile
+            if building_profile == BUILDING_GEOMETRY_V2:
+                raw_evidence = bpy.context.scene.get(
+                    "nv_building_geometry_evidence",
+                )
+                if not isinstance(raw_evidence, str):
+                    raise RuntimeBuildError("v2 building geometry evidence is absent")
+                try:
+                    report["building_geometry"] = json.loads(raw_evidence)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeBuildError(
+                        "v2 building geometry evidence is invalid",
+                    ) from exc
         report["counts"].update(glb_counts)
     if local:
         report["authoritative"] = False
@@ -3215,6 +3718,15 @@ def _execute_build(request, staging_path, materials_path=None):
             for digest, path in material_paths.items():
                 _read_stable_material(path, digest)
         glb_counts = _save_scene_and_glb(work_dir, textured=textured)
+        if request.get("building_geometry_profile_id") == BUILDING_GEOMETRY_V2:
+            glb_size = (work_dir / "village-canary.glb").stat().st_size
+            if (
+                glb_counts["glb_primitives"] != EXPECTED_TEXTURED_GLB_PRIMITIVES
+                or glb_size > MAX_TEXTURED_GLB_BYTES
+            ):
+                raise RuntimeBuildError(
+                    "v2 building geometry exceeded the GLB primitive or byte budget",
+                )
         if textured:
             for digest, path in material_paths.items():
                 _read_stable_material(path, digest)
