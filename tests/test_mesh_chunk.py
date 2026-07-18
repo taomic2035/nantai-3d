@@ -13,6 +13,12 @@ from pipeline.synthetic_village.mesh_asset_bundle import (
     MESH_ASSET_BUNDLE_SCHEMA,
     MeshAssetBundle,
 )
+from pipeline.synthetic_village.material_bundle import (
+    MATERIAL_PARAMETERS,
+    DerivedMaterialBundle,
+    DerivedMaterialRecord,
+    MaterialMapDescriptor,
+)
 from pipeline.synthetic_village.mesh_chunk import (
     MeshChunkError,
     MeshChunkManifest,
@@ -60,6 +66,8 @@ def _asset_kind(asset_id: str) -> str:
 def _bundle(
     *,
     material_bundle_id: str = "2" * 64,
+    material_bundle_manifest_sha256: str = "3" * 64,
+    material_algorithm_id: str = "mirror-sobel-orm-v1",
     asset_ids: tuple[str, ...] | None = None,
     lod_templates: tuple[
         tuple[str, int, int],
@@ -83,7 +91,7 @@ def _bundle(
                 else f"{index:064x}"
             ),
             "bundle_id": material_bundle_id,
-            "algorithm_id": "mirror-sobel-orm-v1",
+            "algorithm_id": material_algorithm_id,
         }
         for index, slot_id in enumerate(MATERIAL_SLOTS, start=1)
     ]
@@ -122,7 +130,7 @@ def _bundle(
         "bundle_id": "0" * 64,
         "coordinate_encoding": "three-east-up-negative-north",
         "material_bundle_id": material_bundle_id,
-        "material_bundle_manifest_sha256": "3" * 64,
+        "material_bundle_manifest_sha256": material_bundle_manifest_sha256,
         "synthetic": True,
         "real_photo_textures": False,
         "build_tool_id": "pytest-mesh-template-v1",
@@ -134,6 +142,50 @@ def _bundle(
     identity.pop("bundle_id")
     payload["bundle_id"] = hashlib.sha256(_canonical(identity)).hexdigest()
     return MeshAssetBundle.model_validate_json(_canonical(payload))
+
+
+def _surface_material_bundle(bundle: MeshAssetBundle) -> DerivedMaterialBundle:
+    sources = {row.slot_id: row.source_sha256 for row in bundle.material_registry}
+    records = []
+    for slot_id in (
+        "material-packed-earth-01",
+        "material-shallow-water-01",
+        "material-terrace-soil-01",
+        "material-wet-stone-paving-01",
+    ):
+        parameters = MATERIAL_PARAMETERS[slot_id]
+        descriptors = {}
+        for role, color_space in (
+            ("base_color", "srgb"),
+            ("normal", "non-color"),
+            ("orm", "non-color"),
+        ):
+            digest = hashlib.sha256(f"{slot_id}:{role}".encode()).hexdigest()
+            descriptors[role] = MaterialMapDescriptor(
+                object_path=f"objects/{digest}.png",
+                sha256=digest,
+                bytes=1024,
+                color_space=color_space,
+            )
+        records.append(
+            DerivedMaterialRecord(
+                slot_id=slot_id,
+                source_sha256=sources[slot_id],
+                source_width=12,
+                source_height=8,
+                uv_policy=parameters.uv_policy,
+                nominal_tile_m=parameters.nominal_tile_m,
+                normal_strength=parameters.normal_strength,
+                roughness_center=parameters.roughness_center,
+                metallic=parameters.metallic,
+                replacement_contract_sha256="9" * 64,
+                **descriptors,
+            ),
+        )
+    return DerivedMaterialBundle.model_construct(
+        bundle_id=bundle.material_bundle_id,
+        records=tuple(records),
+    )
 
 
 def test_negative_chunk_is_deterministic_and_path_free() -> None:
@@ -221,7 +273,11 @@ def test_runtime_projection_uses_only_exact_same_origin_asset_routes() -> None:
         lod=0,
     )
 
-    runtime = project_mesh_chunk_runtime(chunk, bundle=bundle)
+    runtime = project_mesh_chunk_runtime(
+        chunk,
+        bundle=bundle,
+        material_bundle=_surface_material_bundle(bundle),
+    )
 
     assert runtime.chunk is chunk
     assert runtime.asset_urls
@@ -236,6 +292,22 @@ def test_runtime_projection_uses_only_exact_same_origin_asset_routes() -> None:
         )
         for row in runtime.asset_urls
     )
+    expected_slots = tuple(sorted({
+        chunk.terrain.material_slot_id,
+        *(ribbon.material_slot_id for ribbon in chunk.roads),
+        *(ribbon.material_slot_id for ribbon in chunk.water),
+    }))
+    assert tuple(row.slot_id for row in runtime.surface_materials) == expected_slots
+    for material in runtime.surface_materials:
+        assert material.nominal_tile_m == MATERIAL_PARAMETERS[
+            material.slot_id
+        ].nominal_tile_m
+        for role in ("base_color", "normal", "orm"):
+            descriptor = getattr(material, role)
+            assert descriptor.url == (
+                f"/api/world/material-maps/{bundle.material_bundle_id}/"
+                f"{material.slot_id}/{role}.png"
+            )
 
 
 def test_layout_asset_missing_from_bundle_fails_closed() -> None:

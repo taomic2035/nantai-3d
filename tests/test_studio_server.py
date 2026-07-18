@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import json
 import threading
 import warnings
@@ -16,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from pipeline.studio_server import (
     PathAccessError,
@@ -30,6 +32,12 @@ from pipeline.synthetic_village.local_textured_preview import (
 )
 from pipeline.synthetic_village.mesh_asset_bundle import (
     canonical_mesh_asset_bundle_bytes,
+)
+from pipeline.synthetic_village.material_bundle import (
+    ALGORITHM_ID,
+    MATERIAL_PARAMETERS,
+    DerivedMaterialBundle,
+    canonical_material_bundle_bytes,
 )
 from tests.test_mesh_asset_bundle import _glb_payload
 from tests.test_mesh_chunk import _bundle
@@ -67,6 +75,12 @@ CORE_PROPERTIES = (
     "rot_3",
 )
 SIMPLE_PROPERTIES = ("x", "y", "z", "r", "g", "b", "scale")
+
+
+def _canonical(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode()
 
 
 def _write_ply(
@@ -289,7 +303,106 @@ def _write_mesh_world_bundle(root: Path):
         (hashlib.sha256(glb).hexdigest(), len(glb), level + 1)
         for level, glb in enumerate(glbs)
     )
+    material_payloads = {}
+    for role, color in (
+        ("base_color", (112, 94, 62)),
+        ("normal", (128, 128, 255)),
+        ("orm", (255, 210, 0)),
+    ):
+        output = io.BytesIO()
+        Image.new("RGB", (1024, 1024), color).save(
+            output,
+            format="PNG",
+            compress_level=9,
+            optimize=False,
+        )
+        material_payloads[role] = output.getvalue()
+    source_registry = {
+        row.slot_id: row.source_sha256
+        for row in _bundle().material_registry
+    }
+    records = []
+    for index, slot_id in enumerate(sorted(MATERIAL_PARAMETERS), start=1):
+        parameters = MATERIAL_PARAMETERS[slot_id]
+        descriptors = {}
+        for role, color_space in (
+            ("base_color", "srgb"),
+            ("normal", "non-color"),
+            ("orm", "non-color"),
+        ):
+            payload = material_payloads[role]
+            digest = hashlib.sha256(payload).hexdigest()
+            descriptors[role] = {
+                "object_path": f"objects/{digest}.png",
+                "sha256": digest,
+                "bytes": len(payload),
+                "width": 1024,
+                "height": 1024,
+                "media_type": "image/png",
+                "color_space": color_space,
+            }
+        records.append({
+            "slot_id": slot_id,
+            "source_sha256": source_registry.get(slot_id, f"{index + 100:064x}"),
+            "source_width": 12,
+            "source_height": 8,
+            **descriptors,
+            "uv_policy": parameters.uv_policy,
+            "nominal_tile_m": parameters.nominal_tile_m,
+            "normal_strength": parameters.normal_strength,
+            "roughness_center": parameters.roughness_center,
+            "metallic": parameters.metallic,
+            "replacement_contract_sha256": f"{index + 200:064x}",
+            "synthetic": True,
+        })
+    material_identity = {
+        "schema_version": "nantai.synthetic-village.derived-material-bundle.v1",
+        "synthetic": True,
+        "source_pack_id": "pytest-material-runtime",
+        "source_manifest_sha256": "6" * 64,
+        "algorithm_id": ALGORITHM_ID,
+        "python_version": "pytest",
+        "pillow_version": "pytest",
+        "module_sha256": "7" * 64,
+        "records": tuple(records),
+    }
+    material_bundle_id = hashlib.sha256(_canonical(material_identity)).hexdigest()
+    material_bundle = DerivedMaterialBundle(
+        bundle_id=material_bundle_id,
+        **material_identity,
+    )
+    material_manifest = canonical_material_bundle_bytes(material_bundle)
+    material_directory = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/material-bundles"
+        / material_bundle.bundle_id
+    )
+    material_objects = material_directory / "objects"
+    material_objects.mkdir(parents=True)
+    for payload in material_payloads.values():
+        digest = hashlib.sha256(payload).hexdigest()
+        (material_objects / f"{digest}.png").write_bytes(payload)
+    (material_directory / "manifest.json").write_bytes(material_manifest)
+
+    glbs = tuple(
+        _glb_payload(
+            triangle_count=triangle_count,
+            source_sha256=source_registry["material-fieldstone-01"],
+            material_bundle_id=material_bundle.bundle_id,
+            material_algorithm_id=ALGORITHM_ID,
+        )
+        for triangle_count in (1, 2, 3)
+    )
+    lod_templates = tuple(
+        (hashlib.sha256(glb).hexdigest(), len(glb), level + 1)
+        for level, glb in enumerate(glbs)
+    )
     bundle = _bundle(
+        material_bundle_id=material_bundle.bundle_id,
+        material_bundle_manifest_sha256=hashlib.sha256(
+            material_manifest,
+        ).hexdigest(),
+        material_algorithm_id=ALGORITHM_ID,
         lod_templates=lod_templates,
         descriptor_aabb={
             "min": [0.0, 0.0, 0.0],
@@ -1109,9 +1222,35 @@ class TestHttpContract:
                 asset_url,
                 headers={"If-None-Match": asset_headers.get("etag", "")},
             )
+            material = runtime["surface_materials"][0]
+            map_descriptor = material["base_color"]
+            map_status, map_headers, map_payload = _request(
+                server,
+                "GET",
+                map_descriptor["url"],
+            )
+            map_head_status, map_head_headers, map_head_payload = _request(
+                server,
+                "HEAD",
+                map_descriptor["url"],
+            )
+            map_cached_status, _, map_cached_payload = _request(
+                server,
+                "GET",
+                map_descriptor["url"],
+                headers={"If-None-Match": map_headers.get("etag", "")},
+            )
 
-        assert status == head_status == asset_status == asset_head_status == 200
-        assert cached_status == asset_cached_status == 304
+        assert (
+            status
+            == head_status
+            == asset_status
+            == asset_head_status
+            == map_status
+            == map_head_status
+            == 200
+        )
+        assert cached_status == asset_cached_status == map_cached_status == 304
         assert runtime["chunk"]["chunk_id"] == {"x": -2, "y": 3}
         assert runtime["chunk"]["world_offset"] == [-400.0, 600.0, 0.0]
         assert runtime["chunk"]["mesh_asset_bundle_id"] == bundle.bundle_id
@@ -1131,8 +1270,16 @@ class TestHttpContract:
         )
         assert asset_headers["etag"] == asset_head_headers["etag"]
         assert asset_payload == expected_glb
+        assert map_headers["content-type"] == "image/png"
+        assert map_headers["cache-control"] == (
+            "public, max-age=31536000, immutable"
+        )
+        assert map_headers["etag"] == map_head_headers["etag"]
+        assert len(map_payload) == map_descriptor["bytes"]
+        assert hashlib.sha256(map_payload).hexdigest() == map_descriptor["sha256"]
         assert head_payload == cached_payload == b""
         assert asset_head_payload == asset_cached_payload == b""
+        assert map_head_payload == map_cached_payload == b""
         assert not (tmp_path / "web/data/chunk_-2_3.json").exists()
 
     def test_mesh_routes_fail_closed_without_exact_manifest_opt_in(
@@ -1169,6 +1316,29 @@ class TestHttpContract:
 
         assert status == 500
         assert json.loads(payload)["error"]["code"] == "mesh_asset_bundle_invalid"
+
+    def test_mesh_routes_reject_tampered_surface_material_bytes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _write_mesh_world_bundle(tmp_path)
+        material_root = (
+            tmp_path
+            / ".nantai-studio/synthetic-village/hybrid-v3/material-bundles"
+        )
+        material_map = next(material_root.glob("*/objects/*.png"))
+        material_map.write_bytes(material_map.read_bytes() + b"\0")
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/0/0.json?lod=2",
+            )
+
+        assert status == 500
+        assert json.loads(payload)["error"]["code"] == "material_bundle_invalid"
 
     @pytest.mark.parametrize(
         "path",

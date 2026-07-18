@@ -20,6 +20,7 @@ from pipeline.synthetic_village.material_bundle import (
     load_material_bundle,
     prepare_material_bundle,
     publish_material_bundle,
+    read_verified_material_map,
     verify_prepared_material_bundle,
 )
 from pipeline.synthetic_village.visual_sources import (
@@ -83,6 +84,43 @@ def test_prepare_derives_three_content_addressed_maps_for_all_slots(
     assert hashlib.sha256(canonical_without_id).hexdigest() == manifest.bundle_id
     assert canonical_material_bundle_bytes(manifest).endswith(b"\n")
     assert b".nantai-studio" not in canonical_material_bundle_bytes(manifest)
+
+
+@pytest.mark.parametrize("role", ["base_color", "normal", "orm"])
+def test_exact_material_map_read_rechecks_selected_bundle(
+    prepared_bundle,
+    role: str,
+) -> None:
+    _, prepared = prepared_bundle
+    record = prepared.manifest.records[0]
+    descriptor = getattr(record, role)
+
+    assert read_verified_material_map(
+        prepared.staging_root,
+        bundle=prepared.manifest,
+        slot_id=record.slot_id,
+        role=role,
+    ) == (prepared.staging_root / descriptor.object_path).read_bytes()
+
+
+def test_exact_material_map_read_rejects_changed_object(
+    prepared_bundle,
+    tmp_path: Path,
+) -> None:
+    _, prepared = prepared_bundle
+    copied = tmp_path / "bundle"
+    shutil.copytree(prepared.staging_root, copied)
+    bundle = load_material_bundle(copied)
+    descriptor = bundle.records[0].base_color
+    (copied / descriptor.object_path).write_bytes(b"altered")
+
+    with pytest.raises(MaterialBundleError, match="does not match|verification"):
+        read_verified_material_map(
+            copied,
+            bundle=bundle,
+            slot_id=bundle.records[0].slot_id,
+            role="base_color",
+        )
 
 
 def test_base_color_is_repeatable_without_a_hard_edge(prepared_bundle) -> None:

@@ -15,6 +15,7 @@ API contract:
 * ``GET /api/world/chunk/{x}/{y}.ply`` -> opt-in, side-effect-free world chunk.
 * ``GET /api/world/mesh-chunk/{x}/{y}.json`` -> verified mesh chunk evidence.
 * ``GET /api/world/mesh-assets/...`` -> immutable audited template GLB bytes.
+* ``GET /api/world/material-maps/...`` -> immutable verified PBR map bytes.
 * ``GET``/``HEAD`` below approved static roots -> project-relative files.
 * every mutating method -> structured HTTP 405; no job is started.
 """
@@ -68,6 +69,13 @@ from pipeline.synthetic_village.mesh_chunk import (
     build_mesh_chunk_manifest,
     canonical_mesh_chunk_runtime_bytes,
     project_mesh_chunk_runtime,
+)
+from pipeline.synthetic_village.material_bundle import (
+    DerivedMaterialBundle,
+    MaterialBundleError,
+    canonical_material_bundle_bytes,
+    load_material_bundle,
+    read_verified_material_map,
 )
 
 SNAPSHOT_SCHEMA_VERSION = 2
@@ -270,6 +278,42 @@ def _resolve_mesh_asset_bundle_directory(
     boundary = (
         root
         / ".nantai-studio/synthetic-village/hybrid-v3/mesh-asset-bundles"
+    )
+    cursor = root
+    for component in boundary.relative_to(root).parts:
+        cursor = cursor / component
+        if cursor.is_symlink():
+            return None
+        try:
+            resolved = cursor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if resolved != cursor or not resolved.is_dir():
+            return None
+    directory = boundary / bundle_id
+    if directory.is_symlink():
+        return None
+    try:
+        resolved_directory = directory.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if (
+        resolved_directory != directory
+        or not _is_below(boundary, resolved_directory)
+        or not resolved_directory.is_dir()
+    ):
+        return None
+    return resolved_directory
+
+
+def _resolve_material_bundle_directory(
+    root: Path,
+    bundle_id: str,
+) -> Path | None:
+    root = root.resolve()
+    boundary = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/material-bundles"
     )
     cursor = root
     for component in boundary.relative_to(root).parts:
@@ -1521,6 +1565,42 @@ def _load_active_mesh_asset_bundle(
     return directory, bundle
 
 
+def _load_active_material_bundle(
+    root: Path,
+    manifest: dict[str, Any],
+    *,
+    mesh_bundle: MeshAssetBundle,
+) -> tuple[Path, DerivedMaterialBundle]:
+    grid = manifest["mesh_grid"]
+    directory = _resolve_material_bundle_directory(
+        root,
+        grid["material_bundle_id"],
+    )
+    if directory is None:
+        raise MaterialBundleError("declared material bundle is unavailable")
+    bundle = load_material_bundle(directory)
+    if (
+        bundle.bundle_id != grid["material_bundle_id"]
+        or bundle.bundle_id != mesh_bundle.material_bundle_id
+        or hashlib.sha256(
+            canonical_material_bundle_bytes(bundle),
+        ).hexdigest() != mesh_bundle.material_bundle_manifest_sha256
+    ):
+        raise MaterialBundleError(
+            "declared material bundle identity or manifest digest disagrees",
+        )
+    records = {record.slot_id: record for record in bundle.records}
+    if any(
+        records.get(expected.slot_id) is None
+        or records[expected.slot_id].source_sha256 != expected.source_sha256
+        for expected in mesh_bundle.material_registry
+    ):
+        raise MaterialBundleError(
+            "mesh and material bundle source identities disagree",
+        )
+    return directory, bundle
+
+
 def _is_world_bounds_validation_error(error: ValidationError) -> bool:
     """Identify the mock world's finite WGS84 envelope without hiding other bugs."""
 
@@ -1886,6 +1966,20 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
+                _material_directory, material_bundle = _load_active_material_bundle(
+                    self.project_root,
+                    mesh_manifest,
+                    mesh_bundle=bundle,
+                )
+            except MaterialBundleError:
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "material_bundle_invalid",
+                    "The declared material bundle is unavailable or invalid.",
+                    head_only=head_only,
+                )
+                return
+            try:
                 chunk = build_mesh_chunk_manifest(
                     chunk_x,
                     chunk_y,
@@ -1893,7 +1987,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     bundle=bundle,
                     lod=int(query.removeprefix("lod=")),
                 )
-                runtime = project_mesh_chunk_runtime(chunk, bundle=bundle)
+                runtime = project_mesh_chunk_runtime(
+                    chunk,
+                    bundle=bundle,
+                    material_bundle=material_bundle,
+                )
                 payload = canonical_mesh_chunk_runtime_bytes(runtime)
             except ValidationError as exc:
                 if _is_world_bounds_validation_error(exc):
@@ -1934,6 +2032,99 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 payload,
                 content_type="application/json; charset=utf-8",
+                cache_control=cache_control,
+                head_only=head_only,
+                extra_headers={"ETag": etag},
+            )
+            return
+        if request_path.startswith("/api/world/material-maps/"):
+            match = re.fullmatch(
+                r"/api/world/material-maps/([0-9a-f]{64})/"
+                r"(material-[a-z0-9]+(?:-[a-z0-9]+)*)/"
+                r"(base_color|normal|orm)\.png",
+                request_path,
+            )
+            if match is None or urlsplit(self.path).query:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "material_map_not_found",
+                    "Material map not found.",
+                    head_only=head_only,
+                )
+                return
+            route_bundle_id, slot_id, role = match.groups()
+            mesh_manifest = _on_demand_mesh_manifest(self.project_root)
+            if mesh_manifest is None:
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "mesh_on_demand_unavailable",
+                    "The world manifest does not opt in to verified mesh chunks.",
+                    head_only=head_only,
+                )
+                return
+            if route_bundle_id != mesh_manifest["mesh_grid"]["material_bundle_id"]:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "material_map_not_found",
+                    "Material map not found.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                _mesh_directory, mesh_bundle = _load_active_mesh_asset_bundle(
+                    self.project_root,
+                    mesh_manifest,
+                )
+                directory, material_bundle = _load_active_material_bundle(
+                    self.project_root,
+                    mesh_manifest,
+                    mesh_bundle=mesh_bundle,
+                )
+                payload = read_verified_material_map(
+                    directory,
+                    bundle=material_bundle,
+                    slot_id=slot_id,
+                    role=role,
+                )
+            except MaterialBundleError as exc:
+                if "not present" in str(exc) or "role" in str(exc):
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "material_map_not_found",
+                        "Material map not found.",
+                        head_only=head_only,
+                    )
+                else:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "material_bundle_invalid",
+                        "The declared material bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                return
+            except MeshAssetBundleError:
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "mesh_asset_bundle_invalid",
+                    "The declared mesh asset bundle is unavailable or invalid.",
+                    head_only=head_only,
+                )
+                return
+            digest = hashlib.sha256(payload).hexdigest()
+            etag = f'"sha256:{digest}"'
+            cache_control = "public, max-age=31536000, immutable"
+            request_etags = {
+                candidate.strip()
+                for candidate in self.headers.get("If-None-Match", "").split(",")
+                if candidate.strip()
+            }
+            if "*" in request_etags or etag in request_etags:
+                self._send_not_modified(etag, cache_control=cache_control)
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                payload,
+                content_type="image/png",
                 cache_control=cache_control,
                 head_only=head_only,
                 extra_headers={"ETag": etag},

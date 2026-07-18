@@ -22,6 +22,11 @@ from pipeline.synthetic_village.mesh_asset_bundle import (
     MeshAssetBundle,
     MeshAssetRecord,
 )
+from pipeline.synthetic_village.material_bundle import (
+    DerivedMaterialBundle,
+    DerivedMaterialRecord,
+    UvPolicy,
+)
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -173,12 +178,61 @@ class MeshAssetRuntimeUrl(FrozenModel):
         return self
 
 
+class MaterialMapRuntimeUrl(FrozenModel):
+    role: Literal["base_color", "normal", "orm"]
+    url: str = Field(min_length=1)
+    sha256: Sha256
+    bytes: int = Field(ge=1)
+    color_space: Literal["srgb", "non-color"]
+
+    @model_validator(mode="after")
+    def _exact_same_origin_route(self) -> MaterialMapRuntimeUrl:
+        suffix = f"/{self.role}.png"
+        if (
+            not self.url.startswith("/api/world/material-maps/")
+            or not self.url.endswith(suffix)
+            or "\\" in self.url
+            or "?" in self.url
+            or "#" in self.url
+        ):
+            raise ValueError("material map runtime URL is not an exact same-origin route")
+        if (
+            (self.role == "base_color" and self.color_space != "srgb")
+            or (self.role != "base_color" and self.color_space != "non-color")
+        ):
+            raise ValueError("material map runtime color space is invalid")
+        return self
+
+
+class SurfaceMaterialRuntime(FrozenModel):
+    slot_id: str = Field(pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$")
+    uv_policy: UvPolicy
+    nominal_tile_m: float = Field(gt=0, allow_inf_nan=False)
+    normal_strength: float = Field(gt=0, allow_inf_nan=False)
+    roughness_center: float = Field(ge=0, le=1, allow_inf_nan=False)
+    metallic: float = Field(ge=0, le=1, allow_inf_nan=False)
+    base_color: MaterialMapRuntimeUrl
+    normal: MaterialMapRuntimeUrl
+    orm: MaterialMapRuntimeUrl
+
+    @model_validator(mode="after")
+    def _exact_map_roles(self) -> SurfaceMaterialRuntime:
+        if (
+            self.base_color.role != "base_color"
+            or self.normal.role != "normal"
+            or self.orm.role != "orm"
+        ):
+            raise ValueError("surface material runtime map roles are invalid")
+        return self
+
+
 class MeshChunkRuntimeManifest(FrozenModel):
     schema_version: Literal[
         "nantai.synthetic-village.mesh-chunk-runtime.v1"
     ] = MESH_CHUNK_RUNTIME_SCHEMA
     chunk: MeshChunkManifest
     asset_urls: tuple[MeshAssetRuntimeUrl, ...]
+    surface_materials: tuple[SurfaceMaterialRuntime, ...]
 
 
 def _jsonable(value: object) -> object:
@@ -559,14 +613,16 @@ def project_mesh_chunk_runtime(
     chunk: MeshChunkManifest,
     *,
     bundle: MeshAssetBundle,
+    material_bundle: DerivedMaterialBundle,
 ) -> MeshChunkRuntimeManifest:
     """Add exact runtime routes without changing the canonical chunk identity."""
 
     if (
         chunk.mesh_asset_bundle_id != bundle.bundle_id
         or chunk.material_bundle_id != bundle.material_bundle_id
+        or material_bundle.bundle_id != bundle.material_bundle_id
     ):
-        raise MeshChunkError("mesh chunk and asset bundle identities disagree")
+        raise MeshChunkError("mesh chunk, asset, and material bundle identities disagree")
     records = {record.asset_id: record for record in bundle.records}
     rows = []
     for asset_id in sorted({instance.asset_id for instance in chunk.instances}):
@@ -586,7 +642,66 @@ def project_mesh_chunk_runtime(
                 glb_bytes=descriptor.glb_bytes,
             ),
         )
+    material_records = {
+        record.slot_id: record
+        for record in material_bundle.records
+    }
+    registered_materials = {
+        record.slot_id: record
+        for record in bundle.material_registry
+    }
+    surface_slots = sorted({
+        chunk.terrain.material_slot_id,
+        *(ribbon.material_slot_id for ribbon in chunk.roads),
+        *(ribbon.material_slot_id for ribbon in chunk.water),
+    })
+    surfaces = []
+    for slot_id in surface_slots:
+        record = material_records.get(slot_id)
+        registered = registered_materials.get(slot_id)
+        if (
+            record is None
+            or registered is None
+            or record.source_sha256 != registered.source_sha256
+        ):
+            raise MeshChunkError(
+                "mesh surface material is unavailable or disagrees with verified evidence",
+            )
+        surfaces.append(_surface_material_runtime(record, material_bundle.bundle_id))
     return MeshChunkRuntimeManifest(
         chunk=chunk,
         asset_urls=tuple(rows),
+        surface_materials=tuple(surfaces),
+    )
+
+
+def _surface_material_runtime(
+    record: DerivedMaterialRecord,
+    material_bundle_id: str,
+) -> SurfaceMaterialRuntime:
+    def map_runtime(
+        role: Literal["base_color", "normal", "orm"],
+    ) -> MaterialMapRuntimeUrl:
+        descriptor = getattr(record, role)
+        return MaterialMapRuntimeUrl(
+            role=role,
+            url=(
+                f"/api/world/material-maps/{material_bundle_id}/"
+                f"{record.slot_id}/{role}.png"
+            ),
+            sha256=descriptor.sha256,
+            bytes=descriptor.bytes,
+            color_space=descriptor.color_space,
+        )
+
+    return SurfaceMaterialRuntime(
+        slot_id=record.slot_id,
+        uv_policy=record.uv_policy,
+        nominal_tile_m=record.nominal_tile_m,
+        normal_strength=record.normal_strength,
+        roughness_center=record.roughness_center,
+        metallic=record.metallic,
+        base_color=map_runtime("base_color"),
+        normal=map_runtime("normal"),
+        orm=map_runtime("orm"),
     )

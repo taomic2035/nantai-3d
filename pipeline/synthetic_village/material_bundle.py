@@ -722,6 +722,41 @@ def load_material_bundle(root: Path) -> DerivedMaterialBundle:
     return verify_prepared_material_bundle(root)
 
 
+def read_verified_material_map(
+    root: Path,
+    *,
+    bundle: DerivedMaterialBundle,
+    slot_id: str,
+    role: Literal["base_color", "normal", "orm"],
+) -> bytes:
+    """Read one exact map only while the selected bundle still verifies."""
+
+    if role not in {"base_color", "normal", "orm"}:
+        raise MaterialBundleError("material map role is not supported")
+    current = load_material_bundle(Path(root))
+    if current != bundle:
+        raise MaterialBundleError("material bundle changed after it was selected")
+    record = next(
+        (candidate for candidate in current.records if candidate.slot_id == slot_id),
+        None,
+    )
+    if record is None:
+        raise MaterialBundleError("material slot is not present in the verified bundle")
+    descriptor = getattr(record, role)
+    directory = _require_real_directory(Path(root), label="material bundle root")
+    payload = _read_stable_file(
+        directory / descriptor.object_path,
+        maximum_bytes=MAX_DERIVED_MAP_BYTES,
+        label=f"material map {slot_id}/{role}",
+    )
+    if (
+        len(payload) != descriptor.bytes
+        or hashlib.sha256(payload).hexdigest() != descriptor.sha256
+    ):
+        raise MaterialBundleError("material map bytes do not match verified evidence")
+    return payload
+
+
 def _source_manifest_digest(visual_pack_root: Path) -> str:
     manifest = load_visual_source_manifest(
         visual_pack_root / VISUAL_MANIFEST_NAME,
