@@ -53,6 +53,50 @@ Measured result:
 - 13 observed semantic IDs and 93 observed canonical/noncanonical instance
   values including background.
 
-The complete 24-frame render and coverage audit remain subsequent gates. This
-canary proves the local L0 execution path, not completion of the dataset or
-photo-realistic source quality.
+## Complete local render
+
+The same content-addressed build subsequently completed all 24 planned local
+frames:
+
+- 24/24 frames verified;
+- 23 new frames plus the byte-revalidated first-frame reuse;
+- no renderer stderr;
+- subsequent frames took approximately 10--15 seconds each on this Mac;
+- output size: approximately 212 MiB across the six layers and journals.
+
+Ground-truth conversion to the COLMAP text layout retained all 24 cameras and
+three intrinsic groups. The conversion sampled 49,308 initialization points.
+Two adjacent-camera depth consistency probes measured median relative errors of
+`0.0011` and `0.0008`. These checks validate the local camera/depth conversion;
+they do not validate scene realism or guarantee enough views for 3DGS training.
+
+## 3DGS visual-quality gate: failed
+
+Brush trained the converted dataset for 2,000 steps and exported 106,016
+degree-3 SH Gaussians. An independent comparison of three held-out renders
+against their source RGB frames measured:
+
+| Held-out frame | PSNR (dB) | SSIM |
+|---|---:|---:|
+| `camera-bridge-001` | 6.824113 | 0.258619 |
+| `camera-ground-001` | 20.442931 | 0.415808 |
+| `camera-outer-001` | 22.841708 | 0.729803 |
+| mean | 16.702917 | 0.468077 |
+
+Visual inspection also found severe smearing, holes, and stretched splats.
+`camera-bridge-001` is close to or inside scene geometry, while 24 images are
+too sparse to constrain a scene approximately 700 by 500 metres. The source
+RGB itself remains visibly procedural and tiled, so matching it more closely
+would still not by itself make the result photorealistic.
+
+This experiment therefore failed the visual-quality gate and was not promoted.
+The Viewer default was restored byte-for-byte to the previous manifest
+SHA-256
+`c292fc762ace57050f7249ef2ed5c2b247f58893cb37c25b0249ff2e2ccbf650`.
+Increasing Brush steps against the same 24 views is not an approved next step.
+The next useful gate is a denser, collision-free camera plan followed by a
+small-area 3DGS canary; source-material realism is a separate upstream gate.
+
+This result proves the local L0 six-layer execution path and records a failed
+training experiment. It does not claim completion of the dataset,
+source-image consistency, or photorealistic quality.
