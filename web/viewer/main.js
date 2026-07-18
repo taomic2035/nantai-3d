@@ -65,7 +65,11 @@ import {
 import {
   modelPreviewCameraPose,
   modelPreviewDisclosure,
+  modelPreviewSha256,
+  modelPreviewTrustMetadata,
   resolveModelPreviewUrl,
+  resolveRequestedModelPreviewManifestUrl,
+  selectEmbeddedModelPreviewCamera,
   validateModelPreviewManifest,
   verifyModelPreviewBytes,
 } from './model-preview.mjs';
@@ -109,6 +113,7 @@ let modelPreviewManifestUrl = new URL(
 ).href;
 let modelPreviewRoot = null;
 let modelPreviewBounds = null;
+let modelPreviewEmbeddedCamera = null;
 let modelPreviewKeyLight = null;
 let viewerBridge = null;
 let splatLayer = null;
@@ -622,29 +627,58 @@ function applyModelPreviewFraming() {
   if (cameraMode === 'free') toggleCameraMode();
 
   if (modelPreviewManifest) {
-    const {
-      positionThree,
-      targetThree,
-      verticalFovDeg,
-      near,
-      far,
-    } = modelPreviewCameraPose(modelPreviewManifest);
-    camera.fov = verticalFovDeg;
-    camera.near = near;
-    camera.far = far;
-    camera.position.set(...positionThree);
-    camera.lookAt(...targetThree);
-    camera.updateProjectionMatrix();
-    controls.target.set(...targetThree);
-    controls.maxDistance = 900;
-    controls.update();
-    applyZoom(DEFAULT_ZOOM);
-    return;
+    const authoredPose = modelPreviewCameraPose(modelPreviewManifest);
+    if (authoredPose) {
+      const {
+        positionThree,
+        targetThree,
+        verticalFovDeg,
+        near,
+        far,
+      } = authoredPose;
+      camera.fov = verticalFovDeg;
+      camera.near = near;
+      camera.far = far;
+      camera.position.set(...positionThree);
+      camera.lookAt(...targetThree);
+      camera.updateProjectionMatrix();
+      controls.target.set(...targetThree);
+      controls.maxDistance = 900;
+      controls.update();
+      applyZoom(DEFAULT_ZOOM);
+      return;
+    }
   }
 
   const center = modelPreviewBounds.getCenter(new THREE.Vector3());
   const size = modelPreviewBounds.getSize(new THREE.Vector3());
   const radius = Math.max(size.length() / 2, 1);
+  if (modelPreviewEmbeddedCamera) {
+    modelPreviewEmbeddedCamera.updateWorldMatrix(true, false);
+    const position = modelPreviewEmbeddedCamera.getWorldPosition(new THREE.Vector3());
+    const direction = modelPreviewEmbeddedCamera.getWorldDirection(new THREE.Vector3());
+    if (
+      position.toArray().every(Number.isFinite)
+      && direction.toArray().every(Number.isFinite)
+      && direction.lengthSq() > 0.5
+    ) {
+      const target = position.clone().addScaledVector(
+        direction.normalize(),
+        Math.max(radius * 0.25, 60),
+      );
+      camera.fov = modelPreviewEmbeddedCamera.fov;
+      camera.near = Math.max(modelPreviewEmbeddedCamera.near, 0.05);
+      camera.far = Math.max(modelPreviewEmbeddedCamera.far, radius * 6);
+      camera.position.copy(position);
+      camera.lookAt(target);
+      camera.updateProjectionMatrix();
+      controls.target.copy(target);
+      controls.maxDistance = radius * 8;
+      controls.update();
+      applyZoom(DEFAULT_ZOOM);
+      return;
+    }
+  }
   const verticalFov = THREE.MathUtils.degToRad(camera.fov);
   const distance = radius / Math.sin(verticalFov / 2) * 1.08;
   const direction = new THREE.Vector3(1, 0.72, 1).normalize();
@@ -725,25 +759,33 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
       throw new Error(`Model preview GLB load failed: ${modelResponse.status}`);
     }
     const bytes = await modelResponse.arrayBuffer();
-    await verifyModelPreviewBytes(bytes, nextManifest.model.sha256);
+    const expectedSha256 = modelPreviewSha256(nextManifest);
+    await verifyModelPreviewBytes(bytes, expectedSha256);
 
     const loader = new GLTFLoader();
     const gltf = await loader.parseAsync(bytes, new URL('./', modelUrl).href);
     const root = gltf.scene;
     root.name = 'verified_synthetic_model_preview';
     root.visible = false;
+    let meshCount = 0;
     root.traverse((object) => {
       if (object.isLight) object.visible = false;
+      if (object.isMesh) meshCount += 1;
     });
     root.updateMatrixWorld(true);
     const bounds = new THREE.Box3().setFromObject(root);
     if (bounds.isEmpty()) throw new Error('Model preview GLB has no renderable bounds');
+    const embeddedCamera = selectEmbeddedModelPreviewCamera(
+      nextManifest,
+      gltf.cameras,
+    );
 
     if (modelPreviewRoot) scene.remove(modelPreviewRoot);
     modelPreviewManifest = nextManifest;
     modelPreviewManifestUrl = absoluteManifestUrl.href;
     modelPreviewRoot = root;
     modelPreviewBounds = bounds;
+    modelPreviewEmbeddedCamera = embeddedCamera;
     scene.add(root);
 
     const badge = document.getElementById('model-preview-badge');
@@ -752,13 +794,14 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
     setPresentationMode(requestedMode === 'points' ? 'points' : 'model');
     return {
       status: 'loaded',
-      sha256: nextManifest.model.sha256,
-      mesh_count: nextManifest.counts?.mesh_objects ?? 'unknown',
+      sha256: expectedSha256,
+      mesh_count: nextManifest.counts?.mesh_objects ?? meshCount,
     };
   } catch (error) {
     modelPreviewManifest = null;
     modelPreviewRoot = null;
     modelPreviewBounds = null;
+    modelPreviewEmbeddedCamera = null;
     presentationMode = 'points';
     syncPresentationVisibility();
     console.warn('合成模型预览已拒绝，保留点云视图:', error);
@@ -1277,8 +1320,11 @@ function updateHUD() {
   }
   const presentationEl = document.getElementById('hud-presentation');
   if (presentationEl) {
+    const trust = modelPreviewManifest
+      ? modelPreviewTrustMetadata(modelPreviewManifest)
+      : null;
     presentationEl.textContent = presentationMode === 'model'
-      ? '合成 GLB 网格（简化 PBR）'
+      ? `合成 GLB 网格（${trust?.fidelity ?? 'preview-only'}）`
       : '点云 / 高斯';
   }
 
@@ -1286,7 +1332,7 @@ function updateHUD() {
   if (rendererReason) {
     const rendererState = activeReconstructionState();
     rendererReason.textContent = presentationMode === 'model'
-      ? '已校验 release GLB · 简化 PBR · 非照片纹理'
+      ? modelPreviewDisclosure(modelPreviewManifest)
       : (
       rendererState?.mode === 'spark'
       || rendererState?.mode === 'spark-chunks'
@@ -1306,16 +1352,21 @@ function updateHUD() {
       : `Nantai Village · ${viewerCapabilities.renderer.label}`;
   }
 
+  const modelTrust = modelPreviewManifest
+    ? modelPreviewTrustMetadata(modelPreviewManifest)
+    : null;
   const provenance = presentationMode === 'model' && modelPreviewManifest
     ? {
       requested_engine: 'not-applicable',
-      actual_engine: 'verified-release-glb',
+      actual_engine: modelPreviewManifest.schema_version === 2
+        ? 'verified-local-l0-glb'
+        : 'verified-release-glb',
       synthetic: true,
-      frame: modelPreviewManifest.coordinate_frame.frame_id,
-      units: modelPreviewManifest.coordinate_frame.units,
+      frame: modelTrust.coordinate_frame.frame_id,
+      units: modelTrust.coordinate_frame.units,
       handedness: 'right-handed',
       geometry_usability: modelPreviewManifest.geometry_usability,
-      artifact_fidelity: modelPreviewManifest.fidelity,
+      artifact_fidelity: modelTrust.fidelity,
       viewer_fidelity: viewerCapabilities.renderer.fidelity,
     }
     : artifactProvenance(reconManifest ?? {}, viewerCapabilities);
@@ -1437,6 +1488,14 @@ async function main() {
   init();
 
   const loadingText = document.getElementById('loading-text');
+  try {
+    modelPreviewManifestUrl = resolveRequestedModelPreviewManifestUrl(
+      window.location.href,
+      modelPreviewManifestUrl,
+    );
+  } catch (error) {
+    console.warn('已拒绝不安全的模型预览入口，使用内置预览:', error);
+  }
   loadingText.textContent = '加载 manifest.json...';
 
   const res = await fetch(worldManifestUrl);
@@ -1504,6 +1563,9 @@ async function main() {
     const [east, north, up] = threeToWorld([
       camera.position.x, camera.position.y, camera.position.z,
     ]);
+    const modelTrust = modelPreviewManifest
+      ? modelPreviewTrustMetadata(modelPreviewManifest)
+      : null;
     return {
       renderer: viewerCapabilities.renderer,
       capabilities: viewerCapabilities,
@@ -1514,9 +1576,9 @@ async function main() {
           ? {
             synthetic: true,
             geometry_usability: modelPreviewManifest.geometry_usability,
-            fidelity: modelPreviewManifest.fidelity,
-            photo_textures: false,
-            sha256: modelPreviewManifest.model.sha256,
+            fidelity: modelTrust.fidelity,
+            photo_textures: modelTrust.photo_textures,
+            sha256: modelTrust.sha256,
           }
           : null,
       },

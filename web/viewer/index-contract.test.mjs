@@ -143,6 +143,13 @@ test('verified synthetic mesh preview is visually distinct from point layers', (
   assert.match(main, /GLTFLoader/);
   assert.match(main, /from ['"]\.\/model-preview\.mjs['"]/);
   assert.match(main, /verifyModelPreviewBytes/);
+  assert.match(main, /resolveRequestedModelPreviewManifestUrl/);
+  assert.match(main, /modelPreviewSha256/);
+  assert.match(main, /modelPreviewTrustMetadata/);
+  assert.match(main, /selectEmbeddedModelPreviewCamera/);
+  assert.match(main, /modelPreviewEmbeddedCamera/);
+  assert.match(main, /getWorldDirection/);
+  assert.match(main, /modelPreviewCameraPose\(modelPreviewManifest\)[\s\S]*modelPreviewBounds/);
   assert.match(main, /presentationMode/);
   assert.match(html, /id="presentation-toggle"[^>]*hidden/);
   assert.match(html, /id="model-preview-badge"[^>]*aria-live="polite"[^>]*hidden/);
