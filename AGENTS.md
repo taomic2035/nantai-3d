@@ -37,10 +37,12 @@
 - Blender 4.5.11 LTS Apple Silicon 官方包已安装到 `/Applications/Blender.app` 并通过
   SHA-256、codesign 与 headless version 探针；但正式 canary 工具链仍严格锁定
   Windows x64 `third/blender/blender.exe`，因此 Mac Blender **尚不能**被该链路当成已验证运行时。
-- 素材 registry 实测为 **9/11**：九份本机 payload 与登记 SHA 逐字节一致；
-  `stone_wall_01`、`fence_wood_01` 的 Mac 生成字节仍漂移并被 fail-closed 拒绝。
-  不得重新登记这两份本机字节来掩盖跨平台差异。完整回执见
-  `handoff/FEEDBACK-CODEX-007-macos-environment-audit.md`。
+- 素材 registry 当前本机实测为 **11/11**：`stone_wall_01`、`fence_wood_01`
+  已通过 Linux/x86_64 容器生成与登记 SHA 逐字节一致的权威 payload 并幂等恢复。
+  **这不表示 Mac 原生生成器已修复**：Mac / NumPy 2.3.5 重生成仍漂移，绝不能
+  重新登记本机漂移字节来掩盖跨平台差异。原始环境审计见
+  `handoff/FEEDBACK-CODEX-007-macos-environment-audit.md`，恢复证据与未决项见
+  `handoff/FEEDBACK-CODEX-008-macos-asset-payload-recovery.md`。
 
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 
