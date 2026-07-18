@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from pipeline import studio_ledger as ledger_module
 from pipeline.studio_ledger import (
     ActiveRunConflictError,
     FencingError,
@@ -27,6 +28,21 @@ def _ledger(tmp_path) -> StudioLedger:
     ledger = StudioLedger(tmp_path / ".nantai-studio/studio.db")
     ledger.initialize()
     return ledger
+
+
+def _write_v1_database(path) -> StudioLedger:
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path, isolation_level=None) as connection:
+        connection.executescript(ledger_module._SCHEMA_V1_SQL)
+        fingerprint = ledger_module._schema_fingerprint(connection)
+        connection.executemany(
+            "INSERT INTO meta(key,value) VALUES(?,?)",
+            (
+                ("schema_version", "1"),
+                ("schema_fingerprint", fingerprint),
+            ),
+        )
+    return StudioLedger(path)
 
 
 def _create_run(
@@ -71,11 +87,118 @@ def test_initialize_configures_sqlite_and_expected_tables(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type='table'",
             )
         }
+        metadata = dict(connection.execute(
+            "SELECT key,value FROM meta",
+        ).fetchall())
 
     assert {
         "meta", "runs", "events", "request_dedup",
         "publications", "publication_targets",
+        "capture_revisions", "sfm_bundles", "training_handoffs",
+        "import_descriptors", "scene_revisions", "scene_inputs",
+        "spatial_artifacts", "verification_records", "active_scene",
+        "revision_pins", "revision_leases", "publication_intents",
+        "gc_plans",
     }.issubset(tables)
+    assert metadata == {
+        "schema_version": "2",
+        "schema_fingerprint": ledger_module.EXPECTED_V2_SCHEMA_FINGERPRINT,
+    }
+
+
+def test_initialize_migrates_exact_v1_to_v2_without_losing_runs(tmp_path):
+    database = tmp_path / ".nantai-studio/studio.db"
+    old = _write_v1_database(database)
+    _create_run(old)
+
+    migrated = StudioLedger(database)
+    migrated.initialize()
+
+    with migrated.connection() as connection:
+        metadata = dict(connection.execute(
+            "SELECT key,value FROM meta",
+        ).fetchall())
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'",
+            )
+        }
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+    assert metadata == {
+        "schema_version": "2",
+        "schema_fingerprint": ledger_module.EXPECTED_V2_SCHEMA_FINGERPRINT,
+    }
+    assert migrated.get_run("run-001").command == "ingest"
+    assert {
+        "capture_revisions", "sfm_bundles", "training_handoffs",
+        "import_descriptors", "scene_revisions", "scene_inputs",
+        "spatial_artifacts", "verification_records", "active_scene",
+        "revision_pins", "revision_leases", "publication_intents",
+        "gc_plans",
+    }.issubset(tables)
+
+
+def test_migration_rolls_back_every_v2_statement_on_failure(
+    tmp_path, monkeypatch,
+):
+    database = tmp_path / ".nantai-studio/studio.db"
+    _write_v1_database(database)
+    original = ledger_module._apply_statements
+
+    def fail_after_one_statement(connection, statements):
+        connection.execute(statements[0])
+        raise sqlite3.OperationalError("injected migration failure")
+
+    monkeypatch.setattr(
+        ledger_module,
+        "_apply_statements",
+        fail_after_one_statement,
+    )
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        StudioLedger(database).initialize()
+    monkeypatch.setattr(ledger_module, "_apply_statements", original)
+
+    with sqlite3.connect(database) as connection:
+        metadata = dict(connection.execute(
+            "SELECT key,value FROM meta",
+        ).fetchall())
+        capture_table = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='capture_revisions'",
+        ).fetchone()
+
+    assert metadata == {
+        "schema_version": "1",
+        "schema_fingerprint": ledger_module.EXPECTED_V1_SCHEMA_FINGERPRINT,
+    }
+    assert capture_table is None
+
+
+def test_declared_v2_with_weakened_schema_fails_closed(tmp_path):
+    database = tmp_path / ".nantai-studio/studio.db"
+    database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        )
+        connection.executemany(
+            "INSERT INTO meta VALUES (?,?)",
+            (
+                ("schema_version", "2"),
+                (
+                    "schema_fingerprint",
+                    ledger_module.EXPECTED_V2_SCHEMA_FINGERPRINT,
+                ),
+            ),
+        )
+        connection.execute(
+            "CREATE TABLE capture_revisions (id TEXT PRIMARY KEY)",
+        )
+
+    with pytest.raises(LedgerSchemaError, match="fingerprint|schema"):
+        StudioLedger(database).initialize()
 
 
 def test_unknown_newer_schema_fails_closed(tmp_path):

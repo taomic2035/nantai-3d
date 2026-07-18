@@ -83,7 +83,6 @@ def test_initialize_migrates_exact_v1_to_v2_without_losing_runs(tmp_path):
     database = tmp_path / ".nantai-studio/studio.db"
     _write_v1_database(database)
     old = StudioLedger(database)
-    old.initialize(target_version=1)
     _create_run(old)
 
     StudioLedger(database).initialize()
@@ -123,7 +122,7 @@ Run:
 .venv/bin/python -m pytest tests/test_studio_ledger.py -q
 ```
 
-Expected: failures because `_SCHEMA_V1_SQL`, v2 fingerprints, `target_version`, and v2 tables do not exist.
+Expected: failures because `_SCHEMA_V1_SQL`, v2 fingerprints, migration helpers, and v2 tables do not exist.
 
 - [ ] **Step 3: Freeze v1 SQL and define the complete v2 schema**
 
@@ -316,7 +315,7 @@ def _migrate_v1_to_v2(connection):
 4. validate the resulting v2 fingerprint;
 5. reject every other version without modifying bytes.
 
-The test-only `target_version=1` keyword may create or validate v1 but must reject a v2 database as newer. Production callers use the default and never pass it.
+The public `initialize()` signature remains unchanged. Tests construct an exact v1 database from the frozen `_SCHEMA_V1_SQL`; no test-only switch is added to production code.
 
 - [ ] **Step 5: Run focused and regression tests**
 

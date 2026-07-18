@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled"})
@@ -142,7 +142,7 @@ class PublicationRecord:
     targets: tuple[PublicationTargetRecord, ...]
 
 
-_SCHEMA_SQL = """
+_SCHEMA_V1_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -238,6 +238,211 @@ CREATE TABLE IF NOT EXISTS publication_targets (
 );
 """
 
+_SCHEMA_V2_TABLE_STATEMENTS = (
+    """
+    CREATE TABLE capture_revisions (
+        id TEXT PRIMARY KEY
+            CHECK(
+                length(id) = 40
+                AND substr(id, 1, 8) = 'capture-'
+                AND substr(id, 9) NOT GLOB '*[^0-9a-f]*'
+            ),
+        manifest_digest TEXT NOT NULL CHECK(length(manifest_digest) = 64),
+        bundle_relpath TEXT NOT NULL UNIQUE
+            CHECK(bundle_relpath = '.nantai-studio/artifacts/capture/' || id),
+        provenance TEXT NOT NULL
+            CHECK(provenance IN ('measured','synthetic','unknown')),
+        source_count INTEGER NOT NULL CHECK(source_count >= 1),
+        output_count INTEGER NOT NULL CHECK(output_count >= 1),
+        created_by_run TEXT NOT NULL UNIQUE
+            REFERENCES runs(id) ON DELETE RESTRICT,
+        created_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE sfm_bundles (
+        id TEXT PRIMARY KEY,
+        capture_revision_id TEXT NOT NULL
+            REFERENCES capture_revisions(id) ON DELETE RESTRICT,
+        manifest_digest TEXT NOT NULL CHECK(length(manifest_digest) = 64),
+        bundle_relpath TEXT NOT NULL UNIQUE,
+        frame_id TEXT NOT NULL,
+        created_by_run TEXT REFERENCES runs(id) ON DELETE RESTRICT,
+        created_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE training_handoffs (
+        id TEXT PRIMARY KEY,
+        capture_revision_id TEXT NOT NULL
+            REFERENCES capture_revisions(id) ON DELETE RESTRICT,
+        sfm_bundle_id TEXT NOT NULL
+            REFERENCES sfm_bundles(id) ON DELETE RESTRICT,
+        manifest_digest TEXT NOT NULL CHECK(length(manifest_digest) = 64),
+        bundle_relpath TEXT NOT NULL UNIQUE,
+        created_by_run TEXT REFERENCES runs(id) ON DELETE RESTRICT,
+        created_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE import_descriptors (
+        id TEXT PRIMARY KEY,
+        manifest_digest TEXT NOT NULL CHECK(length(manifest_digest) = 64),
+        bundle_relpath TEXT NOT NULL UNIQUE,
+        created_by_run TEXT REFERENCES runs(id) ON DELETE RESTRICT,
+        created_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE scene_revisions (
+        id TEXT PRIMARY KEY,
+        parent_revision_id TEXT
+            REFERENCES scene_revisions(id) ON DELETE RESTRICT,
+        manifest_digest TEXT NOT NULL CHECK(length(manifest_digest) = 64),
+        bundle_relpath TEXT NOT NULL UNIQUE,
+        requested_engine TEXT NOT NULL,
+        actual_engine TEXT NOT NULL,
+        toolchain_capsule_digest TEXT NOT NULL
+            CHECK(length(toolchain_capsule_digest) = 64),
+        created_by_run TEXT NOT NULL UNIQUE
+            REFERENCES runs(id) ON DELETE RESTRICT,
+        created_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE scene_inputs (
+        scene_revision_id TEXT NOT NULL
+            REFERENCES scene_revisions(id) ON DELETE RESTRICT,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        input_kind TEXT NOT NULL,
+        input_id TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL CHECK(length(manifest_digest) = 64),
+        PRIMARY KEY(scene_revision_id, ordinal)
+    )
+    """,
+    """
+    CREATE TABLE spatial_artifacts (
+        id TEXT PRIMARY KEY,
+        scene_revision_id TEXT NOT NULL
+            REFERENCES scene_revisions(id) ON DELETE RESTRICT,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        format TEXT NOT NULL,
+        sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+        byte_length INTEGER NOT NULL CHECK(byte_length >= 1),
+        descriptor_json TEXT NOT NULL,
+        UNIQUE(scene_revision_id, ordinal)
+    )
+    """,
+    """
+    CREATE TABLE verification_records (
+        id TEXT PRIMARY KEY,
+        subject_kind TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        level TEXT NOT NULL CHECK(level IN ('L0','L1','L2','L3','L4','L5')),
+        passed INTEGER NOT NULL CHECK(passed IN (0,1)),
+        evidence_json TEXT NOT NULL,
+        created_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE active_scene (
+        project_id TEXT PRIMARY KEY,
+        scene_revision_id TEXT NOT NULL
+            REFERENCES scene_revisions(id) ON DELETE RESTRICT,
+        generation INTEGER NOT NULL CHECK(generation >= 1),
+        updated_event_id TEXT NOT NULL,
+        updated_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE revision_pins (
+        id TEXT PRIMARY KEY,
+        subject_kind TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_utc TEXT NOT NULL,
+        released_utc TEXT
+    )
+    """,
+    """
+    CREATE TABLE revision_leases (
+        id TEXT PRIMARY KEY,
+        subject_kind TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        expires_utc TEXT NOT NULL,
+        created_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE publication_intents (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+        subject_kind TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL CHECK(length(manifest_digest) = 64),
+        destination_relpath TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL
+            CHECK(status IN ('prepared','committed','quarantined')),
+        created_utc TEXT NOT NULL,
+        finished_utc TEXT
+    )
+    """,
+    """
+    CREATE TABLE gc_plans (
+        id TEXT PRIMARY KEY,
+        observed_active_generation INTEGER NOT NULL
+            CHECK(observed_active_generation >= 0),
+        mark_set_json TEXT NOT NULL,
+        status TEXT NOT NULL
+            CHECK(
+                status IN (
+                    'planned','tombstoning','cooling','completed','aborted'
+                )
+            ),
+        created_utc TEXT NOT NULL,
+        finished_utc TEXT
+    )
+    """,
+)
+
+_APPEND_ONLY_V2_TABLES = (
+    "capture_revisions",
+    "sfm_bundles",
+    "training_handoffs",
+    "import_descriptors",
+    "scene_revisions",
+    "scene_inputs",
+    "spatial_artifacts",
+    "verification_records",
+)
+
+_SCHEMA_V2_TRIGGER_STATEMENTS = tuple(
+    statement
+    for table in _APPEND_ONLY_V2_TABLES
+    for statement in (
+        f"""
+        CREATE TRIGGER {table}_append_only_update
+        BEFORE UPDATE ON {table}
+        BEGIN
+            SELECT RAISE(ABORT, '{table} is append-only');
+        END
+        """,
+        f"""
+        CREATE TRIGGER {table}_append_only_delete
+        BEFORE DELETE ON {table}
+        BEGIN
+            SELECT RAISE(ABORT, '{table} is append-only');
+        END
+        """,
+    )
+)
+
+_SCHEMA_V2_STATEMENTS = (
+    *_SCHEMA_V2_TABLE_STATEMENTS,
+    *_SCHEMA_V2_TRIGGER_STATEMENTS,
+)
+
 
 def _schema_fingerprint(connection: sqlite3.Connection) -> str:
     rows = connection.execute(
@@ -252,16 +457,108 @@ def _schema_fingerprint(connection: sqlite3.Connection) -> str:
     return hashlib.sha256(canonical_json(payload).encode("ascii")).hexdigest()
 
 
-def _expected_schema_fingerprint() -> str:
+def _apply_sql_script(connection: sqlite3.Connection, script: str) -> None:
+    """Execute a trusted SQL script without sqlite3.executescript auto-commits."""
+
+    pending = ""
+    for line in script.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            statement = pending.strip()
+            if statement:
+                connection.execute(statement)
+            pending = ""
+    if pending.strip():
+        raise LedgerSchemaError("trusted ledger schema SQL is incomplete")
+
+
+def _apply_statements(
+    connection: sqlite3.Connection,
+    statements: Sequence[str],
+) -> None:
+    for statement in statements:
+        connection.execute(statement)
+
+
+def _expected_schema_fingerprint(version: int) -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        connection.executescript(_SCHEMA_SQL)
+        _apply_sql_script(connection, _SCHEMA_V1_SQL)
+        if version == 2:
+            _apply_statements(connection, _SCHEMA_V2_STATEMENTS)
+        elif version != 1:
+            raise ValueError(f"unsupported schema fingerprint version: {version}")
         return _schema_fingerprint(connection)
     finally:
         connection.close()
 
 
-EXPECTED_SCHEMA_FINGERPRINT = _expected_schema_fingerprint()
+EXPECTED_V1_SCHEMA_FINGERPRINT = _expected_schema_fingerprint(1)
+EXPECTED_V2_SCHEMA_FINGERPRINT = _expected_schema_fingerprint(2)
+# Compatibility name for callers that only need the current schema identity.
+EXPECTED_SCHEMA_FINGERPRINT = EXPECTED_V2_SCHEMA_FINGERPRINT
+
+
+def _create_v2_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _apply_sql_script(connection, _SCHEMA_V1_SQL)
+        _apply_statements(connection, _SCHEMA_V2_STATEMENTS)
+        actual = _schema_fingerprint(connection)
+        if actual != EXPECTED_V2_SCHEMA_FINGERPRINT:
+            raise LedgerSchemaError(
+                "new ledger schema fingerprint does not match schema v2",
+            )
+        connection.executemany(
+            "INSERT INTO meta(key,value) VALUES(?,?)",
+            (
+                ("schema_version", str(SCHEMA_VERSION)),
+                ("schema_fingerprint", EXPECTED_V2_SCHEMA_FINGERPRINT),
+            ),
+        )
+        connection.execute("COMMIT")
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        metadata = dict(connection.execute(
+            "SELECT key,value FROM meta WHERE key IN "
+            "('schema_version','schema_fingerprint')",
+        ).fetchall())
+        if (
+            metadata.get("schema_version") != "1"
+            or metadata.get("schema_fingerprint")
+            != EXPECTED_V1_SCHEMA_FINGERPRINT
+            or _schema_fingerprint(connection) != EXPECTED_V1_SCHEMA_FINGERPRINT
+        ):
+            raise LedgerSchemaError(
+                "ledger schema fingerprint does not match schema v1",
+            )
+        _apply_statements(connection, _SCHEMA_V2_STATEMENTS)
+        if _schema_fingerprint(connection) != EXPECTED_V2_SCHEMA_FINGERPRINT:
+            raise LedgerSchemaError(
+                "migrated ledger schema fingerprint does not match schema v2",
+            )
+        version_update = connection.execute(
+            "UPDATE meta SET value=? WHERE key='schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+        fingerprint_update = connection.execute(
+            "UPDATE meta SET value=? WHERE key='schema_fingerprint'",
+            (EXPECTED_V2_SCHEMA_FINGERPRINT,),
+        )
+        if version_update.rowcount != 1 or fingerprint_update.rowcount != 1:
+            raise LedgerSchemaError("ledger schema metadata is incomplete")
+        connection.execute("COMMIT")
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
 
 
 class StudioLedger:
@@ -310,7 +607,7 @@ class StudioLedger:
             connection.close()
 
     def initialize(self) -> None:
-        """Create schema v1 or fail closed on any incompatible database."""
+        """Create schema v2, migrate exact v1, or reject incompatible state."""
 
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
@@ -319,14 +616,7 @@ class StudioLedger:
                 "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
             ).fetchall()
             if not user_objects:
-                connection.executescript(_SCHEMA_SQL)
-                connection.executemany(
-                    "INSERT INTO meta(key,value) VALUES(?,?)",
-                    (
-                        ("schema_version", str(SCHEMA_VERSION)),
-                        ("schema_fingerprint", EXPECTED_SCHEMA_FINGERPRINT),
-                    ),
-                )
+                _create_v2_schema(connection)
                 return
 
             has_meta = connection.execute(
@@ -336,29 +626,45 @@ class StudioLedger:
                 raise LedgerSchemaError(
                     "nonempty ledger database is missing schema metadata",
                 )
-            if has_meta:
-                try:
-                    metadata = dict(connection.execute(
-                        "SELECT key,value FROM meta WHERE key IN "
-                        "('schema_version','schema_fingerprint')",
-                    ).fetchall())
-                    version = int(metadata.get("schema_version", ""))
-                except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
-                    raise LedgerSchemaError("ledger schema version is invalid") from exc
-                if version != SCHEMA_VERSION:
-                    direction = "newer" if version and version > SCHEMA_VERSION else "unsupported"
-                    raise LedgerSchemaError(
-                        f"ledger schema {version!r} is {direction}; expected {SCHEMA_VERSION}",
-                    )
-                actual_fingerprint = _schema_fingerprint(connection)
-                stored_fingerprint = metadata.get("schema_fingerprint")
+            try:
+                metadata = dict(connection.execute(
+                    "SELECT key,value FROM meta WHERE key IN "
+                    "('schema_version','schema_fingerprint')",
+                ).fetchall())
+                version = int(metadata.get("schema_version", ""))
+            except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
+                raise LedgerSchemaError("ledger schema version is invalid") from exc
+
+            if version > SCHEMA_VERSION:
+                raise LedgerSchemaError(
+                    f"ledger schema {version!r} is newer; expected {SCHEMA_VERSION}",
+                )
+            if version == 1:
                 if (
-                    stored_fingerprint != EXPECTED_SCHEMA_FINGERPRINT
-                    or actual_fingerprint != EXPECTED_SCHEMA_FINGERPRINT
+                    metadata.get("schema_fingerprint")
+                    != EXPECTED_V1_SCHEMA_FINGERPRINT
+                    or _schema_fingerprint(connection)
+                    != EXPECTED_V1_SCHEMA_FINGERPRINT
                 ):
                     raise LedgerSchemaError(
                         "ledger schema fingerprint does not match schema v1",
                     )
+                _migrate_v1_to_v2(connection)
+                return
+            if version != SCHEMA_VERSION:
+                raise LedgerSchemaError(
+                    f"ledger schema {version!r} is unsupported; "
+                    f"expected {SCHEMA_VERSION}",
+                )
+            if (
+                metadata.get("schema_fingerprint")
+                != EXPECTED_V2_SCHEMA_FINGERPRINT
+                or _schema_fingerprint(connection)
+                != EXPECTED_V2_SCHEMA_FINGERPRINT
+            ):
+                raise LedgerSchemaError(
+                    "ledger schema fingerprint does not match schema v2",
+                )
 
     @staticmethod
     def _payload_digest(
