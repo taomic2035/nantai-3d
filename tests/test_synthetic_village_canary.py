@@ -14,6 +14,10 @@ import pytest
 from pydantic import ValidationError
 
 from pipeline.synthetic_village import tool_lock
+from pipeline.synthetic_village.building_geometry import (
+    BUILDING_GEOMETRY_V1,
+    BUILDING_GEOMETRY_V2,
+)
 from pipeline.synthetic_village.camera_plan import build_camera_plan
 from pipeline.synthetic_village.canary import (
     ARTIFACT_REQUESTS,
@@ -44,6 +48,7 @@ from pipeline.synthetic_village.canary import (
     run_canary_build,
     run_textured_canary_build,
     verify_build_report,
+    verify_textured_build_report,
 )
 from pipeline.synthetic_village.defaults import (
     DEFAULT_RECIPE_PATH,
@@ -246,6 +251,7 @@ def test_textured_request_binds_exact_material_bundle_without_private_paths(
     )
 
     assert request.schema_version == "nantai.synthetic-village.blender-build-request.v2"
+    assert request.building_geometry_profile_id == BUILDING_GEOMETRY_V1
     assert len(request.material_input_registry) == 24
     assert all(
         row.usage_mode == "runtime-material-source-v1"
@@ -255,6 +261,7 @@ def test_textured_request_binds_exact_material_bundle_without_private_paths(
     )
     assert request.material_algorithm_id == "edge-feather-sobel-orm-v2"
     raw = canonical_textured_build_request_bytes(request)
+    assert b"building_geometry_profile_id" not in raw
     assert b".nantai-studio" not in raw
     assert str(Path.home()).encode() not in raw
     assert (
@@ -830,6 +837,67 @@ def _valid_textured_report(
         ),
         artifacts=_write_artifacts(staging),
     )
+
+
+def test_textured_report_requires_exact_v2_building_geometry_evidence(
+    tmp_path: Path,
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    report = _valid_textured_report(request, tmp_path)
+    payload = dict(report.__dict__)
+    payload["building_geometry_profile_id"] = BUILDING_GEOMETRY_V2
+
+    with pytest.raises(ValidationError, match="building geometry.*evidence"):
+        TexturedBuildReport.model_validate(payload)
+
+    payload["building_geometry"] = {
+        "profile_id": BUILDING_GEOMETRY_V2,
+        "building_count": 70,
+        "covered_elevations": ("front", "left", "rear", "right"),
+        "variant_counts": {
+            "balanced-residence": 21,
+            "rear-service-house": 20,
+            "side-entry-workshop": 29,
+        },
+        "added_face_count": 1000,
+        "maximum_added_faces_per_building": 20,
+        "new_mesh_object_count": 0,
+    }
+    validated = TexturedBuildReport.model_validate(payload)
+
+    assert validated.building_geometry is not None
+    assert validated.building_geometry.added_face_count == 1000
+
+
+def test_textured_report_verifier_rejects_geometry_profile_mismatch(
+    tmp_path: Path,
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    v2_payload = _rebuild_textured_payload(
+        request,
+        building_geometry_profile_id=BUILDING_GEOMETRY_V2,
+    )
+    v2_request = TexturedBuildRequest.model_validate(v2_payload)
+    v1_report = _valid_textured_report(v2_request, tmp_path)
+
+    with pytest.raises(CanaryBuildError, match="geometry profile"):
+        verify_textured_build_report(
+            v1_report,
+            request=v2_request,
+            staging=tmp_path,
+        )
 
 
 def test_build_report_is_canonical_path_free_and_verifies_artifact_hashes(

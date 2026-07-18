@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from pipeline.synthetic_village import canary
+from pipeline.synthetic_village.building_geometry import BUILDING_GEOMETRY_V2
 from pipeline.synthetic_village.canary import TexturedBuildRequest
 from pipeline.synthetic_village.local_textured_preview import (
     LocalBlenderIdentity,
@@ -46,6 +48,7 @@ def test_local_request_is_content_addressed_but_never_authoritative(
     assert request.release_channel == "local-preview-only"
     assert request.tool_identity.platform == "macos-arm64"
     assert request.material_algorithm_id == "edge-feather-sobel-orm-v2"
+    assert request.building_geometry_profile_id == BUILDING_GEOMETRY_V2
     assert (
         hashlib.sha256(
             canonical_local_textured_preview_request_bytes(
@@ -56,6 +59,10 @@ def test_local_request_is_content_addressed_but_never_authoritative(
         == request.preview_id
     )
     raw = canonical_local_textured_preview_request_bytes(request)
+    assert (
+        b'"building_geometry_profile_id": "four-sided-rural-building-v2"'
+        in raw
+    )
     assert raw.endswith(b"\n")
     assert b".nantai-studio" not in raw
     assert str(Path.home()).encode() not in raw
@@ -66,6 +73,25 @@ def test_local_request_cannot_validate_as_authoritative_request(tmp_path: Path) 
 
     with pytest.raises(ValidationError):
         TexturedBuildRequest.model_validate(request.model_dump())
+
+
+def test_historical_local_request_omits_absent_geometry_profile(
+    tmp_path: Path,
+) -> None:
+    request = _local_request(tmp_path)
+    payload = dict(request.__dict__)
+    payload.pop("preview_id")
+    payload.pop("building_geometry_profile_id")
+    historical_id = hashlib.sha256(canary._canonical_json_bytes(payload)).hexdigest()
+
+    historical = LocalTexturedPreviewRequest(
+        preview_id=historical_id,
+        **payload,
+    )
+    raw = canonical_local_textured_preview_request_bytes(historical)
+
+    assert historical.building_geometry_profile_id == "front-facade-box-v1"
+    assert b"building_geometry_profile_id" not in raw
 
 
 def test_local_manifest_is_preview_only_and_not_real_photo_texture(

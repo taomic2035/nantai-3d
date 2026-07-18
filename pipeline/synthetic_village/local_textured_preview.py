@@ -24,6 +24,12 @@ from pydantic import (
 
 from pipeline.studio_jobs import JobContractError, ProjectFileLock
 from pipeline.synthetic_village import canary
+from pipeline.synthetic_village.building_geometry import (
+    BUILDING_GEOMETRY_V1,
+    BUILDING_GEOMETRY_V2,
+    BuildingGeometryEvidence,
+    BuildingGeometryProfileId,
+)
 from pipeline.synthetic_village.camera_plan import (
     CameraPlan,
     build_camera_plan,
@@ -134,6 +140,7 @@ class LocalTexturedPreviewRequest(FrozenModel):
     material_bundle_manifest_sha256: Sha256
     material_bundle_id: Sha256
     material_algorithm_id: MaterialAlgorithmId
+    building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
     material_input_registry: tuple[canary.MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -213,6 +220,8 @@ class LocalTexturedBuildReport(FrozenModel):
     material_bundle_manifest_sha256: Sha256
     material_bundle_id: Sha256
     material_algorithm_id: MaterialAlgorithmId = "mirror-sobel-orm-v1"
+    building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
+    building_geometry: BuildingGeometryEvidence | None = None
     material_input_registry: tuple[canary.MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -282,6 +291,11 @@ class LocalTexturedBuildReport(FrozenModel):
             (row.name, row.kind) for row in canary.ARTIFACT_REQUESTS
         ):
             raise ValueError("local build artifact registry is not exact")
+        if self.building_geometry_profile_id == BUILDING_GEOMETRY_V2:
+            if self.building_geometry is None:
+                raise ValueError("local v2 building geometry requires measured evidence")
+        elif self.building_geometry is not None:
+            raise ValueError("local v1 building geometry cannot claim v2 evidence")
         return self
 
 
@@ -330,7 +344,10 @@ def canonical_local_textured_preview_request_bytes(
     exclude_preview_id: bool = False,
 ) -> bytes:
     exclude = {"preview_id"} if exclude_preview_id else None
-    return _canonical_bytes(request.model_dump(mode="json", exclude=exclude))
+    payload = request.model_dump(mode="json", exclude=exclude)
+    if "building_geometry_profile_id" not in request.model_fields_set:
+        payload.pop("building_geometry_profile_id")
+    return _canonical_bytes(payload)
 
 
 def canonical_local_textured_preview_manifest_bytes(
@@ -345,6 +362,10 @@ def canonical_local_textured_build_report_bytes(
     payload = report.model_dump(mode="json", by_alias=True)
     if "material_algorithm_id" not in report.model_fields_set:
         payload.pop("material_algorithm_id")
+    if "building_geometry_profile_id" not in report.model_fields_set:
+        payload.pop("building_geometry_profile_id")
+    if "building_geometry" not in report.model_fields_set:
+        payload.pop("building_geometry")
     return _canonical_bytes(payload)
 
 
@@ -493,6 +514,7 @@ def verify_local_textured_build_report(
         "material_bundle_manifest_sha256",
         "material_bundle_id",
         "material_algorithm_id",
+        "building_geometry_profile_id",
         "material_input_registry",
     ):
         if getattr(report, label) != getattr(request, label):
@@ -756,6 +778,7 @@ def build_local_textured_preview_request(
         ),
         "material_bundle_id": bundle.bundle_id,
         "material_algorithm_id": bundle.algorithm_id,
+        "building_geometry_profile_id": BUILDING_GEOMETRY_V2,
         "material_input_registry": inputs,
     }
     preview_id = hashlib.sha256(_canonical_bytes(payload)).hexdigest()

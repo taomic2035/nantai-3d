@@ -34,6 +34,12 @@ from pipeline.studio_jobs import (
     ProjectFileLock,
     WindowsNtfsDurabilityBackend,
 )
+from pipeline.synthetic_village.building_geometry import (
+    BUILDING_GEOMETRY_V1,
+    BUILDING_GEOMETRY_V2,
+    BuildingGeometryEvidence,
+    BuildingGeometryProfileId,
+)
 from pipeline.synthetic_village.camera_plan import (
     CameraPlan,
     CameraPose,
@@ -638,6 +644,7 @@ class TexturedBuildRequest(FrozenModel):
     material_bundle_manifest_sha256: Sha256
     material_bundle_id: Sha256
     material_algorithm_id: MaterialAlgorithmId
+    building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
     material_input_registry: tuple[MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -960,6 +967,8 @@ class TexturedBuildReport(FrozenModel):
     material_bundle_manifest_sha256: Sha256
     material_bundle_id: Sha256
     material_algorithm_id: MaterialAlgorithmId = "mirror-sobel-orm-v1"
+    building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
+    building_geometry: BuildingGeometryEvidence | None = None
     material_input_registry: tuple[MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -1019,6 +1028,11 @@ class TexturedBuildReport(FrozenModel):
         artifact_contract = tuple((item.name, item.kind) for item in ARTIFACT_REQUESTS)
         if tuple((item.name, item.kind) for item in self.artifacts) != artifact_contract:
             raise ValueError("textured report artifact registry is not exact")
+        if self.building_geometry_profile_id == BUILDING_GEOMETRY_V2:
+            if self.building_geometry is None:
+                raise ValueError("v2 building geometry requires measured evidence")
+        elif self.building_geometry is not None:
+            raise ValueError("v1 building geometry cannot claim v2 evidence")
         return self
 
 
@@ -1307,7 +1321,10 @@ def canonical_textured_build_request_bytes(
     exclude_build_id: bool = False,
 ) -> bytes:
     exclude = {"build_id"} if exclude_build_id else None
-    return _canonical_json_bytes(request.model_dump(mode="json", exclude=exclude))
+    payload = request.model_dump(mode="json", exclude=exclude)
+    if "building_geometry_profile_id" not in request.model_fields_set:
+        payload.pop("building_geometry_profile_id")
+    return _canonical_json_bytes(payload)
 
 
 def canonical_build_report_bytes(report: BuildReport) -> bytes:
@@ -1318,6 +1335,10 @@ def canonical_textured_build_report_bytes(report: TexturedBuildReport) -> bytes:
     payload = report.model_dump(mode="json", by_alias=True)
     if "material_algorithm_id" not in report.model_fields_set:
         payload.pop("material_algorithm_id")
+    if "building_geometry_profile_id" not in report.model_fields_set:
+        payload.pop("building_geometry_profile_id")
+    if "building_geometry" not in report.model_fields_set:
+        payload.pop("building_geometry")
     return _canonical_json_bytes(payload)
 
 
@@ -1630,6 +1651,7 @@ def verify_textured_build_report(
         "material_bundle_manifest_sha256",
         "material_bundle_id",
         "material_algorithm_id",
+        "building_geometry_profile_id",
         "material_input_registry",
     ):
         if getattr(report, label) != getattr(request, label):
