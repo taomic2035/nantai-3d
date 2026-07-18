@@ -127,6 +127,7 @@ class GlbMaterialAudit(FrozenModel):
     byte_count: int = Field(ge=1)
     mesh_count: int = Field(ge=1)
     primitive_count: int = Field(ge=1)
+    triangle_count: int = Field(ge=1)
     material_count: int = Field(ge=1)
     texture_count: int = Field(ge=3)
     embedded_image_count: int = Field(ge=3)
@@ -854,6 +855,12 @@ def audit_textured_glb(
             material_count=len(materials),
             textured_materials=textured_materials,
         )
+        triangle_count = sum(
+            _indexed_triangle_counts_by_mesh(
+                document,
+                accessors=accessors,
+            ),
+        )
         if used_materials != textured_materials:
             raise GlbMaterialAuditError("GLB contains an expected material with no primitive")
         building_geometry = (
@@ -871,6 +878,7 @@ def audit_textured_glb(
             "byte_count": len(raw),
             "mesh_count": len(meshes),
             "primitive_count": primitive_count,
+            "triangle_count": triangle_count,
             "material_count": len(materials),
             "texture_count": len(texture_sources),
             "embedded_image_count": image_count,

@@ -323,6 +323,7 @@ def test_audit_accepts_embedded_pbr_material_with_uv_and_tangent(
     assert audit.material_count == 1
     assert audit.mesh_count == 1
     assert audit.primitive_count == 1
+    assert audit.triangle_count == 1
     assert audit.textured_primitive_count == 1
     assert audit.uv_primitive_count == 1
     assert audit.tangent_primitive_count == 1

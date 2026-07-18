@@ -138,6 +138,7 @@ def test_historical_local_glb_audit_omits_absent_geometry_evidence() -> None:
         byte_count=1024,
         mesh_count=1,
         primitive_count=1,
+        triangle_count=1,
         material_count=1,
         texture_count=3,
         embedded_image_count=3,
