@@ -13,9 +13,11 @@ import os
 import re
 import shutil
 import stat
+import struct
 import sys
 from pathlib import Path
 
+import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
@@ -25,9 +27,20 @@ class RuntimeBuildError(RuntimeError):
 
 
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
+MAX_MATERIAL_IMAGE_BYTES = 64 * 1024 * 1024
 REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v1"
 REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v1"
+TEXTURED_REQUEST_SCHEMA = "nantai.synthetic-village.blender-build-request.v2"
+TEXTURED_REPORT_SCHEMA = "nantai.synthetic-village.blender-build-report.v2"
 FIDELITY = "simplified-pbr-not-render-parity"
+TEXTURED_ALGORITHM_ID = "mirror-sobel-orm-v1"
+UV_POLICIES = {
+    "world-xy",
+    "dominant-axis-box",
+    "roof-slope",
+    "object-long-axis",
+    "leaf-card",
+}
 # 可选 weather 块的 schema, 必须与 pipeline/synthetic_village/weather_profile.py
 # 的 WEATHER_PROFILE_SCHEMA 逐字一致。weather 缺省 -> 走 canary 原样光照。
 WEATHER_PROFILE_SCHEMA = "nantai.synthetic-village.weather-profile.v1"
@@ -450,7 +463,8 @@ def _validate_weather_block(weather):
 
 
 def _validate_request(request, raw):
-    top_keys = (
+    textured = request.get("schema_version") == TEXTURED_REQUEST_SCHEMA
+    common_top_keys = (
         "schema_version",
         "build_id",
         "synthetic",
@@ -466,9 +480,19 @@ def _validate_request(request, raw):
         "visual_slot_registry",
         "requested_artifacts",
     )
+    top_keys = (
+        (
+            *common_top_keys,
+            "material_bundle_manifest_sha256",
+            "material_bundle_id",
+            "material_input_registry",
+        )
+        if textured
+        else common_top_keys
+    )
     # weather 是【可选】top key: 缺席 -> canary 14 键契约原样不变; 出现 -> 天气变体,
     # 该块进入 canonical payload 故 build_id 自动按天气分叉。
-    if "weather" in request:
+    if "weather" in request and not textured:
         _expect_keys(request, (*top_keys, "weather"), "request")
         _validate_weather_block(request["weather"])
     else:
@@ -476,7 +500,7 @@ def _validate_request(request, raw):
     if raw != _canonical_bytes(request):
         raise RuntimeBuildError("request must be canonical JSON")
     if (
-        request["schema_version"] != REQUEST_SCHEMA
+        request["schema_version"] not in {REQUEST_SCHEMA, TEXTURED_REQUEST_SCHEMA}
         or request["synthetic"] is not True
         or request["verification_level"] != "L2"
     ):
@@ -663,7 +687,7 @@ def _validate_request(request, raw):
     expected_evidence = _visual_slot_evidence(scene)
     category_implementation = {
         "key-view": "composition-reference-v1",
-        "material": "pbr-material-v1",
+        "material": "derived-pbr-material-v1" if textured else "pbr-material-v1",
         "detail": "geometry-detail-v1",
         "environment": "environment-element-v1",
         "prop": "prop-element-v1",
@@ -673,7 +697,12 @@ def _validate_request(request, raw):
         if (
             not _is_slug(row["slot_id"])
             or row["category"] != expected_categories[row["slot_id"]]
-            or row["usage_mode"] not in {"design-reference-only", "procedural-placeholder-v1"}
+            or row["usage_mode"]
+            not in {
+                "design-reference-only",
+                "procedural-placeholder-v1",
+                *({"runtime-material-source-v1"} if textured else set()),
+            }
             or row["reference_status"] not in {"verified-design-reference", "no-reference"}
             or type(row["canary_critical"]) is not bool
             or row["build_status"] not in {"instantiated", "declared-not-instantiated"}
@@ -688,7 +717,10 @@ def _validate_request(request, raw):
             or not all(_is_evidence_id(value) for value in evidence_ids)
         ):
             raise RuntimeBuildError("visual slot enum or scalar field is invalid")
-        if row["usage_mode"] == "design-reference-only":
+        if row["usage_mode"] in {
+            "design-reference-only",
+            "runtime-material-source-v1",
+        }:
             if (
                 not _is_sha256(row["source_sha256"])
                 or row["reference_status"] != "verified-design-reference"
@@ -713,7 +745,8 @@ def _validate_request(request, raw):
         ):
             raise RuntimeBuildError("visual slot build claim does not match stable evidence")
         if (
-            row["canary_critical"]
+            not textured
+            and row["canary_critical"]
             and row["build_status"] != "instantiated"
             and row["reference_status"] != "verified-design-reference"
         ):
@@ -724,13 +757,74 @@ def _validate_request(request, raw):
         or {row["slot_id"] for row in material_slots} != set(VISUAL_MATERIALS)
         or any(
             row["build_status"] != "instantiated"
-            or row["implementation"] != "pbr-material-v1"
+            or row["implementation"]
+            != ("derived-pbr-material-v1" if textured else "pbr-material-v1")
+            or (textured and row["usage_mode"] != "runtime-material-source-v1")
             or row["component_tag"] != "blender-material"
             or row["evidence_ids"] != [row["slot_id"]]
             for row in material_slots
         )
     ):
         raise RuntimeBuildError("all 24 visual material slots must be instantiated")
+
+    if textured:
+        if (
+            not _is_sha256(request["material_bundle_manifest_sha256"])
+            or not _is_sha256(request["material_bundle_id"])
+        ):
+            raise RuntimeBuildError("textured material bundle identity is invalid")
+        material_inputs = request["material_input_registry"]
+        _expect_list(material_inputs, 24, "material_input_registry")
+        expected_input_keys = {
+            "slot_id",
+            "source_sha256",
+            "base_color_sha256",
+            "normal_sha256",
+            "orm_sha256",
+            "width",
+            "height",
+            "uv_policy",
+            "nominal_tile_m",
+            "normal_strength",
+            "synthetic",
+        }
+        if any(
+            not isinstance(row, dict) or set(row) != expected_input_keys
+            for row in material_inputs
+        ):
+            raise RuntimeBuildError("material input registry fields are invalid")
+        input_ids = [row["slot_id"] for row in material_inputs]
+        if input_ids != sorted(VISUAL_MATERIALS):
+            raise RuntimeBuildError("material input registry is not the exact sorted set")
+        sources_by_slot = {
+            row["slot_id"]: row["source_sha256"] for row in material_slots
+        }
+        for row in material_inputs:
+            map_digests = (
+                row["base_color_sha256"],
+                row["normal_sha256"],
+                row["orm_sha256"],
+            )
+            if (
+                row["slot_id"] not in VISUAL_MATERIALS
+                or not _is_sha256(row["source_sha256"])
+                or not all(_is_sha256(value) for value in map_digests)
+                or len(set(map_digests)) != 3
+                or sources_by_slot.get(row["slot_id"]) != row["source_sha256"]
+                or row["width"] != 1024
+                or row["height"] != 1024
+                or row["uv_policy"] not in UV_POLICIES
+                or isinstance(row["nominal_tile_m"], bool)
+                or not isinstance(row["nominal_tile_m"], (int, float))
+                or not math.isfinite(row["nominal_tile_m"])
+                or row["nominal_tile_m"] <= 0
+                or isinstance(row["normal_strength"], bool)
+                or not isinstance(row["normal_strength"], (int, float))
+                or not math.isfinite(row["normal_strength"])
+                or row["normal_strength"] <= 0
+                or row["synthetic"] is not True
+            ):
+                raise RuntimeBuildError("material input registry row is invalid")
 
     if request["requested_artifacts"] != list(ARTIFACT_REQUESTS):
         raise RuntimeBuildError("requested artifact registry is not stable v1")
@@ -919,6 +1013,182 @@ def _new_collection(name, parent=None):
     return collection
 
 
+def _read_stable_material(path, expected_sha256):
+    try:
+        before = path.stat()
+        if (
+            before.st_size <= 0
+            or before.st_size > MAX_MATERIAL_IMAGE_BYTES
+            or _is_reparse_point(path)
+            or not path.is_file()
+        ):
+            raise RuntimeBuildError("material image is redirected or outside the size bound")
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if _signature(before) != _signature(opened):
+                raise RuntimeBuildError("material image changed before bounded read")
+            raw = stream.read(MAX_MATERIAL_IMAGE_BYTES + 1)
+            after_open = os.fstat(stream.fileno())
+        after = path.stat()
+    except RuntimeBuildError:
+        raise
+    except OSError as exc:
+        raise RuntimeBuildError("material image cannot be read stably") from exc
+    if (
+        len(raw) != before.st_size
+        or len(raw) > MAX_MATERIAL_IMAGE_BYTES
+        or _signature(opened) != _signature(after_open)
+        or _signature(before) != _signature(after)
+        or _sha256_bytes(raw) != expected_sha256
+    ):
+        raise RuntimeBuildError("material image changed or failed its SHA-256 check")
+    if (
+        len(raw) < 33
+        or raw[:8] != b"\x89PNG\r\n\x1a\n"
+        or struct.unpack_from(">I", raw, 8)[0] != 13
+        or raw[12:16] != b"IHDR"
+    ):
+        raise RuntimeBuildError("material image is not a bounded PNG")
+    width, height, bit_depth, color_type = struct.unpack_from(">IIBB", raw, 16)
+    if (
+        width != 1024
+        or height != 1024
+        or bit_depth != 8
+        or color_type not in {2, 6}
+    ):
+        raise RuntimeBuildError("material image dimensions or pixel format are invalid")
+
+
+def _validate_material_directory(materials_path, request):
+    if materials_path is None:
+        raise RuntimeBuildError("textured request requires a material directory")
+    _assert_direct_path(materials_path, "materials")
+    if not materials_path.is_dir():
+        raise RuntimeBuildError("material path is not a directory")
+    expected_hashes = {
+        digest
+        for row in request["material_input_registry"]
+        for digest in (
+            row["base_color_sha256"],
+            row["normal_sha256"],
+            row["orm_sha256"],
+        )
+    }
+    expected_names = {f"{digest}.png" for digest in expected_hashes}
+    try:
+        children = list(materials_path.iterdir())
+    except OSError as exc:
+        raise RuntimeBuildError("material directory cannot be enumerated") from exc
+    if {child.name for child in children} != expected_names:
+        raise RuntimeBuildError("material directory is not the exact requested map set")
+    paths = {}
+    for child in children:
+        digest = child.stem
+        if (
+            child.parent != materials_path
+            or child.suffix != ".png"
+            or digest not in expected_hashes
+            or _is_reparse_point(child)
+        ):
+            raise RuntimeBuildError("material directory contains a redirected map")
+        _assert_direct_path(child, "material image")
+        _read_stable_material(child, digest)
+        paths[digest] = child
+    return paths
+
+
+def _load_packed_image(path, expected_sha256, *, colorspace):
+    _read_stable_material(path, expected_sha256)
+    try:
+        image = bpy.data.images.load(str(path), check_existing=False)
+        if tuple(image.size) != (1024, 1024):
+            raise RuntimeBuildError("Blender decoded unexpected material dimensions")
+        image.colorspace_settings.name = colorspace
+        image.name = f"nv__image-{expected_sha256}"
+        image.pack()
+        image.filepath = ""
+        image.filepath_raw = ""
+    except RuntimeBuildError:
+        raise
+    except Exception as exc:
+        raise RuntimeBuildError("Blender could not decode and pack a material image") from exc
+    _read_stable_material(path, expected_sha256)
+    return image
+
+
+def _create_textured_materials(request, material_paths):
+    visual_registry = request["visual_slot_registry"]
+    material_rows = {
+        row["slot_id"]: row
+        for row in visual_registry
+        if row["category"] == "material"
+    }
+    inputs = {row["slot_id"]: row for row in request["material_input_registry"]}
+    if set(material_rows) != set(VISUAL_MATERIALS) or set(inputs) != set(VISUAL_MATERIALS):
+        raise RuntimeBuildError("textured material registry is not executable")
+    materials = {}
+    for material_index, slot_id in enumerate(sorted(VISUAL_MATERIALS), 1):
+        row = inputs[slot_id]
+        base_image = _load_packed_image(
+            material_paths[row["base_color_sha256"]],
+            row["base_color_sha256"],
+            colorspace="sRGB",
+        )
+        normal_image = _load_packed_image(
+            material_paths[row["normal_sha256"]],
+            row["normal_sha256"],
+            colorspace="Non-Color",
+        )
+        orm_image = _load_packed_image(
+            material_paths[row["orm_sha256"]],
+            row["orm_sha256"],
+            colorspace="Non-Color",
+        )
+        material = bpy.data.materials.new(f"nv__mat-{slot_id}")
+        material.use_nodes = True
+        material.pass_index = material_index
+        material["nv_slot_id"] = slot_id
+        material["nv_implementation"] = "derived-pbr-material-v1"
+        material["nv_synthetic"] = True
+        material["slot_id"] = slot_id
+        material["source_sha256"] = row["source_sha256"]
+        material["bundle_id"] = request["material_bundle_id"]
+        material["algorithm_id"] = TEXTURED_ALGORITHM_ID
+        material["synthetic"] = True
+        material["uv_policy"] = row["uv_policy"]
+        material["nv_nominal_tile_m"] = row["nominal_tile_m"]
+
+        nodes = material.node_tree.nodes
+        links = material.node_tree.links
+        principled = nodes.get("Principled BSDF")
+        base = nodes.new("ShaderNodeTexImage")
+        base.name = f"nv__base-color-{slot_id}"
+        base.image = base_image
+        normal = nodes.new("ShaderNodeTexImage")
+        normal.name = f"nv__normal-{slot_id}"
+        normal.image = normal_image
+        orm = nodes.new("ShaderNodeTexImage")
+        orm.name = f"nv__orm-{slot_id}"
+        orm.image = orm_image
+        normal_map = nodes.new("ShaderNodeNormalMap")
+        normal_map.name = f"nv__normal-map-{slot_id}"
+        normal_map.inputs["Strength"].default_value = row["normal_strength"]
+        separate = nodes.new("ShaderNodeSeparateColor")
+        separate.name = f"nv__orm-channels-{slot_id}"
+        links.new(base.outputs["Color"], principled.inputs["Base Color"])
+        links.new(normal.outputs["Color"], normal_map.inputs["Color"])
+        links.new(normal_map.outputs["Normal"], principled.inputs["Normal"])
+        links.new(orm.outputs["Color"], separate.inputs["Color"])
+        links.new(separate.outputs["Green"], principled.inputs["Roughness"])
+        links.new(separate.outputs["Blue"], principled.inputs["Metallic"])
+        if "Coat Weight" in principled.inputs:
+            principled.inputs["Coat Weight"].default_value = 0.08
+        materials[slot_id] = material
+    for digest, path in material_paths.items():
+        _read_stable_material(path, digest)
+    return materials
+
+
 def _create_materials(visual_registry):
     registry_ids = {
         row["slot_id"]
@@ -1002,6 +1272,124 @@ def _configure_terrain_material(material):
     links.new(noise.outputs["Color"], multiply.inputs[2])
     links.new(multiply.outputs["Color"], principled.inputs["Base Color"])
     material["nv_procedural_style"] = "height-slope-noise-v1"
+
+
+def _dominant_projection_axes(normal):
+    dominant = max(range(3), key=lambda index: abs(normal[index]))
+    return tuple(index for index in range(3) if index != dominant)
+
+
+def _triangle_uv_area(values):
+    first, second, third = values
+    return abs(
+        (second[0] - first[0]) * (third[1] - first[1])
+        - (second[1] - first[1]) * (third[0] - first[0])
+    )
+
+
+def _project_polygon_uvs(obj, polygon, policy, tile_m):
+    mesh = obj.data
+    local = [mesh.vertices[index].co.copy() for index in polygon.vertices]
+    world = [obj.matrix_world @ coordinate for coordinate in local]
+    normal_matrix = obj.matrix_world.to_3x3().inverted_safe().transposed()
+    world_normal = (normal_matrix @ polygon.normal).normalized()
+
+    def project_axes(coordinates, axes):
+        return [
+            (float(coordinate[axes[0]]) / tile_m, float(coordinate[axes[1]]) / tile_m)
+            for coordinate in coordinates
+        ]
+
+    if policy == "world-xy":
+        values = project_axes(world, (0, 1))
+    elif policy == "dominant-axis-box":
+        values = project_axes(world, _dominant_projection_axes(world_normal))
+    elif policy == "roof-slope":
+        ridge = Vector((-world_normal.y, world_normal.x, 0.0))
+        if ridge.length <= 1e-8:
+            ridge = Vector((1.0, 0.0, 0.0))
+        ridge.normalize()
+        fall = world_normal.cross(ridge)
+        if fall.length <= 1e-8:
+            values = project_axes(world, _dominant_projection_axes(world_normal))
+        else:
+            fall.normalize()
+            values = [
+                (
+                    float(coordinate.dot(ridge)) / tile_m,
+                    float(coordinate.dot(fall)) / tile_m,
+                )
+                for coordinate in world
+            ]
+    elif policy == "object-long-axis":
+        spans = [
+            max(vertex.co[index] for vertex in mesh.vertices)
+            - min(vertex.co[index] for vertex in mesh.vertices)
+            for index in range(3)
+        ]
+        long_axis = max(range(3), key=lambda index: spans[index])
+        remaining = [index for index in range(3) if index != long_axis]
+        second_axis = max(remaining, key=lambda index: spans[index])
+        values = project_axes(local, (long_axis, second_axis))
+    elif policy == "leaf-card":
+        values = project_axes(local, _dominant_projection_axes(polygon.normal))
+    else:
+        raise RuntimeBuildError(f"unsupported UV policy: {policy}")
+
+    if len(values) != 3 or _triangle_uv_area(values) <= 1e-12:
+        values = project_axes(world, _dominant_projection_axes(world_normal))
+    if len(values) != 3 or _triangle_uv_area(values) <= 1e-12:
+        raise RuntimeBuildError(f"UV projection is degenerate: {obj.name}")
+    return values
+
+
+def _apply_textured_uvs_and_tangents(mesh_objects):
+    for obj in mesh_objects:
+        if obj.type != "MESH":
+            continue
+        if obj.data.users > 1:
+            obj.data = obj.data.copy()
+        mesh = obj.data
+        edit_mesh = bmesh.new()
+        try:
+            edit_mesh.from_mesh(mesh)
+            bmesh.ops.triangulate(edit_mesh, faces=list(edit_mesh.faces))
+            edit_mesh.to_mesh(mesh)
+        finally:
+            edit_mesh.free()
+        mesh.update(calc_edges=True)
+        if len(mesh.materials) <= 0:
+            raise RuntimeBuildError(f"textured mesh has no material: {obj.name}")
+        uv_layer = mesh.uv_layers.get("nv_uv0") or mesh.uv_layers.new(name="nv_uv0")
+        for polygon in mesh.polygons:
+            if len(polygon.vertices) != 3 or polygon.material_index >= len(mesh.materials):
+                raise RuntimeBuildError(f"textured mesh primitive is invalid: {obj.name}")
+            material = mesh.materials[polygon.material_index]
+            policy = material.get("uv_policy")
+            tile_m = material.get("nv_nominal_tile_m")
+            if (
+                policy not in UV_POLICIES
+                or isinstance(tile_m, bool)
+                or not isinstance(tile_m, (int, float))
+                or not math.isfinite(tile_m)
+                or tile_m <= 0
+            ):
+                raise RuntimeBuildError(f"textured material UV metadata is invalid: {obj.name}")
+            values = _project_polygon_uvs(obj, polygon, policy, float(tile_m))
+            for loop_index, uv in zip(polygon.loop_indices, values, strict=True):
+                uv_layer.data[loop_index].uv = uv
+        try:
+            mesh.calc_tangents(uvmap=uv_layer.name)
+        except Exception as exc:
+            raise RuntimeBuildError(f"mesh tangent generation failed: {obj.name}") from exc
+        for loop in mesh.loops:
+            if (
+                not all(math.isfinite(value) for value in loop.tangent)
+                or not math.isfinite(loop.bitangent_sign)
+            ):
+                raise RuntimeBuildError(f"mesh tangent evidence is non-finite: {obj.name}")
+        obj["nv_uv_layer"] = uv_layer.name
+        obj["nv_tangents"] = True
 
 
 def _tag_object(obj, stable_id, semantic_id, instance_id, material_id, variant_id=None):
@@ -2018,6 +2406,10 @@ def _require_root_component(root, component_tag, slot_id):
 
 
 def _validate_visual_scene_evidence(request, roots, materials):
+    textured = request["schema_version"] == TEXTURED_REQUEST_SCHEMA
+    expected_material_implementation = (
+        "derived-pbr-material-v1" if textured else "pbr-material-v1"
+    )
     roots_by_id = {root["nv_stable_id"]: root for root in roots}
     auxiliary_names = {
         row["auxiliary_id"]: row["blender_name"] for row in request["auxiliary_registry"]
@@ -2042,11 +2434,23 @@ def _validate_visual_scene_evidence(request, roots, materials):
                 component_tag != "blender-material"
                 or material is None
                 or material.get("nv_slot_id") != slot_id
-                or material.get("nv_implementation") != "pbr-material-v1"
+                or material.get("nv_implementation") != expected_material_implementation
                 or principled is None
                 or material.users <= 0
             ):
                 raise RuntimeBuildError(f"PBR material evidence is absent: {slot_id}")
+            if textured and any(
+                material.get(key) is None
+                for key in (
+                    "slot_id",
+                    "source_sha256",
+                    "bundle_id",
+                    "algorithm_id",
+                    "synthetic",
+                    "uv_policy",
+                )
+            ):
+                raise RuntimeBuildError(f"textured material extras are absent: {slot_id}")
             _record_visual_evidence(material, slot_id, component_tag)
         elif row["category"] == "prop":
             for evidence_id in evidence_ids:
@@ -2417,7 +2821,84 @@ def _validate_preview_evidence(request, preview_registry, work_dir):
     )
 
 
-def _save_scene_and_glb(work_dir):
+def _glb_textured_counts(glb_path):
+    try:
+        raw = glb_path.read_bytes()
+        if len(raw) < 20:
+            raise RuntimeBuildError("textured GLB header is incomplete")
+        magic, version, declared = struct.unpack_from("<4sII", raw, 0)
+        json_length, json_kind = struct.unpack_from("<I4s", raw, 12)
+        if (
+            magic != b"glTF"
+            or version != 2
+            or declared != len(raw)
+            or json_kind != b"JSON"
+            or json_length <= 0
+            or 20 + json_length > len(raw)
+        ):
+            raise RuntimeBuildError("textured GLB header is invalid")
+        document = json.loads(raw[20 : 20 + json_length].decode("utf-8"))
+    except RuntimeBuildError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, struct.error) as exc:
+        raise RuntimeBuildError("textured GLB cannot be inspected") from exc
+    meshes = document.get("meshes")
+    materials = document.get("materials")
+    images = document.get("images")
+    textures = document.get("textures")
+    if not all(isinstance(value, list) for value in (meshes, materials, images, textures)):
+        raise RuntimeBuildError("textured GLB PBR collections are absent")
+    primitives = [
+        primitive
+        for mesh in meshes
+        if isinstance(mesh, dict)
+        for primitive in mesh.get("primitives", [])
+        if isinstance(primitive, dict)
+    ]
+    uv_count = sum(
+        isinstance(primitive.get("attributes"), dict)
+        and "TEXCOORD_0" in primitive["attributes"]
+        for primitive in primitives
+    )
+    tangent_count = sum(
+        isinstance(primitive.get("attributes"), dict)
+        and "TANGENT" in primitive["attributes"]
+        for primitive in primitives
+    )
+    embedded_images = sum(
+        isinstance(image, dict)
+        and "bufferView" in image
+        and "uri" not in image
+        and image.get("mimeType") == "image/png"
+        for image in images
+    )
+    expected_slots = set(VISUAL_MATERIALS)
+    material_slots = {
+        material.get("extras", {}).get("slot_id")
+        for material in materials
+        if isinstance(material, dict) and isinstance(material.get("extras"), dict)
+    }
+    if (
+        not primitives
+        or len(materials) != 24
+        or material_slots != expected_slots
+        or len(images) < 72
+        or embedded_images != len(images)
+        or len(textures) < 72
+        or uv_count != len(primitives)
+        or tangent_count != len(primitives)
+    ):
+        raise RuntimeBuildError("textured GLB lacks complete embedded PBR/UV/tangent evidence")
+    return {
+        "glb_primitives": len(primitives),
+        "glb_embedded_images": embedded_images,
+        "glb_textures": len(textures),
+        "glb_uv_primitives": uv_count,
+        "glb_tangent_primitives": tangent_count,
+    }
+
+
+def _save_scene_and_glb(work_dir, *, textured=False):
     blend_path = work_dir / "village-canary.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(blend_path), check_existing=False)
     if not blend_path.is_file() or blend_path.stat().st_size <= 0:
@@ -2431,9 +2912,11 @@ def _save_scene_and_glb(work_dir):
         export_lights=True,
         export_apply=True,
         export_extras=True,
+        export_tangents=textured,
     )
     if "FINISHED" not in result or not glb_path.is_file() or glb_path.stat().st_size <= 0:
         raise RuntimeBuildError("GLB export did not finish")
+    return _glb_textured_counts(glb_path) if textured else None
 
 
 def _artifact_records(work_dir):
@@ -2463,7 +2946,9 @@ def _build_report(
     camera_objects,
     preview_registry,
     artifacts,
+    glb_counts=None,
 ):
+    textured = request["schema_version"] == TEXTURED_REQUEST_SCHEMA
     semantic_ids = [row["semantic_id"] for row in request["semantic_registry"]]
     material_ids = [row["material_id"] for row in request["material_registry"]]
     critical_ok = all(
@@ -2472,8 +2957,8 @@ def _build_report(
         or row["reference_status"] == "verified-design-reference"
         for row in request["visual_slot_registry"]
     )
-    return {
-        "schema_version": REPORT_SCHEMA,
+    report = {
+        "schema_version": TEXTURED_REPORT_SCHEMA if textured else REPORT_SCHEMA,
         "build_id": request["build_id"],
         "synthetic": True,
         "verification_level": "L2",
@@ -2520,6 +3005,17 @@ def _build_report(
         },
         "artifacts": artifacts,
     }
+    if textured:
+        if glb_counts is None:
+            raise RuntimeBuildError("textured report requires measured GLB evidence")
+        report["geometry_usability"] = "preview-only"
+        report["material_bundle_manifest_sha256"] = request[
+            "material_bundle_manifest_sha256"
+        ]
+        report["material_bundle_id"] = request["material_bundle_id"]
+        report["material_input_registry"] = request["material_input_registry"]
+        report["counts"].update(glb_counts)
+    return report
 
 
 def _camera_report_registry(request, camera_objects):
@@ -2549,7 +3045,13 @@ def _camera_report_registry(request, camera_objects):
     return registry
 
 
-def _execute_build(request, staging_path):
+def _execute_build(request, staging_path, materials_path=None):
+    textured = request["schema_version"] == TEXTURED_REQUEST_SCHEMA
+    material_paths = (
+        _validate_material_directory(materials_path, request) if textured else None
+    )
+    if not textured and materials_path is not None:
+        raise RuntimeBuildError("legacy request does not accept a material directory")
     if staging_path.exists():
         raise RuntimeBuildError("staging directory must be absent")
     if not staging_path.parent.is_dir():
@@ -2564,7 +3066,11 @@ def _execute_build(request, staging_path):
         _clear_factory_scene()
         canonical_collection = _new_collection("nv__canonical-roots")
         auxiliary_collection = _new_collection("nv__auxiliary")
-        materials = _create_materials(request["visual_slot_registry"])
+        materials = (
+            _create_textured_materials(request, material_paths)
+            if textured
+            else _create_materials(request["visual_slot_registry"])
+        )
         scene = _configure_scene(request, materials)
         _create_terrain(request["scene_plan"]["extent"], materials, auxiliary_collection)
         roots = _build_canonical_objects(
@@ -2574,6 +3080,10 @@ def _execute_build(request, staging_path):
         )
         camera_objects = _create_cameras(request)
         scene.camera = camera_objects["camera-outer-001"]
+        if textured:
+            _apply_textured_uvs_and_tangents(
+                [obj for obj in bpy.data.objects if obj.type == "MESH"],
+            )
         mesh_objects, prop_counts = _validate_built_scene(
             request,
             roots,
@@ -2582,7 +3092,13 @@ def _execute_build(request, staging_path):
         )
         preview_registry = _render_previews(scene, camera_objects, work_dir)
         _validate_preview_evidence(request, preview_registry, work_dir)
-        _save_scene_and_glb(work_dir)
+        if textured:
+            for digest, path in material_paths.items():
+                _read_stable_material(path, digest)
+        glb_counts = _save_scene_and_glb(work_dir, textured=textured)
+        if textured:
+            for digest, path in material_paths.items():
+                _read_stable_material(path, digest)
         artifacts = _artifact_records(work_dir)
         report = _build_report(
             request,
@@ -2591,6 +3107,7 @@ def _execute_build(request, staging_path):
             camera_objects,
             preview_registry,
             artifacts,
+            glb_counts,
         )
         report_path = work_dir / "build-report.json"
         with report_path.open("xb") as stream:
@@ -2611,34 +3128,55 @@ def _execute_build(request, staging_path):
         raise RuntimeBuildError(f"scene build failed: {type(exc).__name__}: {exc}") from exc
 
 
-def _runtime_argv(argv: list[str]) -> tuple[Path, Path]:
+def _runtime_argv(argv: list[str]) -> tuple[Path, Path | None, Path]:
     try:
         marker = argv.index("--")
     except ValueError as exc:
         raise RuntimeBuildError("runtime arguments must follow --") from exc
     values = argv[marker + 1 :]
-    if len(values) != 4 or values[0] != "--request" or values[2] != "--staging":
+    legacy = (
+        len(values) == 4
+        and values[0] == "--request"
+        and values[2] == "--staging"
+    )
+    textured = (
+        len(values) == 6
+        and values[0] == "--request"
+        and values[2] == "--materials"
+        and values[4] == "--staging"
+    )
+    if not legacy and not textured:
         raise RuntimeBuildError(
-            "expected exactly --request <file> --staging <directory>",
+            "expected exact legacy args or --request <file> --materials <dir> --staging <dir>",
         )
     raw_request_path = Path(values[1])
-    raw_staging_path = Path(values[3])
-    if not raw_request_path.is_absolute() or not raw_staging_path.is_absolute():
-        raise RuntimeBuildError("request and staging paths must be absolute")
+    raw_materials_path = Path(values[3]) if textured else None
+    raw_staging_path = Path(values[5] if textured else values[3])
+    if (
+        not raw_request_path.is_absolute()
+        or not raw_staging_path.is_absolute()
+        or (raw_materials_path is not None and not raw_materials_path.is_absolute())
+    ):
+        raise RuntimeBuildError("request, material, and staging paths must be absolute")
     request_path = raw_request_path.absolute()
+    materials_path = (
+        raw_materials_path.absolute() if raw_materials_path is not None else None
+    )
     staging_path = raw_staging_path.absolute()
     if not request_path.is_file():
         raise RuntimeBuildError("request file does not exist")
     _assert_direct_path(request_path, "request")
+    if materials_path is not None:
+        _assert_direct_path(materials_path, "materials")
     _assert_direct_path(staging_path, "staging", leaf_may_be_absent=True)
-    return request_path, staging_path
+    return request_path, materials_path, staging_path
 
 
 def main() -> None:
-    request_path, staging_path = _runtime_argv(sys.argv)
+    request_path, materials_path, staging_path = _runtime_argv(sys.argv)
     request, raw = _load_request(request_path)
     _validate_request(request, raw)
-    _execute_build(request, staging_path)
+    _execute_build(request, staging_path, materials_path)
 
 
 if __name__ == "__main__":

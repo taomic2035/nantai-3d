@@ -29,8 +29,10 @@ from pipeline.synthetic_village.canary import (
     CanaryBuildError,
     PreviewCameraRecord,
     SemanticRegistryEntry,
+    TexturedBuildCounts,
     TexturedBuildReport,
     TexturedBuildRequest,
+    TexturedBuildValidation,
     VisualSlotRegistryEntry,
     build_canary_request,
     build_textured_canary_request,
@@ -263,6 +265,46 @@ def test_textured_request_binds_exact_material_bundle_without_private_paths(
         ).hexdigest()
         == request.build_id
     )
+
+
+def test_builder_source_contains_verified_texture_uv_and_tangent_path() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/blender/build_synthetic_village.py"
+    ).read_text("utf-8")
+
+    for required in (
+        '"--materials"',
+        "ShaderNodeTexImage",
+        "ShaderNodeNormalMap",
+        "ShaderNodeSeparateColor",
+        "uv_layers.new",
+        "calc_tangents",
+        "export_tangents=textured",
+        "runtime-material-source-v1",
+        "derived-pbr-material-v1",
+    ):
+        assert required in source
+
+
+def test_textured_report_preserves_unfulfilled_critical_slot_evidence(
+    tmp_path: Path,
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    report = _valid_textured_report(
+        request,
+        tmp_path,
+        canary_critical_slots_fulfilled=False,
+    )
+
+    assert report.validation.canary_critical_slots_fulfilled is False
+    assert report.geometry_usability == "preview-only"
 
 
 def _rebuild_textured_payload(
@@ -648,6 +690,8 @@ def _valid_report(request: BuildRequest, staging: Path) -> BuildReport:
 def _valid_textured_report(
     request: TexturedBuildRequest,
     staging: Path,
+    *,
+    canary_critical_slots_fulfilled: bool = True,
 ) -> TexturedBuildReport:
     return TexturedBuildReport(
         build_id=request.build_id,
@@ -720,7 +764,7 @@ def _valid_textured_report(
                 image_height_px=576,
             ),
         ),
-        counts=BuildCounts(
+        counts=TexturedBuildCounts(
             canonical_roots=126,
             mesh_objects=130,
             scene_material_families=11,
@@ -728,8 +772,13 @@ def _valid_textured_report(
             cameras=24,
             lights=3,
             auxiliary_semantic_objects=2,
+            glb_primitives=130,
+            glb_embedded_images=72,
+            glb_textures=72,
+            glb_uv_primitives=130,
+            glb_tangent_primitives=130,
         ),
-        validation=BuildValidation(
+        validation=TexturedBuildValidation(
             canonical_object_ids_match=True,
             camera_matrices_within_tolerance=True,
             finite_nonempty_meshes=True,
@@ -737,7 +786,7 @@ def _valid_textured_report(
             material_ids_unique=True,
             auxiliary_semantics_present=True,
             all_visual_material_slots_built=True,
-            canary_critical_slots_fulfilled=True,
+            canary_critical_slots_fulfilled=canary_critical_slots_fulfilled,
             prop_type_counts={
                 variant: 2
                 for variant in (

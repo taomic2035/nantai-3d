@@ -796,6 +796,30 @@ class BuildCounts(FrozenModel):
     auxiliary_semantic_objects: Literal[2]
 
 
+class TexturedBuildCounts(FrozenModel):
+    canonical_roots: Literal[126]
+    mesh_objects: int = Field(ge=126)
+    scene_material_families: Literal[11]
+    visual_materials: Literal[24]
+    cameras: Literal[24]
+    lights: int = Field(ge=1)
+    auxiliary_semantic_objects: Literal[2]
+    glb_primitives: int = Field(ge=1)
+    glb_embedded_images: int = Field(ge=72)
+    glb_textures: int = Field(ge=72)
+    glb_uv_primitives: int = Field(ge=1)
+    glb_tangent_primitives: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _all_glb_primitives_have_uvs_and_tangents(self) -> TexturedBuildCounts:
+        if (
+            self.glb_uv_primitives != self.glb_primitives
+            or self.glb_tangent_primitives != self.glb_primitives
+        ):
+            raise ValueError("every textured GLB primitive requires UV and tangent evidence")
+        return self
+
+
 class PropTypeCounts(FrozenModel):
     water_jar: Literal[2] = Field(alias="water-jar")
     firewood_stack: Literal[2] = Field(alias="firewood-stack")
@@ -816,6 +840,18 @@ class BuildValidation(FrozenModel):
     auxiliary_semantics_present: Literal[True]
     all_visual_material_slots_built: Literal[True]
     canary_critical_slots_fulfilled: Literal[True]
+    prop_type_counts: PropTypeCounts
+
+
+class TexturedBuildValidation(FrozenModel):
+    canonical_object_ids_match: Literal[True]
+    camera_matrices_within_tolerance: Literal[True]
+    finite_nonempty_meshes: Literal[True]
+    semantic_ids_unique: Literal[True]
+    material_ids_unique: Literal[True]
+    auxiliary_semantics_present: Literal[True]
+    all_visual_material_slots_built: Literal[True]
+    canary_critical_slots_fulfilled: bool
     prop_type_counts: PropTypeCounts
 
 
@@ -904,8 +940,9 @@ class TexturedBuildReport(FrozenModel):
     synthetic: Literal[True] = True
     verification_level: Literal["L2"] = "L2"
     fidelity: Literal[
-        "synthetic-derived-pbr-not-render-parity"
-    ] = "synthetic-derived-pbr-not-render-parity"
+        "simplified-pbr-not-render-parity"
+    ] = "simplified-pbr-not-render-parity"
+    geometry_usability: Literal["preview-only"] = "preview-only"
     tool_identity: ToolIdentity
     source_hashes: SourceHashes
     object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
@@ -927,8 +964,8 @@ class TexturedBuildReport(FrozenModel):
     )
     camera_registry: tuple[CameraRegistryEntry, ...] = Field(min_length=24, max_length=24)
     preview_registry: tuple[PreviewCameraRecord, ...] = Field(min_length=4, max_length=4)
-    counts: BuildCounts
-    validation: BuildValidation
+    counts: TexturedBuildCounts
+    validation: TexturedBuildValidation
     determinism: BuildDeterminism
     artifacts: tuple[ArtifactRecord, ...] = Field(min_length=6, max_length=6)
 
