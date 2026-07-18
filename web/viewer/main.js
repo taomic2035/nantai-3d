@@ -557,6 +557,20 @@ function setupEnvironmentControls() {
   }, { passive: false });
 }
 
+function setupDisplayMode() {
+  const button = document.getElementById('display-toggle');
+  const setFocused = (focused) => {
+    document.body.classList.toggle('focus-mode', focused);
+    button.setAttribute('aria-pressed', String(focused));
+    button.textContent = focused ? '显示信息' : '专注画面';
+  };
+  const embedded = new URLSearchParams(window.location.search).get('embed') === '1';
+  setFocused(embedded);
+  button.addEventListener('click', () => {
+    setFocused(!document.body.classList.contains('focus-mode'));
+  });
+}
+
 function applyFraming(frame, resetCamera = true) {
   currentFrame = frame;
   camera.near = frame.near;
@@ -601,6 +615,7 @@ function applyFraming(frame, resetCamera = true) {
 
 // ============ 初始化 ============
 function init() {
+  setupDisplayMode();
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1a2228);
 

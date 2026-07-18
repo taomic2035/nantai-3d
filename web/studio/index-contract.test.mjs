@@ -12,6 +12,18 @@ test('reset camera participates in capability-gated viewer controls', () => {
   );
 });
 
+test('near-view preview is capability-gated and sends an explicit look target', () => {
+  assert.match(
+    html,
+    /id="showcase-camera"[^>]*data-viewer-command="setCameraPose"/,
+  );
+  assert.match(app, /showcaseCameraPose\(state\.bounds\)/);
+  assert.match(
+    app,
+    /bridge\.command\('setCameraPose',\s*showcaseCameraPose\(state\.bounds\)\)/,
+  );
+});
+
 test('primary write availability has a visible live reason', () => {
   assert.match(html, /id="primary-action-reason"[^>]*aria-live="polite"/);
   assert.match(html, /Views\s*·\s*DAG/);

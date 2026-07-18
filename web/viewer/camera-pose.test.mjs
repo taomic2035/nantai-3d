@@ -163,3 +163,31 @@ test('normalizeCameraPose 误例抛中文错误', () => {
     /look_at\.up/,
   );
 });
+
+test('showcaseCameraPose turns kilometre-scale bounds into a readable near view', () => {
+  const { showcaseCameraPose } = subject();
+  assert.equal(
+    typeof showcaseCameraPose,
+    'function',
+    'camera-pose.mjs must expose a near-view preset',
+  );
+
+  const bounds = {
+    min: [-400, -400, 0],
+    max: [600, 600, 12],
+  };
+  const pose = showcaseCameraPose(bounds);
+
+  assert.deepEqual(
+    { ...pose.position, up: Math.round(pose.position.up * 10) / 10 },
+    { east: 136, north: 20, up: 24.8 },
+  );
+  assert.deepEqual(
+    { ...pose.look_at, up: Math.round(pose.look_at.up * 10) / 10 },
+    { east: 100, north: 100, up: 2.4 },
+  );
+  assert.deepEqual(bounds, {
+    min: [-400, -400, 0],
+    max: [600, 600, 12],
+  }, 'camera preset must not shrink or rewrite geometric truth');
+});

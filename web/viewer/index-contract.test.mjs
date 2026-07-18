@@ -107,6 +107,21 @@ test('expanded evidence HUD stays within the viewport and can scroll', () => {
   assert.match(hudRule, /scrollbar-gutter:\s*stable/);
 });
 
+test('embedded viewer starts focused and keeps evidence one click away', () => {
+  assert.match(
+    html,
+    /id="display-toggle"[^>]*aria-pressed="false"[^>]*type="button"/,
+  );
+  assert.match(
+    html,
+    /body\.focus-mode\s+:is\(#hud,\s*#minimap-wrap,\s*#environment-controls,\s*#controls\)\s*\{[^}]*display:\s*none\s*!important/s,
+  );
+  assert.match(main, /new URLSearchParams\(window\.location\.search\)\.get\('embed'\)\s*===\s*'1'/);
+  assert.match(main, /setupDisplayMode\(\)/);
+  assert.match(main, /classList\.toggle\('focus-mode',\s*focused\)/);
+  assert.match(main, /focused\s*\?\s*'显示信息'\s*:\s*'专注画面'/);
+});
+
 test('viewer loads coverage audit independently from reconstruction artifacts', () => {
   assert.match(main, /from ['"]\.\/coverage-audit\.mjs['"]/);
   assert.match(main, /kind\s*===\s*['"]coverage-audit['"]/);

@@ -135,3 +135,33 @@ export function normalizeCameraPose(payload) {
   }
   return { positionThree, lookAtThree };
 }
+
+/**
+ * 将完整场景 bounds 转成一组近景展示姿态。
+ *
+ * 只生成相机位置与注视点，不改写 bounds，也不改变加载或 provenance 语义。
+ */
+export function showcaseCameraPose(bounds) {
+  const centerEast = (bounds.min[0] + bounds.max[0]) / 2;
+  const centerNorth = (bounds.min[1] + bounds.max[1]) / 2;
+  const spanUp = bounds.max[2] - bounds.min[2];
+  const targetUp = bounds.min[2] + Math.min(Math.max(spanUp * 0.2, 2), 4);
+  const horizontalSpan = Math.min(
+    bounds.max[0] - bounds.min[0],
+    bounds.max[1] - bounds.min[1],
+  );
+  const distance = Math.min(Math.max(horizontalSpan * 0.08, 30), 80);
+
+  return {
+    position: {
+      east: centerEast + distance * 0.45,
+      north: centerNorth - distance,
+      up: targetUp + Math.max(12, distance * 0.28),
+    },
+    look_at: {
+      east: centerEast,
+      north: centerNorth,
+      up: targetUp,
+    },
+  };
+}

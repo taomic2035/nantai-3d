@@ -20,6 +20,7 @@ import {
   ingestConfirmationModel,
   validateIngestParameters,
 } from './job-forms.mjs';
+import { showcaseCameraPose } from '../viewer/camera-pose.mjs';
 
 const VIEW_META = {
   sources: '图片 + 视频',
@@ -574,6 +575,15 @@ function setupViewerBridge() {
 
   byId('reset-camera').addEventListener('click', () => {
     bridge.command('resetCamera').catch((error) => announce(error.message));
+  });
+  byId('showcase-camera').addEventListener('click', async () => {
+    try {
+      const state = await bridge.command('getState');
+      await bridge.command('setCameraPose', showcaseCameraPose(state.bounds));
+      announce('已切换到场景中心近景；这是取景变化，不提升素材真实性');
+    } catch (error) {
+      announce(error.message);
+    }
   });
   const jumpToCoordinates = () => {
     if (byId('coord-jump-btn').disabled) return;

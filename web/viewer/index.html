@@ -8,6 +8,17 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { overflow: hidden; background: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   #canvas-container { width: 100vw; height: 100vh; }
+  #display-toggle {
+    position: fixed; top: 12px; right: 218px; z-index: 12;
+    min-height: 34px; padding: 6px 11px; color: #e8f5ff;
+    background: rgba(20, 22, 28, 0.82);
+    border: 1px solid rgba(127,209,255,0.45); border-radius: 7px;
+    backdrop-filter: blur(6px); cursor: pointer;
+  }
+  body.focus-mode #display-toggle { right: 12px; }
+  body.focus-mode :is(#hud, #minimap-wrap, #environment-controls, #controls) {
+    display: none !important;
+  }
   #hud {
     position: fixed; top: 12px; left: 12px; padding: 14px 18px;
     background: rgba(20, 22, 28, 0.85); color: #e0e0e0;
@@ -84,6 +95,7 @@
 </head>
 <body>
 <div id="canvas-container"></div>
+<button id="display-toggle" aria-pressed="false" type="button">专注画面</button>
 
 <div id="hud" style="display:none">
   <h1 id="hud-title">Nantai Village · DC point preview</h1>
