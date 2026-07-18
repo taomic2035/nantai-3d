@@ -21,8 +21,14 @@ const BUNDLE_ID = '1'.repeat(64);
 const MATERIAL_ID = '2'.repeat(64);
 const GLB_SHA = '3'.repeat(64);
 const MAP_SHA = '6'.repeat(64);
-const TERRAIN_ALGORITHM_ID = 'synthetic-multiscale-relief-v1';
-const TERRAIN_RESOLUTION = 9;
+const TERRAIN_ALGORITHM_ID =
+  'synthetic-multiscale-relief-slope-macro-patch-v2';
+const TERRAIN_RESOLUTION = 41;
+const TERRAIN_MATERIAL_SLOTS = [
+  'material-moss-stone-01',
+  'material-packed-earth-01',
+  'material-terrace-soil-01',
+];
 const WORLD = {
   mesh_grid: {
     on_demand: true,
@@ -57,13 +63,17 @@ function runtime() {
         algorithm_id: TERRAIN_ALGORITHM_ID,
         resolution: TERRAIN_RESOLUTION,
         material_slot_id: 'material-terrace-soil-01',
+        material_slot_ids: Array.from(
+          { length: (TERRAIN_RESOLUTION - 1) ** 2 },
+          (_, index) => TERRAIN_MATERIAL_SLOTS[index % 3],
+        ),
         vertices: Array.from(
           { length: TERRAIN_RESOLUTION ** 2 },
           (_, index) => {
             const row = Math.floor(index / TERRAIN_RESOLUTION);
             const column = index % TERRAIN_RESOLUTION;
-            const x = column * 25;
-            const y = row * 25;
+            const x = column * 5;
+            const y = row * 5;
             return {
               x,
               y,
@@ -100,8 +110,8 @@ function runtime() {
       glb_sha256: GLB_SHA,
       glb_bytes: 1024,
     }],
-    surface_materials: [{
-      slot_id: 'material-terrace-soil-01',
+    surface_materials: TERRAIN_MATERIAL_SLOTS.map((slotId) => ({
+      slot_id: slotId,
       uv_policy: 'world-xy',
       nominal_tile_m: 4,
       normal_strength: 0.75,
@@ -109,26 +119,26 @@ function runtime() {
       metallic: 0,
       base_color: {
         role: 'base_color',
-        url: `/api/world/material-maps/${MATERIAL_ID}/material-terrace-soil-01/base_color.png`,
+        url: `/api/world/material-maps/${MATERIAL_ID}/${slotId}/base_color.png`,
         sha256: MAP_SHA,
         bytes: 4096,
         color_space: 'srgb',
       },
       normal: {
         role: 'normal',
-        url: `/api/world/material-maps/${MATERIAL_ID}/material-terrace-soil-01/normal.png`,
+        url: `/api/world/material-maps/${MATERIAL_ID}/${slotId}/normal.png`,
         sha256: MAP_SHA,
         bytes: 4096,
         color_space: 'non-color',
       },
       orm: {
         role: 'orm',
-        url: `/api/world/material-maps/${MATERIAL_ID}/material-terrace-soil-01/orm.png`,
+        url: `/api/world/material-maps/${MATERIAL_ID}/${slotId}/orm.png`,
         sha256: MAP_SHA,
         bytes: 4096,
         color_space: 'non-color',
       },
-    }],
+    })),
   };
 }
 
@@ -234,20 +244,32 @@ test('instance and terrain conversion preserve ENU while mapping to Three axes',
   const geometry = terrainGeometryThree(payload.chunk);
   assert.deepEqual(Array.from(geometry.positions.slice(0, 6)), [
     -200, 0, -400,
-    -175, -0.25, -400,
+    -195, -0.25, -400,
   ]);
   assert.deepEqual(
     Array.from(geometry.positions.slice(-3)),
     [0, 0, -600],
   );
-  assert.equal(geometry.indices.length, 8 * 8 * 6);
+  assert.equal(geometry.indices.length, 40 * 40 * 6);
+  assert.deepEqual(geometry.materialSlotIds, TERRAIN_MATERIAL_SLOTS);
   assert.deepEqual(
-    Array.from(geometry.indices.slice(0, 6)),
-    [0, 9, 1, 1, 9, 10],
+    geometry.groups.map(({ materialSlotId, materialIndex }) => ({
+      materialSlotId,
+      materialIndex,
+    })),
+    TERRAIN_MATERIAL_SLOTS.map((materialSlotId, materialIndex) => ({
+      materialSlotId,
+      materialIndex,
+    })),
   );
+  assert.equal(
+    geometry.groups.reduce((sum, group) => sum + group.count, 0),
+    geometry.indices.length,
+  );
+  assert.ok(geometry.groups.every((group) => group.count > 0));
   assert.deepEqual(
     Array.from(geometry.uvs.slice(0, 4)),
-    [-200, 400, -175, 400],
+    [-200, 400, -195, 400],
   );
   assert.equal(geometry.colors.length, TERRAIN_RESOLUTION ** 2 * 3);
   assert.ok(Math.abs(geometry.colors[0] - 0.95) < 1e-6);

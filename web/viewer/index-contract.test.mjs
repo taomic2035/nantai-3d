@@ -183,6 +183,8 @@ test('mesh world surfaces use byte-verified PBR maps with metre-scaled UVs', () 
   assert.match(main, /metalnessMap:\s*ormMap/);
   assert.match(main, /geometry\.setAttribute\('color'/);
   assert.match(main, /material\.vertexColors\s*=\s*true/);
+  assert.match(main, /geometry\.addGroup\(group\.start,\s*group\.count/);
+  assert.match(main, /terrainGeometry\.materialSlotIds/);
 });
 
 test('model preview neutralizes exported lights and uses an authored close camera', () => {

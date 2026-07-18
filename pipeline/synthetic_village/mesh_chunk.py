@@ -19,8 +19,10 @@ from pydantic import (
 from pipeline.mock_layout import MockLayoutGenerator
 from pipeline.synthetic_village.infinite_terrain import (
     TERRAIN_ALGORITHM_ID,
+    TERRAIN_MATERIAL_SLOTS,
     terrain_height_m,
     terrain_macro_tint,
+    terrain_material_slot,
 )
 from pipeline.synthetic_village.material_bundle import (
     DerivedMaterialBundle,
@@ -41,7 +43,7 @@ LAYOUT_ALGORITHM_ID = "mock-layout-v1"
 RENDERER_CAPABILITY = "synthetic-textured-mesh-grid"
 CHUNK_SIZE_M = 200
 MAX_SAFE_INTEGER = 2**53 - 1
-TERRAIN_RESOLUTION = {0: 9, 1: 9, 2: 9}
+TERRAIN_RESOLUTION = {0: 41, 1: 41, 2: 41}
 VEGETATION_LIMIT = {0: 2, 1: 5, 2: 12}
 
 TERRAIN_MATERIAL_SLOT = "material-terrace-soil-01"
@@ -77,18 +79,35 @@ class TerrainVertex(FrozenModel):
 
 class TerrainGrid(FrozenModel):
     algorithm_id: Literal[
-        "synthetic-multiscale-relief-v1"
+        "synthetic-multiscale-relief-slope-macro-patch-v2"
     ] = TERRAIN_ALGORITHM_ID
-    resolution: Literal[9]
+    resolution: Literal[41]
     material_slot_id: Literal[
         "material-terrace-soil-01"
     ] = TERRAIN_MATERIAL_SLOT
-    vertices: tuple[TerrainVertex, ...] = Field(min_length=9, max_length=81)
+    material_slot_ids: tuple[
+        Literal[
+            "material-moss-stone-01",
+            "material-packed-earth-01",
+            "material-terrace-soil-01",
+        ],
+        ...,
+    ] = Field(min_length=1600, max_length=1600)
+    vertices: tuple[TerrainVertex, ...] = Field(
+        min_length=1681,
+        max_length=1681,
+    )
 
     @model_validator(mode="after")
     def _complete_grid(self) -> TerrainGrid:
         if len(self.vertices) != self.resolution**2:
             raise ValueError("terrain grid vertex count does not match its resolution")
+        if len(self.material_slot_ids) != (self.resolution - 1) ** 2:
+            raise ValueError(
+                "terrain material count does not match its cell count",
+            )
+        if not set(self.material_slot_ids) <= set(TERRAIN_MATERIAL_SLOTS):
+            raise ValueError("terrain material is outside the approved profile")
         return self
 
 
@@ -129,7 +148,7 @@ class MeshChunkManifest(FrozenModel):
     layout_algorithm_id: Literal["mock-layout-v1"] = LAYOUT_ALGORITHM_ID
     layout_sha256: Sha256
     terrain_algorithm_id: Literal[
-        "synthetic-multiscale-relief-v1"
+        "synthetic-multiscale-relief-slope-macro-patch-v2"
     ] = TERRAIN_ALGORITHM_ID
     mesh_asset_bundle_id: Sha256
     material_bundle_id: Sha256
@@ -334,6 +353,15 @@ def _terrain_grid(
             )
     return TerrainGrid(
         resolution=resolution,
+        material_slot_ids=tuple(
+            terrain_material_slot(
+                chunk_x * CHUNK_SIZE_M + (x_index + 0.5) * step,
+                chunk_y * CHUNK_SIZE_M + (y_index + 0.5) * step,
+                world_seed=world_seed,
+            )
+            for y_index in range(resolution - 1)
+            for x_index in range(resolution - 1)
+        ),
         vertices=tuple(vertices),
     )
 
@@ -636,6 +664,7 @@ def build_mesh_chunk_manifest(
     instances = _mesh_instances(layout, bundle, lod)
     required_material_slots = {
         terrain.material_slot_id,
+        *terrain.material_slot_ids,
         *(ribbon.material_slot_id for ribbon in (*roads, *water)),
     }
     available_material_slots = {
@@ -729,6 +758,7 @@ def project_mesh_chunk_runtime(
     }
     surface_slots = sorted({
         chunk.terrain.material_slot_id,
+        *chunk.terrain.material_slot_ids,
         *(ribbon.material_slot_id for ribbon in chunk.roads),
         *(ribbon.material_slot_id for ribbon in chunk.water),
     })

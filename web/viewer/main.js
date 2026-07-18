@@ -529,14 +529,20 @@ function meshFromGeometryData(data, material, name) {
   geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
   if (data.colors) {
     geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
-    material.vertexColors = true;
-    material.needsUpdate = true;
+    const materials = Array.isArray(material) ? material : [material];
+    for (const material of materials) {
+      material.vertexColors = true;
+      material.needsUpdate = true;
+    }
   }
   const uv = new THREE.BufferAttribute(data.uvs, 2);
   geometry.setAttribute('uv', uv);
   geometry.setAttribute('uv1', uv.clone());
   geometry.setAttribute('uv2', uv.clone());
   geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+  for (const group of data.groups ?? []) {
+    geometry.addGroup(group.start, group.count, group.materialIndex);
+  }
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
   const mesh = new THREE.Mesh(geometry, material);
@@ -615,16 +621,23 @@ async function buildMeshWorldGroup(runtime) {
   group.name = `mesh_world_${chunk.chunk_id.x}_${chunk.chunk_id.y}_lod${chunk.selected_lod}`;
 
   await Promise.all(surfaceMaterials.map(loadVerifiedSurfaceTextures));
-  const terrainDescriptor = materialDescriptors.get(chunk.terrain.material_slot_id);
-  if (!terrainDescriptor) throw new Error('Mesh terrain lacks its surface material');
-  const terrainMaterial = await meshSurfaceMaterial(terrainDescriptor, 'terrain');
+  const terrainGeometry = terrainGeometryThree(chunk);
+  const terrainMaterials = await Promise.all(
+    terrainGeometry.materialSlotIds.map(async (slotId) => {
+      const descriptor = materialDescriptors.get(slotId);
+      if (!descriptor) {
+        throw new Error('Mesh terrain lacks a zoned surface material');
+      }
+      return meshSurfaceMaterial(descriptor, 'terrain');
+    }),
+  );
   const terrain = meshFromGeometryData(
-    terrainGeometryThree(chunk),
-    terrainMaterial,
+    terrainGeometry,
+    terrainMaterials,
     `${group.name}_terrain`,
   );
   group.add(terrain);
-  ownedResources.push(terrain.geometry, terrainMaterial);
+  ownedResources.push(terrain.geometry, ...terrainMaterials);
 
   for (const ribbon of [...chunk.roads, ...chunk.water]) {
     const materialDescriptor = materialDescriptors.get(ribbon.material_slot_id);

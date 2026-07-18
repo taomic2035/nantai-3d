@@ -4,8 +4,14 @@ const ASSET_TEMPLATE =
 const SHA256 = /^[0-9a-f]{64}$/;
 const ASSET_ID = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
 const MATERIAL_SLOT_ID = /^material-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const TERRAIN_ALGORITHM_ID = 'synthetic-multiscale-relief-v1';
-const TERRAIN_RESOLUTION = 9;
+const TERRAIN_ALGORITHM_ID =
+  'synthetic-multiscale-relief-slope-macro-patch-v2';
+const TERRAIN_RESOLUTION = 41;
+const TERRAIN_MATERIAL_SLOTS = new Set([
+  'material-moss-stone-01',
+  'material-packed-earth-01',
+  'material-terrace-soil-01',
+]);
 const UV_POLICIES = new Set([
   'world-xy',
   'dominant-axis-box',
@@ -100,6 +106,11 @@ function validateTerrain(chunk) {
     || terrain.algorithm_id !== TERRAIN_ALGORITHM_ID
     || terrain.material_slot_id !== 'material-terrace-soil-01'
     || terrain.resolution !== resolution
+    || !Array.isArray(terrain.material_slot_ids)
+    || terrain.material_slot_ids.length !== (resolution - 1) ** 2
+    || !terrain.material_slot_ids.every(
+      (slotId) => TERRAIN_MATERIAL_SLOTS.has(slotId),
+    )
     || !Array.isArray(terrain.vertices)
     || terrain.vertices.length !== resolution ** 2
   ) {
@@ -182,6 +193,7 @@ function validateSurfaceMaterials(payload, chunk, grid) {
   }
   const expectedSlots = [...new Set([
     chunk.terrain.material_slot_id,
+    ...chunk.terrain.material_slot_ids,
     ...chunk.roads.map((ribbon) => ribbon.material_slot_id),
     ...chunk.water.map((ribbon) => ribbon.material_slot_id),
   ])].sort();
@@ -369,22 +381,58 @@ export function terrainGeometryThree(chunk) {
       index * 3,
     );
   }
-  const indices = new Uint32Array((resolution - 1) ** 2 * 6);
-  let cursor = 0;
+  const materialSlotIds = [...new Set(
+    chunk.terrain.material_slot_ids,
+  )].sort();
+  const buckets = new Map(
+    materialSlotIds.map((slotId) => [slotId, []]),
+  );
   for (let row = 0; row < resolution - 1; row += 1) {
     for (let column = 0; column < resolution - 1; column += 1) {
       const southwest = row * resolution + column;
       const southeast = southwest + 1;
       const northwest = southwest + resolution;
       const northeast = northwest + 1;
-      indices.set(
-        [southwest, northwest, southeast, southeast, northwest, northeast],
-        cursor,
+      const slotId = chunk.terrain.material_slot_ids[
+        row * (resolution - 1) + column
+      ];
+      buckets.get(slotId).push(
+        southwest,
+        northwest,
+        southeast,
+        southeast,
+        northwest,
+        northeast,
       );
-      cursor += 6;
     }
   }
-  return { positions, uvs, colors, indices };
+  const indices = new Uint32Array((resolution - 1) ** 2 * 6);
+  const groups = [];
+  let cursor = 0;
+  for (
+    let materialIndex = 0;
+    materialIndex < materialSlotIds.length;
+    materialIndex += 1
+  ) {
+    const materialSlotId = materialSlotIds[materialIndex];
+    const bucket = buckets.get(materialSlotId);
+    indices.set(bucket, cursor);
+    groups.push({
+      start: cursor,
+      count: bucket.length,
+      materialIndex,
+      materialSlotId,
+    });
+    cursor += bucket.length;
+  }
+  return {
+    positions,
+    uvs,
+    colors,
+    indices,
+    groups,
+    materialSlotIds,
+  };
 }
 
 export function ribbonGeometryThree(chunk, ribbon) {

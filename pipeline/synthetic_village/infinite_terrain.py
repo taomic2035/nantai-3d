@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import math
 
-TERRAIN_ALGORITHM_ID = "synthetic-multiscale-relief-v1"
+TERRAIN_ALGORITHM_ID = "synthetic-multiscale-relief-slope-macro-patch-v2"
+TERRAIN_MATERIAL_PROFILE_ID = "slope-macro-patch-v1"
+TERRAIN_MATERIAL_SLOTS = (
+    "material-moss-stone-01",
+    "material-packed-earth-01",
+    "material-terrace-soil-01",
+)
 
 _MASK_64 = (1 << 64) - 1
 _SALT_HEIGHT_MACRO = 0xE17A1465
@@ -101,3 +107,38 @@ def terrain_macro_tint(
         salt=_SALT_TINT,
     )
     return 1.0 + noise * 0.1
+
+
+def terrain_material_slot(
+    world_x: float,
+    world_y: float,
+    *,
+    world_seed: int,
+) -> str:
+    """Port the approved Blender terrain zoning to absolute world space."""
+
+    x = float(world_x)
+    y = float(world_y)
+    gradient_x = (
+        terrain_height_m(x + 1.0, y, world_seed=world_seed)
+        - terrain_height_m(x - 1.0, y, world_seed=world_seed)
+    ) / 2.0
+    gradient_y = (
+        terrain_height_m(x, y + 1.0, world_seed=world_seed)
+        - terrain_height_m(x, y - 1.0, world_seed=world_seed)
+    ) / 2.0
+    normal_z = round(
+        1.0 / math.sqrt(1.0 + gradient_x**2 + gradient_y**2),
+        6,
+    )
+    macro_patch = round(
+        math.sin(x * 0.031)
+        + 0.72 * math.cos(y * 0.027)
+        + 0.38 * math.sin((x + y) * 0.017),
+        6,
+    )
+    if normal_z < 0.965 or macro_patch > 0.92:
+        return "material-moss-stone-01"
+    if macro_patch < -0.28:
+        return "material-packed-earth-01"
+    return "material-terrace-soil-01"

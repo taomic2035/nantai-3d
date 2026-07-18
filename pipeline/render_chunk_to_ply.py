@@ -23,6 +23,7 @@ from pipeline.schema import ChunkLayout
 from pipeline.synthetic_village.infinite_terrain import (
     TERRAIN_ALGORITHM_ID,
     terrain_height_m,
+    terrain_material_slot,
 )
 
 VEGETATION_POINT_BUDGET = 6000
@@ -97,7 +98,11 @@ def _record_asset_consumption(
 
 
 # 颜色 (RGB 0-255)
-COLOR_GROUND = (90, 130, 60)     # 草绿
+TERRAIN_POINT_COLORS = {
+    "material-moss-stone-01": (66, 76, 56),
+    "material-packed-earth-01": (99, 64, 33),
+    "material-terrace-soil-01": (64, 38, 19),
+}
 COLOR_ROAD_MAIN = (80, 80, 80)  # 深灰
 COLOR_ROAD_TRAIL = (140, 110, 80)  # 土黄
 COLOR_BUILDING_WALL = (170, 130, 90)  # 木色
@@ -145,7 +150,20 @@ def _emit_ground(
         _terrain_heights(pts['x'], pts['y'], world_seed=world_seed)
         + rng.uniform(0, 0.3, n)
     )
-    pts['r'], pts['g'], pts['b'] = COLOR_GROUND
+    colours = np.array(
+        [
+            TERRAIN_POINT_COLORS[
+                terrain_material_slot(
+                    float(x),
+                    float(y),
+                    world_seed=world_seed,
+                )
+            ]
+            for x, y in zip(pts['x'], pts['y'], strict=True)
+        ],
+        dtype=np.uint8,
+    )
+    pts['r'], pts['g'], pts['b'] = colours.T
     pts['scale'] = rng.uniform(0.5, 1.2, n)
     return pts
 

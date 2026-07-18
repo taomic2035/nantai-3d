@@ -29,6 +29,7 @@ from pipeline.render_chunk_to_ply import (
 from pipeline.synthetic_village.infinite_terrain import (
     TERRAIN_ALGORITHM_ID,
     terrain_height_m,
+    terrain_material_slot,
 )
 
 
@@ -102,6 +103,30 @@ def test_gaussian_ground_uses_the_shared_world_relief() -> None:
     assert float(offset.min()) >= -1e-5
     assert float(offset.max()) <= 0.30001
     assert float(np.ptp(terrain)) > 1.0
+
+
+def test_gaussian_ground_colours_follow_the_shared_material_zones() -> None:
+    layout = MockLayoutGenerator(world_seed=42).generate_chunk(0, 0)
+    ground = build_chunk_array(layout, registry=None)[:4000]
+    colours = {
+        "material-moss-stone-01": (66, 76, 56),
+        "material-packed-earth-01": (99, 64, 33),
+        "material-terrace-soil-01": (64, 38, 19),
+    }
+    expected = [
+        colours[
+            terrain_material_slot(
+                float(x),
+                float(y),
+                world_seed=layout.world_seed,
+            )
+        ]
+        for x, y in zip(ground["x"], ground["y"], strict=True)
+    ]
+    actual = list(zip(ground["r"], ground["g"], ground["b"], strict=True))
+
+    assert actual == expected
+    assert set(actual) == set(colours.values())
 
 
 def test_ground_seed_stays_byte_stable_for_nonnegative_offsets():

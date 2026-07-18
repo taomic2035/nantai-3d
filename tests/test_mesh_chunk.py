@@ -11,8 +11,10 @@ from pydantic import ValidationError
 from pipeline.mock_layout import DEFAULT_ASSETS
 from pipeline.synthetic_village.infinite_terrain import (
     TERRAIN_ALGORITHM_ID,
+    TERRAIN_MATERIAL_SLOTS,
     terrain_height_m,
     terrain_macro_tint,
+    terrain_material_slot,
 )
 from pipeline.synthetic_village.material_bundle import (
     MATERIAL_PARAMETERS,
@@ -34,6 +36,7 @@ from pipeline.synthetic_village.mesh_chunk import (
 
 MATERIAL_SLOTS = (
     "material-fieldstone-01",
+    "material-moss-stone-01",
     "material-packed-earth-01",
     "material-shallow-water-01",
     "material-terrace-soil-01",
@@ -153,6 +156,7 @@ def _surface_material_bundle(bundle: MeshAssetBundle) -> DerivedMaterialBundle:
     sources = {row.slot_id: row.source_sha256 for row in bundle.material_registry}
     records = []
     for slot_id in (
+        "material-moss-stone-01",
         "material-packed-earth-01",
         "material-shallow-water-01",
         "material-terrace-soil-01",
@@ -255,7 +259,7 @@ def test_relief_is_shared_by_terrain_ribbons_instances_and_bounds() -> None:
         for lod in (0, 1, 2)
     ]
 
-    assert {manifest.terrain.resolution for manifest in manifests} == {9}
+    assert {manifest.terrain.resolution for manifest in manifests} == {41}
     manifest = manifests[-1]
     assert manifest.terrain_algorithm_id == TERRAIN_ALGORITHM_ID
     assert manifest.terrain.algorithm_id == TERRAIN_ALGORITHM_ID
@@ -294,6 +298,37 @@ def test_relief_is_shared_by_terrain_ribbons_instances_and_bounds() -> None:
     terrain_z = [vertex.z for vertex in manifest.terrain.vertices]
     assert manifest.aabb.min[2] <= min(terrain_z)
     assert manifest.aabb.max[2] >= max(terrain_z)
+
+
+def test_terrain_cells_bind_verified_material_zones_in_world_space() -> None:
+    bundle = _bundle()
+    west = build_mesh_chunk_manifest(0, 0, world_seed=42, bundle=bundle, lod=2)
+    east = build_mesh_chunk_manifest(1, 0, world_seed=42, bundle=bundle, lod=2)
+
+    assert len(west.terrain.material_slot_ids) == 1600
+    assert set(west.terrain.material_slot_ids) == set(TERRAIN_MATERIAL_SLOTS)
+    for manifest in (west, east):
+        resolution = manifest.terrain.resolution
+        step = manifest.chunk_size_m / (resolution - 1)
+        expected = tuple(
+            terrain_material_slot(
+                manifest.world_offset[0] + (column + 0.5) * step,
+                manifest.world_offset[1] + (row + 0.5) * step,
+                world_seed=manifest.world_seed,
+            )
+            for row in range(resolution - 1)
+            for column in range(resolution - 1)
+        )
+        assert manifest.terrain.material_slot_ids == expected
+
+    runtime = project_mesh_chunk_runtime(
+        west,
+        bundle=bundle,
+        material_bundle=_surface_material_bundle(bundle),
+    )
+    assert {
+        material.slot_id for material in runtime.surface_materials
+    } >= set(TERRAIN_MATERIAL_SLOTS)
 
 
 def test_bundle_or_material_replacement_changes_chunk_identity() -> None:
@@ -348,6 +383,7 @@ def test_runtime_projection_uses_only_exact_same_origin_asset_routes() -> None:
     )
     expected_slots = tuple(sorted({
         chunk.terrain.material_slot_id,
+        *chunk.terrain.material_slot_ids,
         *(ribbon.material_slot_id for ribbon in chunk.roads),
         *(ribbon.material_slot_id for ribbon in chunk.water),
     }))
