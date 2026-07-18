@@ -381,6 +381,13 @@ def test_runner_snapshots_invokes_cross_checks_and_publishes(
     _install_fake_post_audits(monkeypatch, material_bundle)
 
     def publish(**kwargs):
+        # Publication owns its own writer-lock lifecycle.  The outer Blender
+        # build lock must already be released before this callback begins.
+        with mesh_asset_build.ProjectFileLock(
+            kwargs["work_root"] / ".test-publication.lock",
+            role="writer",
+        ):
+            pass
         publications.append(kwargs)
         final = kwargs["publication_root"] / ("a" * 64)
         return SimpleNamespace(

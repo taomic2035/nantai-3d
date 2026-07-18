@@ -1046,31 +1046,31 @@ def run_mesh_asset_build(
                 canary._verify_snapshots_unchanged(immutable_snapshots)
             except CanaryBuildError as exc:
                 raise MeshAssetBuildError(str(exc)) from exc
-            bundle = publish_mesh_asset_bundle(
-                material_bundle_root=material_bundle_root,
-                sources=sources,
-                publication_root=publication_root,
-                work_root=work_root,
-                build_tool_id=f"mesh-asset-build-{request.build_id}",
-                verification_level="L0",
+        bundle = publish_mesh_asset_bundle(
+            material_bundle_root=material_bundle_root,
+            sources=sources,
+            publication_root=publication_root,
+            work_root=work_root,
+            build_tool_id=f"mesh-asset-build-{request.build_id}",
+            verification_level="L0",
+        )
+        published = load_mesh_asset_bundle(bundle.final_directory)
+        if (
+            published.bundle_id != bundle.bundle_id
+            or len(published.records) != bundle.record_count
+            or tuple(record.asset_id for record in published.records)
+            != request.asset_ids
+        ):
+            raise MeshAssetBuildError(
+                "published mesh asset bundle disagrees with the build request",
             )
-            published = load_mesh_asset_bundle(bundle.final_directory)
-            if (
-                published.bundle_id != bundle.bundle_id
-                or len(published.records) != bundle.record_count
-                or tuple(record.asset_id for record in published.records)
-                != request.asset_ids
-            ):
-                raise MeshAssetBuildError(
-                    "published mesh asset bundle disagrees with the build request",
-                )
-            return MeshAssetBuildResult(
-                request=request,
-                report=report,
-                bundle=bundle,
-                stdout=stdout,
-                stderr=stderr,
-            )
+        return MeshAssetBuildResult(
+            request=request,
+            report=report,
+            bundle=bundle,
+            stdout=stdout,
+            stderr=stderr,
+        )
     except MeshAssetBuildError:
         raise
     except JobContractError as exc:
