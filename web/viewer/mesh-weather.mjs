@@ -21,10 +21,10 @@ export const MESH_WEATHER_RESPONSES = Object.freeze({
     roughnessMultiplier: 1.08,
   }),
   rain: freezeResponse({
-    exposure: 0.68,
+    exposure: 0.78,
     keyColor: 0xa9bfd0,
-    keyIntensity: 0.65,
-    baseColorMultiplier: [0.68, 0.74, 0.80],
+    keyIntensity: 0.85,
+    baseColorMultiplier: [0.78, 0.82, 0.87],
     roughnessMultiplier: 0.55,
   }),
   snow: freezeResponse({

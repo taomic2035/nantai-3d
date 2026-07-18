@@ -42,6 +42,18 @@ test('night keeps textured mesh materials dark but readable', () => {
   assert.ok(night.baseColorMultiplier[2] > night.baseColorMultiplier[0]);
 });
 
+test('rain darkens and cools textured mesh without crushing material detail', () => {
+  const rain = meshWeatherResponse('rain');
+  const darkestChannel = Math.min(...rain.baseColorMultiplier);
+  const materialResponse = rain.exposure * darkestChannel;
+
+  assert.ok(materialResponse >= 0.6);
+  assert.ok(materialResponse < 0.75);
+  assert.ok(rain.keyIntensity >= 0.8);
+  assert.ok(rain.baseColorMultiplier[2] > rain.baseColorMultiplier[0]);
+  assert.ok(rain.roughnessMultiplier < 1);
+});
+
 test('renderer notice distinguishes mesh relighting from 3DGS overlay', () => {
   assert.match(
     environmentNotice({
