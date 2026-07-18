@@ -37,6 +37,7 @@ from pipeline.synthetic_village.camera_plan import (
 )
 from pipeline.synthetic_village.defaults import canonical_json_bytes, load_default_recipe
 from pipeline.synthetic_village.glb_material_audit import (
+    ExpectedBuildingGeometry,
     ExpectedGlbMaterial,
     GlbMaterialAudit,
     audit_textured_glb,
@@ -370,7 +371,10 @@ def canonical_local_textured_build_report_bytes(
 
 
 def canonical_local_glb_audit_bytes(audit: GlbMaterialAudit) -> bytes:
-    return _canonical_bytes(audit.model_dump(mode="json"))
+    payload = audit.model_dump(mode="json")
+    if "building_geometry" not in audit.model_fields_set:
+        payload.pop("building_geometry")
+    return _canonical_bytes(payload)
 
 
 def _read_stable_file(path: Path, *, maximum_bytes: int, label: str) -> bytes:
@@ -557,6 +561,84 @@ def _expected_glb_materials(
     )
 
 
+def _expected_building_geometry(
+    report: LocalTexturedBuildReport,
+) -> ExpectedBuildingGeometry | None:
+    if report.building_geometry_profile_id == BUILDING_GEOMETRY_V1:
+        return None
+    evidence = report.building_geometry
+    if evidence is None:  # pragma: no cover - rejected by the report model
+        raise LocalTexturedPreviewError(
+            "local v2 build report has no building geometry evidence",
+        )
+    building_semantics = tuple(
+        row.semantic_id
+        for row in report.semantic_registry
+        if row.semantic_class == "building"
+    )
+    if len(building_semantics) != 1:
+        raise LocalTexturedPreviewError(
+            "local build report has no unique building semantic identity",
+        )
+    building_ids = tuple(
+        row.object_id
+        for row in report.object_registry
+        if row.semantic_id == building_semantics[0]
+    )
+    canonical_building_ids = tuple(
+        row.object_id
+        for row in build_scene_plan().objects
+        if row.semantic_class == "building"
+    )
+    if building_ids != canonical_building_ids:
+        raise LocalTexturedPreviewError(
+            "local build report building IDs are not the canonical scene set",
+        )
+    try:
+        return ExpectedBuildingGeometry(
+            profile_id=BUILDING_GEOMETRY_V2,
+            expected_building_ids=building_ids,
+            variant_counts=evidence.variant_counts,
+            expected_added_face_count=evidence.added_face_count,
+            expected_maximum_added_faces_per_building=(
+                evidence.maximum_added_faces_per_building
+            ),
+            expected_primitive_count=report.counts.glb_primitives,
+        )
+    except ValidationError as exc:
+        raise LocalTexturedPreviewError(
+            f"local building geometry expectation is invalid: {exc}",
+        ) from exc
+
+
+def _verify_building_geometry_audit_agreement(
+    report: LocalTexturedBuildReport,
+    audit: GlbMaterialAudit,
+) -> None:
+    evidence = report.building_geometry
+    measured = audit.building_geometry
+    if report.building_geometry_profile_id == BUILDING_GEOMETRY_V1:
+        if measured is not None:
+            raise LocalTexturedPreviewError(
+                "local v1 preview cannot claim v2 GLB geometry evidence",
+            )
+        return
+    if (
+        evidence is None
+        or measured is None
+        or measured.profile_id != evidence.profile_id
+        or measured.building_count != evidence.building_count
+        or measured.covered_elevations != evidence.covered_elevations
+        or measured.variant_counts != evidence.variant_counts
+        or measured.builder_measured_added_face_count != evidence.added_face_count
+        or measured.builder_measured_maximum_added_faces_per_building
+        != evidence.maximum_added_faces_per_building
+    ):
+        raise LocalTexturedPreviewError(
+            "local GLB building geometry audit disagrees with the build report",
+        )
+
+
 def load_local_textured_preview_manifest(path: Path) -> LocalTexturedPreviewManifest:
     raw = _read_stable_file(
         path,
@@ -642,9 +724,11 @@ def verify_local_textured_preview_directory(
         measured_audit = audit_textured_glb(
             directory / "village-canary.glb",
             _expected_glb_materials(report),
+            expected_building_geometry=_expected_building_geometry(report),
         )
     except ValueError as exc:
         raise LocalTexturedPreviewError(f"local GLB audit failed: {exc}") from exc
+    _verify_building_geometry_audit_agreement(report, measured_audit)
     if measured_audit != audit:
         raise LocalTexturedPreviewError("local GLB audit does not match current GLB bytes")
     try:
@@ -1025,11 +1109,13 @@ def run_local_textured_preview(
                 audit = audit_textured_glb(
                     staging / "village-canary.glb",
                     _expected_glb_materials(request),
+                    expected_building_geometry=_expected_building_geometry(report),
                 )
             except ValueError as exc:
                 raise LocalTexturedPreviewError(
                     f"local GLB material audit failed: {exc}",
                 ) from exc
+            _verify_building_geometry_audit_agreement(report, audit)
             glb_record = next(
                 row for row in report.artifacts if row.name == "village-canary.glb"
             )

@@ -11,11 +11,19 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from pipeline.synthetic_village.building_geometry import (
+    BUILDING_ELEVATIONS,
+    BUILDING_GEOMETRY_V2,
+    building_variant,
+    expected_variant_counts,
+)
 from pipeline.synthetic_village.glb_material_audit import (
+    ExpectedBuildingGeometry,
     ExpectedGlbMaterial,
     GlbMaterialAuditError,
     audit_textured_glb,
 )
+from pipeline.synthetic_village.scene_plan import build_scene_plan
 
 SLOT_ID = "material-fieldstone-01"
 SOURCE_SHA256 = "1" * 64
@@ -54,7 +62,11 @@ def _png_bytes(color: tuple[int, int, int]) -> bytes:
     return output.getvalue()
 
 
-def _document_and_binary() -> tuple[dict, bytes]:
+def _document_and_binary(
+    *,
+    triangle_count: int = 1,
+    extra_triangle_count: int | None = None,
+) -> tuple[dict, bytes]:
     binary = bytearray()
     buffer_views = []
 
@@ -88,6 +100,18 @@ def _document_and_binary() -> tuple[dict, bytes]:
         struct.pack("<12f", 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1),
         target=34962,
     )
+    index_view = append(
+        struct.pack("<3H", 0, 1, 2) * triangle_count,
+        target=34963,
+    )
+    extra_index_view = (
+        append(
+            struct.pack("<3H", 0, 1, 2) * extra_triangle_count,
+            target=34963,
+        )
+        if extra_triangle_count is not None
+        else None
+    )
     base_view = append(_png_bytes((127, 91, 63)))
     normal_image_view = append(_png_bytes((128, 128, 255)))
     orm_view = append(_png_bytes((255, 192, 0)))
@@ -120,6 +144,12 @@ def _document_and_binary() -> tuple[dict, bytes]:
                 "componentType": 5126,
                 "count": 3,
                 "type": "VEC4",
+            },
+            {
+                "bufferView": index_view,
+                "componentType": 5123,
+                "count": triangle_count * 3,
+                "type": "SCALAR",
             },
         ],
         "images": [
@@ -156,6 +186,7 @@ def _document_and_binary() -> tuple[dict, bytes]:
                             "TEXCOORD_0": 2,
                             "TANGENT": 3,
                         },
+                        "indices": 4,
                         "material": 0,
                         "mode": 4,
                     },
@@ -166,6 +197,34 @@ def _document_and_binary() -> tuple[dict, bytes]:
         "scenes": [{"nodes": [0]}],
         "scene": 0,
     }
+    if extra_index_view is not None and extra_triangle_count is not None:
+        document["accessors"].append(
+            {
+                "bufferView": extra_index_view,
+                "componentType": 5123,
+                "count": extra_triangle_count * 3,
+                "type": "SCALAR",
+            },
+        )
+        document["meshes"].append(
+            {
+                "primitives": [
+                    {
+                        "attributes": {
+                            "POSITION": 0,
+                            "NORMAL": 1,
+                            "TEXCOORD_0": 2,
+                            "TANGENT": 3,
+                        },
+                        "indices": 5,
+                        "material": 0,
+                        "mode": 4,
+                    },
+                ],
+            },
+        )
+        document["nodes"].append({"mesh": 1})
+        document["scenes"][0]["nodes"].append(1)
     return document, bytes(binary)
 
 
@@ -178,6 +237,78 @@ def _expected() -> tuple[ExpectedGlbMaterial, ...]:
             algorithm_id="mirror-sobel-orm-v1",
         ),
     )
+
+
+def _building_ids() -> tuple[str, ...]:
+    return tuple(
+        row.object_id
+        for row in build_scene_plan().objects
+        if row.semantic_class == "building"
+    )
+
+
+def _expected_geometry(
+    *,
+    primitive_count: int = 1,
+) -> ExpectedBuildingGeometry:
+    building_ids = _building_ids()
+    return ExpectedBuildingGeometry(
+        profile_id=BUILDING_GEOMETRY_V2,
+        expected_building_ids=building_ids,
+        variant_counts=expected_variant_counts(
+            building_ids,
+            BUILDING_GEOMETRY_V2,
+        ),
+        expected_added_face_count=700,
+        expected_maximum_added_faces_per_building=10,
+        expected_primitive_count=primitive_count,
+    )
+
+
+def _v2_document_and_binary(
+    *,
+    triangle_count: int = 1,
+    extra_triangle_count: int | None = None,
+) -> tuple[dict, bytes]:
+    document, binary = _document_and_binary(
+        triangle_count=triangle_count,
+        extra_triangle_count=extra_triangle_count,
+    )
+    roots = []
+    nodes = []
+    for object_id in _building_ids():
+        child_index = len(nodes)
+        nodes.append({"mesh": 0})
+        root_index = len(nodes)
+        nodes.append(
+            {
+                "children": [child_index],
+                "extras": {
+                    "nv_added_face_count": 10,
+                    "nv_building_geometry_profile": BUILDING_GEOMETRY_V2,
+                    "nv_building_variant": building_variant(
+                        object_id,
+                        BUILDING_GEOMETRY_V2,
+                    ),
+                    "nv_facade_elevations": json.dumps(
+                        BUILDING_ELEVATIONS,
+                        separators=(",", ":"),
+                    ),
+                    "nv_root": True,
+                    "nv_semantic_class": "building",
+                    "nv_stable_id": object_id,
+                },
+                "name": f"nv__{object_id}",
+            },
+        )
+        roots.append(root_index)
+    if extra_triangle_count is not None:
+        nodes.append({"mesh": 1})
+        roots.append(len(nodes) - 1)
+    document["nodes"] = nodes
+    document["scenes"] = [{"nodes": roots}]
+    document["scene"] = 0
+    return document, binary
 
 
 def test_audit_accepts_embedded_pbr_material_with_uv_and_tangent(
@@ -200,6 +331,114 @@ def test_audit_accepts_embedded_pbr_material_with_uv_and_tangent(
     assert audit.external_uri_count == 0
     assert audit.slot_ids == (SLOT_ID,)
     assert len(audit.glb_sha256) == 64
+    assert audit.building_geometry is None
+
+
+def test_audit_accepts_v2_building_geometry_from_glb_nodes_and_indices(
+    tmp_path: Path,
+) -> None:
+    document, binary = _v2_document_and_binary()
+    glb_path = tmp_path / "textured-v2.glb"
+    glb_path.write_bytes(_glb(document, binary))
+
+    audit = audit_textured_glb(
+        glb_path,
+        expected_materials=_expected(),
+        expected_building_geometry=_expected_geometry(),
+    )
+
+    assert audit.building_geometry is not None
+    assert audit.building_geometry.building_count == 70
+    assert audit.building_geometry.covered_elevations == BUILDING_ELEVATIONS
+    assert audit.building_geometry.variant_counts == {
+        "balanced-residence": 21,
+        "rear-service-house": 20,
+        "side-entry-workshop": 29,
+    }
+    assert audit.building_geometry.builder_measured_added_face_count == 700
+    assert (
+        audit.building_geometry.builder_measured_maximum_added_faces_per_building
+        == 10
+    )
+    assert audit.building_geometry.maximum_triangles_per_building == 1
+    assert audit.building_geometry.total_triangle_count == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("elevation", "elevations"),
+        ("variant", "variant"),
+        ("root", "root"),
+        ("face-count", "added-face"),
+        ("primitive-count", "primitive count"),
+    ],
+)
+def test_audit_rejects_tampered_v2_building_geometry(
+    case: str,
+    message: str,
+    tmp_path: Path,
+) -> None:
+    document, binary = _v2_document_and_binary()
+    first_root = document["nodes"][1]
+    extras = first_root["extras"]
+    expectation = _expected_geometry()
+    if case == "elevation":
+        extras["nv_facade_elevations"] = '["front","rear","right"]'
+    elif case == "variant":
+        expected = extras["nv_building_variant"]
+        extras["nv_building_variant"] = (
+            "rear-service-house"
+            if expected != "rear-service-house"
+            else "balanced-residence"
+        )
+    elif case == "root":
+        extras.pop("nv_root")
+    elif case == "face-count":
+        extras["nv_added_face_count"] = 11
+    elif case == "primitive-count":
+        expectation = _expected_geometry(primitive_count=2)
+    else:  # pragma: no cover - parametrization is closed
+        raise AssertionError(case)
+    glb_path = tmp_path / f"textured-v2-{case}.glb"
+    glb_path.write_bytes(_glb(document, binary))
+
+    with pytest.raises(GlbMaterialAuditError, match=message):
+        audit_textured_glb(
+            glb_path,
+            expected_materials=_expected(),
+            expected_building_geometry=expectation,
+        )
+
+
+def test_audit_rejects_v2_building_triangle_budget_overrun(
+    tmp_path: Path,
+) -> None:
+    document, binary = _v2_document_and_binary(triangle_count=721)
+    glb_path = tmp_path / "textured-v2-building-budget.glb"
+    glb_path.write_bytes(_glb(document, binary))
+
+    with pytest.raises(GlbMaterialAuditError, match="building triangle budget"):
+        audit_textured_glb(
+            glb_path,
+            expected_materials=_expected(),
+            expected_building_geometry=_expected_geometry(),
+        )
+
+
+def test_audit_rejects_v2_total_triangle_budget_overrun(
+    tmp_path: Path,
+) -> None:
+    document, binary = _v2_document_and_binary(extra_triangle_count=100_001)
+    glb_path = tmp_path / "textured-v2-total-budget.glb"
+    glb_path.write_bytes(_glb(document, binary))
+
+    with pytest.raises(GlbMaterialAuditError, match="total triangle budget"):
+        audit_textured_glb(
+            glb_path,
+            expected_materials=_expected(),
+            expected_building_geometry=_expected_geometry(primitive_count=2),
+        )
 
 
 def _mutate(document: dict, case: str) -> None:

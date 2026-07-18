@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import struct
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -17,8 +18,16 @@ from pydantic import (
     Field,
     StringConstraints,
     ValidationError,
+    model_validator,
 )
 
+from pipeline.synthetic_village.building_geometry import (
+    BUILDING_ELEVATIONS,
+    BUILDING_GEOMETRY_V2,
+    BuildingVariantId,
+    building_variant,
+    expected_variant_counts,
+)
 from pipeline.synthetic_village.material_bundle import MaterialAlgorithmId
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -66,6 +75,53 @@ class ExpectedGlbMaterial(FrozenModel):
     algorithm_id: MaterialAlgorithmId
 
 
+class ExpectedBuildingGeometry(FrozenModel):
+    """Report-backed expectations independently checked against GLB bytes."""
+
+    profile_id: Literal["four-sided-rural-building-v2"]
+    expected_building_ids: tuple[str, ...] = Field(min_length=70, max_length=70)
+    variant_counts: dict[BuildingVariantId, int]
+    expected_added_face_count: int = Field(ge=1, le=15_400)
+    expected_maximum_added_faces_per_building: int = Field(ge=1, le=220)
+    maximum_triangles_per_building: Literal[720] = 720
+    maximum_total_triangles: Literal[100000] = 100_000
+    expected_primitive_count: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _validate_expected_buildings(self) -> ExpectedBuildingGeometry:
+        if len(set(self.expected_building_ids)) != 70:
+            raise ValueError("expected building IDs must be unique")
+        if self.variant_counts != expected_variant_counts(
+            self.expected_building_ids,
+            self.profile_id,
+        ):
+            raise ValueError("expected building variant counts are inconsistent")
+        if (
+            self.expected_maximum_added_faces_per_building
+            > self.expected_added_face_count
+        ):
+            raise ValueError("expected building added-face evidence is inconsistent")
+        return self
+
+
+class GlbBuildingGeometryEvidence(FrozenModel):
+    """Evidence recomputed from GLB nodes and indexed triangle accessors."""
+
+    profile_id: Literal["four-sided-rural-building-v2"]
+    building_count: Literal[70]
+    covered_elevations: tuple[
+        Literal["front"],
+        Literal["left"],
+        Literal["rear"],
+        Literal["right"],
+    ]
+    variant_counts: dict[BuildingVariantId, int]
+    builder_measured_added_face_count: int = Field(ge=1, le=15_400)
+    builder_measured_maximum_added_faces_per_building: int = Field(ge=1, le=220)
+    maximum_triangles_per_building: int = Field(ge=1, le=720)
+    total_triangle_count: int = Field(ge=1, le=100_000)
+
+
 class GlbMaterialAudit(FrozenModel):
     glb_sha256: Sha256
     byte_count: int = Field(ge=1)
@@ -79,6 +135,7 @@ class GlbMaterialAudit(FrozenModel):
     tangent_primitive_count: int = Field(ge=1)
     external_uri_count: Literal[0] = 0
     slot_ids: tuple[str, ...] = Field(min_length=1)
+    building_geometry: GlbBuildingGeometryEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -554,9 +611,213 @@ def _validate_meshes(
     return primitive_count, uv_count, tangent_count, used_materials
 
 
+def _indexed_triangle_counts_by_mesh(
+    document: dict[str, object],
+    *,
+    accessors: list[_AccessorEvidence],
+) -> tuple[int, ...]:
+    """Measure stored triangle counts without trusting node or report extras."""
+
+    meshes = _required_list(document, "meshes")
+    counts = []
+    for mesh_index, raw_mesh in enumerate(meshes):
+        if not isinstance(raw_mesh, dict):  # pragma: no cover - checked earlier
+            raise GlbMaterialAuditError(f"GLB mesh {mesh_index} is not an object")
+        primitives = raw_mesh.get("primitives")
+        if not isinstance(primitives, list) or not primitives:
+            raise GlbMaterialAuditError(f"GLB mesh {mesh_index} has no primitives")
+        triangle_count = 0
+        for raw_primitive in primitives:
+            if not isinstance(raw_primitive, dict):  # pragma: no cover - checked earlier
+                raise GlbMaterialAuditError("GLB mesh primitive is not an object")
+            if raw_primitive.get("mode", 4) != 4:
+                raise GlbMaterialAuditError(
+                    "GLB building geometry requires indexed triangle primitives",
+                )
+            accessor_index = raw_primitive.get("indices")
+            if (
+                isinstance(accessor_index, bool)
+                or not isinstance(accessor_index, int)
+                or accessor_index < 0
+                or accessor_index >= len(accessors)
+            ):
+                raise GlbMaterialAuditError(
+                    "GLB building geometry requires indexed triangle primitives",
+                )
+            accessor = accessors[accessor_index]
+            if (
+                accessor.component_type not in {5121, 5123, 5125}
+                or accessor.value_type != "SCALAR"
+                or accessor.count % 3
+            ):
+                raise GlbMaterialAuditError(
+                    "GLB building geometry index accessor is invalid",
+                )
+            triangle_count += accessor.count // 3
+        counts.append(triangle_count)
+    return tuple(counts)
+
+
+def _node_subtree_triangle_count(
+    root_index: int,
+    *,
+    nodes: list[object],
+    triangles_by_mesh: tuple[int, ...],
+) -> int:
+    seen: set[int] = set()
+    active: set[int] = set()
+
+    def visit(node_index: int) -> int:
+        if node_index in active:
+            raise GlbMaterialAuditError("GLB building node tree contains a cycle")
+        if node_index in seen:
+            raise GlbMaterialAuditError(
+                "GLB building node tree contains a repeated child",
+            )
+        if node_index < 0 or node_index >= len(nodes):
+            raise GlbMaterialAuditError("GLB building node child is out of range")
+        raw_node = nodes[node_index]
+        if not isinstance(raw_node, dict):
+            raise GlbMaterialAuditError("GLB building node is not an object")
+        seen.add(node_index)
+        active.add(node_index)
+        triangle_count = 0
+        mesh_index = raw_node.get("mesh")
+        if mesh_index is not None:
+            if (
+                isinstance(mesh_index, bool)
+                or not isinstance(mesh_index, int)
+                or mesh_index < 0
+                or mesh_index >= len(triangles_by_mesh)
+            ):
+                raise GlbMaterialAuditError("GLB building node mesh is out of range")
+            triangle_count += triangles_by_mesh[mesh_index]
+        children = raw_node.get("children", [])
+        if not isinstance(children, list) or any(
+            isinstance(child, bool) or not isinstance(child, int)
+            for child in children
+        ):
+            raise GlbMaterialAuditError("GLB building node children are invalid")
+        for child in children:
+            triangle_count += visit(child)
+        active.remove(node_index)
+        return triangle_count
+
+    return visit(root_index)
+
+
+def _validate_building_geometry(
+    document: dict[str, object],
+    *,
+    accessors: list[_AccessorEvidence],
+    primitive_count: int,
+    expected: ExpectedBuildingGeometry,
+) -> GlbBuildingGeometryEvidence:
+    if primitive_count != expected.expected_primitive_count:
+        raise GlbMaterialAuditError(
+            "GLB building geometry primitive count does not match the expected value",
+        )
+    triangles_by_mesh = _indexed_triangle_counts_by_mesh(
+        document,
+        accessors=accessors,
+    )
+    total_triangle_count = sum(triangles_by_mesh)
+    if total_triangle_count > expected.maximum_total_triangles:
+        raise GlbMaterialAuditError(
+            "GLB building geometry exceeds the total triangle budget",
+        )
+
+    nodes = _required_list(document, "nodes")
+    building_nodes = []
+    for node_index, raw_node in enumerate(nodes):
+        if not isinstance(raw_node, dict):
+            raise GlbMaterialAuditError(f"GLB node {node_index} is not an object")
+        extras = raw_node.get("extras")
+        if isinstance(extras, dict) and extras.get("nv_semantic_class") == "building":
+            building_nodes.append((node_index, raw_node, extras))
+    if len(building_nodes) != 70:
+        raise GlbMaterialAuditError(
+            "GLB building root count does not match the expected 70 nodes",
+        )
+
+    stable_ids = []
+    added_face_counts = []
+    triangle_counts = []
+    variants: Counter[str] = Counter()
+    for node_index, _raw_node, extras in building_nodes:
+        if extras.get("nv_root") is not True:
+            raise GlbMaterialAuditError("GLB building root marker is missing")
+        stable_id = extras.get("nv_stable_id")
+        if not isinstance(stable_id, str) or not stable_id:
+            raise GlbMaterialAuditError("GLB building stable ID is invalid")
+        if extras.get("nv_building_geometry_profile") != expected.profile_id:
+            raise GlbMaterialAuditError("GLB building geometry profile is invalid")
+        expected_variant = building_variant(stable_id, expected.profile_id)
+        if extras.get("nv_building_variant") != expected_variant:
+            raise GlbMaterialAuditError("GLB building variant is invalid")
+        elevations_raw = extras.get("nv_facade_elevations")
+        try:
+            elevations = json.loads(elevations_raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise GlbMaterialAuditError(
+                "GLB building elevations are invalid",
+            ) from exc
+        if elevations != list(BUILDING_ELEVATIONS):
+            raise GlbMaterialAuditError("GLB building elevations are incomplete")
+        added_faces = extras.get("nv_added_face_count")
+        if (
+            isinstance(added_faces, bool)
+            or not isinstance(added_faces, int)
+            or not 1 <= added_faces <= 220
+        ):
+            raise GlbMaterialAuditError("GLB building added-face evidence is invalid")
+        triangle_count = _node_subtree_triangle_count(
+            node_index,
+            nodes=nodes,
+            triangles_by_mesh=triangles_by_mesh,
+        )
+        if triangle_count <= 0:
+            raise GlbMaterialAuditError("GLB building subtree has no triangles")
+        if triangle_count > expected.maximum_triangles_per_building:
+            raise GlbMaterialAuditError(
+                "GLB building geometry exceeds the per-building triangle budget",
+            )
+        stable_ids.append(stable_id)
+        variants[str(expected_variant)] += 1
+        added_face_counts.append(added_faces)
+        triangle_counts.append(triangle_count)
+
+    if len(set(stable_ids)) != 70 or set(stable_ids) != set(
+        expected.expected_building_ids,
+    ):
+        raise GlbMaterialAuditError("GLB building stable ID set is invalid")
+    variant_counts = dict(sorted(variants.items()))
+    if variant_counts != expected.variant_counts:
+        raise GlbMaterialAuditError("GLB building variant counts are invalid")
+    if (
+        sum(added_face_counts) != expected.expected_added_face_count
+        or max(added_face_counts)
+        != expected.expected_maximum_added_faces_per_building
+    ):
+        raise GlbMaterialAuditError(
+            "GLB building added-face evidence disagrees with the build report",
+        )
+    return GlbBuildingGeometryEvidence(
+        profile_id=BUILDING_GEOMETRY_V2,
+        building_count=70,
+        covered_elevations=BUILDING_ELEVATIONS,
+        variant_counts=variant_counts,
+        builder_measured_added_face_count=sum(added_face_counts),
+        builder_measured_maximum_added_faces_per_building=max(added_face_counts),
+        maximum_triangles_per_building=max(triangle_counts),
+        total_triangle_count=total_triangle_count,
+    )
+
+
 def audit_textured_glb(
     path: Path,
     expected_materials: tuple[ExpectedGlbMaterial, ...],
+    expected_building_geometry: ExpectedBuildingGeometry | None = None,
 ) -> GlbMaterialAudit:
     """Audit actual GLB bytes without trusting filenames or build-report claims."""
 
@@ -595,20 +856,33 @@ def audit_textured_glb(
         )
         if used_materials != textured_materials:
             raise GlbMaterialAuditError("GLB contains an expected material with no primitive")
-        return GlbMaterialAudit(
-            glb_sha256=hashlib.sha256(raw).hexdigest(),
-            byte_count=len(raw),
-            mesh_count=len(meshes),
-            primitive_count=primitive_count,
-            material_count=len(materials),
-            texture_count=len(texture_sources),
-            embedded_image_count=image_count,
-            textured_primitive_count=primitive_count,
-            uv_primitive_count=uv_count,
-            tangent_primitive_count=tangent_count,
-            external_uri_count=0,
-            slot_ids=tuple(sorted(slot_ids)),
+        building_geometry = (
+            _validate_building_geometry(
+                document,
+                accessors=accessors,
+                primitive_count=primitive_count,
+                expected=expected_building_geometry,
+            )
+            if expected_building_geometry is not None
+            else None
         )
+        audit_payload = {
+            "glb_sha256": hashlib.sha256(raw).hexdigest(),
+            "byte_count": len(raw),
+            "mesh_count": len(meshes),
+            "primitive_count": primitive_count,
+            "material_count": len(materials),
+            "texture_count": len(texture_sources),
+            "embedded_image_count": image_count,
+            "textured_primitive_count": primitive_count,
+            "uv_primitive_count": uv_count,
+            "tangent_primitive_count": tangent_count,
+            "external_uri_count": 0,
+            "slot_ids": tuple(sorted(slot_ids)),
+        }
+        if building_geometry is not None:
+            audit_payload["building_geometry"] = building_geometry
+        return GlbMaterialAudit.model_validate(audit_payload)
     except GlbMaterialAuditError:
         raise
     except (OSError, TypeError, ValueError, ValidationError) as exc:

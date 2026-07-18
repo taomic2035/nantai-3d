@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
 from pipeline.synthetic_village import canary
-from pipeline.synthetic_village.building_geometry import BUILDING_GEOMETRY_V2
+from pipeline.synthetic_village.building_geometry import (
+    BUILDING_GEOMETRY_V2,
+    expected_variant_counts,
+)
 from pipeline.synthetic_village.canary import TexturedBuildRequest
+from pipeline.synthetic_village.glb_material_audit import GlbMaterialAudit
 from pipeline.synthetic_village.local_textured_preview import (
     LocalBlenderIdentity,
+    LocalTexturedPreviewError,
     LocalTexturedPreviewRequest,
+    _expected_building_geometry,
     build_local_textured_preview_manifest,
     build_local_textured_preview_request,
+    canonical_local_glb_audit_bytes,
     canonical_local_textured_preview_request_bytes,
 )
+from pipeline.synthetic_village.scene_plan import build_scene_plan
 from tests.synthetic_material_fixtures import publish_material_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +130,71 @@ def test_local_manifest_is_preview_only_and_not_real_photo_texture(
         f"/{request.preview_id}/village-canary.glb",
     )
     assert "local-preview-only" in manifest.limitations
+
+
+def test_historical_local_glb_audit_omits_absent_geometry_evidence() -> None:
+    audit = GlbMaterialAudit(
+        glb_sha256="3" * 64,
+        byte_count=1024,
+        mesh_count=1,
+        primitive_count=1,
+        material_count=1,
+        texture_count=3,
+        embedded_image_count=3,
+        textured_primitive_count=1,
+        uv_primitive_count=1,
+        tangent_primitive_count=1,
+        slot_ids=("material-fieldstone-01",),
+    )
+
+    raw = canonical_local_glb_audit_bytes(audit)
+
+    assert audit.building_geometry is None
+    assert b"building_geometry" not in raw
+
+
+def test_local_v2_report_derives_exact_glb_geometry_expectation() -> None:
+    building_ids = tuple(
+        row.object_id
+        for row in build_scene_plan().objects
+        if row.semantic_class == "building"
+    )
+    report = SimpleNamespace(
+        building_geometry_profile_id=BUILDING_GEOMETRY_V2,
+        building_geometry=SimpleNamespace(
+            added_face_count=8659,
+            maximum_added_faces_per_building=124,
+            variant_counts=expected_variant_counts(
+                building_ids,
+                BUILDING_GEOMETRY_V2,
+            ),
+        ),
+        counts=SimpleNamespace(glb_primitives=544),
+        semantic_registry=(
+            SimpleNamespace(semantic_class="building", semantic_id=3),
+        ),
+        object_registry=tuple(
+            SimpleNamespace(object_id=object_id, semantic_id=3)
+            for object_id in building_ids
+        ),
+    )
+
+    expected = _expected_building_geometry(report)
+
+    assert expected is not None
+    assert expected.expected_building_ids == building_ids
+    assert expected.expected_primitive_count == 544
+    assert expected.expected_added_face_count == 8659
+    assert expected.expected_maximum_added_faces_per_building == 124
+
+    tampered_rows = list(report.object_registry)
+    tampered_rows[0] = SimpleNamespace(
+        object_id="building-tampered-001",
+        semantic_id=3,
+    )
+    report.object_registry = tuple(tampered_rows)
+    with pytest.raises(LocalTexturedPreviewError, match="canonical scene set"):
+        _expected_building_geometry(report)
 
 
 def test_local_models_reject_trust_or_texture_upgrades(tmp_path: Path) -> None:
