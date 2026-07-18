@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 from plyfile import PlyData, PlyElement
 
-
 ROOT = Path(__file__).resolve().parents[4]
 OUT = Path(__file__).resolve().parents[1]
 SOURCE_GENERATOR = (
