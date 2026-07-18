@@ -10,7 +10,9 @@ import json
 import math
 import os
 import shutil
+import stat
 import sys
+import threading
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -221,6 +223,16 @@ class MeshAssetBundleResult:
     final_directory: Path
     record_count: int
     reused: bool
+
+
+_MESH_ASSET_BUNDLE_CACHE_LOCK = threading.RLock()
+_MESH_ASSET_BUNDLE_CACHE: dict[
+    Path,
+    tuple[
+        MeshAssetBundle,
+        tuple[tuple[str, int, int, int, int, int, int], ...],
+    ],
+] = {}
 
 
 def _jsonable(value: object) -> object:
@@ -446,7 +458,7 @@ def _verify_descriptor(
     return payload
 
 
-def load_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
+def _verify_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
     """Load and independently verify every immutable template in a bundle."""
 
     bundle_root = _real_directory(Path(root))
@@ -542,6 +554,75 @@ def load_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
             "mesh asset bundle manifest changed during verification",
         )
     return bundle
+
+
+def _mesh_asset_bundle_stat_signature(
+    root: Path,
+    bundle: MeshAssetBundle,
+) -> tuple[tuple[str, int, int, int, int, int, int], ...]:
+    object_paths = sorted({
+        descriptor.glb_object_path
+        for record in bundle.records
+        for descriptor in record.lod.values()
+    })
+    rows = []
+    for relative, expected_directory in (
+        (MESH_ASSET_BUNDLE_MANIFEST, False),
+        ("objects", True),
+        *((object_path, False) for object_path in object_paths),
+    ):
+        path = root / relative
+        if _is_linklike(path):
+            raise MeshAssetBundleError("mesh asset bundle snapshot contains a redirect")
+        try:
+            metadata = path.stat()
+        except OSError as exc:
+            raise MeshAssetBundleError(
+                "mesh asset bundle snapshot is unavailable",
+            ) from exc
+        if (
+            expected_directory
+            and not stat.S_ISDIR(metadata.st_mode)
+        ) or (
+            not expected_directory
+            and not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise MeshAssetBundleError("mesh asset bundle snapshot type changed")
+        rows.append((
+            relative,
+            metadata.st_mode,
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ))
+    return tuple(rows)
+
+
+def load_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
+    """Load verified templates, reusing only an unchanged filesystem snapshot."""
+
+    bundle_root = _real_directory(Path(root))
+    with _MESH_ASSET_BUNDLE_CACHE_LOCK:
+        cached = _MESH_ASSET_BUNDLE_CACHE.get(bundle_root)
+        if cached is not None:
+            bundle, signature = cached
+            try:
+                current_signature = _mesh_asset_bundle_stat_signature(
+                    bundle_root,
+                    bundle,
+                )
+            except MeshAssetBundleError:
+                _MESH_ASSET_BUNDLE_CACHE.pop(bundle_root, None)
+            else:
+                if current_signature == signature:
+                    return bundle
+                _MESH_ASSET_BUNDLE_CACHE.pop(bundle_root, None)
+        bundle = _verify_mesh_asset_bundle(bundle_root)
+        signature = _mesh_asset_bundle_stat_signature(bundle_root, bundle)
+        _MESH_ASSET_BUNDLE_CACHE[bundle_root] = (bundle, signature)
+        return bundle
 
 
 def read_verified_mesh_template_glb(

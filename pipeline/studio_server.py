@@ -1569,7 +1569,7 @@ def _load_active_material_bundle(
     root: Path,
     manifest: dict[str, Any],
     *,
-    mesh_bundle: MeshAssetBundle,
+    mesh_bundle: MeshAssetBundle | None = None,
 ) -> tuple[Path, DerivedMaterialBundle]:
     grid = manifest["mesh_grid"]
     directory = _resolve_material_bundle_directory(
@@ -1579,25 +1579,29 @@ def _load_active_material_bundle(
     if directory is None:
         raise MaterialBundleError("declared material bundle is unavailable")
     bundle = load_material_bundle(directory)
-    if (
-        bundle.bundle_id != grid["material_bundle_id"]
-        or bundle.bundle_id != mesh_bundle.material_bundle_id
-        or hashlib.sha256(
-            canonical_material_bundle_bytes(bundle),
-        ).hexdigest() != mesh_bundle.material_bundle_manifest_sha256
-    ):
+    if bundle.bundle_id != grid["material_bundle_id"]:
         raise MaterialBundleError(
-            "declared material bundle identity or manifest digest disagrees",
+            "declared material bundle identity disagrees",
         )
-    records = {record.slot_id: record for record in bundle.records}
-    if any(
-        records.get(expected.slot_id) is None
-        or records[expected.slot_id].source_sha256 != expected.source_sha256
-        for expected in mesh_bundle.material_registry
-    ):
-        raise MaterialBundleError(
-            "mesh and material bundle source identities disagree",
-        )
+    if mesh_bundle is not None:
+        if (
+            bundle.bundle_id != mesh_bundle.material_bundle_id
+            or hashlib.sha256(
+                canonical_material_bundle_bytes(bundle),
+            ).hexdigest() != mesh_bundle.material_bundle_manifest_sha256
+        ):
+            raise MaterialBundleError(
+                "declared material bundle manifest digest disagrees",
+            )
+        records = {record.slot_id: record for record in bundle.records}
+        if any(
+            records.get(expected.slot_id) is None
+            or records[expected.slot_id].source_sha256 != expected.source_sha256
+            for expected in mesh_bundle.material_registry
+        ):
+            raise MaterialBundleError(
+                "mesh and material bundle source identities disagree",
+            )
     return directory, bundle
 
 
@@ -2071,14 +2075,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                _mesh_directory, mesh_bundle = _load_active_mesh_asset_bundle(
-                    self.project_root,
-                    mesh_manifest,
-                )
                 directory, material_bundle = _load_active_material_bundle(
                     self.project_root,
                     mesh_manifest,
-                    mesh_bundle=mesh_bundle,
                 )
                 payload = read_verified_material_map(
                     directory,
@@ -2101,14 +2100,6 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                         "The declared material bundle is unavailable or invalid.",
                         head_only=head_only,
                     )
-                return
-            except MeshAssetBundleError:
-                self._error(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    "mesh_asset_bundle_invalid",
-                    "The declared mesh asset bundle is unavailable or invalid.",
-                    head_only=head_only,
-                )
                 return
             digest = hashlib.sha256(payload).hexdigest()
             etag = f'"sha256:{digest}"'

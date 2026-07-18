@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+import pipeline.synthetic_village.mesh_asset_bundle as mesh_asset_bundle
 from pipeline.synthetic_village.material_bundle import prepare_material_bundle
 from pipeline.synthetic_village.mesh_asset_bundle import (
     MESH_ASSET_BUNDLE_SCHEMA,
@@ -317,9 +318,27 @@ def test_bundle_rejects_tampered_template_bytes(tmp_path: Path) -> None:
         load_mesh_asset_bundle(bundle_root)
 
 
-def test_exact_read_rejects_template_changed_after_load(tmp_path: Path) -> None:
+def test_exact_read_rejects_template_changed_after_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bundle_root, _glb = write_mesh_bundle_fixture(tmp_path)
     bundle = load_mesh_asset_bundle(bundle_root)
+    verification_calls = 0
+    original_verify = mesh_asset_bundle._verify_mesh_asset_bundle
+
+    def count_verification(root: Path):
+        nonlocal verification_calls
+        verification_calls += 1
+        return original_verify(root)
+
+    monkeypatch.setattr(
+        mesh_asset_bundle,
+        "_verify_mesh_asset_bundle",
+        count_verification,
+    )
+    assert load_mesh_asset_bundle(bundle_root) == bundle
+    assert verification_calls == 0
     object_path = next((bundle_root / "objects").glob("*.glb"))
     object_path.write_bytes(object_path.read_bytes() + b"\0")
 
@@ -330,6 +349,7 @@ def test_exact_read_rejects_template_changed_after_load(tmp_path: Path) -> None:
             asset_id="house_wood_01",
             lod=2,
         )
+    assert verification_calls == 1
 
 
 def test_bundle_rejects_triangle_count_not_measured_from_glb(tmp_path: Path) -> None:

@@ -106,11 +106,27 @@ def test_exact_material_map_read_rechecks_selected_bundle(
 def test_exact_material_map_read_rejects_changed_object(
     prepared_bundle,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, prepared = prepared_bundle
     copied = tmp_path / "bundle"
     shutil.copytree(prepared.staging_root, copied)
     bundle = load_material_bundle(copied)
+    verification_calls = 0
+    original_verify = material_bundle.verify_prepared_material_bundle
+
+    def count_verification(root: Path):
+        nonlocal verification_calls
+        verification_calls += 1
+        return original_verify(root)
+
+    monkeypatch.setattr(
+        material_bundle,
+        "verify_prepared_material_bundle",
+        count_verification,
+    )
+    assert load_material_bundle(copied) == bundle
+    assert verification_calls == 0
     descriptor = bundle.records[0].base_color
     (copied / descriptor.object_path).write_bytes(b"altered")
 
@@ -121,6 +137,7 @@ def test_exact_material_map_read_rejects_changed_object(
             slot_id=bundle.records[0].slot_id,
             role="base_color",
         )
+    assert verification_calls == 1
 
 
 def test_base_color_is_repeatable_without_a_hard_edge(prepared_bundle) -> None:

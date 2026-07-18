@@ -10,7 +10,9 @@ import json
 import os
 import platform
 import shutil
+import stat
 import sys
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -220,6 +222,16 @@ class MaterialBundleResult:
     final_directory: Path
     record_count: int
     reused: bool
+
+
+_MATERIAL_BUNDLE_CACHE_LOCK = threading.RLock()
+_MATERIAL_BUNDLE_CACHE: dict[
+    Path,
+    tuple[
+        DerivedMaterialBundle,
+        tuple[tuple[str, int, int, int, int, int, int], ...],
+    ],
+] = {}
 
 
 def _jsonable(value: object) -> object:
@@ -717,9 +729,72 @@ def verify_prepared_material_bundle(root: Path) -> DerivedMaterialBundle:
 
 
 def load_material_bundle(root: Path) -> DerivedMaterialBundle:
-    """Load one canonical bundle only after verifying every declared byte."""
+    """Load verified bytes, reusing only an unchanged filesystem snapshot."""
 
-    return verify_prepared_material_bundle(root)
+    directory = _require_real_directory(Path(root), label="material bundle root")
+    with _MATERIAL_BUNDLE_CACHE_LOCK:
+        cached = _MATERIAL_BUNDLE_CACHE.get(directory)
+        if cached is not None:
+            bundle, signature = cached
+            try:
+                current_signature = _material_bundle_stat_signature(
+                    directory,
+                    bundle,
+                )
+            except MaterialBundleError:
+                _MATERIAL_BUNDLE_CACHE.pop(directory, None)
+            else:
+                if current_signature == signature:
+                    return bundle
+                _MATERIAL_BUNDLE_CACHE.pop(directory, None)
+        bundle = verify_prepared_material_bundle(directory)
+        signature = _material_bundle_stat_signature(directory, bundle)
+        _MATERIAL_BUNDLE_CACHE[directory] = (bundle, signature)
+        return bundle
+
+
+def _material_bundle_stat_signature(
+    root: Path,
+    bundle: DerivedMaterialBundle,
+) -> tuple[tuple[str, int, int, int, int, int, int], ...]:
+    object_paths = sorted({
+        descriptor.object_path
+        for record in bundle.records
+        for descriptor in (record.base_color, record.normal, record.orm)
+    })
+    rows = []
+    for relative, expected_directory in (
+        (MATERIAL_BUNDLE_MANIFEST, False),
+        ("objects", True),
+        *((object_path, False) for object_path in object_paths),
+    ):
+        path = root / relative
+        if _is_linklike(path):
+            raise MaterialBundleError("material bundle snapshot contains a redirect")
+        try:
+            metadata = path.stat()
+        except OSError as exc:
+            raise MaterialBundleError(
+                "material bundle snapshot is unavailable",
+            ) from exc
+        if (
+            expected_directory
+            and not stat.S_ISDIR(metadata.st_mode)
+        ) or (
+            not expected_directory
+            and not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise MaterialBundleError("material bundle snapshot type changed")
+        rows.append((
+            relative,
+            metadata.st_mode,
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ))
+    return tuple(rows)
 
 
 def read_verified_material_map(
