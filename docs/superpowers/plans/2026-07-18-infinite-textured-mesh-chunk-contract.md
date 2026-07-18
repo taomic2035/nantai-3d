@@ -327,7 +327,7 @@ not use declared registry footprints as measured template bounds.
 Run:
 
 ```bash
-python3 -m pytest tests/test_mesh_chunk.py tests/test_mock_layout.py tests/test_render_chunk_to_ply.py -q
+python3 -m pytest tests/test_mesh_chunk.py tests/test_mock_layout_assets.py tests/test_asset_pipeline.py tests/test_render_on_demand.py -q
 python3 -m ruff check pipeline/synthetic_village/mesh_chunk.py tests/test_mesh_chunk.py
 python3 -m compileall -q pipeline/synthetic_village/mesh_chunk.py
 git diff --check -- pipeline/synthetic_village/mesh_chunk.py tests/test_mesh_chunk.py
