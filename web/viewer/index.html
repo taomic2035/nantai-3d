@@ -104,6 +104,35 @@
   .zoom-row button { padding: 3px 9px; cursor: pointer; }
   #environment-controls :focus-visible { outline: 2px solid #7fd1ff; outline-offset: 2px; }
   #environment-status { margin-top: 7px; color: #8997a3; font-size: 11px; }
+  #teleport-dialog {
+    margin: auto; width: min(430px, calc(100vw - 28px)); padding: 0;
+    color: #eaf6ff; background: rgba(21, 27, 34, 0.98);
+    border: 1px solid rgba(127,209,255,0.42); border-radius: 12px;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.55);
+  }
+  #teleport-dialog::backdrop {
+    background: rgba(5, 10, 15, 0.72); backdrop-filter: blur(4px);
+  }
+  #teleport-form { display: grid; gap: 12px; padding: 22px; }
+  #teleport-title { color: #7fd1ff; font-size: 18px; }
+  #teleport-hint { color: #9eacb8; font-size: 12px; line-height: 1.5; }
+  #teleport-form label { color: #dce8ef; font-size: 13px; }
+  #teleport-input {
+    width: 100%; min-height: 42px; padding: 9px 11px;
+    color: #fff; background: #111820; font: 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+    border: 1px solid rgba(255,255,255,0.22); border-radius: 6px;
+  }
+  #teleport-input[aria-invalid="true"] { border-color: #ff8d83; }
+  #teleport-dialog :focus-visible { outline: 2px solid #7fd1ff; outline-offset: 2px; }
+  #teleport-error { min-height: 18px; color: #ffaba3; font-size: 12px; }
+  .teleport-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .teleport-actions button {
+    min-height: 36px; padding: 7px 14px; color: #eaf6ff; background: #27313b;
+    border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; cursor: pointer;
+  }
+  #teleport-submit {
+    color: #07141c; background: #7fd1ff; border-color: #7fd1ff; font-weight: 650;
+  }
   @media (max-width: 720px) {
     #environment-controls { bottom: 74px; }
     #controls { right: 12px; max-height: 54px; overflow: auto; }
@@ -188,6 +217,28 @@
   </div>
   <p id="environment-status" aria-live="polite">大气叠加 atmospheric overlay · 非重光照 not relighting · 不改变 3DGS 已烘焙光照</p>
 </section>
+
+<dialog id="teleport-dialog" aria-labelledby="teleport-title" aria-describedby="teleport-hint">
+  <form id="teleport-form">
+    <h2 id="teleport-title">传送到任意坐标</h2>
+    <p id="teleport-hint">输入统一 ENU 坐标（米）：东 E、北 N、高 U，使用英文逗号分隔。</p>
+    <label for="teleport-input">E, N, U</label>
+    <input
+      id="teleport-input"
+      name="coordinates"
+      type="text"
+      inputmode="decimal"
+      autocomplete="off"
+      placeholder="例如：-1200, 1800, 120"
+      aria-describedby="teleport-hint teleport-error"
+    >
+    <p id="teleport-error" role="alert" aria-live="assertive"></p>
+    <div class="teleport-actions">
+      <button id="teleport-cancel" type="button">取消</button>
+      <button id="teleport-submit" type="submit">传送并加载</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="controls" style="display:none">
   移动: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> |

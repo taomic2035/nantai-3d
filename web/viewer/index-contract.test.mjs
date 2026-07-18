@@ -78,6 +78,32 @@ test('viewer runtime wires environment state without mutating provenance', () =>
   assert.doesNotMatch(main, /manifest\.environment\s*=/);
 });
 
+test('embedded teleport uses an in-document ENU form instead of browser prompt', () => {
+  assert.match(
+    html,
+    /<dialog[^>]*id="teleport-dialog"[^>]*aria-labelledby="teleport-title"/,
+  );
+  assert.match(html, /<form[^>]*id="teleport-form"/);
+  assert.match(html, /<label[^>]*for="teleport-input"/);
+  assert.match(
+    html,
+    /id="teleport-input"[^>]*aria-describedby="teleport-hint teleport-error"/,
+  );
+  assert.match(
+    html,
+    /id="teleport-error"[^>]*role="alert"[^>]*aria-live="assertive"/,
+  );
+  assert.match(html, /id="teleport-cancel"[^>]*type="button"/);
+  assert.match(html, /id="teleport-submit"[^>]*type="submit"/);
+
+  assert.match(main, /setupTeleportControl\(\)/);
+  assert.match(main, /openTeleportDialog\(\)/);
+  assert.match(main, /parseEnuText\(teleportInput\.value\)/);
+  assert.match(main, /moveCameraTo\(worldToThree\(\[east,\s*north,\s*up\]\),\s*null\)/);
+  assert.match(main, /teleportError\.textContent\s*=\s*error\.message/);
+  assert.doesNotMatch(main, /window\.prompt\(/);
+});
+
 test('weather atmosphere includes a procedural sky with a solid-color fallback', () => {
   assert.match(main, /from ['"]\.\/sky-dome\.mjs['"]/);
   assert.match(main, /createSkyDome\(\{\s*THREE,\s*scene\s*\}\)/);

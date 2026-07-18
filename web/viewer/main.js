@@ -167,6 +167,9 @@ let hemisphereLight = null;
 let precipitationPoints = null;
 let precipitationEffect = null;
 let skyDome = null;
+let teleportDialog = null;
+let teleportInput = null;
+let teleportError = null;
 
 // ============ PLY Loader ============
 function parsePly(buffer) {
@@ -997,6 +1000,42 @@ function setupEnvironmentControls() {
   }, { passive: false });
 }
 
+function closeTeleportDialog() {
+  if (typeof teleportDialog?.close === 'function') {
+    teleportDialog.close();
+  } else {
+    teleportDialog?.removeAttribute('open');
+  }
+}
+
+function setupTeleportControl() {
+  teleportDialog = document.getElementById('teleport-dialog');
+  teleportInput = document.getElementById('teleport-input');
+  teleportError = document.getElementById('teleport-error');
+  const form = document.getElementById('teleport-form');
+  const cancel = document.getElementById('teleport-cancel');
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    try {
+      const { east, north, up } = parseEnuText(teleportInput.value);
+      moveCameraTo(worldToThree([east, north, up]), null);
+      closeTeleportDialog();
+    } catch (error) {
+      teleportInput.setAttribute('aria-invalid', 'true');
+      teleportError.textContent = error.message;
+      teleportInput.focus();
+      teleportInput.select();
+    }
+  });
+  cancel.addEventListener('click', closeTeleportDialog);
+  teleportDialog.addEventListener('close', () => {
+    teleportInput.removeAttribute('aria-invalid');
+    teleportError.textContent = '';
+    renderer.domElement.focus();
+  });
+}
+
 function setupDisplayMode() {
   const button = document.getElementById('display-toggle');
   const setFocused = (focused) => {
@@ -1450,6 +1489,7 @@ function init() {
     console.warn('降水粒子初始化失败:', error);
   }
   setupEnvironmentControls();
+  setupTeleportControl();
   applyWeather(DEFAULT_WEATHER);
   applyZoom(DEFAULT_ZOOM);
 
@@ -1498,7 +1538,7 @@ function onKeyDown(e) {
   }
   // G 键传送到指定 ENU 坐标
   if (k === 'g' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    teleportPrompt();
+    openTeleportDialog();
   }
 }
 function onKeyUp(e) {
@@ -1610,16 +1650,26 @@ function moveCameraTo(positionThree, lookAtThree = null) {
   }
 }
 
-// G 键: 输入 ENU 坐标传送 (无 look_at 分支，保持当前朝向)。
-function teleportPrompt() {
-  const input = window.prompt('传送到 E,N,U (米):');
-  if (input === null) return;  // 用户取消
-  try {
-    const { east, north, up } = parseEnuText(input);
-    moveCameraTo(worldToThree([east, north, up]), null);
-  } catch (error) {
-    console.warn('传送失败:', error.message);
+// G 键: 页面内输入 ENU 坐标传送 (无 look_at 分支，保持当前朝向)。
+function openTeleportDialog() {
+  if (!teleportDialog || teleportDialog.open) return;
+  const [east, north, up] = threeToWorld([
+    camera.position.x,
+    camera.position.y,
+    camera.position.z,
+  ]);
+  teleportInput.value = [east, north, up]
+    .map((value) => Number(value.toFixed(2)))
+    .join(', ');
+  teleportInput.removeAttribute('aria-invalid');
+  teleportError.textContent = '';
+  if (typeof teleportDialog.showModal === 'function') {
+    teleportDialog.showModal();
+  } else {
+    teleportDialog.setAttribute('open', '');
   }
+  teleportInput.focus();
+  teleportInput.select();
 }
 
 // ============ 相机控制 (WASD) ============
