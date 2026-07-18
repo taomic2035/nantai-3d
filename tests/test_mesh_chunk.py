@@ -61,12 +61,19 @@ def _bundle(
     *,
     material_bundle_id: str = "2" * 64,
     asset_ids: tuple[str, ...] | None = None,
+    glb_sha256: str = "a" * 64,
+    glb_bytes: int = 1024,
+    triangle_count: int = 12,
 ) -> MeshAssetBundle:
     asset_ids = asset_ids or tuple(sorted(FOOTPRINTS))
     material_registry = [
         {
             "slot_id": slot_id,
-            "source_sha256": f"{index:064x}",
+            "source_sha256": (
+                "1" * 64
+                if slot_id == "material-fieldstone-01"
+                else f"{index:064x}"
+            ),
             "bundle_id": material_bundle_id,
             "algorithm_id": "mirror-sobel-orm-v1",
         }
@@ -76,10 +83,10 @@ def _bundle(
     for asset_id in sorted(asset_ids):
         width, depth, height = FOOTPRINTS[asset_id]
         descriptor = {
-            "glb_object_path": f"objects/{'a' * 64}.glb",
-            "glb_sha256": "a" * 64,
-            "glb_bytes": 1024,
-            "triangle_count": 12,
+            "glb_object_path": f"objects/{glb_sha256}.glb",
+            "glb_sha256": glb_sha256,
+            "glb_bytes": glb_bytes,
+            "triangle_count": triangle_count,
             "primitive_count": 1,
             "material_slot_ids": ["material-fieldstone-01"],
             "aabb": {

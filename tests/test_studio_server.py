@@ -28,6 +28,11 @@ from pipeline.synthetic_village.local_textured_preview import (
     LocalTexturedPreviewManifest,
     canonical_local_textured_preview_manifest_bytes,
 )
+from pipeline.synthetic_village.mesh_asset_bundle import (
+    canonical_mesh_asset_bundle_bytes,
+)
+from tests.test_mesh_asset_bundle import _glb_payload
+from tests.test_mesh_chunk import _bundle
 
 
 def _symlink_or_skip(link: Path, target, *, target_is_directory: bool = False) -> None:
@@ -273,6 +278,43 @@ def _write_local_textured_preview(
         canonical_local_textured_preview_manifest_bytes(manifest),
     )
     return directory, manifest
+
+
+def _write_mesh_world_bundle(root: Path):
+    glb = _glb_payload()
+    digest = hashlib.sha256(glb).hexdigest()
+    bundle = _bundle(
+        glb_sha256=digest,
+        glb_bytes=len(glb),
+        triangle_count=1,
+    )
+    directory = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/mesh-asset-bundles"
+        / bundle.bundle_id
+    )
+    object_root = directory / "objects"
+    object_root.mkdir(parents=True)
+    (object_root / f"{digest}.glb").write_bytes(glb)
+    (directory / "manifest.json").write_bytes(
+        canonical_mesh_asset_bundle_bytes(bundle),
+    )
+    manifest_path = root / "web/data/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["mesh_grid"] = {
+        "on_demand": True,
+        "url_template": "/api/world/mesh-chunk/{x}/{y}.json",
+        "asset_url_template": (
+            "/api/world/mesh-assets/{bundle_id}/{asset_id}/lod{lod}.glb"
+        ),
+        "world_seed": 42,
+        "layout_engine": "mock",
+        "terrain_algorithm_id": "mock-flat-ground-v1",
+        "mesh_asset_bundle_id": bundle.bundle_id,
+        "material_bundle_id": bundle.material_bundle_id,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return directory, bundle, glb
 
 
 class TestProjectSnapshot:
@@ -1011,6 +1053,150 @@ class TestHttpContract:
 
         assert status in {403, 404, 409, 500}
         assert b"glTF-local-preview" not in payload
+
+    def test_mesh_chunk_and_template_are_verified_cacheable_and_stream_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _directory, bundle, expected_glb = _write_mesh_world_bundle(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, headers, payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/-2/3.json?lod=1",
+            )
+            head_status, head_headers, head_payload = _request(
+                server,
+                "HEAD",
+                "/api/world/mesh-chunk/-2/3.json?lod=1",
+            )
+            cached_status, cached_headers, cached_payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/-2/3.json?lod=1",
+                headers={"If-None-Match": headers.get("etag", "")},
+            )
+            runtime = json.loads(payload)
+            asset_url = runtime["asset_urls"][0]["url"]
+            asset_status, asset_headers, asset_payload = _request(
+                server,
+                "GET",
+                asset_url,
+            )
+            asset_head_status, asset_head_headers, asset_head_payload = _request(
+                server,
+                "HEAD",
+                asset_url,
+            )
+            asset_cached_status, _, asset_cached_payload = _request(
+                server,
+                "GET",
+                asset_url,
+                headers={"If-None-Match": asset_headers.get("etag", "")},
+            )
+
+        assert status == head_status == asset_status == asset_head_status == 200
+        assert cached_status == asset_cached_status == 304
+        assert runtime["chunk"]["chunk_id"] == {"x": -2, "y": 3}
+        assert runtime["chunk"]["world_offset"] == [-400.0, 600.0, 0.0]
+        assert runtime["chunk"]["mesh_asset_bundle_id"] == bundle.bundle_id
+        assert all(
+            row["url"].startswith(
+                f"/api/world/mesh-assets/{bundle.bundle_id}/",
+            )
+            for row in runtime["asset_urls"]
+        )
+        assert headers["content-type"] == "application/json; charset=utf-8"
+        assert headers["cache-control"] == "no-store"
+        assert headers["etag"] == head_headers["etag"] == cached_headers["etag"]
+        assert headers["content-length"] == head_headers["content-length"]
+        assert asset_headers["content-type"] == "model/gltf-binary"
+        assert asset_headers["cache-control"] == (
+            "public, max-age=31536000, immutable"
+        )
+        assert asset_headers["etag"] == asset_head_headers["etag"]
+        assert asset_payload == expected_glb
+        assert head_payload == cached_payload == b""
+        assert asset_head_payload == asset_cached_payload == b""
+        assert not (tmp_path / "web/data/chunk_-2_3.json").exists()
+
+    def test_mesh_routes_fail_closed_without_exact_manifest_opt_in(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/0/0.json?lod=2",
+            )
+
+        assert status == 409
+        assert json.loads(payload)["error"]["code"] == "mesh_on_demand_unavailable"
+
+    def test_mesh_routes_reject_tampered_template_bytes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        directory, _bundle_value, _glb = _write_mesh_world_bundle(tmp_path)
+        template = next((directory / "objects").glob("*.glb"))
+        template.write_bytes(template.read_bytes() + b"\0")
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/0/0.json?lod=2",
+            )
+
+        assert status == 500
+        assert json.loads(payload)["error"]["code"] == "mesh_asset_bundle_invalid"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/world/mesh-chunk/not-an-int/1.json?lod=2",
+            "/api/world/mesh-chunk/1/1.5.json?lod=2",
+            "/api/world/mesh-chunk/1/2.json",
+            "/api/world/mesh-chunk/1/2.json?lod=3",
+            "/api/world/mesh-chunk/1/2.json?lod=0&lod=1",
+        ],
+    )
+    def test_mesh_chunk_rejects_invalid_coordinates_and_query(
+        self,
+        tmp_path: Path,
+        path: str,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _write_mesh_world_bundle(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(server, "GET", path)
+
+        assert status == 400
+        assert json.loads(payload)["error"]["code"] == "invalid_mesh_chunk_request"
+
+    def test_mesh_chunk_distinguishes_geographic_envelope(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _write_mesh_world_bundle(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/0/32001.json?lod=2",
+            )
+
+        assert status == 422
+        assert json.loads(payload)["error"]["code"] == "mesh_world_bounds_exceeded"
 
     def test_on_demand_world_chunk_is_deterministic_lod_cacheable_and_stream_only(
         self, tmp_path,

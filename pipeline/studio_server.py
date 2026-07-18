@@ -13,6 +13,8 @@ API contract:
 * ``GET /api/runs`` -> ``{"items": [...], "cursor": "..."}``.
 * ``GET /api/capabilities`` -> explicit fail-closed operation capabilities.
 * ``GET /api/world/chunk/{x}/{y}.ply`` -> opt-in, side-effect-free world chunk.
+* ``GET /api/world/mesh-chunk/{x}/{y}.json`` -> verified mesh chunk evidence.
+* ``GET /api/world/mesh-assets/...`` -> immutable audited template GLB bytes.
 * ``GET``/``HEAD`` below approved static roots -> project-relative files.
 * every mutating method -> structured HTTP 405; no job is started.
 """
@@ -40,6 +42,7 @@ from pydantic import ValidationError
 
 from pipeline.assets import AssetRegistry
 from pipeline.gaussian_scene import GaussianScene
+from pipeline.mock_layout import DEFAULT_ASSETS
 from pipeline.render_chunk_to_ply import render_single_chunk
 from pipeline.studio_jobs import JobContractError, JobService, WriterBusyError
 from pipeline.studio_ledger import (
@@ -52,6 +55,19 @@ from pipeline.synthetic_village.local_textured_preview import (
     canonical_local_textured_preview_manifest_bytes,
     load_local_textured_preview_manifest,
     read_verified_local_textured_preview_glb,
+)
+from pipeline.synthetic_village.mesh_asset_bundle import (
+    MeshAssetBundle,
+    MeshAssetBundleError,
+    load_mesh_asset_bundle,
+    read_verified_mesh_template_glb,
+)
+from pipeline.synthetic_village.mesh_chunk import (
+    MAX_SAFE_INTEGER,
+    MeshChunkError,
+    build_mesh_chunk_manifest,
+    canonical_mesh_chunk_runtime_bytes,
+    project_mesh_chunk_runtime,
 )
 
 SNAPSHOT_SCHEMA_VERSION = 2
@@ -231,6 +247,42 @@ def _resolve_local_textured_preview_directory(
         if resolved != cursor or not resolved.is_dir():
             return None
     directory = boundary / preview_id
+    if directory.is_symlink():
+        return None
+    try:
+        resolved_directory = directory.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if (
+        resolved_directory != directory
+        or not _is_below(boundary, resolved_directory)
+        or not resolved_directory.is_dir()
+    ):
+        return None
+    return resolved_directory
+
+
+def _resolve_mesh_asset_bundle_directory(
+    root: Path,
+    bundle_id: str,
+) -> Path | None:
+    root = root.resolve()
+    boundary = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/mesh-asset-bundles"
+    )
+    cursor = root
+    for component in boundary.relative_to(root).parts:
+        cursor = cursor / component
+        if cursor.is_symlink():
+            return None
+        try:
+            resolved = cursor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if resolved != cursor or not resolved.is_dir():
+            return None
+    directory = boundary / bundle_id
     if directory.is_symlink():
         return None
     try:
@@ -1388,6 +1440,87 @@ def _on_demand_world_manifest(root: Path) -> dict[str, Any] | None:
     return _valid_on_demand_world_manifest(manifest)
 
 
+def _valid_on_demand_mesh_manifest(
+    manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Accept only the exact synthetic mesh recipe implemented by this runtime."""
+
+    grid = manifest.get("mesh_grid")
+    required_keys = {
+        "on_demand",
+        "url_template",
+        "asset_url_template",
+        "world_seed",
+        "layout_engine",
+        "terrain_algorithm_id",
+        "mesh_asset_bundle_id",
+        "material_bundle_id",
+    }
+    if not isinstance(grid, dict) or set(grid) != required_keys:
+        return None
+    if type(grid.get("on_demand")) is not bool:
+        return None
+    if grid.get("url_template") != "/api/world/mesh-chunk/{x}/{y}.json":
+        return None
+    if grid.get("asset_url_template") != (
+        "/api/world/mesh-assets/{bundle_id}/{asset_id}/lod{lod}.glb"
+    ):
+        return None
+    world_seed = grid.get("world_seed")
+    if (
+        type(world_seed) is not int
+        or abs(world_seed) > MAX_SAFE_INTEGER
+    ):
+        return None
+    if grid.get("layout_engine") != "mock":
+        return None
+    if grid.get("terrain_algorithm_id") != "mock-flat-ground-v1":
+        return None
+    for field in ("mesh_asset_bundle_id", "material_bundle_id"):
+        value = grid.get(field)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            return None
+    return manifest
+
+
+def _on_demand_mesh_manifest(root: Path) -> dict[str, Any] | None:
+    manifest = _read_world_manifest(root)
+    if manifest is None:
+        return None
+    return _valid_on_demand_mesh_manifest(manifest)
+
+
+def _load_active_mesh_asset_bundle(
+    root: Path,
+    manifest: dict[str, Any],
+) -> tuple[Path, MeshAssetBundle]:
+    grid = manifest["mesh_grid"]
+    directory = _resolve_mesh_asset_bundle_directory(
+        root,
+        grid["mesh_asset_bundle_id"],
+    )
+    if directory is None:
+        raise MeshAssetBundleError("declared mesh asset bundle is unavailable")
+    bundle = load_mesh_asset_bundle(directory)
+    if (
+        bundle.bundle_id != grid["mesh_asset_bundle_id"]
+        or bundle.material_bundle_id != grid["material_bundle_id"]
+    ):
+        raise MeshAssetBundleError(
+            "declared mesh asset or material bundle identity disagrees",
+        )
+    expected_asset_ids = tuple(sorted({
+        asset_id
+        for group in DEFAULT_ASSETS.values()
+        for asset_id in group
+    }))
+    if bundle.asset_ids != expected_asset_ids:
+        raise MeshAssetBundleError(
+            "declared mesh asset bundle does not cover the layout asset closure",
+        )
+    return directory, bundle
+
+
 def _is_world_bounds_validation_error(error: ValidationError) -> bool:
     """Identify the mock world's finite WGS84 envelope without hiding other bugs."""
 
@@ -1689,6 +1822,198 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 payload,
                 content_type=content_type,
+                cache_control=cache_control,
+                head_only=head_only,
+                extra_headers={"ETag": etag},
+            )
+            return
+        if request_path.startswith("/api/world/mesh-chunk/"):
+            match = re.fullmatch(
+                r"/api/world/mesh-chunk/([^/]+)/([^/]+)\.json",
+                request_path,
+            )
+            query = urlsplit(self.path).query
+            if match is None or re.fullmatch(r"lod=[012]", query) is None:
+                self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_mesh_chunk_request",
+                    "Mesh chunk coordinates must be integers and lod must be 0, 1, or 2.",
+                    head_only=head_only,
+                )
+                return
+            segments = tuple(unquote(segment) for segment in match.groups())
+            if any(
+                re.fullmatch(r"-?(?:0|[1-9]\d*)", segment) is None
+                or segment == "-0"
+                for segment in segments
+            ):
+                self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_mesh_chunk_request",
+                    "Mesh chunk coordinates must be canonical integers.",
+                    head_only=head_only,
+                )
+                return
+            chunk_x, chunk_y = (int(segment) for segment in segments)
+            if any(abs(value) > MAX_SAFE_INTEGER for value in (chunk_x, chunk_y)):
+                self._error(
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_mesh_chunk_request",
+                    "Mesh chunk coordinates exceed the safe integer range.",
+                    head_only=head_only,
+                )
+                return
+            mesh_manifest = _on_demand_mesh_manifest(self.project_root)
+            if mesh_manifest is None:
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "mesh_on_demand_unavailable",
+                    "The world manifest does not opt in to verified mesh chunks.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                _directory, bundle = _load_active_mesh_asset_bundle(
+                    self.project_root,
+                    mesh_manifest,
+                )
+            except MeshAssetBundleError:
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "mesh_asset_bundle_invalid",
+                    "The declared mesh asset bundle is unavailable or invalid.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                chunk = build_mesh_chunk_manifest(
+                    chunk_x,
+                    chunk_y,
+                    world_seed=mesh_manifest["mesh_grid"]["world_seed"],
+                    bundle=bundle,
+                    lod=int(query.removeprefix("lod=")),
+                )
+                runtime = project_mesh_chunk_runtime(chunk, bundle=bundle)
+                payload = canonical_mesh_chunk_runtime_bytes(runtime)
+            except ValidationError as exc:
+                if _is_world_bounds_validation_error(exc):
+                    self._error(
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        "mesh_world_bounds_exceeded",
+                        "The requested mesh chunk is outside the renderable geographic envelope.",
+                        head_only=head_only,
+                    )
+                else:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_chunk_render_failed",
+                        "The mesh chunk failed internal layout validation.",
+                        head_only=head_only,
+                    )
+                return
+            except MeshChunkError:
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "mesh_chunk_render_failed",
+                    "The mesh chunk could not be derived from verified evidence.",
+                    head_only=head_only,
+                )
+                return
+            digest = hashlib.sha256(payload).hexdigest()
+            etag = f'"sha256:{digest}"'
+            cache_control = "no-store"
+            request_etags = {
+                candidate.strip()
+                for candidate in self.headers.get("If-None-Match", "").split(",")
+                if candidate.strip()
+            }
+            if "*" in request_etags or etag in request_etags:
+                self._send_not_modified(etag, cache_control=cache_control)
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                payload,
+                content_type="application/json; charset=utf-8",
+                cache_control=cache_control,
+                head_only=head_only,
+                extra_headers={"ETag": etag},
+            )
+            return
+        if request_path.startswith("/api/world/mesh-assets/"):
+            match = re.fullmatch(
+                r"/api/world/mesh-assets/([0-9a-f]{64})/"
+                r"([a-z0-9]+(?:_[a-z0-9]+)*)/lod([012])\.glb",
+                request_path,
+            )
+            if match is None or urlsplit(self.path).query:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "mesh_asset_not_found",
+                    "Mesh asset not found.",
+                    head_only=head_only,
+                )
+                return
+            route_bundle_id, asset_id, lod_text = match.groups()
+            mesh_manifest = _on_demand_mesh_manifest(self.project_root)
+            if mesh_manifest is None:
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "mesh_on_demand_unavailable",
+                    "The world manifest does not opt in to verified mesh chunks.",
+                    head_only=head_only,
+                )
+                return
+            if route_bundle_id != mesh_manifest["mesh_grid"]["mesh_asset_bundle_id"]:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "mesh_asset_not_found",
+                    "Mesh asset not found.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                directory, bundle = _load_active_mesh_asset_bundle(
+                    self.project_root,
+                    mesh_manifest,
+                )
+                payload = read_verified_mesh_template_glb(
+                    directory,
+                    bundle=bundle,
+                    asset_id=asset_id,
+                    lod=int(lod_text),
+                )
+            except MeshAssetBundleError as exc:
+                message = str(exc)
+                if "not present" in message or "LOD" in message:
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "mesh_asset_not_found",
+                        "Mesh asset not found.",
+                        head_only=head_only,
+                    )
+                else:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_asset_bundle_invalid",
+                        "The declared mesh asset bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                return
+            digest = hashlib.sha256(payload).hexdigest()
+            etag = f'"sha256:{digest}"'
+            cache_control = "public, max-age=31536000, immutable"
+            request_etags = {
+                candidate.strip()
+                for candidate in self.headers.get("If-None-Match", "").split(",")
+                if candidate.strip()
+            }
+            if "*" in request_etags or etag in request_etags:
+                self._send_not_modified(etag, cache_control=cache_control)
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                payload,
+                content_type="model/gltf-binary",
                 cache_control=cache_control,
                 head_only=head_only,
                 extra_headers={"ETag": etag},
