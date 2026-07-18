@@ -98,6 +98,7 @@ SEMANTIC_CLASSES = (
     "courtyard",
     "retaining-wall",
     "prop",
+    "elevated-walkway",
 )
 MATERIAL_FAMILIES = (
     "bamboo-stem",
@@ -646,7 +647,7 @@ def _validate_request(request, raw):
         raise RuntimeBuildError("executing local Blender bytes do not match request")
 
     semantic_registry = request["semantic_registry"]
-    _expect_list(semantic_registry, 14, "semantic_registry")
+    _expect_list(semantic_registry, 15, "semantic_registry")
     expected_semantics = []
     for semantic_id, semantic_class in enumerate(SEMANTIC_CLASSES):
         scope = (

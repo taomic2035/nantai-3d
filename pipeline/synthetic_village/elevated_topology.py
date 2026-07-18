@@ -176,7 +176,7 @@ class ElevatedTopologyPlan(FrozenModel):
     synthetic: Literal[True]
     verification_level: Literal["L2"]
     geometry_trust: Literal["simplified-pbr-not-render-parity"]
-    semantic_id: Literal[12]
+    semantic_id: Literal[14]
     nodes: tuple[WalkableNode, ...] = Field(min_length=8)
     edges: tuple[WalkableEdge, ...] = Field(min_length=6)
     components: tuple[ElevatedComponent, ...] = Field(min_length=4, max_length=4)
@@ -606,7 +606,7 @@ def build_elevated_topology_plan(
         synthetic=True,
         verification_level="L2",
         geometry_trust="simplified-pbr-not-render-parity",
-        semantic_id=12,
+        semantic_id=14,
         nodes=nodes,
         edges=edges,
         components=components,

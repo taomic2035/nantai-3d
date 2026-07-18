@@ -57,7 +57,7 @@ def test_plan_binds_the_exact_tracked_scene_without_changing_scene_plan_v1() -> 
     assert plan.synthetic is True
     assert plan.verification_level == "L2"
     assert plan.geometry_trust == "simplified-pbr-not-render-parity"
-    assert plan.semantic_id == 12
+    assert plan.semantic_id == 14
     assert all(item.semantic_class != "elevated-walkway" for item in scene.objects)
 
 

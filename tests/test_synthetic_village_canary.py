@@ -206,8 +206,9 @@ def test_build_request_is_frozen_complete_and_content_addressed() -> None:
         "terrain",
         "support",
         *SEMANTIC_ORDER,
+        "elevated-walkway",
     )
-    assert tuple(entry.semantic_id for entry in request.semantic_registry) == tuple(range(14))
+    assert tuple(entry.semantic_id for entry in request.semantic_registry) == tuple(range(15))
     assert tuple(entry.scope for entry in request.semantic_registry[:3]) == (
         "background",
         "auxiliary",

@@ -127,6 +127,7 @@ SemanticClass = Literal[
     "courtyard",
     "retaining-wall",
     "prop",
+    "elevated-walkway",
 ]
 SemanticScope = Literal["background", "auxiliary", "canonical-object"]
 VisualUsageMode = Literal["design-reference-only", "procedural-placeholder-v1"]
@@ -598,7 +599,7 @@ class BuildRequest(FrozenModel):
         min_length=3,
         max_length=3,
     )
-    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=15, max_length=15)
     material_registry: tuple[MaterialRegistryEntry, ...] = Field(min_length=11, max_length=11)
     visual_slot_registry: tuple[VisualSlotRegistryEntry, ...] = Field(
         min_length=68,
@@ -646,7 +647,7 @@ class TexturedBuildRequest(FrozenModel):
         min_length=3,
         max_length=3,
     )
-    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=15, max_length=15)
     material_registry: tuple[MaterialRegistryEntry, ...] = Field(min_length=11, max_length=11)
     visual_slot_registry: tuple[TexturedVisualSlotRegistryEntry, ...] = Field(
         min_length=68,
@@ -899,7 +900,7 @@ class BuildReport(FrozenModel):
         min_length=3,
         max_length=3,
     )
-    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=15, max_length=15)
     material_registry: tuple[MaterialRegistryEntry, ...] = Field(min_length=11, max_length=11)
     visual_slot_registry: tuple[VisualSlotRegistryEntry, ...] = Field(
         min_length=68,
@@ -970,7 +971,7 @@ class TexturedBuildReport(FrozenModel):
         min_length=3,
         max_length=3,
     )
-    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=15, max_length=15)
     material_registry: tuple[MaterialRegistryEntry, ...] = Field(min_length=11, max_length=11)
     visual_slot_registry: tuple[TexturedVisualSlotRegistryEntry, ...] = Field(
         min_length=68,
@@ -1094,7 +1095,7 @@ class RenderFrameRequest(FrozenModel):
     measured_c2w_blender: Matrix4
     object_registry: tuple[ObjectRegistryEntry, ...] = Field(min_length=126, max_length=126)
     auxiliary_registry: tuple[AuxiliaryRegistryEntry, ...] = Field(min_length=3, max_length=3)
-    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=15, max_length=15)
 
     @model_validator(mode="after")
     def _validate_render_request(self) -> RenderFrameRequest:
@@ -1158,9 +1159,9 @@ class RenderStatistics(FrozenModel):
         ):
             raise ValueError("observed instance IDs must be unique stable IDs from 0 through 126")
         if self.semantic_ids != tuple(sorted(set(self.semantic_ids))) or any(
-            value < 0 or value > 13 for value in self.semantic_ids
+            value < 0 or value > 14 for value in self.semantic_ids
         ):
-            raise ValueError("observed semantic IDs must be unique stable IDs from 0 through 13")
+            raise ValueError("observed semantic IDs must be unique stable IDs from 0 through 14")
         if self.depth_max_m < self.depth_min_m:
             raise ValueError("depth statistics are inverted")
         return self
@@ -1255,7 +1256,7 @@ class CameraFrameMetadata(FrozenModel):
     measured_c2w_opencv: Matrix4
     measured_c2w_blender: Matrix4
     object_registry_sha256: Sha256
-    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=14, max_length=14)
+    semantic_registry: tuple[SemanticRegistryEntry, ...] = Field(min_length=15, max_length=15)
 
     @model_validator(mode="after")
     def _validate_camera_metadata_provenance(self) -> CameraFrameMetadata:
@@ -1751,6 +1752,13 @@ def _semantic_registry() -> tuple[SemanticRegistryEntry, ...]:
             scope="canonical-object",
         )
         for semantic_id, semantic_class in enumerate(SEMANTIC_ORDER, start=3)
+    )
+    rows.append(
+        SemanticRegistryEntry(
+            semantic_class="elevated-walkway",
+            semantic_id=14,
+            scope="canonical-object",
+        ),
     )
     return tuple(rows)
 

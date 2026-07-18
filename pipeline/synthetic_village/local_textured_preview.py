@@ -142,8 +142,8 @@ class LocalTexturedPreviewRequest(FrozenModel):
         max_length=3,
     )
     semantic_registry: tuple[canary.SemanticRegistryEntry, ...] = Field(
-        min_length=14,
-        max_length=14,
+        min_length=15,
+        max_length=15,
     )
     material_registry: tuple[canary.MaterialRegistryEntry, ...] = Field(
         min_length=11,
@@ -226,8 +226,8 @@ class LocalTexturedBuildReport(FrozenModel):
         max_length=3,
     )
     semantic_registry: tuple[canary.SemanticRegistryEntry, ...] = Field(
-        min_length=14,
-        max_length=14,
+        min_length=15,
+        max_length=15,
     )
     material_registry: tuple[canary.MaterialRegistryEntry, ...] = Field(
         min_length=11,

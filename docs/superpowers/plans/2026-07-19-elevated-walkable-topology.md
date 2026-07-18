@@ -69,7 +69,7 @@ class ElevatedTopologyPlan(FrozenModel):
     synthetic: Literal[True]
     verification_level: Literal["L2"]
     geometry_trust: Literal["simplified-pbr-not-render-parity"]
-    semantic_id: Literal[12]
+    semantic_id: Literal[14]
     nodes: tuple[WalkableNode, ...]
     edges: tuple[WalkableEdge, ...]
     components: tuple[ElevatedComponent, ...]
