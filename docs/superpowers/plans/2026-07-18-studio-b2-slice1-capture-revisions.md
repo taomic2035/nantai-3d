@@ -345,7 +345,7 @@ git push origin main
 - Create: `tests/test_studio_capture_revisions.py`
 
 **Interfaces:**
-- Consumes: `IngestManifest` returned by `verify_ingest_artifact()`.
+- Consumes: `IngestManifest` returned by `verify_ingest_artifact()` plus the SHA-256 measured from the exact verified `ingest_manifest.json` bytes.
 - Produces: `CaptureRevisionManifest`, `CapturePayload`, `build_capture_manifest()`, `canonical_manifest_bytes()`, `capture_manifest_digest()`.
 
 - [ ] **Step 1: Write strict manifest tests**
@@ -356,6 +356,7 @@ Test one mixed photo/video ingest fixture and assert:
 manifest = build_capture_manifest(
     revision_id="capture-" + "a" * 32,
     ingest=verified_ingest,
+    ingest_manifest_sha256="d" * 64,
     synthetic=True,
     created_utc=datetime(2026, 7, 18, 8, 0, tzinfo=UTC),
 )
@@ -413,7 +414,7 @@ class CaptureRevisionManifest(BaseModel):
     payloads: tuple[CapturePayload, ...]
 ```
 
-`build_capture_manifest()` derives payloads only from verified `IngestManifest.sources[*].outputs`. It records GPS presence only in the private embedded ingest manifest; the public projection in Task 6 does not expose it.
+`build_capture_manifest()` derives payloads only from verified `IngestManifest.sources[*].outputs`. Its `ingest_manifest_sha256` argument is required and must be the digest of the exact file bytes that were verified; the function never invents that evidence by reserializing the Pydantic model. It records GPS presence only in the private embedded ingest manifest; the public projection in Task 6 does not expose it.
 
 Canonical bytes use sorted keys, ASCII JSON, finite numbers, compact separators, and exactly one LF:
 
