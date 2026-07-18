@@ -23,6 +23,7 @@ from pipeline.synthetic_village.glb_material_audit import GlbMaterialAudit
 from pipeline.synthetic_village.local_textured_preview import (
     LOCAL_TRAINING_BUILD_ENTRIES,
     LocalBlenderIdentity,
+    LocalTexturedBuildReport,
     LocalTexturedPreviewError,
     LocalTexturedPreviewRequest,
     _expected_building_geometry,
@@ -34,12 +35,21 @@ from pipeline.synthetic_village.local_textured_preview import (
     verify_local_textured_training_build_layout,
     verify_stored_local_glb_audit,
 )
+from pipeline.synthetic_village.production_profile import (
+    build_production_camera_plan,
+)
+from pipeline.synthetic_village.production_render import (
+    LOCAL_PRODUCTION_RENDER_REPORT_SCHEMA,
+    build_local_production_frame_request,
+    canonical_local_production_render_request_bytes,
+)
 from pipeline.synthetic_village.scene_plan import build_scene_plan
 from tests.synthetic_material_fixtures import publish_material_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_BLENDER = Path("/Applications/Blender.app/Contents/MacOS/Blender")
 BLENDER_BUILDER = ROOT / "scripts/blender/build_synthetic_village.py"
+BLENDER_RENDERER = ROOT / "scripts/blender/render_synthetic_village.py"
 RUN_LOCAL_ELEVATED_BUILD = os.environ.get("NANTAI_RUN_LOCAL_ELEVATED_BUILD") == "1"
 
 
@@ -311,6 +321,61 @@ print("NANTAI_ELEVATED_COMPONENTS_OK", flush=True)
     )
     assert probe_result.returncode == 0, probe_result.stdout + probe_result.stderr
     assert "NANTAI_ELEVATED_COMPONENTS_OK" in probe_result.stdout
+
+    parsed_report = LocalTexturedBuildReport.model_validate_json(
+        (staging / "build-report.json").read_bytes(),
+    )
+    frame_request = build_local_production_frame_request(
+        plan=build_production_camera_plan(),
+        camera_id="camera-elevated-pedestrian-001",
+        build_id=parsed_report.preview_id,
+        blender_executable_sha256=_sha256_file(LOCAL_BLENDER),
+        renderer_script_sha256=_sha256_file(BLENDER_RENDERER),
+        blend_sha256=_sha256_file(staging / "village-canary.blend"),
+        build_report_sha256=_sha256_file(staging / "build-report.json"),
+        object_registry=parsed_report.object_registry,
+        auxiliary_registry=parsed_report.auxiliary_registry,
+        semantic_registry=parsed_report.semantic_registry,
+    )
+    frame_request_path = tmp_path / "production-render-request.json"
+    frame_request_path.write_bytes(
+        canonical_local_production_render_request_bytes(frame_request),
+    )
+    frame_staging = tmp_path / "production-frame"
+    render_result = subprocess.run(
+        [
+            str(LOCAL_BLENDER),
+            "--background",
+            "--factory-startup",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "17",
+            str(staging / "village-canary.blend"),
+            "--python",
+            str(BLENDER_RENDERER),
+            "--",
+            "--request",
+            str(frame_request_path),
+            "--staging",
+            str(frame_staging),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+    )
+    assert render_result.returncode == 0, render_result.stdout + render_result.stderr
+    frame_report = json.loads(
+        (frame_staging / "frame-report.json").read_text("utf-8"),
+    )
+    assert frame_report["schema_version"] == LOCAL_PRODUCTION_RENDER_REPORT_SCHEMA
+    assert frame_report["verification_level"] == "L0"
+    assert frame_report["camera_id"] == "camera-elevated-pedestrian-001"
+    assert frame_report["statistics"]["semantic_ids"][-1] == 14
+    assert len(frame_report["artifacts"]) == 6
 
 
 def test_historical_local_request_omits_absent_geometry_profile(

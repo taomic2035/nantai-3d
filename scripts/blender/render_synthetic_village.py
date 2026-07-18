@@ -21,6 +21,7 @@ from pathlib import Path
 
 import bpy
 import OpenImageIO as oiio  # noqa: N813
+from mathutils import Matrix
 
 
 class RuntimeRenderError(RuntimeError):
@@ -38,6 +39,15 @@ LOCAL_REPORT_SCHEMA = (
 )
 LOCAL_CAMERA_SCHEMA = (
     "nantai.synthetic-village.local-textured-camera-metadata.v1"
+)
+LOCAL_PRODUCTION_REQUEST_SCHEMA = (
+    "nantai.synthetic-village.local-production-render-frame-request.v1"
+)
+LOCAL_PRODUCTION_REPORT_SCHEMA = (
+    "nantai.synthetic-village.local-production-render-frame-report.v1"
+)
+LOCAL_PRODUCTION_CAMERA_SCHEMA = (
+    "nantai.synthetic-village.local-production-camera-metadata.v1"
 )
 DEPTH_ENCODING = "euclidean-camera-center-range-m"
 NORMAL_ENCODING = "world-space-unit-vector"
@@ -283,33 +293,217 @@ def _validate_auxiliary_registry_contract(auxiliary):
         raise RuntimeRenderError("auxiliary registry is not stable v1")
 
 
+def _is_production_request(request):
+    return request.get("schema_version") == LOCAL_PRODUCTION_REQUEST_SCHEMA
+
+
+def _request_blender_matrix(request):
+    return (
+        request["requested_c2w_blender"]
+        if _is_production_request(request)
+        else request["measured_c2w_blender"]
+    )
+
+
+def _production_camera_pattern():
+    return (
+        r"camera-(?:ground-route|elevated-pedestrian|perimeter-inward"
+        r"|environment-corridor|audit-overview)-[0-9]{3}"
+    )
+
+
+def _validate_rigid_matrix(matrix, label):
+    _validate_matrix(matrix, label)
+    if any(abs(float(matrix[3][index]) - expected) > 1e-9 for index, expected in enumerate(
+        (0.0, 0.0, 0.0, 1.0),
+    )):
+        raise RuntimeRenderError(f"{label} has an invalid homogeneous row")
+    rotation = [[float(matrix[row][column]) for column in range(3)] for row in range(3)]
+    for left in range(3):
+        for right in range(3):
+            dot = sum(rotation[row][left] * rotation[row][right] for row in range(3))
+            expected = 1.0 if left == right else 0.0
+            if abs(dot - expected) > 1e-6:
+                raise RuntimeRenderError(f"{label} rotation is not orthonormal")
+    determinant = (
+        rotation[0][0]
+        * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
+        - rotation[0][1]
+        * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
+        + rotation[0][2]
+        * (rotation[1][0] * rotation[2][1] - rotation[1][1] * rotation[2][0])
+    )
+    if abs(determinant - 1.0) > 1e-6:
+        raise RuntimeRenderError(f"{label} determinant is not +1")
+
+
+def _production_registry_digest(plan):
+    payload = {
+        "profile_id": plan["profile_id"],
+        "plan_schema": plan["plan_schema"],
+        "scene_plan_sha256": plan["scene_plan_sha256"],
+        "elevated_topology_sha256": plan["elevated_topology_sha256"],
+        "cameras": [
+            {
+                "camera_id": camera["camera_id"],
+                "group_id": camera["group_id"],
+                "topology_ref": camera["topology_ref"],
+                "c2w_opencv": camera["c2w_opencv"],
+            }
+            for camera in plan["cameras"]
+        ],
+    }
+    return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+
+
+def _validate_production_camera_request(request):
+    plan = request["production_plan"]
+    if (
+        not isinstance(plan, dict)
+        or plan.get("profile_id") != "synthetic-village-coverage-180-v1"
+        or plan.get("camera_count") != 180
+        or plan.get("declared_target_count") != 180
+        or plan.get("complete") is not True
+        or plan.get("unplaced_groups") != []
+        or plan.get("geometry_trust") != "simplified-pbr-not-render-parity"
+        or plan.get("verification_level") != "L2"
+        or plan.get("elevated_topology_sha256")
+        != request["elevated_topology_sha256"]
+    ):
+        raise RuntimeRenderError("production plan summary is invalid")
+    if hashlib.sha256(_canonical_bytes(plan)).hexdigest() != request[
+        "production_plan_sha256"
+    ]:
+        raise RuntimeRenderError("production plan digest is invalid")
+    cameras = plan.get("cameras")
+    if (
+        not isinstance(cameras, list)
+        or len(cameras) != 180
+        or len({row.get("camera_id") for row in cameras if isinstance(row, dict)}) != 180
+    ):
+        raise RuntimeRenderError("production camera registry is incomplete")
+    if _production_registry_digest(plan) != request["camera_registry_sha256"]:
+        raise RuntimeRenderError("production camera registry digest is invalid")
+    camera = request["camera"]
+    selected = next(
+        (
+            row
+            for row in cameras
+            if isinstance(row, dict) and row.get("camera_id") == camera.get("camera_id")
+        ),
+        None,
+    )
+    if selected != camera:
+        raise RuntimeRenderError("production camera does not match the immutable plan")
+    _expect_keys(
+        camera,
+        (
+            "camera_id",
+            "group_id",
+            "sequence_index",
+            "topology_ref",
+            "arc_length_m",
+            "position_m",
+            "look_at_m",
+            "eye_height_m",
+            "fov_x_deg",
+            "intrinsics",
+            "c2w_opencv",
+            "audit_only",
+            "disclosure",
+        ),
+        "production camera",
+    )
+    if (
+        re.fullmatch(_production_camera_pattern(), camera["camera_id"]) is None
+        or not camera["camera_id"].startswith(f"camera-{camera['group_id']}-")
+        or not isinstance(camera["sequence_index"], int)
+        or isinstance(camera["sequence_index"], bool)
+        or not 1 <= camera["sequence_index"] <= 180
+        or not isinstance(camera["topology_ref"], str)
+        or not camera["topology_ref"]
+        or not isinstance(camera["position_m"], list)
+        or len(camera["position_m"]) != 3
+        or not isinstance(camera["look_at_m"], list)
+        or len(camera["look_at_m"]) != 3
+        or not isinstance(camera["eye_height_m"], (int, float))
+        or isinstance(camera["eye_height_m"], bool)
+        or not 0.0 < camera["eye_height_m"] < 200.0
+    ):
+        raise RuntimeRenderError("production camera identity or position is invalid")
+    _validate_rigid_matrix(camera["c2w_opencv"], "production OpenCV camera matrix")
+    _validate_rigid_matrix(
+        request["requested_c2w_blender"],
+        "requested production Blender camera matrix",
+    )
+    expected_blender = [
+        [
+            float(camera["c2w_opencv"][row][column])
+            * (-1.0 if column in {1, 2} else 1.0)
+            for column in range(4)
+        ]
+        for row in range(4)
+    ]
+    if _matrix_error(request["requested_c2w_blender"], expected_blender) > 1e-6:
+        raise RuntimeRenderError("production Blender matrix disagrees with OpenCV pose")
+    if any(
+        abs(float(camera["position_m"][axis]) - float(camera["c2w_opencv"][axis][3]))
+        > 1e-6
+        for axis in range(3)
+    ):
+        raise RuntimeRenderError("production camera position disagrees with its matrix")
+
+
 def _validate_request(request):
+    production = _is_production_request(request)
+    common_keys = (
+        "schema_version",
+        "render_id",
+        "build_id",
+        "synthetic",
+        "verification_level",
+        "fidelity",
+        "blender_executable_sha256",
+        "renderer_script_sha256",
+        "blend_sha256",
+        "build_report_sha256",
+        "object_registry_sha256",
+        "settings",
+        "camera",
+        "object_registry",
+        "auxiliary_registry",
+        "semantic_registry",
+    )
     _expect_keys(
         request,
         (
-            "schema_version",
-            "render_id",
-            "build_id",
-            "synthetic",
-            "verification_level",
-            "fidelity",
-            "blender_executable_sha256",
-            "renderer_script_sha256",
-            "blend_sha256",
-            "build_report_sha256",
-            "object_registry_sha256",
-            "settings",
-            "camera",
-            "measured_c2w_blender",
-            "object_registry",
-            "auxiliary_registry",
-            "semantic_registry",
+            *common_keys,
+            *(
+                (
+                    "profile_id",
+                    "production_plan_sha256",
+                    "camera_registry_sha256",
+                    "elevated_topology_sha256",
+                    "production_plan",
+                    "requested_c2w_blender",
+                )
+                if production
+                else ("measured_c2w_blender",)
+            ),
         ),
         "request",
     )
-    local = request["schema_version"] == LOCAL_REQUEST_SCHEMA
+    local = request["schema_version"] in {
+        LOCAL_REQUEST_SCHEMA,
+        LOCAL_PRODUCTION_REQUEST_SCHEMA,
+    }
     if (
-        request["schema_version"] not in {REQUEST_SCHEMA, LOCAL_REQUEST_SCHEMA}
+        request["schema_version"]
+        not in {
+            REQUEST_SCHEMA,
+            LOCAL_REQUEST_SCHEMA,
+            LOCAL_PRODUCTION_REQUEST_SCHEMA,
+        }
         or request["synthetic"] is not True
         or request["verification_level"] != ("L0" if local else "L2")
         or request["fidelity"] != "simplified-pbr-not-render-parity"
@@ -323,6 +517,15 @@ def _validate_request(request):
         "blend_sha256",
         "build_report_sha256",
         "object_registry_sha256",
+        *(
+            (
+                "production_plan_sha256",
+                "camera_registry_sha256",
+                "elevated_topology_sha256",
+            )
+            if production
+            else ()
+        ),
     ):
         if not _is_sha256(request[key]):
             raise RuntimeRenderError(f"request {key} is not a SHA-256")
@@ -387,32 +590,37 @@ def _validate_request(request):
         raise RuntimeRenderError("render settings are not the exact render v1 contract")
 
     camera = request["camera"]
-    _expect_keys(
-        camera,
-        (
-            "camera_id",
-            "sequence_index",
-            "category",
-            "split",
-            "source_anchor_ids",
-            "fov_x_deg",
-            "intrinsics",
-            "look_at_target",
-            "c2w_opencv",
-            "c2w_blender",
-            "visible_building_ids",
-            "placement_attempts",
-        ),
-        "camera",
-    )
-    if (
-        re.fullmatch(
-            r"camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}",
-            camera["camera_id"],
+    if production:
+        if request["profile_id"] != "synthetic-village-coverage-180-v1":
+            raise RuntimeRenderError("production profile ID is invalid")
+        _validate_production_camera_request(request)
+    else:
+        _expect_keys(
+            camera,
+            (
+                "camera_id",
+                "sequence_index",
+                "category",
+                "split",
+                "source_anchor_ids",
+                "fov_x_deg",
+                "intrinsics",
+                "look_at_target",
+                "c2w_opencv",
+                "c2w_blender",
+                "visible_building_ids",
+                "placement_attempts",
+            ),
+            "camera",
         )
-        is None
-    ):
-        raise RuntimeRenderError("camera ID is not canonical")
+        if (
+            re.fullmatch(
+                r"camera-(?:outer|ground|courtyard|bridge)-[0-9]{3}",
+                camera["camera_id"],
+            )
+            is None
+        ):
+            raise RuntimeRenderError("camera ID is not canonical")
     _expect_keys(
         camera["intrinsics"],
         ("width_px", "height_px", "fx", "fy", "cx", "cy"),
@@ -434,8 +642,12 @@ def _validate_request(request):
     ):
         raise RuntimeRenderError("camera intrinsics are invalid")
     _validate_matrix(camera["c2w_opencv"], "OpenCV camera matrix")
-    _validate_matrix(camera["c2w_blender"], "Blender camera matrix")
-    _validate_matrix(request["measured_c2w_blender"], "measured Blender camera matrix")
+    if not production:
+        _validate_matrix(camera["c2w_blender"], "Blender camera matrix")
+        _validate_matrix(
+            request["measured_c2w_blender"],
+            "measured Blender camera matrix",
+        )
 
     object_registry = request["object_registry"]
     _validate_object_registry_contract(object_registry)
@@ -468,6 +680,24 @@ def _matrix_error(actual, expected):
         for row in range(4)
         for column in range(4)
     )
+
+
+def _matrix_within_float32_tolerance(actual, expected):
+    translation_errors = []
+    for row in range(4):
+        for column in range(4):
+            requested = float(expected[row][column])
+            delta = abs(float(actual[row][column]) - requested)
+            if row < 3 and column < 3:
+                allowed = 0.00000032
+            elif row < 3 and column == 3:
+                allowed = max(5e-8, abs(requested) * 1.2e-7)
+                translation_errors.append(delta)
+            else:
+                allowed = 5e-8
+            if delta > allowed + 1e-12:
+                return False
+    return max(translation_errors) <= 0.00004 + 1e-12
 
 
 def _layer_collection_renders_object(layer_collection, user_collections, ancestors_visible=True):
@@ -608,16 +838,49 @@ def _validate_camera_data(camera_obj, camera):
         raise RuntimeRenderError("loaded camera optics do not match request intrinsics")
 
 
+def _create_production_camera(request):
+    camera = request["camera"]
+    object_name = f"nv__{camera['camera_id']}"
+    if bpy.data.objects.get(object_name) is not None:
+        raise RuntimeRenderError("production camera name collides with loaded scene")
+    camera_data = bpy.data.cameras.new(f"{object_name}-data")
+    camera_obj = bpy.data.objects.new(object_name, camera_data)
+    bpy.context.scene.collection.objects.link(camera_obj)
+    camera_obj["nv_camera_id"] = camera["camera_id"]
+    camera_obj["nv_production_profile_id"] = request["profile_id"]
+    camera_obj["nv_topology_ref"] = camera["topology_ref"]
+    camera_obj["nv_production_plan_sha256"] = request["production_plan_sha256"]
+    intrinsics = camera["intrinsics"]
+    camera_data.type = "PERSP"
+    camera_data.sensor_fit = "HORIZONTAL"
+    camera_data.sensor_width = 36.0
+    camera_data.lens = float(intrinsics["fx"]) * 36.0 / WIDTH
+    camera_data.shift_x = 0.0
+    camera_data.shift_y = 0.0
+    camera_data.clip_start = 0.1
+    camera_data.clip_end = 1200.0
+    camera_data.dof.use_dof = False
+    camera_obj.matrix_world = Matrix(request["requested_c2w_blender"])
+    bpy.context.view_layer.update()
+    return camera_obj
+
+
 def _validate_scene_and_prepare_indices(request):
     camera = request["camera"]
-    camera_obj = bpy.data.objects.get(f"nv__{camera['camera_id']}")
+    production = _is_production_request(request)
+    camera_obj = (
+        _create_production_camera(request)
+        if production
+        else bpy.data.objects.get(f"nv__{camera['camera_id']}")
+    )
     if camera_obj is None or camera_obj.type != "CAMERA":
         raise RuntimeRenderError("requested camera is absent from the loaded scene")
     if camera_obj.get("nv_camera_id") != camera["camera_id"]:
         raise RuntimeRenderError("requested camera metadata is invalid")
     _validate_camera_data(camera_obj, camera)
-    if _matrix_error(camera_obj.matrix_world, request["measured_c2w_blender"]) > 1e-6:
-        raise RuntimeRenderError("loaded camera matrix does not match measured build evidence")
+    expected_matrix = _request_blender_matrix(request)
+    if not _matrix_within_float32_tolerance(camera_obj.matrix_world, expected_matrix):
+        raise RuntimeRenderError("render camera matrix does not match immutable request evidence")
 
     _validate_registry_mesh_coverage(
         request["object_registry"],
@@ -914,7 +1177,7 @@ def _depth_output(request, axial_path, position_path, destination):
     axial_image, axial_pixels = _load_pixels(axial_path, "axial depth")
     position_image, position_pixels = _load_pixels(position_path, "position")
     intrinsics = request["camera"]["intrinsics"]
-    eye = [request["measured_c2w_blender"][row][3] for row in range(3)]
+    eye = [_request_blender_matrix(request)[row][3] for row in range(3)]
     output = array("f", [0.0]) * PIXELS
     minimum = math.inf
     maximum = 0.0
@@ -1298,13 +1561,21 @@ def _matrix_payload(matrix):
 
 def _write_camera_metadata(request, path, measured_c2w_blender):
     camera = request["camera"]
-    if _matrix_error(measured_c2w_blender, request["measured_c2w_blender"]) > 1e-6:
-        raise RuntimeRenderError("rendered camera pose diverged from measured build evidence")
+    production = _is_production_request(request)
+    if not _matrix_within_float32_tolerance(
+        measured_c2w_blender,
+        _request_blender_matrix(request),
+    ):
+        raise RuntimeRenderError("rendered camera pose diverged from immutable request")
     payload = {
         "schema_version": (
-            LOCAL_CAMERA_SCHEMA
-            if request["schema_version"] == LOCAL_REQUEST_SCHEMA
-            else CAMERA_SCHEMA
+            LOCAL_PRODUCTION_CAMERA_SCHEMA
+            if production
+            else (
+                LOCAL_CAMERA_SCHEMA
+                if request["schema_version"] == LOCAL_REQUEST_SCHEMA
+                else CAMERA_SCHEMA
+            )
         ),
         "build_id": request["build_id"],
         "render_id": request["render_id"],
@@ -1312,8 +1583,6 @@ def _write_camera_metadata(request, path, measured_c2w_blender):
         "verification_level": request["verification_level"],
         "blender_executable_sha256": request["blender_executable_sha256"],
         "camera_id": camera["camera_id"],
-        "category": camera["category"],
-        "split": camera["split"],
         "image_width_px": WIDTH,
         "image_height_px": HEIGHT,
         "coordinate_system": "opencv-c2w-right-down-forward-meters",
@@ -1334,12 +1603,33 @@ def _write_camera_metadata(request, path, measured_c2w_blender):
         "settings_sha256": hashlib.sha256(_canonical_bytes(request["settings"])).hexdigest(),
         "intrinsics": camera["intrinsics"],
         "requested_c2w_opencv": camera["c2w_opencv"],
-        "requested_c2w_blender": camera["c2w_blender"],
+        "requested_c2w_blender": _request_blender_matrix(request),
         "measured_c2w_opencv": _blender_c2w_to_opencv(measured_c2w_blender),
         "measured_c2w_blender": measured_c2w_blender,
         "object_registry_sha256": request["object_registry_sha256"],
         "semantic_registry": request["semantic_registry"],
     }
+    if production:
+        payload.update(
+            {
+                "profile_id": request["profile_id"],
+                "production_plan_sha256": request["production_plan_sha256"],
+                "camera_registry_sha256": request["camera_registry_sha256"],
+                "elevated_topology_sha256": request["elevated_topology_sha256"],
+                "group_id": camera["group_id"],
+                "topology_ref": camera["topology_ref"],
+                "arc_length_m": camera["arc_length_m"],
+                "audit_only": camera["audit_only"],
+                "disclosure": camera["disclosure"],
+            },
+        )
+    else:
+        payload.update(
+            {
+                "category": camera["category"],
+                "split": camera["split"],
+            },
+        )
     with path.open("xb") as stream:
         stream.write(_canonical_bytes(payload))
         stream.flush()
@@ -1433,11 +1723,16 @@ def _execute_render(request, staging_path):
         shutil.rmtree(pass_root)
 
         artifacts = _artifact_records(work_dir, camera_id)
+        production = _is_production_request(request)
         report = {
             "schema_version": (
-                LOCAL_REPORT_SCHEMA
-                if request["schema_version"] == LOCAL_REQUEST_SCHEMA
-                else REPORT_SCHEMA
+                LOCAL_PRODUCTION_REPORT_SCHEMA
+                if production
+                else (
+                    LOCAL_REPORT_SCHEMA
+                    if request["schema_version"] == LOCAL_REQUEST_SCHEMA
+                    else REPORT_SCHEMA
+                )
             ),
             "build_id": request["build_id"],
             "render_id": request["render_id"],
@@ -1477,6 +1772,17 @@ def _execute_render(request, staging_path):
                 "camera_metadata_matches": True,
             },
         }
+        if production:
+            report.update(
+                {
+                    "profile_id": request["profile_id"],
+                    "production_plan_sha256": request["production_plan_sha256"],
+                    "camera_registry_sha256": request["camera_registry_sha256"],
+                    "elevated_topology_sha256": request["elevated_topology_sha256"],
+                    "group_id": request["camera"]["group_id"],
+                    "topology_ref": request["camera"]["topology_ref"],
+                },
+            )
         report["content_sha256"] = hashlib.sha256(_canonical_bytes(report)).hexdigest()
         report_path = work_dir / "frame-report.json"
         with report_path.open("xb") as stream:
