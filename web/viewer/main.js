@@ -88,6 +88,7 @@ import {
   meshWorldAvailable,
   resolveMeshChunkUrl,
   ribbonGeometryThree,
+  selectInitialPresentationMode,
   terrainGeometryThree,
   validateMeshChunkRuntime,
 } from './mesh-world.mjs';
@@ -1318,12 +1319,6 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
 
     const badge = document.getElementById('model-preview-badge');
     if (badge) badge.textContent = modelPreviewDisclosure(nextManifest);
-    const requestedMode = new URLSearchParams(window.location.search).get('presentation');
-    setPresentationMode(
-      requestedMode === 'points' || requestedMode === 'mesh'
-        ? 'points'
-        : 'model',
-    );
     return {
       status: 'loaded',
       sha256: expectedSha256,
@@ -2138,10 +2133,12 @@ async function main() {
   await loadReconstructionLayer();
   loadingText.textContent = '检查已校验的合成模型预览...';
   const modelPreviewResult = await loadModelPreview();
-  const requestedPresentation = new URLSearchParams(
-    window.location.search,
-  ).get('presentation');
-  if (requestedPresentation === 'mesh' && meshWorldAvailable(manifest)) {
+  const initialPresentation = selectInitialPresentationMode({
+    manifest,
+    modelAvailable: modelPreviewResult.status === 'loaded',
+    search: window.location.search,
+  });
+  if (initialPresentation === 'mesh') {
     setPresentationMode('mesh', { resetCamera: false });
     applyMeshWorldFraming();
     const [meshChunkX, meshChunkY] = threeToChunk(
@@ -2151,6 +2148,10 @@ async function main() {
     loadingText.textContent = '加载已校验的可替换纹理网格...';
     await loadMeshWorldChunk(meshChunkX, meshChunkY, 2);
     updateMeshWorldChunks(camera.position.x, camera.position.z);
+  } else if (initialPresentation === 'model') {
+    setPresentationMode('model');
+  } else {
+    setPresentationMode('points', { resetCamera: false });
   }
 
   const xCount = new Set(manifest.chunks.map((chunk) => chunk.x)).size;

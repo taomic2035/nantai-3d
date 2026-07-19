@@ -161,6 +161,72 @@ test('mesh chunk URL is available only for the exact fail-closed grid contract',
   assert.throws(() => resolveMeshChunkUrl(WORLD, 0, 0, 3), /LOD/);
 });
 
+test('plain viewer prefers the arbitrary-coordinate textured mesh world', () => {
+  const { selectInitialPresentationMode } = subject();
+
+  assert.equal(
+    selectInitialPresentationMode({
+      manifest: WORLD,
+      modelAvailable: true,
+      search: '',
+    }),
+    'mesh',
+  );
+  assert.equal(
+    selectInitialPresentationMode({
+      manifest: WORLD,
+      modelAvailable: false,
+      search: '',
+    }),
+    'mesh',
+  );
+});
+
+test('explicit presentation and model-preview review links keep priority', () => {
+  const { selectInitialPresentationMode } = subject();
+
+  assert.equal(
+    selectInitialPresentationMode({
+      manifest: WORLD,
+      modelAvailable: true,
+      search: '?presentation=points',
+    }),
+    'points',
+  );
+  assert.equal(
+    selectInitialPresentationMode({
+      manifest: WORLD,
+      modelAvailable: true,
+      search: '?presentation=model',
+    }),
+    'model',
+  );
+  assert.equal(
+    selectInitialPresentationMode({
+      manifest: WORLD,
+      modelAvailable: true,
+      search: '?modelPreview=%2Fapi%2Flocal-textured-preview%2Fabc%2Fmanifest.json',
+    }),
+    'model',
+  );
+  assert.equal(
+    selectInitialPresentationMode({
+      manifest: {},
+      modelAvailable: true,
+      search: '',
+    }),
+    'model',
+  );
+  assert.equal(
+    selectInitialPresentationMode({
+      manifest: {},
+      modelAvailable: false,
+      search: '?presentation=mesh',
+    }),
+    'points',
+  );
+});
+
 test('runtime validation binds chunk, bundle, LOD, assets, and exact same-origin routes', () => {
   const { validateMeshChunkRuntime } = subject();
   const payload = runtime();

@@ -249,6 +249,27 @@ export function meshWorldAvailable(manifest) {
   return validGrid(manifest);
 }
 
+export function selectInitialPresentationMode({
+  manifest,
+  modelAvailable,
+  search = '',
+}) {
+  const parameters = new URLSearchParams(search);
+  const requested = parameters.get('presentation');
+  const meshAvailable = meshWorldAvailable(manifest);
+
+  if (requested === 'points') return 'points';
+  if (requested === 'mesh') {
+    return meshAvailable ? 'mesh' : modelAvailable ? 'model' : 'points';
+  }
+  if (requested === 'model') {
+    return modelAvailable ? 'model' : meshAvailable ? 'mesh' : 'points';
+  }
+  if (parameters.has('modelPreview') && modelAvailable) return 'model';
+  if (meshAvailable) return 'mesh';
+  return modelAvailable ? 'model' : 'points';
+}
+
 export function resolveMeshChunkUrl(manifest, chunkX, chunkY, lod) {
   assertSchedulerInputs(chunkX, chunkY, lod);
   if (!validGrid(manifest)) return null;
