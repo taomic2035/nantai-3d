@@ -11,6 +11,56 @@ from pipeline.synthetic_village.mesh_asset_bundle import MeshAssetBundleResult
 from scripts import synthetic_village as synthetic_village_cli
 
 
+def test_import_h3_material_sources_prints_bounded_truth_summary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = []
+    final_root = tmp_path / "published" / ("a" * 64)
+    manifest = SimpleNamespace(
+        schema_version="nantai.h3-ai-material-source-pack.v1",
+        source_pack_id="a" * 64,
+        synthetic=True,
+        ai_generated=True,
+        real_photo_textures=False,
+        records=tuple(range(8)),
+    )
+
+    def prepare_h3_source_pack(selection_receipt: Path, output_root: Path):
+        calls.append((selection_receipt, output_root))
+        return SimpleNamespace(root=final_root, manifest=manifest)
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_prepare_h3_source_pack",
+        lambda: prepare_h3_source_pack,
+    )
+
+    assert synthetic_village_cli.main(
+        [
+            "import-h3-material-sources",
+            "--selection-receipt",
+            str(tmp_path / "selection.json"),
+            "--output-root",
+            str(tmp_path / "published"),
+        ],
+    ) == 0
+
+    assert calls == [
+        (tmp_path / "selection.json", tmp_path / "published"),
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "ai_generated": True,
+        "output_root": str(final_root),
+        "real_photo_textures": False,
+        "record_count": 8,
+        "schema_version": "nantai.h3-ai-material-source-pack.v1",
+        "source_pack_id": "a" * 64,
+        "synthetic": True,
+    }
+
+
 def test_build_materials_prints_one_stable_json_object(
     tmp_path: Path,
     monkeypatch,

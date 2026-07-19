@@ -36,6 +36,16 @@ def _import_visual_source():
     return import_visual_source
 
 
+def _prepare_h3_source_pack():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.h3_material_sources import (
+        prepare_h3_source_pack,
+    )
+
+    return prepare_h3_source_pack
+
+
 def _publish_material_bundle():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -170,6 +180,23 @@ def _parser() -> argparse.ArgumentParser:
     import_visual.add_argument("--slot", required=True)
     import_visual.add_argument("--source", type=Path, required=True)
     import_visual.add_argument("--source-manifest", type=Path, required=True)
+    import_h3_sources = commands.add_parser(
+        "import-h3-material-sources",
+        help=(
+            "Audit all 24 private AI candidates and publish only the eight "
+            "selected content-addressed H3 sources."
+        ),
+    )
+    import_h3_sources.add_argument(
+        "--selection-receipt",
+        type=Path,
+        required=True,
+    )
+    import_h3_sources.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+    )
     revise_visual = commands.add_parser(
         "revise-visual",
         help=(
@@ -401,6 +428,28 @@ def main(argv: list[str] | None = None) -> int:
             pack_root=DEFAULT_VISUAL_PACK_ROOT,
         )
         print(json.dumps(record.model_dump(mode="json"), ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "import-h3-material-sources":
+        prepared = _prepare_h3_source_pack()(
+            args.selection_receipt,
+            args.output_root,
+        )
+        manifest = prepared.manifest
+        print(
+            json.dumps(
+                {
+                    "ai_generated": manifest.ai_generated,
+                    "output_root": str(prepared.root),
+                    "real_photo_textures": manifest.real_photo_textures,
+                    "record_count": len(manifest.records),
+                    "schema_version": manifest.schema_version,
+                    "source_pack_id": manifest.source_pack_id,
+                    "synthetic": manifest.synthetic,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         return 0
     if args.command == "revise-visual":
         manifest = _revise_visual_source_pack()(
