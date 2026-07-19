@@ -1010,6 +1010,7 @@ export function createVerifiedMeshResourceStore({
     bitmap_decodes: 0,
     gpu_texture_creations: 0,
   };
+  let disposed = false;
 
   function deleteUnretainedByte(sha256) {
     const record = byteObjects.get(sha256);
@@ -1509,7 +1510,25 @@ export function createVerifiedMeshResourceStore({
     releaseByte(template.glbSha256);
   }
 
+  function disposeTemplateRecord(record) {
+    if (record.disposalScheduled) return;
+    record.disposalScheduled = true;
+    if (record.template) {
+      disposeTemplate(record.template);
+      return;
+    }
+    record.promise
+      .then((template) => {
+        record.template = template;
+        disposeTemplate(template);
+      })
+      .catch(() => {});
+  }
+
   async function loadTemplate(descriptor) {
+    if (disposed) {
+      throw new Error('verified mesh resource store is disposed');
+    }
     validateTemplateDescriptor(descriptor, materialProfile);
     const key = templateKey(descriptor);
     let record = templates.get(key);
@@ -1517,6 +1536,7 @@ export function createVerifiedMeshResourceStore({
       record = {
         refs: 0,
         promise: null,
+        disposalScheduled: false,
       };
       record.promise = buildTemplate(descriptor);
       templates.set(key, record);
@@ -1526,6 +1546,10 @@ export function createVerifiedMeshResourceStore({
     }
     const template = await record.promise;
     record.template = template;
+    if (disposed) {
+      disposeTemplateRecord(record);
+      throw new Error('verified mesh resource store is disposed');
+    }
     if (record.refs === 0) {
       const idleIndex = idleTemplateKeys.indexOf(key);
       if (idleIndex >= 0) idleTemplateKeys.splice(idleIndex, 1);
@@ -1535,6 +1559,7 @@ export function createVerifiedMeshResourceStore({
   }
 
   function releaseTemplate(descriptor) {
+    if (disposed) return false;
     const key = templateKey(descriptor);
     const record = templates.get(key);
     if (!record || record.refs <= 0) return false;
@@ -1546,11 +1571,7 @@ export function createVerifiedMeshResourceStore({
         const evicted = templates.get(evictedKey);
         if (!evicted || evicted.refs !== 0) continue;
         templates.delete(evictedKey);
-        if (evicted.template) {
-          disposeTemplate(evicted.template);
-        } else {
-          evicted.promise.then(disposeTemplate);
-        }
+        disposeTemplateRecord(evicted);
       }
     }
     return true;
@@ -1568,9 +1589,20 @@ export function createVerifiedMeshResourceStore({
     };
   }
 
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    for (const record of templates.values()) {
+      disposeTemplateRecord(record);
+    }
+    templates.clear();
+    idleTemplateKeys.length = 0;
+  }
+
   return {
     loadTemplate,
     releaseTemplate,
     diagnostics,
+    dispose,
   };
 }

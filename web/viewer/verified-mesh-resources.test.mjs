@@ -1045,6 +1045,7 @@ test('mesh template binds H3 KTX only through the verified profile store', async
     descriptor,
     materialProfile: 'h3-ai-ktx2-4k',
     profileTextureStore,
+    maximumIdleTemplates: 36,
   });
 
   await setup.store.loadTemplate(descriptor);
@@ -1062,5 +1063,12 @@ test('mesh template binds H3 KTX only through the verified profile store', async
     true,
   );
   assert.equal(setup.store.releaseTemplate(descriptor), true);
+  assert.equal(released.length, 0);
+  setup.store.dispose();
   assert.equal(released.length, 3);
+  assert.equal(setup.store.diagnostics().templates, 0);
+  await assert.rejects(
+    setup.store.loadTemplate(descriptor),
+    /disposed/,
+  );
 });
