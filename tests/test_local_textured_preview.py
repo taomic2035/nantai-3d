@@ -223,11 +223,20 @@ def test_local_blender_authors_float_corner_surface_color(
         "assert layer.domain == 'CORNER'\n"
         "colors = [tuple(row.color) for row in layer.data]\n"
         "assert len(colors) == 3\n"
-        "assert any(color[:3] != (1.0, 1.0, 1.0) for color in colors)\n"
-        "assert all(0.88 <= value <= 1.10 for color in colors for value in color[:3])\n"
-        "assert obj['nv_surface_color_mode'] == 'macro'\n"
-        "print('NANTAI_SURFACE_COLOR_OK', flush=True)\n",
-    )
+            "assert any(color[:3] != (1.0, 1.0, 1.0) for color in colors)\n"
+            "assert all(0.88 <= value <= 1.10 for color in colors for value in color[:3])\n"
+            "assert obj['nv_surface_color_mode'] == 'macro'\n"
+            "obj['nv_surface_detail_class'] = 'damp-patch'\n"
+            "request['surface_realism_plan']['macro_palettes'][0]['multipliers_q'] = (\n"
+            "    [[3605, 3605, 3605] for _ in range(256)]\n"
+            ")\n"
+            "ns['_apply_surface_color_attribute'](obj, request, runtime)\n"
+            "damp = [tuple(row.color) for row in layer.data]\n"
+            "assert len({color[:3] for color in damp}) > 1\n"
+            "assert all(0.88 <= value <= 1.10 for color in damp for value in color[:3])\n"
+            "assert obj['nv_surface_color_mode'] == 'damp'\n"
+            "print('NANTAI_SURFACE_COLOR_OK', flush=True)\n",
+        )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "NANTAI_SURFACE_COLOR_OK" in result.stdout
