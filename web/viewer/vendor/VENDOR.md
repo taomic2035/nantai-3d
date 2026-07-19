@@ -18,8 +18,15 @@ viewer) 在**无网络**时也能加载完整 3DGS 渲染, 而不是退回 DC po
 | `three/three.core.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.core.js | `eb077d2417f61d3e6d9264c317cabc4ea35769ed6b0ab533067292a550784c20` | 1403455 |
 | `three/addons/controls/OrbitControls.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/controls/OrbitControls.js | `b97879c748170baadeb3fb84cea1ffdf4674e283dc06042f34e2acb95a76042c` | 38703 |
 | `three/addons/loaders/GLTFLoader.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/loaders/GLTFLoader.js | `67ac5551fdafa6e349bd80c8f8e5e39c136d6b2fb1ad647db9abb21dc86f9e4a` | 114739 |
+| `three/addons/loaders/KTX2Loader.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/loaders/KTX2Loader.js | `c43052b95310199d50935bdc41fcd0fc347f25eac3b4f0245e6e4de1ef6e1d93` | 34635 |
+| `three/addons/libs/ktx-parse.module.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/ktx-parse.module.js | `f40c491f6c44dde511268121f778a0050e73b1a15fd844c1ae2c78c73213eafc` | 19932 |
+| `three/addons/libs/zstddec.module.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/zstddec.module.js | `5cbf818e842628a4464e748594a6deae18ceddda3c2f541e7b3a0ff5fc7611e2` | 39754 |
+| `three/addons/math/ColorSpaces.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/math/ColorSpaces.js | `cc35c01c793cd17ccded7bc8142abffd3ce0d60dd6de8d5d216983bd05aee262` | 4290 |
 | `three/addons/postprocessing/Pass.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/postprocessing/Pass.js | `444b409c235ead986893c472e720da1b779a56985c7d10b279c7944b52bd61c5` | 4218 |
 | `three/addons/utils/BufferGeometryUtils.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/utils/BufferGeometryUtils.js | `fda7e946b8e0b5ab39b779206589e7a1079a22eb24efb89d7223e03fdfb1f751` | 35539 |
+| `three/addons/utils/WorkerPool.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/utils/WorkerPool.js | `5ac7095fd566bc9ae48376055fd66edf27cb9ebbf9e1269dc206bfd4933ae9eb` | 3110 |
+| `three/examples/jsm/libs/basis/basis_transcoder.js` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/basis/basis_transcoder.js | `8478b5b6d6b74e7d3082b89f6417321d8d1dc0307f2b30d4484bb11b441696a1` | 57529 |
+| `three/examples/jsm/libs/basis/basis_transcoder.wasm` | https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/basis/basis_transcoder.wasm | `6cf17dc889352c42e9acf8897107978d127005fe3386c36a0e3845e27967630a` | 527333 |
 | `spark/spark.module.js` | https://sparkjs.dev/releases/spark/2.1.0/spark.module.js | `c0355a962f68a6de9b13df69f05b1aba3614d9aec43a4504975daeb349126a8a` | 5379614 |
 
 ## 许可证
@@ -32,7 +39,7 @@ viewer) 在**无网络**时也能加载完整 3DGS 渲染, 而不是退回 DC po
 完整许可文本分别保存在 `three/LICENSE` 和 `spark/LICENSE`，并由离线依赖测试锁定哈希。
 Spark npm 发布包的 LICENSE 无文末换行，vendoring 时只规范化为 POSIX 文本文末 LF，许可内容未改。
 
-## 模块图 (为什么正好这 5 个)
+## 模块图（为什么需要这组闭包）
 
 ```
 index.html importmap
@@ -43,6 +50,11 @@ index.html importmap
 main.js         import 'three', 'three/addons/controls/OrbitControls.js',
                 'three/addons/loaders/GLTFLoader.js'
 GLTFLoader.js   import 'three', '../utils/BufferGeometryUtils.js'
+KTX2Loader.js   import 'three', '../utils/WorkerPool.js',
+                '../libs/ktx-parse.module.js', '../libs/zstddec.module.js',
+                '../math/ColorSpaces.js'
+KTX2Loader      runtime fetch → examples/jsm/libs/basis/basis_transcoder.js
+                                + basis_transcoder.wasm
 splat-layer.mjs import('@sparkjsdev/spark')  (懒加载)
 OrbitControls.js import 'three'
 BufferGeometryUtils.js import 'three'
@@ -52,8 +64,9 @@ spark.module.js  import 'three', 'three/addons/postprocessing/Pass.js'
                  worker → Blob + createObjectURL 内联 (无外部 worker fetch)
 ```
 
-Spark 的 WASM 与 Web Worker 都内联在 `spark.module.js` 内 (data URI / blob URL), 因此没有额外
-二进制文件需要 vendoring。
+Spark 的 WASM 与 Web Worker 都内联在 `spark.module.js` 内（data URI / blob URL），因此没有
+额外二进制文件。KTX2Loader 不同：它在运行时读取 Basis transcoder JS/WASM，所以两者必须作为
+同版本独立文件 vendoring；离线门禁同时从 KTX2Loader 静态导入继续遍历其三个辅助模块。
 
 ## 更新 / 复现
 

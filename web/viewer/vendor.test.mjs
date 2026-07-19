@@ -16,8 +16,15 @@ const VENDORED = [
   'three/three.core.js',
   'three/addons/controls/OrbitControls.js',
   'three/addons/loaders/GLTFLoader.js',
+  'three/addons/loaders/KTX2Loader.js',
+  'three/addons/libs/ktx-parse.module.js',
+  'three/addons/libs/zstddec.module.js',
+  'three/addons/math/ColorSpaces.js',
   'three/addons/postprocessing/Pass.js',
   'three/addons/utils/BufferGeometryUtils.js',
+  'three/addons/utils/WorkerPool.js',
+  'three/examples/jsm/libs/basis/basis_transcoder.js',
+  'three/examples/jsm/libs/basis/basis_transcoder.wasm',
   'spark/spark.module.js',
 ];
 
@@ -75,7 +82,13 @@ test('importmap 无任何 CDN / 外部 URL', () => {
 test('模块图从入口起完全闭合在本地 (BFS, 无未 vendored 依赖)', () => {
   const imports = loadImportmap();
   // 入口: index.html 的 module 入口 main.js, 加上 splat-layer 懒加载的 spark 根。
-  const seeds = ['main.js', stripLeadingDot(imports['@sparkjsdev/spark'])];
+  const seeds = [
+    'main.js',
+    stripLeadingDot(imports['@sparkjsdev/spark']),
+    'vendor/three/addons/loaders/KTX2Loader.js',
+    'vendor/three/examples/jsm/libs/basis/basis_transcoder.js',
+    'vendor/three/examples/jsm/libs/basis/basis_transcoder.wasm',
+  ];
   const seen = new Set();
   const queue = [...seeds];
   while (queue.length) {
@@ -84,6 +97,7 @@ test('模块图从入口起完全闭合在本地 (BFS, 无未 vendored 依赖)',
     seen.add(rel);
     const abs = resolve(VIEWER_DIR, rel);
     assert.ok(existsSync(abs), `模块图指向缺失文件: ${rel}`);
+    if (!rel.endsWith('.js') && !rel.endsWith('.mjs')) continue;
     for (const spec of extractSpecifiers(readFileSync(abs, 'utf8'))) {
       const target = resolveSpecifier(spec, rel, imports);
       if (target) queue.push(target);
@@ -99,6 +113,7 @@ test('模块图从入口起完全闭合在本地 (BFS, 无未 vendored 依赖)',
 
 test('无 vendored 文件残留 `from "http..."` / `import("http...")` 外部依赖', () => {
   for (const f of VENDORED) {
+    if (!f.endsWith('.js')) continue;
     const src = read(`vendor/${f}`)
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/.*$/gm, '');
@@ -114,7 +129,7 @@ test('vendored 文件 sha256 与 VENDOR.md 锁定一致', () => {
   const doc = read('vendor/VENDOR.md');
   const rows = [
     ...doc.matchAll(
-      /\|\s*`([^`]+\.js)`\s*\|[^|]*\|\s*`([0-9a-f]{64})`\s*\|\s*(\d+)\s*\|/g,
+      /\|\s*`([^`]+\.(?:js|wasm))`\s*\|[^|]*\|\s*`([0-9a-f]{64})`\s*\|\s*(\d+)\s*\|/g,
     ),
   ];
   assert.equal(rows.length, VENDORED.length, `VENDOR.md 应锁定 ${VENDORED.length} 个文件`);
