@@ -48,6 +48,7 @@ from pipeline.synthetic_village.material_bundle import (
 
 if TYPE_CHECKING:
     from pipeline.synthetic_village.mesh_asset_bundle_v2 import MeshAssetBundleV2
+    from pipeline.synthetic_village.mesh_asset_bundle_v3 import MeshAssetBundleV3
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -202,6 +203,7 @@ class MeshAssetBundle(FrozenModel):
 MeshAssetBundleAny: TypeAlias = Union[
     MeshAssetBundle,
     "MeshAssetBundleV2",
+    "MeshAssetBundleV3",
 ]
 
 
@@ -693,6 +695,13 @@ def load_mesh_asset_bundle(root: Path) -> MeshAssetBundleAny:
 
     if schema == MESH_ASSET_BUNDLE_V2_SCHEMA:
         return load_mesh_asset_bundle_v2(bundle_root)
+    from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
+        MESH_ASSET_BUNDLE_V3_SCHEMA,
+        load_mesh_asset_bundle_v3,
+    )
+
+    if schema == MESH_ASSET_BUNDLE_V3_SCHEMA:
+        return load_mesh_asset_bundle_v3(bundle_root)
     raise MeshAssetBundleError(
         f"unsupported mesh asset bundle schema: {schema}",
     )
@@ -719,6 +728,10 @@ def read_verified_mesh_template_glb(
     if record is None:
         raise MeshAssetBundleError("mesh asset is not present in the verified bundle")
     descriptor = record.lod[str(lod)]
+    if not hasattr(descriptor, "glb_object_path"):
+        raise MeshAssetBundleError(
+            "mesh v3 LOD2 requires an explicit profile-aware reader",
+        )
     return _read_template_bytes(_real_directory(Path(root)), descriptor)
 
 

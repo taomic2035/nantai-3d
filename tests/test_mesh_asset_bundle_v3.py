@@ -14,12 +14,19 @@ from pipeline.synthetic_village.material_bundle_v2 import (
     H2_PROFILE_ID,
     H3_PROFILE_ID,
 )
+from pipeline.synthetic_village.mesh_asset_bundle import load_mesh_asset_bundle
 from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
     MESH_ASSET_BUNDLE_V3_SCHEMA,
     MeshAssetBundleV3Error,
     canonical_mesh_asset_bundle_v3_bytes,
     compose_mesh_asset_bundle_v3,
+    load_mesh_asset_bundle_v3,
+    prepare_mesh_asset_bundle_v3,
+    publish_mesh_asset_bundle_v3,
+    read_verified_mesh_texture_v3,
+    read_verified_mesh_variant_glb,
 )
+from tests.test_ktx2_toolchain import _fake_ktx2
 from tests.test_mesh_asset_bundle_v2 import _prepare_real_v2_fixture
 
 
@@ -57,6 +64,38 @@ def _material_v2(h2_material_bundle_id: str):
             H2_PROFILE_ID: SimpleNamespace(textures=()),
         },
     )
+
+
+def _material_v2_with_ktx_files(tmp_path, h2_material_bundle_id: str):
+    root = tmp_path / "ktx-pack"
+    (root / "objects").mkdir(parents=True)
+    textures = []
+    payloads = {}
+    for slot_id in H3_HERO_SLOTS:
+        for role in ("base_color", "normal", "orm"):
+            payload = _fake_ktx2(
+                transfer=2 if role == "base_color" else 1,
+                colour_model=166,
+            )
+            digest = hashlib.sha256(payload).hexdigest()
+            descriptor = SimpleNamespace(
+                slot_id=slot_id,
+                role=role,
+                object_path=f"objects/{digest}.ktx2",
+                sha256=digest,
+                bytes=len(payload),
+                width=4096,
+                height=4096,
+                media_type="image/ktx2",
+                transfer="srgb" if role == "base_color" else "linear",
+            )
+            textures.append(descriptor)
+            payloads[digest] = payload
+    for digest, payload in payloads.items():
+        (root / f"objects/{digest}.ktx2").write_bytes(payload)
+    material = _material_v2(h2_material_bundle_id)
+    material.profiles[H3_PROFILE_ID].textures = tuple(textures)
+    return material, root
 
 
 def _fallback_glbs(prepared):
@@ -139,3 +178,117 @@ def test_mesh_v3_rejects_wrong_h2_or_tampered_lod2_bytes(
     tampered[asset_id] = tampered[asset_id][:-1] + b"\x01"
     with pytest.raises(MeshAssetBundleV3Error, match="bytes|SHA"):
         compose_mesh_asset_bundle_v3(h2, tampered, materials)
+
+
+def test_mesh_v3_prepares_and_verifies_complete_file_closure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    h2_prepared, _objects = _prepare_real_v2_fixture(tmp_path / "h2")
+    h2 = h2_prepared.manifest
+    monkeypatch.setattr(
+        mesh_v3,
+        "ACCEPTED_H2_MESH_BUNDLE_ID",
+        h2.bundle_id,
+    )
+    material, ktx_root = _material_v2_with_ktx_files(
+        tmp_path,
+        h2.material_bundle_id,
+    )
+
+    prepared = prepare_mesh_asset_bundle_v3(
+        source_v2_bundle_root=h2_prepared.staging_root,
+        material_bundle_v2=material,
+        ktx2_root=ktx_root,
+        staging_root=tmp_path / "v3-staging",
+    )
+    loaded = load_mesh_asset_bundle_v3(prepared.staging_root)
+    assert loaded == prepared.manifest
+
+    for record in loaded.records:
+        for profile_id in (H3_PROFILE_ID, H2_PROFILE_ID):
+            payload = read_verified_mesh_variant_glb(
+                prepared.staging_root,
+                bundle=loaded,
+                asset_id=record.asset_id,
+                profile_id=profile_id,
+            )
+            assert geometry_fingerprint_glb(payload) == (record.lod["2"].geometry_fingerprint)
+
+    ktx_object = next(row for row in loaded.texture_objects if row.media_type == "image/ktx2")
+    ktx_payload = read_verified_mesh_texture_v3(
+        prepared.staging_root,
+        bundle=loaded,
+        sha256=ktx_object.sha256,
+        media_type="image/ktx2",
+    )
+    assert hashlib.sha256(ktx_payload).hexdigest() == ktx_object.sha256
+
+    ktx_path = prepared.staging_root / ktx_object.object_path
+    ktx_path.write_bytes(ktx_payload[:-1] + b"\x01")
+    with pytest.raises(MeshAssetBundleV3Error, match="texture|KTX"):
+        load_mesh_asset_bundle_v3(prepared.staging_root)
+
+
+def test_mesh_v3_publication_is_absent_only_and_reusable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    h2_prepared, _objects = _prepare_real_v2_fixture(tmp_path / "h2")
+    h2 = h2_prepared.manifest
+    monkeypatch.setattr(
+        mesh_v3,
+        "ACCEPTED_H2_MESH_BUNDLE_ID",
+        h2.bundle_id,
+    )
+    material, ktx_root = _material_v2_with_ktx_files(
+        tmp_path,
+        h2.material_bundle_id,
+    )
+    kwargs = {
+        "source_v2_bundle_root": h2_prepared.staging_root,
+        "material_bundle_v2": material,
+        "ktx2_root": ktx_root,
+        "publication_root": tmp_path / "published",
+        "work_root": tmp_path / "work",
+    }
+
+    first = publish_mesh_asset_bundle_v3(**kwargs)
+    second = publish_mesh_asset_bundle_v3(**kwargs)
+
+    assert first.reused is False
+    assert second.reused is True
+    assert second.bundle_id == first.bundle_id
+    assert second.final_directory == first.final_directory
+    assert load_mesh_asset_bundle_v3(first.final_directory).bundle_id == (first.bundle_id)
+    assert load_mesh_asset_bundle(first.final_directory).bundle_id == (first.bundle_id)
+
+
+def test_mesh_v3_loader_rejects_tampered_reused_lod0(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    h2_prepared, _objects = _prepare_real_v2_fixture(tmp_path / "h2")
+    h2 = h2_prepared.manifest
+    monkeypatch.setattr(
+        mesh_v3,
+        "ACCEPTED_H2_MESH_BUNDLE_ID",
+        h2.bundle_id,
+    )
+    material, ktx_root = _material_v2_with_ktx_files(
+        tmp_path,
+        h2.material_bundle_id,
+    )
+    prepared = prepare_mesh_asset_bundle_v3(
+        source_v2_bundle_root=h2_prepared.staging_root,
+        material_bundle_v2=material,
+        ktx2_root=ktx_root,
+        staging_root=tmp_path / "v3-staging",
+    )
+    descriptor = prepared.manifest.records[0].lod["0"]
+    path = prepared.staging_root / descriptor.glb_object_path
+    payload = path.read_bytes()
+    path.write_bytes(payload[:-1] + b"\x01")
+
+    with pytest.raises(MeshAssetBundleV3Error, match="GLB bytes"):
+        load_mesh_asset_bundle_v3(prepared.staging_root)

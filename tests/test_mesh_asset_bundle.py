@@ -320,7 +320,7 @@ def test_bundle_dispatch_rejects_unknown_schema(tmp_path: Path) -> None:
     payload["schema_version"] = "nantai.synthetic-village.mesh-asset-bundle.v3"
     manifest_path.write_bytes(_canonical(payload))
 
-    with pytest.raises(MeshAssetBundleError, match="unsupported"):
+    with pytest.raises(MeshAssetBundleError, match="manifest"):
         load_mesh_asset_bundle(bundle_root)
 
 
