@@ -286,6 +286,10 @@ def test_local_blender_normalizes_exported_surface_colors_to_float_vec4(
         "    (0.94, 1.00, 1.08, 1),\n"
         "    (1.02, 1.06, 1.10, 1),\n"
         "], 2)\n"
+        "add_surface('damp', [\n"
+        "    (3605 / 4096 + index / 255,) * 3 + (1,)\n"
+        "    for index in range(3)\n"
+        "], 4)\n"
         f"output = Path({str(output)!r})\n"
         "bpy.ops.export_scene.gltf(\n"
         "    filepath=str(output), export_format='GLB', export_apply=True,\n"
@@ -300,7 +304,7 @@ def test_local_blender_normalizes_exported_surface_colors_to_float_vec4(
         "    for primitive in mesh['primitives']\n"
         "    if 'COLOR_0' in primitive['attributes']\n"
         "]\n"
-        "assert len(color_accessors) == 2\n"
+        "assert len(color_accessors) == 3\n"
         "assert all(row['componentType'] == 5126 for row in color_accessors)\n"
         "assert all(row['type'] == 'VEC4' for row in color_accessors)\n"
         "assert all(row.get('normalized', False) is False for row in color_accessors)\n"
@@ -320,6 +324,11 @@ def test_local_blender_normalizes_exported_surface_colors_to_float_vec4(
         ")\n"
         "assert any(max(values) > 1.0 for values in decoded)\n"
         "assert any(all(value == 1.0 for value in values) for values in decoded)\n"
+        "assert any(\n"
+        "    max(value for index, value in enumerate(values) if index % 4 != 3) < 1.0\n"
+        "    and len({values[index:index + 3] for index in range(0, len(values), 4)}) > 1\n"
+        "    for values in decoded\n"
+        ")\n"
         "print('NANTAI_SURFACE_COLOR_GLB_OK', flush=True)\n",
     )
 

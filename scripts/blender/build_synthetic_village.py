@@ -2099,7 +2099,7 @@ def _apply_surface_color_attribute(obj, request, surface_runtime):
                     source_sha256=palette["source_sha256"],
                 )
                 if damp_detail:
-                    damp_variation = (loop.vertex_index % 7) / 4096.0
+                    damp_variation = (loop.vertex_index % 7) / 255.0
                     damp_minimum = 3605 / 4096.0
                     color = tuple(
                         min(
