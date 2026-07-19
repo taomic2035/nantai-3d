@@ -397,8 +397,10 @@ def test_h3_ktx2_pack_is_complete_content_addressed_and_idempotent(
     monkeypatch,
 ) -> None:
     authored_pack_id = "a" * 64
+    source_pack_id = "b" * 64
     authored = SimpleNamespace(
         pack_id=authored_pack_id,
+        source_pack_id=source_pack_id,
         synthetic=True,
         ai_generated=True,
         real_photo_textures=False,
@@ -488,6 +490,7 @@ def test_h3_ktx2_pack_is_complete_content_addressed_and_idempotent(
 
     assert pack.schema_version == H3_KTX2_PACK_SCHEMA
     assert pack.authored_pack_id == authored_pack_id
+    assert pack.source_pack_id == source_pack_id
     assert pack.synthetic is True
     assert pack.real_photo_textures is False
     assert tuple(record.slot_id for record in pack.records) == H3_HERO_SLOTS

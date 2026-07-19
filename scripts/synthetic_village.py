@@ -536,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
                     "real_photo_textures": manifest.real_photo_textures,
                     "record_count": len(manifest.records),
                     "schema_version": manifest.schema_version,
+                    "source_pack_id": manifest.source_pack_id,
                     "synthetic": manifest.synthetic,
                     "texture_count": len(manifest.records) * 3,
                     "tool_version": manifest.tool_version,

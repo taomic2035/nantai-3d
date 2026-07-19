@@ -307,6 +307,7 @@ class H3Ktx2MaterialRecord(FrozenModel):
 class H3Ktx2Pack(FrozenModel):
     schema_version: Literal["nantai.h3-ktx2-pack.v1"] = H3_KTX2_PACK_SCHEMA
     pack_id: Sha256
+    source_pack_id: Sha256
     authored_pack_id: Sha256
     synthetic: Literal[True] = True
     ai_generated: Literal[True] = True
@@ -995,6 +996,8 @@ def compile_h3_ktx2_pack(
         except KtxToolchainError:
             continue
         if (
+            existing.source_pack_id == authored.source_pack_id
+            and
             existing.authored_pack_id == authored.pack_id
             and existing.package_sha256 == receipt.package_sha256
             and existing.toktx_sha256 == receipt.toktx.sha256
@@ -1038,6 +1041,7 @@ def compile_h3_ktx2_pack(
             )
         identity = {
             "schema_version": H3_KTX2_PACK_SCHEMA,
+            "source_pack_id": authored.source_pack_id,
             "authored_pack_id": authored.pack_id,
             "synthetic": True,
             "ai_generated": True,

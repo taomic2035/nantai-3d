@@ -126,6 +126,7 @@ def test_build_h3_ktx2_prints_bounded_truth_summary(
     manifest = SimpleNamespace(
         schema_version="nantai.h3-ktx2-pack.v1",
         pack_id="c" * 64,
+        source_pack_id="a" * 64,
         authored_pack_id="b" * 64,
         synthetic=True,
         ai_generated=True,
@@ -167,6 +168,7 @@ def test_build_h3_ktx2_prints_bounded_truth_summary(
         "real_photo_textures": False,
         "record_count": 8,
         "schema_version": "nantai.h3-ktx2-pack.v1",
+        "source_pack_id": "a" * 64,
         "synthetic": True,
         "texture_count": 24,
         "tool_version": "4.4.2",
