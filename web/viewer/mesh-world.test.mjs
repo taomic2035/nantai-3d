@@ -17,7 +17,8 @@ function subject() {
   return meshWorld;
 }
 
-const BUNDLE_ID = '1'.repeat(64);
+const BUNDLE_ID =
+  '866c4c1cb8219c12ae0c20f176e65ac39311bfc69e36b360b03eaa6fa5977ee6';
 const MATERIAL_ID = '2'.repeat(64);
 const GLB_SHA = '3'.repeat(64);
 const MAP_SHA = '6'.repeat(64);
