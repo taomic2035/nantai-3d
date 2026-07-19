@@ -64,6 +64,12 @@ from pipeline.synthetic_village.elevated_topology import (
     canonical_elevated_topology_bytes,
 )
 from pipeline.synthetic_village.scene_plan import SEMANTIC_ORDER, build_scene_plan
+from pipeline.synthetic_village.surface_realism import (
+    LEGACY_SURFACE_PROFILE_ID,
+    SURFACE_ALGORITHM_V1,
+    SURFACE_PROFILE_V1,
+    canonical_surface_realism_plan_bytes,
+)
 from pipeline.synthetic_village.visual_sources import (
     VisualSourceManifest,
     VisualSourceRecord,
@@ -88,6 +94,7 @@ def _hermetic_canary_inputs(tmp_path_factory: pytest.TempPathFactory):
         Path("assets/default-resources/synthetic-mountain-village-v1.json"),
         Path("assets/default-resources/synthetic-mountain-village-visual-slots-v1.json"),
         Path("scripts/blender/build_synthetic_village.py"),
+        Path("scripts/blender/surface_realism_runtime.py"),
         Path("scripts/blender/render_synthetic_village.py"),
         Path("tools.lock.json"),
     ):
@@ -312,8 +319,11 @@ def test_textured_request_binds_exact_material_bundle_without_private_paths(
         if row.category == "material"
     )
     assert request.material_algorithm_id == "edge-feather-sobel-orm-v2"
+    assert request.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID
+    assert request.surface_realism_plan is None
     raw = canonical_textured_build_request_bytes(request)
     assert b"building_geometry_profile_id" not in raw
+    assert b"surface_realism" not in raw
     assert b".nantai-studio" not in raw
     assert str(Path.home()).encode() not in raw
     assert (
@@ -325,6 +335,53 @@ def test_textured_request_binds_exact_material_bundle_without_private_paths(
         ).hexdigest()
         == request.build_id
     )
+
+
+def test_textured_request_can_bind_content_addressed_surface_plan(
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+        surface_realism_profile_id=SURFACE_PROFILE_V1,
+    )
+
+    assert request.surface_realism_profile_id == SURFACE_PROFILE_V1
+    assert request.surface_realism_plan is not None
+    assert request.surface_realism_plan.algorithm_id == SURFACE_ALGORITHM_V1
+    assert request.surface_realism_plan.scene_seed == request.scene_plan.seed
+    assert request.surface_realism_plan.plan_sha256 == hashlib.sha256(
+        canonical_surface_realism_plan_bytes(request.surface_realism_plan),
+    ).hexdigest()
+    raw = canonical_textured_build_request_bytes(request)
+    assert b"source-consistent-multiscale-surface-v1" in raw
+    assert b".nantai-studio" not in raw
+    assert str(Path.home()).encode() not in raw
+
+
+def test_historical_textured_request_omits_surface_defaults(
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    payload = dict(request.__dict__)
+    payload.pop("build_id")
+    payload.pop("surface_realism_profile_id")
+    payload.pop("surface_realism_plan")
+    build_id = hashlib.sha256(canary._canonical_json_bytes(payload)).hexdigest()
+
+    historical = TexturedBuildRequest(build_id=build_id, **payload)
+    raw = canonical_textured_build_request_bytes(historical)
+
+    assert historical.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID
+    assert historical.surface_realism_plan is None
+    assert b"surface_realism" not in raw
 
 
 def test_builder_source_contains_verified_texture_uv_and_tangent_path() -> None:
@@ -382,6 +439,71 @@ def test_textured_report_preserves_unfulfilled_critical_slot_evidence(
 
     assert report.validation.canary_critical_slots_fulfilled is False
     assert report.geometry_usability == "preview-only"
+    assert report.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID
+    assert report.surface_realism is None
+    assert b"surface_realism" not in canonical_textured_build_report_bytes(report)
+
+
+def test_textured_report_requires_surface_evidence_to_match_request(
+    tmp_path: Path,
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+        surface_realism_profile_id=SURFACE_PROFILE_V1,
+    )
+    legacy_request = request.model_copy(
+        update={
+            "surface_realism_profile_id": LEGACY_SURFACE_PROFILE_ID,
+            "surface_realism_plan": None,
+        },
+    )
+    legacy_report = _valid_textured_report(legacy_request, tmp_path)
+    payload = dict(legacy_report.__dict__)
+    payload.update(
+        {
+            "build_id": request.build_id,
+            "surface_realism_profile_id": SURFACE_PROFILE_V1,
+            "surface_realism": {
+                "profile_id": SURFACE_PROFILE_V1,
+                "algorithm_id": SURFACE_ALGORITHM_V1,
+                "scene_seed": 20260715,
+                "plan_sha256": request.surface_realism_plan.plan_sha256,
+                "runtime_module_sha256": (
+                    request.surface_realism_plan.runtime_module_sha256
+                ),
+                "terrain_resolution": (176, 126),
+                "terrain_triangle_count": 43_750,
+                "path_interval_count": 1_452,
+                "path_triangle_count": 14_520,
+                "detail_counts": {
+                    "damp-patch": 12,
+                    "leaf-card": 48,
+                    "stone-fragment": 18,
+                    "rut-run": 12,
+                },
+                "detail_mesh_object_count": 18,
+                "color_min": 0.88,
+                "color_max": 1.10,
+                "colored_primitive_count": 4,
+                "white_primitive_count": 1,
+            },
+        },
+    )
+    validated = TexturedBuildReport.model_validate(payload)
+    assert validated.surface_realism is not None
+
+    payload["surface_realism"]["plan_sha256"] = "0" * 64
+    tampered = TexturedBuildReport.model_validate(payload)
+    with pytest.raises(CanaryBuildError, match="surface realism"):
+        verify_textured_build_report(
+            tampered,
+            request=request,
+            staging=tmp_path,
+        )
 
 
 def _rebuild_textured_payload(
@@ -390,6 +512,13 @@ def _rebuild_textured_payload(
 ) -> dict:
     candidate = request.model_copy(update=updates)
     payload = dict(candidate.__dict__)
+    for optional_field in (
+        "building_geometry_profile_id",
+        "surface_realism_profile_id",
+        "surface_realism_plan",
+    ):
+        if optional_field not in candidate.model_fields_set:
+            payload.pop(optional_field)
     payload["build_id"] = hashlib.sha256(
         canonical_textured_build_request_bytes(
             candidate,

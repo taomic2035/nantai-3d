@@ -52,6 +52,10 @@ RUNTIME_MODULE = (
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 MultiplierQ = Annotated[int, Field(ge=3604, le=4506)]
 DetailClass = Literal["stone-fragment", "leaf-card", "damp-patch"]
+SurfaceRealismProfileId = Literal[
+    "single-scale-derived-pbr-v0",
+    "source-consistent-multiscale-surface-v1",
+]
 
 
 class FrozenModel(BaseModel):
@@ -195,6 +199,36 @@ class SurfaceRealismPlan(FrozenModel):
         ).hexdigest()
         if actual != self.plan_sha256:
             raise ValueError("surface realism plan digest does not match")
+        return self
+
+
+class SurfaceRealismBuildEvidence(FrozenModel):
+    profile_id: Literal["source-consistent-multiscale-surface-v1"]
+    algorithm_id: Literal["source-palette-world-macro-path-detail-v1"]
+    scene_seed: Literal[20260715]
+    plan_sha256: Sha256
+    runtime_module_sha256: Sha256
+    terrain_resolution: tuple[Literal[176], Literal[126]]
+    terrain_triangle_count: Literal[43750]
+    path_interval_count: int = Field(ge=1452, le=1464)
+    path_triangle_count: int = Field(ge=14520, le=14640)
+    detail_counts: dict[str, int]
+    detail_mesh_object_count: Literal[18]
+    color_min: float = Field(ge=0.88, le=1.0, allow_inf_nan=False)
+    color_max: float = Field(ge=1.0, le=1.10, allow_inf_nan=False)
+    colored_primitive_count: int = Field(ge=1)
+    white_primitive_count: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _complete_bounded_evidence(self) -> Self:
+        if set(self.detail_counts) != set(MAX_DETAIL_COUNTS) or any(
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+            or count > MAX_DETAIL_COUNTS[detail_class]
+            for detail_class, count in self.detail_counts.items()
+        ):
+            raise ValueError("surface detail build evidence is incomplete or unbounded")
         return self
 
 

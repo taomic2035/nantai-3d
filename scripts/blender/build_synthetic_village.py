@@ -89,6 +89,22 @@ MAX_GLTF_TRIANGLES = 100_000
 MAX_TEXTURED_GLB_BYTES = 150_000_000
 EXPECTED_TEXTURED_GLB_PRIMITIVES = 559
 EXPECTED_BUILDING_MESH_OBJECTS = 421
+LEGACY_SURFACE_PROFILE_ID = "single-scale-derived-pbr-v0"
+SURFACE_PROFILE_V1 = "source-consistent-multiscale-surface-v1"
+SURFACE_ALGORITHM_V1 = "source-palette-world-macro-path-detail-v1"
+SURFACE_RUNTIME_NAME = "surface_realism_runtime.py"
+SURFACE_MACRO_SLOTS = (
+    "material-moss-stone-01",
+    "material-packed-earth-01",
+    "material-terrace-soil-01",
+    "material-wet-stone-paving-01",
+)
+SURFACE_DETAIL_CAPS = {
+    "stone-fragment": 128,
+    "leaf-card": 384,
+    "damp-patch": 72,
+    "rut-run": 96,
+}
 
 SEMANTIC_CLASSES = (
     "background",
@@ -786,6 +802,213 @@ def _validate_elevated_topology(topology, scene, source_hashes, semantic_registr
         raise RuntimeBuildError("elevated topology summary is invalid")
 
 
+def _validate_surface_realism_plan(request):
+    profile_id = request["surface_realism_profile_id"]
+    plan = request["surface_realism_plan"]
+    if profile_id != SURFACE_PROFILE_V1 or not isinstance(plan, dict):
+        raise RuntimeBuildError("surface realism profile or plan is invalid")
+    _expect_keys(
+        plan,
+        (
+            "schema_version",
+            "plan_sha256",
+            "profile_id",
+            "algorithm_id",
+            "scene_seed",
+            "runtime_module_sha256",
+            "terrain_spacing_m",
+            "terrain_period_m",
+            "ground_period_m",
+            "macro_palettes",
+            "path_plans",
+        ),
+        "surface_realism_plan",
+    )
+    unsigned = dict(plan)
+    unsigned.pop("plan_sha256")
+    runtime_path = Path(__file__).with_name(SURFACE_RUNTIME_NAME)
+    if (
+        plan["schema_version"]
+        != "nantai.synthetic-village.surface-realism-plan.v1"
+        or plan["profile_id"] != SURFACE_PROFILE_V1
+        or plan["algorithm_id"] != SURFACE_ALGORITHM_V1
+        or plan["scene_seed"] != request["scene_plan"].get("seed")
+        or plan["terrain_spacing_m"] != 4.0
+        or plan["terrain_period_m"] != 20.0
+        or plan["ground_period_m"] != 10.0
+        or not _is_sha256(plan["plan_sha256"])
+        or _sha256_bytes(_canonical_bytes(unsigned)) != plan["plan_sha256"]
+        or not _is_sha256(plan["runtime_module_sha256"])
+        or not runtime_path.is_file()
+        or _sha256_file(runtime_path) != plan["runtime_module_sha256"]
+    ):
+        raise RuntimeBuildError("surface realism plan identity is invalid")
+
+    material_inputs = request["material_input_registry"]
+    _expect_list(material_inputs, 24, "material_input_registry")
+    if any(
+        not isinstance(row, dict)
+        or "slot_id" not in row
+        or "source_sha256" not in row
+        for row in material_inputs
+    ):
+        raise RuntimeBuildError("surface material source registry is invalid")
+    material_sources = {
+        row["slot_id"]: row["source_sha256"]
+        for row in material_inputs
+    }
+    palettes = plan["macro_palettes"]
+    _expect_list(palettes, 4, "surface_realism_plan.macro_palettes")
+    if [row.get("slot_id") for row in palettes if isinstance(row, dict)] != list(
+        SURFACE_MACRO_SLOTS,
+    ):
+        raise RuntimeBuildError("surface realism macro palette slots are invalid")
+    for palette in palettes:
+        _expect_keys(
+            palette,
+            (
+                "slot_id",
+                "source_sha256",
+                "quantization_denominator",
+                "multipliers_q",
+                "palette_sha256",
+            ),
+            "surface macro palette",
+        )
+        multipliers = palette["multipliers_q"]
+        _expect_list(multipliers, 256, "surface macro palette multipliers")
+        if (
+            palette["source_sha256"]
+            != material_sources.get(palette["slot_id"])
+            or palette["quantization_denominator"] != 4096
+            or not _is_sha256(palette["palette_sha256"])
+            or _sha256_bytes(_canonical_bytes(multipliers))
+            != palette["palette_sha256"]
+            or any(
+                not isinstance(row, list)
+                or len(row) != 3
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 3604 <= value <= 4506
+                    for value in row
+                )
+                for row in multipliers
+            )
+        ):
+            raise RuntimeBuildError("surface macro palette evidence is invalid")
+
+    path_plans = plan["path_plans"]
+    _expect_list(path_plans, 6, "surface_realism_plan.path_plans")
+    expected_path_ids = [
+        f"path-network-{index:03d}"
+        for index in range(1, 7)
+    ]
+    if [
+        row.get("object_id")
+        for row in path_plans
+        if isinstance(row, dict)
+    ] != expected_path_ids:
+        raise RuntimeBuildError("surface path plan identities are invalid")
+    detail_counts = {key: 0 for key in SURFACE_DETAIL_CAPS}
+    for path_plan in path_plans:
+        _expect_keys(
+            path_plan,
+            (
+                "object_id",
+                "path_length_m",
+                "longitudinal_step_m",
+                "lateral_rail_count",
+                "details",
+                "rut_runs",
+            ),
+            "surface path plan",
+        )
+        path_length = path_plan["path_length_m"]
+        details = path_plan["details"]
+        rut_runs = path_plan["rut_runs"]
+        if (
+            not _is_finite_number(path_length)
+            or path_length <= 0
+            or path_plan["longitudinal_step_m"] != 1.0
+            or path_plan["lateral_rail_count"] != 6
+            or not isinstance(details, list)
+            or not isinstance(rut_runs, list)
+            or not details
+            or not rut_runs
+        ):
+            raise RuntimeBuildError("surface path plan dimensions are invalid")
+        classes = set()
+        for detail in details:
+            _expect_keys(
+                detail,
+                (
+                    "detail_id",
+                    "detail_class",
+                    "arc_length_m",
+                    "side_fraction",
+                    "scale",
+                    "yaw_deg",
+                ),
+                "surface path detail",
+            )
+            detail_class = detail["detail_class"]
+            classes.add(detail_class)
+            if (
+                detail_class not in {
+                    "stone-fragment",
+                    "leaf-card",
+                    "damp-patch",
+                }
+                or not isinstance(detail["detail_id"], str)
+                or not detail["detail_id"].startswith(
+                    f"{path_plan['object_id']}:",
+                )
+                or not _is_finite_number(detail["arc_length_m"])
+                or not 0 <= detail["arc_length_m"] <= path_length
+                or not _is_finite_number(detail["side_fraction"])
+                or not 0.68 <= abs(detail["side_fraction"]) <= 0.78
+                or not _is_finite_number(detail["scale"])
+                or not 0.65 <= detail["scale"] <= 0.90
+                or not _is_finite_number(detail["yaw_deg"])
+                or not 0 <= detail["yaw_deg"] < 360
+            ):
+                raise RuntimeBuildError("surface path detail is invalid")
+            detail_counts[detail_class] += 1
+        if classes != {"stone-fragment", "leaf-card", "damp-patch"}:
+            raise RuntimeBuildError("surface path detail classes are incomplete")
+        for rut in rut_runs:
+            _expect_keys(
+                rut,
+                (
+                    "rut_id",
+                    "start_arc_length_m",
+                    "length_m",
+                    "depth_m",
+                ),
+                "surface path rut",
+            )
+            if (
+                not isinstance(rut["rut_id"], str)
+                or not rut["rut_id"].startswith(f"{path_plan['object_id']}:rut:")
+                or not _is_finite_number(rut["start_arc_length_m"])
+                or not _is_finite_number(rut["length_m"])
+                or not _is_finite_number(rut["depth_m"])
+                or not 6 <= rut["length_m"] <= 18
+                or not 0.015 <= rut["depth_m"] <= 0.035
+                or rut["start_arc_length_m"] < 0
+                or rut["start_arc_length_m"] + rut["length_m"]
+                > path_length + 1e-9
+            ):
+                raise RuntimeBuildError("surface path rut is invalid")
+            detail_counts["rut-run"] += 1
+    if any(
+        count < 1 or count > SURFACE_DETAIL_CAPS[detail_class]
+        for detail_class, count in detail_counts.items()
+    ):
+        raise RuntimeBuildError("surface path detail counts exceed their bounds")
+
+
 def _validate_request(request, raw):
     local = request.get("schema_version") == LOCAL_TEXTURED_REQUEST_SCHEMA
     textured = request.get("schema_version") in {
@@ -828,6 +1051,18 @@ def _validate_request(request, raw):
         if not textured:
             raise RuntimeBuildError("legacy request cannot select a building geometry profile")
         top_keys = (*top_keys, "building_geometry_profile_id")
+    has_surface_profile = "surface_realism_profile_id" in request
+    has_surface_plan = "surface_realism_plan" in request
+    if has_surface_profile != has_surface_plan:
+        raise RuntimeBuildError("surface realism profile and plan must appear together")
+    if has_surface_profile:
+        if not textured:
+            raise RuntimeBuildError("legacy request cannot select a surface realism profile")
+        top_keys = (
+            *top_keys,
+            "surface_realism_profile_id",
+            "surface_realism_plan",
+        )
     # weather 是【可选】top key: 缺席 -> canary 14 键契约原样不变; 出现 -> 天气变体,
     # 该块进入 canonical payload 故 build_id 自动按天气分叉。
     if "weather" in request and not textured:
@@ -857,6 +1092,8 @@ def _validate_request(request, raw):
     without_identity.pop(identity_key)
     if _sha256_bytes(_canonical_bytes(without_identity)) != request[identity_key]:
         raise RuntimeBuildError("request content identity does not match canonical inputs")
+    if has_surface_profile:
+        _validate_surface_realism_plan(request)
 
     source_hashes = request["source_hashes"]
     source_keys = (

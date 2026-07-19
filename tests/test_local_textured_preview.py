@@ -44,6 +44,11 @@ from pipeline.synthetic_village.production_render import (
     canonical_local_production_render_request_bytes,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
+from pipeline.synthetic_village.surface_realism import (
+    LEGACY_SURFACE_PROFILE_ID,
+    SURFACE_PROFILE_V1,
+    canonical_surface_realism_plan_bytes,
+)
 from tests.synthetic_material_fixtures import publish_material_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +94,11 @@ def test_local_request_is_content_addressed_but_never_authoritative(
     assert request.tool_identity.platform == "macos-arm64"
     assert request.material_algorithm_id == "edge-feather-sobel-orm-v2"
     assert request.building_geometry_profile_id == BUILDING_GEOMETRY_V2
+    assert request.surface_realism_profile_id == SURFACE_PROFILE_V1
+    assert request.surface_realism_plan is not None
+    assert request.surface_realism_plan.plan_sha256 == hashlib.sha256(
+        canonical_surface_realism_plan_bytes(request.surface_realism_plan),
+    ).hexdigest()
     assert request.elevated_topology.scene_plan_sha256 == (
         request.source_hashes.scene_plan_sha256
     )
@@ -109,6 +119,7 @@ def test_local_request_is_content_addressed_but_never_authoritative(
         b'"building_geometry_profile_id": "four-sided-rural-building-v2"'
         in raw
     )
+    assert b"source-consistent-multiscale-surface-v1" in raw
     assert raw.endswith(b"\n")
     assert b".nantai-studio" not in raw
     assert str(Path.home()).encode() not in raw
@@ -395,6 +406,27 @@ def test_historical_local_request_omits_absent_geometry_profile(
 
     assert historical.building_geometry_profile_id == "front-facade-box-v1"
     assert b"building_geometry_profile_id" not in raw
+
+
+def test_historical_local_request_omits_absent_surface_defaults(
+    tmp_path: Path,
+) -> None:
+    request = _local_request(tmp_path)
+    payload = dict(request.__dict__)
+    payload.pop("preview_id")
+    payload.pop("surface_realism_profile_id")
+    payload.pop("surface_realism_plan")
+    historical_id = hashlib.sha256(canary._canonical_json_bytes(payload)).hexdigest()
+
+    historical = LocalTexturedPreviewRequest(
+        preview_id=historical_id,
+        **payload,
+    )
+    raw = canonical_local_textured_preview_request_bytes(historical)
+
+    assert historical.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID
+    assert historical.surface_realism_plan is None
+    assert b"surface_realism" not in raw
 
 
 def test_local_manifest_is_preview_only_and_not_real_photo_texture(

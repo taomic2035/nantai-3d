@@ -61,6 +61,15 @@ from pipeline.synthetic_village.scene_plan import (
     build_scene_plan,
     canonical_scene_plan_bytes,
 )
+from pipeline.synthetic_village.surface_realism import (
+    LEGACY_SURFACE_PROFILE_ID,
+    SURFACE_ALGORITHM_V1,
+    SURFACE_PROFILE_V1,
+    SurfaceRealismBuildEvidence,
+    SurfaceRealismPlan,
+    SurfaceRealismProfileId,
+    build_surface_realism_plan,
+)
 from pipeline.synthetic_village.visual_sources import (
     VISUAL_MANIFEST_NAME,
     canonical_manifest_bytes,
@@ -167,6 +176,10 @@ class LocalTexturedPreviewRequest(FrozenModel):
     material_bundle_id: Sha256
     material_algorithm_id: MaterialAlgorithmId
     building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
+    surface_realism_profile_id: SurfaceRealismProfileId = (
+        LEGACY_SURFACE_PROFILE_ID
+    )
+    surface_realism_plan: SurfaceRealismPlan | None = None
     material_input_registry: tuple[canary.MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -197,6 +210,17 @@ class LocalTexturedPreviewRequest(FrozenModel):
             for row in material_slots
         ):
             raise ValueError("local material slots do not match verified bundle sources")
+        if self.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID:
+            if self.surface_realism_plan is not None:
+                raise ValueError("legacy surface profile cannot carry a v1 plan")
+        elif (
+            self.surface_realism_profile_id != SURFACE_PROFILE_V1
+            or self.surface_realism_plan is None
+            or self.surface_realism_plan.profile_id
+            != self.surface_realism_profile_id
+            or self.surface_realism_plan.scene_seed != self.scene_plan.seed
+        ):
+            raise ValueError("local surface realism plan is absent or scene-mismatched")
         expected = hashlib.sha256(
             canonical_local_textured_preview_request_bytes(
                 self,
@@ -248,6 +272,10 @@ class LocalTexturedBuildReport(FrozenModel):
     material_algorithm_id: MaterialAlgorithmId = "mirror-sobel-orm-v1"
     building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
     building_geometry: BuildingGeometryEvidence | None = None
+    surface_realism_profile_id: SurfaceRealismProfileId = (
+        LEGACY_SURFACE_PROFILE_ID
+    )
+    surface_realism: SurfaceRealismBuildEvidence | None = None
     material_input_registry: tuple[canary.MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -322,6 +350,19 @@ class LocalTexturedBuildReport(FrozenModel):
                 raise ValueError("local v2 building geometry requires measured evidence")
         elif self.building_geometry is not None:
             raise ValueError("local v1 building geometry cannot claim v2 evidence")
+        if self.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID:
+            if self.surface_realism is not None:
+                raise ValueError("legacy surface profile cannot claim v1 evidence")
+        elif (
+            self.surface_realism_profile_id != SURFACE_PROFILE_V1
+            or self.surface_realism is None
+            or self.surface_realism.profile_id
+            != self.surface_realism_profile_id
+            or self.surface_realism.algorithm_id != SURFACE_ALGORITHM_V1
+        ):
+            raise ValueError(
+                "local surface realism report evidence is absent or mismatched",
+            )
         return self
 
 
@@ -391,6 +432,10 @@ def canonical_local_textured_preview_request_bytes(
     payload = request.model_dump(mode="json", exclude=exclude)
     if "building_geometry_profile_id" not in request.model_fields_set:
         payload.pop("building_geometry_profile_id")
+    if "surface_realism_profile_id" not in request.model_fields_set:
+        payload.pop("surface_realism_profile_id")
+    if "surface_realism_plan" not in request.model_fields_set:
+        payload.pop("surface_realism_plan")
     return _canonical_bytes(payload)
 
 
@@ -410,6 +455,10 @@ def canonical_local_textured_build_report_bytes(
         payload.pop("building_geometry_profile_id")
     if "building_geometry" not in report.model_fields_set:
         payload.pop("building_geometry")
+    if "surface_realism_profile_id" not in report.model_fields_set:
+        payload.pop("surface_realism_profile_id")
+    if "surface_realism" not in report.model_fields_set:
+        payload.pop("surface_realism")
     return _canonical_bytes(payload)
 
 
@@ -624,12 +673,29 @@ def verify_local_textured_build_report(
         "material_bundle_id",
         "material_algorithm_id",
         "building_geometry_profile_id",
+        "surface_realism_profile_id",
         "material_input_registry",
     ):
         if getattr(report, label) != getattr(request, label):
             raise LocalTexturedPreviewError(
                 f"local build report {label.replace('_', ' ')} was tampered",
             )
+    plan = request.surface_realism_plan
+    evidence = report.surface_realism
+    if (
+        request.surface_realism_profile_id == SURFACE_PROFILE_V1
+        and (
+            plan is None
+            or evidence is None
+            or evidence.plan_sha256 != plan.plan_sha256
+            or evidence.runtime_module_sha256 != plan.runtime_module_sha256
+            or evidence.scene_seed != plan.scene_seed
+            or evidence.algorithm_id != plan.algorithm_id
+        )
+    ):
+        raise LocalTexturedPreviewError(
+            "local build report surface realism evidence was tampered",
+        )
     for reported, requested in zip(
         report.camera_registry,
         request.camera_plan.cameras,
@@ -1129,6 +1195,15 @@ def build_local_textured_preview_request(
         raise LocalTexturedPreviewError(
             "material bundle does not match the selected visual source pack",
         )
+    try:
+        surface_plan = build_surface_realism_plan(
+            active_scene,
+            bundle_root,
+        )
+    except (OSError, ValueError, ValidationError) as exc:
+        raise LocalTexturedPreviewError(
+            f"surface realism plan cannot be trusted: {exc}",
+        ) from exc
     semantics = canary._semantic_registry()
     materials = canary._material_registry(active_scene)
     objects = canary._object_registry(
@@ -1176,6 +1251,8 @@ def build_local_textured_preview_request(
         "material_bundle_id": bundle.bundle_id,
         "material_algorithm_id": bundle.algorithm_id,
         "building_geometry_profile_id": BUILDING_GEOMETRY_V2,
+        "surface_realism_profile_id": SURFACE_PROFILE_V1,
+        "surface_realism_plan": surface_plan,
         "material_input_registry": inputs,
     }
     preview_id = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
@@ -1221,6 +1298,7 @@ def _collect_local_input_snapshots(
         / "assets/default-resources/synthetic-mountain-village-visual-slots-v1.json",
         repo_root / "tools.lock.json",
         repo_root / "scripts/blender/build_synthetic_village.py",
+        repo_root / "scripts/blender/surface_realism_runtime.py",
         manifest_path,
         executable,
         *(visual_pack_root / row.object_path for row in manifest.records),

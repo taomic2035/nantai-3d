@@ -77,6 +77,15 @@ from pipeline.synthetic_village.scene_plan import (
     build_scene_plan,
     canonical_scene_plan_bytes,
 )
+from pipeline.synthetic_village.surface_realism import (
+    LEGACY_SURFACE_PROFILE_ID,
+    SURFACE_ALGORITHM_V1,
+    SURFACE_PROFILE_V1,
+    SurfaceRealismBuildEvidence,
+    SurfaceRealismPlan,
+    SurfaceRealismProfileId,
+    build_surface_realism_plan,
+)
 from pipeline.synthetic_village.tool_lock import (
     ToolInstallReceipt,
     load_tool_lock,
@@ -692,6 +701,10 @@ class TexturedBuildRequest(FrozenModel):
     material_bundle_id: Sha256
     material_algorithm_id: MaterialAlgorithmId
     building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
+    surface_realism_profile_id: SurfaceRealismProfileId = (
+        LEGACY_SURFACE_PROFILE_ID
+    )
+    surface_realism_plan: SurfaceRealismPlan | None = None
     material_input_registry: tuple[MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -725,6 +738,17 @@ class TexturedBuildRequest(FrozenModel):
             for item in material_slots
         ):
             raise ValueError("textured visual slots do not match material input sources")
+        if self.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID:
+            if self.surface_realism_plan is not None:
+                raise ValueError("legacy surface profile cannot carry a v1 plan")
+        elif (
+            self.surface_realism_profile_id != SURFACE_PROFILE_V1
+            or self.surface_realism_plan is None
+            or self.surface_realism_plan.profile_id
+            != self.surface_realism_profile_id
+            or self.surface_realism_plan.scene_seed != self.scene_plan.seed
+        ):
+            raise ValueError("surface realism plan is absent or scene-mismatched")
         expected_build_id = hashlib.sha256(
             canonical_textured_build_request_bytes(self, exclude_build_id=True),
         ).hexdigest()
@@ -1016,6 +1040,10 @@ class TexturedBuildReport(FrozenModel):
     material_algorithm_id: MaterialAlgorithmId = "mirror-sobel-orm-v1"
     building_geometry_profile_id: BuildingGeometryProfileId = BUILDING_GEOMETRY_V1
     building_geometry: BuildingGeometryEvidence | None = None
+    surface_realism_profile_id: SurfaceRealismProfileId = (
+        LEGACY_SURFACE_PROFILE_ID
+    )
+    surface_realism: SurfaceRealismBuildEvidence | None = None
     material_input_registry: tuple[MaterialInputRecord, ...] = Field(
         min_length=24,
         max_length=24,
@@ -1080,6 +1108,17 @@ class TexturedBuildReport(FrozenModel):
                 raise ValueError("v2 building geometry requires measured evidence")
         elif self.building_geometry is not None:
             raise ValueError("v1 building geometry cannot claim v2 evidence")
+        if self.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID:
+            if self.surface_realism is not None:
+                raise ValueError("legacy surface profile cannot claim v1 evidence")
+        elif (
+            self.surface_realism_profile_id != SURFACE_PROFILE_V1
+            or self.surface_realism is None
+            or self.surface_realism.profile_id
+            != self.surface_realism_profile_id
+            or self.surface_realism.algorithm_id != SURFACE_ALGORITHM_V1
+        ):
+            raise ValueError("surface realism report evidence is absent or mismatched")
         return self
 
 
@@ -1405,6 +1444,10 @@ def canonical_textured_build_request_bytes(
     payload = request.model_dump(mode="json", exclude=exclude)
     if "building_geometry_profile_id" not in request.model_fields_set:
         payload.pop("building_geometry_profile_id")
+    if "surface_realism_profile_id" not in request.model_fields_set:
+        payload.pop("surface_realism_profile_id")
+    if "surface_realism_plan" not in request.model_fields_set:
+        payload.pop("surface_realism_plan")
     return _canonical_json_bytes(payload)
 
 
@@ -1420,6 +1463,10 @@ def canonical_textured_build_report_bytes(report: TexturedBuildReport) -> bytes:
         payload.pop("building_geometry_profile_id")
     if "building_geometry" not in report.model_fields_set:
         payload.pop("building_geometry")
+    if "surface_realism_profile_id" not in report.model_fields_set:
+        payload.pop("surface_realism_profile_id")
+    if "surface_realism" not in report.model_fields_set:
+        payload.pop("surface_realism")
     return _canonical_json_bytes(payload)
 
 
@@ -1733,11 +1780,26 @@ def verify_textured_build_report(
         "material_bundle_id",
         "material_algorithm_id",
         "building_geometry_profile_id",
+        "surface_realism_profile_id",
         "material_input_registry",
     ):
         if getattr(report, label) != getattr(request, label):
             raise CanaryBuildError(
                 f"textured build report {label.replace('_', ' ')} was tampered",
+            )
+    if request.surface_realism_profile_id == SURFACE_PROFILE_V1:
+        plan = request.surface_realism_plan
+        evidence = report.surface_realism
+        if (
+            plan is None
+            or evidence is None
+            or evidence.plan_sha256 != plan.plan_sha256
+            or evidence.runtime_module_sha256 != plan.runtime_module_sha256
+            or evidence.scene_seed != plan.scene_seed
+            or evidence.algorithm_id != plan.algorithm_id
+        ):
+            raise CanaryBuildError(
+                "textured build report surface realism evidence was tampered",
             )
     for reported, requested in zip(
         report.camera_registry,
@@ -2174,6 +2236,9 @@ def build_textured_canary_request(
     elevated_topology: ElevatedTopologyPlan | None = None,
     camera_plan: CameraPlan | None = None,
     visual_pack_root: Path | None = None,
+    surface_realism_profile_id: SurfaceRealismProfileId = (
+        LEGACY_SURFACE_PROFILE_ID
+    ),
 ) -> TexturedBuildRequest:
     """Build schema v2 only from a fully verified material bundle and source pack."""
 
@@ -2218,6 +2283,22 @@ def build_textured_canary_request(
     }
     if sources != {row.slot_id: row.source_sha256 for row in inputs}:
         raise CanaryBuildError("material bundle source hashes do not match the visual source pack")
+    if surface_realism_profile_id not in {
+        LEGACY_SURFACE_PROFILE_ID,
+        SURFACE_PROFILE_V1,
+    }:
+        raise CanaryBuildError("surface realism profile is unknown")
+    surface_plan = None
+    if surface_realism_profile_id == SURFACE_PROFILE_V1:
+        try:
+            surface_plan = build_surface_realism_plan(
+                active_scene,
+                bundle_root,
+            )
+        except (OSError, ValueError, ValidationError) as exc:
+            raise CanaryBuildError(
+                f"surface realism plan cannot be trusted: {exc}",
+            ) from exc
     lock = load_tool_lock(lock_path)
     receipt = verify_locked_install(
         lock.blender,
@@ -2268,6 +2349,9 @@ def build_textured_canary_request(
         "material_algorithm_id": bundle.algorithm_id,
         "material_input_registry": inputs,
     }
+    if surface_plan is not None:
+        payload["surface_realism_profile_id"] = surface_realism_profile_id
+        payload["surface_realism_plan"] = surface_plan
     build_id = hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
     return TexturedBuildRequest(build_id=build_id, **payload)
 
@@ -2384,7 +2468,12 @@ def _snapshot_regular_file(path: Path) -> _FileSnapshot:
     )
 
 
-def _collect_input_snapshots(repo_root: Path, visual_pack_root: Path) -> tuple[_FileSnapshot, ...]:
+def _collect_input_snapshots(
+    repo_root: Path,
+    visual_pack_root: Path,
+    *,
+    include_surface_runtime: bool = False,
+) -> tuple[_FileSnapshot, ...]:
     manifest_path = visual_pack_root / VISUAL_MANIFEST_NAME
     manifest = load_visual_source_manifest(manifest_path)
     paths = [
@@ -2397,6 +2486,10 @@ def _collect_input_snapshots(repo_root: Path, visual_pack_root: Path) -> tuple[_
         manifest_path,
         *(visual_pack_root / record.object_path for record in manifest.records),
     ]
+    if include_surface_runtime:
+        paths.append(
+            repo_root / "scripts/blender/surface_realism_runtime.py",
+        )
     return tuple(_snapshot_regular_file(path) for path in paths)
 
 
@@ -2968,6 +3061,9 @@ def run_textured_canary_build(
     visual_pack_root: Path | None = None,
     work_root: Path | None = None,
     timeout_seconds: int = DEFAULT_BUILD_TIMEOUT_SECONDS,
+    surface_realism_profile_id: SurfaceRealismProfileId = (
+        LEGACY_SURFACE_PROFILE_ID
+    ),
 ) -> TexturedCanaryBuildResult:
     """Build and publish a schema-v2 canary only after byte-level material audit."""
 
@@ -2994,7 +3090,13 @@ def run_textured_canary_build(
     staging: Path | None = None
     try:
         with ProjectFileLock(active_work_root / ".textured-canary-build.lock", role="writer"):
-            snapshots = _collect_input_snapshots(repo_root, pack_root)
+            snapshots = _collect_input_snapshots(
+                repo_root,
+                pack_root,
+                include_surface_runtime=(
+                    surface_realism_profile_id == SURFACE_PROFILE_V1
+                ),
+            )
             bundle_snapshots = _collect_material_bundle_snapshots(bundle_root)
             scene = build_scene_plan()
             request = build_textured_canary_request(
@@ -3003,6 +3105,7 @@ def run_textured_canary_build(
                 camera_plan=build_camera_plan(scene),
                 visual_pack_root=pack_root,
                 material_bundle_root=bundle_root,
+                surface_realism_profile_id=surface_realism_profile_id,
             )
             _verify_snapshots_unchanged((*snapshots, *bundle_snapshots))
             final_directory = active_work_root / request.build_id
