@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,21 @@ def test_builder_source_uses_proven_textured_canary_primitives() -> None:
         "build-report.json",
     ):
         assert token in source
+
+
+def test_builder_passes_complete_shared_uv_runtime_contract() -> None:
+    tree = ast.parse(BUILDER.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_apply_textured_uvs_and_tangents"
+    ]
+
+    assert len(calls) == 1
+    assert len(calls[0].args) == 3
+    assert not calls[0].keywords
 
 
 @pytest.mark.skipif(not BLENDER.is_file(), reason="local Mac Blender is absent")

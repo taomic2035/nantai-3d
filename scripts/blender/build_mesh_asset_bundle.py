@@ -670,7 +670,7 @@ def _build_prop(recipe, lod, root, registry, materials, collection):
     raise MeshTemplateRuntimeError("unknown prop recipe")
 
 
-def _build_asset(recipe, lod, materials):
+def _build_asset(recipe, lod, materials, material_request):
     _clear_geometry()
     collection = shared._new_collection(
         f"nv__template-{recipe['asset_id']}-lod{lod}",
@@ -697,7 +697,11 @@ def _build_asset(recipe, lod, materials):
     mesh_objects = tuple(child for child in root.children if child.type == "MESH")
     if not mesh_objects:
         raise MeshTemplateRuntimeError("mesh template contains no geometry")
-    _apply_textured_uvs_and_tangents(mesh_objects)
+    _apply_textured_uvs_and_tangents(
+        mesh_objects,
+        material_request,
+        None,
+    )
     bpy.context.view_layer.update()
     return root, mesh_objects
 
@@ -860,8 +864,9 @@ def _build(request, materials_path, staging):
             materials_path,
             request,
         )
+        material_request = _compatibility_material_request(request)
         materials = _create_textured_materials(
-            _compatibility_material_request(request),
+            material_request,
             material_paths,
         )
         artifacts = []
@@ -870,7 +875,12 @@ def _build(request, materials_path, staging):
             asset_directory.mkdir(parents=True)
             triangle_counts = []
             for lod in (0, 1, 2):
-                root, mesh_objects = _build_asset(recipe, lod, materials)
+                root, mesh_objects = _build_asset(
+                    recipe,
+                    lod,
+                    materials,
+                    material_request,
+                )
                 bounds = _measure_enu_bounds(mesh_objects)
                 relative = f"artifacts/{recipe['asset_id']}/lod{lod}.glb"
                 target = temporary / relative
