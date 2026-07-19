@@ -5009,7 +5009,10 @@ def _surface_realism_evidence(request, mesh_objects):
         for polygon in obj.data.polygons:
             colored = False
             for loop_index in polygon.loop_indices:
-                color = tuple(float(value) for value in layer.data[loop_index].color[:3])
+                color = tuple(
+                    round(float(value), 6)
+                    for value in layer.data[loop_index].color[:3]
+                )
                 if not all(math.isfinite(value) for value in color):
                     raise RuntimeBuildError("surface color evidence is non-finite")
                 all_channels.extend(color)
