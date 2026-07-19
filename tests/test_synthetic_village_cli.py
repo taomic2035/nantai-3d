@@ -61,6 +61,61 @@ def test_import_h3_material_sources_prints_bounded_truth_summary(
     }
 
 
+def test_author_h3_materials_prints_bounded_truth_summary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = []
+    final_root = tmp_path / "authored" / ("b" * 64)
+    manifest = SimpleNamespace(
+        schema_version="nantai.h3-authored-material-pack.v1",
+        pack_id="b" * 64,
+        source_pack_id="a" * 64,
+        synthetic=True,
+        ai_generated=True,
+        real_photo_textures=False,
+        records=tuple(range(8)),
+    )
+
+    def build_h3_authored_material_pack(
+        source_pack_root: Path,
+        output_root: Path,
+    ):
+        calls.append((source_pack_root, output_root))
+        return SimpleNamespace(root=final_root, manifest=manifest)
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_build_h3_authored_material_pack",
+        lambda: build_h3_authored_material_pack,
+    )
+
+    assert synthetic_village_cli.main(
+        [
+            "author-h3-materials",
+            "--source-pack-root",
+            str(tmp_path / "sources"),
+            "--output-root",
+            str(tmp_path / "authored"),
+        ],
+    ) == 0
+
+    assert calls == [
+        (tmp_path / "sources", tmp_path / "authored"),
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "ai_generated": True,
+        "output_root": str(final_root),
+        "pack_id": "b" * 64,
+        "real_photo_textures": False,
+        "record_count": 8,
+        "schema_version": "nantai.h3-authored-material-pack.v1",
+        "source_pack_id": "a" * 64,
+        "synthetic": True,
+    }
+
+
 def test_build_materials_prints_one_stable_json_object(
     tmp_path: Path,
     monkeypatch,

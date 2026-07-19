@@ -46,6 +46,16 @@ def _prepare_h3_source_pack():
     return prepare_h3_source_pack
 
 
+def _build_h3_authored_material_pack():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.h3_material_authoring import (
+        build_h3_authored_material_pack,
+    )
+
+    return build_h3_authored_material_pack
+
+
 def _publish_material_bundle():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -193,6 +203,23 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     import_h3_sources.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+    )
+    author_h3_materials = commands.add_parser(
+        "author-h3-materials",
+        help=(
+            "Derive deterministic seamless 4096 masters and heuristic PBR "
+            "maps from one verified H3 source pack."
+        ),
+    )
+    author_h3_materials.add_argument(
+        "--source-pack-root",
+        type=Path,
+        required=True,
+    )
+    author_h3_materials.add_argument(
         "--output-root",
         type=Path,
         required=True,
@@ -440,6 +467,29 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "ai_generated": manifest.ai_generated,
                     "output_root": str(prepared.root),
+                    "real_photo_textures": manifest.real_photo_textures,
+                    "record_count": len(manifest.records),
+                    "schema_version": manifest.schema_version,
+                    "source_pack_id": manifest.source_pack_id,
+                    "synthetic": manifest.synthetic,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "author-h3-materials":
+        prepared = _build_h3_authored_material_pack()(
+            args.source_pack_root,
+            args.output_root,
+        )
+        manifest = prepared.manifest
+        print(
+            json.dumps(
+                {
+                    "ai_generated": manifest.ai_generated,
+                    "output_root": str(prepared.root),
+                    "pack_id": manifest.pack_id,
                     "real_photo_textures": manifest.real_photo_textures,
                     "record_count": len(manifest.records),
                     "schema_version": manifest.schema_version,
