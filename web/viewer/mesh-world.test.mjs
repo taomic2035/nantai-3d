@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 let meshWorld;
@@ -20,6 +21,10 @@ function subject() {
 const BUNDLE_ID =
   '866c4c1cb8219c12ae0c20f176e65ac39311bfc69e36b360b03eaa6fa5977ee6';
 const MATERIAL_ID = '2'.repeat(64);
+const MESH_V3_ID = 'a'.repeat(64);
+const MATERIAL_V2_ID = 'b'.repeat(64);
+const H3_PROFILE_ID = 'h3-ai-ktx2-4k';
+const H2_PROFILE_ID = 'h2-png-1k-fallback';
 const GLB_SHA = '3'.repeat(64);
 const MAP_SHA = '6'.repeat(64);
 const NORMAL_SHA = '7'.repeat(64);
@@ -31,6 +36,32 @@ const TERRAIN_MATERIAL_SLOTS = [
   'material-moss-stone-01',
   'material-packed-earth-01',
   'material-terrace-soil-01',
+];
+const MATERIAL_SLOTS = [
+  'material-aged-metal-01',
+  'material-bamboo-leaf-01',
+  'material-bamboo-stem-01',
+  'material-broadleaf-bark-01',
+  'material-broadleaf-canopy-01',
+  'material-clay-brick-01',
+  'material-creek-rock-01',
+  'material-dark-timber-01',
+  'material-dry-stone-wall-01',
+  'material-fieldstone-01',
+  'material-gray-roof-tile-01',
+  'material-moss-stone-01',
+  'material-orchard-bark-01',
+  'material-orchard-leaf-01',
+  'material-packed-earth-01',
+  'material-pale-plaster-01',
+  'material-rammed-earth-01',
+  'material-rice-paddy-water-01',
+  'material-shallow-water-01',
+  'material-terrace-soil-01',
+  'material-vegetable-leaf-01',
+  'material-weathered-timber-01',
+  'material-wet-stone-paving-01',
+  'material-woven-bamboo-01',
 ];
 const WORLD = {
   mesh_grid: {
@@ -187,6 +218,140 @@ function runtimeV2(lod = 2) {
   return payload;
 }
 
+function digest(label) {
+  return createHash('sha256').update(label).digest('hex');
+}
+
+function profileTexture(
+  profileId,
+  slotId,
+  role,
+  {
+    namespace = 'surface',
+    mediaType = profileId === H3_PROFILE_ID
+      ? 'image/ktx2'
+      : 'image/png',
+  } = {},
+) {
+  const sha = digest(`${namespace}:${profileId}:${slotId}:${role}`);
+  const extension = mediaType === 'image/ktx2' ? 'ktx2' : 'png';
+  return {
+    url: (
+      `/api/world/mesh-textures/${MESH_V3_ID}/${profileId}/`
+      + `${sha}.${extension}`
+    ),
+    sha256: sha,
+    bytes: 2048,
+    width: profileId === H3_PROFILE_ID ? 4096 : 1024,
+    height: profileId === H3_PROFILE_ID ? 4096 : 1024,
+    media_type: mediaType,
+    role,
+    transfer: role === 'base_color' ? 'srgb' : 'linear',
+    material_slot_id: slotId,
+  };
+}
+
+function runtimeV3Profile(profileId) {
+  const dependencies = ['base_color', 'normal', 'orm'].map((role) => (
+    profileTexture(
+      profileId,
+      'material-fieldstone-01',
+      role,
+      { namespace: 'mesh' },
+    )
+  ));
+  return {
+    profile_id: profileId,
+    asset_urls: [{
+      profile_id: profileId,
+      asset_id: 'house_wood_01',
+      lod: 2,
+      url: (
+        `/api/world/mesh-assets/${MESH_V3_ID}/${profileId}/`
+        + 'house_wood_01/lod2.glb'
+      ),
+      glb_sha256: digest(`glb:${profileId}`),
+      glb_bytes: 8192,
+      geometry_fingerprint: digest('shared-geometry'),
+      texture_dependencies: dependencies,
+    }],
+    textures: MATERIAL_SLOTS.flatMap((slotId) => (
+      ['base_color', 'normal', 'orm'].map((role) => (
+        profileTexture(profileId, slotId, role)
+      ))
+    )),
+  };
+}
+
+const WORLD_V3 = {
+  mesh_grid: {
+    runtime_schema: 'nantai.synthetic-village.mesh-chunk-runtime.v3',
+    on_demand: true,
+    url_template: '/api/world/mesh-chunk/{x}/{y}.json',
+    asset_url_template: (
+      '/api/world/mesh-assets/{bundle_id}/{profile_id}/'
+      + '{asset_id}/lod{lod}.glb'
+    ),
+    texture_url_template: (
+      '/api/world/mesh-textures/{bundle_id}/{profile_id}/'
+      + '{sha256}.{extension}'
+    ),
+    world_seed: 42,
+    layout_engine: 'mock',
+    terrain_algorithm_id: TERRAIN_ALGORITHM_ID,
+    source_mesh_asset_bundle_id: BUNDLE_ID,
+    mesh_asset_bundle_id: MESH_V3_ID,
+    fallback_material_bundle_id: MATERIAL_ID,
+    material_bundle_id: MATERIAL_V2_ID,
+  },
+};
+
+function runtimeV3() {
+  const source = runtimeV2(2);
+  const h2 = runtimeV3Profile(H2_PROFILE_ID);
+  const h3 = runtimeV3Profile(H3_PROFILE_ID);
+  const predicted = [
+    ...h3.textures,
+    ...h3.asset_urls.flatMap((asset) => asset.texture_dependencies),
+  ].reduce(
+    (sum, descriptor) => (
+      descriptor.media_type === 'image/ktx2'
+        ? sum + descriptor.bytes
+        : sum
+    ),
+    0,
+  );
+  return {
+    schema_version: 'nantai.synthetic-village.mesh-chunk-runtime.v3',
+    chunk: source.chunk,
+    source_mesh_asset_bundle_id: BUNDLE_ID,
+    mesh_asset_bundle_id: MESH_V3_ID,
+    material_bundle_id: MATERIAL_V2_ID,
+    fallback_material_bundle_id: MATERIAL_ID,
+    primary_profile_id: H3_PROFILE_ID,
+    fallback_profile_id: H2_PROFILE_ID,
+    predicted_compressed_texture_bytes: predicted,
+    profiles: {
+      [H2_PROFILE_ID]: h2,
+      [H3_PROFILE_ID]: h3,
+    },
+    surface_materials: source.surface_materials.map((material) => ({
+      slot_id: material.slot_id,
+      uv_policy: material.uv_policy,
+      nominal_tile_m: material.nominal_tile_m,
+      normal_strength: material.normal_strength,
+      roughness_center: material.roughness_center,
+      metallic: material.metallic,
+    })),
+    synthetic: true,
+    ai_generated: true,
+    real_photo_textures: false,
+    geometry_usability: 'preview-only',
+    metric_alignment: false,
+    verification_level: 'L0',
+  };
+}
+
 test('mesh chunk URL is available only for the exact fail-closed grid contract', () => {
   const { meshWorldAvailable, resolveMeshChunkUrl } = subject();
 
@@ -225,6 +390,109 @@ test('plain viewer prefers the arbitrary-coordinate textured mesh world', () => 
     }),
     'mesh',
   );
+});
+
+test('runtime v3 validates both profiles but resolves only the frozen closure', () => {
+  const {
+    meshWorldAvailable,
+    resolveMeshChunkUrl,
+    resolveSelectedProfile,
+    validateMeshChunkRuntime,
+  } = subject();
+  const payload = runtimeV3();
+
+  assert.equal(meshWorldAvailable(WORLD_V3), true);
+  assert.equal(
+    resolveMeshChunkUrl(WORLD_V3, -1, 2, 2),
+    '/api/world/mesh-chunk/-1/2.json?lod=2',
+  );
+  assert.throws(
+    () => resolveSelectedProfile(payload, H3_PROFILE_ID),
+    /profile/,
+  );
+  assert.equal(validateMeshChunkRuntime(payload, {
+    worldManifest: WORLD_V3,
+    chunkX: -1,
+    chunkY: 2,
+    lod: 2,
+  }), payload);
+
+  const h3 = resolveSelectedProfile(payload, H3_PROFILE_ID);
+  const h2 = resolveSelectedProfile(payload, H2_PROFILE_ID);
+  const h3Json = JSON.stringify(h3);
+  const h2Json = JSON.stringify(h2);
+  assert.equal(h3.profile_id, H3_PROFILE_ID);
+  assert.equal(h2.profile_id, H2_PROFILE_ID);
+  assert.equal(h3Json.includes(`/${H2_PROFILE_ID}/`), false);
+  assert.equal(h2Json.includes(`/${H3_PROFILE_ID}/`), false);
+  assert.ok(h3.textures.some((row) => row.media_type === 'image/ktx2'));
+  assert.ok(h2.textures.every((row) => row.media_type === 'image/png'));
+  assert.ok(
+    h2.asset_urls
+      .flatMap((asset) => asset.texture_dependencies)
+      .every((row) => row.media_type === 'image/png'),
+  );
+  assert.equal(
+    h3.predicted_compressed_texture_bytes,
+    payload.predicted_compressed_texture_bytes,
+  );
+  assert.equal(h2.predicted_compressed_texture_bytes, 0);
+  assert.throws(() => {
+    h3.profile_id = H2_PROFILE_ID;
+  }, TypeError);
+  assert.throws(() => {
+    payload.profiles[H3_PROFILE_ID].textures[0].bytes += 1;
+  }, TypeError);
+  assert.throws(
+    () => resolveSelectedProfile(payload, 'unknown-profile'),
+    /profile/,
+  );
+});
+
+test('runtime v3 rejects mixed profiles, topology drift, truth drift, and budget drift', () => {
+  const { validateMeshChunkRuntime } = subject();
+  const cases = {
+    'missing counterpart': (payload) => {
+      delete payload.profiles[H2_PROFILE_ID];
+    },
+    'cross-profile route': (payload) => {
+      payload.profiles[H3_PROFILE_ID].asset_urls[0].url =
+        payload.profiles[H2_PROFILE_ID].asset_urls[0].url;
+    },
+    'geometry fingerprint drift': (payload) => {
+      payload.profiles[H3_PROFILE_ID]
+        .asset_urls[0].geometry_fingerprint = digest('drifted-geometry');
+    },
+    'H2 KTX2 drift': (payload) => {
+      const descriptor = payload.profiles[H2_PROFILE_ID].textures[0];
+      descriptor.media_type = 'image/ktx2';
+      descriptor.url = descriptor.url.replace(/\.png$/, '.ktx2');
+    },
+    'compressed budget drift': (payload) => {
+      payload.predicted_compressed_texture_bytes += 1;
+    },
+    'real-photo truth drift': (payload) => {
+      payload.real_photo_textures = true;
+    },
+    'unknown runtime field': (payload) => {
+      payload.local_path = '/private/runtime.json';
+    },
+  };
+
+  for (const [label, mutate] of Object.entries(cases)) {
+    const payload = runtimeV3();
+    mutate(payload);
+    assert.throws(
+      () => validateMeshChunkRuntime(payload, {
+        worldManifest: WORLD_V3,
+        chunkX: -1,
+        chunkY: 2,
+        lod: 2,
+      }),
+      /v3|profile|geometry|texture|budget|provenance|contract/,
+      label,
+    );
+  }
 });
 
 test('explicit presentation and model-preview review links keep priority', () => {
