@@ -17,6 +17,15 @@ DEFAULT_MATERIAL_PUBLICATION_ROOT = (
 DEFAULT_MATERIAL_WORK_ROOT = (
     ROOT / ".nantai-studio/synthetic-village/hybrid-v3/material-work"
 )
+DEFAULT_NEAR_MESH_WORK_ROOT = (
+    ROOT / ".nantai-studio/synthetic-village/hybrid-v3/mesh-near-v2-work"
+)
+DEFAULT_MESH_ASSET_PUBLICATION_ROOT = (
+    ROOT / ".nantai-studio/synthetic-village/hybrid-v3/mesh-asset-bundles"
+)
+DEFAULT_MACOS_BLENDER = Path(
+    "/Applications/Blender.app/Contents/MacOS/Blender",
+)
 
 
 def _import_visual_source():
@@ -33,6 +42,16 @@ def _publish_material_bundle():
     from pipeline.synthetic_village.material_bundle import publish_material_bundle
 
     return publish_material_bundle
+
+
+def _run_near_mesh_asset_build():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.mesh_asset_build_v2 import (
+        run_mesh_asset_build_v2,
+    )
+
+    return run_mesh_asset_build_v2
 
 
 def _revise_visual_source_pack():
@@ -181,6 +200,43 @@ def _parser() -> argparse.ArgumentParser:
         "--work-root",
         type=Path,
         default=DEFAULT_MATERIAL_WORK_ROOT,
+    )
+    build_near_mesh_assets = commands.add_parser(
+        "build-near-mesh-assets",
+        help=(
+            "Rebuild only the eleven synthetic near LOD2 meshes, reuse exact "
+            "v1 LOD0/1 objects, and privately publish one audited v2 bundle."
+        ),
+    )
+    build_near_mesh_assets.add_argument(
+        "--source-v1-bundle-root",
+        type=Path,
+        required=True,
+    )
+    build_near_mesh_assets.add_argument(
+        "--material-bundle-root",
+        type=Path,
+        required=True,
+    )
+    build_near_mesh_assets.add_argument(
+        "--blender",
+        type=Path,
+        default=DEFAULT_MACOS_BLENDER,
+    )
+    build_near_mesh_assets.add_argument(
+        "--work-root",
+        type=Path,
+        default=DEFAULT_NEAR_MESH_WORK_ROOT,
+    )
+    build_near_mesh_assets.add_argument(
+        "--publication-root",
+        type=Path,
+        default=DEFAULT_MESH_ASSET_PUBLICATION_ROOT,
+    )
+    build_near_mesh_assets.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=60 * 60,
     )
     build_canary = commands.add_parser(
         "build-canary",
@@ -383,6 +439,37 @@ def main(argv: list[str] | None = None) -> int:
                     "final_directory": str(result.final_directory),
                     "record_count": result.record_count,
                     "reused": result.reused,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "build-near-mesh-assets":
+        result = _run_near_mesh_asset_build()(
+            repo_root=ROOT,
+            source_v1_bundle_root=args.source_v1_bundle_root,
+            material_bundle_root=args.material_bundle_root,
+            blender_executable=args.blender,
+            builder_script=(
+                ROOT / "scripts/blender/build_mesh_asset_bundle_v2.py"
+            ),
+            work_root=args.work_root,
+            publication_root=args.publication_root,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(
+            json.dumps(
+                {
+                    "build_id": result.request.build_id,
+                    "bundle_id": result.bundle.bundle_id,
+                    "bundle_root": str(result.bundle.final_directory),
+                    "lod2_asset_count": len(result.report.artifacts),
+                    "reused_lod_count": len(result.request.reused_lods),
+                    "synthetic": result.request.synthetic,
+                    "verification_level": (
+                        result.request.verification_level
+                    ),
                 },
                 ensure_ascii=False,
                 sort_keys=True,

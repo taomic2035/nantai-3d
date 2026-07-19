@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from pipeline.synthetic_village.material_bundle import MaterialBundleResult
+from pipeline.synthetic_village.mesh_asset_bundle import MeshAssetBundleResult
 from scripts import synthetic_village as synthetic_village_cli
 
 
@@ -56,4 +58,80 @@ def test_build_materials_prints_one_stable_json_object(
         "final_directory": str(final_directory),
         "record_count": 24,
         "reused": False,
+    }
+
+
+def test_build_near_mesh_assets_prints_honest_stable_summary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    final_directory = tmp_path / "published" / ("d" * 64)
+    calls = []
+
+    def run_mesh_asset_build_v2(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            request=SimpleNamespace(
+                build_id="c" * 64,
+                synthetic=True,
+                verification_level="L0",
+                reused_lods=tuple(range(22)),
+            ),
+            report=SimpleNamespace(artifacts=tuple(range(11))),
+            bundle=MeshAssetBundleResult(
+                bundle_id="d" * 64,
+                final_directory=final_directory,
+                record_count=11,
+                reused=False,
+            ),
+        )
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_near_mesh_asset_build",
+        lambda: run_mesh_asset_build_v2,
+    )
+
+    assert synthetic_village_cli.main(
+        [
+            "build-near-mesh-assets",
+            "--source-v1-bundle-root",
+            str(tmp_path / "v1"),
+            "--material-bundle-root",
+            str(tmp_path / "materials"),
+            "--blender",
+            str(tmp_path / "Blender"),
+            "--work-root",
+            str(tmp_path / "work"),
+            "--publication-root",
+            str(tmp_path / "published"),
+            "--timeout-seconds",
+            "123",
+        ],
+    ) == 0
+
+    assert calls == [
+        {
+            "repo_root": synthetic_village_cli.ROOT,
+            "source_v1_bundle_root": tmp_path / "v1",
+            "material_bundle_root": tmp_path / "materials",
+            "blender_executable": tmp_path / "Blender",
+            "builder_script": (
+                synthetic_village_cli.ROOT
+                / "scripts/blender/build_mesh_asset_bundle_v2.py"
+            ),
+            "work_root": tmp_path / "work",
+            "publication_root": tmp_path / "published",
+            "timeout_seconds": 123,
+        },
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "build_id": "c" * 64,
+        "bundle_id": "d" * 64,
+        "bundle_root": str(final_directory),
+        "lod2_asset_count": 11,
+        "reused_lod_count": 22,
+        "synthetic": True,
+        "verification_level": "L0",
     }
