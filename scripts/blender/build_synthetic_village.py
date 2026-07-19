@@ -90,6 +90,10 @@ MAX_GLTF_TRIANGLES = 100_000
 MAX_TEXTURED_GLB_BYTES = 150_000_000
 EXPECTED_TEXTURED_GLB_PRIMITIVES = 559
 EXPECTED_BUILDING_MESH_OBJECTS = 421
+MAX_SURFACE_GLTF_TRIANGLES = 125_000
+MAX_SURFACE_GLB_BYTES = 160_000_000
+EXPECTED_SURFACE_GLB_PRIMITIVES = 577
+EXPECTED_SURFACE_DETAIL_MESH_OBJECTS = 18
 LEGACY_SURFACE_PROFILE_ID = "single-scale-derived-pbr-v0"
 SURFACE_PROFILE_V1 = "source-consistent-multiscale-surface-v1"
 SURFACE_ALGORITHM_V1 = "source-palette-world-macro-path-detail-v1"
@@ -2068,6 +2072,7 @@ def _apply_surface_color_attribute(obj, request, surface_runtime):
     macro_object = _surface_object_uses_macro_color(obj)
     used_palettes = {}
     used_macro = False
+    damp_detail = obj.get("nv_surface_detail_class") == "damp-patch"
     for polygon in mesh.polygons:
         if polygon.material_index >= len(mesh.materials):
             raise RuntimeBuildError(f"surface material index is invalid: {obj.name}")
@@ -2093,11 +2098,18 @@ def _apply_surface_color_attribute(obj, request, surface_runtime):
                     scene_seed=request["surface_realism_plan"]["scene_seed"],
                     source_sha256=palette["source_sha256"],
                 )
+                if damp_detail:
+                    color = tuple(
+                        min(1.10, max(0.88, channel * 0.88))
+                        for channel in color[:3]
+                    ) + (1.0,)
                 used_macro = True
                 used_palettes[slot_id] = palette["palette_sha256"]
             color_layer.data[loop_index].color = color
     obj["nv_surface_realism_profile"] = SURFACE_PROFILE_V1
-    obj["nv_surface_color_mode"] = "macro" if used_macro else "white"
+    obj["nv_surface_color_mode"] = (
+        "damp" if used_macro and damp_detail else "macro" if used_macro else "white"
+    )
     obj["nv_surface_palette_sha256"] = json.dumps(
         used_palettes,
         sort_keys=True,
@@ -2570,6 +2582,133 @@ def _surface_rut_depth(path_plan, arc_length_m, side_fraction):
         edge_weight = edge_weight * edge_weight * (3.0 - 2.0 * edge_weight)
         depth = max(depth, run["depth_m"] * track_weight * edge_weight)
     return depth
+
+
+def _surface_detail_frame(points, width, detail, extent):
+    centerline = _resample_polyline_at_most(
+        points,
+        step_m=SURFACE_PATH_STEP_M,
+    )
+    arc_length_m = detail["arc_length_m"]
+    if (
+        not _is_finite_number(arc_length_m)
+        or arc_length_m < 0
+        or arc_length_m > centerline[-1][3] + 1e-6
+    ):
+        raise RuntimeBuildError("surface path detail arc length is invalid")
+    segment = len(centerline) - 2
+    for index in range(len(centerline) - 1):
+        if arc_length_m <= centerline[index + 1][3] + 1e-9:
+            segment = index
+            break
+    first = centerline[segment]
+    second = centerline[segment + 1]
+    span = second[3] - first[3]
+    fraction = min(1.0, max(0.0, (arc_length_m - first[3]) / span))
+    x_m = first[0] + (second[0] - first[0]) * fraction
+    y_m = first[1] + (second[1] - first[1]) * fraction
+    tangent = _segment_tangent(first, second)
+    normal = Vector((-tangent.y, tangent.x))
+    offset_m = detail["side_fraction"] * width / 2.0
+    x_m += normal.x * offset_m
+    y_m += normal.y * offset_m
+    return (
+        x_m,
+        y_m,
+        _terrain_height(x_m, y_m, extent) + 0.115,
+        tangent,
+        normal,
+    )
+
+
+def _add_leaf_diamond(assembler, center, scale, yaw_deg):
+    x_m, y_m, z_m = center
+    yaw = math.radians(yaw_deg)
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    half_length = 0.14 * scale
+    half_width = 0.055 * scale
+    vertices = []
+    for local_x, local_y in (
+        (half_length, 0.0),
+        (0.0, half_width),
+        (-half_length, 0.0),
+        (0.0, -half_width),
+    ):
+        vertices.append(
+            (
+                x_m + local_x * cosine - local_y * sine,
+                y_m + local_x * sine + local_y * cosine,
+                z_m + 0.006,
+            ),
+        )
+    assembler.add(vertices, ((0, 1, 2), (0, 2, 3)))
+
+
+def _add_irregular_damp_patch(assembler, center, scale, yaw_deg, detail_id):
+    x_m, y_m, z_m = center
+    digest = hashlib.sha256(detail_id.encode("utf-8")).digest()
+    yaw = math.radians(yaw_deg)
+    vertices = [(x_m, y_m, z_m + 0.003)]
+    for index in range(8):
+        angle = yaw + 2.0 * math.pi * index / 8.0
+        radius_weight = 0.78 + digest[index] / 255.0 * 0.22
+        radius_x = 0.31 * scale * radius_weight
+        radius_y = 0.20 * scale * radius_weight
+        vertices.append(
+            (
+                x_m + radius_x * math.cos(angle),
+                y_m + radius_y * math.sin(angle),
+                z_m + 0.003,
+            ),
+        )
+    assembler.add(
+        vertices,
+        tuple((0, 1 + index, 1 + (index + 1) % 8) for index in range(8)),
+    )
+
+
+def _surface_detail_assemblers(points, width, path_plan, extent):
+    assemblers = {
+        "damp-patch": MeshAssembler(),
+        "leaf-card": MeshAssembler(),
+        "stone-fragment": MeshAssembler(),
+    }
+    counts = {detail_class: 0 for detail_class in assemblers}
+    for detail in path_plan["details"]:
+        detail_class = detail["detail_class"]
+        if detail_class not in assemblers:
+            raise RuntimeBuildError("surface path detail class is invalid")
+        x_m, y_m, z_m, _tangent, _normal = _surface_detail_frame(
+            points,
+            width,
+            detail,
+            extent,
+        )
+        scale = detail["scale"]
+        if detail_class == "stone-fragment":
+            assemblers[detail_class].add_ellipsoid(
+                (x_m, y_m, z_m + 0.08 * scale),
+                (0.18 * scale, 0.12 * scale, 0.08 * scale),
+                segments=7,
+                rings=3,
+            )
+        elif detail_class == "leaf-card":
+            _add_leaf_diamond(
+                assemblers[detail_class],
+                (x_m, y_m, z_m),
+                scale,
+                detail["yaw_deg"],
+            )
+        else:
+            _add_irregular_damp_patch(
+                assemblers[detail_class],
+                (x_m, y_m, z_m),
+                scale,
+                detail["yaw_deg"],
+                detail["detail_id"],
+            )
+        counts[detail_class] += 1
+    return assemblers, counts
 
 
 def _surface_path_ribbon(points, width, path_plan, extent):
@@ -3440,6 +3579,13 @@ def _build_linear_feature(
         root["nv_surface_path_triangle_count"] = (
             interval_count * (SURFACE_PATH_LATERAL_RAILS - 1) * 2
         )
+        root["nv_surface_rut_run_count"] = len(path_plan["rut_runs"])
+        surface_details, surface_detail_counts = _surface_detail_assemblers(
+            topology["points"],
+            topology["width_m"],
+            path_plan,
+            extent,
+        )
     else:
         ribbon = _ribbon(
             topology["points"],
@@ -3454,6 +3600,26 @@ def _build_linear_feature(
         registry,
         collection,
     )
+    if (
+        semantic == "path"
+        and request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1
+    ):
+        detail_materials = {
+            "damp-patch": "material-packed-earth-01",
+            "leaf-card": "material-broadleaf-canopy-01",
+            "stone-fragment": "material-creek-rock-01",
+        }
+        for detail_class, assembler in surface_details.items():
+            detail_obj = _link_mesh(
+                root,
+                f"surface-{detail_class}",
+                assembler,
+                materials[detail_materials[detail_class]],
+                registry,
+                collection,
+            )
+            detail_obj["nv_surface_detail_class"] = detail_class
+            detail_obj["nv_surface_detail_count"] = surface_detail_counts[detail_class]
     if semantic == "creek":
         rocks = MeshAssembler()
         for segment_index, point in enumerate(topology["points"][::2]):
@@ -4702,7 +4868,11 @@ def _glb_textured_counts(glb_path):
     materials = document.get("materials")
     images = document.get("images")
     textures = document.get("textures")
-    if not all(isinstance(value, list) for value in (meshes, materials, images, textures)):
+    accessors = document.get("accessors")
+    if not all(
+        isinstance(value, list)
+        for value in (meshes, materials, images, textures, accessors)
+    ):
         raise RuntimeBuildError("textured GLB PBR collections are absent")
     primitives = [
         primitive
@@ -4721,6 +4891,35 @@ def _glb_textured_counts(glb_path):
         and "TANGENT" in primitive["attributes"]
         for primitive in primitives
     )
+    triangle_count = 0
+    for primitive in primitives:
+        if primitive.get("mode", 4) != 4:
+            raise RuntimeBuildError("textured GLB primitive mode is not TRIANGLES")
+        accessor_index = primitive.get("indices")
+        if accessor_index is None:
+            attributes = primitive.get("attributes")
+            accessor_index = (
+                attributes.get("POSITION")
+                if isinstance(attributes, dict)
+                else None
+            )
+        if (
+            isinstance(accessor_index, bool)
+            or not isinstance(accessor_index, int)
+            or accessor_index < 0
+            or accessor_index >= len(accessors)
+            or not isinstance(accessors[accessor_index], dict)
+        ):
+            raise RuntimeBuildError("textured GLB triangle accessor is invalid")
+        index_count = accessors[accessor_index].get("count")
+        if (
+            isinstance(index_count, bool)
+            or not isinstance(index_count, int)
+            or index_count <= 0
+            or index_count % 3 != 0
+        ):
+            raise RuntimeBuildError("textured GLB triangle count is invalid")
+        triangle_count += index_count // 3
     embedded_images = sum(
         isinstance(image, dict)
         and "bufferView" in image
@@ -4747,10 +4946,108 @@ def _glb_textured_counts(glb_path):
         raise RuntimeBuildError("textured GLB lacks complete embedded PBR/UV/tangent evidence")
     return {
         "glb_primitives": len(primitives),
+        "glb_triangles": triangle_count,
         "glb_embedded_images": embedded_images,
         "glb_textures": len(textures),
         "glb_uv_primitives": uv_count,
         "glb_tangent_primitives": tangent_count,
+    }
+
+
+def _surface_realism_evidence(request, mesh_objects):
+    if request.get("surface_realism_profile_id") != SURFACE_PROFILE_V1:
+        return None
+    plan = request.get("surface_realism_plan")
+    if not isinstance(plan, dict):
+        raise RuntimeBuildError("surface realism plan is absent")
+    terrain = next(
+        (obj for obj in mesh_objects if obj.name == "nv__aux-terrain"),
+        None,
+    )
+    if terrain is None:
+        raise RuntimeBuildError("surface terrain evidence is absent")
+    path_roots = [
+        obj
+        for obj in bpy.data.objects
+        if obj.type == "EMPTY"
+        and str(obj.get("nv_stable_id", "")).startswith("path-network-")
+    ]
+    detail_objects = [
+        obj for obj in mesh_objects if obj.get("nv_surface_detail_class")
+    ]
+    if len(path_roots) != 6 or len(detail_objects) != EXPECTED_SURFACE_DETAIL_MESH_OBJECTS:
+        raise RuntimeBuildError("surface path object evidence is incomplete")
+    detail_counts = {detail_class: 0 for detail_class in SURFACE_DETAIL_CAPS}
+    for obj in detail_objects:
+        detail_class = obj.get("nv_surface_detail_class")
+        detail_count = obj.get("nv_surface_detail_count")
+        if (
+            detail_class not in detail_counts
+            or isinstance(detail_count, bool)
+            or not isinstance(detail_count, int)
+            or detail_count <= 0
+        ):
+            raise RuntimeBuildError("surface detail mesh evidence is invalid")
+        detail_counts[detail_class] += detail_count
+    detail_counts["rut-run"] = sum(
+        int(root.get("nv_surface_rut_run_count", 0))
+        for root in path_roots
+    )
+    all_channels = []
+    colored_primitive_count = 0
+    white_primitive_count = 0
+    for obj in mesh_objects:
+        layer = obj.data.color_attributes.get("nv_surface_color")
+        if (
+            layer is None
+            or layer.data_type != "FLOAT_COLOR"
+            or layer.domain != "CORNER"
+            or len(layer.data) != len(obj.data.loops)
+        ):
+            raise RuntimeBuildError(f"surface color evidence is absent: {obj.name}")
+        primitive_colored = {}
+        for polygon in obj.data.polygons:
+            colored = False
+            for loop_index in polygon.loop_indices:
+                color = tuple(float(value) for value in layer.data[loop_index].color[:3])
+                if not all(math.isfinite(value) for value in color):
+                    raise RuntimeBuildError("surface color evidence is non-finite")
+                all_channels.extend(color)
+                colored = colored or any(abs(value - 1.0) > 1e-6 for value in color)
+            primitive_colored[polygon.material_index] = (
+                primitive_colored.get(polygon.material_index, False) or colored
+            )
+        colored_primitive_count += sum(primitive_colored.values())
+        white_primitive_count += sum(not value for value in primitive_colored.values())
+    if not all_channels:
+        raise RuntimeBuildError("surface color evidence is empty")
+    return {
+        "profile_id": SURFACE_PROFILE_V1,
+        "algorithm_id": SURFACE_ALGORITHM_V1,
+        "scene_seed": plan["scene_seed"],
+        "plan_sha256": plan["plan_sha256"],
+        "runtime_module_sha256": plan["runtime_module_sha256"],
+        "terrain_resolution": [
+            int(terrain.get("nv_surface_grid_columns", 0)),
+            int(terrain.get("nv_surface_grid_rows", 0)),
+        ],
+        "terrain_triangle_count": int(
+            terrain.get("nv_surface_triangle_count", 0),
+        ),
+        "path_interval_count": sum(
+            int(root.get("nv_surface_path_interval_count", 0))
+            for root in path_roots
+        ),
+        "path_triangle_count": sum(
+            int(root.get("nv_surface_path_triangle_count", 0))
+            for root in path_roots
+        ),
+        "detail_counts": detail_counts,
+        "detail_mesh_object_count": len(detail_objects),
+        "color_min": min(all_channels),
+        "color_max": max(all_channels),
+        "colored_primitive_count": colored_primitive_count,
+        "white_primitive_count": white_primitive_count,
     }
 
 
@@ -4898,6 +5195,12 @@ def _build_report(
                     raise RuntimeBuildError(
                         "v2 building geometry evidence is invalid",
                     ) from exc
+        if request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1:
+            report["surface_realism_profile_id"] = SURFACE_PROFILE_V1
+            report["surface_realism"] = _surface_realism_evidence(
+                request,
+                mesh_objects,
+            )
         report["counts"].update(glb_counts)
     if local:
         report["authoritative"] = False
@@ -4991,7 +5294,17 @@ def _execute_build(request, staging_path, materials_path=None):
             for digest, path in material_paths.items():
                 _read_stable_material(path, digest)
         glb_counts = _save_scene_and_glb(work_dir, textured=textured)
-        if request.get("building_geometry_profile_id") == BUILDING_GEOMETRY_V2:
+        if request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1:
+            glb_size = (work_dir / "village-canary.glb").stat().st_size
+            if (
+                glb_counts["glb_primitives"] != EXPECTED_SURFACE_GLB_PRIMITIVES
+                or glb_counts["glb_triangles"] > MAX_SURFACE_GLTF_TRIANGLES
+                or glb_size > MAX_SURFACE_GLB_BYTES
+            ):
+                raise RuntimeBuildError(
+                    "surface realism exceeded the GLB primitive, triangle, or byte budget",
+                )
+        elif request.get("building_geometry_profile_id") == BUILDING_GEOMETRY_V2:
             glb_size = (work_dir / "village-canary.glb").stat().st_size
             if (
                 glb_counts["glb_primitives"] != EXPECTED_TEXTURED_GLB_PRIMITIVES

@@ -506,6 +506,31 @@ def test_textured_report_requires_surface_evidence_to_match_request(
         )
 
 
+def test_textured_counts_bind_bounded_glb_triangle_evidence_without_historical_drift(
+    tmp_path: Path,
+    textured_material_inputs,
+) -> None:
+    visual_root, bundle = textured_material_inputs
+    request = build_textured_canary_request(
+        repo_root=ROOT,
+        visual_pack_root=visual_root,
+        material_bundle_root=bundle.final_directory,
+    )
+    historical_report = _valid_textured_report(request, tmp_path)
+    assert b"glb_triangles" not in canonical_textured_build_report_bytes(
+        historical_report,
+    )
+
+    payload = historical_report.counts.model_dump(mode="json")
+    payload["glb_triangles"] = 124_999
+    measured = TexturedBuildCounts.model_validate(payload)
+    assert measured.glb_triangles == 124_999
+
+    payload["glb_triangles"] = 125_001
+    with pytest.raises(ValueError, match="less than or equal to 125000"):
+        TexturedBuildCounts.model_validate(payload)
+
+
 def _rebuild_textured_payload(
     request: TexturedBuildRequest,
     **updates,

@@ -233,6 +233,58 @@ def test_local_blender_authors_float_corner_surface_color(
     assert "NANTAI_SURFACE_COLOR_OK" in result.stdout
 
 
+def test_local_blender_builds_three_consolidated_detail_meshes(
+    tmp_path: Path,
+) -> None:
+    if not LOCAL_BLENDER.is_file():
+        pytest.skip("local Blender runtime is not installed")
+    result = _run_builder_probe(
+        tmp_path,
+        "import runpy\n"
+        f"ns = runpy.run_path({str(BLENDER_BUILDER)!r}, run_name='surface_probe')\n"
+        "extent = {'width_m': 700.0, 'depth_m': 500.0, 'relief_m': 120.0}\n"
+        "points = [\n"
+        "    {'x_m': 0.0, 'y_m': 0.0, 'z_m': 0.0},\n"
+        "    {'x_m': 20.0, 'y_m': 0.0, 'z_m': 0.0},\n"
+        "]\n"
+        "plan = {\n"
+        "    'details': [\n"
+            "        {'detail_id': 'path-network-001:stone:000', "
+            "'detail_class': 'stone-fragment', 'arc_length_m': 5.0, "
+            "'side_fraction': 0.72, 'scale': 0.8, 'yaw_deg': 20.0},\n"
+            "        {'detail_id': 'path-network-001:leaf:000', "
+            "'detail_class': 'leaf-card', 'arc_length_m': 10.0, "
+            "'side_fraction': -0.72, 'scale': 0.8, 'yaw_deg': 70.0},\n"
+            "        {'detail_id': 'path-network-001:damp:000', "
+            "'detail_class': 'damp-patch', 'arc_length_m': 15.0, "
+            "'side_fraction': 0.72, 'scale': 0.8, 'yaw_deg': 120.0},\n"
+        "    ],\n"
+        "}\n"
+        "parts, counts = ns['_surface_detail_assemblers'](\n"
+        "    points, 3.2, plan, extent,\n"
+        ")\n"
+        "assert tuple(parts) == ('damp-patch', 'leaf-card', 'stone-fragment')\n"
+        "assert counts == {'damp-patch': 1, 'leaf-card': 1, 'stone-fragment': 1}\n"
+        "assert len(parts['damp-patch'].faces) == 8\n"
+        "assert len(parts['leaf-card'].faces) == 2\n"
+        "assert len(parts['stone-fragment'].faces) == 21\n"
+        "for part in parts.values():\n"
+        "    assert part.vertices and part.faces\n"
+        "    assert all(0.6 < abs(vertex[1]) < 1.6 for vertex in part.vertices)\n"
+        "print('NANTAI_SURFACE_DETAILS_OK', flush=True)\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_SURFACE_DETAILS_OK" in result.stdout
+
+
+def test_builder_declares_combined_surface_budgets() -> None:
+    assert _literal_assignment("MAX_SURFACE_GLTF_TRIANGLES") == 125_000
+    assert _literal_assignment("MAX_SURFACE_GLB_BYTES") == 160_000_000
+    assert _literal_assignment("EXPECTED_SURFACE_GLB_PRIMITIVES") == 577
+    assert _literal_assignment("EXPECTED_SURFACE_DETAIL_MESH_OBJECTS") == 18
+
+
 def test_local_request_is_content_addressed_but_never_authoritative(
     tmp_path: Path,
 ) -> None:

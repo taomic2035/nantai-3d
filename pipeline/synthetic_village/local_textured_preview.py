@@ -449,6 +449,8 @@ def canonical_local_textured_build_report_bytes(
     report: LocalTexturedBuildReport,
 ) -> bytes:
     payload = report.model_dump(mode="json", by_alias=True)
+    if "glb_triangles" not in report.counts.model_fields_set:
+        payload["counts"].pop("glb_triangles")
     if "material_algorithm_id" not in report.model_fields_set:
         payload.pop("material_algorithm_id")
     if "building_geometry_profile_id" not in report.model_fields_set:

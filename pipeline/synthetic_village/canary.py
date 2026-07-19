@@ -884,6 +884,7 @@ class TexturedBuildCounts(FrozenModel):
     lights: int = Field(ge=1)
     auxiliary_semantic_objects: Literal[2]
     glb_primitives: int = Field(ge=1)
+    glb_triangles: int | None = Field(default=None, ge=1, le=125_000)
     glb_embedded_images: int = Field(ge=72)
     glb_textures: int = Field(ge=72)
     glb_uv_primitives: int = Field(ge=1)
@@ -1457,6 +1458,8 @@ def canonical_build_report_bytes(report: BuildReport) -> bytes:
 
 def canonical_textured_build_report_bytes(report: TexturedBuildReport) -> bytes:
     payload = report.model_dump(mode="json", by_alias=True)
+    if "glb_triangles" not in report.counts.model_fields_set:
+        payload["counts"].pop("glb_triangles")
     if "material_algorithm_id" not in report.model_fields_set:
         payload.pop("material_algorithm_id")
     if "building_geometry_profile_id" not in report.model_fields_set:
