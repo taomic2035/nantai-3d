@@ -161,8 +161,46 @@ def test_request_binds_v1_reuse_and_only_rebuilds_lod2(
     assert len(request.reused_lods) == 22
     assert all(row.lod in {0, 1} for row in request.reused_lods)
     assert all(row.recipe_id.endswith("-near-v2") for row in request.recipes)
+    assert tuple(
+        row.asset_id for row in request.geometry_plans
+    ) == EXPECTED_ASSET_IDS
+    assert all(
+        row.recipe_id == recipe.recipe_id
+        and row.footprint_m == recipe.footprint_m
+        for row, recipe in zip(
+            request.geometry_plans,
+            request.recipes,
+            strict=True,
+        )
+    )
     assert b"/Users/" not in canonical_mesh_asset_build_request_v2_bytes(request)
     assert request.foliage_atlas_set == request_inputs["atlas"].manifest
+
+
+def test_request_rejects_geometry_plan_drift(
+    request_inputs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "load_mesh_asset_bundle",
+        lambda _root: request_inputs["source_bundle"],
+    )
+    request = build_mesh_asset_request_v2(
+        repo_root=ROOT,
+        source_v1_bundle_root=request_inputs["source_root"],
+        material_bundle_root=request_inputs["material_root"],
+        foliage_atlas_set=request_inputs["atlas"],
+        builder_script=Path("scripts/blender/build_mesh_asset_bundle.py"),
+        blender_identity=LOCAL_BLENDER,
+    )
+    payload = request.model_dump(mode="json")
+    payload["geometry_plans"][0]["planned_triangles"] += 2
+
+    with pytest.raises(ValidationError):
+        type(request).model_validate_json(
+            json.dumps(payload, sort_keys=True),
+        )
 
 
 def test_request_texture_closure_replaces_only_foliage_sources(

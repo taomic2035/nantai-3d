@@ -83,6 +83,10 @@ from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     TextureObjectV2,
     publish_mesh_asset_bundle_v2,
 )
+from pipeline.synthetic_village.mesh_near_geometry import (
+    NearGeometryPlan,
+    build_near_geometry_plan,
+)
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -208,6 +212,10 @@ class MeshAssetBuildRequestV2(FrozenModel):
     blender_identity: LocalBlenderIdentity
     builder_script_sha256: Sha256
     recipes: tuple[NearMeshRecipeV2, ...] = Field(min_length=11, max_length=11)
+    geometry_plans: tuple[NearGeometryPlan, ...] = Field(
+        min_length=11,
+        max_length=11,
+    )
     reused_lods: tuple[ReusedMeshLodV2, ...] = Field(
         min_length=22,
         max_length=22,
@@ -224,6 +232,24 @@ class MeshAssetBuildRequestV2(FrozenModel):
     def _complete_path_free_identity(self) -> MeshAssetBuildRequestV2:
         if self.asset_ids != EXPECTED_ASSET_IDS:
             raise ValueError("near mesh recipes are not the exact sorted asset set")
+        if tuple(
+            row.asset_id for row in self.geometry_plans
+        ) != EXPECTED_ASSET_IDS or any(
+            plan.recipe_id != recipe.recipe_id
+            or plan.kind != recipe.kind
+            or plan.footprint_m != recipe.footprint_m
+            or plan.material_slot_ids != recipe.material_slot_ids
+            or plan.planned_triangles < recipe.lod2_triangle_min
+            or plan.planned_triangles > recipe.lod2_triangle_max
+            for plan, recipe in zip(
+                self.geometry_plans,
+                self.recipes,
+                strict=True,
+            )
+        ):
+            raise ValueError(
+                "near mesh geometry plans differ from their exact recipes",
+            )
         expected_reuse = tuple(
             (asset_id, lod)
             for asset_id in EXPECTED_ASSET_IDS
@@ -771,6 +797,13 @@ def build_mesh_asset_request_v2(
         "blender_identity": blender_identity,
         "builder_script_sha256": hashlib.sha256(builder_raw).hexdigest(),
         "recipes": tuple(recipes),
+        "geometry_plans": tuple(
+            build_near_geometry_plan(
+                recipe.asset_id,
+                recipe.footprint_m,
+            )
+            for recipe in recipes
+        ),
         "reused_lods": tuple(reused),
         "lod_levels_to_build": (2,),
         "alpha_cutoff": ALPHA_CUTOFF,
