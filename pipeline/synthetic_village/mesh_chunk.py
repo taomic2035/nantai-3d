@@ -25,9 +25,15 @@ from pipeline.synthetic_village.infinite_terrain import (
     terrain_material_slot,
 )
 from pipeline.synthetic_village.material_bundle import (
+    MATERIAL_PARAMETERS,
     DerivedMaterialBundle,
     DerivedMaterialRecord,
     UvPolicy,
+)
+from pipeline.synthetic_village.material_bundle_v2 import (
+    H2_PROFILE_ID,
+    H3_PROFILE_ID,
+    MaterialBundleV2,
 )
 from pipeline.synthetic_village.mesh_asset_bundle import (
     Bounds3,
@@ -40,15 +46,24 @@ from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     MeshAssetRecordV2,
     MeshTemplateLodV2,
 )
+from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
+    MeshAssetBundleV3,
+    MeshAssetRecordV3,
+    MeshTemplateLod2V3,
+)
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-MeshAssetRecordAny = MeshAssetRecord | MeshAssetRecordV2
+MeshAssetRecordAny = MeshAssetRecord | MeshAssetRecordV2 | MeshAssetRecordV3
 
 MESH_CHUNK_SCHEMA = "nantai.synthetic-village.mesh-chunk.v1"
 MESH_CHUNK_RUNTIME_SCHEMA = "nantai.synthetic-village.mesh-chunk-runtime.v1"
 MESH_CHUNK_RUNTIME_V2_SCHEMA = (
     "nantai.synthetic-village.mesh-chunk-runtime.v2"
 )
+MESH_CHUNK_RUNTIME_V3_SCHEMA = (
+    "nantai.synthetic-village.mesh-chunk-runtime.v3"
+)
+MAX_H3_COMPRESSED_TEXTURE_BYTES = 512 * 1024 * 1024
 LAYOUT_ALGORITHM_ID = "mock-layout-v1"
 RENDERER_CAPABILITY = "synthetic-textured-mesh-grid"
 CHUNK_SIZE_M = 200
@@ -314,6 +329,187 @@ class MeshAssetRuntimeUrlV2(MeshAssetRuntimeUrl):
         return self
 
 
+class MeshTextureRuntimeUrlV3(FrozenModel):
+    url: str = Field(min_length=1)
+    sha256: Sha256
+    bytes: int = Field(ge=1)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    media_type: Literal["image/png", "image/ktx2"]
+    role: Literal["base_color", "normal", "orm"]
+    transfer: Literal["srgb", "linear"]
+    material_slot_id: str = Field(
+        pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
+    min_filter: Literal[9987] = 9987
+    mag_filter: Literal[9729] = 9729
+    wrap_s: Literal[10497] = 10497
+    wrap_t: Literal[10497] = 10497
+    alpha_mode: Literal["opaque"] = "opaque"
+    flip_y: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _exact_profile_texture_route(self) -> MeshTextureRuntimeUrlV3:
+        suffix = ".ktx2" if self.media_type == "image/ktx2" else ".png"
+        parts = self.url.split("/")
+        if (
+            len(parts) != 7
+            or parts[:4] != ["", "api", "world", "mesh-textures"]
+            or len(parts[4]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in parts[4]
+            )
+            or parts[5] not in {H3_PROFILE_ID, H2_PROFILE_ID}
+            or parts[6] != f"{self.sha256}{suffix}"
+            or "\\" in self.url
+            or "?" in self.url
+            or "#" in self.url
+        ):
+            raise ValueError(
+                "mesh v3 texture URL is not an exact same-origin route",
+            )
+        expected_transfer = (
+            "srgb" if self.role == "base_color" else "linear"
+        )
+        if self.transfer != expected_transfer:
+            raise ValueError(
+                "mesh v3 texture transfer disagrees with its role",
+            )
+        return self
+
+
+class MeshAssetRuntimeUrlV3(FrozenModel):
+    profile_id: Literal[
+        "h3-ai-ktx2-4k",
+        "h2-png-1k-fallback",
+    ]
+    asset_id: str = Field(pattern=r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+    lod: Literal[0, 1, 2]
+    url: str = Field(min_length=1)
+    glb_sha256: Sha256
+    glb_bytes: int = Field(ge=1)
+    geometry_fingerprint: Sha256 | None = None
+    texture_dependencies: tuple[MeshTextureRuntimeUrlV3, ...]
+
+    @model_validator(mode="after")
+    def _exact_profile_asset_route(self) -> MeshAssetRuntimeUrlV3:
+        expected = (
+            f"/api/world/mesh-assets/"
+            f"{self.url.split('/')[4] if len(self.url.split('/')) > 4 else ''}/"
+            f"{self.profile_id}/{self.asset_id}/lod{self.lod}.glb"
+        )
+        parts = self.url.split("/")
+        if (
+            len(parts) != 8
+            or parts[:4] != ["", "api", "world", "mesh-assets"]
+            or len(parts[4]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in parts[4]
+            )
+            or self.url != expected
+            or "\\" in self.url
+            or "?" in self.url
+            or "#" in self.url
+        ):
+            raise ValueError(
+                "mesh v3 asset URL is not an exact same-origin route",
+            )
+        dependency_keys = tuple(
+            (row.material_slot_id, row.role)
+            for row in self.texture_dependencies
+        )
+        if (
+            dependency_keys != tuple(sorted(dependency_keys))
+            or len(set(dependency_keys)) != len(dependency_keys)
+        ):
+            raise ValueError(
+                "mesh v3 asset texture dependencies must be sorted and unique",
+            )
+        if self.lod == 2:
+            if self.geometry_fingerprint is None:
+                raise ValueError(
+                    "mesh v3 LOD2 requires a geometry fingerprint",
+                )
+            if not self.texture_dependencies:
+                raise ValueError(
+                    "mesh v3 LOD2 requires texture dependencies",
+                )
+        elif (
+            self.geometry_fingerprint is not None
+            or self.texture_dependencies
+        ):
+            raise ValueError(
+                "mesh v3 embedded LOD cannot declare variant dependencies",
+            )
+        return self
+
+
+class MeshRuntimeProfileV3(FrozenModel):
+    profile_id: Literal[
+        "h3-ai-ktx2-4k",
+        "h2-png-1k-fallback",
+    ]
+    asset_urls: tuple[MeshAssetRuntimeUrlV3, ...]
+    textures: tuple[MeshTextureRuntimeUrlV3, ...] = Field(
+        min_length=72,
+        max_length=72,
+    )
+
+    @model_validator(mode="after")
+    def _complete_sorted_profile(self) -> MeshRuntimeProfileV3:
+        texture_keys = tuple(
+            (row.material_slot_id, row.role)
+            for row in self.textures
+        )
+        expected_texture_keys = tuple(
+            (slot_id, role)
+            for slot_id in sorted(MATERIAL_PARAMETERS)
+            for role in ("base_color", "normal", "orm")
+        )
+        if texture_keys != expected_texture_keys:
+            raise ValueError(
+                "mesh runtime v3 profile texture closure is incomplete or unsorted",
+            )
+        asset_ids = tuple(row.asset_id for row in self.asset_urls)
+        if (
+            asset_ids != tuple(sorted(asset_ids))
+            or len(set(asset_ids)) != len(asset_ids)
+            or any(
+                row.profile_id != self.profile_id
+                for row in self.asset_urls
+            )
+        ):
+            raise ValueError(
+                "mesh runtime v3 profile asset closure is invalid",
+            )
+        textures = {
+            (row.material_slot_id, row.role): row
+            for row in self.textures
+        }
+        for asset in self.asset_urls:
+            for dependency in asset.texture_dependencies:
+                if textures.get(
+                    (dependency.material_slot_id, dependency.role),
+                ) != dependency:
+                    raise ValueError(
+                        "mesh runtime v3 dependency is outside its profile closure",
+                    )
+        return self
+
+
+class SurfaceMaterialPolicyV3(FrozenModel):
+    slot_id: str = Field(
+        pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
+    uv_policy: UvPolicy
+    nominal_tile_m: float = Field(gt=0, allow_inf_nan=False)
+    normal_strength: float = Field(gt=0, allow_inf_nan=False)
+    roughness_center: float = Field(ge=0, le=1, allow_inf_nan=False)
+    metallic: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+
 class MaterialMapRuntimeUrl(FrozenModel):
     role: Literal["base_color", "normal", "orm"]
     url: str = Field(min_length=1)
@@ -438,8 +634,143 @@ class MeshChunkRuntimeManifestV2(FrozenModel):
         return self
 
 
+class MeshChunkRuntimeManifestV3(FrozenModel):
+    schema_version: Literal[
+        "nantai.synthetic-village.mesh-chunk-runtime.v3"
+    ] = MESH_CHUNK_RUNTIME_V3_SCHEMA
+    chunk: MeshChunkManifest
+    source_mesh_asset_bundle_id: Sha256
+    mesh_asset_bundle_id: Sha256
+    material_bundle_id: Sha256
+    fallback_material_bundle_id: Sha256
+    primary_profile_id: Literal["h3-ai-ktx2-4k"] = H3_PROFILE_ID
+    fallback_profile_id: Literal["h2-png-1k-fallback"] = H2_PROFILE_ID
+    predicted_compressed_texture_bytes: int = Field(
+        ge=1,
+        le=MAX_H3_COMPRESSED_TEXTURE_BYTES,
+    )
+    profiles: dict[str, MeshRuntimeProfileV3]
+    surface_materials: tuple[SurfaceMaterialPolicyV3, ...]
+    synthetic: Literal[True] = True
+    ai_generated: Literal[True] = True
+    real_photo_textures: Literal[False] = False
+    geometry_usability: Literal["preview-only"] = "preview-only"
+    metric_alignment: Literal[False] = False
+    verification_level: Literal["L0"] = "L0"
+
+    @model_validator(mode="after")
+    def _exact_dual_profile_closure(
+        self,
+    ) -> MeshChunkRuntimeManifestV3:
+        if (
+            self.source_mesh_asset_bundle_id
+            != self.chunk.mesh_asset_bundle_id
+            or self.fallback_material_bundle_id
+            != self.chunk.material_bundle_id
+        ):
+            raise ValueError(
+                "mesh runtime v3 source identities disagree with its chunk",
+            )
+        if tuple(self.profiles) != (H2_PROFILE_ID, H3_PROFILE_ID):
+            raise ValueError(
+                "mesh runtime v3 requires exact ordered H2 and H3 profiles",
+            )
+        if any(
+            profile.profile_id != profile_id
+            for profile_id, profile in self.profiles.items()
+        ):
+            raise ValueError(
+                "mesh runtime v3 profile identity disagrees",
+            )
+        required_assets = tuple(sorted({
+            instance.asset_id
+            for instance in self.chunk.instances
+        }))
+        for profile in self.profiles.values():
+            if tuple(
+                row.asset_id for row in profile.asset_urls
+            ) != required_assets:
+                raise ValueError(
+                    "mesh runtime v3 asset closure is incomplete",
+                )
+            for asset in profile.asset_urls:
+                expected_url = (
+                    f"/api/world/mesh-assets/{self.mesh_asset_bundle_id}/"
+                    f"{profile.profile_id}/{asset.asset_id}/"
+                    f"lod{asset.lod}.glb"
+                )
+                if (
+                    asset.lod != self.chunk.selected_lod
+                    or asset.url != expected_url
+                ):
+                    raise ValueError(
+                        "mesh runtime v3 asset route or LOD is invalid",
+                    )
+            for texture in profile.textures:
+                suffix = (
+                    ".ktx2"
+                    if texture.media_type == "image/ktx2"
+                    else ".png"
+                )
+                expected_url = (
+                    f"/api/world/mesh-textures/"
+                    f"{self.mesh_asset_bundle_id}/"
+                    f"{profile.profile_id}/{texture.sha256}{suffix}"
+                )
+                if texture.url != expected_url:
+                    raise ValueError(
+                        "mesh runtime v3 texture route is invalid",
+                    )
+        h3_assets = {
+            row.asset_id: row
+            for row in self.profiles[H3_PROFILE_ID].asset_urls
+        }
+        h2_assets = {
+            row.asset_id: row
+            for row in self.profiles[H2_PROFILE_ID].asset_urls
+        }
+        if any(
+            h3_assets[asset_id].geometry_fingerprint
+            != h2_assets[asset_id].geometry_fingerprint
+            for asset_id in required_assets
+        ):
+            raise ValueError(
+                "mesh runtime v3 profile geometry fingerprints disagree",
+            )
+        predicted = sum(
+            row.bytes
+            for row in self.profiles[H3_PROFILE_ID].textures
+            if row.media_type == "image/ktx2"
+        )
+        if predicted != self.predicted_compressed_texture_bytes:
+            raise ValueError(
+                "mesh runtime v3 compressed texture prediction disagrees",
+            )
+        required_surface_slots = tuple(sorted({
+            self.chunk.terrain.material_slot_id,
+            *self.chunk.terrain.material_slot_ids,
+            *(
+                ribbon.material_slot_id
+                for ribbon in self.chunk.roads
+            ),
+            *(
+                ribbon.material_slot_id
+                for ribbon in self.chunk.water
+            ),
+        }))
+        if tuple(
+            row.slot_id for row in self.surface_materials
+        ) != required_surface_slots:
+            raise ValueError(
+                "mesh runtime v3 surface closure is incomplete or unsorted",
+            )
+        return self
+
+
 MeshChunkRuntimeManifestAny = (
-    MeshChunkRuntimeManifest | MeshChunkRuntimeManifestV2
+    MeshChunkRuntimeManifest
+    | MeshChunkRuntimeManifestV2
+    | MeshChunkRuntimeManifestV3
 )
 
 
@@ -837,6 +1168,10 @@ def build_mesh_chunk_manifest(
 ) -> MeshChunkManifest:
     """Derive one canonical mesh chunk from the shared deterministic layout."""
 
+    if type(bundle) is MeshAssetBundleV3:
+        raise MeshChunkError(
+            "mesh runtime v3 must retain its source v2 canonical chunk",
+        )
     chunk_x = _require_safe_int(chunk_x, label="chunk X")
     chunk_y = _require_safe_int(chunk_y, label="chunk Y")
     world_seed = _require_safe_int(world_seed, label="world seed")
@@ -1041,6 +1376,284 @@ def project_mesh_chunk_runtime(
             surface_materials=tuple(surfaces),
         )
     raise MeshChunkError("mesh runtime bundle schema is unsupported")
+
+
+def _runtime_texture_v3(
+    descriptor,
+    *,
+    mesh_bundle_id: str,
+    profile_id: str,
+) -> MeshTextureRuntimeUrlV3:
+    suffix = (
+        ".ktx2"
+        if descriptor.media_type == "image/ktx2"
+        else ".png"
+    )
+    return MeshTextureRuntimeUrlV3(
+        url=(
+            f"/api/world/mesh-textures/{mesh_bundle_id}/"
+            f"{profile_id}/{descriptor.sha256}{suffix}"
+        ),
+        sha256=descriptor.sha256,
+        bytes=descriptor.bytes,
+        width=descriptor.width,
+        height=descriptor.height,
+        media_type=descriptor.media_type,
+        role=descriptor.role,
+        transfer=descriptor.transfer,
+        material_slot_id=descriptor.slot_id,
+    )
+
+
+def _runtime_profile_v3(
+    chunk: MeshChunkManifest,
+    *,
+    bundle: MeshAssetBundleV3,
+    material_bundle: MaterialBundleV2,
+    profile_id: Literal[
+        "h3-ai-ktx2-4k",
+        "h2-png-1k-fallback",
+    ],
+) -> MeshRuntimeProfileV3:
+    material_profile = material_bundle.profiles[profile_id]
+    textures = tuple(
+        _runtime_texture_v3(
+            descriptor,
+            mesh_bundle_id=bundle.bundle_id,
+            profile_id=profile_id,
+        )
+        for descriptor in material_profile.textures
+    )
+    runtime_textures = {
+        (row.material_slot_id, row.role): row
+        for row in textures
+    }
+    texture_objects = {
+        (row.sha256, row.media_type): row
+        for row in bundle.texture_objects
+    }
+    records = {
+        record.asset_id: record
+        for record in bundle.records
+    }
+    assets = []
+    for asset_id in sorted({
+        instance.asset_id
+        for instance in chunk.instances
+    }):
+        record = records.get(asset_id)
+        if record is None:
+            raise MeshChunkError(
+                "mesh runtime v3 references an unavailable asset",
+            )
+        descriptor = record.lod[str(chunk.selected_lod)]
+        dependencies: tuple[MeshTextureRuntimeUrlV3, ...] = ()
+        geometry_fingerprint = None
+        if chunk.selected_lod == 2:
+            if type(descriptor) is not MeshTemplateLod2V3:
+                raise MeshChunkError(
+                    "mesh runtime v3 LOD2 descriptor type disagrees",
+                )
+            variant = descriptor.variants[profile_id]
+            dependencies_list = []
+            for slot_id in descriptor.material_slot_ids:
+                for role in ("base_color", "normal", "orm"):
+                    runtime_texture = runtime_textures.get(
+                        (slot_id, role),
+                    )
+                    if runtime_texture is None:
+                        raise MeshChunkError(
+                            "mesh runtime v3 material profile is incomplete",
+                        )
+                    binding = next(
+                        (
+                            row
+                            for row in variant.texture_bindings
+                            if (
+                                row.material_slot_id == slot_id
+                                and row.role == role
+                                and row.sha256
+                                == runtime_texture.sha256
+                                and row.media_type
+                                == runtime_texture.media_type
+                                and row.transfer
+                                == runtime_texture.transfer
+                            )
+                        ),
+                        None,
+                    )
+                    texture_object = texture_objects.get(
+                        (
+                            runtime_texture.sha256,
+                            runtime_texture.media_type,
+                        ),
+                    )
+                    if (
+                        binding is None
+                        or texture_object is None
+                        or texture_object.bytes
+                        != runtime_texture.bytes
+                        or texture_object.width
+                        != runtime_texture.width
+                        or texture_object.height
+                        != runtime_texture.height
+                    ):
+                        raise MeshChunkError(
+                            "mesh runtime v3 asset and material texture evidence disagrees",
+                        )
+                    dependencies_list.append(runtime_texture)
+            dependencies = tuple(
+                sorted(
+                    dependencies_list,
+                    key=lambda row: (
+                        row.material_slot_id,
+                        row.role,
+                    ),
+                ),
+            )
+            geometry_fingerprint = descriptor.geometry_fingerprint
+            glb_descriptor = variant
+        else:
+            if type(descriptor) is not MeshTemplateLodV2:
+                raise MeshChunkError(
+                    "mesh runtime v3 embedded LOD descriptor type disagrees",
+                )
+            glb_descriptor = descriptor
+        assets.append(
+            MeshAssetRuntimeUrlV3(
+                profile_id=profile_id,
+                asset_id=asset_id,
+                lod=chunk.selected_lod,
+                url=(
+                    f"/api/world/mesh-assets/{bundle.bundle_id}/"
+                    f"{profile_id}/{asset_id}/"
+                    f"lod{chunk.selected_lod}.glb"
+                ),
+                glb_sha256=glb_descriptor.glb_sha256,
+                glb_bytes=glb_descriptor.glb_bytes,
+                geometry_fingerprint=geometry_fingerprint,
+                texture_dependencies=dependencies,
+            ),
+        )
+    return MeshRuntimeProfileV3(
+        profile_id=profile_id,
+        asset_urls=tuple(assets),
+        textures=textures,
+    )
+
+
+def project_mesh_chunk_runtime_v3(
+    chunk: MeshChunkManifest,
+    *,
+    bundle: MeshAssetBundleV3,
+    material_bundle: MaterialBundleV2,
+) -> MeshChunkRuntimeManifestV3:
+    """Project one unchanged H2 chunk into exact H3/H2 runtime choices."""
+
+    if (
+        type(bundle) is not MeshAssetBundleV3
+        or type(material_bundle) is not MaterialBundleV2
+        or chunk.mesh_asset_bundle_id != bundle.source_v2_bundle_id
+        or chunk.material_bundle_id
+        != bundle.fallback_material_bundle_id
+        or chunk.material_bundle_id
+        != material_bundle.fallback_bundle_id
+        or bundle.material_bundle_v2_id
+        != material_bundle.bundle_id
+    ):
+        raise MeshChunkError(
+            "mesh runtime v3 source identities disagree",
+        )
+    truth = (
+        bundle.synthetic,
+        bundle.ai_generated,
+        bundle.real_photo_textures,
+        bundle.geometry_usability,
+        bundle.metric_alignment,
+        bundle.verification_level,
+        material_bundle.synthetic,
+        material_bundle.ai_generated,
+        material_bundle.real_photo_textures,
+        material_bundle.geometry_usability,
+        material_bundle.metric_alignment,
+        material_bundle.verification_level,
+    )
+    if truth != (
+        True,
+        True,
+        False,
+        "preview-only",
+        False,
+        "L0",
+        True,
+        True,
+        False,
+        "preview-only",
+        False,
+        "L0",
+    ):
+        raise MeshChunkError(
+            "mesh runtime v3 provenance is not synthetic preview-only L0",
+        )
+    profiles = {
+        profile_id: _runtime_profile_v3(
+            chunk,
+            bundle=bundle,
+            material_bundle=material_bundle,
+            profile_id=profile_id,
+        )
+        for profile_id in (H2_PROFILE_ID, H3_PROFILE_ID)
+    }
+    predicted = sum(
+        row.bytes
+        for row in profiles[H3_PROFILE_ID].textures
+        if row.media_type == "image/ktx2"
+    )
+    if predicted > MAX_H3_COMPRESSED_TEXTURE_BYTES:
+        raise MeshChunkError(
+            "mesh runtime v3 compressed texture budget is exceeded",
+        )
+    surface_slots = sorted({
+        chunk.terrain.material_slot_id,
+        *chunk.terrain.material_slot_ids,
+        *(
+            ribbon.material_slot_id
+            for ribbon in chunk.roads
+        ),
+        *(
+            ribbon.material_slot_id
+            for ribbon in chunk.water
+        ),
+    })
+    surfaces = tuple(
+        SurfaceMaterialPolicyV3(
+            slot_id=slot_id,
+            uv_policy=MATERIAL_PARAMETERS[slot_id].uv_policy,
+            nominal_tile_m=(
+                MATERIAL_PARAMETERS[slot_id].nominal_tile_m
+            ),
+            normal_strength=(
+                MATERIAL_PARAMETERS[slot_id].normal_strength
+            ),
+            roughness_center=(
+                MATERIAL_PARAMETERS[slot_id].roughness_center
+            ),
+            metallic=MATERIAL_PARAMETERS[slot_id].metallic,
+        )
+        for slot_id in surface_slots
+    )
+    return MeshChunkRuntimeManifestV3(
+        chunk=chunk,
+        source_mesh_asset_bundle_id=bundle.source_v2_bundle_id,
+        mesh_asset_bundle_id=bundle.bundle_id,
+        material_bundle_id=material_bundle.bundle_id,
+        fallback_material_bundle_id=(
+            material_bundle.fallback_bundle_id
+        ),
+        predicted_compressed_texture_bytes=predicted,
+        profiles=profiles,
+        surface_materials=surfaces,
+    )
 
 
 def _surface_material_runtime(

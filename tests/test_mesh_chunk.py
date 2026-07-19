@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+import pipeline.synthetic_village.material_bundle_v2 as material_v2_module
+import pipeline.synthetic_village.mesh_asset_bundle_v3 as mesh_v3_module
 from pipeline.mock_layout import DEFAULT_ASSETS
 from pipeline.synthetic_village.infinite_terrain import (
     TERRAIN_ALGORITHM_ID,
@@ -22,6 +25,11 @@ from pipeline.synthetic_village.material_bundle import (
     DerivedMaterialRecord,
     MaterialMapDescriptor,
 )
+from pipeline.synthetic_village.material_bundle_v2 import (
+    H2_PROFILE_ID,
+    H3_PROFILE_ID,
+    compose_material_bundle_v2,
+)
 from pipeline.synthetic_village.mesh_asset_build import (
     ASSET_RECIPE_CONTRACTS,
 )
@@ -33,16 +41,26 @@ from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     MESH_ASSET_BUNDLE_V2_SCHEMA,
     MeshAssetBundleV2,
 )
+from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
+    compose_mesh_asset_bundle_v3,
+)
 from pipeline.synthetic_village.mesh_chunk import (
+    MAX_H3_COMPRESSED_TEXTURE_BYTES,
     MeshChunkError,
     MeshChunkManifest,
     MeshChunkRuntimeManifest,
     MeshChunkRuntimeManifestV2,
+    MeshChunkRuntimeManifestV3,
     build_mesh_chunk_manifest,
     canonical_mesh_chunk_bytes,
     canonical_mesh_chunk_runtime_bytes,
+    mesh_chunk_content_key,
     project_mesh_chunk_runtime,
+    project_mesh_chunk_runtime_v3,
 )
+from tests.test_material_bundle_v2 import _fake_h3_pack
+from tests.test_mesh_asset_bundle_v2 import _prepare_real_v2_fixture
+from tests.test_mesh_asset_bundle_v3 import _fallback_glbs
 
 MATERIAL_SLOTS = (
     "material-fieldstone-01",
@@ -325,6 +343,115 @@ def _bundle_v2() -> MeshAssetBundleV2:
             },
         ),
     )
+
+
+def _h2_material_evidence(mesh_bundle: MeshAssetBundleV2) -> SimpleNamespace:
+    mesh_bindings = {
+        (binding.material_slot_id, binding.role): binding
+        for record in mesh_bundle.records
+        for binding in record.lod["2"].texture_bindings
+    }
+    mesh_objects = {
+        row.sha256: row
+        for row in mesh_bundle.texture_objects
+    }
+    records = []
+    for slot_id, parameters in sorted(MATERIAL_PARAMETERS.items()):
+        descriptors = {}
+        for role, color_space in (
+            ("base_color", "srgb"),
+            ("normal", "non-color"),
+            ("orm", "non-color"),
+        ):
+            binding = mesh_bindings.get((slot_id, role))
+            if binding is None:
+                digest = hashlib.sha256(
+                    f"runtime-v3:{slot_id}:{role}".encode(),
+                ).hexdigest()
+                texture_bytes = 1024
+                width = 1024
+                height = 1024
+            else:
+                texture_object = mesh_objects[binding.sha256]
+                digest = binding.sha256
+                texture_bytes = texture_object.bytes
+                width = texture_object.width
+                height = texture_object.height
+            descriptors[role] = MaterialMapDescriptor(
+                object_path=f"objects/{digest}.png",
+                sha256=digest,
+                bytes=texture_bytes,
+                width=width,
+                height=height,
+                color_space=color_space,
+            )
+        records.append(
+            DerivedMaterialRecord(
+                slot_id=slot_id,
+                source_sha256=hashlib.sha256(
+                    f"runtime-v3-source:{slot_id}".encode(),
+                ).hexdigest(),
+                source_width=12,
+                source_height=8,
+                uv_policy=parameters.uv_policy,
+                nominal_tile_m=parameters.nominal_tile_m,
+                normal_strength=parameters.normal_strength,
+                roughness_center=parameters.roughness_center,
+                metallic=parameters.metallic,
+                replacement_contract_sha256="9" * 64,
+                **descriptors,
+            ),
+        )
+    return SimpleNamespace(
+        bundle_id=mesh_bundle.material_bundle_id,
+        records=tuple(records),
+    )
+
+
+def _runtime_v3_evidence(tmp_path, monkeypatch, *, lod: int = 2):
+    prepared, _objects = _prepare_real_v2_fixture(tmp_path / "mesh-v2")
+    h2_mesh = prepared.manifest
+    monkeypatch.setattr(
+        material_v2_module,
+        "ACCEPTED_H2_MATERIAL_BUNDLE_ID",
+        h2_mesh.material_bundle_id,
+    )
+    material_v2 = compose_material_bundle_v2(
+        _h2_material_evidence(h2_mesh),
+        _fake_h3_pack(),
+    )
+    monkeypatch.setattr(
+        mesh_v3_module,
+        "ACCEPTED_H2_MESH_BUNDLE_ID",
+        h2_mesh.bundle_id,
+    )
+    mesh_v3 = compose_mesh_asset_bundle_v3(
+        h2_mesh,
+        _fallback_glbs(prepared),
+        material_v2,
+    )
+    source_chunk = build_mesh_chunk_manifest(
+        -3,
+        -3,
+        world_seed=42,
+        bundle=_bundle_v2(),
+        lod=lod,
+    )
+    chunk_payload = source_chunk.model_dump(mode="json")
+    chunk_payload["mesh_asset_bundle_id"] = h2_mesh.bundle_id
+    chunk_payload["material_bundle_id"] = h2_mesh.material_bundle_id
+    chunk_payload["instances"] = [
+        row
+        for row in chunk_payload["instances"]
+        if row["asset_id"] == "stone_lamp_01"
+    ]
+    chunk_payload["content_key"] = mesh_chunk_content_key(
+        chunk_payload,
+    )
+    chunk = MeshChunkManifest.model_validate_json(
+        _canonical(chunk_payload),
+    )
+    return chunk, mesh_v3, material_v2
 
 
 def test_negative_chunk_is_deterministic_and_path_free() -> None:
@@ -722,6 +849,206 @@ def test_v2_runtime_rejects_missing_texture_object_evidence() -> None:
             chunk,
             bundle=incomplete,
             material_bundle=_surface_material_bundle(bundle),
+        )
+
+
+def test_runtime_v3_exposes_exact_dual_profiles_without_payload_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    chunk, mesh_v3, material_v2 = _runtime_v3_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+
+    runtime = project_mesh_chunk_runtime_v3(
+        chunk,
+        bundle=mesh_v3,
+        material_bundle=material_v2,
+    )
+
+    assert type(runtime) is MeshChunkRuntimeManifestV3
+    assert runtime.schema_version == (
+        "nantai.synthetic-village.mesh-chunk-runtime.v3"
+    )
+    assert runtime.chunk is chunk
+    assert runtime.source_mesh_asset_bundle_id == chunk.mesh_asset_bundle_id
+    assert runtime.mesh_asset_bundle_id == mesh_v3.bundle_id
+    assert runtime.material_bundle_id == material_v2.bundle_id
+    assert runtime.fallback_material_bundle_id == chunk.material_bundle_id
+    assert runtime.primary_profile_id == H3_PROFILE_ID
+    assert runtime.fallback_profile_id == H2_PROFILE_ID
+    assert tuple(runtime.profiles) == (H2_PROFILE_ID, H3_PROFILE_ID)
+    assert runtime.predicted_compressed_texture_bytes <= (
+        MAX_H3_COMPRESSED_TEXTURE_BYTES
+    )
+    assert runtime.synthetic is True
+    assert runtime.ai_generated is True
+    assert runtime.real_photo_textures is False
+    assert runtime.geometry_usability == "preview-only"
+    assert runtime.metric_alignment is False
+    assert runtime.verification_level == "L0"
+
+    required_assets = tuple(sorted({
+        instance.asset_id for instance in chunk.instances
+    }))
+    for profile_id, profile in runtime.profiles.items():
+        assert profile.profile_id == profile_id
+        assert len(profile.textures) == 72
+        assert tuple(
+            (row.material_slot_id, row.role)
+            for row in profile.textures
+        ) == tuple(
+            (slot_id, role)
+            for slot_id in sorted(MATERIAL_PARAMETERS)
+            for role in ("base_color", "normal", "orm")
+        )
+        assert tuple(row.asset_id for row in profile.asset_urls) == (
+            required_assets
+        )
+        assert all(
+            row.url
+            == (
+                f"/api/world/mesh-assets/{mesh_v3.bundle_id}/"
+                f"{profile_id}/{row.asset_id}/lod2.glb"
+            )
+            for row in profile.asset_urls
+        )
+        assert all(
+            texture.url
+            == (
+                f"/api/world/mesh-textures/{mesh_v3.bundle_id}/"
+                f"{profile_id}/{texture.sha256}"
+                f"{'.ktx2' if texture.media_type == 'image/ktx2' else '.png'}"
+            )
+            for texture in profile.textures
+        )
+
+    raw = canonical_mesh_chunk_runtime_bytes(runtime)
+    assert b"\xabKTX 20" not in raw
+    reloaded = MeshChunkRuntimeManifestV3.model_validate_json(raw)
+    assert canonical_mesh_chunk_runtime_bytes(reloaded) == raw
+
+
+def test_runtime_v3_rejects_identity_drift_and_texture_budget_overflow(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    chunk, mesh_v3, material_v2 = _runtime_v3_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    wrong_chunk = chunk.model_copy(
+        update={"mesh_asset_bundle_id": "f" * 64},
+    )
+
+    with pytest.raises(MeshChunkError, match="identities"):
+        project_mesh_chunk_runtime_v3(
+            wrong_chunk,
+            bundle=mesh_v3,
+            material_bundle=material_v2,
+        )
+
+    monkeypatch.setattr(
+        "pipeline.synthetic_village.mesh_chunk."
+        "MAX_H3_COMPRESSED_TEXTURE_BYTES",
+        1,
+    )
+    with pytest.raises(MeshChunkError, match="budget"):
+        project_mesh_chunk_runtime_v3(
+            chunk,
+            bundle=mesh_v3,
+            material_bundle=material_v2,
+        )
+
+
+@pytest.mark.parametrize("lod", (0, 1))
+def test_runtime_v3_preserves_shared_embedded_lods(
+    tmp_path,
+    monkeypatch,
+    lod: int,
+) -> None:
+    chunk, mesh_v3, material_v2 = _runtime_v3_evidence(
+        tmp_path,
+        monkeypatch,
+        lod=lod,
+    )
+
+    runtime = project_mesh_chunk_runtime_v3(
+        chunk,
+        bundle=mesh_v3,
+        material_bundle=material_v2,
+    )
+
+    h2_asset = runtime.profiles[H2_PROFILE_ID].asset_urls[0]
+    h3_asset = runtime.profiles[H3_PROFILE_ID].asset_urls[0]
+    source = mesh_v3.records[0].lod[str(lod)]
+    assert h2_asset.glb_sha256 == h3_asset.glb_sha256
+    assert h2_asset.glb_sha256 == source.glb_sha256
+    assert h2_asset.texture_dependencies == ()
+    assert h3_asset.texture_dependencies == ()
+    assert h2_asset.geometry_fingerprint is None
+    assert h3_asset.geometry_fingerprint is None
+
+
+def test_runtime_v3_model_rejects_route_profile_and_geometry_drift(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    chunk, mesh_v3, material_v2 = _runtime_v3_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+    runtime = project_mesh_chunk_runtime_v3(
+        chunk,
+        bundle=mesh_v3,
+        material_bundle=material_v2,
+    )
+
+    payload = runtime.model_dump(mode="json")
+    texture = payload["profiles"][H3_PROFILE_ID]["textures"][0]
+    texture["url"] += ".png"
+    with pytest.raises(ValidationError, match="route"):
+        MeshChunkRuntimeManifestV3.model_validate_json(
+            _canonical(payload),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    del payload["profiles"][H2_PROFILE_ID]
+    with pytest.raises(ValidationError, match="profiles"):
+        MeshChunkRuntimeManifestV3.model_validate_json(
+            _canonical(payload),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    payload["profiles"][H3_PROFILE_ID]["asset_urls"][0][
+        "geometry_fingerprint"
+    ] = "f" * 64
+    with pytest.raises(ValidationError, match="geometry"):
+        MeshChunkRuntimeManifestV3.model_validate_json(
+            _canonical(payload),
+        )
+
+
+def test_mesh_v3_cannot_replace_the_source_v2_canonical_chunk(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _chunk, mesh_v3, _material_v2 = _runtime_v3_evidence(
+        tmp_path,
+        monkeypatch,
+    )
+
+    with pytest.raises(
+        MeshChunkError,
+        match="source v2 canonical chunk",
+    ):
+        build_mesh_chunk_manifest(
+            0,
+            0,
+            world_seed=42,
+            bundle=mesh_v3,
+            lod=2,
         )
 
 
