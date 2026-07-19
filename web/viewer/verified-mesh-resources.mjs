@@ -61,23 +61,31 @@ function textureUri(loaded, texture) {
   const textureRecord = Number.isInteger(textureIndex)
     ? loaded?.parser?.json?.textures?.[textureIndex]
     : null;
-  const imageRecord = Number.isInteger(textureRecord?.source)
-    ? loaded?.parser?.json?.images?.[textureRecord.source]
+  const sourceIndex = Number.isInteger(textureRecord?.source)
+    ? textureRecord.source
+    : textureRecord?.extensions?.KHR_texture_basisu?.source;
+  const imageRecord = Number.isInteger(sourceIndex)
+    ? loaded?.parser?.json?.images?.[sourceIndex]
     : null;
   return typeof imageRecord?.uri === 'string' ? imageRecord.uri : null;
 }
 
 function expectedRelativeTextureUri(dependency) {
-  return `../textures/${dependency.sha256}.png`;
+  const extension = dependency.media_type === 'image/ktx2'
+    ? 'ktx2'
+    : 'png';
+  return `../textures/${dependency.sha256}.${extension}`;
 }
 
 function templateKey(descriptor) {
   return JSON.stringify([
     descriptor.glb_sha256,
     descriptor.glb_bytes,
+    descriptor.profile_id ?? 'legacy-png',
     (descriptor.texture_dependencies ?? []).map((row) => [
       row.sha256,
       row.bytes,
+      row.media_type ?? 'image/png',
     ]),
   ]);
 }
@@ -312,31 +320,119 @@ function assertEmbeddedGlb(glbBytes) {
   }
 }
 
-function validateDependencyClosure(dependencies) {
+function normalizeDependency(row, materialProfile) {
+  if (row?.media_type !== undefined) {
+    const keys = new Set([
+      'url',
+      'sha256',
+      'bytes',
+      'width',
+      'height',
+      'media_type',
+      'role',
+      'transfer',
+      'material_slot_id',
+    ]);
+    const actualKeys = (
+      row !== null
+      && typeof row === 'object'
+      && !Array.isArray(row)
+    ) ? Object.keys(row) : [];
+    const extension = row.media_type === 'image/ktx2'
+      ? 'ktx2'
+      : 'png';
+    const expectedTransfer = row.role === 'base_color'
+      ? 'srgb'
+      : 'linear';
+    const urlParts = typeof row.url === 'string'
+      ? row.url.split('/')
+      : [];
+    if (
+      !['h3-ai-ktx2-4k', 'h2-png-1k-fallback'].includes(
+        materialProfile,
+      )
+      || actualKeys.length !== keys.size
+      || actualKeys.some((key) => !keys.has(key))
+      || typeof row.url !== 'string'
+      || urlParts.length !== 7
+      || urlParts[0] !== ''
+      || urlParts[1] !== 'api'
+      || urlParts[2] !== 'world'
+      || urlParts[3] !== 'mesh-textures'
+      || !SHA256.test(urlParts[4])
+      || urlParts[5] !== materialProfile
+      || urlParts[6] !== `${row.sha256}.${extension}`
+      || !SHA256.test(row.sha256)
+      || !Number.isSafeInteger(row.bytes)
+      || row.bytes <= 0
+      || !Number.isSafeInteger(row.width)
+      || row.width <= 0
+      || !Number.isSafeInteger(row.height)
+      || row.height <= 0
+      || !['image/png', 'image/ktx2'].includes(row.media_type)
+      || (
+        materialProfile === 'h2-png-1k-fallback'
+        && row.media_type !== 'image/png'
+      )
+      || !TEXTURE_ROLES.has(row.role)
+      || row.transfer !== expectedTransfer
+      || typeof row.material_slot_id !== 'string'
+      || row.material_slot_id.length === 0
+    ) {
+      throw new TypeError('verified mesh texture descriptor is invalid');
+    }
+    return {
+      ...row,
+      colour_space: row.transfer === 'srgb' ? 'srgb' : 'non-color',
+      derivation_algorithm_id: 'verified-profile-runtime-v3',
+      min_filter: 9987,
+      mag_filter: 9729,
+      wrap_s: 10497,
+      wrap_t: 10497,
+      material_profile: materialProfile,
+      source_descriptor: row,
+    };
+  }
+  if (
+    typeof row?.url !== 'string'
+    || !SHA256.test(row.sha256)
+    || !Number.isSafeInteger(row.bytes)
+    || row.bytes <= 0
+    || !TEXTURE_ROLES.has(row.role)
+    || !['srgb', 'non-color'].includes(row.colour_space)
+    || typeof row.material_slot_id !== 'string'
+    || row.material_slot_id.length === 0
+    || typeof row.derivation_algorithm_id !== 'string'
+    || row.derivation_algorithm_id.length === 0
+    || row.min_filter !== 9987
+    || row.mag_filter !== 9729
+    || row.wrap_s !== 10497
+    || row.wrap_t !== 10497
+  ) {
+    throw new TypeError('verified mesh texture descriptor is invalid');
+  }
+  return {
+    ...row,
+    media_type: 'image/png',
+    transfer: row.colour_space === 'srgb' ? 'srgb' : 'linear',
+    material_profile: materialProfile ?? 'legacy-png',
+    source_descriptor: null,
+  };
+}
+
+function validateDependencyClosure(
+  dependencies,
+  {
+    materialProfile = null,
+  } = {},
+) {
   if (!Array.isArray(dependencies) || dependencies.length === 0) {
     throw new TypeError('verified mesh texture closure is absent');
   }
   const bySlot = new Map();
   const semanticKeys = new Set();
-  for (const row of dependencies) {
-    if (
-      typeof row?.url !== 'string'
-      || !SHA256.test(row.sha256)
-      || !Number.isSafeInteger(row.bytes)
-      || row.bytes <= 0
-      || !TEXTURE_ROLES.has(row.role)
-      || !['srgb', 'non-color'].includes(row.colour_space)
-      || typeof row.material_slot_id !== 'string'
-      || row.material_slot_id.length === 0
-      || typeof row.derivation_algorithm_id !== 'string'
-      || row.derivation_algorithm_id.length === 0
-      || row.min_filter !== 9987
-      || row.mag_filter !== 9729
-      || row.wrap_s !== 10497
-      || row.wrap_t !== 10497
-    ) {
-      throw new TypeError('verified mesh texture descriptor is invalid');
-    }
+  for (const source of dependencies) {
+    const row = normalizeDependency(source, materialProfile);
     const semanticKey = `${row.material_slot_id}:${row.role}`;
     if (semanticKeys.has(semanticKey)) {
       throw new TypeError('verified mesh texture closure is ambiguous');
@@ -358,7 +454,7 @@ function validateDependencyClosure(dependencies) {
   return bySlot;
 }
 
-function validateTemplateDescriptor(descriptor) {
+function validateTemplateDescriptor(descriptor, materialProfile = null) {
   if (
     typeof descriptor?.url !== 'string'
     || !SHA256.test(descriptor.glb_sha256)
@@ -373,13 +469,19 @@ function validateTemplateDescriptor(descriptor) {
   if (!Array.isArray(dependencies)) {
     throw new TypeError('verified mesh texture closure is invalid');
   }
+  if (
+    dependencies.some((row) => row?.media_type !== undefined)
+    && descriptor.profile_id !== materialProfile
+  ) {
+    throw new TypeError('verified mesh material profile is inconsistent');
+  }
   if (dependencies.length === 0) {
     if (descriptor.lod === 2) {
       throw new TypeError('verified mesh texture closure is absent');
     }
     return;
   }
-  validateDependencyClosure(dependencies);
+  validateDependencyClosure(dependencies, { materialProfile });
 }
 
 function materialPlan(loaded, resources, bySlot, THREE) {
@@ -462,7 +564,7 @@ export function semanticTextureKey(
   ) {
     throw new TypeError('semantic texture rendering state is invalid');
   }
-  return [
+  const parts = [
     dependency.sha256,
     dependency.role,
     dependency.colour_space,
@@ -474,7 +576,14 @@ export function semanticTextureKey(
     ].join(':'),
     String(flipY),
     alphaMode,
-  ].join(':');
+  ];
+  if (
+    dependency.material_profile
+    && dependency.material_profile !== 'legacy-png'
+  ) {
+    parts.push(dependency.material_profile);
+  }
+  return parts.join(':');
 }
 
 export function createVerifiedProfileTextureStore({
@@ -857,6 +966,8 @@ export function createVerifiedMeshResourceStore({
   createObjectURL = globalThis.URL?.createObjectURL?.bind(globalThis.URL),
   revokeObjectURL = globalThis.URL?.revokeObjectURL?.bind(globalThis.URL),
   maximumIdleTemplates = 36,
+  materialProfile = null,
+  profileTextureStore = null,
 } = {}) {
   if (
     typeof THREE?.LoadingManager !== 'function'
@@ -872,6 +983,19 @@ export function createVerifiedMeshResourceStore({
     || (mergeGeometriesFn !== null && typeof mergeGeometriesFn !== 'function')
     || !Number.isSafeInteger(maximumIdleTemplates)
     || maximumIdleTemplates < 0
+    || (
+      materialProfile !== null
+      && !['h3-ai-ktx2-4k', 'h2-png-1k-fallback'].includes(
+        materialProfile,
+      )
+    )
+    || (
+      materialProfile === 'h3-ai-ktx2-4k'
+      && (
+        typeof profileTextureStore?.acquire !== 'function'
+        || typeof profileTextureStore?.release !== 'function'
+      )
+    )
   ) {
     throw new TypeError('verified mesh resource dependencies are unavailable');
   }
@@ -1033,6 +1157,22 @@ export function createVerifiedMeshResourceStore({
   }
 
   async function acquireGpuTexture(dependency, rendering) {
+    if (dependency.media_type === 'image/ktx2') {
+      if (
+        materialProfile !== 'h3-ai-ktx2-4k'
+        || dependency.source_descriptor == null
+      ) {
+        throw new TypeError('verified KTX2 texture route is unavailable');
+      }
+      const acquired = await profileTextureStore.acquire(
+        dependency.source_descriptor,
+        rendering,
+      );
+      return {
+        key: `profile:${acquired.key}`,
+        texture: acquired.texture,
+      };
+    }
     await fetchExactObject(dependency, 'image/png');
     const key = semanticTextureKey(dependency, rendering);
     let record = gpuTextures.get(key);
@@ -1078,6 +1218,9 @@ export function createVerifiedMeshResourceStore({
   }
 
   function releaseGpuTexture(key) {
+    if (key.startsWith('profile:')) {
+      return profileTextureStore.release(key.slice('profile:'.length));
+    }
     const record = gpuTextures.get(key);
     if (!record || record.refs <= 0) return false;
     record.refs -= 1;
@@ -1159,7 +1302,16 @@ export function createVerifiedMeshResourceStore({
       }
       return buildEmbeddedTemplate(descriptor);
     }
-    const bySlot = validateDependencyClosure(dependencies);
+    const normalizedDependencies = dependencies.map(
+      (row) => normalizeDependency(row, materialProfile),
+    );
+    const bySlot = validateDependencyClosure(
+      dependencies,
+      { materialProfile },
+    );
+    const pngDependencies = normalizedDependencies.filter(
+      (row) => row.media_type === 'image/png',
+    );
     const glbDescriptor = {
       url: descriptor.url,
       sha256: descriptor.glb_sha256,
@@ -1168,10 +1320,12 @@ export function createVerifiedMeshResourceStore({
     const dependencyBytes = new Map();
     const fetched = await Promise.all([
       fetchExactObject(glbDescriptor, 'model/gltf-binary'),
-      ...dependencies.map((row) => fetchExactObject(row, 'image/png')),
+      ...pngDependencies.map(
+        (row) => fetchExactObject(row, 'image/png'),
+      ),
     ]);
     const [glbBytes, ...textureBytes] = fetched;
-    dependencies.forEach((row, index) => {
+    pngDependencies.forEach((row, index) => {
       dependencyBytes.set(row.sha256, textureBytes[index]);
     });
     const objectUrls = new Map();
@@ -1181,8 +1335,11 @@ export function createVerifiedMeshResourceStore({
     const acquiredGpuKeys = new Set();
     let retainedGlb = false;
     try {
-      for (const row of dependencies) {
-        if (!objectUrls.has(row.sha256)) {
+      for (const row of normalizedDependencies) {
+        if (
+          row.media_type === 'image/png'
+          && !objectUrls.has(row.sha256)
+        ) {
           objectUrls.set(
             row.sha256,
             createObjectURL(
@@ -1195,7 +1352,9 @@ export function createVerifiedMeshResourceStore({
         }
         uriToObjectUrl.set(
           expectedRelativeTextureUri(row),
-          objectUrls.get(row.sha256),
+          row.media_type === 'image/ktx2'
+            ? `ktx2-placeholder:${row.sha256}`
+            : objectUrls.get(row.sha256),
         );
       }
       const requestedUris = new Set();
@@ -1210,6 +1369,30 @@ export function createVerifiedMeshResourceStore({
         return uriToObjectUrl.get(url);
       });
       const loader = new GLTFLoader(manager);
+      if (
+        normalizedDependencies.some(
+          (row) => row.media_type === 'image/ktx2',
+        )
+      ) {
+        if (typeof loader.setKTX2Loader !== 'function') {
+          throw new TypeError('GLTF KTX2 placeholder route is unavailable');
+        }
+        loader.setKTX2Loader({
+          load(_url, onLoad, _onProgress, onError) {
+            try {
+              const texture = new THREE.Texture();
+              texture.needsUpdate = false;
+              onLoad(texture);
+              return texture;
+            } catch {
+              onError?.(
+                new TypeError('GLTF KTX2 placeholder creation failed'),
+              );
+              return null;
+            }
+          },
+        });
+      }
       loaded = await loader.parseAsync(arrayBufferFrom(glbBytes), '');
       if (
         requestedUris.size !== uriToObjectUrl.size
@@ -1232,7 +1415,7 @@ export function createVerifiedMeshResourceStore({
               flipY: false,
             });
             acquiredGpuKeys.add(acquired.key);
-            textureByKey.set(acquired.key, acquired.texture);
+            textureByKey.set(key, acquired.texture);
           }
         }
       }
@@ -1303,7 +1486,9 @@ export function createVerifiedMeshResourceStore({
     } finally {
       for (const url of objectUrls.values()) revokeObjectURL(url);
       deleteUnretainedByte(descriptor.glb_sha256);
-      for (const row of dependencies) deleteUnretainedByte(row.sha256);
+      for (const row of pngDependencies) {
+        deleteUnretainedByte(row.sha256);
+      }
     }
   }
 
@@ -1325,7 +1510,7 @@ export function createVerifiedMeshResourceStore({
   }
 
   async function loadTemplate(descriptor) {
-    validateTemplateDescriptor(descriptor);
+    validateTemplateDescriptor(descriptor, materialProfile);
     const key = templateKey(descriptor);
     let record = templates.get(key);
     if (!record) {

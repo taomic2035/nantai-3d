@@ -295,9 +295,20 @@ function createSceneFixture(THREE, dependencies, {
     dependencies.map((row) => [row.role, new FakeTexture(`transient:${row.role}`)]),
   );
   const images = dependencies.map((row) => ({
-    uri: `../textures/${row.sha256}.png`,
+    uri: (
+      `../textures/${row.sha256}.`
+      + (row.media_type === 'image/ktx2' ? 'ktx2' : 'png')
+    ),
   }));
-  const textures = dependencies.map((row, index) => ({ source: index }));
+  const textures = dependencies.map((row, index) => (
+    row.media_type === 'image/ktx2'
+      ? {
+        extensions: {
+          KHR_texture_basisu: { source: index },
+        },
+      }
+      : { source: index }
+  ));
   const associations = new Map(
     dependencies.map((row, index) => [
       transientByRole.get(row.role),
@@ -428,6 +439,8 @@ function harness({
   sceneOptions,
   mutateResponse,
   maximumIdleTemplates = 0,
+  materialProfile = null,
+  profileTextureStore = null,
 } = {}) {
   const THREE = fakeThree();
   const counters = {
@@ -474,12 +487,29 @@ function harness({
   class FakeGLTFLoader {
     constructor(manager) {
       this.manager = manager;
+      this.ktx2Loader = null;
+    }
+
+    setKTX2Loader(loader) {
+      this.ktx2Loader = loader;
+      return this;
     }
 
     async parseAsync() {
       counters.parses += 1;
       for (const row of descriptor.texture_dependencies ?? []) {
-        this.manager.resolveURL(`../textures/${row.sha256}.png`);
+        const extension = row.media_type === 'image/ktx2'
+          ? 'ktx2'
+          : 'png';
+        const resolved = this.manager.resolveURL(
+          `../textures/${row.sha256}.${extension}`,
+        );
+        if (extension === 'ktx2') {
+          assert.ok(this.ktx2Loader);
+          await new Promise((resolve, reject) => {
+            this.ktx2Loader.load(resolved, resolve, undefined, reject);
+          });
+        }
       }
       lastFixture = descriptor.texture_dependencies?.length
         ? createSceneFixture(
@@ -542,6 +572,8 @@ function harness({
     createObjectURL,
     revokeObjectURL,
     maximumIdleTemplates,
+    materialProfile,
+    profileTextureStore,
   });
   return {
     THREE,
@@ -974,4 +1006,61 @@ test('profile texture store rejects profile drift and reports bounded H3 failure
     false,
   );
   assert.equal(store.diagnostics().active_textures, 0);
+});
+
+test('mesh template binds H3 KTX only through the verified profile store', async () => {
+  const dependencies = [
+    profileDependency(BASE_BYTES, { role: 'base_color' }),
+    profileDependency(NORMAL_BYTES, { role: 'normal' }),
+    profileDependency(ORM_BYTES, { role: 'orm' }),
+  ];
+  const descriptor = assetDescriptor({
+    dependencies,
+    profile_id: 'h3-ai-ktx2-4k',
+    url: (
+      `/api/world/mesh-assets/${BUNDLE_ID}/h3-ai-ktx2-4k/`
+      + 'house_stone_01/lod2.glb'
+    ),
+    geometry_fingerprint: '9'.repeat(64),
+  });
+  const acquired = [];
+  const released = [];
+  const textures = new Map();
+  const profileTextureStore = {
+    async acquire(row, rendering) {
+      const key = `${row.material_slot_id}:${row.role}:${rendering.alphaMode}`;
+      acquired.push([row.url, rendering]);
+      if (!textures.has(key)) textures.set(key, new FakeTexture(null));
+      return { key, texture: textures.get(key) };
+    },
+    release(key) {
+      released.push(key);
+      return true;
+    },
+    diagnostics() {
+      return { active_textures: textures.size };
+    },
+  };
+  const setup = harness({
+    descriptor,
+    materialProfile: 'h3-ai-ktx2-4k',
+    profileTextureStore,
+  });
+
+  await setup.store.loadTemplate(descriptor);
+
+  assert.equal(setup.counters.fetches, 1);
+  assert.equal(setup.counters.bitmapDecodes, 0);
+  assert.equal(acquired.length, 3);
+  assert.ok(
+    acquired.every(([url]) => url.endsWith('.ktx2')),
+  );
+  assert.equal(
+    setup.lastFixture.transientTextures.every(
+      (texture) => texture.disposals === 1,
+    ),
+    true,
+  );
+  assert.equal(setup.store.releaseTemplate(descriptor), true);
+  assert.equal(released.length, 3);
 });
