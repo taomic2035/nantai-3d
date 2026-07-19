@@ -79,6 +79,20 @@ VEGETATION_DETAIL = {
         "leaf-card": 3_000,
     },
 }
+VEGETATION_MATERIALS = {
+    "tree_bamboo_01": (
+        "material-bamboo-leaf-01",
+        "material-bamboo-stem-01",
+    ),
+    "tree_broadleaf_01": (
+        "material-broadleaf-canopy-01",
+        "material-broadleaf-bark-01",
+    ),
+    "tree_pine_01": (
+        "material-orchard-leaf-01",
+        "material-orchard-bark-01",
+    ),
+}
 PROP_DETAIL = {
     "fence_wood_01": {"post": 12, "rail": 22, "brace": 10},
     "stone_lamp_01": {"bevelled-part": 48, "cage-member": 12},
@@ -110,6 +124,142 @@ class FrozenModel(BaseModel):
         frozen=True,
         revalidate_instances="always",
         strict=True,
+    )
+
+
+def _rotation_matrix(
+    rotation_degrees: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], ...]:
+    rx, ry, rz = (math.radians(value) for value in rotation_degrees)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    return (
+        (
+            cz * cy,
+            cz * sy * sx - sz * cx,
+            cz * sy * cx + sz * sx,
+        ),
+        (
+            sz * cy,
+            sz * sy * sx + cz * cx,
+            sz * sy * cx - cz * sx,
+        ),
+        (-sy, cy * sx, cy * cx),
+    )
+
+
+def _rotated_box_half_extents(
+    scale: tuple[float, float, float],
+    rotation_degrees: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Return conservative world-axis extents for a rotated local unit box."""
+
+    matrix = _rotation_matrix(rotation_degrees)
+    return tuple(
+        sum(
+            abs(matrix[axis][source_axis])
+            * scale[source_axis]
+            / 2
+            for source_axis in range(3)
+        )
+        for axis in range(3)
+    )
+
+
+def _rotated_prism_relative_bounds(
+    scale: tuple[float, float, float],
+    rotation_degrees: tuple[float, float, float],
+    triangles: int,
+    *,
+    axis: Literal["x", "z"],
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+]:
+    segments = (triangles + 4) // 4
+    if segments < 3 or 4 * segments - 4 != triangles:
+        raise ValueError("near prism triangle contract is unsupported")
+    vertices = tuple(
+        (
+            (end, 0.5 * math.cos(angle), 0.5 * math.sin(angle))
+            if axis == "x"
+            else (0.5 * math.cos(angle), 0.5 * math.sin(angle), end)
+        )
+        for end in (-0.5, 0.5)
+        for angle in (
+            2 * math.pi * index / segments
+            for index in range(segments)
+        )
+    )
+    matrix = _rotation_matrix(rotation_degrees)
+    transformed = tuple(
+        tuple(
+            sum(
+                matrix[world_axis][source_axis]
+                * vertex[source_axis]
+                * scale[source_axis]
+                for source_axis in range(3)
+            )
+            for world_axis in range(3)
+        )
+        for vertex in vertices
+    )
+    return (
+        tuple(
+            min(vertex[world_axis] for vertex in transformed)
+            for world_axis in range(3)
+        ),
+        tuple(
+            max(vertex[world_axis] for vertex in transformed)
+            for world_axis in range(3)
+        ),
+    )
+
+
+def _component_relative_bounds(
+    component: NearComponent,
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+]:
+    if component.primitive in {"cylinder", "branch"}:
+        return _rotated_prism_relative_bounds(
+            component.scale,
+            component.rotation_degrees,
+            component.planned_triangles,
+            axis="x" if component.primitive == "branch" else "z",
+        )
+    extents = _rotated_box_half_extents(
+        component.scale,
+        component.rotation_degrees,
+    )
+    return (
+        tuple(-value for value in extents),
+        extents,
+    )
+
+
+def _component_inside_footprint(
+    component: NearComponent,
+    footprint_m: tuple[float, float, float],
+) -> bool:
+    relative_min, relative_max = _component_relative_bounds(component)
+    minimum = tuple(
+        component.position[axis] + relative_min[axis]
+        for axis in range(3)
+    )
+    maximum = tuple(
+        component.position[axis] + relative_max[axis]
+        for axis in range(3)
+    )
+    return (
+        minimum[0] >= -footprint_m[0] / 2 - 1e-9
+        and maximum[0] <= footprint_m[0] / 2 + 1e-9
+        and minimum[1] >= -footprint_m[1] / 2 - 1e-9
+        and maximum[1] <= footprint_m[1] / 2 + 1e-9
+        and minimum[2] >= -1e-9
+        and maximum[2] <= footprint_m[2] + 1e-9
     )
 
 
@@ -233,16 +383,8 @@ class NearGeometryPlan(FrozenModel):
             raise ValueError(
                 "near geometry component uses an undeclared material",
             )
-        half_width = self.footprint_m[0] / 2
-        half_depth = self.footprint_m[1] / 2
-        height = self.footprint_m[2]
         if any(
-            abs(row.position[0]) + row.scale[0] / 2
-            > half_width + 1e-9
-            or abs(row.position[1]) + row.scale[1] / 2
-            > half_depth + 1e-9
-            or row.position[2] - row.scale[2] / 2 < -1e-9
-            or row.position[2] + row.scale[2] / 2 > height + 1e-9
+            not _component_inside_footprint(row, self.footprint_m)
             for row in self.components
         ):
             raise ValueError(
@@ -440,7 +582,7 @@ def _build_building(
         wall_material,
         (0.0, 0.0, height * 0.025),
         (width * 0.96, depth * 0.96, height * 0.05),
-        triangles=12,
+        triangles=28,
     )
     walls = (
         ("east", (width * 0.49, 0.0, wall_height / 2), (width * 0.02, depth, wall_height)),
@@ -455,6 +597,7 @@ def _build_building(
             wall_material,
             position,
             scale,
+            triangles=28,
             elevation=elevation,
         )
     for side in (-1, 1):
@@ -518,6 +661,7 @@ def _build_building(
             frame_material,
             eave_position,
             eave_scale,
+            triangles=28,
             elevation=elevation,
         )
     opening_rows = (
@@ -581,6 +725,7 @@ def _build_building(
                 height * 0.965,
             ),
             (width * 0.11, depth * 0.045, height * 0.035),
+            triangles=28,
         )
     for index in range(24):
         elevation: Elevation = (
@@ -609,6 +754,7 @@ def _build_building(
                 max(scale[1] * 0.35, depth * 0.012),
                 height * 0.035,
             ),
+            triangles=28,
             elevation=elevation,
         )
     specific_class = BUILDING_SPECIFIC_CLASS[asset_id]
@@ -616,6 +762,15 @@ def _build_building(
         "quoin": "stone-block",
         "thatch-fringe": "thatch-strip",
     }.get(specific_class, "frame")
+    specific_material = (
+        wall_material
+        if specific_class == "quoin"
+        else roof_material
+        if specific_class == "thatch-fringe"
+        else _material_like(slots, "weathered")
+        if specific_class == "barn-door"
+        else frame_material
+    )
     for index in range(64):
         elevation = (
             "east",
@@ -632,7 +787,7 @@ def _build_building(
         builder.add(
             specific_class,
             specific_primitive,
-            wall_material if specific_class == "quoin" else frame_material,
+            specific_material,
             (
                 position[0],
                 position[1],
@@ -644,6 +799,7 @@ def _build_building(
                 height * 0.08,
             ),
             rotation=(0.0, 0.0, (index % 3 - 1) * 8.0),
+            triangles=28 if specific_primitive == "stone-block" else 12,
             elevation=elevation,
         )
     detail_counts = {
@@ -669,14 +825,11 @@ def _build_vegetation(
 ) -> tuple[tuple[NearComponent, ...], dict[str, int]]:
     width, depth, height = footprint
     builder = _ComponentBuilder(asset_id)
-    foliage_material = _material_like(
-        slots,
-        "leaf",
-        "canopy",
-    )
-    structure_material = next(
-        slot for slot in slots if slot != foliage_material
-    )
+    foliage_material, structure_material = VEGETATION_MATERIALS[asset_id]
+    if {foliage_material, structure_material} != set(slots):
+        raise NearGeometryPlanError(
+            "vegetation materials differ from the registered recipe",
+        )
     counts = VEGETATION_DETAIL[asset_id]
     trunk_ids = []
     for index in range(counts["trunk-or-culm"]):
@@ -696,18 +849,27 @@ def _build_vegetation(
             if asset_id == "tree_bamboo_01"
             else 0.065
         )
+        trunk_scale = (radius, radius, height * 0.92)
+        trunk_rotation = (
+            (stable_unit(asset_id, token, "lean-x") - 0.5) * 4.0,
+            (stable_unit(asset_id, token, "lean-y") - 0.5) * 4.0,
+            0.0,
+        )
+        trunk_relative_min, _ = _rotated_prism_relative_bounds(
+            trunk_scale,
+            trunk_rotation,
+            48 if asset_id == "tree_bamboo_01" else 64,
+            axis="z",
+        )
+        trunk_z = -trunk_relative_min[2]
         trunk_ids.append(
             builder.add(
                 "trunk-or-culm",
                 "cylinder",
                 structure_material,
-                (x, y, height * 0.46),
-                (radius, radius, height * 0.92),
-                rotation=(
-                    (stable_unit(asset_id, token, "lean-x") - 0.5) * 4.0,
-                    (stable_unit(asset_id, token, "lean-y") - 0.5) * 4.0,
-                    0.0,
-                ),
+                (x, y, trunk_z),
+                trunk_scale,
+                rotation=trunk_rotation,
                 triangles=(
                     48 if asset_id == "tree_bamboo_01" else 64
                 ),
@@ -837,7 +999,7 @@ def _build_prop(
             for index in range(count):
                 fraction = (index + 0.5) / count
                 z = (
-                    height * 0.48
+                    height * 0.45
                     if part_class == "post"
                     else height * (0.24 + 0.5 * (index % 2))
                 )
@@ -853,7 +1015,7 @@ def _build_prop(
                             else width / count * 0.90
                         ),
                         depth * 0.92,
-                        height * (0.78 if part_class == "post" else 0.07),
+                        height * (0.90 if part_class == "post" else 0.07),
                     ),
                     rotation=(
                         0.0,
@@ -872,7 +1034,7 @@ def _build_prop(
                         )
                         * 2.0,
                     ),
-                    triangles=24,
+                    triangles=28 if part_class != "brace" else 24,
                 )
     elif asset_id == "stone_lamp_01":
         stone = _material_like(slots, "stone")
@@ -892,7 +1054,7 @@ def _build_prop(
                 ),
                 (width * 0.16, depth * 0.16, height * 0.10),
                 rotation=(0.0, 0.0, math.degrees(angle)),
-                triangles=24,
+                triangles=28,
             )
         for index in range(counts["cage-member"]):
             angle = 2 * math.pi * index / counts["cage-member"]
@@ -915,56 +1077,75 @@ def _build_prop(
             course = index // 24
             column = index % 24
             token = f"block-{index:04d}"
+            scale = (
+                width / 24 * 0.92,
+                depth
+                * (
+                    0.62
+                    + 0.20
+                    * stable_unit(asset_id, token, "thickness")
+                ),
+                height * 0.18,
+            )
+            rotation = (
+                0.0,
+                0.0,
+                (
+                    stable_unit(asset_id, token, "yaw") - 0.5
+                )
+                * 8.0,
+            )
+            nominal_x = -width / 2 + width * (column + 0.5) / 24
+            half_x = _rotated_box_half_extents(scale, rotation)[0]
+            x = max(
+                -width / 2 + half_x + 1e-6,
+                min(width / 2 - half_x - 1e-6, nominal_x),
+            )
             builder.add(
                 "stone-block",
                 "stone-block",
                 material,
                 (
-                    -width / 2 + width * (column + 0.5) / 24,
+                    x,
                     (
                         stable_unit(asset_id, token, "depth") - 0.5
                     )
                     * depth
                     * 0.08,
-                    height * (0.10 + course * 0.20),
+                    height * (0.09 + course * 0.20),
                 ),
-                (
-                    width / 24 * 0.92,
-                    depth
-                    * (
-                        0.62
-                        + 0.20
-                        * stable_unit(asset_id, token, "thickness")
-                    ),
-                    height * 0.18,
-                ),
-                rotation=(
-                    0.0,
-                    0.0,
-                    (
-                        stable_unit(asset_id, token, "yaw") - 0.5
-                    )
-                    * 8.0,
-                ),
-                triangles=24,
+                scale,
+                rotation=rotation,
+                triangles=28,
             )
         for index in range(counts["cap-stone"]):
+            scale = (
+                width / counts["cap-stone"] * 0.96,
+                depth * 0.92,
+                height * 0.16,
+            )
+            rotation = (0.0, 0.0, (-1) ** index * 2.0)
+            nominal_x = (
+                -width / 2
+                + width * (index + 0.5) / counts["cap-stone"]
+            )
+            half_x = _rotated_box_half_extents(scale, rotation)[0]
+            x = max(
+                -width / 2 + half_x + 1e-6,
+                min(width / 2 - half_x - 1e-6, nominal_x),
+            )
             builder.add(
                 "cap-stone",
                 "stone-block",
                 material,
                 (
-                    -width / 2 + width * (index + 0.5) / counts["cap-stone"],
+                    x,
                     0.0,
                     height * 0.91,
                 ),
-                (
-                    width / counts["cap-stone"] * 0.96,
-                    depth * 0.92,
-                    height * 0.16,
-                ),
-                rotation=(0.0, 0.0, (-1) ** index * 2.0),
-                triangles=24,
+                scale,
+                rotation=rotation,
+                triangles=28,
             )
     return tuple(sorted(
         builder.components,

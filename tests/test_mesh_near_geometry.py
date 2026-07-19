@@ -29,6 +29,84 @@ FOOTPRINTS = {
 }
 
 
+def _component_relative_bounds(
+    component: object,
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+]:
+    scale = component.scale
+    rotation_degrees = component.rotation_degrees
+    rx, ry, rz = (math.radians(value) for value in rotation_degrees)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    matrix = (
+        (
+            cz * cy,
+            cz * sy * sx - sz * cx,
+            cz * sy * cx + sz * sx,
+        ),
+        (
+            sz * cy,
+            sz * sy * sx + cz * cx,
+            sz * sy * cx - cz * sx,
+        ),
+        (-sy, cy * sx, cy * cx),
+    )
+    if component.primitive in {"cylinder", "branch"}:
+        triangles = component.planned_triangles
+        segments = (triangles + 4) // 4
+        vertices = tuple(
+            (
+                (end, 0.5 * math.cos(angle), 0.5 * math.sin(angle))
+                if component.primitive == "branch"
+                else (
+                    0.5 * math.cos(angle),
+                    0.5 * math.sin(angle),
+                    end,
+                )
+            )
+            for end in (-0.5, 0.5)
+            for angle in (
+                2 * math.pi * index / segments
+                for index in range(segments)
+            )
+        )
+        transformed = tuple(
+            tuple(
+                sum(
+                    matrix[axis][source_axis]
+                    * vertex[source_axis]
+                    * scale[source_axis]
+                    for source_axis in range(3)
+                )
+                for axis in range(3)
+            )
+            for vertex in vertices
+        )
+        return (
+            tuple(
+                min(vertex[axis] for vertex in transformed)
+                for axis in range(3)
+            ),
+            tuple(
+                max(vertex[axis] for vertex in transformed)
+                for axis in range(3)
+            ),
+        )
+    extents = tuple(
+        sum(
+            abs(matrix[axis][source_axis])
+            * scale[source_axis]
+            / 2
+            for source_axis in range(3)
+        )
+        for axis in range(3)
+    )
+    return tuple(-value for value in extents), extents
+
+
 @pytest.mark.parametrize("asset_id", EXPECTED_ASSET_IDS)
 def test_near_plan_is_deterministic_complete_and_inside_footprint(
     asset_id: str,
@@ -46,6 +124,11 @@ def test_near_plan_is_deterministic_complete_and_inside_footprint(
         footprint[1] / 2,
         footprint[2],
     )
+    component_min_z = min(
+        row.position[2] + _component_relative_bounds(row)[0][2]
+        for row in first.components
+    )
+    assert component_min_z == pytest.approx(0.0, abs=1e-9)
     lower, upper = LOD2_TRIANGLE_BANDS[first.kind]
     assert lower <= first.planned_triangles <= upper
     assert first.planned_triangles == sum(
@@ -55,6 +138,9 @@ def test_near_plan_is_deterministic_complete_and_inside_footprint(
     component_ids = tuple(row.component_id for row in first.components)
     assert component_ids == tuple(sorted(component_ids))
     assert len(component_ids) == len(set(component_ids))
+    assert {
+        row.material_slot_id for row in first.components
+    } == set(first.material_slot_ids)
     assert all(
         math.isfinite(value)
         for row in first.components
@@ -64,6 +150,22 @@ def test_near_plan_is_deterministic_complete_and_inside_footprint(
             *row.rotation_degrees,
         )
     )
+    for row in first.components:
+        relative_min, relative_max = _component_relative_bounds(row)
+        minimum = tuple(
+            row.position[axis] + relative_min[axis]
+            for axis in range(3)
+        )
+        maximum = tuple(
+            row.position[axis] + relative_max[axis]
+            for axis in range(3)
+        )
+        assert minimum[0] >= -footprint[0] / 2 - 1e-9
+        assert maximum[0] <= footprint[0] / 2 + 1e-9
+        assert minimum[1] >= -footprint[1] / 2 - 1e-9
+        assert maximum[1] <= footprint[1] / 2 + 1e-9
+        assert minimum[2] >= -1e-9
+        assert maximum[2] <= footprint[2] + 1e-9
     assert b"/Users/" not in canonical_near_geometry_plan_bytes(first)
 
 
@@ -144,25 +246,38 @@ def test_building_plans_cover_all_elevations_and_visible_construction(
 
 
 @pytest.mark.parametrize(
-    ("asset_id", "structural_counts"),
+    (
+        "asset_id",
+        "structural_counts",
+        "foliage_material",
+        "structure_material",
+    ),
     (
         (
             "tree_bamboo_01",
             {"trunk-or-culm": 12, "branch": 96, "leaf-card": 3_000},
+            "material-bamboo-leaf-01",
+            "material-bamboo-stem-01",
         ),
         (
             "tree_broadleaf_01",
             {"trunk-or-culm": 1, "branch": 180, "leaf-card": 3_000},
+            "material-broadleaf-canopy-01",
+            "material-broadleaf-bark-01",
         ),
         (
             "tree_pine_01",
             {"trunk-or-culm": 1, "branch": 240, "leaf-card": 3_000},
+            "material-orchard-leaf-01",
+            "material-orchard-bark-01",
         ),
     ),
 )
 def test_vegetation_plans_have_structure_and_exact_leaf_cards(
     asset_id: str,
     structural_counts: dict[str, int],
+    foliage_material: str,
+    structure_material: str,
 ) -> None:
     plan = build_near_geometry_plan(asset_id, FOOTPRINTS[asset_id])
 
@@ -179,6 +294,16 @@ def test_vegetation_plans_have_structure_and_exact_leaf_cards(
     assert "canopy-blob" not in {
         row.part_class for row in plan.components
     }
+    assert {
+        row.material_slot_id
+        for row in plan.components
+        if row.part_class == "leaf-card"
+    } == {foliage_material}
+    assert {
+        row.material_slot_id
+        for row in plan.components
+        if row.part_class != "leaf-card"
+    } == {structure_material}
     if asset_id == "tree_bamboo_01":
         assert any(
             row.part_class == "culm-node"
@@ -214,6 +339,17 @@ def test_prop_plans_have_exact_silhouette_detail(
             row.part_class == part_class
             for row in plan.components
         ) == count
+
+
+@pytest.mark.parametrize("asset_id", EXPECTED_ASSET_IDS)
+def test_near_plans_reserve_real_bevel_topology(asset_id: str) -> None:
+    plan = build_near_geometry_plan(asset_id, FOOTPRINTS[asset_id])
+
+    assert all(
+        row.planned_triangles == 28
+        for row in plan.components
+        if row.primitive in {"bevelled-box", "stone-block"}
+    )
 
 
 def test_plan_rejects_unknown_asset_and_registry_footprint_drift() -> None:
