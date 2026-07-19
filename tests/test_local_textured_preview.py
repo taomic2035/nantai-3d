@@ -233,6 +233,91 @@ def test_local_blender_authors_float_corner_surface_color(
     assert "NANTAI_SURFACE_COLOR_OK" in result.stdout
 
 
+def test_local_blender_normalizes_exported_surface_colors_to_float_vec4(
+    tmp_path: Path,
+) -> None:
+    if not LOCAL_BLENDER.is_file():
+        pytest.skip("local Blender runtime is not installed")
+    output = tmp_path / "normalized-colors.glb"
+    result = _run_builder_probe(
+        tmp_path,
+        "import json\n"
+        "import runpy\n"
+        "import struct\n"
+        "from pathlib import Path\n"
+        f"ns = runpy.run_path({str(BLENDER_BUILDER)!r}, run_name='surface_probe')\n"
+        "bpy = ns['bpy']\n"
+        "bpy.ops.object.select_all(action='SELECT')\n"
+        "bpy.ops.object.delete(use_global=False)\n"
+        "def add_surface(name, colors, x_offset):\n"
+        "    mesh = bpy.data.meshes.new(name + '-mesh')\n"
+        "    mesh.from_pydata([(x_offset, 0, 0), (x_offset + 1, 0, 0), "
+        "(x_offset, 1, 0)], [], [(0, 1, 2)])\n"
+        "    mesh.update()\n"
+        "    layer = mesh.color_attributes.new(\n"
+        "        name='nv_surface_color', type='FLOAT_COLOR', domain='CORNER',\n"
+        "    )\n"
+        "    for row, color in zip(layer.data, colors, strict=True):\n"
+        "        row.color = color\n"
+        "    mesh.color_attributes.active_color = layer\n"
+        "    material = bpy.data.materials.new(name + '-material')\n"
+        "    material.use_nodes = True\n"
+        "    vertex = material.node_tree.nodes.new('ShaderNodeVertexColor')\n"
+        "    vertex.layer_name = 'nv_surface_color'\n"
+        "    principled = material.node_tree.nodes.get('Principled BSDF')\n"
+        "    material.node_tree.links.new(\n"
+        "        vertex.outputs['Color'], principled.inputs['Base Color'],\n"
+        "    )\n"
+        "    mesh.materials.append(material)\n"
+        "    obj = bpy.data.objects.new(name, mesh)\n"
+        "    bpy.context.scene.collection.objects.link(obj)\n"
+        "add_surface('white', [(1, 1, 1, 1)] * 3, 0)\n"
+        "add_surface('macro', [\n"
+        "    (0.88, 0.92, 1.04, 1),\n"
+        "    (0.94, 1.00, 1.08, 1),\n"
+        "    (1.02, 1.06, 1.10, 1),\n"
+        "], 2)\n"
+        f"output = Path({str(output)!r})\n"
+        "bpy.ops.export_scene.gltf(\n"
+        "    filepath=str(output), export_format='GLB', export_apply=True,\n"
+        ")\n"
+        "ns['_normalize_surface_color_accessors'](output)\n"
+        "raw = output.read_bytes()\n"
+        "json_length = struct.unpack_from('<I', raw, 12)[0]\n"
+        "document = json.loads(raw[20:20 + json_length].decode('utf-8'))\n"
+        "color_accessors = [\n"
+        "    document['accessors'][primitive['attributes']['COLOR_0']]\n"
+        "    for mesh in document['meshes']\n"
+        "    for primitive in mesh['primitives']\n"
+        "    if 'COLOR_0' in primitive['attributes']\n"
+        "]\n"
+        "assert len(color_accessors) == 2\n"
+        "assert all(row['componentType'] == 5126 for row in color_accessors)\n"
+        "assert all(row['type'] == 'VEC4' for row in color_accessors)\n"
+        "assert all(row.get('normalized', False) is False for row in color_accessors)\n"
+        "binary_start = 20 + json_length + 8\n"
+        "decoded = []\n"
+        "for accessor in color_accessors:\n"
+        "    view = document['bufferViews'][accessor['bufferView']]\n"
+        "    offset = binary_start + view.get('byteOffset', 0)\n"
+        "    values = struct.unpack_from(\n"
+        "        '<' + 'f' * accessor['count'] * 4, raw, offset,\n"
+        "    )\n"
+        "    decoded.append(tuple(values))\n"
+        "assert all(\n"
+        "    values[index] == 1.0\n"
+        "    for values in decoded\n"
+        "    for index in range(3, len(values), 4)\n"
+        ")\n"
+        "assert any(max(values) > 1.0 for values in decoded)\n"
+        "assert any(all(value == 1.0 for value in values) for values in decoded)\n"
+        "print('NANTAI_SURFACE_COLOR_GLB_OK', flush=True)\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_SURFACE_COLOR_GLB_OK" in result.stdout
+
+
 def test_local_blender_builds_three_consolidated_detail_meshes(
     tmp_path: Path,
 ) -> None:

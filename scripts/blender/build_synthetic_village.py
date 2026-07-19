@@ -4843,6 +4843,222 @@ def _validate_preview_evidence(request, preview_registry, work_dir):
     )
 
 
+def _decode_exported_surface_colors(document, binary, accessor_index):
+    accessors = document.get("accessors")
+    views = document.get("bufferViews")
+    if (
+        not isinstance(accessors, list)
+        or not isinstance(views, list)
+        or isinstance(accessor_index, bool)
+        or not isinstance(accessor_index, int)
+        or accessor_index < 0
+        or accessor_index >= len(accessors)
+        or not isinstance(accessors[accessor_index], dict)
+    ):
+        raise RuntimeBuildError("exported surface color accessor is invalid")
+    accessor = accessors[accessor_index]
+    if "sparse" in accessor:
+        raise RuntimeBuildError("exported surface color accessor is sparse")
+    value_type = accessor.get("type")
+    component_count = {"VEC3": 3, "VEC4": 4}.get(value_type)
+    component_type = accessor.get("componentType")
+    formats = {
+        5121: ("B", 1, 255.0),
+        5123: ("H", 2, 65535.0),
+        5126: ("f", 4, None),
+    }
+    if component_count is None or component_type not in formats:
+        raise RuntimeBuildError("exported surface color type is unsupported")
+    normalized = accessor.get("normalized", False)
+    if (
+        not isinstance(normalized, bool)
+        or (component_type == 5126 and normalized)
+        or (component_type != 5126 and not normalized)
+    ):
+        raise RuntimeBuildError("exported surface color normalization is invalid")
+    count = accessor.get("count")
+    view_index = accessor.get("bufferView")
+    accessor_offset = accessor.get("byteOffset", 0)
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count <= 0
+        or isinstance(view_index, bool)
+        or not isinstance(view_index, int)
+        or view_index < 0
+        or view_index >= len(views)
+        or not isinstance(views[view_index], dict)
+        or isinstance(accessor_offset, bool)
+        or not isinstance(accessor_offset, int)
+        or accessor_offset < 0
+    ):
+        raise RuntimeBuildError("exported surface color range is invalid")
+    view = views[view_index]
+    view_offset = view.get("byteOffset", 0)
+    view_length = view.get("byteLength")
+    if (
+        view.get("buffer") != 0
+        or isinstance(view_offset, bool)
+        or not isinstance(view_offset, int)
+        or view_offset < 0
+        or isinstance(view_length, bool)
+        or not isinstance(view_length, int)
+        or view_length <= 0
+    ):
+        raise RuntimeBuildError("exported surface color buffer view is invalid")
+    format_code, component_bytes, denominator = formats[component_type]
+    element_bytes = component_count * component_bytes
+    stride = view.get("byteStride", element_bytes)
+    if (
+        isinstance(stride, bool)
+        or not isinstance(stride, int)
+        or stride < element_bytes
+        or accessor_offset + stride * (count - 1) + element_bytes > view_length
+        or view_offset + view_length > len(binary)
+    ):
+        raise RuntimeBuildError("exported surface color stride is invalid")
+    unpack_format = "<" + format_code * component_count
+    colors = []
+    for index in range(count):
+        offset = view_offset + accessor_offset + stride * index
+        values = struct.unpack_from(unpack_format, binary, offset)
+        if denominator is not None:
+            values = tuple(value / denominator for value in values)
+        color = tuple(float(value) for value in values)
+        if component_count == 3:
+            color += (1.0,)
+        if any(not math.isfinite(value) for value in color):
+            raise RuntimeBuildError("exported surface color is non-finite")
+        colors.append(color)
+    return tuple(colors)
+
+
+def _normalize_surface_color_accessors(glb_path):
+    try:
+        raw = glb_path.read_bytes()
+        if len(raw) < 28:
+            raise RuntimeBuildError("surface GLB header is incomplete")
+        magic, version, declared = struct.unpack_from("<4sII", raw, 0)
+        json_length, json_kind = struct.unpack_from("<I4s", raw, 12)
+        json_start = 20
+        json_end = json_start + json_length
+        if (
+            magic != b"glTF"
+            or version != 2
+            or declared != len(raw)
+            or json_kind != b"JSON"
+            or json_length <= 0
+            or json_end + 8 > len(raw)
+        ):
+            raise RuntimeBuildError("surface GLB header is invalid")
+        binary_length, binary_kind = struct.unpack_from("<I4s", raw, json_end)
+        binary_start = json_end + 8
+        binary_end = binary_start + binary_length
+        if binary_kind != b"BIN\0" or binary_end != len(raw):
+            raise RuntimeBuildError("surface GLB binary chunk is invalid")
+        document = json.loads(raw[json_start:json_end].decode("utf-8"))
+    except RuntimeBuildError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, struct.error) as exc:
+        raise RuntimeBuildError("surface GLB cannot be normalized") from exc
+    if not isinstance(document, dict):
+        raise RuntimeBuildError("surface GLB document is invalid")
+    buffers = document.get("buffers")
+    views = document.get("bufferViews")
+    accessors = document.get("accessors")
+    meshes = document.get("meshes")
+    if (
+        not isinstance(buffers, list)
+        or len(buffers) != 1
+        or not isinstance(buffers[0], dict)
+        or not isinstance(views, list)
+        or not isinstance(accessors, list)
+        or not isinstance(meshes, list)
+    ):
+        raise RuntimeBuildError("surface GLB collections are invalid")
+    declared_binary = buffers[0].get("byteLength")
+    if (
+        isinstance(declared_binary, bool)
+        or not isinstance(declared_binary, int)
+        or declared_binary <= 0
+        or declared_binary > binary_length
+        or binary_length - declared_binary > 3
+        or any(raw[binary_start + declared_binary : binary_end])
+    ):
+        raise RuntimeBuildError("surface GLB buffer length is invalid")
+    binary = bytearray(raw[binary_start : binary_start + declared_binary])
+    converted = {}
+    color_primitive_count = 0
+    for mesh in meshes:
+        primitives = mesh.get("primitives") if isinstance(mesh, dict) else None
+        if not isinstance(primitives, list) or not primitives:
+            raise RuntimeBuildError("surface GLB mesh primitive is invalid")
+        for primitive in primitives:
+            attributes = (
+                primitive.get("attributes")
+                if isinstance(primitive, dict)
+                else None
+            )
+            if not isinstance(attributes, dict) or "COLOR_0" not in attributes:
+                raise RuntimeBuildError("surface GLB COLOR_0 is absent")
+            source_index = attributes["COLOR_0"]
+            if source_index not in converted:
+                colors = _decode_exported_surface_colors(
+                    document,
+                    bytes(binary),
+                    source_index,
+                )
+                binary.extend(b"\0" * (-len(binary) % 4))
+                offset = len(binary)
+                payload = b"".join(struct.pack("<4f", *color) for color in colors)
+                binary.extend(payload)
+                views.append(
+                    {
+                        "buffer": 0,
+                        "byteLength": len(payload),
+                        "byteOffset": offset,
+                        "target": 34962,
+                    },
+                )
+                accessors.append(
+                    {
+                        "bufferView": len(views) - 1,
+                        "componentType": 5126,
+                        "count": len(colors),
+                        "type": "VEC4",
+                    },
+                )
+                converted[source_index] = len(accessors) - 1
+            attributes["COLOR_0"] = converted[source_index]
+            color_primitive_count += 1
+    if color_primitive_count <= 0:
+        raise RuntimeBuildError("surface GLB has no color primitives")
+    buffers[0]["byteLength"] = len(binary)
+    json_bytes = json.dumps(
+        document,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    json_bytes += b" " * (-len(json_bytes) % 4)
+    binary_bytes = bytes(binary)
+    binary_bytes += b"\0" * (-len(binary_bytes) % 4)
+    total_length = 12 + 8 + len(json_bytes) + 8 + len(binary_bytes)
+    normalized = b"".join(
+        (
+            struct.pack("<4sII", b"glTF", 2, total_length),
+            struct.pack("<I4s", len(json_bytes), b"JSON"),
+            json_bytes,
+            struct.pack("<I4s", len(binary_bytes), b"BIN\0"),
+            binary_bytes,
+        ),
+    )
+    try:
+        glb_path.write_bytes(normalized)
+    except OSError as exc:
+        raise RuntimeBuildError("surface GLB normalization cannot be written") from exc
+
+
 def _glb_textured_counts(glb_path):
     try:
         raw = glb_path.read_bytes()
@@ -5054,7 +5270,7 @@ def _surface_realism_evidence(request, mesh_objects):
     }
 
 
-def _save_scene_and_glb(work_dir, *, textured=False):
+def _save_scene_and_glb(work_dir, *, textured=False, surface_realism=False):
     blend_path = work_dir / "village-canary.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(blend_path), check_existing=False)
     if not blend_path.is_file() or blend_path.stat().st_size <= 0:
@@ -5072,6 +5288,8 @@ def _save_scene_and_glb(work_dir, *, textured=False):
     )
     if "FINISHED" not in result or not glb_path.is_file() or glb_path.stat().st_size <= 0:
         raise RuntimeBuildError("GLB export did not finish")
+    if surface_realism:
+        _normalize_surface_color_accessors(glb_path)
     return _glb_textured_counts(glb_path) if textured else None
 
 
@@ -5296,7 +5514,13 @@ def _execute_build(request, staging_path, materials_path=None):
         if textured:
             for digest, path in material_paths.items():
                 _read_stable_material(path, digest)
-        glb_counts = _save_scene_and_glb(work_dir, textured=textured)
+        glb_counts = _save_scene_and_glb(
+            work_dir,
+            textured=textured,
+            surface_realism=(
+                request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1
+            ),
+        )
         if request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1:
             glb_size = (work_dir / "village-canary.glb").stat().st_size
             if (
