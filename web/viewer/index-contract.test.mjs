@@ -224,6 +224,44 @@ test('mesh world surfaces use byte-verified PBR maps with metre-scaled UVs', () 
   assert.match(main, /terrainGeometry\.materialSlotIds/);
 });
 
+test('mesh templates use the verified ref-counted store and bounded evidence', () => {
+  assert.match(
+    main,
+    /from ['"]\.\/verified-mesh-resources\.mjs['"]/,
+  );
+  assert.match(main, /createVerifiedMeshResourceStore\(/);
+  assert.match(main, /meshResourceStore\.loadTemplate\(/);
+  assert.match(main, /meshResourceStore\.releaseTemplate\(/);
+  assert.doesNotMatch(main, /meshAssetCache/);
+  assert.doesNotMatch(main, /function loadVerifiedMeshAsset/);
+  assert.match(main, /templateDescriptors/);
+  assert.match(main, /mesh_resources:\s*\{/);
+  assert.match(main, /active_chunks:\s*meshWorldChunks\.size/);
+  assert.match(main, /pending_chunks:\s*meshWorldLoading\.size/);
+  assert.match(main, /failed_chunks:/);
+  assert.match(main, /meshResourceStore\.diagnostics\(\)/);
+
+  assert.match(main, /from ['"]\.\/frame-performance\.mjs['"]/);
+  assert.match(main, /createFrameIntervalSampler\(/);
+  assert.match(main, /frameIntervalSampler\.record\(now\)/);
+  assert.match(main, /frame_performance:\s*\{/);
+  assert.match(main, /frameIntervalSampler\.snapshot\(\)/);
+  assert.match(main, /renderer\.info\.memory\.geometries/);
+  assert.match(main, /renderer\.info\.memory\.textures/);
+});
+
+test('mesh weather clones preserve maps alpha and side while changing scalars', () => {
+  assert.match(main, /cloneMeshWorldWeatherMaterials/);
+  assert.match(main, /clone\.map\s*===\s*material\.map/);
+  assert.match(main, /clone\.normalMap\s*===\s*material\.normalMap/);
+  assert.match(main, /clone\.roughnessMap\s*===\s*material\.roughnessMap/);
+  assert.match(main, /clone\.metalnessMap\s*===\s*material\.metalnessMap/);
+  assert.match(main, /clone\.alphaTest\s*===\s*material\.alphaTest/);
+  assert.match(main, /clone\.side\s*===\s*material\.side/);
+  assert.match(main, /clone\.transparent\s*===\s*material\.transparent/);
+  assert.match(main, /record\.weatherMaterials/);
+});
+
 test('model preview neutralizes exported lights and uses an authored close camera', () => {
   assert.match(main, /object\.isLight[\s\S]*object\.visible\s*=\s*false/);
   assert.match(main, /modelPreviewKeyLight/);

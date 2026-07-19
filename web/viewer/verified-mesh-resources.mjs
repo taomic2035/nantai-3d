@@ -73,23 +73,11 @@ function expectedRelativeTextureUri(dependency) {
 
 function templateKey(descriptor) {
   return JSON.stringify([
-    descriptor.asset_id,
-    descriptor.lod,
-    descriptor.url,
     descriptor.glb_sha256,
     descriptor.glb_bytes,
-    descriptor.texture_dependencies.map((row) => [
-      row.url,
+    (descriptor.texture_dependencies ?? []).map((row) => [
       row.sha256,
       row.bytes,
-      row.role,
-      row.colour_space,
-      row.material_slot_id,
-      row.derivation_algorithm_id,
-      row.min_filter,
-      row.mag_filter,
-      row.wrap_s,
-      row.wrap_t,
     ]),
   ]);
 }
@@ -150,15 +138,76 @@ function collectParsedResources(loaded) {
   };
 }
 
+function disposeParsedTexture(texture) {
+  texture.dispose();
+  texture.image?.close?.();
+}
+
 function disposeParsedResources(resources) {
-  for (const texture of resources.transientTextures) texture.dispose();
+  for (const texture of resources.transientTextures) {
+    disposeParsedTexture(texture);
+  }
   for (const material of resources.materials) material.dispose?.();
   for (const geometry of resources.geometries) geometry.dispose?.();
 }
 
 function disposeTransientTextures(resources) {
-  for (const texture of resources.transientTextures) texture.dispose();
+  for (const texture of resources.transientTextures) {
+    disposeParsedTexture(texture);
+  }
   resources.transientTextures.clear();
+}
+
+function assertEmbeddedGlb(glbBytes) {
+  if (!(glbBytes instanceof Uint8Array) || glbBytes.byteLength < 20) {
+    throw new TypeError('embedded mesh GLB is malformed');
+  }
+  const view = new DataView(
+    glbBytes.buffer,
+    glbBytes.byteOffset,
+    glbBytes.byteLength,
+  );
+  if (
+    view.getUint32(0, true) !== 0x46546c67
+    || view.getUint32(4, true) !== 2
+    || view.getUint32(8, true) !== glbBytes.byteLength
+    || view.getUint32(16, true) !== 0x4e4f534a
+  ) {
+    throw new TypeError('embedded mesh GLB header is invalid');
+  }
+  const jsonLength = view.getUint32(12, true);
+  if (jsonLength === 0 || 20 + jsonLength > glbBytes.byteLength) {
+    throw new TypeError('embedded mesh GLB JSON chunk is invalid');
+  }
+  let json;
+  try {
+    json = JSON.parse(
+      new TextDecoder()
+        .decode(glbBytes.subarray(20, 20 + jsonLength))
+        .replace(/[\u0000\u0020]+$/u, ''),
+    );
+  } catch {
+    throw new TypeError('embedded mesh GLB JSON is invalid');
+  }
+  if (
+    !Array.isArray(json.buffers)
+    || json.buffers.length === 0
+    || json.buffers.some((buffer) => (
+      buffer === null
+      || typeof buffer !== 'object'
+      || Object.hasOwn(buffer, 'uri')
+    ))
+    || !Array.isArray(json.images)
+    || json.images.some((image) => (
+      image === null
+      || typeof image !== 'object'
+      || Object.hasOwn(image, 'uri')
+      || !Number.isSafeInteger(image.bufferView)
+      || !['image/png', 'image/jpeg', 'image/webp'].includes(image.mimeType)
+    ))
+  ) {
+    throw new TypeError('embedded mesh GLB contains an external resource');
+  }
 }
 
 function validateDependencyClosure(dependencies) {
@@ -205,6 +254,30 @@ function validateDependencyClosure(dependencies) {
     }
   }
   return bySlot;
+}
+
+function validateTemplateDescriptor(descriptor) {
+  if (
+    typeof descriptor?.url !== 'string'
+    || !SHA256.test(descriptor.glb_sha256)
+    || !Number.isSafeInteger(descriptor.glb_bytes)
+    || descriptor.glb_bytes <= 0
+    || ![0, 1, 2].includes(descriptor.lod)
+  ) {
+    throw new TypeError('verified mesh template descriptor is invalid');
+  }
+  const dependencies = descriptor.texture_dependencies;
+  if (dependencies === undefined) return;
+  if (!Array.isArray(dependencies)) {
+    throw new TypeError('verified mesh texture closure is invalid');
+  }
+  if (dependencies.length === 0) {
+    if (descriptor.lod === 2) {
+      throw new TypeError('verified mesh texture closure is absent');
+    }
+    return;
+  }
+  validateDependencyClosure(dependencies);
 }
 
 function materialPlan(loaded, resources, bySlot, THREE) {
@@ -312,6 +385,7 @@ export function createVerifiedMeshResourceStore({
   locationHref = globalThis.location?.href,
   createObjectURL = globalThis.URL?.createObjectURL?.bind(globalThis.URL),
   revokeObjectURL = globalThis.URL?.revokeObjectURL?.bind(globalThis.URL),
+  maximumIdleTemplates = 36,
 } = {}) {
   if (
     typeof THREE?.LoadingManager !== 'function'
@@ -324,6 +398,8 @@ export function createVerifiedMeshResourceStore({
     || typeof locationHref !== 'string'
     || typeof createObjectURL !== 'function'
     || typeof revokeObjectURL !== 'function'
+    || !Number.isSafeInteger(maximumIdleTemplates)
+    || maximumIdleTemplates < 0
   ) {
     throw new TypeError('verified mesh resource dependencies are unavailable');
   }
@@ -332,6 +408,7 @@ export function createVerifiedMeshResourceStore({
   const decodedBitmaps = new Map();
   const gpuTextures = new Map();
   const templates = new Map();
+  const idleTemplateKeys = [];
   const counters = {
     network_fetches: 0,
     bitmap_decodes: 0,
@@ -544,8 +621,72 @@ export function createVerifiedMeshResourceStore({
     return true;
   }
 
+  async function buildEmbeddedTemplate(descriptor) {
+    const glbDescriptor = {
+      url: descriptor.url,
+      sha256: descriptor.glb_sha256,
+      bytes: descriptor.glb_bytes,
+    };
+    let parsedResources = null;
+    let retainedGlb = false;
+    try {
+      const glbBytes = await fetchExactObject(
+        glbDescriptor,
+        'model/gltf-binary',
+      );
+      assertEmbeddedGlb(glbBytes);
+      const manager = new THREE.LoadingManager();
+      manager.setURLModifier((url) => {
+        if (!url.startsWith('blob:')) {
+          throw new TypeError(
+            'embedded mesh GLB requested an external resource',
+          );
+        }
+        return url;
+      });
+      const loader = new GLTFLoader(manager);
+      const loaded = await loader.parseAsync(arrayBufferFrom(glbBytes), '');
+      parsedResources = collectParsedResources(loaded);
+      if (parsedResources.meshCount === 0) {
+        throw new TypeError(
+          'verified mesh template contains no renderable mesh',
+        );
+      }
+      loaded.scene.traverse((object) => {
+        if (!object.isMesh) return;
+        object.castShadow = false;
+        object.receiveShadow = true;
+      });
+      loaded.scene.updateMatrixWorld(true);
+      retainByte(descriptor.glb_sha256);
+      retainedGlb = true;
+      return {
+        scene: loaded.scene,
+        parsedResources,
+        gpuKeys: new Set(),
+        glbSha256: descriptor.glb_sha256,
+        ownsTransientTextures: true,
+      };
+    } catch (error) {
+      if (parsedResources) disposeParsedResources(parsedResources);
+      if (retainedGlb) releaseByte(descriptor.glb_sha256);
+      throw error;
+    } finally {
+      deleteUnretainedByte(descriptor.glb_sha256);
+    }
+  }
+
   async function buildTemplate(descriptor) {
     const dependencies = descriptor.texture_dependencies;
+    if (dependencies === undefined) {
+      return buildEmbeddedTemplate(descriptor);
+    }
+    if (Array.isArray(dependencies) && dependencies.length === 0) {
+      if (descriptor.lod === 2) {
+        throw new TypeError('verified mesh texture closure is absent');
+      }
+      return buildEmbeddedTemplate(descriptor);
+    }
     const bySlot = validateDependencyClosure(dependencies);
     const glbDescriptor = {
       url: descriptor.url,
@@ -669,6 +810,7 @@ export function createVerifiedMeshResourceStore({
         parsedResources,
         gpuKeys: acquiredGpuKeys,
         glbSha256: descriptor.glb_sha256,
+        ownsTransientTextures: false,
       };
     } catch (error) {
       if (parsedResources) disposeParsedResources(parsedResources);
@@ -684,6 +826,11 @@ export function createVerifiedMeshResourceStore({
 
   function disposeTemplate(template) {
     for (const key of template.gpuKeys) releaseGpuTexture(key);
+    if (template.ownsTransientTextures) {
+      for (const texture of template.parsedResources.transientTextures) {
+        disposeParsedTexture(texture);
+      }
+    }
     template.parsedResources.transientTextures.clear();
     for (const material of template.parsedResources.materials) {
       material.dispose?.();
@@ -695,6 +842,7 @@ export function createVerifiedMeshResourceStore({
   }
 
   async function loadTemplate(descriptor) {
+    validateTemplateDescriptor(descriptor);
     const key = templateKey(descriptor);
     let record = templates.get(key);
     if (!record) {
@@ -710,6 +858,10 @@ export function createVerifiedMeshResourceStore({
     }
     const template = await record.promise;
     record.template = template;
+    if (record.refs === 0) {
+      const idleIndex = idleTemplateKeys.indexOf(key);
+      if (idleIndex >= 0) idleTemplateKeys.splice(idleIndex, 1);
+    }
     record.refs += 1;
     return template.scene;
   }
@@ -720,11 +872,17 @@ export function createVerifiedMeshResourceStore({
     if (!record || record.refs <= 0) return false;
     record.refs -= 1;
     if (record.refs === 0) {
-      templates.delete(key);
-      if (record.template) {
-        disposeTemplate(record.template);
-      } else {
-        record.promise.then(disposeTemplate);
+      idleTemplateKeys.push(key);
+      while (idleTemplateKeys.length > maximumIdleTemplates) {
+        const evictedKey = idleTemplateKeys.shift();
+        const evicted = templates.get(evictedKey);
+        if (!evicted || evicted.refs !== 0) continue;
+        templates.delete(evictedKey);
+        if (evicted.template) {
+          disposeTemplate(evicted.template);
+        } else {
+          evicted.promise.then(disposeTemplate);
+        }
       }
     }
     return true;

@@ -23,7 +23,40 @@ function subject() {
 const ORIGIN = 'https://viewer.test/web/viewer/';
 const BUNDLE_ID = '1'.repeat(64);
 const SLOT_ID = 'material-fieldstone-01';
-const GLB_BYTES = new TextEncoder().encode('verified-near-glb');
+
+function embeddedGlbBytes() {
+  const json = new TextEncoder().encode(JSON.stringify({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: 4 }],
+    bufferViews: [{
+      buffer: 0,
+      byteOffset: 0,
+      byteLength: 4,
+    }],
+    images: [{
+      bufferView: 0,
+      mimeType: 'image/png',
+    }],
+    textures: [{ source: 0 }],
+  }));
+  const paddedJsonLength = Math.ceil(json.byteLength / 4) * 4;
+  const totalLength = 12 + 8 + paddedJsonLength + 8 + 4;
+  const bytes = new Uint8Array(totalLength);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 0x46546c67, true);
+  view.setUint32(4, 2, true);
+  view.setUint32(8, totalLength, true);
+  view.setUint32(12, paddedJsonLength, true);
+  view.setUint32(16, 0x4e4f534a, true);
+  bytes.fill(0x20, 20, 20 + paddedJsonLength);
+  bytes.set(json, 20);
+  const binOffset = 20 + paddedJsonLength;
+  view.setUint32(binOffset, 4, true);
+  view.setUint32(binOffset + 4, 0x004e4942, true);
+  return bytes;
+}
+
+const GLB_BYTES = embeddedGlbBytes();
 const BASE_BYTES = new TextEncoder().encode('verified-base-png');
 const NORMAL_BYTES = new TextEncoder().encode('verified-normal-png');
 const ORM_BYTES = new TextEncoder().encode('verified-orm-png');
@@ -218,10 +251,64 @@ function createSceneFixture(THREE, dependencies, {
   };
 }
 
+function createEmbeddedSceneFixture() {
+  const embeddedBitmap = {
+    closes: 0,
+    close() {
+      this.closes += 1;
+    },
+  };
+  const map = new FakeTexture(embeddedBitmap);
+  const material = {
+    map,
+    normalMap: null,
+    roughnessMap: null,
+    metalnessMap: null,
+    disposals: 0,
+    dispose() {
+      this.disposals += 1;
+    },
+  };
+  const geometry = {
+    disposals: 0,
+    dispose() {
+      this.disposals += 1;
+    },
+  };
+  const mesh = {
+    isMesh: true,
+    material,
+    geometry,
+    castShadow: true,
+    receiveShadow: false,
+  };
+  const scene = {
+    traverse(visitor) {
+      visitor(mesh);
+    },
+    updateMatrixWorld() {},
+  };
+  return {
+    scene,
+    material,
+    geometry,
+    embeddedBitmap,
+    transientTextures: [map],
+    parser: {
+      associations: new Map([[map, { textures: 0 }]]),
+      json: {
+        images: [{ bufferView: 0, mimeType: 'image/png' }],
+        textures: [{ source: 0 }],
+      },
+    },
+  };
+}
+
 function harness({
   descriptor = assetDescriptor(),
   sceneOptions,
   mutateResponse,
+  maximumIdleTemplates = 0,
 } = {}) {
   const THREE = fakeThree();
   const counters = {
@@ -241,7 +328,7 @@ function harness({
         bytes: descriptor.glb_bytes,
       },
     }],
-    ...descriptor.texture_dependencies.map((row) => {
+    ...(descriptor.texture_dependencies ?? []).map((row) => {
       const bytes = [
         BASE_BYTES,
         NORMAL_BYTES,
@@ -272,14 +359,16 @@ function harness({
 
     async parseAsync() {
       counters.parses += 1;
-      for (const row of descriptor.texture_dependencies) {
+      for (const row of descriptor.texture_dependencies ?? []) {
         this.manager.resolveURL(`../textures/${row.sha256}.png`);
       }
-      lastFixture = createSceneFixture(
-        THREE,
-        descriptor.texture_dependencies,
-        sceneOptions,
-      );
+      lastFixture = descriptor.texture_dependencies?.length
+        ? createSceneFixture(
+          THREE,
+          descriptor.texture_dependencies,
+          sceneOptions,
+        )
+        : createEmbeddedSceneFixture();
       return {
         scene: lastFixture.scene,
         parser: lastFixture.parser,
@@ -333,6 +422,7 @@ function harness({
     locationHref: ORIGIN,
     createObjectURL,
     revokeObjectURL,
+    maximumIdleTemplates,
   });
   return {
     THREE,
@@ -437,6 +527,83 @@ test('one bitmap can back distinct role-specific GPU textures', async () => {
   assert.equal(setup.counters.fetches, 3);
   assert.equal(setup.counters.bitmapDecodes, 2);
   assert.equal(setup.store.diagnostics().gpu_textures, 3);
+});
+
+test('bounded idle templates reuse content across runtime names and routes', async () => {
+  const setup = harness({ maximumIdleTemplates: 36 });
+  const first = await setup.store.loadTemplate(setup.descriptor);
+  assert.equal(setup.store.releaseTemplate(setup.descriptor), true);
+  assert.equal(setup.store.diagnostics().templates, 1);
+
+  const alias = {
+    ...setup.descriptor,
+    asset_id: 'house_stone_alias_01',
+    lod: 1,
+    url: `/api/world/mesh-assets/${BUNDLE_ID}/house_stone_alias_01/lod1.glb`,
+  };
+  const second = await setup.store.loadTemplate(alias);
+
+  assert.equal(second, first);
+  assert.equal(setup.counters.fetches, 4);
+  assert.equal(setup.counters.parses, 1);
+  assert.equal(setup.counters.bitmapDecodes, 3);
+  assert.equal(setup.store.releaseTemplate(alias), true);
+  assert.equal(setup.store.diagnostics().templates, 1);
+});
+
+for (const [label, descriptor] of [
+  [
+    'v1 descriptor without a dependency field',
+    (() => {
+      const row = assetDescriptor({ lod: 2 });
+      delete row.texture_dependencies;
+      return row;
+    })(),
+  ],
+  [
+    'v2 LOD0 descriptor with an explicit empty dependency closure',
+    assetDescriptor({ lod: 0, dependencies: [] }),
+  ],
+]) {
+  test(`store retains and releases embedded resources for ${label}`, async () => {
+    const setup = harness({ descriptor });
+
+    await setup.store.loadTemplate(descriptor);
+
+    assert.equal(setup.counters.fetches, 1);
+    assert.equal(setup.counters.parses, 1);
+    assert.equal(setup.counters.bitmapDecodes, 0);
+    assert.deepEqual(setup.store.diagnostics(), {
+      byte_objects: 1,
+      decoded_bitmaps: 0,
+      gpu_textures: 0,
+      templates: 1,
+      network_fetches: 1,
+      bitmap_decodes: 0,
+      gpu_texture_creations: 0,
+    });
+    assert.equal(setup.lastFixture.transientTextures[0].disposals, 0);
+
+    assert.equal(setup.store.releaseTemplate(descriptor), true);
+    assert.equal(setup.lastFixture.transientTextures[0].disposals, 1);
+    assert.equal(setup.lastFixture.embeddedBitmap.closes, 1);
+    assert.equal(setup.lastFixture.geometry.disposals, 1);
+    assert.equal(setup.lastFixture.material.disposals, 1);
+    assert.equal(setup.store.diagnostics().byte_objects, 0);
+  });
+}
+
+test('store rejects an explicit empty LOD2 dependency closure before parsing', async () => {
+  const descriptor = assetDescriptor({ dependencies: [] });
+  const setup = harness({ descriptor });
+
+  await assert.rejects(
+    setup.store.loadTemplate(descriptor),
+    /texture closure is absent/,
+  );
+
+  assert.equal(setup.counters.fetches, 0);
+  assert.equal(setup.counters.parses, 0);
 });
 
 for (const [label, mutateResponse, descriptorMutation] of [

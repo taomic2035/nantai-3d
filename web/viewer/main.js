@@ -92,6 +92,12 @@ import {
   terrainGeometryThree,
   validateMeshChunkRuntime,
 } from './mesh-world.mjs';
+import {
+  createVerifiedMeshResourceStore,
+} from './verified-mesh-resources.mjs';
+import {
+  createFrameIntervalSampler,
+} from './frame-performance.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
@@ -138,11 +144,15 @@ let modelPreviewWeatherMaterials = [];
 let modelPreviewKeyLight = null;
 const meshWorldChunks = new Map();
 const meshWorldLoading = new Map();
-const meshAssetCache = new Map();
 const meshMaterialTextureCache = new Map();
 const meshWorldRetryAt = new Map();
 const meshWorldTerminalFailures = new Set();
 const meshWorldStats = { loaded: 0, evicted: 0 };
+const meshResourceStore = createVerifiedMeshResourceStore({
+  THREE,
+  GLTFLoader,
+});
+const frameIntervalSampler = createFrameIntervalSampler();
 let viewerBridge = null;
 let splatLayer = null;
 let spatialSplatLayer = null;
@@ -569,46 +579,63 @@ async function sha256Hex(bytes) {
     .join('');
 }
 
-function loadVerifiedMeshAsset(descriptor) {
-  const cacheKey = `${descriptor.url}:${descriptor.glb_sha256}:${descriptor.glb_bytes}`;
-  if (meshAssetCache.has(cacheKey)) return meshAssetCache.get(cacheKey);
-  const promise = (async () => {
-    const response = await fetch(descriptor.url);
-    if (!response.ok) {
-      throw new Error(`Mesh asset load failed: ${response.status}`);
+function registerMeshWorldWeatherMaterial(material, weatherMaterials) {
+  if (
+    !material?.isMeshStandardMaterial
+    || !material.color
+    || !Number.isFinite(material.roughness)
+  ) {
+    throw new Error('Textured mesh weather requires MeshStandardMaterial');
+  }
+  if (!material.userData.nvBaseColor) {
+    material.userData.nvBaseColor = material.color.clone();
+    material.userData.nvBaseRoughness = material.roughness;
+  }
+  weatherMaterials.add(material);
+  return material;
+}
+
+function cloneMeshWorldWeatherMaterials(
+  root,
+  clones,
+  weatherMaterials,
+) {
+  const cloneMaterial = (material) => {
+    if (clones.has(material)) return clones.get(material);
+    const clone = material.clone();
+    if (
+      clone.map === material.map
+      && clone.normalMap === material.normalMap
+      && clone.roughnessMap === material.roughnessMap
+      && clone.metalnessMap === material.metalnessMap
+      && clone.alphaTest === material.alphaTest
+      && clone.side === material.side
+      && clone.transparent === material.transparent
+    ) {
+      clones.set(material, clone);
+      return registerMeshWorldWeatherMaterial(clone, weatherMaterials);
     }
-    const bytes = await response.arrayBuffer();
-    if (bytes.byteLength !== descriptor.glb_bytes) {
-      throw new Error('Mesh asset byte count disagrees with its runtime descriptor');
+    clone.dispose();
+    throw new Error('Textured mesh weather clone changed immutable material state');
+  };
+
+  root.traverse((object) => {
+    if (!object.isMesh) return;
+    if (Array.isArray(object.material)) {
+      object.material = object.material.map(cloneMaterial);
+    } else {
+      object.material = cloneMaterial(object.material);
     }
-    const actualSha256 = await sha256Hex(bytes);
-    if (actualSha256 !== descriptor.glb_sha256) {
-      throw new Error('Mesh asset SHA-256 disagrees with its runtime descriptor');
-    }
-    const loader = new GLTFLoader();
-    const assetUrl = new URL(descriptor.url, window.location.href);
-    const gltf = await loader.parseAsync(bytes, new URL('./', assetUrl).href);
-    const root = gltf.scene;
-    let meshCount = 0;
-    root.traverse((object) => {
-      if (!object.isMesh) return;
-      meshCount += 1;
-      object.castShadow = false;
-      object.receiveShadow = true;
-    });
-    if (meshCount === 0) throw new Error('Mesh asset contains no renderable mesh');
-    root.updateMatrixWorld(true);
-    return root;
-  })();
-  meshAssetCache.set(cacheKey, promise);
-  promise.catch(() => meshAssetCache.delete(cacheKey));
-  return promise;
+  });
 }
 
 function disposeMeshWorldRecord(record) {
   if (!record) return;
   scene.remove(record.group);
   for (const resource of record.ownedResources) resource.dispose();
+  for (const descriptor of record.templateDescriptors) {
+    meshResourceStore.releaseTemplate(descriptor);
+  }
 }
 
 async function buildMeshWorldGroup(runtime) {
@@ -621,67 +648,112 @@ async function buildMeshWorldGroup(runtime) {
   const materialDescriptors = new Map(
     surfaceMaterials.map((row) => [row.slot_id, row]),
   );
-  const templates = new Map(await Promise.all(
-    assetUrls.map(async (descriptor) => [
-      descriptor.asset_id,
-      await loadVerifiedMeshAsset(descriptor),
-    ]),
-  ));
   const group = new THREE.Group();
   const ownedResources = [];
+  const templateDescriptors = [];
+  const weatherMaterials = new Set();
+  const weatherMaterialClones = new Map();
+  const record = {
+    group,
+    ownedResources,
+    templateDescriptors,
+    weatherMaterials,
+    lod: chunk.selected_lod,
+  };
   group.name = `mesh_world_${chunk.chunk_id.x}_${chunk.chunk_id.y}_lod${chunk.selected_lod}`;
-
-  await Promise.all(surfaceMaterials.map(loadVerifiedSurfaceTextures));
-  const terrainGeometry = terrainGeometryThree(chunk);
-  const terrainMaterials = await Promise.all(
-    terrainGeometry.materialSlotIds.map(async (slotId) => {
-      const descriptor = materialDescriptors.get(slotId);
-      if (!descriptor) {
-        throw new Error('Mesh terrain lacks a zoned surface material');
-      }
-      return meshSurfaceMaterial(descriptor, 'terrain');
-    }),
-  );
-  const terrain = meshFromGeometryData(
-    terrainGeometry,
-    terrainMaterials,
-    `${group.name}_terrain`,
-  );
-  group.add(terrain);
-  ownedResources.push(terrain.geometry, ...terrainMaterials);
-
-  for (const ribbon of [...chunk.roads, ...chunk.water]) {
-    const materialDescriptor = materialDescriptors.get(ribbon.material_slot_id);
-    if (!materialDescriptor) {
-      throw new Error('Mesh ribbon lacks its surface material');
-    }
-    const material = await meshSurfaceMaterial(materialDescriptor, ribbon.kind);
-    const mesh = meshFromGeometryData(
-      ribbonGeometryThree(chunk, ribbon),
-      material,
-      `${group.name}_${ribbon.kind}_${ribbon.ribbon_id}`,
+  try {
+    const templateResults = await Promise.allSettled(
+      assetUrls.map((descriptor) => meshResourceStore.loadTemplate(descriptor)),
     );
-    group.add(mesh);
-    ownedResources.push(mesh.geometry, material);
-  }
+    const firstFailure = templateResults.find(
+      (result) => result.status === 'rejected',
+    );
+    templateResults.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        templateDescriptors.push(assetUrls[index]);
+      }
+    });
+    if (firstFailure) throw firstFailure.reason;
+    const templates = new Map(
+      templateResults.map((result, index) => [
+        assetUrls[index].asset_id,
+        result.value,
+      ]),
+    );
 
-  for (const instance of chunk.instances) {
-    if (!descriptors.has(instance.asset_id)) {
-      throw new Error('Mesh instance lacks its verified asset descriptor');
+    await Promise.all(surfaceMaterials.map(loadVerifiedSurfaceTextures));
+    const terrainGeometry = terrainGeometryThree(chunk);
+    const terrainMaterials = await Promise.all(
+      terrainGeometry.materialSlotIds.map(async (slotId) => {
+        const descriptor = materialDescriptors.get(slotId);
+        if (!descriptor) {
+          throw new Error('Mesh terrain lacks a zoned surface material');
+        }
+        const material = await meshSurfaceMaterial(descriptor, 'terrain');
+        return registerMeshWorldWeatherMaterial(
+          material,
+          weatherMaterials,
+        );
+      }),
+    );
+    const terrain = meshFromGeometryData(
+      terrainGeometry,
+      terrainMaterials,
+      `${group.name}_terrain`,
+    );
+    group.add(terrain);
+    ownedResources.push(terrain.geometry, ...terrainMaterials);
+
+    for (const ribbon of [...chunk.roads, ...chunk.water]) {
+      const materialDescriptor = materialDescriptors.get(
+        ribbon.material_slot_id,
+      );
+      if (!materialDescriptor) {
+        throw new Error('Mesh ribbon lacks its surface material');
+      }
+      const material = registerMeshWorldWeatherMaterial(
+        await meshSurfaceMaterial(materialDescriptor, ribbon.kind),
+        weatherMaterials,
+      );
+      const mesh = meshFromGeometryData(
+        ribbonGeometryThree(chunk, ribbon),
+        material,
+        `${group.name}_${ribbon.kind}_${ribbon.ribbon_id}`,
+      );
+      group.add(mesh);
+      ownedResources.push(mesh.geometry, material);
     }
-    const template = templates.get(instance.asset_id);
-    if (!template) throw new Error('Mesh instance template did not load');
-    const object = template.clone(true);
-    const transform = meshInstanceThreeTransformInChunk(instance, chunk);
-    object.name = instance.instance_id;
-    object.position.set(...transform.position);
-    object.rotation.y = transform.rotationYRadians;
-    object.scale.setScalar(transform.scale);
-    object.updateMatrixWorld(true);
-    group.add(object);
+
+    for (const instance of chunk.instances) {
+      if (!descriptors.has(instance.asset_id)) {
+        throw new Error('Mesh instance lacks its verified asset descriptor');
+      }
+      const template = templates.get(instance.asset_id);
+      if (!template) throw new Error('Mesh instance template did not load');
+      const object = template.clone(true);
+      cloneMeshWorldWeatherMaterials(
+        object,
+        weatherMaterialClones,
+        weatherMaterials,
+      );
+      const transform = meshInstanceThreeTransformInChunk(instance, chunk);
+      object.name = instance.instance_id;
+      object.position.set(...transform.position);
+      object.rotation.y = transform.rotationYRadians;
+      object.scale.setScalar(transform.scale);
+      object.updateMatrixWorld(true);
+      group.add(object);
+    }
+    ownedResources.push(...weatherMaterialClones.values());
+    group.visible = presentationMode === 'mesh' && worldVisible;
+    return record;
+  } catch (error) {
+    for (const material of weatherMaterialClones.values()) {
+      if (!ownedResources.includes(material)) ownedResources.push(material);
+    }
+    disposeMeshWorldRecord(record);
+    throw error;
   }
-  group.visible = presentationMode === 'mesh' && worldVisible;
-  return { group, ownedResources, lod: chunk.selected_lod };
 }
 
 async function loadMeshWorldChunk(chunkX, chunkY, lod) {
@@ -724,6 +796,7 @@ async function loadMeshWorldChunk(chunkX, chunkY, lod) {
     if (old) disposeMeshWorldRecord(old);
     scene.add(record.group);
     meshWorldChunks.set(key, record);
+    applyModelWeather();
     meshWorldRetryAt.delete(key);
     meshWorldTerminalFailures.delete(key);
     meshWorldStats.loaded += 1;
@@ -908,7 +981,11 @@ function applyZoom(value) {
 }
 
 function resetModelWeatherMaterials() {
-  for (const material of modelPreviewWeatherMaterials) {
+  const materials = new Set(modelPreviewWeatherMaterials);
+  for (const record of meshWorldChunks.values()) {
+    for (const material of record.weatherMaterials) materials.add(material);
+  }
+  for (const material of materials) {
     const baseColor = material.userData.nvBaseColor;
     const baseRoughness = material.userData.nvBaseRoughness;
     material.color.copy(baseColor);
@@ -918,10 +995,16 @@ function resetModelWeatherMaterials() {
 
 function applyModelWeather() {
   resetModelWeatherMaterials();
+  const weatherMaterials = presentationMode === 'model'
+    ? modelPreviewWeatherMaterials
+    : presentationMode === 'mesh'
+      ? [...meshWorldChunks.values()].flatMap(
+        (record) => [...record.weatherMaterials],
+      )
+      : [];
   const active = (
-    presentationMode === 'model'
-    && viewerCapabilities.renderer.dynamic_mesh_relighting === true
-    && modelPreviewWeatherMaterials.length > 0
+    viewerCapabilities.renderer.dynamic_mesh_relighting === true
+    && weatherMaterials.length > 0
   );
   if (!active) {
     renderer.toneMappingExposure = 1;
@@ -932,7 +1015,7 @@ function applyModelWeather() {
 
   const response = meshWeatherResponse(environmentState.weather);
   const multiplier = new THREE.Color(...response.baseColorMultiplier);
-  for (const material of modelPreviewWeatherMaterials) {
+  for (const material of weatherMaterials) {
     material.color
       .copy(material.userData.nvBaseColor)
       .multiply(multiplier);
@@ -2238,6 +2321,20 @@ async function main() {
       artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
       coverage: coverageAuditViewModel(coverageAudit),
       camera: { position: { east, north, up }, mode: cameraMode },
+      mesh_resources: {
+        ...meshResourceStore.diagnostics(),
+        active_chunks: meshWorldChunks.size,
+        pending_chunks: meshWorldLoading.size,
+        failed_chunks: new Set([
+          ...meshWorldRetryAt.keys(),
+          ...meshWorldTerminalFailures,
+        ]).size,
+      },
+      frame_performance: {
+        ...frameIntervalSampler.snapshot(),
+        geometries: renderer.info.memory.geometries,
+        textures: renderer.info.memory.textures,
+      },
       environment: {
         ...environmentState,
         mesh_relighting: viewerCapabilities.renderer.dynamic_mesh_relighting === true,
@@ -2403,6 +2500,8 @@ async function main() {
 
 function animate() {
   requestAnimationFrame(animate);
+  const now = performance.now();
+  frameIntervalSampler.record(now);
   const dt = Math.min(clock.getDelta(), 0.1);
   updateCamera(dt);
   if (cameraMode === 'orbit') controls.update();
@@ -2410,7 +2509,6 @@ function animate() {
   updatePrecipitation(dt);
 
   // 每 50ms 调度一次 chunk (避免每帧都触发)
-  const now = performance.now();
   if (!animate._lastCheck || now - animate._lastCheck > 50) {
     animate._lastCheck = now;
     if (presentationMode === 'points') {
