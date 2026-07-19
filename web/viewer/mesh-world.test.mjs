@@ -21,6 +21,8 @@ const BUNDLE_ID = '1'.repeat(64);
 const MATERIAL_ID = '2'.repeat(64);
 const GLB_SHA = '3'.repeat(64);
 const MAP_SHA = '6'.repeat(64);
+const NORMAL_SHA = '7'.repeat(64);
+const ORM_SHA = '8'.repeat(64);
 const TERRAIN_ALGORITHM_ID =
   'synthetic-multiscale-relief-slope-macro-patch-v2';
 const TERRAIN_RESOLUTION = 41;
@@ -140,6 +142,48 @@ function runtime() {
       },
     })),
   };
+}
+
+function textureDependency({
+  sha256 = MAP_SHA,
+  role = 'base_color',
+  colourSpace = role === 'base_color' ? 'srgb' : 'non-color',
+  materialSlotId = 'material-fieldstone-01',
+  ...overrides
+} = {}) {
+  return {
+    url: `/api/world/mesh-assets/${BUNDLE_ID}/textures/${sha256}.png`,
+    sha256,
+    bytes: 4096,
+    role,
+    colour_space: colourSpace,
+    material_slot_id: materialSlotId,
+    derivation_algorithm_id: 'deterministic-near-map-v2',
+    min_filter: 9987,
+    mag_filter: 9729,
+    wrap_s: 10497,
+    wrap_t: 10497,
+    ...overrides,
+  };
+}
+
+function runtimeV2(lod = 2) {
+  const payload = runtime();
+  payload.schema_version = 'nantai.synthetic-village.mesh-chunk-runtime.v2';
+  payload.chunk.selected_lod = lod;
+  payload.chunk.instances[0].template_lod = lod;
+  const asset = payload.asset_urls[0];
+  asset.lod = lod;
+  asset.url =
+    `/api/world/mesh-assets/${BUNDLE_ID}/house_wood_01/lod${lod}.glb`;
+  asset.texture_dependencies = lod === 2
+    ? [
+      textureDependency(),
+      textureDependency({ sha256: NORMAL_SHA, role: 'normal' }),
+      textureDependency({ sha256: ORM_SHA, role: 'orm' }),
+    ]
+    : [];
+  return payload;
 }
 
 test('mesh chunk URL is available only for the exact fail-closed grid contract', () => {
@@ -285,6 +329,159 @@ test('runtime validation binds chunk, bundle, LOD, assets, and exact same-origin
     }),
     /surface material/,
   );
+});
+
+test('runtime v2 accepts only its exact LOD-paired texture dependency closure', () => {
+  const { validateMeshChunkRuntime } = subject();
+  const near = runtimeV2(2);
+  const far = runtimeV2(0);
+
+  assert.equal(validateMeshChunkRuntime(near, {
+    worldManifest: WORLD,
+    chunkX: -1,
+    chunkY: 2,
+    lod: 2,
+  }), near);
+  assert.equal(validateMeshChunkRuntime(far, {
+    worldManifest: WORLD,
+    chunkX: -1,
+    chunkY: 2,
+    lod: 0,
+  }), far);
+
+  const v1WithDependencies = runtime();
+  v1WithDependencies.asset_urls[0].texture_dependencies = [];
+  assert.throws(
+    () => validateMeshChunkRuntime(v1WithDependencies, {
+      worldManifest: WORLD,
+      chunkX: -1,
+      chunkY: 2,
+      lod: 0,
+    }),
+    /asset route/,
+  );
+
+  const missingNearDependencies = runtimeV2(2);
+  missingNearDependencies.asset_urls[0].texture_dependencies = [];
+  assert.throws(
+    () => validateMeshChunkRuntime(missingNearDependencies, {
+      worldManifest: WORLD,
+      chunkX: -1,
+      chunkY: 2,
+      lod: 2,
+    }),
+    /texture dependenc/,
+  );
+
+  const farWithDependencies = runtimeV2(0);
+  farWithDependencies.asset_urls[0].texture_dependencies = [
+    textureDependency(),
+  ];
+  assert.throws(
+    () => validateMeshChunkRuntime(farWithDependencies, {
+      worldManifest: WORLD,
+      chunkX: -1,
+      chunkY: 2,
+      lod: 0,
+    }),
+    /texture dependenc/,
+  );
+});
+
+test('runtime v2 rejects repaired, escaped, ambiguous, or unsafe dependencies', () => {
+  const { validateMeshChunkRuntime } = subject();
+  const cases = {
+    'cross-origin URL': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].url =
+        'https://evil.test/base.png';
+    },
+    'absolute URL': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].url =
+        `/textures/${MAP_SHA}.png`;
+    },
+    'wrong bundle': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].url =
+        `/api/world/mesh-assets/${'9'.repeat(64)}/textures/${MAP_SHA}.png`;
+    },
+    'wrong object': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].url =
+        `/api/world/mesh-assets/${BUNDLE_ID}/textures/${NORMAL_SHA}.png`;
+    },
+    query: (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].url += '?raw=1';
+    },
+    fragment: (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].url += '#map';
+    },
+    'wrong colour space': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].colour_space =
+        'non-color';
+    },
+    'wrong role': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].role = 'emissive';
+    },
+    'unsafe bytes': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].bytes =
+        Number.MAX_SAFE_INTEGER + 1;
+    },
+    'empty derivation': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0]
+        .derivation_algorithm_id = '';
+    },
+    'wrong sampler': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].wrap_s = 33071;
+    },
+    unsorted: (payload) => {
+      payload.asset_urls[0].texture_dependencies.reverse();
+    },
+    'duplicate semantic': (payload) => {
+      payload.asset_urls[0].texture_dependencies[1] = textureDependency({
+        sha256: NORMAL_SHA,
+      });
+    },
+    'extra key': (payload) => {
+      payload.asset_urls[0].texture_dependencies[0].local_path =
+        '/private/map.png';
+    },
+  };
+
+  for (const [label, mutate] of Object.entries(cases)) {
+    const payload = runtimeV2(2);
+    mutate(payload);
+    assert.throws(
+      () => validateMeshChunkRuntime(payload, {
+        worldManifest: WORLD,
+        chunkX: -1,
+        chunkY: 2,
+        lod: 2,
+      }),
+      /texture dependenc/,
+      label,
+    );
+  }
+});
+
+test('runtime objects reject unknown fields instead of normalizing them', () => {
+  const { validateMeshChunkRuntime } = subject();
+  for (const mutate of [
+    (payload) => { payload.debug = true; },
+    (payload) => { payload.chunk.local_path = '/private/chunk.json'; },
+    (payload) => { payload.chunk.chunk_id.extra = 1; },
+    (payload) => { payload.chunk.terrain.vertices[0].extra = 1; },
+    (payload) => { payload.chunk.instances[0].extra = 1; },
+  ]) {
+    const payload = runtimeV2(2);
+    mutate(payload);
+    assert.throws(
+      () => validateMeshChunkRuntime(payload, {
+        worldManifest: WORLD,
+        chunkX: -1,
+        chunkY: 2,
+        lod: 2,
+      }),
+      /invalid|contract/,
+    );
+  }
 });
 
 test('instance and terrain conversion preserve ENU while mapping to Three axes', () => {

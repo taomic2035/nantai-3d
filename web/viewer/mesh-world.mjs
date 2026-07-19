@@ -4,6 +4,8 @@ const ASSET_TEMPLATE =
 const SHA256 = /^[0-9a-f]{64}$/;
 const ASSET_ID = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
 const MATERIAL_SLOT_ID = /^material-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const RUNTIME_V1 = 'nantai.synthetic-village.mesh-chunk-runtime.v1';
+const RUNTIME_V2 = 'nantai.synthetic-village.mesh-chunk-runtime.v2';
 const TERRAIN_ALGORITHM_ID =
   'synthetic-multiscale-relief-slope-macro-patch-v2';
 const TERRAIN_RESOLUTION = 41;
@@ -46,6 +48,96 @@ const GRID_KEYS = new Set([
   'terrain_algorithm_id',
   'mesh_asset_bundle_id',
   'material_bundle_id',
+]);
+const RUNTIME_KEYS = new Set([
+  'schema_version',
+  'chunk',
+  'asset_urls',
+  'surface_materials',
+]);
+const CHUNK_KEYS = new Set([
+  'schema_version',
+  'content_key',
+  'renderer_capability',
+  'world_seed',
+  'chunk_id',
+  'chunk_size_m',
+  'world_offset',
+  'layout_algorithm_id',
+  'layout_sha256',
+  'terrain_algorithm_id',
+  'mesh_asset_bundle_id',
+  'material_bundle_id',
+  'selected_lod',
+  'terrain',
+  'roads',
+  'water',
+  'instances',
+  'aabb',
+  'synthetic',
+  'geometry_usability',
+  'coordinate_confidence',
+  'metric_alignment',
+  'real_photo_textures',
+]);
+const CHUNK_ID_KEYS = new Set(['x', 'y']);
+const BOUNDS_KEYS = new Set(['min', 'max']);
+const TERRAIN_KEYS = new Set([
+  'algorithm_id',
+  'resolution',
+  'material_slot_id',
+  'material_slot_ids',
+  'vertices',
+]);
+const TERRAIN_VERTEX_KEYS = new Set([
+  'x',
+  'y',
+  'z',
+  'world_u',
+  'world_v',
+  'macro_tint',
+]);
+const RIBBON_KEYS = new Set([
+  'ribbon_id',
+  'kind',
+  'feature_type',
+  'width',
+  'z_offset',
+  'material_slot_id',
+  'points',
+]);
+const INSTANCE_KEYS = new Set([
+  'instance_id',
+  'asset_id',
+  'kind',
+  'local_position',
+  'rotation_z_degrees',
+  'scale',
+  'template_lod',
+]);
+const ASSET_RUNTIME_V1_KEYS = new Set([
+  'asset_id',
+  'lod',
+  'url',
+  'glb_sha256',
+  'glb_bytes',
+]);
+const ASSET_RUNTIME_V2_KEYS = new Set([
+  ...ASSET_RUNTIME_V1_KEYS,
+  'texture_dependencies',
+]);
+const TEXTURE_DEPENDENCY_KEYS = new Set([
+  'url',
+  'sha256',
+  'bytes',
+  'role',
+  'colour_space',
+  'material_slot_id',
+  'derivation_algorithm_id',
+  'min_filter',
+  'mag_filter',
+  'wrap_s',
+  'wrap_t',
 ]);
 
 function isObject(value) {
@@ -98,11 +190,15 @@ function expectedMaterialMapPath(grid, slotId, role) {
   return `/api/world/material-maps/${grid.material_bundle_id}/${slotId}/${role}.png`;
 }
 
+function expectedTexturePath(bundleId, sha256) {
+  return `/api/world/mesh-assets/${bundleId}/textures/${sha256}.png`;
+}
+
 function validateTerrain(chunk) {
   const terrain = chunk.terrain;
   const resolution = TERRAIN_RESOLUTION;
   if (
-    !isObject(terrain)
+    !exactKeys(terrain, TERRAIN_KEYS)
     || terrain.algorithm_id !== TERRAIN_ALGORITHM_ID
     || terrain.material_slot_id !== 'material-terrace-soil-01'
     || terrain.resolution !== resolution
@@ -118,7 +214,7 @@ function validateTerrain(chunk) {
   }
   for (const vertex of terrain.vertices) {
     if (
-      !isObject(vertex)
+      !exactKeys(vertex, TERRAIN_VERTEX_KEYS)
       || !['x', 'y', 'z', 'world_u', 'world_v', 'macro_tint'].every(
         (key) => Number.isFinite(vertex[key]),
       )
@@ -138,7 +234,7 @@ function validateRibbons(ribbons, kind) {
   }
   for (const ribbon of ribbons) {
     if (
-      !isObject(ribbon)
+      !exactKeys(ribbon, RIBBON_KEYS)
       || ribbon.kind !== kind
       || typeof ribbon.ribbon_id !== 'string'
       || typeof ribbon.feature_type !== 'string'
@@ -163,7 +259,7 @@ function validateInstances(chunk) {
   const instanceIds = new Set();
   for (const instance of chunk.instances) {
     if (
-      !isObject(instance)
+      !exactKeys(instance, INSTANCE_KEYS)
       || typeof instance.instance_id !== 'string'
       || instanceIds.has(instance.instance_id)
       || !ASSET_ID.test(instance.asset_id)
@@ -245,6 +341,55 @@ function validateSurfaceMaterials(payload, chunk, grid) {
   }
 }
 
+function validateTextureDependencies(descriptor, grid, lod) {
+  const dependencies = descriptor.texture_dependencies;
+  if (
+    !Array.isArray(dependencies)
+    || (lod === 2 && dependencies.length === 0)
+    || (lod !== 2 && dependencies.length !== 0)
+  ) {
+    throw new TypeError('mesh texture dependency closure is invalid');
+  }
+  const semanticKeys = new Set();
+  let previousSortKey = null;
+  for (const dependency of dependencies) {
+    const expectedColourSpace =
+      dependency?.role === 'base_color' ? 'srgb' : 'non-color';
+    const sortKey = [
+      dependency?.sha256,
+      dependency?.role,
+      dependency?.material_slot_id,
+    ].join(':');
+    const semanticKey =
+      `${dependency?.material_slot_id}:${dependency?.role}`;
+    if (
+      !exactKeys(dependency, TEXTURE_DEPENDENCY_KEYS)
+      || dependency.url !== expectedTexturePath(
+        grid.mesh_asset_bundle_id,
+        dependency.sha256,
+      )
+      || !SHA256.test(dependency.sha256)
+      || !Number.isSafeInteger(dependency.bytes)
+      || dependency.bytes <= 0
+      || !['base_color', 'normal', 'orm'].includes(dependency.role)
+      || dependency.colour_space !== expectedColourSpace
+      || !MATERIAL_SLOT_ID.test(dependency.material_slot_id)
+      || typeof dependency.derivation_algorithm_id !== 'string'
+      || dependency.derivation_algorithm_id.length === 0
+      || dependency.min_filter !== 9987
+      || dependency.mag_filter !== 9729
+      || dependency.wrap_s !== 10497
+      || dependency.wrap_t !== 10497
+      || (previousSortKey !== null && sortKey < previousSortKey)
+      || semanticKeys.has(semanticKey)
+    ) {
+      throw new TypeError('mesh texture dependency closure is invalid');
+    }
+    previousSortKey = sortKey;
+    semanticKeys.add(semanticKey);
+  }
+}
+
 export function meshWorldAvailable(manifest) {
   return validGrid(manifest);
 }
@@ -294,15 +439,18 @@ export function validateMeshChunkRuntime(
   }
   const grid = worldManifest.mesh_grid;
   const chunk = payload?.chunk;
+  const runtimeVersion = payload?.schema_version;
+  const isRuntimeV2 = runtimeVersion === RUNTIME_V2;
   if (
-    !isObject(payload)
-    || payload.schema_version !== 'nantai.synthetic-village.mesh-chunk-runtime.v1'
-    || !isObject(chunk)
+    !exactKeys(payload, RUNTIME_KEYS)
+    || ![RUNTIME_V1, RUNTIME_V2].includes(runtimeVersion)
+    || !exactKeys(chunk, CHUNK_KEYS)
     || chunk.schema_version !== 'nantai.synthetic-village.mesh-chunk.v1'
     || chunk.renderer_capability !== 'synthetic-textured-mesh-grid'
     || !SHA256.test(chunk.content_key)
     || !SHA256.test(chunk.layout_sha256)
     || chunk.world_seed !== grid.world_seed
+    || !exactKeys(chunk.chunk_id, CHUNK_ID_KEYS)
     || chunk.chunk_id?.x !== chunkX
     || chunk.chunk_id?.y !== chunkY
     || !Number.isSafeInteger(chunk.chunk_size_m)
@@ -321,6 +469,7 @@ export function validateMeshChunkRuntime(
     || chunk.coordinate_confidence !== 'synthetic-layout'
     || chunk.metric_alignment !== false
     || chunk.real_photo_textures !== false
+    || !exactKeys(chunk.aabb, BOUNDS_KEYS)
     || !finiteTuple(chunk.aabb?.min, 3)
     || !finiteTuple(chunk.aabb?.max, 3)
   ) {
@@ -337,8 +486,11 @@ export function validateMeshChunkRuntime(
   }
   const descriptors = new Map();
   for (const descriptor of payload.asset_urls) {
+    const expectedKeys = isRuntimeV2
+      ? ASSET_RUNTIME_V2_KEYS
+      : ASSET_RUNTIME_V1_KEYS;
     if (
-      !isObject(descriptor)
+      !exactKeys(descriptor, expectedKeys)
       || !ASSET_ID.test(descriptor.asset_id)
       || descriptors.has(descriptor.asset_id)
       || descriptor.lod !== lod
@@ -348,6 +500,9 @@ export function validateMeshChunkRuntime(
       || descriptor.glb_bytes <= 0
     ) {
       throw new TypeError('mesh asset route contract is invalid');
+    }
+    if (isRuntimeV2) {
+      validateTextureDependencies(descriptor, grid, lod);
     }
     descriptors.set(descriptor.asset_id, descriptor);
   }
