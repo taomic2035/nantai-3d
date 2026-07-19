@@ -808,3 +808,170 @@ test('diagnostics remain bounded counts without URLs hashes or raw bytes', async
   assert.equal(serialized.includes(sha256(BASE_BYTES)), false);
   assert.equal(serialized.includes('verified-base-png'), false);
 });
+
+function profileDependency(bytes, {
+  profileId = 'h3-ai-ktx2-4k',
+  role = 'base_color',
+  mediaType = 'image/ktx2',
+  ...overrides
+} = {}) {
+  const digest = sha256(bytes);
+  const extension = mediaType === 'image/ktx2' ? 'ktx2' : 'png';
+  return {
+    url: (
+      `/api/world/mesh-textures/${BUNDLE_ID}/${profileId}/`
+      + `${digest}.${extension}`
+    ),
+    sha256: digest,
+    bytes: bytes.byteLength,
+    width: 4096,
+    height: 4096,
+    media_type: mediaType,
+    role,
+    transfer: role === 'base_color' ? 'srgb' : 'linear',
+    material_slot_id: SLOT_ID,
+    ...overrides,
+  };
+}
+
+test('profile texture store verifies and shares one KTX transcode per semantic key', async () => {
+  const { createVerifiedProfileTextureStore } = subject();
+  const bytes = new TextEncoder().encode('verified-profile-ktx2');
+  const descriptor = profileDependency(bytes);
+  const events = [];
+  const texture = new FakeTexture(null);
+  texture.mipmaps = [{ data: new Uint8Array(16) }];
+  const store = createVerifiedProfileTextureStore({
+    THREE: fakeThree(),
+    materialProfile: 'h3-ai-ktx2-4k',
+    ktx2Loader: {
+      parse(buffer, onLoad) {
+        events.push(['transcode', buffer.byteLength]);
+        onLoad(texture);
+      },
+    },
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      redirected: false,
+      url: new URL(descriptor.url, ORIGIN).href,
+      headers: {
+        get(name) {
+          if (name.toLowerCase() === 'content-type') return 'image/ktx2';
+          if (name.toLowerCase() === 'content-length') {
+            return String(bytes.byteLength);
+          }
+          return null;
+        },
+      },
+      async arrayBuffer() {
+        return bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        );
+      },
+    }),
+    cryptoSubtle: webcrypto.subtle,
+    locationHref: ORIGIN,
+  });
+
+  const [first, second] = await Promise.all([
+    store.acquire(descriptor, { alphaMode: 'OPAQUE', flipY: false }),
+    store.acquire(descriptor, { alphaMode: 'OPAQUE', flipY: false }),
+  ]);
+
+  assert.equal(first.texture, second.texture);
+  assert.equal(first.key, second.key);
+  assert.deepEqual(events, [['transcode', bytes.byteLength]]);
+  assert.deepEqual(store.diagnostics(), {
+    active_textures: 1,
+    network_fetches: 1,
+    ktx_transcodes: 1,
+    png_bitmap_decodes: 0,
+    gpu_texture_creations: 1,
+    compressed_mip_bytes: 16,
+  });
+  assert.equal(store.release(first.key), true);
+  assert.equal(texture.disposals, 0);
+  assert.equal(store.release(second.key), true);
+  assert.equal(texture.disposals, 1);
+  assert.equal(store.release(second.key), false);
+  assert.equal(store.diagnostics().active_textures, 0);
+});
+
+test('profile texture store rejects profile drift and reports bounded H3 failure', async () => {
+  const { createVerifiedProfileTextureStore } = subject();
+  const bytes = new TextEncoder().encode('verified-profile-ktx2');
+  const descriptor = profileDependency(bytes);
+  const failures = [];
+  let fetches = 0;
+  const store = createVerifiedProfileTextureStore({
+    THREE: fakeThree(),
+    materialProfile: 'h3-ai-ktx2-4k',
+    ktx2Loader: {
+      parse(_buffer, _onLoad, onError) {
+        onError(new Error(`private:${descriptor.url}`));
+      },
+    },
+    fetchFn: async () => {
+      fetches += 1;
+      return {
+        ok: true,
+        status: 200,
+        redirected: false,
+        url: new URL(descriptor.url, ORIGIN).href,
+        headers: {
+          get(name) {
+            if (name.toLowerCase() === 'content-type') return 'image/ktx2';
+            if (name.toLowerCase() === 'content-length') {
+              return String(bytes.byteLength);
+            }
+            return null;
+          },
+        },
+        async arrayBuffer() {
+          return bytes.buffer.slice(
+            bytes.byteOffset,
+            bytes.byteOffset + bytes.byteLength,
+          );
+        },
+      };
+    },
+    cryptoSubtle: webcrypto.subtle,
+    locationHref: ORIGIN,
+    onProfileFailure(reason) {
+      failures.push(reason);
+    },
+  });
+
+  await assert.rejects(
+    store.acquire(descriptor, {
+      alphaMode: 'OPAQUE',
+      flipY: false,
+    }),
+    /KTX2 profile texture failed/,
+  );
+  await assert.rejects(
+    store.acquire({
+      ...descriptor,
+      url: descriptor.url.replace(
+        'h3-ai-ktx2-4k',
+        'h2-png-1k-fallback',
+      ),
+    }, {
+      alphaMode: 'OPAQUE',
+      flipY: false,
+    }),
+    /profile texture descriptor/,
+  );
+
+  assert.equal(fetches, 1);
+  assert.deepEqual(failures, [{
+    code: 'runtime_h3_failure',
+  }]);
+  assert.equal(
+    JSON.stringify(failures).includes(descriptor.url),
+    false,
+  );
+  assert.equal(store.diagnostics().active_textures, 0);
+});

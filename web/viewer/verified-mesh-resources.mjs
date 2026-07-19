@@ -477,6 +477,374 @@ export function semanticTextureKey(
   ].join(':');
 }
 
+export function createVerifiedProfileTextureStore({
+  THREE,
+  materialProfile,
+  ktx2Loader = null,
+  fetchFn = globalThis.fetch,
+  cryptoSubtle = globalThis.crypto?.subtle,
+  createImageBitmapFn = globalThis.createImageBitmap,
+  BlobCtor = globalThis.Blob,
+  locationHref = globalThis.location?.href,
+  onProfileFailure = () => {},
+} = {}) {
+  const profiles = new Set([
+    'h3-ai-ktx2-4k',
+    'h2-png-1k-fallback',
+  ]);
+  if (
+    !profiles.has(materialProfile)
+    || typeof THREE?.Texture !== 'function'
+    || typeof fetchFn !== 'function'
+    || typeof cryptoSubtle?.digest !== 'function'
+    || typeof locationHref !== 'string'
+    || typeof onProfileFailure !== 'function'
+    || (
+      materialProfile === 'h3-ai-ktx2-4k'
+      && typeof ktx2Loader?.parse !== 'function'
+    )
+  ) {
+    throw new TypeError(
+      'verified profile texture dependencies are unavailable',
+    );
+  }
+
+  const byteObjects = new Map();
+  const textures = new Map();
+  const counters = {
+    network_fetches: 0,
+    ktx_transcodes: 0,
+    png_bitmap_decodes: 0,
+    gpu_texture_creations: 0,
+  };
+  let disposed = false;
+
+  function validateDescriptor(descriptor) {
+    const keys = new Set([
+      'url',
+      'sha256',
+      'bytes',
+      'width',
+      'height',
+      'media_type',
+      'role',
+      'transfer',
+      'material_slot_id',
+    ]);
+    const actualKeys = descriptor && typeof descriptor === 'object'
+      ? Object.keys(descriptor)
+      : [];
+    const extension = descriptor?.media_type === 'image/ktx2'
+      ? 'ktx2'
+      : 'png';
+    const parts = descriptor?.url?.split('/') ?? [];
+    if (
+      actualKeys.length !== keys.size
+      || actualKeys.some((key) => !keys.has(key))
+      || parts.length !== 7
+      || parts.slice(0, 4).join('/') !== '/api/world/mesh-textures'
+      || !SHA256.test(parts[4])
+      || parts[5] !== materialProfile
+      || parts[6] !== `${descriptor.sha256}.${extension}`
+      || !SHA256.test(descriptor.sha256)
+      || !Number.isSafeInteger(descriptor.bytes)
+      || descriptor.bytes <= 0
+      || !Number.isSafeInteger(descriptor.width)
+      || descriptor.width <= 0
+      || !Number.isSafeInteger(descriptor.height)
+      || descriptor.height <= 0
+      || !['image/ktx2', 'image/png'].includes(descriptor.media_type)
+      || (
+        materialProfile === 'h2-png-1k-fallback'
+        && descriptor.media_type !== 'image/png'
+      )
+      || !TEXTURE_ROLES.has(descriptor.role)
+      || descriptor.transfer !== (
+        descriptor.role === 'base_color' ? 'srgb' : 'linear'
+      )
+      || typeof descriptor.material_slot_id !== 'string'
+      || descriptor.material_slot_id.length === 0
+    ) {
+      throw new TypeError(
+        'verified profile texture descriptor is invalid',
+      );
+    }
+  }
+
+  async function fetchExact(descriptor) {
+    let record = byteObjects.get(descriptor.sha256);
+    if (record) {
+      if (
+        record.url !== descriptor.url
+        || record.bytes !== descriptor.bytes
+        || record.mediaType !== descriptor.media_type
+      ) {
+        throw new TypeError(
+          'verified profile byte descriptor disagrees',
+        );
+      }
+      return record.promise;
+    }
+    record = {
+      url: descriptor.url,
+      bytes: descriptor.bytes,
+      mediaType: descriptor.media_type,
+      promise: null,
+    };
+    record.promise = (async () => {
+      counters.network_fetches += 1;
+      const response = await fetchFn(descriptor.url, {
+        redirect: 'error',
+        credentials: 'same-origin',
+      });
+      if (
+        !response?.ok
+        || response.status !== 200
+        || response.redirected !== false
+        || response.url
+          !== new URL(descriptor.url, locationHref).href
+        || contentType(response) !== descriptor.media_type
+        || response.headers?.get?.('content-length')
+          !== String(descriptor.bytes)
+      ) {
+        throw new Error('verified profile texture response disagrees');
+      }
+      const raw = await response.arrayBuffer();
+      const bytes = new Uint8Array(raw);
+      if (
+        bytes.byteLength !== descriptor.bytes
+        || bytesToHex(
+          await cryptoSubtle.digest('SHA-256', raw),
+        ) !== descriptor.sha256
+      ) {
+        throw new Error('verified profile texture identity disagrees');
+      }
+      return bytes;
+    })();
+    byteObjects.set(descriptor.sha256, record);
+    record.promise.catch(() => {
+      if (byteObjects.get(descriptor.sha256) === record) {
+        byteObjects.delete(descriptor.sha256);
+      }
+    });
+    return record.promise;
+  }
+
+  function keyFor(descriptor, rendering) {
+    if (
+      !['MASK', 'OPAQUE'].includes(rendering?.alphaMode)
+      || typeof rendering.flipY !== 'boolean'
+    ) {
+      throw new TypeError(
+        'verified profile texture rendering state is invalid',
+      );
+    }
+    return [
+      descriptor.sha256,
+      descriptor.role,
+      descriptor.transfer,
+      '9987:9729:10497:10497',
+      String(rendering.flipY),
+      rendering.alphaMode,
+      materialProfile,
+    ].join(':');
+  }
+
+  function parseKtx2(bytes) {
+    const buffer = arrayBufferFrom(bytes);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        callback(value);
+      };
+      try {
+        ktx2Loader.parse(
+          buffer,
+          (texture) => finish(resolve, texture),
+          () => finish(
+            reject,
+            new Error('KTX2 profile texture failed'),
+          ),
+        );
+      } catch {
+        finish(
+          reject,
+          new Error('KTX2 profile texture failed'),
+        );
+      }
+    });
+  }
+
+  function compressedMipBytes(texture) {
+    let total = 0;
+    const visit = (value) => {
+      if (ArrayBuffer.isView(value)) {
+        total += value.byteLength;
+      } else if (Array.isArray(value)) {
+        value.forEach(visit);
+      } else if (value && typeof value === 'object') {
+        if (Object.hasOwn(value, 'data')) visit(value.data);
+        else if (Object.hasOwn(value, 'mipmaps')) visit(value.mipmaps);
+      }
+    };
+    visit(texture?.mipmaps);
+    return total;
+  }
+
+  async function createTexture(descriptor, rendering) {
+    const bytes = await fetchExact(descriptor);
+    let texture;
+    let bitmap = null;
+    let compressedBytes = 0;
+    if (descriptor.media_type === 'image/ktx2') {
+      counters.ktx_transcodes += 1;
+      texture = await parseKtx2(bytes);
+      compressedBytes = compressedMipBytes(texture);
+    } else {
+      if (
+        typeof createImageBitmapFn !== 'function'
+        || typeof BlobCtor !== 'function'
+      ) {
+        throw new Error('PNG profile texture failed');
+      }
+      counters.png_bitmap_decodes += 1;
+      bitmap = await createImageBitmapFn(
+        new BlobCtor([bytes], { type: 'image/png' }),
+        {
+          imageOrientation: rendering.flipY ? 'flipY' : 'none',
+          colorSpaceConversion: 'none',
+          premultiplyAlpha: 'none',
+        },
+      );
+      texture = new THREE.Texture(bitmap);
+    }
+    if (!texture || typeof texture.dispose !== 'function') {
+      bitmap?.close?.();
+      throw new Error('profile texture produced no GPU resource');
+    }
+    texture.flipY = descriptor.media_type === 'image/ktx2'
+      ? rendering.flipY
+      : false;
+    texture.colorSpace = descriptor.transfer === 'srgb'
+      ? THREE.SRGBColorSpace
+      : THREE.NoColorSpace;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.generateMipmaps = descriptor.media_type === 'image/png';
+    texture.needsUpdate = true;
+    counters.gpu_texture_creations += 1;
+    return { texture, bitmap, compressedBytes };
+  }
+
+  async function acquire(descriptor, rendering) {
+    if (disposed) {
+      throw new Error('verified profile texture store is disposed');
+    }
+    validateDescriptor(descriptor);
+    const key = keyFor(descriptor, rendering);
+    let record = textures.get(key);
+    if (!record) {
+      record = {
+        refs: 0,
+        promise: null,
+        texture: null,
+        bitmap: null,
+        compressedBytes: 0,
+      };
+      record.promise = createTexture(descriptor, rendering)
+        .then((created) => {
+          if (disposed) {
+            created.texture.dispose();
+            created.bitmap?.close?.();
+            throw new Error(
+              'verified profile texture store is disposed',
+            );
+          }
+          Object.assign(record, created);
+          return created.texture;
+        })
+        .catch(() => {
+          if (textures.get(key) === record) textures.delete(key);
+          if (
+            !disposed
+            && materialProfile === 'h3-ai-ktx2-4k'
+          ) {
+            try {
+              onProfileFailure({ code: 'runtime_h3_failure' });
+            } catch {
+              // Failure reporting must not replace the fail-closed error.
+            }
+          }
+          throw new Error(
+            descriptor.media_type === 'image/ktx2'
+              ? 'KTX2 profile texture failed'
+              : 'PNG profile texture failed',
+          );
+        });
+      textures.set(key, record);
+    }
+    const texture = await record.promise;
+    record.refs += 1;
+    return { key, texture };
+  }
+
+  function release(key) {
+    const record = textures.get(key);
+    if (!record || record.refs <= 0) return false;
+    record.refs -= 1;
+    if (record.refs === 0) {
+      textures.delete(key);
+      record.texture?.dispose();
+      record.bitmap?.close?.();
+    }
+    return true;
+  }
+
+  function diagnostics() {
+    let compressed_mip_bytes = 0;
+    for (const record of textures.values()) {
+      if (record.refs > 0) {
+        compressed_mip_bytes += record.compressedBytes;
+      }
+    }
+    return {
+      active_textures: [...textures.values()].filter(
+        (record) => record.refs > 0,
+      ).length,
+      network_fetches: counters.network_fetches,
+      ktx_transcodes: counters.ktx_transcodes,
+      png_bitmap_decodes: counters.png_bitmap_decodes,
+      gpu_texture_creations: counters.gpu_texture_creations,
+      compressed_mip_bytes,
+    };
+  }
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    for (const record of textures.values()) {
+      record.texture?.dispose();
+      record.bitmap?.close?.();
+      if (!record.texture) {
+        record.promise.catch(() => {});
+      }
+    }
+    textures.clear();
+    byteObjects.clear();
+  }
+
+  return Object.freeze({
+    acquire,
+    release,
+    diagnostics,
+    dispose,
+  });
+}
+
 export function createVerifiedMeshResourceStore({
   THREE,
   GLTFLoader,
