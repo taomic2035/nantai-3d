@@ -2062,10 +2062,20 @@ def _apply_surface_color_attribute(obj, request, surface_runtime):
             type="FLOAT_COLOR",
             domain="CORNER",
         )
+    transport_layer = mesh.attributes.get("_NV_SURFACE_COLOR")
+    if transport_layer is None:
+        transport_layer = mesh.attributes.new(
+            name="_NV_SURFACE_COLOR",
+            type="FLOAT_VECTOR",
+            domain="CORNER",
+        )
     if (
         color_layer.data_type != "FLOAT_COLOR"
         or color_layer.domain != "CORNER"
         or len(color_layer.data) != len(mesh.loops)
+        or transport_layer.data_type != "FLOAT_VECTOR"
+        or transport_layer.domain != "CORNER"
+        or len(transport_layer.data) != len(mesh.loops)
     ):
         raise RuntimeBuildError(f"surface color layer is invalid: {obj.name}")
     mesh.color_attributes.active_color = color_layer
@@ -2117,6 +2127,7 @@ def _apply_surface_color_attribute(obj, request, surface_runtime):
                 used_macro = True
                 used_palettes[slot_id] = palette["palette_sha256"]
             color_layer.data[loop_index].color = color
+            transport_layer.data[loop_index].vector = color[:3]
     obj["nv_surface_realism_profile"] = SURFACE_PROFILE_V1
     obj["nv_surface_color_mode"] = (
         "damp" if used_macro and damp_detail else "macro" if used_macro else "white"
@@ -5010,9 +5021,14 @@ def _normalize_surface_color_accessors(glb_path):
                 if isinstance(primitive, dict)
                 else None
             )
-            if not isinstance(attributes, dict) or "COLOR_0" not in attributes:
-                raise RuntimeBuildError("surface GLB COLOR_0 is absent")
-            source_index = attributes["COLOR_0"]
+            if (
+                not isinstance(attributes, dict)
+                or "_NV_SURFACE_COLOR" not in attributes
+            ):
+                raise RuntimeBuildError(
+                    "surface GLB transport color attribute is absent",
+                )
+            source_index = attributes["_NV_SURFACE_COLOR"]
             if source_index not in converted:
                 colors = _decode_exported_surface_colors(
                     document,
@@ -5041,6 +5057,7 @@ def _normalize_surface_color_accessors(glb_path):
                 )
                 converted[source_index] = len(accessors) - 1
             attributes["COLOR_0"] = converted[source_index]
+            attributes.pop("_NV_SURFACE_COLOR")
             color_primitive_count += 1
     if color_primitive_count <= 0:
         raise RuntimeBuildError("surface GLB has no color primitives")
@@ -5298,6 +5315,7 @@ def _save_scene_and_glb(work_dir, *, textured=False, surface_realism=False):
         export_tangents=textured,
         export_vertex_color="ACTIVE" if surface_realism else "MATERIAL",
         export_all_vertex_colors=not surface_realism,
+        export_attributes=surface_realism,
     )
     if "FINISHED" not in result or not glb_path.is_file() or glb_path.stat().st_size <= 0:
         raise RuntimeBuildError("GLB export did not finish")
