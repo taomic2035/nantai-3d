@@ -20,11 +20,13 @@ manifests, replacement semantics, weather states, and Viewer scheduling do not
 change. H3, importing externally authored or AI-generated GLBs, remains out of
 scope.
 
-The result is named `synthetic-template-mesh-near-v2`. It is still a
-deterministic synthetic preview, not a real reconstruction or a calibrated
-scan. It may be described as a **high-fidelity near synthetic mesh** only
-after the gates in this document pass. It may not be described as photoreal,
-measured, or source-photo-consistent.
+The rebuilt LOD2 algorithm is named `synthetic-template-mesh-near-v2`. Reused
+LOD0/1 payloads retain `synthetic-template-mesh-v1`; they are not relabelled.
+The result is still a deterministic synthetic preview, not a real
+reconstruction or a calibrated scan. It may be described as a
+**high-fidelity near synthetic mesh** only after the gates in this document
+pass. It may not be described as photoreal, measured, or
+source-photo-consistent.
 
 ## 2. Evidence motivating this slice
 
@@ -92,7 +94,7 @@ The following remain exact:
 - `MockLayoutGenerator` inputs and stable instance IDs;
 - `world_x = cx * 200 + local_x` and
   `world_y = cy * 200 + local_y`;
-- mesh chunk manifest schema and same-origin asset projection;
+- canonical mesh chunk manifest schema and same-origin asset projection;
 - LOD distance selection, hysteresis, 3 x 3 active window, and LRU behavior;
 - weather state IDs and their provenance-neutral behavior.
 
@@ -107,12 +109,31 @@ publication therefore uses:
 
 - bundle schema `nantai.synthetic-village.mesh-asset-bundle.v2`;
 - build schema `nantai.synthetic-village.mesh-asset-build.v2`;
-- mesh algorithm `synthetic-template-mesh-near-v2`;
-- per-asset recipe IDs ending in `-near-v2`.
+- per-LOD mesh algorithm identity;
+- LOD2 per-asset recipe IDs ending in `-near-v2`.
 
 The v1 parser and canonical bytes remain untouched. The loader dispatches on
 the explicit schema value and accepts v1 and v2 independently. A v2 record
 must never be coerced into v1, and an unknown schema fails closed.
+
+Every v2 LOD descriptor records its own algorithm and recipe identity:
+
+- reused LOD0/1: `synthetic-template-mesh-v1` plus the exact current v1 recipe;
+- rebuilt LOD2: `synthetic-template-mesh-near-v2` plus its exact `-near-v2`
+  recipe.
+
+The v2 build request binds the source v1 bundle ID and reused object
+descriptors instead of pretending to rebuild them. The publisher verifies
+their bytes against that source bundle before copying them into the new
+content-addressed closure.
+
+The canonical `MeshChunkManifest` remains unchanged except for its new bundle
+ID. Its path-bearing runtime projection is explicitly versioned to
+`nantai.synthetic-village.mesh-chunk-runtime.v2`; each LOD2 asset URL record
+includes the exact texture dependency descriptors required by that GLB. The
+Viewer continues to accept runtime v1 only for bundle v1 and accepts runtime v2
+only for bundle v2. It never derives dependency URLs from asset or material
+names.
 
 The new bundle ID binds:
 
@@ -271,6 +292,14 @@ bundle route, with strong ETag, HEAD, range behavior where already supported,
 and `nosniff`. A texture object is never resolved by filename or material
 slot; the SHA-256 path and verified manifest record are authoritative.
 
+The only texture route shape is:
+
+`/api/world/mesh-assets/{bundle_id}/textures/{sha256}.png`
+
+The runtime projection supplies that exact path, SHA-256, byte count, role,
+colour space, sampler state, and derivation identity. The Viewer does not
+construct it by string replacement.
+
 ## 8. Independent audit and fail-closed behavior
 
 The existing embedded-only GLB audit remains the default and is not relaxed.
@@ -287,7 +316,10 @@ Before publication, the independent Python auditor:
 4. inspects alpha coverage and exact material mode for the three foliage
    slots;
 5. verifies material closure, UVs, tangents, indexed triangles, transformed
-   ENU bounds, footprint tolerance, and triangle bands;
+   ENU bounds, footprint tolerance, and triangle bands; geometry-bound
+   measurement uses only the embedded geometry buffer plus a strict in-memory
+   resolver for the already verified texture closure, never a filesystem or
+   network resolver;
 6. confirms v1 LOD0/1 object hashes are exactly reused;
 7. reloads the staged canonical bundle and repeats verification before an
    absent-only atomic publication.
@@ -303,22 +335,36 @@ template is the requested v2 asset.
 
 ## 9. Viewer loading and cache behavior
 
-The mesh chunk payload remains unchanged except for its new bundle ID. When
-that bundle resolves to v2, the Viewer:
+The canonical mesh chunk payload remains unchanged except for its new bundle
+ID. The Studio projects runtime v2 dependency descriptors from the verified
+bundle. When that bundle resolves to v2, the Viewer:
 
 1. validates the bundle and selected LOD dependency closure;
 2. fetches GLB and texture objects from strict same-origin projected routes;
-3. verifies hashes with Web Crypto before parsing;
-4. maps only the declared relative image URIs to verified blob URLs;
-5. invokes GLTFLoader on the verified payload and dependencies;
-6. caches decoded textures by texture SHA-256 and templates by
+3. rejects redirects, changed final URLs, wrong content types, wrong byte
+   counts, and wrong hashes before parsing;
+4. caches immutable response bytes and decoded `ImageBitmap` objects by
+   texture SHA-256;
+5. maps only the declared relative image URIs to verified in-memory object
+   URLs through a template-local `LoadingManager`;
+6. invokes GLTFLoader, then rebinds each material map to the shared GPU texture
+   whose key is
+   `(sha256, role, colour_space, sampler, wrap, flip_y, alpha_mode)`;
+7. independently checks the parsed material/texture closure after GLTFLoader
+   returns, because GLTFLoader can otherwise continue after an image error;
+8. disposes transient loader-created texture wrappers before first render;
+9. caches templates by
    `(glb_sha256, ordered_dependency_hashes)`;
-7. reference-counts object URLs and GPU textures across chunks;
-8. disposes them only after no active or cached template refers to them.
+10. reference-counts object URLs, decoded bitmaps, and GPU textures across
+   chunks;
+11. disposes them only after no active or cached template refers to them.
 
-One corrupt dependency fails only the templates that require it, but its
-failure is never hidden. Cache keys contain content identity, not asset names
-or runtime URLs.
+A byte payload is shared solely by SHA-256. A GPU texture is deliberately not
+keyed by SHA alone because the same bytes used with different colour space,
+sampler, or alpha semantics are different rendering resources. One corrupt
+dependency fails only the templates that require it, but its failure is never
+hidden. Cache keys contain content identity and rendering semantics, not asset
+names or runtime URLs.
 
 Weather continues to operate on reversible Viewer-owned material clones.
 Alpha mode, alpha cutoff, texture hashes, and double-sided state are immutable
@@ -335,10 +381,13 @@ ID, and commit. After a 10-second warm-up it must prove:
 
 - exactly nine active chunks at the default camera and after a far
   positive/negative coordinate jump;
-- no duplicate network fetch or texture decode for one texture SHA in a
+- no duplicate network fetch or `ImageBitmap` decode for one texture SHA in a
   session;
+- no duplicate GPU texture upload for one exact
+  `(sha256, role, colour_space, sampler, wrap, flip_y, alpha_mode)` key;
 - no failed or permanently pending chunks;
 - no console warning or error;
+- no parsed material with a missing, substituted, or unexpected map;
 - stable geometry/texture counts after a 60-second stationary period;
 - median frame interval no worse than 33.3 ms and 95th percentile no worse
   than 50 ms during a documented 60-second pedestrian orbit;
