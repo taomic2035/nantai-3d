@@ -2542,8 +2542,8 @@ def test_textured_runner_snapshots_materials_and_uses_exact_argv(
     audits = []
     monkeypatch.setattr(subprocess, "run", _successful_textured_fake_subprocess(calls))
 
-    def audit_glb(path, expected_materials):
-        audits.append((Path(path), expected_materials))
+    def audit_glb(path, expected_materials, expected_surface_realism=None):
+        audits.append((Path(path), expected_materials, expected_surface_realism))
         artifact = next(
             row
             for row in load_textured_report_from_staging(Path(path).parent).artifacts

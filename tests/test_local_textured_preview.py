@@ -202,7 +202,7 @@ def test_local_blender_authors_float_corner_surface_color(
         "obj = bpy.data.objects.new('surface-color-probe', mesh)\n"
         "bpy.context.scene.collection.objects.link(obj)\n"
         "obj['nv_root_id'] = 'path-network-001'\n"
-        "palette = [[3604 + i % 300, 3700 + i % 250, 3800 + i % 200] for i in range(256)]\n"
+            "palette = [[3605 + i % 300, 3700 + i % 250, 3800 + i % 200] for i in range(256)]\n"
         "request = {\n"
         "    'surface_realism_profile_id': ns['SURFACE_PROFILE_V1'],\n"
         "    'surface_realism_plan': {\n"
@@ -680,6 +680,8 @@ def test_historical_local_glb_audit_omits_absent_geometry_evidence() -> None:
 
     assert audit.building_geometry is None
     assert b"building_geometry" not in raw
+    assert audit.surface_realism is None
+    assert b"surface_realism" not in raw
 
 
 def test_historical_local_glb_audit_remeasures_new_triangle_evidence(
@@ -702,6 +704,7 @@ def test_historical_local_glb_audit_remeasures_new_triangle_evidence(
     historical_payload = measured.model_dump(mode="json")
     historical_payload.pop("triangle_count")
     historical_payload.pop("building_geometry")
+    historical_payload.pop("surface_realism")
     audit_path = tmp_path / "glb-material-audit.json"
     audit_path.write_bytes(canary._canonical_json_bytes(historical_payload))
 
@@ -755,6 +758,10 @@ def test_local_v2_report_derives_exact_glb_geometry_expectation() -> None:
     assert expected.expected_primitive_count == 544
     assert expected.expected_added_face_count == 8659
     assert expected.expected_maximum_added_faces_per_building == 124
+    assert expected.maximum_total_triangles == 100_000
+
+    report.surface_realism_profile_id = SURFACE_PROFILE_V1
+    assert _expected_building_geometry(report).maximum_total_triangles == 125_000
 
     tampered_rows = list(report.object_registry)
     tampered_rows[0] = SimpleNamespace(

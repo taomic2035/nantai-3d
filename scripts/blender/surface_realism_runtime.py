@@ -8,8 +8,8 @@ from collections.abc import Sequence
 
 PROFILE_ID = "source-consistent-multiscale-surface-v1"
 FIXED_DENOMINATOR = 4096
-MIN_MULTIPLIER_Q = round(0.88 * FIXED_DENOMINATOR)
-MAX_MULTIPLIER_Q = round(1.10 * FIXED_DENOMINATOR)
+MIN_MULTIPLIER_Q = math.ceil(0.88 * FIXED_DENOMINATOR)
+MAX_MULTIPLIER_Q = math.floor(1.10 * FIXED_DENOMINATOR)
 
 
 def _digest(*parts: object) -> bytes:
@@ -42,7 +42,11 @@ def _smoothstep(value: float) -> float:
 
 def _quantize(value: float) -> float:
     bounded = min(1.10, max(0.88, value))
-    return round(bounded * FIXED_DENOMINATOR) / FIXED_DENOMINATOR
+    quantized = min(
+        MAX_MULTIPLIER_Q,
+        max(MIN_MULTIPLIER_Q, round(bounded * FIXED_DENOMINATOR)),
+    )
+    return quantized / FIXED_DENOMINATOR
 
 
 def _validate_inputs(

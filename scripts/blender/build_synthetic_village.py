@@ -898,7 +898,7 @@ def _validate_surface_realism_plan(request):
                 or any(
                     isinstance(value, bool)
                     or not isinstance(value, int)
-                    or not 3604 <= value <= 4506
+                    or not 3605 <= value <= 4505
                     for value in row
                 )
                 for row in multipliers

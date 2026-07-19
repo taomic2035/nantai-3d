@@ -50,7 +50,7 @@ RUNTIME_MODULE = (
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-MultiplierQ = Annotated[int, Field(ge=3604, le=4506)]
+MultiplierQ = Annotated[int, Field(ge=3605, le=4505)]
 DetailClass = Literal["stone-fragment", "leaf-card", "damp-patch"]
 SurfaceRealismProfileId = Literal[
     "single-scale-derived-pbr-v0",
@@ -301,9 +301,21 @@ def _macro_palette(
         raise ValueError("surface palette linear mean is invalid")
     multipliers = tuple(
         tuple(
-            round(
-                min(1.10, max(0.88, channels[channel][index] / means[channel]))
-                * 4096,
+            min(
+                4505,
+                max(
+                    3605,
+                    round(
+                        min(
+                            1.10,
+                            max(
+                                0.88,
+                                channels[channel][index] / means[channel],
+                            ),
+                        )
+                        * 4096,
+                    ),
+                ),
             )
             for channel in range(3)
         )

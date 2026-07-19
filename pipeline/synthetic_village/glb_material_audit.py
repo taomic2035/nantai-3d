@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import struct
 from collections import Counter
 from dataclasses import dataclass
@@ -84,7 +85,7 @@ class ExpectedBuildingGeometry(FrozenModel):
     expected_added_face_count: int = Field(ge=1, le=15_400)
     expected_maximum_added_faces_per_building: int = Field(ge=1, le=220)
     maximum_triangles_per_building: Literal[720] = 720
-    maximum_total_triangles: Literal[100000] = 100_000
+    maximum_total_triangles: int = Field(default=100_000, ge=1, le=125_000)
     expected_primitive_count: int = Field(ge=1)
 
     @model_validator(mode="after")
@@ -104,6 +105,30 @@ class ExpectedBuildingGeometry(FrozenModel):
         return self
 
 
+class ExpectedSurfaceRealism(FrozenModel):
+    """Independent limits and active source slots for the v1 surface profile."""
+
+    profile_id: Literal["source-consistent-multiscale-surface-v1"]
+    maximum_triangles: int = Field(default=125_000, ge=1, le=125_000)
+    maximum_primitives: int = Field(default=580, ge=1, le=580)
+    maximum_bytes: int = Field(default=160_000_000, ge=1, le=160_000_000)
+    expected_detail_mesh_objects: int = Field(default=18, ge=0, le=18)
+    active_macro_slots: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_active_macro_slots(self) -> ExpectedSurfaceRealism:
+        if (
+            tuple(sorted(self.active_macro_slots)) != self.active_macro_slots
+            or len(set(self.active_macro_slots)) != len(self.active_macro_slots)
+            or any(
+                not slot_id.startswith("material-")
+                for slot_id in self.active_macro_slots
+            )
+        ):
+            raise ValueError("surface macro material slots must be unique and sorted")
+        return self
+
+
 class GlbBuildingGeometryEvidence(FrozenModel):
     """Evidence recomputed from GLB nodes and indexed triangle accessors."""
 
@@ -119,7 +144,22 @@ class GlbBuildingGeometryEvidence(FrozenModel):
     builder_measured_added_face_count: int = Field(ge=1, le=15_400)
     builder_measured_maximum_added_faces_per_building: int = Field(ge=1, le=220)
     maximum_triangles_per_building: int = Field(ge=1, le=720)
-    total_triangle_count: int = Field(ge=1, le=100_000)
+    total_triangle_count: int = Field(ge=1, le=125_000)
+
+
+class GlbSurfaceRealismEvidence(FrozenModel):
+    """Evidence decoded directly from standard GLB float vertex colours."""
+
+    profile_id: Literal["source-consistent-multiscale-surface-v1"]
+    color_primitive_count: int = Field(ge=1, le=580)
+    macro_primitive_count: int = Field(ge=1, le=580)
+    damp_primitive_count: int = Field(ge=0, le=580)
+    white_primitive_count: int = Field(ge=0, le=580)
+    unique_color_count: int = Field(ge=2)
+    detail_mesh_object_count: int = Field(ge=0, le=18)
+    color_min: float = Field(ge=0.88, le=1.0, allow_inf_nan=False)
+    color_max: float = Field(ge=1.0, le=1.10, allow_inf_nan=False)
+    active_macro_slots: tuple[str, ...] = Field(min_length=1)
 
 
 class GlbMaterialAudit(FrozenModel):
@@ -137,6 +177,7 @@ class GlbMaterialAudit(FrozenModel):
     external_uri_count: Literal[0] = 0
     slot_ids: tuple[str, ...] = Field(min_length=1)
     building_geometry: GlbBuildingGeometryEvidence | None = None
+    surface_realism: GlbSurfaceRealismEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +185,10 @@ class _AccessorEvidence:
     count: int
     component_type: int
     value_type: str
+    view_index: int
+    byte_offset: int
+    byte_stride: int | None
+    normalized: bool
 
 
 def _is_linklike(path: Path) -> bool:
@@ -342,6 +387,11 @@ def _validate_accessors(
             raw_accessor.get("byteOffset", 0),
             label=f"GLB accessor {index} byteOffset",
         )
+        normalized = raw_accessor.get("normalized", False)
+        if not isinstance(normalized, bool):
+            raise GlbMaterialAuditError(
+                f"GLB accessor {index} normalized flag is invalid",
+            )
         component_bytes = COMPONENT_BYTES[component_type]
         element_bytes = component_bytes * TYPE_COMPONENTS[value_type]
         raw_view = views[view_index]
@@ -364,6 +414,10 @@ def _validate_accessors(
                 count=count,
                 component_type=component_type,
                 value_type=value_type,
+                view_index=view_index,
+                byte_offset=byte_offset,
+                byte_stride=raw_view.get("byteStride"),
+                normalized=normalized,
             ),
         )
     return evidence
@@ -659,6 +713,223 @@ def _indexed_triangle_counts_by_mesh(
     return tuple(counts)
 
 
+def _decode_float_vec4(
+    accessor: _AccessorEvidence,
+    *,
+    binary: bytes,
+    view_ranges: list[tuple[int, int]],
+) -> tuple[tuple[float, float, float, float], ...]:
+    if accessor.component_type != 5126 or accessor.normalized:
+        raise GlbMaterialAuditError(
+            "GLB surface COLOR_0 must be unnormalized FLOAT",
+        )
+    if accessor.value_type != "VEC4":
+        raise GlbMaterialAuditError("GLB surface COLOR_0 must be VEC4")
+    if accessor.byte_stride is not None:
+        raise GlbMaterialAuditError(
+            "GLB surface COLOR_0 byte stride is unsupported",
+        )
+    view_offset, view_length = view_ranges[accessor.view_index]
+    payload_start = view_offset + accessor.byte_offset
+    payload_length = accessor.count * 16
+    if accessor.byte_offset + payload_length > view_length:
+        raise GlbMaterialAuditError("GLB surface COLOR_0 exceeds its buffer view")
+    payload = binary[payload_start : payload_start + payload_length]
+    colors = tuple(
+        tuple(round(component, 6) for component in color)
+        for color in struct.iter_unpack("<4f", payload)
+    )
+    if len(colors) != accessor.count:
+        raise GlbMaterialAuditError("GLB surface COLOR_0 count is invalid")
+    for color in colors:
+        for component in color:
+            if not math.isfinite(component):
+                raise GlbMaterialAuditError(
+                    "GLB surface COLOR_0 is non-finite",
+                )
+            if component < 0.88:
+                raise GlbMaterialAuditError(
+                    "GLB surface COLOR_0 is below 0.88",
+                )
+            if component > 1.10:
+                raise GlbMaterialAuditError(
+                    "GLB surface COLOR_0 is above 1.10",
+                )
+    return colors
+
+
+def _surface_mesh_modes(
+    document: dict[str, object],
+    *,
+    mesh_count: int,
+    expected: ExpectedSurfaceRealism,
+) -> tuple[dict[int, str], int]:
+    references: dict[int, list[dict[str, object]]] = {
+        index: [] for index in range(mesh_count)
+    }
+    detail_mesh_count = 0
+    for node_index, raw_node in enumerate(_required_list(document, "nodes")):
+        if not isinstance(raw_node, dict):
+            raise GlbMaterialAuditError(f"GLB node {node_index} is not an object")
+        mesh_index = raw_node.get("mesh")
+        if mesh_index is None:
+            continue
+        if (
+            isinstance(mesh_index, bool)
+            or not isinstance(mesh_index, int)
+            or mesh_index < 0
+            or mesh_index >= mesh_count
+        ):
+            raise GlbMaterialAuditError(
+                f"GLB surface node {node_index} mesh is out of range",
+            )
+        extras = raw_node.get("extras")
+        if not isinstance(extras, dict):
+            raise GlbMaterialAuditError(
+                f"GLB surface node {node_index} extras are absent",
+            )
+        if extras.get("nv_surface_realism_profile") != expected.profile_id:
+            raise GlbMaterialAuditError(
+                f"GLB surface node {node_index} profile mismatch",
+            )
+        mode = extras.get("nv_surface_color_mode")
+        if mode not in {"macro", "damp", "white"}:
+            raise GlbMaterialAuditError(
+                f"GLB surface node {node_index} color mode is invalid",
+            )
+        references[mesh_index].append(extras)
+        if extras.get("nv_surface_detail_class") in {
+            "damp-patch",
+            "leaf-card",
+            "stone-fragment",
+        }:
+            detail_mesh_count += 1
+    if any(len(rows) != 1 for rows in references.values()):
+        raise GlbMaterialAuditError(
+            "GLB surface mesh reference is absent or ambiguous",
+        )
+    if detail_mesh_count != expected.expected_detail_mesh_objects:
+        raise GlbMaterialAuditError(
+            "GLB surface detail mesh object count disagrees",
+        )
+    return {
+        mesh_index: str(rows[0]["nv_surface_color_mode"])
+        for mesh_index, rows in references.items()
+    }, detail_mesh_count
+
+
+def _validate_surface_realism(
+    document: dict[str, object],
+    *,
+    raw_bytes: int,
+    binary: bytes,
+    view_ranges: list[tuple[int, int]],
+    accessors: list[_AccessorEvidence],
+    material_slots: list[str],
+    primitive_count: int,
+    triangle_count: int,
+    expected: ExpectedSurfaceRealism,
+) -> GlbSurfaceRealismEvidence:
+    if raw_bytes > expected.maximum_bytes:
+        raise GlbMaterialAuditError("GLB surface exceeds its byte budget")
+    if triangle_count > expected.maximum_triangles:
+        raise GlbMaterialAuditError("GLB surface exceeds its triangle budget")
+    if primitive_count > expected.maximum_primitives:
+        raise GlbMaterialAuditError("GLB surface exceeds its primitive budget")
+    meshes = _required_list(document, "meshes")
+    mesh_modes, detail_mesh_count = _surface_mesh_modes(
+        document,
+        mesh_count=len(meshes),
+        expected=expected,
+    )
+    color_primitive_count = 0
+    macro_primitive_count = 0
+    damp_primitive_count = 0
+    white_primitive_count = 0
+    active_slots = set()
+    all_rgb = []
+    for mesh_index, raw_mesh in enumerate(meshes):
+        if not isinstance(raw_mesh, dict):  # pragma: no cover - checked earlier
+            raise GlbMaterialAuditError(f"GLB mesh {mesh_index} is not an object")
+        primitives = raw_mesh.get("primitives")
+        if not isinstance(primitives, list):  # pragma: no cover - checked earlier
+            raise GlbMaterialAuditError(f"GLB mesh {mesh_index} has no primitives")
+        mode = mesh_modes[mesh_index]
+        for primitive in primitives:
+            if not isinstance(primitive, dict):  # pragma: no cover - checked earlier
+                raise GlbMaterialAuditError("GLB mesh primitive is not an object")
+            attributes = primitive.get("attributes")
+            if not isinstance(attributes, dict) or "COLOR_0" not in attributes:
+                raise GlbMaterialAuditError("GLB surface COLOR_0 is absent")
+            _, position = _attribute(attributes, "POSITION", accessors=accessors)
+            _, color_accessor = _attribute(
+                attributes,
+                "COLOR_0",
+                accessors=accessors,
+            )
+            if color_accessor.count != position.count:
+                raise GlbMaterialAuditError(
+                    "GLB surface COLOR_0 vertex count disagrees",
+                )
+            colors = _decode_float_vec4(
+                color_accessor,
+                binary=binary,
+                view_ranges=view_ranges,
+            )
+            rgb = tuple(tuple(value[:3]) for value in colors)
+            all_rgb.extend(rgb)
+            material_index = primitive.get("material")
+            if (
+                isinstance(material_index, bool)
+                or not isinstance(material_index, int)
+                or material_index < 0
+                or material_index >= len(material_slots)
+            ):
+                raise GlbMaterialAuditError(
+                    "GLB surface primitive material is invalid",
+                )
+            if mode == "white":
+                if any(component != 1.0 for color in rgb for component in color):
+                    raise GlbMaterialAuditError(
+                        "GLB surface white mode is colored",
+                    )
+                white_primitive_count += 1
+            else:
+                if len(set(rgb)) <= 1:
+                    raise GlbMaterialAuditError(
+                        f"GLB surface {mode} color is constant",
+                    )
+                active_slots.add(material_slots[material_index])
+                if mode == "macro":
+                    macro_primitive_count += 1
+                else:
+                    damp_primitive_count += 1
+            color_primitive_count += 1
+    if tuple(sorted(active_slots)) != expected.active_macro_slots:
+        raise GlbMaterialAuditError(
+            "GLB surface active macro material slots disagree",
+        )
+    if not all_rgb:
+        raise GlbMaterialAuditError("GLB surface color evidence is empty")
+    channel_values = [
+        component
+        for color in all_rgb
+        for component in color
+    ]
+    return GlbSurfaceRealismEvidence(
+        profile_id=expected.profile_id,
+        color_primitive_count=color_primitive_count,
+        macro_primitive_count=macro_primitive_count,
+        damp_primitive_count=damp_primitive_count,
+        white_primitive_count=white_primitive_count,
+        unique_color_count=len(set(all_rgb)),
+        detail_mesh_object_count=detail_mesh_count,
+        color_min=min(channel_values),
+        color_max=max(channel_values),
+        active_macro_slots=tuple(sorted(active_slots)),
+    )
+
+
 def _node_subtree_triangle_count(
     root_index: int,
     *,
@@ -819,6 +1090,7 @@ def audit_textured_glb(
     path: Path,
     expected_materials: tuple[ExpectedGlbMaterial, ...],
     expected_building_geometry: ExpectedBuildingGeometry | None = None,
+    expected_surface_realism: ExpectedSurfaceRealism | None = None,
 ) -> GlbMaterialAudit:
     """Audit actual GLB bytes without trusting filenames or build-report claims."""
 
@@ -873,6 +1145,21 @@ def audit_textured_glb(
             if expected_building_geometry is not None
             else None
         )
+        surface_realism = (
+            _validate_surface_realism(
+                document,
+                raw_bytes=len(raw),
+                binary=binary,
+                view_ranges=view_ranges,
+                accessors=accessors,
+                material_slots=slot_ids,
+                primitive_count=primitive_count,
+                triangle_count=triangle_count,
+                expected=expected_surface_realism,
+            )
+            if expected_surface_realism is not None
+            else None
+        )
         audit_payload = {
             "glb_sha256": hashlib.sha256(raw).hexdigest(),
             "byte_count": len(raw),
@@ -890,6 +1177,8 @@ def audit_textured_glb(
         }
         if building_geometry is not None:
             audit_payload["building_geometry"] = building_geometry
+        if surface_realism is not None:
+            audit_payload["surface_realism"] = surface_realism
         return GlbMaterialAudit.model_validate(audit_payload)
     except GlbMaterialAuditError:
         raise

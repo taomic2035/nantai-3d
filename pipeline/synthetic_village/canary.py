@@ -62,6 +62,7 @@ from pipeline.synthetic_village.elevated_topology import (
 )
 from pipeline.synthetic_village.glb_material_audit import (
     ExpectedGlbMaterial,
+    ExpectedSurfaceRealism,
     audit_textured_glb,
 )
 from pipeline.synthetic_village.material_bundle import (
@@ -78,6 +79,7 @@ from pipeline.synthetic_village.scene_plan import (
     canonical_scene_plan_bytes,
 )
 from pipeline.synthetic_village.surface_realism import (
+    ACTIVE_MACRO_SLOTS,
     LEGACY_SURFACE_PROFILE_ID,
     SURFACE_ALGORITHM_V1,
     SURFACE_PROFILE_V1,
@@ -3047,14 +3049,40 @@ def _audit_staged_textured_glb(
     if glb_record is None:
         raise CanaryBuildError("textured build report has no GLB artifact")
     try:
+        expected_surface = (
+            ExpectedSurfaceRealism(
+                profile_id=SURFACE_PROFILE_V1,
+                active_macro_slots=tuple(sorted(ACTIVE_MACRO_SLOTS)),
+            )
+            if request.surface_realism_profile_id == SURFACE_PROFILE_V1
+            else None
+        )
         audit = audit_textured_glb(
             staging / glb_record.name,
             _expected_glb_materials(request),
+            expected_surface_realism=expected_surface,
         )
     except ValueError as exc:
         raise CanaryBuildError(f"textured GLB material audit failed: {exc}") from exc
     if audit.glb_sha256 != glb_record.sha256:
         raise CanaryBuildError("textured GLB audit digest does not match the build report")
+    if request.surface_realism_profile_id == SURFACE_PROFILE_V1:
+        evidence = report.surface_realism
+        measured = audit.surface_realism
+        if (
+            evidence is None
+            or measured is None
+            or report.counts.glb_triangles != audit.triangle_count
+            or measured.color_primitive_count != report.counts.glb_primitives
+            or measured.detail_mesh_object_count
+            != evidence.detail_mesh_object_count
+            or measured.macro_primitive_count + measured.damp_primitive_count
+            != evidence.colored_primitive_count
+            or measured.white_primitive_count != evidence.white_primitive_count
+        ):
+            raise CanaryBuildError(
+                "textured GLB surface audit disagrees with the build report",
+            )
 
 
 def run_textured_canary_build(

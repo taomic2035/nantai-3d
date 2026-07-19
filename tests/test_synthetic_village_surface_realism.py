@@ -37,7 +37,7 @@ from tests.synthetic_material_fixtures import (
 
 def _palette() -> tuple[tuple[int, int, int], ...]:
     return tuple(
-        (3604 + index % 320, 3650 + index % 280, 3700 + index % 240)
+        (3605 + index % 320, 3650 + index % 280, 3700 + index % 240)
         for index in range(256)
     )
 
@@ -117,6 +117,12 @@ def test_surface_plan_is_complete_content_addressed_and_path_free(
     )
     assert plan.profile_id == SURFACE_PROFILE_V1
     assert tuple(row.slot_id for row in plan.macro_palettes) == ACTIVE_MACRO_SLOTS
+    assert all(
+        0.88 <= value / 4096 <= 1.10
+        for palette in plan.macro_palettes
+        for multiplier in palette.multipliers_q
+        for value in multiplier
+    )
     assert len(plan.path_plans) == 6
     assert all(row.lateral_rail_count == 6 for row in plan.path_plans)
     assert all(row.longitudinal_step_m == 1.0 for row in plan.path_plans)

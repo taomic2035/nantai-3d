@@ -45,6 +45,7 @@ from pipeline.synthetic_village.elevated_topology import (
 from pipeline.synthetic_village.glb_material_audit import (
     ExpectedBuildingGeometry,
     ExpectedGlbMaterial,
+    ExpectedSurfaceRealism,
     GlbBuildingGeometryEvidence,
     GlbMaterialAudit,
     audit_textured_glb,
@@ -62,6 +63,7 @@ from pipeline.synthetic_village.scene_plan import (
     canonical_scene_plan_bytes,
 )
 from pipeline.synthetic_village.surface_realism import (
+    ACTIVE_MACRO_SLOTS,
     LEGACY_SURFACE_PROFILE_ID,
     SURFACE_ALGORITHM_V1,
     SURFACE_PROFILE_V1,
@@ -468,6 +470,8 @@ def canonical_local_glb_audit_bytes(audit: GlbMaterialAudit) -> bytes:
     payload = audit.model_dump(mode="json")
     if "building_geometry" not in audit.model_fields_set:
         payload.pop("building_geometry")
+    if "surface_realism" not in audit.model_fields_set:
+        payload.pop("surface_realism")
     return _canonical_bytes(payload)
 
 
@@ -547,6 +551,8 @@ def verify_stored_local_glb_audit(
             )
         measured_payload = measured_audit.model_dump(mode="json")
         measured_payload.pop("triangle_count")
+        if "surface_realism" not in measured_audit.model_fields_set:
+            measured_payload.pop("surface_realism")
         historical_payload = historical.model_dump(mode="json")
         if "building_geometry" not in historical.model_fields_set:
             measured_payload.pop("building_geometry")
@@ -776,11 +782,45 @@ def _expected_building_geometry(
             expected_maximum_added_faces_per_building=(
                 evidence.maximum_added_faces_per_building
             ),
+            maximum_total_triangles=(
+                125_000
+                if getattr(
+                    report,
+                    "surface_realism_profile_id",
+                    LEGACY_SURFACE_PROFILE_ID,
+                )
+                == SURFACE_PROFILE_V1
+                else 100_000
+            ),
             expected_primitive_count=report.counts.glb_primitives,
         )
     except ValidationError as exc:
         raise LocalTexturedPreviewError(
             f"local building geometry expectation is invalid: {exc}",
+        ) from exc
+
+
+def _expected_surface_realism(
+    report: LocalTexturedBuildReport,
+) -> ExpectedSurfaceRealism | None:
+    if report.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID:
+        return None
+    if (
+        report.surface_realism_profile_id != SURFACE_PROFILE_V1
+        or report.surface_realism is None
+        or report.counts.glb_triangles is None
+    ):
+        raise LocalTexturedPreviewError(
+            "local surface realism report evidence is incomplete",
+        )
+    try:
+        return ExpectedSurfaceRealism(
+            profile_id=SURFACE_PROFILE_V1,
+            active_macro_slots=tuple(sorted(ACTIVE_MACRO_SLOTS)),
+        )
+    except ValidationError as exc:  # pragma: no cover - constants are fixed
+        raise LocalTexturedPreviewError(
+            f"local surface realism expectation is invalid: {exc}",
         ) from exc
 
 
@@ -809,6 +849,37 @@ def _verify_building_geometry_audit_agreement(
     ):
         raise LocalTexturedPreviewError(
             "local GLB building geometry audit disagrees with the build report",
+        )
+
+
+def _verify_surface_realism_audit_agreement(
+    report: LocalTexturedBuildReport,
+    audit: GlbMaterialAudit,
+) -> None:
+    measured = audit.surface_realism
+    evidence = report.surface_realism
+    if report.surface_realism_profile_id == LEGACY_SURFACE_PROFILE_ID:
+        if measured is not None:
+            raise LocalTexturedPreviewError(
+                "local legacy preview cannot claim surface GLB evidence",
+            )
+        return
+    if (
+        evidence is None
+        or measured is None
+        or measured.profile_id != evidence.profile_id
+        or measured.detail_mesh_object_count
+        != evidence.detail_mesh_object_count
+        or measured.color_primitive_count != report.counts.glb_primitives
+        or measured.macro_primitive_count + measured.damp_primitive_count
+        != evidence.colored_primitive_count
+        or measured.white_primitive_count != evidence.white_primitive_count
+        or report.counts.glb_triangles != audit.triangle_count
+        or abs(measured.color_min - evidence.color_min) > 1e-6
+        or abs(measured.color_max - evidence.color_max) > 1e-6
+    ):
+        raise LocalTexturedPreviewError(
+            "local GLB surface realism audit disagrees with the build report",
         )
 
 
@@ -887,6 +958,7 @@ def verify_local_textured_preview_directory(
             directory / "village-canary.glb",
             _expected_glb_materials(report),
             expected_building_geometry=_expected_building_geometry(report),
+            expected_surface_realism=_expected_surface_realism(report),
         )
     except ValueError as exc:
         raise LocalTexturedPreviewError(f"local GLB audit failed: {exc}") from exc
@@ -895,6 +967,7 @@ def verify_local_textured_preview_directory(
         measured_audit=measured_audit,
     )
     _verify_building_geometry_audit_agreement(report, measured_audit)
+    _verify_surface_realism_audit_agreement(report, measured_audit)
     try:
         glb_sha256, glb_bytes = canary._sha256_stable_artifact(
             directory / "village-canary.glb",
@@ -989,6 +1062,7 @@ def verify_local_textured_training_build_directory(
             directory / "village-canary.glb",
             _expected_glb_materials(request),
             expected_building_geometry=_expected_building_geometry(report),
+            expected_surface_realism=_expected_surface_realism(report),
         )
     except ValueError as exc:
         raise LocalTexturedPreviewError(
@@ -999,6 +1073,7 @@ def verify_local_textured_training_build_directory(
         measured_audit=measured_audit,
     )
     _verify_building_geometry_audit_agreement(report, audit)
+    _verify_surface_realism_audit_agreement(report, audit)
     try:
         report_sha256, _ = canary._sha256_stable_artifact(
             directory / "build-report.json",
@@ -1539,12 +1614,14 @@ def run_local_textured_preview(
                     staging / "village-canary.glb",
                     _expected_glb_materials(request),
                     expected_building_geometry=_expected_building_geometry(report),
+                    expected_surface_realism=_expected_surface_realism(report),
                 )
             except ValueError as exc:
                 raise LocalTexturedPreviewError(
                     f"local GLB material audit failed: {exc}",
                 ) from exc
             _verify_building_geometry_audit_agreement(report, audit)
+            _verify_surface_realism_audit_agreement(report, audit)
             glb_record = next(
                 row for row in report.artifacts if row.name == "village-canary.glb"
             )

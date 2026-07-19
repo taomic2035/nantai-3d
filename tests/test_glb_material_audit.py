@@ -20,10 +20,12 @@ from pipeline.synthetic_village.building_geometry import (
 from pipeline.synthetic_village.glb_material_audit import (
     ExpectedBuildingGeometry,
     ExpectedGlbMaterial,
+    ExpectedSurfaceRealism,
     GlbMaterialAuditError,
     audit_textured_glb,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
+from pipeline.synthetic_village.surface_realism import SURFACE_PROFILE_V1
 
 SLOT_ID = "material-fieldstone-01"
 SOURCE_SHA256 = "1" * 64
@@ -66,6 +68,7 @@ def _document_and_binary(
     *,
     triangle_count: int = 1,
     extra_triangle_count: int | None = None,
+    surface: bool = False,
 ) -> tuple[dict, bytes]:
     binary = bytearray()
     buffer_views = []
@@ -110,6 +113,28 @@ def _document_and_binary(
             target=34963,
         )
         if extra_triangle_count is not None
+        else None
+    )
+    color_view = (
+        append(
+            struct.pack(
+                "<12f",
+                0.88,
+                0.92,
+                1.04,
+                1.0,
+                0.94,
+                1.00,
+                1.08,
+                1.0,
+                1.02,
+                1.06,
+                1.10,
+                1.0,
+            ),
+            target=34962,
+        )
+        if surface
         else None
     )
     base_view = append(_png_bytes((127, 91, 63)))
@@ -197,7 +222,23 @@ def _document_and_binary(
         "scenes": [{"nodes": [0]}],
         "scene": 0,
     }
+    if color_view is not None:
+        document["accessors"].append(
+            {
+                "bufferView": color_view,
+                "componentType": 5126,
+                "count": 3,
+                "type": "VEC4",
+            },
+        )
+        document["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"] = 5
+        document["nodes"][0]["extras"] = {
+            "nv_surface_realism_profile": SURFACE_PROFILE_V1,
+            "nv_surface_color_mode": "macro",
+            "nv_surface_palette_sha256": "3" * 64,
+        }
     if extra_index_view is not None and extra_triangle_count is not None:
+        extra_accessor_index = len(document["accessors"])
         document["accessors"].append(
             {
                 "bufferView": extra_index_view,
@@ -216,7 +257,7 @@ def _document_and_binary(
                             "TEXCOORD_0": 2,
                             "TANGENT": 3,
                         },
-                        "indices": 5,
+                        "indices": extra_accessor_index,
                         "material": 0,
                         "mode": 4,
                     },
@@ -236,6 +277,20 @@ def _expected() -> tuple[ExpectedGlbMaterial, ...]:
             bundle_id=BUNDLE_ID,
             algorithm_id="mirror-sobel-orm-v1",
         ),
+    )
+
+
+def _expected_surface(
+    *,
+    maximum_triangles: int = 125_000,
+    maximum_bytes: int = 160_000_000,
+) -> ExpectedSurfaceRealism:
+    return ExpectedSurfaceRealism(
+        profile_id=SURFACE_PROFILE_V1,
+        maximum_triangles=maximum_triangles,
+        maximum_bytes=maximum_bytes,
+        expected_detail_mesh_objects=0,
+        active_macro_slots=(SLOT_ID,),
     )
 
 
@@ -333,6 +388,115 @@ def test_audit_accepts_embedded_pbr_material_with_uv_and_tangent(
     assert audit.slot_ids == (SLOT_ID,)
     assert len(audit.glb_sha256) == 64
     assert audit.building_geometry is None
+
+
+def test_surface_audit_accepts_float_color_above_one(tmp_path: Path) -> None:
+    document, binary = _document_and_binary(surface=True)
+    path = tmp_path / "surface.glb"
+    path.write_bytes(_glb(document, binary))
+
+    audit = audit_textured_glb(
+        path,
+        expected_materials=_expected(),
+        expected_surface_realism=_expected_surface(),
+    )
+
+    assert audit.surface_realism is not None
+    assert audit.surface_realism.color_primitive_count == 1
+    assert audit.surface_realism.color_min == pytest.approx(0.88)
+    assert audit.surface_realism.color_max == pytest.approx(1.10)
+    assert audit.surface_realism.active_macro_slots == (SLOT_ID,)
+
+
+def _invalid_surface_case(
+    case: str,
+) -> tuple[dict, bytes, ExpectedSurfaceRealism, str]:
+    triangle_count = 2 if case == "triangle-budget" else 1
+    document, binary = _document_and_binary(
+        surface=True,
+        triangle_count=triangle_count,
+    )
+    primitive = document["meshes"][0]["primitives"][0]
+    color_index = primitive["attributes"]["COLOR_0"]
+    accessor = document["accessors"][color_index]
+    color_view = document["bufferViews"][accessor["bufferView"]]
+    color_offset = color_view["byteOffset"]
+    expected = _expected_surface()
+    message = ""
+    mutable = bytearray(binary)
+    if case == "missing":
+        primitive["attributes"].pop("COLOR_0")
+        message = "COLOR_0 is absent"
+    elif case == "normalized-u8":
+        accessor["componentType"] = 5121
+        accessor["normalized"] = True
+        message = "must be unnormalized FLOAT"
+    elif case == "vec3":
+        accessor["type"] = "VEC3"
+        message = "must be VEC4"
+    elif case == "wrong-count":
+        accessor["count"] = 2
+        message = "vertex count disagrees"
+    elif case == "below-bound":
+        struct.pack_into("<f", mutable, color_offset, 0.87)
+        message = "below 0.88"
+    elif case == "above-bound":
+        struct.pack_into("<f", mutable, color_offset + 10 * 4, 1.11)
+        message = "above 1.10"
+    elif case == "white-macro":
+        struct.pack_into("<12f", mutable, color_offset, *([1.0] * 12))
+        message = "macro color is constant"
+    elif case == "colored-white":
+        document["nodes"][0]["extras"]["nv_surface_color_mode"] = "white"
+        message = "white mode is colored"
+    elif case == "profile-extra":
+        document["nodes"][0]["extras"]["nv_surface_realism_profile"] = (
+            "different-surface-profile"
+        )
+        message = "profile mismatch"
+    elif case == "triangle-budget":
+        expected = _expected_surface(maximum_triangles=1)
+        message = "triangle budget"
+    elif case == "byte-budget":
+        expected = _expected_surface(
+            maximum_bytes=len(_glb(document, bytes(mutable))) - 1,
+        )
+        message = "byte budget"
+    else:  # pragma: no cover - parametrization is closed
+        raise AssertionError(case)
+    return document, bytes(mutable), expected, message
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing",
+        "normalized-u8",
+        "vec3",
+        "wrong-count",
+        "below-bound",
+        "above-bound",
+        "white-macro",
+        "colored-white",
+        "profile-extra",
+        "triangle-budget",
+        "byte-budget",
+    ],
+)
+def test_surface_audit_rejects_invalid_color_contract(
+    case: str,
+    tmp_path: Path,
+) -> None:
+    document, binary, expected, message = _invalid_surface_case(case)
+    path = tmp_path / f"{case}.glb"
+    path.write_bytes(_glb(document, binary))
+
+    with pytest.raises(GlbMaterialAuditError, match=message):
+        audit_textured_glb(
+            path,
+            expected_materials=_expected(),
+            expected_surface_realism=expected,
+        )
 
 
 def test_audit_accepts_v2_building_geometry_from_glb_nodes_and_indices(
