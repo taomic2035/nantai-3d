@@ -888,7 +888,9 @@ def _validate_surface_realism(
                 raise GlbMaterialAuditError(
                     "GLB surface primitive material is invalid",
                 )
-            if mode == "white":
+            slot_id = material_slots[material_index]
+            active_material = slot_id in expected.active_macro_slots
+            if mode == "white" or not active_material:
                 if any(component != 1.0 for color in rgb for component in color):
                     raise GlbMaterialAuditError(
                         "GLB surface white mode is colored",
@@ -901,7 +903,7 @@ def _validate_surface_realism(
                         f"{mode} color is constant: mesh={mesh_index} "
                         f"name={raw_mesh.get('name', '')!r} sample={rgb[0]!r}",
                     )
-                active_slots.add(material_slots[material_index])
+                active_slots.add(slot_id)
                 if mode == "macro":
                     macro_primitive_count += 1
                 else:
