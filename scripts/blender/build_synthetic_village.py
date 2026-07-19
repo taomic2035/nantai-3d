@@ -5293,6 +5293,8 @@ def _save_scene_and_glb(work_dir, *, textured=False, surface_realism=False):
         export_apply=True,
         export_extras=True,
         export_tangents=textured,
+        export_vertex_color="ACTIVE" if surface_realism else "MATERIAL",
+        export_all_vertex_colors=not surface_realism,
     )
     if "FINISHED" not in result or not glb_path.is_file() or glb_path.stat().st_size <= 0:
         raise RuntimeBuildError("GLB export did not finish")

@@ -293,6 +293,7 @@ def test_local_blender_normalizes_exported_surface_colors_to_float_vec4(
         f"output = Path({str(output)!r})\n"
         "bpy.ops.export_scene.gltf(\n"
         "    filepath=str(output), export_format='GLB', export_apply=True,\n"
+        "    export_vertex_color='ACTIVE', export_all_vertex_colors=False,\n"
         ")\n"
         "ns['_normalize_surface_color_accessors'](output)\n"
         "raw = output.read_bytes()\n"

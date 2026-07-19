@@ -897,7 +897,9 @@ def _validate_surface_realism(
             else:
                 if len(set(rgb)) <= 1:
                     raise GlbMaterialAuditError(
-                        f"GLB surface {mode} color is constant",
+                        "GLB surface "
+                        f"{mode} color is constant: mesh={mesh_index} "
+                        f"name={raw_mesh.get('name', '')!r} sample={rgb[0]!r}",
                     )
                 active_slots.add(material_slots[material_index])
                 if mode == "macro":
