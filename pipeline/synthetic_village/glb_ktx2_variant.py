@@ -292,7 +292,7 @@ def geometry_fingerprint_glb(glb_bytes: bytes) -> str:
         ) from exc
 
 
-def _add_required_extension(
+def _add_used_extension(
     document: dict[str, object],
     key: str,
 ) -> None:
@@ -308,7 +308,7 @@ def rewrite_glb_for_ktx2(
     fallback_glb: bytes,
     replacements: Mapping[str, KtxTextureDescriptor],
 ) -> bytes:
-    """Replace the exact external PNG closure with KTX2 BasisU references."""
+    """Add KTX2 BasisU alternatives for an exact non-empty PNG subset."""
 
     try:
         if type(fallback_glb) is not bytes or not isinstance(replacements, Mapping):
@@ -338,7 +338,7 @@ def rewrite_glb_for_ktx2(
             source_uris.append(uri)
         if len(source_uris) != len(set(source_uris)):
             raise GlbKtx2VariantError("GLB image URI closure contains duplicates")
-        if set(source_uris) != set(replacements):
+        if not replacements or not set(replacements) <= set(source_uris):
             raise GlbKtx2VariantError(
                 "GLB image and KTX2 replacement closure disagree",
             )
@@ -399,8 +399,10 @@ def rewrite_glb_for_ktx2(
                 "GLB material texture role closure is incomplete",
             )
 
-        ktx_uris = {}
+        ktx_image_indices = {}
         for image_index, source_uri in enumerate(source_uris):
+            if source_uri not in replacements:
+                continue
             descriptor = replacements[source_uri]
             if (
                 descriptor.media_type != "image/ktx2"
@@ -411,23 +413,24 @@ def rewrite_glb_for_ktx2(
                 raise GlbKtx2VariantError(
                     "KTX2 replacement descriptor role or identity is invalid",
                 )
-            ktx_uris[source_uri] = f"../textures/{descriptor.sha256}.ktx2"
-        if len(set(ktx_uris.values())) != len(ktx_uris):
-            raise GlbKtx2VariantError(
-                "KTX2 replacement closure contains duplicate objects",
+            ktx_image_indices[source_uri] = len(images)
+            images.append(
+                {
+                    "uri": f"../textures/{descriptor.sha256}.ktx2",
+                    "mimeType": "image/ktx2",
+                },
             )
-
         for texture, source in zip(textures, texture_sources, strict=True):
+            source_uri = source_uris[source]
+            if source_uri not in ktx_image_indices:
+                continue
             extensions = texture.get("extensions", {})
-            texture.pop("source")
-            extensions[_KHR_TEXTURE_BASISU] = {"source": source}
+            extensions[_KHR_TEXTURE_BASISU] = {
+                "source": ktx_image_indices[source_uri],
+            }
             texture["extensions"] = extensions
 
-        for image, source_uri in zip(images, source_uris, strict=True):
-            image["uri"] = ktx_uris[source_uri]
-            image["mimeType"] = "image/ktx2"
-        _add_required_extension(document, "extensionsUsed")
-        _add_required_extension(document, "extensionsRequired")
+        _add_used_extension(document, "extensionsUsed")
 
         primary = canonical_glb_bytes(document, binary)
         if geometry_fingerprint_glb(primary) != geometry_fingerprint_glb(

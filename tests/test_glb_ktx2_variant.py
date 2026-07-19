@@ -48,18 +48,23 @@ def test_rewrite_uses_basisu_and_preserves_geometry(tmp_path) -> None:
     _raw, _fallback_document, fallback_binary = _load_glb_bytes(fallback)
 
     assert document["extensionsUsed"] == ["KHR_texture_basisu"]
-    assert document["extensionsRequired"] == ["KHR_texture_basisu"]
+    assert "extensionsRequired" not in document
     assert primary_binary == fallback_binary
-    assert [(image["uri"], image["mimeType"]) for image in document["images"]] == [
+    assert [(image["uri"], image["mimeType"]) for image in document["images"][:3]] == [
+        (binding.uri, "image/png") for binding in bindings
+    ]
+    assert [(image["uri"], image["mimeType"]) for image in document["images"][3:]] == [
         (
             f"../textures/{replacements[binding.uri].sha256}.ktx2",
             "image/ktx2",
         )
         for binding in bindings
     ]
-    assert all("source" not in texture for texture in document["textures"])
+    assert [texture["source"] for texture in document["textures"]] == list(
+        range(3),
+    )
     assert [texture["extensions"]["KHR_texture_basisu"] for texture in document["textures"]] == [
-        {"source": index} for index in range(3)
+        {"source": index} for index in range(3, 6)
     ]
     assert geometry_fingerprint_glb(primary) == geometry_fingerprint_glb(
         fallback,
@@ -90,16 +95,23 @@ def test_geometry_fingerprint_changes_only_with_geometry(tmp_path) -> None:
     )
 
 
-def test_rewrite_rejects_incomplete_extra_or_unsafe_closure(tmp_path) -> None:
+def test_rewrite_accepts_mixed_subset_but_rejects_extra_or_unsafe_closure(
+    tmp_path,
+) -> None:
     _path, fallback, document, bindings, _objects, _expected = _fixture(
         tmp_path,
     )
     replacements = _replacements(bindings)
 
-    incomplete = dict(replacements)
-    incomplete.pop(bindings[-1].uri)
-    with pytest.raises(GlbKtx2VariantError, match="closure"):
-        rewrite_glb_for_ktx2(fallback, incomplete)
+    partial = {bindings[0].uri: replacements[bindings[0].uri]}
+    mixed = rewrite_glb_for_ktx2(fallback, partial)
+    _raw, mixed_document, _binary = _load_glb_bytes(mixed)
+    assert len(mixed_document["images"]) == 4
+    assert "KHR_texture_basisu" in mixed_document["textures"][0]["extensions"]
+    assert all(
+        "KHR_texture_basisu" not in texture.get("extensions", {})
+        for texture in mixed_document["textures"][1:]
+    )
 
     extra = dict(replacements)
     extra["../textures/" + "f" * 64 + ".png"] = _replacement(bindings[0])
