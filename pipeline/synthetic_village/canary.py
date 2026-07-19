@@ -2694,6 +2694,7 @@ def _minimum_blender_environment(invocation_root: Path) -> dict[str, str]:
         "TEMP": str(invocation_root / "temp"),
         "TMP": str(invocation_root / "temp"),
         "PYTHONHASHSEED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",
         "BLENDER_USER_CONFIG": str(invocation_root / "blender-user-config"),

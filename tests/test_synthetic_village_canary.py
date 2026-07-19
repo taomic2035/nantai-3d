@@ -2670,6 +2670,7 @@ def test_runner_uses_fixed_argv_minimum_environment_and_absent_publish(
         assert "HOME" not in env
         assert "USERPROFILE" not in env
         assert env["PYTHONHASHSEED"] == "0"
+        assert env["PYTHONDONTWRITEBYTECODE"] == "1"
         assert env["PYTHONNOUSERSITE"] == "1"
         assert not list(work_root.glob(".staging-*"))
         assert not list(work_root.glob(".invocation-*"))
