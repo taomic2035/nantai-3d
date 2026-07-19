@@ -20,6 +20,125 @@ function subject() {
   return resourcesModule;
 }
 
+test('near template compaction merges transformed primitives by material', () => {
+  const { compactTemplateSceneByMaterial } = subject();
+  const disposed = [];
+  const transformed = [];
+  const materialA = { id: 'a' };
+  const materialB = { id: 'b' };
+  function geometry(id) {
+    return {
+      id,
+      clone() {
+        return {
+          id: `${id}-clone`,
+          applyMatrix4(matrix) {
+            transformed.push([id, matrix.id]);
+          },
+          dispose() {
+            disposed.push(`${id}-clone`);
+          },
+        };
+      },
+    };
+  }
+  const sourceGeometries = [geometry('g1'), geometry('g2'), geometry('g3')];
+  const sourceMeshes = [
+    { isMesh: true, geometry: sourceGeometries[0], material: materialA, matrixWorld: { id: 'm1' } },
+    { isMesh: true, geometry: sourceGeometries[1], material: materialA, matrixWorld: { id: 'm2' } },
+    { isMesh: true, geometry: sourceGeometries[2], material: materialB, matrixWorld: { id: 'm3' } },
+  ];
+  const scene = {
+    name: 'near-template',
+    updateMatrixWorldCalls: 0,
+    updateMatrixWorld() {
+      this.updateMatrixWorldCalls += 1;
+    },
+    traverse(visitor) {
+      sourceMeshes.forEach(visitor);
+    },
+  };
+  class Group {
+    constructor() {
+      this.children = [];
+    }
+
+    add(child) {
+      this.children.push(child);
+    }
+  }
+  class Mesh {
+    constructor(meshGeometry, material) {
+      this.geometry = meshGeometry;
+      this.material = material;
+      this.isMesh = true;
+    }
+  }
+  const mergeCalls = [];
+  const mergeGeometriesFn = (geometries) => {
+    mergeCalls.push(geometries.map((item) => item.id));
+    return {
+      id: `merged-${mergeCalls.length}`,
+      dispose() {
+        disposed.push(this.id);
+      },
+    };
+  };
+
+  const compacted = compactTemplateSceneByMaterial({
+    scene,
+    THREE: { Group, Mesh },
+    mergeGeometriesFn,
+  });
+
+  assert.equal(scene.updateMatrixWorldCalls, 1);
+  assert.deepEqual(transformed, [
+    ['g1', 'm1'],
+    ['g2', 'm2'],
+    ['g3', 'm3'],
+  ]);
+  assert.deepEqual(mergeCalls, [['g1-clone', 'g2-clone']]);
+  assert.deepEqual(disposed, ['g1-clone', 'g2-clone']);
+  assert.equal(compacted.scene.name, 'near-template');
+  assert.equal(compacted.scene.children.length, 2);
+  assert.equal(compacted.scene.children[0].material, materialA);
+  assert.equal(compacted.scene.children[0].geometry.id, 'merged-1');
+  assert.equal(compacted.scene.children[1].material, materialB);
+  assert.equal(compacted.scene.children[1].geometry.id, 'g3-clone');
+  assert.deepEqual(
+    [...compacted.sourceGeometries].map((item) => item.id),
+    ['g1', 'g2', 'g3'],
+  );
+  assert.deepEqual(
+    [...compacted.geometries].map((item) => item.id),
+    ['merged-1', 'g3-clone'],
+  );
+});
+
+test('near template compaction fails closed on unsupported mesh forms', () => {
+  const { compactTemplateSceneByMaterial } = subject();
+  const scene = {
+    updateMatrixWorld() {},
+    traverse(visitor) {
+      visitor({
+        isMesh: true,
+        isSkinnedMesh: true,
+        geometry: { clone() {} },
+        material: {},
+        matrixWorld: {},
+      });
+    },
+  };
+  assert.throws(
+    () => compactTemplateSceneByMaterial({
+      scene,
+      THREE: { Group: class {}, Mesh: class {} },
+      mergeGeometriesFn() {},
+    }),
+    /cannot compact skinned, instanced, morphed, or multi-material mesh/,
+  );
+});
+
 const ORIGIN = 'https://viewer.test/web/viewer/';
 const BUNDLE_ID = '1'.repeat(64);
 const SLOT_ID = 'material-fieldstone-01';

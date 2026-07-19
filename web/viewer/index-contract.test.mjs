@@ -230,6 +230,11 @@ test('mesh templates use the verified ref-counted store and bounded evidence', (
     /from ['"]\.\/verified-mesh-resources\.mjs['"]/,
   );
   assert.match(main, /createVerifiedMeshResourceStore\(/);
+  assert.match(
+    main,
+    /from ['"]three\/addons\/utils\/BufferGeometryUtils\.js['"]/,
+  );
+  assert.match(main, /mergeGeometriesFn:\s*mergeGeometries/);
   assert.match(main, /meshResourceStore\.loadTemplate\(/);
   assert.match(main, /meshResourceStore\.releaseTemplate\(/);
   assert.doesNotMatch(main, /meshAssetCache/);

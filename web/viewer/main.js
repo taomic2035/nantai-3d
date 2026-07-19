@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   threeToChunk,
   threeToWorld,
@@ -151,6 +152,7 @@ const meshWorldStats = { loaded: 0, evicted: 0 };
 const meshResourceStore = createVerifiedMeshResourceStore({
   THREE,
   GLTFLoader,
+  mergeGeometriesFn: mergeGeometries,
 });
 const frameIntervalSampler = createFrameIntervalSampler();
 let viewerBridge = null;

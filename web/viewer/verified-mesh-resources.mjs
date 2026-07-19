@@ -138,6 +138,108 @@ function collectParsedResources(loaded) {
   };
 }
 
+/**
+ * Flatten a verified static near template into one world-baked mesh per material.
+ *
+ * Blender intentionally emits many small authored parts for fidelity. Keeping
+ * every part as a distinct WebGL geometry makes the runtime primitive count
+ * scale into the thousands, even though parts sharing a material can be merged
+ * without changing their verified bytes or visual material identity.
+ */
+export function compactTemplateSceneByMaterial({
+  scene,
+  THREE,
+  mergeGeometriesFn,
+}) {
+  if (
+    !scene?.traverse
+    || !scene?.updateMatrixWorld
+    || typeof THREE?.Group !== 'function'
+    || typeof THREE?.Mesh !== 'function'
+    || typeof mergeGeometriesFn !== 'function'
+  ) {
+    throw new TypeError('near template compaction dependencies are unavailable');
+  }
+  scene.updateMatrixWorld(true);
+  const byMaterial = new Map();
+  const sourceGeometries = new Set();
+  const transformedGeometries = new Set();
+  const outputGeometries = new Set();
+  try {
+    scene.traverse((object) => {
+      if (!object?.isMesh) return;
+      const morphed = (
+        object.morphTargetInfluences != null
+        || Object.keys(object.geometry?.morphAttributes ?? {}).length > 0
+      );
+      if (
+        object.isSkinnedMesh
+        || object.isInstancedMesh
+        || morphed
+        || Array.isArray(object.material)
+      ) {
+        throw new TypeError(
+          'cannot compact skinned, instanced, morphed, or multi-material mesh',
+        );
+      }
+      if (
+        !object.geometry?.clone
+        || !object.material
+        || !object.matrixWorld
+      ) {
+        throw new TypeError('cannot compact incomplete static mesh');
+      }
+      const transformed = object.geometry.clone();
+      if (!transformed?.applyMatrix4 || !transformed?.dispose) {
+        throw new TypeError('cannot compact non-buffer geometry');
+      }
+      transformed.applyMatrix4(object.matrixWorld);
+      sourceGeometries.add(object.geometry);
+      transformedGeometries.add(transformed);
+      const geometries = byMaterial.get(object.material) ?? [];
+      geometries.push(transformed);
+      byMaterial.set(object.material, geometries);
+    });
+    if (byMaterial.size === 0) {
+      throw new TypeError('verified mesh template contains no compactable mesh');
+    }
+
+    const compactedScene = new THREE.Group();
+    compactedScene.name = scene.name ?? '';
+    for (const [material, geometries] of byMaterial) {
+      let geometry;
+      if (geometries.length === 1) {
+        [geometry] = geometries;
+        transformedGeometries.delete(geometry);
+      } else {
+        geometry = mergeGeometriesFn(geometries, false);
+        if (!geometry?.dispose) {
+          throw new TypeError('static mesh primitive merge failed');
+        }
+        for (const transformed of geometries) {
+          transformed.dispose();
+          transformedGeometries.delete(transformed);
+        }
+      }
+      outputGeometries.add(geometry);
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      compactedScene.add(mesh);
+    }
+    compactedScene.updateMatrixWorld?.(true);
+    return {
+      scene: compactedScene,
+      sourceGeometries,
+      geometries: outputGeometries,
+    };
+  } catch (error) {
+    for (const geometry of transformedGeometries) geometry.dispose?.();
+    for (const geometry of outputGeometries) geometry.dispose?.();
+    throw error;
+  }
+}
+
 function disposeParsedTexture(texture) {
   texture.dispose();
   texture.image?.close?.();
@@ -378,6 +480,7 @@ export function semanticTextureKey(
 export function createVerifiedMeshResourceStore({
   THREE,
   GLTFLoader,
+  mergeGeometriesFn = null,
   fetchFn = globalThis.fetch,
   cryptoSubtle = globalThis.crypto?.subtle,
   createImageBitmapFn = globalThis.createImageBitmap,
@@ -398,6 +501,7 @@ export function createVerifiedMeshResourceStore({
     || typeof locationHref !== 'string'
     || typeof createObjectURL !== 'function'
     || typeof revokeObjectURL !== 'function'
+    || (mergeGeometriesFn !== null && typeof mergeGeometriesFn !== 'function')
     || !Number.isSafeInteger(maximumIdleTemplates)
     || maximumIdleTemplates < 0
   ) {
@@ -795,6 +899,17 @@ export function createVerifiedMeshResourceStore({
         ) {
           throw new TypeError('GLTF material rebinding failed');
         }
+      }
+      if (mergeGeometriesFn) {
+        const compacted = compactTemplateSceneByMaterial({
+          scene: loaded.scene,
+          THREE,
+          mergeGeometriesFn,
+        });
+        for (const geometry of compacted.sourceGeometries) geometry.dispose();
+        parsedResources.geometries = compacted.geometries;
+        parsedResources.meshCount = compacted.geometries.size;
+        loaded.scene = compacted.scene;
       }
       disposeTransientTextures(parsedResources);
       loaded.scene.traverse((object) => {
