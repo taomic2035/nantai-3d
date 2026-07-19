@@ -16,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -31,6 +32,8 @@ from pydantic import (
     model_validator,
 )
 from skimage.metrics import structural_similarity
+
+from .h3_material_sources import H3MaterialSourceError, _prepare_real_directory
 
 KTX_TOOL_VERSION = "4.4.2"
 KTX_DARWIN_ARM64_ASSET = "KTX-Software-4.4.2-Darwin-arm64.pkg"
@@ -62,6 +65,7 @@ KTX_RECEIPT_NAME = "receipt.json"
 KTX_MAX_BYTES = 512 * 1024 * 1024
 KTX_MAX_PROCESS_OUTPUT = 1024 * 1024
 KTX_PROCESS_TIMEOUT_SECONDS = 120
+KTX_COMPILE_TIMEOUT_SECONDS = 6 * 60 * 60
 KTX_DF_MODEL_ETC1S = 163
 KTX_DF_MODEL_UASTC = 166
 KTX_DF_TRANSFER_LINEAR = 1
@@ -229,6 +233,44 @@ class KtxDecodedQuality(FrozenModel):
         }
         if not present[self.role] or sum(present.values()) != 1:
             raise ValueError("decoded quality metrics do not match texture role")
+        return self
+
+
+class KtxTextureDescriptor(FrozenModel):
+    role: TextureRole
+    source_sha256: Sha256
+    object_path: str = Field(min_length=1)
+    sha256: Sha256
+    bytes: int = Field(ge=1, le=KTX_MAX_BYTES)
+    width: Literal[4096] = 4096
+    height: Literal[4096] = 4096
+    level_dimensions: tuple[int, ...] = KTX_LEVEL_DIMENSIONS
+    media_type: Literal["image/ktx2"] = "image/ktx2"
+    transfer: Transfer
+    codec: Codec
+    tool_version: Literal["4.4.2"] = KTX_TOOL_VERSION
+    toktx_sha256: Sha256
+    command_options: tuple[str, ...]
+    official_validation: Literal[True] = True
+    repeat_build_byte_equal: Literal[True] = True
+    orm_etc1s_fallback: bool
+    quality: KtxDecodedQuality
+
+    @model_validator(mode="after")
+    def _descriptor_is_role_exact(self) -> KtxTextureDescriptor:
+        if self.object_path != f"objects/{self.sha256}.ktx2":
+            raise ValueError("KTX2 object path must match its content address")
+        if self.level_dimensions != KTX_LEVEL_DIMENSIONS:
+            raise ValueError("KTX2 descriptor mip dimensions are incomplete")
+        expected_transfer = "srgb" if self.role == "base_color" else "linear"
+        if self.transfer != expected_transfer or self.quality.role != self.role:
+            raise ValueError("KTX2 descriptor role semantics disagree")
+        if self.role != "orm" and self.codec != "uastc":
+            raise ValueError("base colour and normal KTX2 must use UASTC")
+        if self.orm_etc1s_fallback and (
+            self.role != "orm" or self.codec != "uastc"
+        ):
+            raise ValueError("ORM ETC1S fallback evidence is inconsistent")
         return self
 
 
@@ -500,6 +542,266 @@ def measure_decoded_quality(
     return KtxDecodedQuality(
         role=role,
         orm_max_channel_error=round(maximum_error, 8),
+    )
+
+
+ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _default_compile_runner(
+    command: tuple[str, ...],
+    *,
+    environment: dict[str, str],
+    label: str,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    return _require_success(
+        command,
+        environment=environment,
+        label=label,
+        timeout=timeout,
+    )
+
+
+def _read_compilation_output(path: Path, *, label: str) -> bytes:
+    try:
+        expected = path.stat().st_size
+        if expected < 1 or expected > KTX_MAX_BYTES:
+            raise KtxToolchainError(f"{label} byte length is invalid")
+        payload = path.read_bytes()
+    except KtxToolchainError:
+        raise
+    except OSError as exc:
+        raise KtxToolchainError(f"{label} cannot be read") from exc
+    if len(payload) != expected:
+        raise KtxToolchainError(f"{label} changed during bounded read")
+    return payload
+
+
+def _require_official_validation(completed: subprocess.CompletedProcess[str]) -> None:
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise KtxToolchainError(
+            "official KTX validator returned invalid JSON",
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("valid") is not True
+        or payload.get("messages") != []
+    ):
+        raise KtxToolchainError(
+            "official KTX validator reported messages or invalid output",
+        )
+
+
+def _compile_texture_codec(
+    source: Path,
+    *,
+    role: TextureRole,
+    codec: Codec,
+    work_root: Path,
+    tool_root: Path,
+    receipt: KtxToolReceipt,
+    environment: dict[str, str],
+    runner: ProcessRunner,
+) -> tuple[bytes, KtxBinaryAudit, KtxDecodedQuality, tuple[str, ...]]:
+    output = work_root / "texture.ktx2"
+    decoded = work_root / "decoded.png"
+    command = toktx_command(
+        tool_root / receipt.toktx.relative_path,
+        role=role,
+        source=source,
+        output=output,
+        force_uastc=codec == "uastc" and role == "orm",
+    )
+    runner(
+        command,
+        environment=environment,
+        label=f"{role} {codec} compilation",
+        timeout=KTX_COMPILE_TIMEOUT_SECONDS,
+    )
+    payload = _read_compilation_output(output, label=f"{role} KTX2 output")
+    transfer: Transfer = "srgb" if role == "base_color" else "linear"
+    audit = audit_ktx2_bytes(
+        payload,
+        expected_transfer=transfer,
+        expected_codec=codec,
+    )
+    validation = runner(
+        validation_command(
+            tool_root / receipt.ktx.relative_path,
+            output,
+        ),
+        environment=environment,
+        label=f"{role} official KTX validation",
+        timeout=KTX_PROCESS_TIMEOUT_SECONDS,
+    )
+    _require_official_validation(validation)
+    runner(
+        extract_command(
+            tool_root / receipt.ktx.relative_path,
+            source=output,
+            output=decoded,
+        ),
+        environment=environment,
+        label=f"{role} level-zero extraction",
+        timeout=KTX_PROCESS_TIMEOUT_SECONDS,
+    )
+    quality = measure_decoded_quality(
+        _read_compilation_output(source, label=f"{role} PNG source"),
+        _read_compilation_output(decoded, label=f"{role} decoded PNG"),
+        role=role,
+    )
+    return payload, audit, quality, command[1:-2]
+
+
+def _compile_texture_attempt(
+    source: Path,
+    *,
+    role: TextureRole,
+    force_uastc: bool,
+    work_root: Path,
+    tool_root: Path,
+    receipt: KtxToolReceipt,
+    environment: dict[str, str],
+    runner: ProcessRunner,
+) -> tuple[
+    bytes,
+    KtxBinaryAudit,
+    KtxDecodedQuality,
+    tuple[str, ...],
+    bool,
+]:
+    codec: Codec = (
+        "uastc" if role != "orm" or force_uastc else "etc1s"
+    )
+    try:
+        payload, audit, quality, options = _compile_texture_codec(
+            source,
+            role=role,
+            codec=codec,
+            work_root=work_root,
+            tool_root=tool_root,
+            receipt=receipt,
+            environment=environment,
+            runner=runner,
+        )
+        return payload, audit, quality, options, force_uastc
+    except KtxToolchainError as exc:
+        if role != "orm" or codec != "etc1s" or "decoded quality" not in str(exc):
+            raise
+    for path in (work_root / "texture.ktx2", work_root / "decoded.png"):
+        if path.exists():
+            path.unlink()
+    payload, audit, quality, options = _compile_texture_codec(
+        source,
+        role=role,
+        codec="uastc",
+        work_root=work_root,
+        tool_root=tool_root,
+        receipt=receipt,
+        environment=environment,
+        runner=runner,
+    )
+    return payload, audit, quality, options, True
+
+
+def compile_verified_ktx2_texture(
+    source: Path,
+    *,
+    role: TextureRole,
+    tool_root: Path,
+    receipt: KtxToolReceipt,
+    output_root: Path,
+    runner: ProcessRunner = _default_compile_runner,
+) -> KtxTextureDescriptor:
+    """Compile twice, validate, quality-check, and publish one KTX2 object."""
+
+    source = Path(source).expanduser().absolute()
+    tool_root = Path(tool_root).expanduser().absolute()
+    output_root = Path(output_root).expanduser().absolute()
+    source_sha256, _ = _sha256_file(source)
+    try:
+        output_root = _prepare_real_directory(
+            output_root,
+            label="KTX2 texture publication root",
+        )
+    except H3MaterialSourceError as exc:
+        raise KtxToolchainError(
+            f"KTX2 publication root cannot be trusted: {exc}",
+        ) from exc
+    environment = _runtime_environment(tool_root)
+    with tempfile.TemporaryDirectory(
+        prefix=".ktx-texture.",
+        dir=output_root,
+    ) as temporary:
+        temporary_root = Path(temporary)
+        first_root = temporary_root / "repeat-1"
+        second_root = temporary_root / "repeat-2"
+        first_root.mkdir()
+        second_root.mkdir()
+        first = _compile_texture_attempt(
+            source,
+            role=role,
+            force_uastc=False,
+            work_root=first_root,
+            tool_root=tool_root,
+            receipt=receipt,
+            environment=environment,
+            runner=runner,
+        )
+        second = _compile_texture_attempt(
+            source,
+            role=role,
+            force_uastc=first[4],
+            work_root=second_root,
+            tool_root=tool_root,
+            receipt=receipt,
+            environment=environment,
+            runner=runner,
+        )
+        if first[:4] != second[:4]:
+            raise KtxToolchainError(
+                f"{role} repeat compilation is not byte-identical",
+            )
+        payload, audit, quality, options, fallback = first
+        object_path = f"objects/{audit.sha256}.ktx2"
+        destination = output_root / object_path
+        try:
+            _prepare_real_directory(
+                destination.parent,
+                label="KTX2 object directory",
+            )
+        except H3MaterialSourceError as exc:
+            raise KtxToolchainError(
+                f"KTX2 object directory cannot be trusted: {exc}",
+            ) from exc
+        if destination.exists():
+            if _read_compilation_output(
+                destination,
+                label=f"{role} published KTX2",
+            ) != payload:
+                raise KtxToolchainError(
+                    f"{role} content-addressed KTX2 conflicts on disk",
+                )
+        else:
+            with destination.open("xb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+    return KtxTextureDescriptor(
+        role=role,
+        source_sha256=source_sha256,
+        object_path=object_path,
+        sha256=audit.sha256,
+        bytes=audit.bytes,
+        transfer=audit.transfer,
+        codec=audit.codec,
+        toktx_sha256=receipt.toktx.sha256,
+        command_options=options,
+        orm_etc1s_fallback=fallback,
+        quality=quality,
     )
 
 

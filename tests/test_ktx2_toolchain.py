@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import struct
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +20,12 @@ from pipeline.synthetic_village.ktx2_toolchain import (
     KTX_DARWIN_ARM64_URL,
     KTX_LEVEL_DIMENSIONS,
     KTX_TOOL_VERSION,
+    KtxToolBinary,
     KtxToolchainError,
+    KtxToolFile,
+    KtxToolReceipt,
     audit_ktx2_bytes,
+    compile_verified_ktx2_texture,
     extract_command,
     measure_decoded_quality,
     toktx_command,
@@ -65,7 +71,7 @@ def _fake_ktx2(
         0,
         1,
         level_count,
-        2,
+        1 if colour_model == 163 else 2,
         dfd_offset,
         dfd_length,
         0,
@@ -85,6 +91,114 @@ def _png_bytes(pixels: np.ndarray) -> bytes:
         compress_level=1,
     )
     return output.getvalue()
+
+
+def _fake_receipt() -> KtxToolReceipt:
+    return KtxToolReceipt(
+        package_file=KtxToolFile(
+            relative_path=f"downloads/{KTX_DARWIN_ARM64_ASSET}",
+            sha256=KTX_DARWIN_ARM64_SHA256,
+            bytes=100,
+        ),
+        toktx=KtxToolBinary(
+            relative_path="runtime/bin/toktx",
+            sha256="1" * 64,
+            bytes=100,
+            version_output="toktx v4.4.2",
+            codesign_valid=True,
+        ),
+        ktx=KtxToolBinary(
+            relative_path="runtime/bin/ktx",
+            sha256="2" * 64,
+            bytes=100,
+            version_output="ktx version: v4.4.2",
+            codesign_valid=True,
+        ),
+        library=KtxToolFile(
+            relative_path="runtime/lib/libktx.4.4.2.dylib",
+            sha256="3" * 64,
+            bytes=100,
+        ),
+        license=KtxToolFile(
+            relative_path="runtime/licenses/License.rtf",
+            sha256="4" * 64,
+            bytes=100,
+        ),
+    )
+
+
+class _FakeCompilerRunner:
+    def __init__(
+        self,
+        reference: bytes,
+        *,
+        drift: bool = False,
+        validator_messages: bool = False,
+        fail_etc1s_quality: bool = False,
+    ) -> None:
+        self.reference = reference
+        self.drift = drift
+        self.validator_messages = validator_messages
+        self.fail_etc1s_quality = fail_etc1s_quality
+        self.codecs: dict[Path, str] = {}
+
+    def __call__(
+        self,
+        command: tuple[str, ...],
+        *,
+        environment: dict[str, str],
+        label: str,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        del environment, label
+        assert timeout >= 120
+        if "--t2" in command:
+            assert timeout > 120
+            codec = command[command.index("--encode") + 1]
+            transfer = command[command.index("--assign_oetf") + 1]
+            output = Path(command[-2])
+            payload = _fake_ktx2(
+                transfer=2 if transfer == "srgb" else 1,
+                colour_model=166 if codec == "uastc" else 163,
+            )
+            if self.drift and output.parent.name == "repeat-2":
+                payload += b"repeat drift"
+            output.write_bytes(payload)
+            self.codecs[output] = codec
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if len(command) > 1 and command[1] == "validate":
+            messages = [{"id": "warning"}] if self.validator_messages else []
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"valid": True, "messages": messages}),
+                "",
+            )
+        if len(command) > 1 and command[1] == "extract":
+            source = Path(command[-2])
+            output = Path(command[-1])
+            decoded = self.reference
+            if self.fail_etc1s_quality and self.codecs[source] == "etc1s":
+                with Image.open(io.BytesIO(self.reference)) as image:
+                    pixels = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
+                pixels[..., 1] = np.clip(
+                    pixels[..., 1].astype(np.int16) + 13,
+                    0,
+                    255,
+                ).astype(np.uint8)
+                decoded = _png_bytes(pixels)
+            output.write_bytes(decoded)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(f"unexpected fake command: {command}")
+
+
+@pytest.fixture(scope="module")
+def compiler_reference_png() -> bytes:
+    pixels = np.empty((4096, 4096, 3), dtype=np.uint8)
+    pixels[..., 0] = 255
+    pixels[..., 1] = 190
+    pixels[..., 2] = 0
+    return _png_bytes(pixels)
 
 
 def test_exact_khronos_darwin_arm64_pin() -> None:
@@ -190,6 +304,84 @@ def test_official_validation_and_decode_commands_are_exact() -> None:
         "texture.ktx2",
         "decoded.png",
     )
+
+
+def test_verified_texture_compiles_twice_then_publishes_content_addressed(
+    tmp_path: Path,
+    compiler_reference_png: bytes,
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(compiler_reference_png)
+    output_root = tmp_path / "published"
+    descriptor = compile_verified_ktx2_texture(
+        source,
+        role="base_color",
+        tool_root=tmp_path / "tools",
+        receipt=_fake_receipt(),
+        output_root=output_root,
+        runner=_FakeCompilerRunner(compiler_reference_png),
+    )
+
+    assert descriptor.role == "base_color"
+    assert descriptor.codec == "uastc"
+    assert descriptor.transfer == "srgb"
+    assert descriptor.repeat_build_byte_equal is True
+    assert descriptor.official_validation is True
+    assert descriptor.quality.base_colour_ssim == pytest.approx(1.0)
+    assert descriptor.object_path == f"objects/{descriptor.sha256}.ktx2"
+    assert (output_root / descriptor.object_path).read_bytes() == (
+        _fake_ktx2()
+    )
+
+
+def test_verified_texture_rejects_repeat_drift_and_validator_messages(
+    tmp_path: Path,
+    compiler_reference_png: bytes,
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(compiler_reference_png)
+    for runner, message in (
+        (_FakeCompilerRunner(compiler_reference_png, drift=True), "repeat"),
+        (
+            _FakeCompilerRunner(
+                compiler_reference_png,
+                validator_messages=True,
+            ),
+            "validator",
+        ),
+    ):
+        with pytest.raises(KtxToolchainError, match=message):
+            compile_verified_ktx2_texture(
+                source,
+                role="base_color",
+                tool_root=tmp_path / "tools",
+                receipt=_fake_receipt(),
+                output_root=tmp_path / f"published-{message}",
+                runner=runner,
+            )
+
+
+def test_orm_quality_failure_rebuilds_both_repeats_as_uastc(
+    tmp_path: Path,
+    compiler_reference_png: bytes,
+) -> None:
+    source = tmp_path / "orm.png"
+    source.write_bytes(compiler_reference_png)
+    descriptor = compile_verified_ktx2_texture(
+        source,
+        role="orm",
+        tool_root=tmp_path / "tools",
+        receipt=_fake_receipt(),
+        output_root=tmp_path / "published",
+        runner=_FakeCompilerRunner(
+            compiler_reference_png,
+            fail_etc1s_quality=True,
+        ),
+    )
+
+    assert descriptor.codec == "uastc"
+    assert descriptor.orm_etc1s_fallback is True
+    assert descriptor.quality.orm_max_channel_error == 0.0
 
 
 def test_decoded_quality_gates_are_role_exact() -> None:
