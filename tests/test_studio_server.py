@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+import pipeline.synthetic_village.material_bundle_v2 as material_v2_module
+import pipeline.synthetic_village.mesh_asset_bundle_v3 as mesh_v3_module
 from pipeline.studio_server import (
     PathAccessError,
     build_project_snapshot,
@@ -36,6 +38,13 @@ from pipeline.synthetic_village.material_bundle import (
     MATERIAL_PARAMETERS,
     DerivedMaterialBundle,
     canonical_material_bundle_bytes,
+    load_material_bundle,
+)
+from pipeline.synthetic_village.material_bundle_v2 import (
+    H2_PROFILE_ID,
+    H3_PROFILE_ID,
+    compose_material_bundle_v2,
+    publish_material_bundle_v2,
 )
 from pipeline.synthetic_village.mesh_asset_build import (
     ASSET_RECIPE_CONTRACTS,
@@ -49,12 +58,16 @@ from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     TextureObjectV2,
     prepare_mesh_asset_bundle_v2,
 )
+from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
+    publish_mesh_asset_bundle_v3,
+)
 from tests.test_glb_shared_texture_audit import (
     _fixture as _write_shared_texture_glb_fixture,
 )
 from tests.test_glb_shared_texture_audit import (
     _rewrite_with_original_binary,
 )
+from tests.test_material_bundle_v2 import _write_fake_ktx_pack
 from tests.test_mesh_asset_bundle import _glb_payload
 from tests.test_mesh_chunk import _bundle
 
@@ -594,6 +607,85 @@ def _write_mesh_world_bundle_v2(
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return final_directory, prepared.manifest
+
+
+def _write_mesh_world_bundle_v3(
+    root: Path,
+    monkeypatch,
+):
+    source_directory, source_bundle = _write_mesh_world_bundle_v2(root)
+    h2_material_directory = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/material-bundles"
+        / source_bundle.material_bundle_id
+    )
+    h2_material = load_material_bundle(h2_material_directory)
+    ktx_root = root / ".pytest-h3-ktx"
+    ktx_pack = _write_fake_ktx_pack(ktx_root)
+    monkeypatch.setattr(
+        material_v2_module,
+        "ACCEPTED_H2_MATERIAL_BUNDLE_ID",
+        h2_material.bundle_id,
+    )
+    material_v2 = compose_material_bundle_v2(
+        h2_material,
+        ktx_pack,
+    )
+    material_result = publish_material_bundle_v2(
+        h2_bundle_root=h2_material_directory,
+        ktx2_root=ktx_root,
+        bundle=material_v2,
+        publication_root=root / ".nantai-studio/h3/material-bundles",
+        work_root=root / ".nantai-studio/h3/work/material",
+    )
+    monkeypatch.setattr(
+        mesh_v3_module,
+        "ACCEPTED_H2_MESH_BUNDLE_ID",
+        source_bundle.bundle_id,
+    )
+    mesh_result = publish_mesh_asset_bundle_v3(
+        source_v2_bundle_root=source_directory,
+        material_bundle_v2=material_v2,
+        ktx2_root=ktx_root,
+        publication_root=root / ".nantai-studio/h3/mesh-bundles",
+        work_root=root / ".nantai-studio/h3/work/mesh",
+    )
+    mesh_v3 = mesh_v3_module.load_mesh_asset_bundle_v3(
+        mesh_result.final_directory,
+    )
+    manifest_path = root / "web/data/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["mesh_grid"] = {
+        "runtime_schema": (
+            "nantai.synthetic-village.mesh-chunk-runtime.v3"
+        ),
+        "on_demand": True,
+        "url_template": "/api/world/mesh-chunk/{x}/{y}.json",
+        "asset_url_template": (
+            "/api/world/mesh-assets/{bundle_id}/{profile_id}/"
+            "{asset_id}/lod{lod}.glb"
+        ),
+        "texture_url_template": (
+            "/api/world/mesh-textures/{bundle_id}/{profile_id}/"
+            "{sha256}.{extension}"
+        ),
+        "world_seed": 42,
+        "layout_engine": "mock",
+        "terrain_algorithm_id": TERRAIN_ALGORITHM_ID,
+        "source_mesh_asset_bundle_id": source_bundle.bundle_id,
+        "mesh_asset_bundle_id": mesh_v3.bundle_id,
+        "fallback_material_bundle_id": h2_material.bundle_id,
+        "material_bundle_id": material_v2.bundle_id,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return (
+        source_directory,
+        source_bundle,
+        material_result.final_directory,
+        material_v2,
+        mesh_result.final_directory,
+        mesh_v3,
+    )
 
 
 class TestProjectSnapshot:
@@ -1562,6 +1654,274 @@ class TestHttpContract:
         assert status == 404
         assert json.loads(payload)["error"]["code"] == (
             "mesh_texture_not_found"
+        )
+
+    def test_mesh_v3_runtime_and_profile_routes_are_verified(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        (
+            _source_directory,
+            _source_bundle,
+            material_directory,
+            _material_v2,
+            mesh_directory,
+            mesh_v3,
+        ) = _write_mesh_world_bundle_v3(tmp_path, monkeypatch)
+
+        with _running_server(tmp_path) as server:
+            chunk_status, chunk_headers, chunk_payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/-2/3.json?lod=2",
+            )
+            runtime = json.loads(chunk_payload)
+            h3 = runtime["profiles"][H3_PROFILE_ID]
+            h2 = runtime["profiles"][H2_PROFILE_ID]
+            h3_asset = h3["asset_urls"][0]
+            h2_asset = h2["asset_urls"][0]
+            asset_results = []
+            for descriptor in (h3_asset, h2_asset):
+                get_result = _request(
+                    server,
+                    "GET",
+                    descriptor["url"],
+                )
+                head_result = _request(
+                    server,
+                    "HEAD",
+                    descriptor["url"],
+                )
+                cached_result = _request(
+                    server,
+                    "GET",
+                    descriptor["url"],
+                    headers={
+                        "If-None-Match": get_result[1]["etag"],
+                    },
+                )
+                asset_results.append(
+                    (get_result, head_result, cached_result),
+                )
+            mesh_dependency = h2_asset["texture_dependencies"][0]
+            mesh_dependency_result = _request(
+                server,
+                "GET",
+                mesh_dependency["url"],
+            )
+            ktx = next(
+                row
+                for row in h3["textures"]
+                if row["media_type"] == "image/ktx2"
+            )
+            png = next(
+                row
+                for row in h2["textures"]
+                if row["media_type"] == "image/png"
+            )
+            texture_results = {}
+            for descriptor in (ktx, png):
+                get_result = _request(
+                    server,
+                    "GET",
+                    descriptor["url"],
+                )
+                head_result = _request(
+                    server,
+                    "HEAD",
+                    descriptor["url"],
+                )
+                cached_result = _request(
+                    server,
+                    "GET",
+                    descriptor["url"],
+                    headers={
+                        "If-None-Match": get_result[1]["etag"],
+                    },
+                )
+                texture_results[descriptor["media_type"]] = (
+                    descriptor,
+                    get_result,
+                    head_result,
+                    cached_result,
+                )
+            invalid_statuses = [
+                _request(server, "GET", path)[0]
+                for path in (
+                    ktx["url"] + "?download=1",
+                    ktx["url"] + "/",
+                    ktx["url"].replace(H3_PROFILE_ID, "unknown-profile"),
+                    ktx["url"].replace(mesh_v3.bundle_id, "f" * 64),
+                    ktx["url"].replace(".ktx2", ".png"),
+                    ktx["url"].replace(ktx["sha256"], ktx["sha256"].upper()),
+                    h3_asset["url"].replace(H3_PROFILE_ID, "unknown-profile"),
+                )
+            ]
+
+        assert chunk_status == 200
+        assert chunk_headers["content-type"] == (
+            "application/json; charset=utf-8"
+        )
+        assert runtime["schema_version"] == (
+            "nantai.synthetic-village.mesh-chunk-runtime.v3"
+        )
+        assert runtime["chunk"]["chunk_id"] == {"x": -2, "y": 3}
+        assert runtime["chunk"]["world_offset"] == [-400.0, 600.0, 0.0]
+        assert runtime["mesh_asset_bundle_id"] == mesh_v3.bundle_id
+        assert set(runtime["profiles"]) == {
+            H3_PROFILE_ID,
+            H2_PROFILE_ID,
+        }
+        assert (
+            h3_asset["geometry_fingerprint"]
+            == h2_asset["geometry_fingerprint"]
+        )
+        for descriptor, (
+            (status, headers, payload),
+            (head_status, head_headers, head_payload),
+            (cached_status, cached_headers, cached_payload),
+        ) in zip(
+            (h3_asset, h2_asset),
+            asset_results,
+            strict=True,
+        ):
+            assert status == head_status == 200
+            assert cached_status == 304
+            assert headers["content-type"] == "model/gltf-binary"
+            assert headers["content-length"] == str(
+                descriptor["glb_bytes"],
+            )
+            assert headers["etag"] == (
+                f"\"sha256:{descriptor['glb_sha256']}\""
+            )
+            assert head_headers["etag"] == cached_headers["etag"]
+            assert len(payload) == descriptor["glb_bytes"]
+            assert hashlib.sha256(payload).hexdigest() == (
+                descriptor["glb_sha256"]
+            )
+            assert head_payload == cached_payload == b""
+        (
+            mesh_dependency_status,
+            mesh_dependency_headers,
+            mesh_dependency_payload,
+        ) = mesh_dependency_result
+        assert mesh_dependency_status == 200
+        assert mesh_dependency_headers["content-type"] == (
+            mesh_dependency["media_type"]
+        )
+        assert hashlib.sha256(mesh_dependency_payload).hexdigest() == (
+            mesh_dependency["sha256"]
+        )
+        for media_type, (
+            descriptor,
+            (status, headers, payload),
+            (head_status, head_headers, head_payload),
+            (cached_status, cached_headers, cached_payload),
+        ) in texture_results.items():
+            assert status == head_status == 200
+            assert cached_status == 304
+            assert headers["content-type"] == media_type
+            assert headers["content-length"] == str(
+                descriptor["bytes"],
+            )
+            assert headers["etag"] == (
+                f"\"sha256:{descriptor['sha256']}\""
+            )
+            assert head_headers["etag"] == cached_headers["etag"]
+            assert hashlib.sha256(payload).hexdigest() == (
+                descriptor["sha256"]
+            )
+            assert head_payload == cached_payload == b""
+        assert all(status == 404 for status in invalid_statuses)
+        assert not (tmp_path / "web/data/chunk_-2_3.json").exists()
+
+        mesh_extension = (
+            "ktx2"
+            if mesh_dependency["media_type"] == "image/ktx2"
+            else "png"
+        )
+        mesh_target = (
+            mesh_directory
+            / "textures"
+            / f"{mesh_dependency['sha256']}.{mesh_extension}"
+        )
+        mesh_original = mesh_target.read_bytes()
+        mesh_target.write_bytes(mesh_original + b"tampered")
+        with _running_server(tmp_path) as server:
+            mesh_tampered_status, _headers, mesh_tampered_payload = (
+                _request(
+                    server,
+                    "GET",
+                    mesh_dependency["url"],
+                )
+            )
+        assert mesh_tampered_status == 500
+        assert json.loads(mesh_tampered_payload)["error"]["code"] == (
+            "mesh_asset_bundle_v3_invalid"
+        )
+        mesh_target.write_bytes(mesh_original)
+
+        target = material_directory / ktx["url"].rsplit("/", 1)[-1]
+        assert not target.exists()
+        target = material_directory / f"objects/{ktx['sha256']}.ktx2"
+        target.write_bytes(target.read_bytes() + b"tampered")
+        with _running_server(tmp_path) as server:
+            tampered_status, _headers, tampered_payload = _request(
+                server,
+                "GET",
+                ktx["url"],
+            )
+        assert tampered_status == 500
+        assert json.loads(tampered_payload)["error"]["code"] == (
+            "material_bundle_v2_invalid"
+        )
+
+    def test_mesh_v3_manifest_requires_exact_counterparts_and_routes(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _write_mesh_world_bundle_v3(tmp_path, monkeypatch)
+        manifest_path = tmp_path / "web/data/manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        wrong_template = json.loads(json.dumps(manifest))
+        wrong_template["mesh_grid"]["asset_url_template"] = (
+            "/api/world/mesh-assets/{bundle_id}/{asset_id}/lod{lod}.glb"
+        )
+        manifest_path.write_text(
+            json.dumps(wrong_template),
+            encoding="utf-8",
+        )
+        with _running_server(tmp_path) as server:
+            wrong_status, _headers, wrong_payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/0/0.json?lod=2",
+            )
+
+        missing_counterpart = json.loads(json.dumps(manifest))
+        del missing_counterpart["mesh_grid"]["material_bundle_id"]
+        manifest_path.write_text(
+            json.dumps(missing_counterpart),
+            encoding="utf-8",
+        )
+        with _running_server(tmp_path) as server:
+            missing_status, _headers, missing_payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/0/0.json?lod=2",
+            )
+
+        assert wrong_status == missing_status == 409
+        assert json.loads(wrong_payload)["error"]["code"] == (
+            "mesh_on_demand_unavailable"
+        )
+        assert json.loads(missing_payload)["error"]["code"] == (
+            "mesh_on_demand_unavailable"
         )
 
     def test_mesh_routes_fail_closed_without_exact_manifest_opt_in(

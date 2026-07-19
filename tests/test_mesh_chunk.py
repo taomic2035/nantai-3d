@@ -345,7 +345,11 @@ def _bundle_v2() -> MeshAssetBundleV2:
     )
 
 
-def _h2_material_evidence(mesh_bundle: MeshAssetBundleV2) -> SimpleNamespace:
+def _h2_material_evidence(
+    mesh_bundle: MeshAssetBundleV2,
+    *,
+    align_mesh_textures: bool = True,
+) -> SimpleNamespace:
     mesh_bindings = {
         (binding.material_slot_id, binding.role): binding
         for record in mesh_bundle.records
@@ -363,7 +367,11 @@ def _h2_material_evidence(mesh_bundle: MeshAssetBundleV2) -> SimpleNamespace:
             ("normal", "non-color"),
             ("orm", "non-color"),
         ):
-            binding = mesh_bindings.get((slot_id, role))
+            binding = (
+                mesh_bindings.get((slot_id, role))
+                if align_mesh_textures
+                else None
+            )
             if binding is None:
                 digest = hashlib.sha256(
                     f"runtime-v3:{slot_id}:{role}".encode(),
@@ -408,7 +416,13 @@ def _h2_material_evidence(mesh_bundle: MeshAssetBundleV2) -> SimpleNamespace:
     )
 
 
-def _runtime_v3_evidence(tmp_path, monkeypatch, *, lod: int = 2):
+def _runtime_v3_evidence(
+    tmp_path,
+    monkeypatch,
+    *,
+    lod: int = 2,
+    align_mesh_textures: bool = True,
+):
     prepared, _objects = _prepare_real_v2_fixture(tmp_path / "mesh-v2")
     h2_mesh = prepared.manifest
     monkeypatch.setattr(
@@ -417,7 +431,10 @@ def _runtime_v3_evidence(tmp_path, monkeypatch, *, lod: int = 2):
         h2_mesh.material_bundle_id,
     )
     material_v2 = compose_material_bundle_v2(
-        _h2_material_evidence(h2_mesh),
+        _h2_material_evidence(
+            h2_mesh,
+            align_mesh_textures=align_mesh_textures,
+        ),
         _fake_h3_pack(),
     )
     monkeypatch.setattr(
@@ -1028,6 +1045,43 @@ def test_runtime_v3_model_rejects_route_profile_and_geometry_drift(
         MeshChunkRuntimeManifestV3.model_validate_json(
             _canonical(payload),
         )
+
+
+def test_runtime_v3_keeps_mesh_specific_textures_separate_from_surfaces(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    chunk, mesh_v3, material_v2 = _runtime_v3_evidence(
+        tmp_path,
+        monkeypatch,
+        align_mesh_textures=False,
+    )
+
+    runtime = project_mesh_chunk_runtime_v3(
+        chunk,
+        bundle=mesh_v3,
+        material_bundle=material_v2,
+    )
+
+    profile = runtime.profiles[H2_PROFILE_ID]
+    dependency = profile.asset_urls[0].texture_dependencies[0]
+    surface = next(
+        row
+        for row in profile.textures
+        if (
+            row.material_slot_id,
+            row.role,
+        )
+        == (
+            dependency.material_slot_id,
+            dependency.role,
+        )
+    )
+    variant = mesh_v3.records[0].lod["2"].variants[H2_PROFILE_ID]
+    assert dependency.sha256 in {
+        row.sha256 for row in variant.texture_bindings
+    }
+    assert dependency.sha256 != surface.sha256
 
 
 def test_mesh_v3_cannot_replace_the_source_v2_canonical_chunk(

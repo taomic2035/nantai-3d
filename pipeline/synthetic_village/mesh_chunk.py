@@ -50,6 +50,8 @@ from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
     MeshAssetBundleV3,
     MeshAssetRecordV3,
     MeshTemplateLod2V3,
+    MeshTextureBindingV3,
+    MeshTextureObjectV3,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -423,6 +425,17 @@ class MeshAssetRuntimeUrlV3(FrozenModel):
         if (
             dependency_keys != tuple(sorted(dependency_keys))
             or len(set(dependency_keys)) != len(dependency_keys)
+            or any(
+                row.url.split("/")[5] != self.profile_id
+                for row in self.texture_dependencies
+            )
+            or (
+                self.profile_id == H2_PROFILE_ID
+                and any(
+                    row.media_type != "image/png"
+                    for row in self.texture_dependencies
+                )
+            )
         ):
             raise ValueError(
                 "mesh v3 asset texture dependencies must be sorted and unique",
@@ -484,18 +497,6 @@ class MeshRuntimeProfileV3(FrozenModel):
             raise ValueError(
                 "mesh runtime v3 profile asset closure is invalid",
             )
-        textures = {
-            (row.material_slot_id, row.role): row
-            for row in self.textures
-        }
-        for asset in self.asset_urls:
-            for dependency in asset.texture_dependencies:
-                if textures.get(
-                    (dependency.material_slot_id, dependency.role),
-                ) != dependency:
-                    raise ValueError(
-                        "mesh runtime v3 dependency is outside its profile closure",
-                    )
         return self
 
 
@@ -634,6 +635,28 @@ class MeshChunkRuntimeManifestV2(FrozenModel):
         return self
 
 
+def _predicted_profile_ktx2_bytes(
+    profile: MeshRuntimeProfileV3,
+) -> int:
+    textures = {
+        (
+            row.sha256,
+            row.material_slot_id,
+            row.role,
+        ): row.bytes
+        for row in (
+            *profile.textures,
+            *(
+                dependency
+                for asset in profile.asset_urls
+                for dependency in asset.texture_dependencies
+            ),
+        )
+        if row.media_type == "image/ktx2"
+    }
+    return sum(textures.values())
+
+
 class MeshChunkRuntimeManifestV3(FrozenModel):
     schema_version: Literal[
         "nantai.synthetic-village.mesh-chunk-runtime.v3"
@@ -706,6 +729,21 @@ class MeshChunkRuntimeManifestV3(FrozenModel):
                     raise ValueError(
                         "mesh runtime v3 asset route or LOD is invalid",
                     )
+                for dependency in asset.texture_dependencies:
+                    suffix = (
+                        ".ktx2"
+                        if dependency.media_type == "image/ktx2"
+                        else ".png"
+                    )
+                    if dependency.url != (
+                        f"/api/world/mesh-textures/"
+                        f"{self.mesh_asset_bundle_id}/"
+                        f"{profile.profile_id}/"
+                        f"{dependency.sha256}{suffix}"
+                    ):
+                        raise ValueError(
+                            "mesh runtime v3 asset dependency route is invalid",
+                        )
             for texture in profile.textures:
                 suffix = (
                     ".ktx2"
@@ -737,10 +775,8 @@ class MeshChunkRuntimeManifestV3(FrozenModel):
             raise ValueError(
                 "mesh runtime v3 profile geometry fingerprints disagree",
             )
-        predicted = sum(
-            row.bytes
-            for row in self.profiles[H3_PROFILE_ID].textures
-            if row.media_type == "image/ktx2"
+        predicted = _predicted_profile_ktx2_bytes(
+            self.profiles[H3_PROFILE_ID],
         )
         if predicted != self.predicted_compressed_texture_bytes:
             raise ValueError(
@@ -1405,6 +1441,34 @@ def _runtime_texture_v3(
     )
 
 
+def _runtime_mesh_texture_v3(
+    binding: MeshTextureBindingV3,
+    texture: MeshTextureObjectV3,
+    *,
+    mesh_bundle_id: str,
+    profile_id: str,
+) -> MeshTextureRuntimeUrlV3:
+    suffix = (
+        ".ktx2"
+        if binding.media_type == "image/ktx2"
+        else ".png"
+    )
+    return MeshTextureRuntimeUrlV3(
+        url=(
+            f"/api/world/mesh-textures/{mesh_bundle_id}/"
+            f"{profile_id}/{binding.sha256}{suffix}"
+        ),
+        sha256=binding.sha256,
+        bytes=texture.bytes,
+        width=texture.width,
+        height=texture.height,
+        media_type=binding.media_type,
+        role=binding.role,
+        transfer=binding.transfer,
+        material_slot_id=binding.material_slot_id,
+    )
+
+
 def _runtime_profile_v3(
     chunk: MeshChunkManifest,
     *,
@@ -1424,10 +1488,6 @@ def _runtime_profile_v3(
         )
         for descriptor in material_profile.textures
     )
-    runtime_textures = {
-        (row.material_slot_id, row.role): row
-        for row in textures
-    }
     texture_objects = {
         (row.sha256, row.media_type): row
         for row in bundle.texture_objects
@@ -1458,50 +1518,58 @@ def _runtime_profile_v3(
             dependencies_list = []
             for slot_id in descriptor.material_slot_ids:
                 for role in ("base_color", "normal", "orm"):
-                    runtime_texture = runtime_textures.get(
-                        (slot_id, role),
-                    )
-                    if runtime_texture is None:
-                        raise MeshChunkError(
-                            "mesh runtime v3 material profile is incomplete",
+                    candidates = tuple(
+                        row
+                        for row in variant.texture_bindings
+                        if (
+                            row.material_slot_id == slot_id
+                            and row.role == role
                         )
-                    binding = next(
-                        (
-                            row
-                            for row in variant.texture_bindings
-                            if (
-                                row.material_slot_id == slot_id
-                                and row.role == role
-                                and row.sha256
-                                == runtime_texture.sha256
-                                and row.media_type
-                                == runtime_texture.media_type
-                                and row.transfer
-                                == runtime_texture.transfer
-                            )
-                        ),
-                        None,
+                    )
+                    png = tuple(
+                        row
+                        for row in candidates
+                        if row.media_type == "image/png"
+                    )
+                    ktx2 = tuple(
+                        row
+                        for row in candidates
+                        if row.media_type == "image/ktx2"
+                    )
+                    if (
+                        len(png) != 1
+                        or len(ktx2) > 1
+                        or (
+                            profile_id == H2_PROFILE_ID
+                            and ktx2
+                        )
+                    ):
+                        raise MeshChunkError(
+                            "mesh runtime v3 variant texture closure is invalid",
+                        )
+                    binding = (
+                        ktx2[0]
+                        if profile_id == H3_PROFILE_ID and ktx2
+                        else png[0]
                     )
                     texture_object = texture_objects.get(
                         (
-                            runtime_texture.sha256,
-                            runtime_texture.media_type,
+                            binding.sha256,
+                            binding.media_type,
                         ),
                     )
-                    if (
-                        binding is None
-                        or texture_object is None
-                        or texture_object.bytes
-                        != runtime_texture.bytes
-                        or texture_object.width
-                        != runtime_texture.width
-                        or texture_object.height
-                        != runtime_texture.height
-                    ):
+                    if texture_object is None:
                         raise MeshChunkError(
-                            "mesh runtime v3 asset and material texture evidence disagrees",
+                            "mesh runtime v3 asset texture evidence is unavailable",
                         )
-                    dependencies_list.append(runtime_texture)
+                    dependencies_list.append(
+                        _runtime_mesh_texture_v3(
+                            binding,
+                            texture_object,
+                            mesh_bundle_id=bundle.bundle_id,
+                            profile_id=profile_id,
+                        ),
+                    )
             dependencies = tuple(
                 sorted(
                     dependencies_list,
@@ -1604,10 +1672,8 @@ def project_mesh_chunk_runtime_v3(
         )
         for profile_id in (H2_PROFILE_ID, H3_PROFILE_ID)
     }
-    predicted = sum(
-        row.bytes
-        for row in profiles[H3_PROFILE_ID].textures
-        if row.media_type == "image/ktx2"
+    predicted = _predicted_profile_ktx2_bytes(
+        profiles[H3_PROFILE_ID],
     )
     if predicted > MAX_H3_COMPRESSED_TEXTURE_BYTES:
         raise MeshChunkError(

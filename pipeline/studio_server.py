@@ -65,6 +65,14 @@ from pipeline.synthetic_village.material_bundle import (
     load_material_bundle,
     read_verified_material_map,
 )
+from pipeline.synthetic_village.material_bundle_v2 import (
+    H2_PROFILE_ID,
+    H3_PROFILE_ID,
+    MaterialBundleV2,
+    MaterialBundleV2Error,
+    load_material_bundle_v2,
+    read_verified_material_texture_v2,
+)
 from pipeline.synthetic_village.mesh_asset_bundle import (
     MeshAssetBundleAny,
     MeshAssetBundleError,
@@ -75,12 +83,20 @@ from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     MeshAssetBundleV2,
     read_verified_mesh_texture,
 )
+from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
+    MeshAssetBundleV3,
+    MeshAssetBundleV3Error,
+    load_mesh_asset_bundle_v3,
+    read_verified_mesh_texture_v3,
+    read_verified_mesh_variant_glb,
+)
 from pipeline.synthetic_village.mesh_chunk import (
     MAX_SAFE_INTEGER,
     MeshChunkError,
     build_mesh_chunk_manifest,
     canonical_mesh_chunk_runtime_bytes,
     project_mesh_chunk_runtime,
+    project_mesh_chunk_runtime_v3,
 )
 
 SNAPSHOT_SCHEMA_VERSION = 2
@@ -320,6 +336,43 @@ def _resolve_material_bundle_directory(
         root
         / ".nantai-studio/synthetic-village/hybrid-v3/material-bundles"
     )
+    cursor = root
+    for component in boundary.relative_to(root).parts:
+        cursor = cursor / component
+        if cursor.is_symlink():
+            return None
+        try:
+            resolved = cursor.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if resolved != cursor or not resolved.is_dir():
+            return None
+    directory = boundary / bundle_id
+    if directory.is_symlink():
+        return None
+    try:
+        resolved_directory = directory.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if (
+        resolved_directory != directory
+        or not _is_below(boundary, resolved_directory)
+        or not resolved_directory.is_dir()
+    ):
+        return None
+    return resolved_directory
+
+
+def _resolve_h3_bundle_directory(
+    root: Path,
+    *,
+    kind: str,
+    bundle_id: str,
+) -> Path | None:
+    if kind not in {"material-bundles", "mesh-bundles"}:
+        return None
+    root = root.resolve()
+    boundary = root / ".nantai-studio/h3" / kind
     cursor = root
     for component in boundary.relative_to(root).parts:
         cursor = cursor / component
@@ -1497,6 +1550,66 @@ def _valid_on_demand_mesh_manifest(
     """Accept only the exact synthetic mesh recipe implemented by this runtime."""
 
     grid = manifest.get("mesh_grid")
+    if (
+        isinstance(grid, dict)
+        and grid.get("runtime_schema")
+        == "nantai.synthetic-village.mesh-chunk-runtime.v3"
+    ):
+        required_keys = {
+            "runtime_schema",
+            "on_demand",
+            "url_template",
+            "asset_url_template",
+            "texture_url_template",
+            "world_seed",
+            "layout_engine",
+            "terrain_algorithm_id",
+            "source_mesh_asset_bundle_id",
+            "mesh_asset_bundle_id",
+            "fallback_material_bundle_id",
+            "material_bundle_id",
+        }
+        if set(grid) != required_keys:
+            return None
+        if type(grid.get("on_demand")) is not bool:
+            return None
+        if (
+            grid.get("url_template")
+            != "/api/world/mesh-chunk/{x}/{y}.json"
+            or grid.get("asset_url_template")
+            != (
+                "/api/world/mesh-assets/{bundle_id}/{profile_id}/"
+                "{asset_id}/lod{lod}.glb"
+            )
+            or grid.get("texture_url_template")
+            != (
+                "/api/world/mesh-textures/{bundle_id}/{profile_id}/"
+                "{sha256}.{extension}"
+            )
+        ):
+            return None
+        world_seed = grid.get("world_seed")
+        if (
+            type(world_seed) is not int
+            or abs(world_seed) > MAX_SAFE_INTEGER
+            or grid.get("layout_engine") != "mock"
+            or grid.get("terrain_algorithm_id")
+            != TERRAIN_ALGORITHM_ID
+        ):
+            return None
+        for field in (
+            "source_mesh_asset_bundle_id",
+            "mesh_asset_bundle_id",
+            "fallback_material_bundle_id",
+            "material_bundle_id",
+        ):
+            value = grid.get(field)
+            if (
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            ):
+                return None
+        return manifest
     required_keys = {
         "on_demand",
         "url_template",
@@ -1612,6 +1725,97 @@ def _load_active_material_bundle(
     return directory, bundle
 
 
+def _load_active_mesh_v3_bundles(
+    root: Path,
+    manifest: dict[str, Any],
+) -> tuple[
+    Path,
+    MeshAssetBundleV2,
+    Path,
+    MeshAssetBundleV3,
+]:
+    grid = manifest["mesh_grid"]
+    source_directory = _resolve_mesh_asset_bundle_directory(
+        root,
+        grid["source_mesh_asset_bundle_id"],
+    )
+    mesh_directory = _resolve_h3_bundle_directory(
+        root,
+        kind="mesh-bundles",
+        bundle_id=grid["mesh_asset_bundle_id"],
+    )
+    if source_directory is None or mesh_directory is None:
+        raise MeshAssetBundleV3Error(
+            "declared mesh v3 bundle closure is unavailable",
+        )
+    source = load_mesh_asset_bundle(source_directory)
+    mesh = load_mesh_asset_bundle_v3(mesh_directory)
+    if type(source) is not MeshAssetBundleV2:
+        raise MeshAssetBundleV3Error(
+            "declared mesh v3 source is not v2",
+        )
+    if (
+        source.bundle_id != grid["source_mesh_asset_bundle_id"]
+        or mesh.bundle_id != grid["mesh_asset_bundle_id"]
+        or mesh.source_v2_bundle_id != source.bundle_id
+        or source.material_bundle_id
+        != grid["fallback_material_bundle_id"]
+        or mesh.fallback_material_bundle_id
+        != grid["fallback_material_bundle_id"]
+        or mesh.material_bundle_v2_id
+        != grid["material_bundle_id"]
+    ):
+        raise MeshAssetBundleV3Error(
+            "declared mesh v3 identities disagree",
+        )
+    expected_asset_ids = tuple(sorted({
+        asset_id
+        for group in DEFAULT_ASSETS.values()
+        for asset_id in group
+    }))
+    if (
+        source.asset_ids != expected_asset_ids
+        or tuple(record.asset_id for record in mesh.records)
+        != expected_asset_ids
+    ):
+        raise MeshAssetBundleV3Error(
+            "declared mesh v3 asset closure is incomplete",
+        )
+    return source_directory, source, mesh_directory, mesh
+
+
+def _load_active_material_bundle_v2(
+    root: Path,
+    manifest: dict[str, Any],
+    *,
+    mesh_bundle: MeshAssetBundleV3,
+) -> tuple[Path, MaterialBundleV2]:
+    grid = manifest["mesh_grid"]
+    directory = _resolve_h3_bundle_directory(
+        root,
+        kind="material-bundles",
+        bundle_id=grid["material_bundle_id"],
+    )
+    if directory is None:
+        raise MaterialBundleV2Error(
+            "declared material bundle v2 is unavailable",
+        )
+    bundle = load_material_bundle_v2(directory)
+    if (
+        bundle.bundle_id != grid["material_bundle_id"]
+        or bundle.fallback_bundle_id
+        != grid["fallback_material_bundle_id"]
+        or mesh_bundle.material_bundle_v2_id != bundle.bundle_id
+        or mesh_bundle.fallback_material_bundle_id
+        != bundle.fallback_bundle_id
+        or set(bundle.profiles) != {H3_PROFILE_ID, H2_PROFILE_ID}
+    ):
+        raise MaterialBundleV2Error(
+            "declared material bundle v2 identities disagree",
+        )
+    return directory, bundle
+
+
 def _is_world_bounds_validation_error(error: ValidationError) -> bool:
     """Identify the mock world's finite WGS84 envelope without hiding other bugs."""
 
@@ -1690,6 +1894,41 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self.send_header("ETag", etag)
         self._security_headers()
         self.end_headers()
+
+    def _send_immutable_verified(
+        self,
+        payload: bytes,
+        *,
+        sha256: str,
+        content_type: str,
+        head_only: bool,
+    ) -> None:
+        if hashlib.sha256(payload).hexdigest() != sha256:
+            raise ValueError("verified payload digest changed before response")
+        etag = f'"sha256:{sha256}"'
+        cache_control = "public, max-age=31536000, immutable"
+        request_etags = {
+            candidate.strip()
+            for candidate in self.headers.get(
+                "If-None-Match",
+                "",
+            ).split(",")
+            if candidate.strip()
+        }
+        if "*" in request_etags or etag in request_etags:
+            self._send_not_modified(
+                etag,
+                cache_control=cache_control,
+            )
+            return
+        self._send_bytes(
+            HTTPStatus.OK,
+            payload,
+            content_type=content_type,
+            cache_control=cache_control,
+            head_only=head_only,
+            extra_headers={"ETag": etag},
+        )
 
     def _error(self, status: int, code: str, message: str, *, head_only: bool = False) -> None:
         self._send_json(
@@ -1963,46 +2202,101 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
                 return
-            try:
-                _directory, bundle = _load_active_mesh_asset_bundle(
-                    self.project_root,
-                    mesh_manifest,
-                )
-            except MeshAssetBundleError:
-                self._error(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    "mesh_asset_bundle_invalid",
-                    "The declared mesh asset bundle is unavailable or invalid.",
-                    head_only=head_only,
-                )
-                return
-            try:
-                _material_directory, material_bundle = _load_active_material_bundle(
-                    self.project_root,
-                    mesh_manifest,
-                    mesh_bundle=bundle,
-                )
-            except MaterialBundleError:
-                self._error(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    "material_bundle_invalid",
-                    "The declared material bundle is unavailable or invalid.",
-                    head_only=head_only,
-                )
-                return
+            is_runtime_v3 = (
+                mesh_manifest["mesh_grid"].get("runtime_schema")
+                == "nantai.synthetic-village.mesh-chunk-runtime.v3"
+            )
+            if is_runtime_v3:
+                try:
+                    (
+                        _source_directory,
+                        source_bundle,
+                        _mesh_directory,
+                        mesh_v3_bundle,
+                    ) = _load_active_mesh_v3_bundles(
+                        self.project_root,
+                        mesh_manifest,
+                    )
+                except MeshAssetBundleError:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_asset_bundle_v3_invalid",
+                        "The declared mesh v3 bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                    return
+                try:
+                    (
+                        _material_directory,
+                        material_v2_bundle,
+                    ) = _load_active_material_bundle_v2(
+                        self.project_root,
+                        mesh_manifest,
+                        mesh_bundle=mesh_v3_bundle,
+                    )
+                except MaterialBundleError:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "material_bundle_v2_invalid",
+                        "The declared material v2 bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                    return
+            else:
+                try:
+                    _directory, bundle = _load_active_mesh_asset_bundle(
+                        self.project_root,
+                        mesh_manifest,
+                    )
+                except MeshAssetBundleError:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_asset_bundle_invalid",
+                        "The declared mesh asset bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                    return
+                try:
+                    (
+                        _material_directory,
+                        material_bundle,
+                    ) = _load_active_material_bundle(
+                        self.project_root,
+                        mesh_manifest,
+                        mesh_bundle=bundle,
+                    )
+                except MaterialBundleError:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "material_bundle_invalid",
+                        "The declared material bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                    return
             try:
                 chunk = build_mesh_chunk_manifest(
                     chunk_x,
                     chunk_y,
                     world_seed=mesh_manifest["mesh_grid"]["world_seed"],
-                    bundle=bundle,
+                    bundle=(
+                        source_bundle
+                        if is_runtime_v3
+                        else bundle
+                    ),
                     lod=int(query.removeprefix("lod=")),
                 )
-                runtime = project_mesh_chunk_runtime(
-                    chunk,
-                    bundle=bundle,
-                    material_bundle=material_bundle,
-                )
+                if is_runtime_v3:
+                    runtime = project_mesh_chunk_runtime_v3(
+                        chunk,
+                        bundle=mesh_v3_bundle,
+                        material_bundle=material_v2_bundle,
+                    )
+                else:
+                    runtime = project_mesh_chunk_runtime(
+                        chunk,
+                        bundle=bundle,
+                        material_bundle=material_bundle,
+                    )
                 payload = canonical_mesh_chunk_runtime_bytes(runtime)
             except ValidationError as exc:
                 if _is_world_bounds_validation_error(exc):
@@ -2047,6 +2341,167 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
                 extra_headers={"ETag": etag},
             )
+            return
+        if request_path.startswith("/api/world/mesh-textures/"):
+            match = re.fullmatch(
+                r"/api/world/mesh-textures/([0-9a-f]{64})/"
+                r"(h3-ai-ktx2-4k|h2-png-1k-fallback)/"
+                r"([0-9a-f]{64})\.(ktx2|png)",
+                request_path,
+            )
+            if match is None or urlsplit(self.path).query:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "mesh_profile_texture_not_found",
+                    "Mesh profile texture not found.",
+                    head_only=head_only,
+                )
+                return
+            (
+                route_bundle_id,
+                profile_id,
+                texture_sha256,
+                extension,
+            ) = match.groups()
+            mesh_manifest = _on_demand_mesh_manifest(
+                self.project_root,
+            )
+            if (
+                mesh_manifest is None
+                or mesh_manifest["mesh_grid"].get("runtime_schema")
+                != "nantai.synthetic-village.mesh-chunk-runtime.v3"
+            ):
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "mesh_v3_on_demand_unavailable",
+                    "The world manifest does not opt in to mesh runtime v3.",
+                    head_only=head_only,
+                )
+                return
+            if (
+                route_bundle_id
+                != mesh_manifest["mesh_grid"]["mesh_asset_bundle_id"]
+            ):
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "mesh_profile_texture_not_found",
+                    "Mesh profile texture not found.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                (
+                    _source_directory,
+                    _source_bundle,
+                    mesh_directory,
+                    mesh_v3_bundle,
+                ) = _load_active_mesh_v3_bundles(
+                    self.project_root,
+                    mesh_manifest,
+                )
+            except MeshAssetBundleError:
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "mesh_asset_bundle_v3_invalid",
+                    "The declared mesh v3 bundle is unavailable or invalid.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                (
+                    material_directory,
+                    material_v2_bundle,
+                ) = _load_active_material_bundle_v2(
+                    self.project_root,
+                    mesh_manifest,
+                    mesh_bundle=mesh_v3_bundle,
+                )
+                media_type = (
+                    "image/ktx2"
+                    if extension == "ktx2"
+                    else "image/png"
+                )
+                is_material_texture = any(
+                    descriptor.sha256 == texture_sha256
+                    and descriptor.media_type == media_type
+                    for descriptor in material_v2_bundle.profiles[
+                        profile_id
+                    ].textures
+                )
+                if is_material_texture:
+                    payload = read_verified_material_texture_v2(
+                        material_directory,
+                        bundle=material_v2_bundle,
+                        profile_id=profile_id,
+                        sha256=texture_sha256,
+                        media_type=media_type,
+                    )
+                else:
+                    is_mesh_texture = any(
+                        binding.sha256 == texture_sha256
+                        and binding.media_type == media_type
+                        for record in mesh_v3_bundle.records
+                        for binding in record.lod["2"].variants[
+                            profile_id
+                        ].texture_bindings
+                    )
+                    if not is_mesh_texture:
+                        self._error(
+                            HTTPStatus.NOT_FOUND,
+                            "mesh_profile_texture_not_found",
+                            "Mesh profile texture not found.",
+                            head_only=head_only,
+                        )
+                        return
+                    payload = read_verified_mesh_texture_v3(
+                        mesh_directory,
+                        bundle=mesh_v3_bundle,
+                        sha256=texture_sha256,
+                        media_type=media_type,
+                    )
+                self._send_immutable_verified(
+                    payload,
+                    sha256=texture_sha256,
+                    content_type=media_type,
+                    head_only=head_only,
+                )
+            except MaterialBundleV2Error as exc:
+                if "absent" in str(exc) or "profile" in str(exc):
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "mesh_profile_texture_not_found",
+                        "Mesh profile texture not found.",
+                        head_only=head_only,
+                    )
+                else:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "material_bundle_v2_invalid",
+                        "The declared material v2 bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+            except MeshAssetBundleV3Error as exc:
+                if "absent" in str(exc):
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "mesh_profile_texture_not_found",
+                        "Mesh profile texture not found.",
+                        head_only=head_only,
+                    )
+                else:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_asset_bundle_v3_invalid",
+                        "The declared mesh v3 bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+            except ValueError:
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "material_bundle_v2_invalid",
+                    "The declared material v2 bundle is unavailable or invalid.",
+                    head_only=head_only,
+                )
             return
         if request_path.startswith("/api/world/material-maps/"):
             match = re.fullmatch(
@@ -2129,6 +2584,157 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if request_path.startswith("/api/world/mesh-assets/"):
+            profile_match = re.fullmatch(
+                r"/api/world/mesh-assets/([0-9a-f]{64})/"
+                r"(h3-ai-ktx2-4k|h2-png-1k-fallback)/"
+                r"([a-z0-9]+(?:_[a-z0-9]+)*)/lod([012])\.glb",
+                request_path,
+            )
+            if profile_match is not None and not urlsplit(self.path).query:
+                (
+                    route_bundle_id,
+                    profile_id,
+                    asset_id,
+                    lod_text,
+                ) = profile_match.groups()
+                mesh_manifest = _on_demand_mesh_manifest(
+                    self.project_root,
+                )
+                if (
+                    mesh_manifest is None
+                    or mesh_manifest["mesh_grid"].get(
+                        "runtime_schema",
+                    )
+                    != "nantai.synthetic-village.mesh-chunk-runtime.v3"
+                ):
+                    self._error(
+                        HTTPStatus.CONFLICT,
+                        "mesh_v3_on_demand_unavailable",
+                        "The world manifest does not opt in to mesh runtime v3.",
+                        head_only=head_only,
+                    )
+                    return
+                if (
+                    route_bundle_id
+                    != mesh_manifest["mesh_grid"][
+                        "mesh_asset_bundle_id"
+                    ]
+                ):
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "mesh_profile_asset_not_found",
+                        "Mesh profile asset not found.",
+                        head_only=head_only,
+                    )
+                    return
+                try:
+                    (
+                        _source_directory,
+                        _source_bundle,
+                        mesh_directory,
+                        mesh_v3_bundle,
+                    ) = _load_active_mesh_v3_bundles(
+                        self.project_root,
+                        mesh_manifest,
+                    )
+                    (
+                        _material_directory,
+                        _material_v2_bundle,
+                    ) = _load_active_material_bundle_v2(
+                        self.project_root,
+                        mesh_manifest,
+                        mesh_bundle=mesh_v3_bundle,
+                    )
+                    lod = int(lod_text)
+                    if lod == 2:
+                        payload = read_verified_mesh_variant_glb(
+                            mesh_directory,
+                            bundle=mesh_v3_bundle,
+                            asset_id=asset_id,
+                            profile_id=profile_id,
+                        )
+                    else:
+                        payload = read_verified_mesh_template_glb(
+                            mesh_directory,
+                            bundle=mesh_v3_bundle,
+                            asset_id=asset_id,
+                            lod=lod,
+                        )
+                    record = next(
+                        (
+                            row
+                            for row in mesh_v3_bundle.records
+                            if row.asset_id == asset_id
+                        ),
+                        None,
+                    )
+                    if record is None:
+                        raise MeshAssetBundleV3Error(
+                            "mesh v3 asset is absent",
+                        )
+                    descriptor = record.lod[lod_text]
+                    expected_sha256 = (
+                        descriptor.variants[
+                            profile_id
+                        ].glb_sha256
+                        if lod == 2
+                        else descriptor.glb_sha256
+                    )
+                    self._send_immutable_verified(
+                        payload,
+                        sha256=expected_sha256,
+                        content_type="model/gltf-binary",
+                        head_only=head_only,
+                    )
+                except MeshAssetBundleError as exc:
+                    if (
+                        "absent" in str(exc)
+                        or "not present" in str(exc)
+                        or "LOD" in str(exc)
+                    ):
+                        self._error(
+                            HTTPStatus.NOT_FOUND,
+                            "mesh_profile_asset_not_found",
+                            "Mesh profile asset not found.",
+                            head_only=head_only,
+                        )
+                    else:
+                        self._error(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            "mesh_asset_bundle_v3_invalid",
+                            "The declared mesh v3 bundle is unavailable or invalid.",
+                            head_only=head_only,
+                        )
+                except MaterialBundleError:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "material_bundle_v2_invalid",
+                        "The declared material v2 bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                except ValueError:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_asset_bundle_v3_invalid",
+                        "The declared mesh v3 bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                return
+            if (
+                re.match(
+                    r"^/api/world/mesh-assets/[^/]+/"
+                    r"(?:h3-ai-ktx2-4k|h2-png-1k-fallback)(?:/|$)",
+                    request_path,
+                )
+                is not None
+            ):
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "mesh_profile_asset_not_found",
+                    "Mesh profile asset not found.",
+                    head_only=head_only,
+                )
+                return
             is_texture_route = (
                 re.match(
                     r"^/api/world/mesh-assets/[^/]*/textures(?:/|$)",
