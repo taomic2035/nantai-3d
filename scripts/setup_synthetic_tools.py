@@ -12,7 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="tool", required=True)
+    parser.add_argument(
+        "--install-ktx-4.4.2",
+        dest="install_ktx_4_4_2",
+        action="store_true",
+        help=(
+            "Verify the cached official signed Darwin arm64 package and "
+            "prepare a project-private KTX 4.4.2 runtime."
+        ),
+    )
+    commands = parser.add_subparsers(dest="tool")
     blender = commands.add_parser("blender", help="Manage the pinned Blender LTS runtime.")
     modes = blender.add_mutually_exclusive_group(required=True)
     modes.add_argument("--archive", type=Path, help="Install from a local locked archive.")
@@ -39,6 +48,35 @@ def _tool_lock_api():
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.install_ktx_4_4_2:
+        if args.tool is not None:
+            print(
+                "synthetic tool setup failed: choose KTX or Blender, not both",
+                file=sys.stderr,
+            )
+            return 2
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from pipeline.synthetic_village.ktx2_toolchain import (
+            KTX_DARWIN_ARM64_ASSET,
+            KtxToolchainError,
+            prepare_private_ktx_runtime,
+        )
+
+        output_root = ROOT / ".nantai-studio/tools/ktx-4.4.2"
+        package = output_root / "downloads" / KTX_DARWIN_ARM64_ASSET
+        try:
+            receipt = prepare_private_ktx_runtime(package, output_root)
+        except KtxToolchainError as exc:
+            print(f"synthetic tool setup failed: {exc}", file=sys.stderr)
+            return 2
+        payload = receipt.model_dump(mode="json")
+        payload["action"] = "project-private-installed-and-verified"
+        payload["receipt"] = str(output_root / "receipt.json")
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.tool is None:
+        _parser().error("choose --install-ktx-4.4.2 or the blender command")
     api = _tool_lock_api()
     try:
         lock = api.load_tool_lock(ROOT / "tools.lock.json")

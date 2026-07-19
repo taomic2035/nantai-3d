@@ -504,3 +504,10 @@ def test_cli_requires_exactly_one_install_mode():
     )
     with pytest.raises(SystemExit):
         parser.parse_args(["blender", "--download", "--verify-only"])
+
+
+def test_cli_accepts_exact_ktx_4_4_2_install_flag():
+    args = setup_synthetic_tools._parser().parse_args(
+        ["--install-ktx-4.4.2"],
+    )
+    assert args.install_ktx_4_4_2 is True
