@@ -17,6 +17,7 @@ import pipeline.synthetic_village.mesh_asset_bundle as mesh_asset_bundle
 from pipeline.synthetic_village.material_bundle import prepare_material_bundle
 from pipeline.synthetic_village.mesh_asset_bundle import (
     MESH_ASSET_BUNDLE_SCHEMA,
+    MeshAssetBundle,
     MeshAssetBundleError,
     MeshAssetTemplateSource,
     canonical_mesh_asset_bundle_bytes,
@@ -290,9 +291,12 @@ def write_mesh_bundle_fixture(
 
 def test_bundle_identity_and_exact_template_read(tmp_path: Path) -> None:
     bundle_root, expected_glb = write_mesh_bundle_fixture(tmp_path)
+    manifest_bytes = (bundle_root / "manifest.json").read_bytes()
 
     bundle = load_mesh_asset_bundle(bundle_root)
 
+    assert type(bundle) is MeshAssetBundle
+    assert canonical_mesh_asset_bundle_bytes(bundle) == manifest_bytes
     assert bundle.schema_version == MESH_ASSET_BUNDLE_SCHEMA
     assert bundle.coordinate_encoding == "three-east-up-negative-north"
     assert bundle.asset_ids == ("house_wood_01",)
@@ -307,6 +311,28 @@ def test_bundle_identity_and_exact_template_read(tmp_path: Path) -> None:
     assert hashlib.sha256(
         canonical_mesh_asset_bundle_bytes(bundle, exclude_bundle_id=True),
     ).hexdigest() == bundle.bundle_id
+
+
+def test_bundle_dispatch_rejects_unknown_schema(tmp_path: Path) -> None:
+    bundle_root, _glb = write_mesh_bundle_fixture(tmp_path)
+    manifest_path = bundle_root / "manifest.json"
+    payload = json.loads(manifest_path.read_bytes())
+    payload["schema_version"] = "nantai.synthetic-village.mesh-asset-bundle.v3"
+    manifest_path.write_bytes(_canonical(payload))
+
+    with pytest.raises(MeshAssetBundleError, match="unsupported"):
+        load_mesh_asset_bundle(bundle_root)
+
+
+def test_v1_bundle_rejects_v2_only_fields(tmp_path: Path) -> None:
+    bundle_root, _glb = write_mesh_bundle_fixture(tmp_path)
+    manifest_path = bundle_root / "manifest.json"
+    payload = json.loads(manifest_path.read_bytes())
+    payload["source_v1_bundle_id"] = "1" * 64
+    manifest_path.write_bytes(_canonical(payload))
+
+    with pytest.raises(MeshAssetBundleError, match="manifest"):
+        load_mesh_asset_bundle(bundle_root)
 
 
 def test_bundle_rejects_tampered_template_bytes(tmp_path: Path) -> None:

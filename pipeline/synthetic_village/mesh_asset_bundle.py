@@ -17,7 +17,7 @@ import uuid
 import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias, Union
 
 import numpy as np
 import trimesh
@@ -45,6 +45,9 @@ from pipeline.synthetic_village.material_bundle import (
     canonical_material_bundle_bytes,
     load_material_bundle,
 )
+
+if TYPE_CHECKING:
+    from pipeline.synthetic_village.mesh_asset_bundle_v2 import MeshAssetBundleV2
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -196,6 +199,12 @@ class MeshAssetBundle(FrozenModel):
         return self
 
 
+MeshAssetBundleAny: TypeAlias = Union[
+    MeshAssetBundle,
+    "MeshAssetBundleV2",
+]
+
+
 @dataclass(frozen=True)
 class MeshAssetTemplateSource:
     """Path-bearing builder output kept outside the canonical bundle manifest."""
@@ -264,6 +273,46 @@ def canonical_mesh_asset_bundle_bytes(
     if exclude_bundle_id:
         payload.pop("bundle_id")
     return _canonical_json_bytes(payload)
+
+
+def _reject_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise MeshAssetBundleError(
+                "mesh asset bundle manifest contains duplicate keys",
+            )
+        payload[key] = value
+    return payload
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise MeshAssetBundleError(
+        f"mesh asset bundle manifest contains non-finite JSON: {value}",
+    )
+
+
+def _manifest_schema(raw: bytes) -> str:
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except MeshAssetBundleError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise MeshAssetBundleError(
+            "mesh asset bundle manifest is invalid JSON",
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("schema_version")) is not str
+    ):
+        raise MeshAssetBundleError("mesh asset bundle schema is missing")
+    return payload["schema_version"]
 
 
 def _is_linklike(path: Path) -> bool:
@@ -600,8 +649,8 @@ def _mesh_asset_bundle_stat_signature(
     return tuple(rows)
 
 
-def load_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
-    """Load verified templates, reusing only an unchanged filesystem snapshot."""
+def _load_mesh_asset_bundle_v1(root: Path) -> MeshAssetBundle:
+    """Load verified v1 templates, reusing an unchanged filesystem snapshot."""
 
     bundle_root = _real_directory(Path(root))
     with _MESH_ASSET_BUNDLE_CACHE_LOCK:
@@ -625,10 +674,34 @@ def load_mesh_asset_bundle(root: Path) -> MeshAssetBundle:
         return bundle
 
 
+def load_mesh_asset_bundle(root: Path) -> MeshAssetBundleAny:
+    """Dispatch only explicitly supported bundle schemas."""
+
+    bundle_root = _real_directory(Path(root))
+    raw = _read_stable_file(
+        bundle_root / MESH_ASSET_BUNDLE_MANIFEST,
+        maximum_bytes=MAX_MESH_ASSET_BUNDLE_MANIFEST_BYTES,
+        label="mesh asset bundle manifest",
+    )
+    schema = _manifest_schema(raw)
+    if schema == MESH_ASSET_BUNDLE_SCHEMA:
+        return _load_mesh_asset_bundle_v1(bundle_root)
+    from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
+        MESH_ASSET_BUNDLE_V2_SCHEMA,
+        load_mesh_asset_bundle_v2,
+    )
+
+    if schema == MESH_ASSET_BUNDLE_V2_SCHEMA:
+        return load_mesh_asset_bundle_v2(bundle_root)
+    raise MeshAssetBundleError(
+        f"unsupported mesh asset bundle schema: {schema}",
+    )
+
+
 def read_verified_mesh_template_glb(
     root: Path,
     *,
-    bundle: MeshAssetBundle,
+    bundle: MeshAssetBundleAny,
     asset_id: str,
     lod: int,
 ) -> bytes:
