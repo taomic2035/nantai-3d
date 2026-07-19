@@ -249,8 +249,7 @@ def _reject_nonfinite(value: str) -> None:
     raise GlbMaterialAuditError(f"GLB JSON contains non-finite number: {value}")
 
 
-def _load_glb(path: Path) -> tuple[bytes, dict[str, object], bytes]:
-    raw = _read_stable_file(path, maximum_bytes=MAX_GLB_BYTES)
+def _load_glb_bytes(raw: bytes) -> tuple[bytes, dict[str, object], bytes]:
     if len(raw) < 28:
         raise GlbMaterialAuditError("GLB header is invalid")
     try:
@@ -293,6 +292,11 @@ def _load_glb(path: Path) -> tuple[bytes, dict[str, object], bytes]:
     ):
         raise GlbMaterialAuditError("GLB binary chunk length is invalid")
     return raw, document, raw[binary_start:binary_end]
+
+
+def _load_glb(path: Path) -> tuple[bytes, dict[str, object], bytes]:
+    raw = _read_stable_file(path, maximum_bytes=MAX_GLB_BYTES)
+    return _load_glb_bytes(raw)
 
 
 def _required_list(document: dict[str, object], key: str) -> list[object]:
@@ -1090,22 +1094,24 @@ def _validate_building_geometry(
     )
 
 
-def audit_textured_glb(
-    path: Path,
+def audit_textured_glb_bytes(
+    payload: bytes,
     expected_materials: tuple[ExpectedGlbMaterial, ...],
     expected_building_geometry: ExpectedBuildingGeometry | None = None,
     expected_surface_realism: ExpectedSurfaceRealism | None = None,
 ) -> GlbMaterialAudit:
-    """Audit actual GLB bytes without trusting filenames or build-report claims."""
+    """Audit exact in-memory GLB bytes while retaining the embedded-only policy."""
 
     try:
+        if type(payload) is not bytes:
+            raise GlbMaterialAuditError("GLB audit payload must be exact bytes")
         expected_materials = tuple(
             material
             if isinstance(material, ExpectedGlbMaterial)
             else ExpectedGlbMaterial.model_validate(material)
             for material in expected_materials
         )
-        raw, document, binary = _load_glb(Path(path))
+        raw, document, binary = _load_glb_bytes(payload)
         external_uri_count = sum(
             1
             for collection_name in ("buffers", "images")
@@ -1184,6 +1190,28 @@ def audit_textured_glb(
         if surface_realism is not None:
             audit_payload["surface_realism"] = surface_realism
         return GlbMaterialAudit.model_validate(audit_payload)
+    except GlbMaterialAuditError:
+        raise
+    except (OSError, TypeError, ValueError, ValidationError) as exc:
+        raise GlbMaterialAuditError(f"GLB material audit failed: {exc}") from exc
+
+
+def audit_textured_glb(
+    path: Path,
+    expected_materials: tuple[ExpectedGlbMaterial, ...],
+    expected_building_geometry: ExpectedBuildingGeometry | None = None,
+    expected_surface_realism: ExpectedSurfaceRealism | None = None,
+) -> GlbMaterialAudit:
+    """Audit a stable real GLB file without trusting its path or filename."""
+
+    try:
+        raw = _read_stable_file(Path(path), maximum_bytes=MAX_GLB_BYTES)
+        return audit_textured_glb_bytes(
+            raw,
+            expected_materials=expected_materials,
+            expected_building_geometry=expected_building_geometry,
+            expected_surface_realism=expected_surface_realism,
+        )
     except GlbMaterialAuditError:
         raise
     except (OSError, TypeError, ValueError, ValidationError) as exc:

@@ -23,6 +23,7 @@ from pipeline.synthetic_village.glb_material_audit import (
     ExpectedSurfaceRealism,
     GlbMaterialAuditError,
     audit_textured_glb,
+    audit_textured_glb_bytes,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
 from pipeline.synthetic_village.surface_realism import SURFACE_PROFILE_V1
@@ -677,6 +678,32 @@ def test_audit_rejects_material_identity_not_in_expected_closure(
 
     with pytest.raises(GlbMaterialAuditError, match="expected material identity"):
         audit_textured_glb(glb_path, expected_materials=_expected())
+
+
+def test_byte_audit_matches_path_audit_without_relaxing_uri_rules(
+    tmp_path: Path,
+) -> None:
+    document, binary = _document_and_binary()
+    payload = _glb(document, binary)
+    glb_path = tmp_path / "textured.glb"
+    glb_path.write_bytes(payload)
+
+    assert audit_textured_glb_bytes(
+        payload,
+        expected_materials=_expected(),
+    ) == audit_textured_glb(
+        glb_path,
+        expected_materials=_expected(),
+    )
+
+    external = copy.deepcopy(document)
+    external["images"][0].pop("bufferView")
+    external["images"][0]["uri"] = "base-color.png"
+    with pytest.raises(GlbMaterialAuditError, match="external URI"):
+        audit_textured_glb_bytes(
+            _glb(external, binary),
+            expected_materials=_expected(),
+        )
 
 
 def test_audit_rejects_malformed_glb_length(tmp_path: Path) -> None:
