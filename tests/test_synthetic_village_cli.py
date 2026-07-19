@@ -116,6 +116,63 @@ def test_author_h3_materials_prints_bounded_truth_summary(
     }
 
 
+def test_build_h3_ktx2_prints_bounded_truth_summary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = []
+    final_root = tmp_path / "ktx2" / ("c" * 64)
+    manifest = SimpleNamespace(
+        schema_version="nantai.h3-ktx2-pack.v1",
+        pack_id="c" * 64,
+        authored_pack_id="b" * 64,
+        synthetic=True,
+        ai_generated=True,
+        real_photo_textures=False,
+        tool_version="4.4.2",
+        records=tuple(range(8)),
+    )
+
+    def compile_pack(authored_root, output_root, *, receipt_path):
+        calls.append((authored_root, output_root, receipt_path))
+        return SimpleNamespace(root=final_root, manifest=manifest)
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_compile_h3_ktx2_pack",
+        lambda: compile_pack,
+    )
+    assert synthetic_village_cli.main(
+        [
+            "build-h3-ktx2",
+            "--authored-root",
+            str(tmp_path / "authored"),
+            "--tool-receipt",
+            str(tmp_path / "receipt.json"),
+            "--output-root",
+            str(tmp_path / "ktx2"),
+        ],
+    ) == 0
+    assert calls == [(
+        tmp_path / "authored",
+        tmp_path / "ktx2",
+        tmp_path / "receipt.json",
+    )]
+    assert json.loads(capsys.readouterr().out) == {
+        "ai_generated": True,
+        "authored_pack_id": "b" * 64,
+        "output_root": str(final_root),
+        "pack_id": "c" * 64,
+        "real_photo_textures": False,
+        "record_count": 8,
+        "schema_version": "nantai.h3-ktx2-pack.v1",
+        "synthetic": True,
+        "texture_count": 24,
+        "tool_version": "4.4.2",
+    }
+
+
 def test_build_materials_prints_one_stable_json_object(
     tmp_path: Path,
     monkeypatch,

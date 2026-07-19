@@ -8,25 +8,33 @@ import json
 import struct
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from PIL import Image
 
+from pipeline.synthetic_village import ktx2_toolchain
+from pipeline.synthetic_village.h3_material_sources import H3_HERO_SLOTS
 from pipeline.synthetic_village.ktx2_toolchain import (
+    H3_KTX2_PACK_SCHEMA,
     KTX2_MAGIC,
     KTX_DARWIN_ARM64_ASSET,
     KTX_DARWIN_ARM64_SHA256,
     KTX_DARWIN_ARM64_URL,
     KTX_LEVEL_DIMENSIONS,
     KTX_TOOL_VERSION,
+    KtxDecodedQuality,
+    KtxTextureDescriptor,
     KtxToolBinary,
     KtxToolchainError,
     KtxToolFile,
     KtxToolReceipt,
     audit_ktx2_bytes,
+    compile_h3_ktx2_pack,
     compile_verified_ktx2_texture,
     extract_command,
+    load_h3_ktx2_pack,
     measure_decoded_quality,
     toktx_command,
     validation_command,
@@ -382,6 +390,128 @@ def test_orm_quality_failure_rebuilds_both_repeats_as_uastc(
     assert descriptor.codec == "uastc"
     assert descriptor.orm_etc1s_fallback is True
     assert descriptor.quality.orm_max_channel_error == 0.0
+
+
+def test_h3_ktx2_pack_is_complete_content_addressed_and_idempotent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    authored_pack_id = "a" * 64
+    authored = SimpleNamespace(
+        pack_id=authored_pack_id,
+        synthetic=True,
+        ai_generated=True,
+        real_photo_textures=False,
+        geometry_usability="preview-only",
+        metric_alignment=False,
+        verification_level="L0",
+        records=tuple(
+            SimpleNamespace(slot_id=slot_id)
+            for slot_id in H3_HERO_SLOTS
+        ),
+    )
+    monkeypatch.setattr(
+        ktx2_toolchain,
+        "load_h3_authored_material_pack",
+        lambda _root: authored,
+    )
+    monkeypatch.setattr(
+        ktx2_toolchain,
+        "read_verified_h3_authored_map",
+        lambda _root, *, pack, slot_id, role: (
+            f"{pack.pack_id}:{slot_id}:{role}".encode()
+        ),
+    )
+    monkeypatch.setattr(
+        ktx2_toolchain,
+        "load_ktx_tool_receipt",
+        lambda _path: _fake_receipt(),
+    )
+
+    def fake_compile(
+        source,
+        *,
+        role,
+        tool_root,
+        receipt,
+        output_root,
+        runner,
+    ):
+        del tool_root, runner
+        source_payload = Path(source).read_bytes()
+        transfer = "srgb" if role == "base_color" else "linear"
+        payload = _fake_ktx2(transfer=2 if transfer == "srgb" else 1)
+        digest = hashlib.sha256(payload).hexdigest()
+        object_path = f"objects/{digest}.ktx2"
+        destination = Path(output_root) / object_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            destination.write_bytes(payload)
+        quality = {
+            "base_color": KtxDecodedQuality(
+                role="base_color",
+                base_colour_ssim=1.0,
+            ),
+            "normal": KtxDecodedQuality(
+                role="normal",
+                normal_mean_cosine=1.0,
+                normal_p01_cosine=1.0,
+            ),
+            "orm": KtxDecodedQuality(
+                role="orm",
+                orm_max_channel_error=0.0,
+            ),
+        }[role]
+        return KtxTextureDescriptor(
+            role=role,
+            source_sha256=hashlib.sha256(source_payload).hexdigest(),
+            object_path=object_path,
+            sha256=digest,
+            bytes=len(payload),
+            transfer=transfer,
+            codec="uastc",
+            toktx_sha256=receipt.toktx.sha256,
+            command_options=("--encode", "uastc"),
+            official_validation=True,
+            repeat_build_byte_equal=True,
+            orm_etc1s_fallback=role == "orm",
+            quality=quality,
+        )
+
+    first = compile_h3_ktx2_pack(
+        tmp_path / "authored",
+        tmp_path / "published",
+        receipt_path=tmp_path / "receipt.json",
+        texture_compiler=fake_compile,
+    )
+    pack = first.manifest
+
+    assert pack.schema_version == H3_KTX2_PACK_SCHEMA
+    assert pack.authored_pack_id == authored_pack_id
+    assert pack.synthetic is True
+    assert pack.real_photo_textures is False
+    assert tuple(record.slot_id for record in pack.records) == H3_HERO_SLOTS
+    assert all(
+        (record.base_color.role, record.normal.role, record.orm.role)
+        == ("base_color", "normal", "orm")
+        for record in pack.records
+    )
+    assert load_h3_ktx2_pack(first.root) == pack
+    second = compile_h3_ktx2_pack(
+        tmp_path / "authored",
+        tmp_path / "published",
+        receipt_path=tmp_path / "receipt.json",
+        texture_compiler=fake_compile,
+    )
+    assert second == first
+
+
+def test_h3_ktx2_pack_rejects_unmanifested_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "invalid-pack"
+    root.mkdir()
+    (root / "unexpected").write_bytes(b"not in manifest")
+    with pytest.raises(KtxToolchainError):
+        load_h3_ktx2_pack(root)
 
 
 def test_decoded_quality_gates_are_role_exact() -> None:

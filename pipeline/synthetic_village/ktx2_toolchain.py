@@ -17,6 +17,7 @@ import struct
 import subprocess
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -33,7 +34,17 @@ from pydantic import (
 )
 from skimage.metrics import structural_similarity
 
-from .h3_material_sources import H3MaterialSourceError, _prepare_real_directory
+from .h3_material_authoring import (
+    load_h3_authored_material_pack,
+    read_verified_h3_authored_map,
+)
+from .h3_material_sources import (
+    H3_HERO_SLOTS,
+    H3MaterialSourceError,
+    _prepare_real_directory,
+    _read_stable_bytes,
+    _require_real_directory,
+)
 
 KTX_TOOL_VERSION = "4.4.2"
 KTX_DARWIN_ARM64_ASSET = "KTX-Software-4.4.2-Darwin-arm64.pkg"
@@ -61,6 +72,8 @@ KTX_LEVEL_DIMENSIONS = (
     1,
 )
 KTX_RECEIPT_SCHEMA = "nantai.ktx-tool-receipt.v1"
+H3_KTX2_PACK_SCHEMA = "nantai.h3-ktx2-pack.v1"
+H3_KTX2_PACK_MANIFEST = "manifest.json"
 KTX_RECEIPT_NAME = "receipt.json"
 KTX_MAX_BYTES = 512 * 1024 * 1024
 KTX_MAX_PROCESS_OUTPUT = 1024 * 1024
@@ -274,6 +287,57 @@ class KtxTextureDescriptor(FrozenModel):
         return self
 
 
+class H3Ktx2MaterialRecord(FrozenModel):
+    slot_id: str = Field(pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$")
+    base_color: KtxTextureDescriptor
+    normal: KtxTextureDescriptor
+    orm: KtxTextureDescriptor
+
+    @model_validator(mode="after")
+    def _roles_are_exact(self) -> H3Ktx2MaterialRecord:
+        if (
+            self.base_color.role,
+            self.normal.role,
+            self.orm.role,
+        ) != ("base_color", "normal", "orm"):
+            raise ValueError("H3 KTX2 material roles are incomplete")
+        return self
+
+
+class H3Ktx2Pack(FrozenModel):
+    schema_version: Literal["nantai.h3-ktx2-pack.v1"] = H3_KTX2_PACK_SCHEMA
+    pack_id: Sha256
+    authored_pack_id: Sha256
+    synthetic: Literal[True] = True
+    ai_generated: Literal[True] = True
+    real_photo_textures: Literal[False] = False
+    geometry_usability: Literal["preview-only"] = "preview-only"
+    metric_alignment: Literal[False] = False
+    verification_level: Literal["L0"] = "L0"
+    tool_version: Literal["4.4.2"] = KTX_TOOL_VERSION
+    package_sha256: Sha256
+    toktx_sha256: Sha256
+    ktx_sha256: Sha256
+    records: tuple[H3Ktx2MaterialRecord, ...]
+
+    @model_validator(mode="after")
+    def _pack_is_complete_and_content_addressed(self) -> H3Ktx2Pack:
+        if tuple(record.slot_id for record in self.records) != H3_HERO_SLOTS:
+            raise ValueError("H3 KTX2 pack must contain the exact eight slots")
+        expected = hashlib.sha256(
+            canonical_h3_ktx2_pack_bytes(self, exclude_pack_id=True),
+        ).hexdigest()
+        if self.pack_id != expected:
+            raise ValueError("H3 KTX2 pack ID disagrees with canonical bytes")
+        return self
+
+
+@dataclass(frozen=True)
+class PreparedH3Ktx2Pack:
+    root: Path
+    manifest: H3Ktx2Pack
+
+
 def _canonical_json_bytes(value: BaseModel) -> bytes:
     return (
         json.dumps(
@@ -289,6 +353,26 @@ def _canonical_json_bytes(value: BaseModel) -> bytes:
 
 def canonical_ktx_tool_receipt_bytes(receipt: KtxToolReceipt) -> bytes:
     return _canonical_json_bytes(receipt)
+
+
+def canonical_h3_ktx2_pack_bytes(
+    pack: H3Ktx2Pack,
+    *,
+    exclude_pack_id: bool = False,
+) -> bytes:
+    payload = pack.model_dump(mode="json")
+    if exclude_pack_id:
+        payload.pop("pack_id")
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def _sha256_file(path: Path) -> tuple[str, int]:
@@ -803,6 +887,207 @@ def compile_verified_ktx2_texture(
         orm_etc1s_fallback=fallback,
         quality=quality,
     )
+
+
+def _pack_descriptors(
+    pack: H3Ktx2Pack,
+) -> tuple[KtxTextureDescriptor, ...]:
+    return tuple(
+        descriptor
+        for record in pack.records
+        for descriptor in (record.base_color, record.normal, record.orm)
+    )
+
+
+def _directory_closure(root: Path) -> tuple[str, ...]:
+    return tuple(
+        sorted(path.relative_to(root).as_posix() for path in root.rglob("*")),
+    )
+
+
+def load_h3_ktx2_pack(root: Path) -> H3Ktx2Pack:
+    root = Path(root).expanduser().absolute()
+    try:
+        _require_real_directory(root, label="H3 KTX2 pack")
+        _require_real_directory(root / "objects", label="H3 KTX2 objects")
+        raw = _read_stable_bytes(
+            root / H3_KTX2_PACK_MANIFEST,
+            maximum_bytes=4 * 1024 * 1024,
+            label="H3 KTX2 manifest",
+        )
+        pack = H3Ktx2Pack.model_validate_json(raw)
+        if raw != canonical_h3_ktx2_pack_bytes(pack):
+            raise KtxToolchainError("H3 KTX2 manifest is not canonical JSON")
+        descriptors = _pack_descriptors(pack)
+        expected = {
+            H3_KTX2_PACK_MANIFEST,
+            "objects",
+            *(descriptor.object_path for descriptor in descriptors),
+        }
+        if _directory_closure(root) != tuple(sorted(expected)):
+            raise KtxToolchainError(
+                "H3 KTX2 pack directory closure disagrees with manifest",
+            )
+        verified: set[str] = set()
+        for descriptor in descriptors:
+            if descriptor.object_path in verified:
+                continue
+            verified.add(descriptor.object_path)
+            payload = _read_stable_bytes(
+                root / descriptor.object_path,
+                maximum_bytes=KTX_MAX_BYTES,
+                label=f"H3 KTX2 object {descriptor.sha256}",
+            )
+            if (
+                len(payload) != descriptor.bytes
+                or hashlib.sha256(payload).hexdigest() != descriptor.sha256
+            ):
+                raise KtxToolchainError("H3 KTX2 object identity disagrees")
+            audit = audit_ktx2_bytes(
+                payload,
+                expected_transfer=descriptor.transfer,
+                expected_codec=descriptor.codec,
+            )
+            if (
+                audit.sha256 != descriptor.sha256
+                or audit.bytes != descriptor.bytes
+            ):
+                raise KtxToolchainError("H3 KTX2 object audit disagrees")
+        return pack
+    except KtxToolchainError:
+        raise
+    except (H3MaterialSourceError, OSError, ValidationError, ValueError) as exc:
+        raise KtxToolchainError(f"H3 KTX2 pack cannot be trusted: {exc}") from exc
+
+
+TextureCompiler = Callable[..., KtxTextureDescriptor]
+
+
+def compile_h3_ktx2_pack(
+    authored_root: Path,
+    output_root: Path,
+    *,
+    receipt_path: Path,
+    texture_compiler: TextureCompiler = compile_verified_ktx2_texture,
+    runner: ProcessRunner = _default_compile_runner,
+) -> PreparedH3Ktx2Pack:
+    """Compile and atomically publish the exact 8-slot, 24-texture H3 pack."""
+
+    authored_root = Path(authored_root).expanduser().absolute()
+    authored = load_h3_authored_material_pack(authored_root)
+    receipt_path = Path(receipt_path).expanduser().absolute()
+    receipt = load_ktx_tool_receipt(receipt_path)
+    tool_root = receipt_path.parent
+    try:
+        publication_root = _prepare_real_directory(
+            output_root,
+            label="H3 KTX2 publication root",
+        )
+    except H3MaterialSourceError as exc:
+        raise KtxToolchainError(
+            f"H3 KTX2 publication root cannot be trusted: {exc}",
+        ) from exc
+    for candidate in sorted(publication_root.iterdir()):
+        if not candidate.is_dir() or len(candidate.name) != 64:
+            continue
+        try:
+            existing = load_h3_ktx2_pack(candidate)
+        except KtxToolchainError:
+            continue
+        if (
+            existing.authored_pack_id == authored.pack_id
+            and existing.package_sha256 == receipt.package_sha256
+            and existing.toktx_sha256 == receipt.toktx.sha256
+            and existing.ktx_sha256 == receipt.ktx.sha256
+        ):
+            return PreparedH3Ktx2Pack(root=candidate, manifest=existing)
+    with tempfile.TemporaryDirectory(
+        prefix=".h3-ktx2-pack.",
+        dir=publication_root,
+    ) as temporary:
+        temporary_root = Path(temporary)
+        pack_root = temporary_root / "pack"
+        inputs = temporary_root / "inputs"
+        pack_root.mkdir()
+        inputs.mkdir()
+        records = []
+        for source_record in authored.records:
+            descriptors = {}
+            for role in ("base_color", "normal", "orm"):
+                payload = read_verified_h3_authored_map(
+                    authored_root,
+                    pack=authored,
+                    slot_id=source_record.slot_id,
+                    role=role,
+                )
+                source = inputs / f"{source_record.slot_id}-{role}.png"
+                source.write_bytes(payload)
+                descriptors[role] = texture_compiler(
+                    source,
+                    role=role,
+                    tool_root=tool_root,
+                    receipt=receipt,
+                    output_root=pack_root,
+                    runner=runner,
+                )
+            records.append(
+                H3Ktx2MaterialRecord(
+                    slot_id=source_record.slot_id,
+                    **descriptors,
+                ),
+            )
+        identity = {
+            "schema_version": H3_KTX2_PACK_SCHEMA,
+            "authored_pack_id": authored.pack_id,
+            "synthetic": True,
+            "ai_generated": True,
+            "real_photo_textures": False,
+            "geometry_usability": "preview-only",
+            "metric_alignment": False,
+            "verification_level": "L0",
+            "tool_version": KTX_TOOL_VERSION,
+            "package_sha256": receipt.package_sha256,
+            "toktx_sha256": receipt.toktx.sha256,
+            "ktx_sha256": receipt.ktx.sha256,
+            "records": tuple(records),
+        }
+        pack_id = hashlib.sha256(
+            (
+                json.dumps(
+                    {
+                        key: (
+                            [item.model_dump(mode="json") for item in value]
+                            if key == "records"
+                            else value
+                        )
+                        for key, value in identity.items()
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8"),
+        ).hexdigest()
+        pack = H3Ktx2Pack(pack_id=pack_id, **identity)
+        manifest = pack_root / H3_KTX2_PACK_MANIFEST
+        manifest.write_bytes(canonical_h3_ktx2_pack_bytes(pack))
+        if load_h3_ktx2_pack(pack_root) != pack:
+            raise KtxToolchainError("staged H3 KTX2 pack verification drifted")
+        final_root = publication_root / pack.pack_id
+        if final_root.exists():
+            verified = load_h3_ktx2_pack(final_root)
+            if verified != pack:
+                raise KtxToolchainError(
+                    "existing H3 KTX2 identity has different evidence",
+                )
+            return PreparedH3Ktx2Pack(root=final_root, manifest=verified)
+        os.rename(pack_root, final_root)
+        verified = load_h3_ktx2_pack(final_root)
+        if verified != pack:
+            raise KtxToolchainError("published H3 KTX2 pack verification drifted")
+        return PreparedH3Ktx2Pack(root=final_root, manifest=verified)
 
 
 def _level_ranges(

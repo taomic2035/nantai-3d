@@ -56,6 +56,14 @@ def _build_h3_authored_material_pack():
     return build_h3_authored_material_pack
 
 
+def _compile_h3_ktx2_pack():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.ktx2_toolchain import compile_h3_ktx2_pack
+
+    return compile_h3_ktx2_pack
+
+
 def _publish_material_bundle():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -224,6 +232,16 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
     )
+    build_h3_ktx2 = commands.add_parser(
+        "build-h3-ktx2",
+        help=(
+            "Compile, validate, quality-check, and atomically publish the "
+            "complete H3 KTX2 material pack."
+        ),
+    )
+    build_h3_ktx2.add_argument("--authored-root", type=Path, required=True)
+    build_h3_ktx2.add_argument("--tool-receipt", type=Path, required=True)
+    build_h3_ktx2.add_argument("--output-root", type=Path, required=True)
     revise_visual = commands.add_parser(
         "revise-visual",
         help=(
@@ -495,6 +513,32 @@ def main(argv: list[str] | None = None) -> int:
                     "schema_version": manifest.schema_version,
                     "source_pack_id": manifest.source_pack_id,
                     "synthetic": manifest.synthetic,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "build-h3-ktx2":
+        prepared = _compile_h3_ktx2_pack()(
+            args.authored_root,
+            args.output_root,
+            receipt_path=args.tool_receipt,
+        )
+        manifest = prepared.manifest
+        print(
+            json.dumps(
+                {
+                    "ai_generated": manifest.ai_generated,
+                    "authored_pack_id": manifest.authored_pack_id,
+                    "output_root": str(prepared.root),
+                    "pack_id": manifest.pack_id,
+                    "real_photo_textures": manifest.real_photo_textures,
+                    "record_count": len(manifest.records),
+                    "schema_version": manifest.schema_version,
+                    "synthetic": manifest.synthetic,
+                    "texture_count": len(manifest.records) * 3,
+                    "tool_version": manifest.tool_version,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
