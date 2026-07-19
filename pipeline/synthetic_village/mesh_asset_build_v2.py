@@ -24,6 +24,11 @@ from pipeline.synthetic_village.foliage_atlas import (
     PreparedFoliageAtlasSet,
     _verify_prepared_atlas_set,
 )
+from pipeline.synthetic_village.glb_material_audit import ExpectedGlbMaterial
+from pipeline.synthetic_village.glb_shared_texture_audit import (
+    SharedTextureGlbAuditError,
+    audit_shared_textured_glb,
+)
 from pipeline.synthetic_village.local_textured_preview import LocalBlenderIdentity
 from pipeline.synthetic_village.material_bundle import (
     MaterialAlgorithmId,
@@ -36,6 +41,7 @@ from pipeline.synthetic_village.mesh_asset_build import (
     EXPECTED_ASSET_IDS,
     AssetKind,
     MeshAssetBuildError,
+    _is_linklike,
     _material_input_registry,
     _read_regular_file,
     _real_directory,
@@ -51,7 +57,10 @@ from pipeline.synthetic_village.mesh_asset_bundle import (
 )
 from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     LOD2_TRIANGLE_BANDS,
+    MAX_MESH_TEXTURE_BYTES,
+    MeshAssetLod2SourceV2,
     TextureBindingV2,
+    TextureObjectV2,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -317,6 +326,234 @@ def canonical_mesh_asset_build_report_v2_bytes(
     report: MeshAssetBuildReportV2,
 ) -> bytes:
     return _canonical_json_bytes(report)
+
+
+def _expected_texture_bindings(
+    request: MeshAssetBuildRequestV2,
+    recipe: NearMeshRecipeV2,
+) -> tuple[TextureBindingV2, ...]:
+    material_inputs = {
+        row.slot_id: row
+        for row in request.material_input_registry
+    }
+    atlas_records = request.foliage_atlas_set.by_slot
+    bindings = []
+    for slot_id in recipe.material_slot_ids:
+        atlas = atlas_records.get(slot_id)
+        material = material_inputs[slot_id]
+        for role in ("base_color", "normal", "orm"):
+            sha256 = (
+                getattr(atlas, role).sha256
+                if atlas is not None
+                else getattr(material, f"{role}_sha256")
+            )
+            bindings.append(
+                TextureBindingV2(
+                    uri=f"../textures/{sha256}.png",
+                    sha256=sha256,
+                    role=role,
+                    colour_space=(
+                        "srgb" if role == "base_color" else "non-color"
+                    ),
+                    material_slot_id=slot_id,
+                    derivation_algorithm_id=(
+                        request.foliage_atlas_set.algorithm_id
+                        if atlas is not None
+                        else request.material_algorithm_id
+                    ),
+                ),
+            )
+    return tuple(
+        sorted(
+            bindings,
+            key=lambda row: (
+                row.material_slot_id,
+                row.role,
+                row.sha256,
+                row.derivation_algorithm_id,
+            ),
+        ),
+    )
+
+
+def _validate_builder_output_closure(
+    staging: Path,
+    report: MeshAssetBuildReportV2,
+    texture_hashes: tuple[str, ...],
+) -> Path:
+    root = _real_directory(staging, label="near mesh builder output")
+    expected_files = {
+        "build-report.json",
+        *(row.artifact_path for row in report.artifacts),
+        *(f"textures/{sha256}.png" for sha256 in texture_hashes),
+    }
+    expected_directories = {
+        "artifacts",
+        "textures",
+        *(f"artifacts/{asset_id}" for asset_id in EXPECTED_ASSET_IDS),
+    }
+    try:
+        entries = tuple(root.rglob("*"))
+    except OSError as exc:
+        raise MeshAssetBuildError(
+            "near mesh builder output cannot be enumerated",
+        ) from exc
+    if any(_is_linklike(path) for path in entries):
+        raise MeshAssetBuildError(
+            "near mesh builder output contains redirected entries",
+        )
+    actual_files = {
+        path.relative_to(root).as_posix()
+        for path in entries
+        if path.is_file()
+    }
+    actual_directories = {
+        path.relative_to(root).as_posix()
+        for path in entries
+        if path.is_dir()
+    }
+    if (
+        actual_files != expected_files
+        or actual_directories != expected_directories
+        or len(entries) != len(actual_files) + len(actual_directories)
+    ):
+        raise MeshAssetBuildError(
+            "near mesh builder output is incomplete or contains extras",
+        )
+    return root
+
+
+def _report_sources_and_texture_objects(
+    *,
+    request: MeshAssetBuildRequestV2,
+    report: MeshAssetBuildReportV2,
+    staging: Path,
+) -> tuple[
+    tuple[MeshAssetLod2SourceV2, ...],
+    tuple[TextureObjectV2, ...],
+]:
+    if (
+        report.build_id != request.build_id
+        or report.blender_identity != request.blender_identity
+        or report.builder_script_sha256 != request.builder_script_sha256
+    ):
+        raise MeshAssetBuildError(
+            "near mesh build report identity disagrees with its request",
+        )
+    recipes = {recipe.asset_id: recipe for recipe in request.recipes}
+    for row in report.artifacts:
+        recipe = recipes[row.asset_id]
+        if row.texture_bindings != _expected_texture_bindings(
+            request,
+            recipe,
+        ):
+            raise MeshAssetBuildError(
+                "near mesh report texture closure disagrees with its request",
+            )
+    texture_hashes = tuple(sorted({
+        binding.sha256
+        for row in report.artifacts
+        for binding in row.texture_bindings
+    }))
+    root = _validate_builder_output_closure(
+        staging,
+        report,
+        texture_hashes,
+    )
+    texture_objects = []
+    for sha256 in texture_hashes:
+        path = root / f"textures/{sha256}.png"
+        payload = _read_regular_file(
+            path,
+            label="near mesh shared texture",
+            maximum_bytes=MAX_MESH_TEXTURE_BYTES,
+        )
+        if hashlib.sha256(payload).hexdigest() != sha256:
+            raise MeshAssetBuildError(
+                "near mesh shared texture bytes disagree with their URI",
+            )
+        texture_objects.append(
+            TextureObjectV2(
+                object_path=f"textures/{sha256}.png",
+                sha256=sha256,
+                bytes=len(payload),
+            ),
+        )
+    texture_objects_tuple = tuple(texture_objects)
+    material_inputs = {
+        row.slot_id: row
+        for row in request.material_input_registry
+    }
+    sources = []
+    for row in report.artifacts:
+        recipe = recipes[row.asset_id]
+        expected_materials = tuple(
+            ExpectedGlbMaterial(
+                slot_id=slot_id,
+                source_sha256=material_inputs[slot_id].source_sha256,
+                bundle_id=request.material_bundle_id,
+                algorithm_id=request.material_algorithm_id,
+            )
+            for slot_id in recipe.material_slot_ids
+        )
+        dependency_hashes = {
+            binding.sha256
+            for binding in row.texture_bindings
+        }
+        dependency_objects = tuple(
+            descriptor
+            for descriptor in texture_objects_tuple
+            if descriptor.sha256 in dependency_hashes
+        )
+        artifact = root / row.artifact_path
+        try:
+            audit = audit_shared_textured_glb(
+                artifact,
+                expected_materials=expected_materials,
+                texture_root=root,
+                bindings=row.texture_bindings,
+                objects=dependency_objects,
+                kind=recipe.kind,
+                footprint_m=recipe.footprint_m,
+            )
+        except SharedTextureGlbAuditError as exc:
+            raise MeshAssetBuildError(
+                "near mesh builder artifact audit failed",
+            ) from exc
+        bounds_agree = all(
+            abs(measured - declared) <= 1e-5
+            for measured, declared in zip(
+                (
+                    *audit.topology.aabb.min,
+                    *audit.topology.aabb.max,
+                ),
+                (
+                    *row.local_enu_aabb.min,
+                    *row.local_enu_aabb.max,
+                ),
+                strict=True,
+            )
+        )
+        if (
+            audit.glb_sha256 != row.glb_sha256
+            or audit.byte_count != row.glb_bytes
+            or audit.triangle_count != row.triangle_count
+            or audit.primitive_count != row.primitive_count
+            or audit.slot_ids != row.material_slot_ids
+            or not bounds_agree
+        ):
+            raise MeshAssetBuildError(
+                "near mesh report differs from independent artifact evidence",
+            )
+        sources.append(
+            MeshAssetLod2SourceV2(
+                asset_id=row.asset_id,
+                glb_path=artifact,
+                recipe_id=recipe.recipe_id,
+                texture_bindings=row.texture_bindings,
+            ),
+        )
+    return tuple(sources), texture_objects_tuple
 
 
 def _selected_builder(repo_root: Path, builder_script: Path) -> Path:

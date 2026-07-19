@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -20,10 +21,13 @@ from pipeline.synthetic_village.material_bundle import (
 from pipeline.synthetic_village.mesh_asset_build import (
     ASSET_RECIPE_CONTRACTS,
     EXPECTED_ASSET_IDS,
+    MeshAssetBuildError,
 )
 from pipeline.synthetic_village.mesh_asset_build_v2 import (
     MeshAssetBuildReportRowV2,
     MeshAssetBuildReportV2,
+    _expected_texture_bindings,
+    _report_sources_and_texture_objects,
     build_mesh_asset_request_v2,
     canonical_mesh_asset_build_report_v2_bytes,
     canonical_mesh_asset_build_request_v2_bytes,
@@ -159,6 +163,78 @@ def test_request_binds_v1_reuse_and_only_rebuilds_lod2(
     assert request.foliage_atlas_set == request_inputs["atlas"].manifest
 
 
+def test_request_texture_closure_replaces_only_foliage_sources(
+    request_inputs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "load_mesh_asset_bundle",
+        lambda _root: request_inputs["source_bundle"],
+    )
+    request = build_mesh_asset_request_v2(
+        repo_root=ROOT,
+        source_v1_bundle_root=request_inputs["source_root"],
+        material_bundle_root=request_inputs["material_root"],
+        foliage_atlas_set=request_inputs["atlas"],
+        builder_script=Path("scripts/blender/build_mesh_asset_bundle.py"),
+        blender_identity=LOCAL_BLENDER,
+    )
+    recipe = next(
+        row for row in request.recipes if row.asset_id == "tree_bamboo_01"
+    )
+    bindings = _expected_texture_bindings(request, recipe)
+    by_semantic = {
+        (row.material_slot_id, row.role): row
+        for row in bindings
+    }
+    atlas = request.foliage_atlas_set.by_slot[
+        "material-bamboo-leaf-01"
+    ]
+    material = next(
+        row
+        for row in request.material_input_registry
+        if row.slot_id == "material-bamboo-stem-01"
+    )
+
+    assert len(bindings) == 6
+    assert (
+        by_semantic[
+            ("material-bamboo-leaf-01", "base_color")
+        ].sha256
+        == atlas.base_color.sha256
+    )
+    assert (
+        by_semantic[
+            ("material-bamboo-leaf-01", "base_color")
+        ].derivation_algorithm_id
+        == request.foliage_atlas_set.algorithm_id
+    )
+    assert (
+        by_semantic[
+            ("material-bamboo-stem-01", "base_color")
+        ].sha256
+        == material.base_color_sha256
+    )
+    assert (
+        by_semantic[
+            ("material-bamboo-stem-01", "base_color")
+        ].derivation_algorithm_id
+        == request.material_algorithm_id
+    )
+    assert bindings == tuple(
+        sorted(
+            bindings,
+            key=lambda row: (
+                row.material_slot_id,
+                row.role,
+                row.sha256,
+                row.derivation_algorithm_id,
+            ),
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "field",
     (
@@ -226,6 +302,152 @@ def _report_payload(request) -> dict[str, object]:
         "builder_script_sha256": request.builder_script_sha256,
         "artifacts": tuple(artifacts),
     }
+
+
+def _write_fake_builder_outputs(
+    root: Path,
+    request,
+    request_inputs,
+) -> MeshAssetBuildReportV2:
+    (root / "artifacts").mkdir()
+    (root / "textures").mkdir()
+    material_payloads = {}
+    for record in request_inputs["material_bundle"].records:
+        for descriptor in (record.base_color, record.normal, record.orm):
+            material_payloads[descriptor.sha256] = (
+                request_inputs["material_root"] / descriptor.object_path
+            ).read_bytes()
+    atlas_payloads = {}
+    for record in request_inputs["atlas"].manifest.records:
+        for descriptor in (record.base_color, record.normal, record.orm):
+            atlas_payloads[descriptor.sha256] = (
+                request_inputs["atlas"].root / descriptor.object_path
+            ).read_bytes()
+    expected_bindings = {
+        recipe.asset_id: _expected_texture_bindings(request, recipe)
+        for recipe in request.recipes
+    }
+    for digest in sorted({
+        binding.sha256
+        for bindings in expected_bindings.values()
+        for binding in bindings
+    }):
+        payload = atlas_payloads.get(digest, material_payloads.get(digest))
+        assert payload is not None
+        (root / f"textures/{digest}.png").write_bytes(payload)
+    rows = []
+    for recipe in request.recipes:
+        directory = root / "artifacts" / recipe.asset_id
+        directory.mkdir()
+        artifact = directory / "lod2.glb"
+        payload = b"glTF-near-v2:" + recipe.asset_id.encode()
+        artifact.write_bytes(payload)
+        rows.append(
+            MeshAssetBuildReportRowV2(
+                asset_id=recipe.asset_id,
+                lod=2,
+                artifact_path=f"artifacts/{recipe.asset_id}/lod2.glb",
+                glb_sha256=hashlib.sha256(payload).hexdigest(),
+                glb_bytes=len(payload),
+                triangle_count=recipe.lod2_triangle_min,
+                primitive_count=1,
+                material_slot_ids=recipe.material_slot_ids,
+                local_enu_aabb={
+                    "min": (0.0, 0.0, 0.0),
+                    "max": recipe.footprint_m,
+                },
+                texture_bindings=expected_bindings[recipe.asset_id],
+            ),
+        )
+    report = MeshAssetBuildReportV2(
+        build_id=request.build_id,
+        blender_identity=request.blender_identity,
+        builder_script_sha256=request.builder_script_sha256,
+        artifacts=tuple(rows),
+    )
+    (root / "build-report.json").write_bytes(
+        canonical_mesh_asset_build_report_v2_bytes(report),
+    )
+    return report
+
+
+def test_report_crosscheck_produces_exact_lod2_and_texture_sources(
+    request_inputs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "load_mesh_asset_bundle",
+        lambda _root: request_inputs["source_bundle"],
+    )
+    request = build_mesh_asset_request_v2(
+        repo_root=ROOT,
+        source_v1_bundle_root=request_inputs["source_root"],
+        material_bundle_root=request_inputs["material_root"],
+        foliage_atlas_set=request_inputs["atlas"],
+        builder_script=Path("scripts/blender/build_mesh_asset_bundle.py"),
+        blender_identity=LOCAL_BLENDER,
+    )
+    staging = request_inputs["root"] / "fake-builder-output"
+    staging.mkdir()
+    report = _write_fake_builder_outputs(staging, request, request_inputs)
+    recipes = {row.asset_id: row for row in request.recipes}
+
+    def audit(path: Path, **_kwargs):
+        row = next(
+            item
+            for item in report.artifacts
+            if path == staging / item.artifact_path
+        )
+        payload = path.read_bytes()
+        return SimpleNamespace(
+            glb_sha256=hashlib.sha256(payload).hexdigest(),
+            byte_count=len(payload),
+            triangle_count=row.triangle_count,
+            primitive_count=row.primitive_count,
+            slot_ids=row.material_slot_ids,
+            topology=SimpleNamespace(aabb=row.local_enu_aabb),
+        )
+
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "audit_shared_textured_glb",
+        audit,
+    )
+    sources, texture_objects = _report_sources_and_texture_objects(
+        request=request,
+        report=report,
+        staging=staging,
+    )
+
+    assert tuple(row.asset_id for row in sources) == EXPECTED_ASSET_IDS
+    assert all(row.glb_path.is_file() for row in sources)
+    assert all(
+        row.recipe_id == recipes[row.asset_id].recipe_id
+        for row in sources
+    )
+    assert tuple(row.object_path for row in texture_objects) == tuple(
+        sorted(row.object_path for row in texture_objects)
+    )
+    assert {row.sha256 for row in texture_objects} == {
+        binding.sha256
+        for row in report.artifacts
+        for binding in row.texture_bindings
+    }
+
+    first = report.artifacts[0]
+    incomplete = first.model_copy(
+        update={"texture_bindings": first.texture_bindings[:-1]},
+    )
+    tampered = report.model_copy(
+        update={"artifacts": (incomplete, *report.artifacts[1:])},
+    )
+    with pytest.raises(MeshAssetBuildError, match="texture closure"):
+        _report_sources_and_texture_objects(
+            request=request,
+            report=tampered,
+            staging=staging,
+        )
 
 
 def test_report_requires_exact_sorted_lod2_matrix(
