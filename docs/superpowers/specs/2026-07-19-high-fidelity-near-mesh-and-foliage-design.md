@@ -1,7 +1,7 @@
 # High-fidelity near mesh and cutout foliage
 
 Date: 2026-07-19
-Status: H1 + H2 selected; written-spec review pending
+Status: user-approved H1 + H2 design
 
 ## 1. Decision summary
 
