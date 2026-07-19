@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import os
 import subprocess
 import sys
@@ -162,6 +163,22 @@ def test_surface_plan_detail_counts_corridor_and_envelope_are_bounded(
         for path in plan.path_plans
         for run in path.rut_runs
     )
+
+
+def test_surface_path_lengths_use_planar_world_arc_length(
+    tmp_path: Path,
+) -> None:
+    _visual_root, bundle = publish_material_fixture(tmp_path)
+    plan = build_surface_realism_plan(
+        build_scene_plan(),
+        bundle.final_directory,
+    )
+
+    assert sum(path.path_length_m for path in plan.path_plans) == pytest.approx(
+        1452.202821,
+        abs=1e-6,
+    )
+    assert sum(math.ceil(path.path_length_m) for path in plan.path_plans) == 1455
 
 
 def test_surface_palette_rejects_out_of_range_multiplier(

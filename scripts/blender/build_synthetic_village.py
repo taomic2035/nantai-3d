@@ -7,6 +7,7 @@ the Python standard library, :mod:`bpy`, and :mod:`mathutils`.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -105,6 +106,9 @@ SURFACE_DETAIL_CAPS = {
     "damp-patch": 72,
     "rut-run": 96,
 }
+SURFACE_TERRAIN_SPACING_M = 4.0
+SURFACE_PATH_STEP_M = 1.0
+SURFACE_PATH_LATERAL_RAILS = 6
 
 SEMANTIC_CLASSES = (
     "background",
@@ -1009,6 +1013,32 @@ def _validate_surface_realism_plan(request):
         raise RuntimeBuildError("surface path detail counts exceed their bounds")
 
 
+def _load_surface_runtime(request):
+    if request.get("surface_realism_profile_id") != SURFACE_PROFILE_V1:
+        return None
+    runtime_path = Path(__file__).with_name(SURFACE_RUNTIME_NAME)
+    expected = request["surface_realism_plan"]["runtime_module_sha256"]
+    if _sha256_file(runtime_path) != expected:
+        raise RuntimeBuildError("surface realism runtime changed after request validation")
+    spec = importlib.util.spec_from_file_location(
+        "nantai_surface_realism_runtime",
+        runtime_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeBuildError("surface realism runtime cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise RuntimeBuildError("surface realism runtime execution failed") from exc
+    if (
+        getattr(module, "PROFILE_ID", None) != SURFACE_PROFILE_V1
+        or not callable(getattr(module, "sample_macro_color", None))
+    ):
+        raise RuntimeBuildError("surface realism runtime interface is invalid")
+    return module
+
+
 def _validate_request(request, raw):
     local = request.get("schema_version") == LOCAL_TEXTURED_REQUEST_SCHEMA
     textured = request.get("schema_version") in {
@@ -1801,7 +1831,33 @@ def _create_textured_materials(request, material_paths):
         material["nv_baked_normal_strength"] = row["normal_strength"]
         separate = nodes.new("ShaderNodeSeparateColor")
         separate.name = f"nv__orm-channels-{slot_id}"
-        links.new(base.outputs["Color"], principled.inputs["Base Color"])
+        if request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1:
+            vertex_color = nodes.new("ShaderNodeVertexColor")
+            vertex_color.name = f"nv__surface-color-{slot_id}"
+            vertex_color.layer_name = "nv_surface_color"
+            multiply_color = nodes.new("ShaderNodeMixRGB")
+            multiply_color.name = f"nv__source-times-surface-{slot_id}"
+            multiply_color.blend_type = "MULTIPLY"
+            multiply_color.inputs[0].default_value = 1.0
+            links.new(base.outputs["Color"], multiply_color.inputs[1])
+            links.new(vertex_color.outputs["Color"], multiply_color.inputs[2])
+            links.new(
+                multiply_color.outputs["Color"],
+                principled.inputs["Base Color"],
+            )
+            palettes = {
+                palette["slot_id"]: palette
+                for palette in request["surface_realism_plan"]["macro_palettes"]
+            }
+            material["nv_surface_realism_profile"] = SURFACE_PROFILE_V1
+            material["nv_surface_color_input"] = "nv_surface_color"
+            material["nv_surface_palette_sha256"] = (
+                palettes[slot_id]["palette_sha256"]
+                if slot_id in palettes
+                else ""
+            )
+        else:
+            links.new(base.outputs["Color"], principled.inputs["Base Color"])
         links.new(normal.outputs["Color"], normal_map.inputs["Color"])
         links.new(normal_map.outputs["Normal"], principled.inputs["Normal"])
         links.new(orm.outputs["Color"], separate.inputs["Color"])
@@ -1969,7 +2025,91 @@ def _project_polygon_uvs(obj, polygon, policy, tile_m):
     return values
 
 
-def _apply_textured_uvs_and_tangents(mesh_objects):
+def _surface_palette_by_slot(request):
+    if request.get("surface_realism_profile_id") != SURFACE_PROFILE_V1:
+        return {}
+    return {
+        palette["slot_id"]: palette
+        for palette in request["surface_realism_plan"]["macro_palettes"]
+    }
+
+
+def _surface_object_uses_macro_color(obj):
+    root_id = str(obj.get("nv_root_id", obj.get("nv_stable_id", "")))
+    return (
+        obj.name == "nv__aux-terrain"
+        or root_id.startswith("path-network-")
+        or root_id.startswith("field-")
+        or root_id.startswith("courtyard-")
+    )
+
+
+def _apply_surface_color_attribute(obj, request, surface_runtime):
+    if request.get("surface_realism_profile_id") != SURFACE_PROFILE_V1:
+        return
+    if surface_runtime is None:
+        raise RuntimeBuildError("surface realism runtime is absent")
+    mesh = obj.data
+    palettes = _surface_palette_by_slot(request)
+    color_layer = mesh.color_attributes.get("nv_surface_color")
+    if color_layer is None:
+        color_layer = mesh.color_attributes.new(
+            name="nv_surface_color",
+            type="FLOAT_COLOR",
+            domain="CORNER",
+        )
+    if (
+        color_layer.data_type != "FLOAT_COLOR"
+        or color_layer.domain != "CORNER"
+        or len(color_layer.data) != len(mesh.loops)
+    ):
+        raise RuntimeBuildError(f"surface color layer is invalid: {obj.name}")
+    mesh.color_attributes.active_color = color_layer
+    macro_object = _surface_object_uses_macro_color(obj)
+    used_palettes = {}
+    used_macro = False
+    for polygon in mesh.polygons:
+        if polygon.material_index >= len(mesh.materials):
+            raise RuntimeBuildError(f"surface material index is invalid: {obj.name}")
+        material = mesh.materials[polygon.material_index]
+        slot_id = material.get("nv_slot_id")
+        palette = palettes.get(slot_id) if macro_object else None
+        for loop_index in polygon.loop_indices:
+            loop = mesh.loops[loop_index]
+            if palette is None:
+                color = (1.0, 1.0, 1.0, 1.0)
+            else:
+                world = obj.matrix_world @ mesh.vertices[loop.vertex_index].co
+                period_m = (
+                    request["surface_realism_plan"]["terrain_period_m"]
+                    if obj.name == "nv__aux-terrain"
+                    else request["surface_realism_plan"]["ground_period_m"]
+                )
+                color = surface_runtime.sample_macro_color(
+                    palette["multipliers_q"],
+                    x_m=float(world.x),
+                    y_m=float(world.y),
+                    period_m=period_m,
+                    scene_seed=request["surface_realism_plan"]["scene_seed"],
+                    source_sha256=palette["source_sha256"],
+                )
+                used_macro = True
+                used_palettes[slot_id] = palette["palette_sha256"]
+            color_layer.data[loop_index].color = color
+    obj["nv_surface_realism_profile"] = SURFACE_PROFILE_V1
+    obj["nv_surface_color_mode"] = "macro" if used_macro else "white"
+    obj["nv_surface_palette_sha256"] = json.dumps(
+        used_palettes,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _apply_textured_uvs_and_tangents(
+    mesh_objects,
+    request,
+    surface_runtime,
+):
     for obj in mesh_objects:
         if obj.type != "MESH":
             continue
@@ -2017,6 +2157,11 @@ def _apply_textured_uvs_and_tangents(mesh_objects):
             )
             for loop_index, uv in zip(polygon.loop_indices, values, strict=True):
                 uv_layer.data[loop_index].uv = uv
+        _apply_surface_color_attribute(
+            obj,
+            request,
+            surface_runtime,
+        )
         try:
             mesh.calc_tangents(uvmap=uv_layer.name)
         except Exception as exc:
@@ -2143,15 +2288,25 @@ def _assign_textured_terrain_materials(terrain_obj, materials):
     )
 
 
-def _create_terrain(extent, materials, auxiliary_collection):
+def _create_terrain(request, materials, auxiliary_collection):
+    extent = request["scene_plan"]["extent"]
     width, depth = extent["width_m"], extent["depth_m"]
-    columns = int(width / 5) + 1
-    rows = int(depth / 5) + 1
+    surface_profile = (
+        request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1
+    )
+    if surface_profile:
+        columns, rows, triangle_count = _surface_terrain_contract(extent)
+        spacing = SURFACE_TERRAIN_SPACING_M
+    else:
+        spacing = 5.0
+        columns = int(width / spacing) + 1
+        rows = int(depth / spacing) + 1
+        triangle_count = (columns - 1) * (rows - 1) * 2
     terrain = MeshAssembler()
     for row in range(rows):
-        y_m = -depth / 2 + row * 5
+        y_m = -depth / 2 + row * spacing
         for column in range(columns):
-            x_m = -width / 2 + column * 5
+            x_m = -width / 2 + column * spacing
             terrain.vertices.append((x_m, y_m, _terrain_height(x_m, y_m, extent)))
     for row in range(rows - 1):
         for column in range(columns - 1):
@@ -2172,12 +2327,15 @@ def _create_terrain(extent, materials, auxiliary_collection):
     }
     terrain_obj = _link_mesh(
         terrain_root,
-        "terrain-5m-grid",
+        "terrain-4m-grid" if surface_profile else "terrain-5m-grid",
         terrain,
         materials["material-moss-stone-01"],
         terrain_registry,
         auxiliary_collection,
     )
+    terrain_obj["nv_surface_grid_columns"] = columns
+    terrain_obj["nv_surface_grid_rows"] = rows
+    terrain_obj["nv_surface_triangle_count"] = triangle_count
     terrain_obj.name = "nv__aux-terrain"
     terrain_obj["nv_auxiliary"] = True
     for polygon in terrain_obj.data.polygons:
@@ -2187,13 +2345,13 @@ def _create_terrain(extent, materials, auxiliary_collection):
     skirt = MeshAssembler()
     perimeter = []
     for column in range(columns):
-        perimeter.append((-width / 2 + column * 5, -depth / 2))
+        perimeter.append((-width / 2 + column * spacing, -depth / 2))
     for row in range(1, rows):
-        perimeter.append((width / 2, -depth / 2 + row * 5))
+        perimeter.append((width / 2, -depth / 2 + row * spacing))
     for column in range(columns - 2, -1, -1):
-        perimeter.append((-width / 2 + column * 5, depth / 2))
+        perimeter.append((-width / 2 + column * spacing, depth / 2))
     for row in range(rows - 2, 0, -1):
-        perimeter.append((-width / 2, -depth / 2 + row * 5))
+        perimeter.append((-width / 2, -depth / 2 + row * spacing))
     bottom = -8.0
     for index, (x_m, y_m) in enumerate(perimeter):
         following = perimeter[(index + 1) % len(perimeter)]
@@ -2315,6 +2473,131 @@ def _ribbon(points, width, lift=0.08):
             ((0, 1, 2, 3),),
         )
     return assembler
+
+
+def _surface_terrain_contract(extent):
+    width = extent["width_m"]
+    depth = extent["depth_m"]
+    if (
+        not _is_finite_number(width)
+        or not _is_finite_number(depth)
+        or width <= 0
+        or depth <= 0
+        or width % SURFACE_TERRAIN_SPACING_M != 0
+        or depth % SURFACE_TERRAIN_SPACING_M != 0
+    ):
+        raise RuntimeBuildError("surface terrain extent is not a complete 4 m grid")
+    columns = int(width / SURFACE_TERRAIN_SPACING_M) + 1
+    rows = int(depth / SURFACE_TERRAIN_SPACING_M) + 1
+    return columns, rows, (columns - 1) * (rows - 1) * 2
+
+
+def _resample_polyline_at_most(points, *, step_m):
+    if (
+        not isinstance(points, list)
+        or len(points) < 2
+        or not _is_finite_number(step_m)
+        or step_m <= 0
+    ):
+        raise RuntimeBuildError("surface path resampling inputs are invalid")
+    source = [
+        Vector((row["x_m"], row["y_m"], row["z_m"]))
+        for row in points
+    ]
+    cumulative = [0.0]
+    for first, second in zip(source, source[1:], strict=False):
+        distance = math.hypot(second.x - first.x, second.y - first.y)
+        if distance <= 1e-9 or not math.isfinite(distance):
+            raise RuntimeBuildError("surface path contains a zero-length segment")
+        cumulative.append(cumulative[-1] + distance)
+    interval_count = max(1, math.ceil(cumulative[-1] / step_m))
+    sampled = []
+    segment = 0
+    for index in range(interval_count + 1):
+        distance = cumulative[-1] * index / interval_count
+        while (
+            segment + 1 < len(cumulative) - 1
+            and cumulative[segment + 1] < distance
+        ):
+            segment += 1
+        span = cumulative[segment + 1] - cumulative[segment]
+        fraction = (distance - cumulative[segment]) / span
+        position = source[segment].lerp(source[segment + 1], fraction)
+        sampled.append((position.x, position.y, position.z, distance))
+    return sampled
+
+
+def _segment_tangent(first, second):
+    tangent = Vector((second[0] - first[0], second[1] - first[1]))
+    if tangent.length <= 1e-9:
+        raise RuntimeBuildError("surface path contains a zero-length planar segment")
+    return tangent.normalized()
+
+
+def _path_miter(centerline, index, half_width):
+    if index == 0:
+        outgoing = _segment_tangent(centerline[0], centerline[1])
+        return Vector((-outgoing.y, outgoing.x)), half_width
+    if index == len(centerline) - 1:
+        incoming = _segment_tangent(centerline[-2], centerline[-1])
+        return Vector((-incoming.y, incoming.x)), half_width
+    incoming = _segment_tangent(centerline[index - 1], centerline[index])
+    outgoing = _segment_tangent(centerline[index], centerline[index + 1])
+    incoming_normal = Vector((-incoming.y, incoming.x))
+    outgoing_normal = Vector((-outgoing.y, outgoing.x))
+    miter = incoming_normal + outgoing_normal
+    if miter.length <= 1e-9:
+        return outgoing_normal, half_width
+    miter.normalize()
+    denominator = miter.dot(outgoing_normal)
+    if denominator <= 1e-6:
+        return outgoing_normal, half_width
+    return miter, min(half_width / denominator, half_width * 1.5)
+
+
+def _surface_rut_depth(path_plan, arc_length_m, side_fraction):
+    track_distance = abs(abs(side_fraction) - 0.58)
+    if track_distance >= 0.18:
+        return 0.0
+    track_weight = 1.0 - track_distance / 0.18
+    depth = 0.0
+    for run in path_plan["rut_runs"]:
+        progress = arc_length_m - run["start_arc_length_m"]
+        if progress < 0 or progress > run["length_m"]:
+            continue
+        edge_distance = min(progress, run["length_m"] - progress)
+        edge_weight = min(1.0, edge_distance / 1.5)
+        edge_weight = edge_weight * edge_weight * (3.0 - 2.0 * edge_weight)
+        depth = max(depth, run["depth_m"] * track_weight * edge_weight)
+    return depth
+
+
+def _surface_path_ribbon(points, width, path_plan, extent):
+    centerline = _resample_polyline_at_most(
+        points,
+        step_m=path_plan["longitudinal_step_m"],
+    )
+    rails = path_plan["lateral_rail_count"]
+    if rails != SURFACE_PATH_LATERAL_RAILS:
+        raise RuntimeBuildError("surface path lateral rail count is invalid")
+    assembler = MeshAssembler()
+    half_width = width / 2.0
+    for index, point in enumerate(centerline):
+        miter, miter_length = _path_miter(centerline, index, half_width)
+        for rail in range(rails):
+            fraction = -1.0 + 2.0 * rail / (rails - 1)
+            x_m = point[0] + miter.x * miter_length * fraction
+            y_m = point[1] + miter.y * miter_length * fraction
+            z_m = _terrain_height(x_m, y_m, extent) + 0.10
+            z_m -= _surface_rut_depth(path_plan, point[3], fraction)
+            assembler.vertices.append((x_m, y_m, z_m))
+    for row in range(len(centerline) - 1):
+        for rail in range(rails - 1):
+            lower = row * rails + rail
+            assembler.faces.append(
+                (lower, lower + 1, lower + rails + 1, lower + rails),
+            )
+    return assembler, len(centerline) - 1
 
 
 def _polygon_surface(ring, extent, lift=0.08):
@@ -3098,7 +3381,15 @@ def _build_area_feature(item, root, registry, materials, collection, extent):
         )
 
 
-def _build_linear_feature(item, root, registry, materials, collection, extent):
+def _build_linear_feature(
+    item,
+    root,
+    registry,
+    materials,
+    collection,
+    extent,
+    request,
+):
     semantic = item["semantic_class"]
     topology = item["polyline"]
     if semantic == "retaining-wall":
@@ -3128,7 +3419,33 @@ def _build_linear_feature(item, root, registry, materials, collection, extent):
             collection,
         )
         return
-    ribbon = _ribbon(topology["points"], topology["width_m"], 0.13 if semantic == "creek" else 0.10)
+    if (
+        semantic == "path"
+        and request.get("surface_realism_profile_id") == SURFACE_PROFILE_V1
+    ):
+        path_plans = {
+            row["object_id"]: row
+            for row in request["surface_realism_plan"]["path_plans"]
+        }
+        path_plan = path_plans.get(item["object_id"])
+        if path_plan is None:
+            raise RuntimeBuildError("surface path plan is absent")
+        ribbon, interval_count = _surface_path_ribbon(
+            topology["points"],
+            topology["width_m"],
+            path_plan,
+            extent,
+        )
+        root["nv_surface_path_interval_count"] = interval_count
+        root["nv_surface_path_triangle_count"] = (
+            interval_count * (SURFACE_PATH_LATERAL_RAILS - 1) * 2
+        )
+    else:
+        ribbon = _ribbon(
+            topology["points"],
+            topology["width_m"],
+            0.13 if semantic == "creek" else 0.10,
+        )
     _link_mesh(
         root,
         "terrain-conform-ribbon",
@@ -3575,6 +3892,7 @@ def _build_canonical_objects(request, materials, canonical_collection):
                 materials,
                 canonical_collection,
                 request["scene_plan"]["extent"],
+                request,
             )
         elif semantic in {"pond", "field", "orchard", "bamboo", "courtyard"}:
             _build_area_feature(
@@ -4624,6 +4942,7 @@ def _execute_build(request, staging_path, materials_path=None):
     material_paths = (
         _validate_material_directory(materials_path, request) if textured else None
     )
+    surface_runtime = _load_surface_runtime(request)
     if not textured and materials_path is not None:
         raise RuntimeBuildError("legacy request does not accept a material directory")
     if staging_path.exists():
@@ -4646,7 +4965,7 @@ def _execute_build(request, staging_path, materials_path=None):
             else _create_materials(request["visual_slot_registry"])
         )
         scene = _configure_scene(request, materials)
-        _create_terrain(request["scene_plan"]["extent"], materials, auxiliary_collection)
+        _create_terrain(request, materials, auxiliary_collection)
         roots = _build_canonical_objects(
             request,
             materials,
@@ -4657,6 +4976,8 @@ def _execute_build(request, staging_path, materials_path=None):
         if textured:
             _apply_textured_uvs_and_tangents(
                 [obj for obj in bpy.data.objects if obj.type == "MESH"],
+                request,
+                surface_runtime,
             )
         mesh_objects, prop_counts = _validate_built_scene(
             request,

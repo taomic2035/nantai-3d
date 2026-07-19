@@ -340,9 +340,9 @@ def _path_length(path: SceneObject) -> float:
     if path.polyline is None:
         raise ValueError("surface path lacks a polyline")
     return sum(
-        math.dist(
-            (first.x_m, first.y_m, first.z_m),
-            (second.x_m, second.y_m, second.z_m),
+        math.hypot(
+            second.x_m - first.x_m,
+            second.y_m - first.y_m,
         )
         for first, second in zip(
             path.polyline.points,

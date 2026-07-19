@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -66,6 +67,47 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _literal_assignment(name: str):
+    tree = ast.parse(BLENDER_BUILDER.read_text("utf-8"))
+    for statement in tree.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in statement.targets
+            )
+        ):
+            return ast.literal_eval(statement.value)
+    raise AssertionError(f"literal assignment is absent: {name}")
+
+
+def _run_builder_probe(
+    tmp_path: Path,
+    source: str,
+) -> subprocess.CompletedProcess[str]:
+    probe = tmp_path / "builder-probe.py"
+    probe.write_text(source, encoding="utf-8")
+    return subprocess.run(
+        [
+            str(LOCAL_BLENDER),
+            "--background",
+            "--factory-startup",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "17",
+            "--python",
+            str(probe),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+
 def _local_request(tmp_path: Path) -> LocalTexturedPreviewRequest:
     visual_root, bundle = publish_material_fixture(tmp_path)
     identity = LocalBlenderIdentity(
@@ -81,6 +123,114 @@ def _local_request(tmp_path: Path) -> LocalTexturedPreviewRequest:
         material_bundle_root=bundle.final_directory,
         tool_identity=identity,
     )
+
+
+def test_builder_declares_approved_surface_geometry_constants() -> None:
+    assert _literal_assignment("SURFACE_PROFILE_V1") == (
+        "source-consistent-multiscale-surface-v1"
+    )
+    assert _literal_assignment("SURFACE_TERRAIN_SPACING_M") == 4.0
+    assert _literal_assignment("SURFACE_PATH_STEP_M") == 1.0
+    assert _literal_assignment("SURFACE_PATH_LATERAL_RAILS") == 6
+
+    source = BLENDER_BUILDER.read_text("utf-8")
+    for required in (
+        "ShaderNodeVertexColor",
+        "ShaderNodeMixRGB",
+        'type="FLOAT_COLOR"',
+        'domain="CORNER"',
+        "nv_surface_color",
+    ):
+        assert required in source
+
+
+def test_local_blender_builds_continuous_surface_ribbon_contract(
+    tmp_path: Path,
+) -> None:
+    if not LOCAL_BLENDER.is_file():
+        pytest.skip("local Blender runtime is not installed")
+    result = _run_builder_probe(
+        tmp_path,
+        "import runpy\n"
+        f"ns = runpy.run_path({str(BLENDER_BUILDER)!r}, run_name='surface_probe')\n"
+        "extent = {'width_m': 700.0, 'depth_m': 500.0, 'relief_m': 120.0}\n"
+        "assert ns['_surface_terrain_contract'](extent) == (176, 126, 43750)\n"
+        "points = [\n"
+        "    {'x_m': -1.0, 'y_m': 0.0, 'z_m': 0.0},\n"
+        "    {'x_m': 1.0, 'y_m': 0.0, 'z_m': 0.0},\n"
+        "]\n"
+        "plan = {\n"
+        "    'longitudinal_step_m': 1.0,\n"
+        "    'lateral_rail_count': 6,\n"
+        "    'rut_runs': [],\n"
+        "}\n"
+        "mesh, intervals = ns['_surface_path_ribbon'](\n"
+        "    points, 3.2, plan, extent,\n"
+        ")\n"
+        "assert intervals == 2\n"
+        "assert len(mesh.vertices) == 18\n"
+        "assert len(mesh.faces) == 10\n"
+        "assert mesh.faces[4][2:] == mesh.faces[9][:2][::-1]\n"
+        "assert all(len(set(face)) == 4 for face in mesh.faces)\n"
+        "print('NANTAI_SURFACE_RIBBON_OK', flush=True)\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_SURFACE_RIBBON_OK" in result.stdout
+
+
+def test_local_blender_authors_float_corner_surface_color(
+    tmp_path: Path,
+) -> None:
+    if not LOCAL_BLENDER.is_file():
+        pytest.skip("local Blender runtime is not installed")
+    runtime = ROOT / "scripts/blender/surface_realism_runtime.py"
+    result = _run_builder_probe(
+        tmp_path,
+        "import runpy\n"
+        "from types import SimpleNamespace\n"
+        f"ns = runpy.run_path({str(BLENDER_BUILDER)!r}, run_name='surface_probe')\n"
+        f"runtime_ns = runpy.run_path({str(runtime)!r}, run_name='surface_runtime')\n"
+        "runtime = SimpleNamespace(sample_macro_color=runtime_ns['sample_macro_color'])\n"
+        "bpy = ns['bpy']\n"
+        "mesh = bpy.data.meshes.new('surface-color-probe-mesh')\n"
+        "mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])\n"
+        "mesh.update()\n"
+        "material = bpy.data.materials.new('surface-color-probe-material')\n"
+        "material['nv_slot_id'] = 'material-packed-earth-01'\n"
+        "mesh.materials.append(material)\n"
+        "obj = bpy.data.objects.new('surface-color-probe', mesh)\n"
+        "bpy.context.scene.collection.objects.link(obj)\n"
+        "obj['nv_root_id'] = 'path-network-001'\n"
+        "palette = [[3604 + i % 300, 3700 + i % 250, 3800 + i % 200] for i in range(256)]\n"
+        "request = {\n"
+        "    'surface_realism_profile_id': ns['SURFACE_PROFILE_V1'],\n"
+        "    'surface_realism_plan': {\n"
+        "        'scene_seed': 20260715,\n"
+        "        'terrain_period_m': 20.0,\n"
+        "        'ground_period_m': 10.0,\n"
+        "        'macro_palettes': [{\n"
+        "            'slot_id': 'material-packed-earth-01',\n"
+        "            'source_sha256': 'a' * 64,\n"
+        "            'palette_sha256': 'b' * 64,\n"
+        "            'multipliers_q': palette,\n"
+        "        }],\n"
+        "    },\n"
+        "}\n"
+        "ns['_apply_surface_color_attribute'](obj, request, runtime)\n"
+        "layer = mesh.color_attributes['nv_surface_color']\n"
+        "assert layer.data_type == 'FLOAT_COLOR'\n"
+        "assert layer.domain == 'CORNER'\n"
+        "colors = [tuple(row.color) for row in layer.data]\n"
+        "assert len(colors) == 3\n"
+        "assert any(color[:3] != (1.0, 1.0, 1.0) for color in colors)\n"
+        "assert all(0.88 <= value <= 1.10 for color in colors for value in color[:3])\n"
+        "assert obj['nv_surface_color_mode'] == 'macro'\n"
+        "print('NANTAI_SURFACE_COLOR_OK', flush=True)\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NANTAI_SURFACE_COLOR_OK" in result.stdout
 
 
 def test_local_request_is_content_addressed_but_never_authoritative(
