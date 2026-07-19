@@ -14,7 +14,7 @@ API contract:
 * ``GET /api/capabilities`` -> explicit fail-closed operation capabilities.
 * ``GET /api/world/chunk/{x}/{y}.ply`` -> opt-in, side-effect-free world chunk.
 * ``GET /api/world/mesh-chunk/{x}/{y}.json`` -> verified mesh chunk evidence.
-* ``GET /api/world/mesh-assets/...`` -> immutable audited template GLB bytes.
+* ``GET /api/world/mesh-assets/...`` -> immutable audited GLB/texture bytes.
 * ``GET /api/world/material-maps/...`` -> immutable verified PBR map bytes.
 * ``GET``/``HEAD`` below approved static roots -> project-relative files.
 * every mutating method -> structured HTTP 405; no job is started.
@@ -66,10 +66,14 @@ from pipeline.synthetic_village.material_bundle import (
     read_verified_material_map,
 )
 from pipeline.synthetic_village.mesh_asset_bundle import (
-    MeshAssetBundle,
+    MeshAssetBundleAny,
     MeshAssetBundleError,
     load_mesh_asset_bundle,
     read_verified_mesh_template_glb,
+)
+from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
+    MeshAssetBundleV2,
+    read_verified_mesh_texture,
 )
 from pipeline.synthetic_village.mesh_chunk import (
     MAX_SAFE_INTEGER,
@@ -1540,7 +1544,7 @@ def _on_demand_mesh_manifest(root: Path) -> dict[str, Any] | None:
 def _load_active_mesh_asset_bundle(
     root: Path,
     manifest: dict[str, Any],
-) -> tuple[Path, MeshAssetBundle]:
+) -> tuple[Path, MeshAssetBundleAny]:
     grid = manifest["mesh_grid"]
     directory = _resolve_mesh_asset_bundle_directory(
         root,
@@ -1572,7 +1576,7 @@ def _load_active_material_bundle(
     root: Path,
     manifest: dict[str, Any],
     *,
-    mesh_bundle: MeshAssetBundle | None = None,
+    mesh_bundle: MeshAssetBundleAny | None = None,
 ) -> tuple[Path, DerivedMaterialBundle]:
     grid = manifest["mesh_grid"]
     directory = _resolve_material_bundle_directory(
@@ -2125,6 +2129,122 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if request_path.startswith("/api/world/mesh-assets/"):
+            is_texture_route = (
+                re.match(
+                    r"^/api/world/mesh-assets/[^/]*/textures(?:/|$)",
+                    request_path,
+                )
+                is not None
+            )
+            if is_texture_route:
+                texture_match = re.fullmatch(
+                    r"/api/world/mesh-assets/([0-9a-f]{64})/"
+                    r"textures/([0-9a-f]{64})\.png",
+                    request_path,
+                )
+                if texture_match is None or urlsplit(self.path).query:
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "mesh_texture_not_found",
+                        "Mesh texture not found.",
+                        head_only=head_only,
+                    )
+                    return
+                route_bundle_id, texture_sha256 = texture_match.groups()
+                mesh_manifest = _on_demand_mesh_manifest(self.project_root)
+                if mesh_manifest is None:
+                    self._error(
+                        HTTPStatus.CONFLICT,
+                        "mesh_on_demand_unavailable",
+                        "The world manifest does not opt in to verified mesh chunks.",
+                        head_only=head_only,
+                    )
+                    return
+                if route_bundle_id != mesh_manifest["mesh_grid"]["mesh_asset_bundle_id"]:
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "mesh_texture_not_found",
+                        "Mesh texture not found.",
+                        head_only=head_only,
+                    )
+                    return
+                try:
+                    directory, bundle = _load_active_mesh_asset_bundle(
+                        self.project_root,
+                        mesh_manifest,
+                    )
+                except MeshAssetBundleError:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_asset_bundle_invalid",
+                        "The declared mesh asset bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                    return
+                if type(bundle) is not MeshAssetBundleV2:
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "mesh_texture_not_found",
+                        "Mesh texture not found.",
+                        head_only=head_only,
+                    )
+                    return
+                try:
+                    payload = read_verified_mesh_texture(
+                        directory,
+                        bundle=bundle,
+                        sha256=texture_sha256,
+                    )
+                except MeshAssetBundleError as exc:
+                    if "not present" in str(exc):
+                        self._error(
+                            HTTPStatus.NOT_FOUND,
+                            "mesh_texture_not_found",
+                            "Mesh texture not found.",
+                            head_only=head_only,
+                        )
+                    else:
+                        self._error(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            "mesh_asset_bundle_invalid",
+                            "The declared mesh asset bundle is unavailable or invalid.",
+                            head_only=head_only,
+                        )
+                    return
+                digest = hashlib.sha256(payload).hexdigest()
+                if digest != texture_sha256:
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "mesh_asset_bundle_invalid",
+                        "The declared mesh asset bundle is unavailable or invalid.",
+                        head_only=head_only,
+                    )
+                    return
+                etag = f'"sha256:{digest}"'
+                cache_control = "public, max-age=31536000, immutable"
+                request_etags = {
+                    candidate.strip()
+                    for candidate in self.headers.get(
+                        "If-None-Match",
+                        "",
+                    ).split(",")
+                    if candidate.strip()
+                }
+                if "*" in request_etags or etag in request_etags:
+                    self._send_not_modified(
+                        etag,
+                        cache_control=cache_control,
+                    )
+                    return
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    payload,
+                    content_type="image/png",
+                    cache_control=cache_control,
+                    head_only=head_only,
+                    extra_headers={"ETag": etag},
+                )
+                return
             match = re.fullmatch(
                 r"/api/world/mesh-assets/([0-9a-f]{64})/"
                 r"([a-z0-9]+(?:_[a-z0-9]+)*)/lod([012])\.glb",

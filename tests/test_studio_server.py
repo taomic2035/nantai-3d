@@ -37,8 +37,23 @@ from pipeline.synthetic_village.material_bundle import (
     DerivedMaterialBundle,
     canonical_material_bundle_bytes,
 )
+from pipeline.synthetic_village.mesh_asset_build import (
+    ASSET_RECIPE_CONTRACTS,
+)
 from pipeline.synthetic_village.mesh_asset_bundle import (
     canonical_mesh_asset_bundle_bytes,
+)
+from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
+    MeshAssetBundleV2,
+    MeshAssetLod2SourceV2,
+    TextureObjectV2,
+    prepare_mesh_asset_bundle_v2,
+)
+from tests.test_glb_shared_texture_audit import (
+    _fixture as _write_shared_texture_glb_fixture,
+)
+from tests.test_glb_shared_texture_audit import (
+    _rewrite_with_original_binary,
 )
 from tests.test_mesh_asset_bundle import _glb_payload
 from tests.test_mesh_chunk import _bundle
@@ -442,6 +457,143 @@ def _write_mesh_world_bundle(root: Path):
     }
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return directory, bundle, glbs[1]
+
+
+def _mesh_v2_grid_geometry(
+    triangle_count: int,
+) -> tuple[
+    tuple[tuple[float, float, float], ...],
+    tuple[int, ...],
+]:
+    columns = 50
+    rows, remainder = divmod(triangle_count, columns * 2)
+    assert rows > 0 and remainder == 0
+    positions = tuple(
+        (
+            -0.2 + 0.4 * column / columns,
+            0.0,
+            -0.04 + 0.08 * row / rows,
+        )
+        for row in range(rows + 1)
+        for column in range(columns + 1)
+    )
+    indices = []
+    stride = columns + 1
+    for row in range(rows):
+        for column in range(columns):
+            lower_left = row * stride + column
+            lower_right = lower_left + 1
+            upper_left = lower_left + stride
+            upper_right = upper_left + 1
+            indices.extend(
+                (
+                    lower_left,
+                    lower_right,
+                    upper_right,
+                    lower_left,
+                    upper_right,
+                    upper_left,
+                ),
+            )
+    return positions, tuple(indices)
+
+
+def _write_mesh_world_bundle_v2(
+    root: Path,
+) -> tuple[Path, MeshAssetBundleV2]:
+    source_directory, source_bundle, _glb = _write_mesh_world_bundle(root)
+    source_material = next(
+        row
+        for row in source_bundle.material_registry
+        if row.slot_id == "material-fieldstone-01"
+    )
+    triangle_counts = {
+        "building": 8_000,
+        "vegetation": 6_000,
+        "prop": 1_000,
+    }
+    near_sources = {}
+    texture_objects: dict[str, TextureObjectV2] = {}
+    texture_root = root / ".pytest-mesh-v2-textures"
+    (texture_root / "textures").mkdir(parents=True)
+    for kind, triangle_count in triangle_counts.items():
+        positions, indices = _mesh_v2_grid_geometry(triangle_count)
+        near_root = root / f".pytest-mesh-v2-{kind}"
+        glb_path, _payload, document, bindings, objects, _expected = (
+            _write_shared_texture_glb_fixture(
+                near_root,
+                kind=kind,
+                material_algorithm_id=source_material.algorithm_id,
+                positions=positions,
+                indices=indices,
+            )
+        )
+        if kind == "vegetation":
+            bindings = tuple(
+                binding.model_copy(
+                    update={"material_slot_id": source_material.slot_id},
+                )
+                for binding in bindings
+            )
+        extras = document["materials"][0]["extras"]
+        extras.update(
+            {
+                "slot_id": source_material.slot_id,
+                "source_sha256": source_material.source_sha256,
+                "bundle_id": source_material.bundle_id,
+                "algorithm_id": source_material.algorithm_id,
+            },
+        )
+        _rewrite_with_original_binary(glb_path, document)
+        for descriptor in objects:
+            payload = (
+                near_root
+                / "texture-root"
+                / descriptor.object_path
+            ).read_bytes()
+            target = texture_root / descriptor.object_path
+            if target.exists():
+                assert target.read_bytes() == payload
+            else:
+                target.write_bytes(payload)
+            texture_objects[descriptor.sha256] = descriptor
+        near_sources[kind] = (glb_path, bindings)
+    lod2_sources = tuple(
+        MeshAssetLod2SourceV2(
+            asset_id=record.asset_id,
+            glb_path=near_sources[record.kind][0],
+            recipe_id=(
+                ASSET_RECIPE_CONTRACTS[record.asset_id][1].removesuffix(
+                    "-v1",
+                )
+                + "-near-v2"
+            ),
+            texture_bindings=near_sources[record.kind][1],
+        )
+        for record in source_bundle.records
+    )
+    prepared = prepare_mesh_asset_bundle_v2(
+        source_v1_bundle_root=source_directory,
+        lod2_sources=lod2_sources,
+        texture_root=texture_root,
+        texture_objects=tuple(
+            sorted(
+                texture_objects.values(),
+                key=lambda row: row.object_path,
+            ),
+        ),
+        staging_root=root / ".pytest-mesh-v2-staging",
+        build_tool_id="pytest-studio-mesh-v2",
+    )
+    final_directory = source_directory.parent / prepared.manifest.bundle_id
+    prepared.staging_root.rename(final_directory)
+    manifest_path = root / "web/data/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["mesh_grid"]["mesh_asset_bundle_id"] = (
+        prepared.manifest.bundle_id
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return final_directory, prepared.manifest
 
 
 class TestProjectSnapshot:
@@ -1283,6 +1435,134 @@ class TestHttpContract:
         assert asset_head_payload == asset_cached_payload == b""
         assert map_head_payload == map_cached_payload == b""
         assert not (tmp_path / "web/data/chunk_-2_3.json").exists()
+
+    def test_mesh_v2_runtime_and_texture_route_are_exact_and_fail_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        directory, bundle = _write_mesh_world_bundle_v2(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            chunk_status, _chunk_headers, chunk_payload = _request(
+                server,
+                "GET",
+                "/api/world/mesh-chunk/-2/3.json?lod=2",
+            )
+            runtime = json.loads(chunk_payload)
+            asset = runtime["asset_urls"][0]
+            dependency = asset["texture_dependencies"][0]
+            asset_status, asset_headers, asset_payload = _request(
+                server,
+                "GET",
+                asset["url"],
+            )
+            texture_status, texture_headers, texture_payload = _request(
+                server,
+                "GET",
+                dependency["url"],
+            )
+            head_status, head_headers, head_payload = _request(
+                server,
+                "HEAD",
+                dependency["url"],
+            )
+            cached_status, cached_headers, cached_payload = _request(
+                server,
+                "GET",
+                dependency["url"],
+                headers={"If-None-Match": texture_headers.get("etag", "")},
+            )
+            invalid_results = [
+                _request(server, "GET", path)
+                for path in (
+                    dependency["url"] + "?download=1",
+                    dependency["url"] + "/",
+                    dependency["url"].replace(
+                        dependency["sha256"],
+                        dependency["sha256"].upper(),
+                    ),
+                    dependency["url"].replace(
+                        dependency["sha256"],
+                        dependency["sha256"][:-1],
+                    ),
+                    dependency["url"].replace(
+                        f"{dependency['sha256']}.png",
+                        "../manifest.json",
+                    ),
+                    (
+                        "/api/world/mesh-assets/"
+                        f"{'f' * 64}/textures/{dependency['sha256']}.png"
+                    ),
+                    (
+                        "/api/world/mesh-assets/"
+                        f"{bundle.bundle_id}/textures/{'e' * 64}.png"
+                    ),
+                )
+            ]
+            target = directory / f"textures/{dependency['sha256']}.png"
+            target.write_bytes(target.read_bytes() + b"\0")
+            tampered_status, _tampered_headers, tampered_payload = _request(
+                server,
+                "GET",
+                dependency["url"],
+            )
+
+        assert chunk_status == 200
+        assert runtime["schema_version"] == (
+            "nantai.synthetic-village.mesh-chunk-runtime.v2"
+        )
+        assert asset_status == 200
+        assert asset_headers["content-type"] == "model/gltf-binary"
+        assert len(asset_payload) == asset["glb_bytes"]
+        assert hashlib.sha256(asset_payload).hexdigest() == (
+            asset["glb_sha256"]
+        )
+        assert texture_status == head_status == 200
+        assert cached_status == 304
+        assert texture_headers["content-type"] == "image/png"
+        assert texture_headers["content-length"] == str(len(texture_payload))
+        assert texture_headers["cache-control"] == (
+            "public, max-age=31536000, immutable"
+        )
+        assert texture_headers["x-content-type-options"] == "nosniff"
+        assert texture_headers["etag"] == head_headers["etag"]
+        assert cached_headers["etag"] == texture_headers["etag"]
+        assert texture_headers["etag"] == (
+            f"\"sha256:{dependency['sha256']}\""
+        )
+        assert len(texture_payload) == dependency["bytes"]
+        assert hashlib.sha256(texture_payload).hexdigest() == (
+            dependency["sha256"]
+        )
+        assert head_payload == cached_payload == b""
+        assert all(status == 404 for status, _headers, _payload in invalid_results)
+        assert tampered_status == 500
+        assert json.loads(tampered_payload)["error"]["code"] == (
+            "mesh_asset_bundle_invalid"
+        )
+
+    def test_mesh_v1_bundle_does_not_expose_v2_texture_route(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        _directory, bundle, _glb = _write_mesh_world_bundle(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _headers, payload = _request(
+                server,
+                "GET",
+                (
+                    "/api/world/mesh-assets/"
+                    f"{bundle.bundle_id}/textures/{'e' * 64}.png"
+                ),
+            )
+
+        assert status == 404
+        assert json.loads(payload)["error"]["code"] == (
+            "mesh_texture_not_found"
+        )
 
     def test_mesh_routes_fail_closed_without_exact_manifest_opt_in(
         self,
