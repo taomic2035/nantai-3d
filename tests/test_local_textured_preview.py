@@ -20,7 +20,10 @@ from pipeline.synthetic_village.canary import TexturedBuildRequest
 from pipeline.synthetic_village.elevated_topology import (
     canonical_elevated_topology_bytes,
 )
-from pipeline.synthetic_village.glb_material_audit import GlbMaterialAudit
+from pipeline.synthetic_village.glb_material_audit import (
+    GlbMaterialAudit,
+    audit_textured_glb,
+)
 from pipeline.synthetic_village.local_textured_preview import (
     LOCAL_TRAINING_BUILD_ENTRIES,
     LocalBlenderIdentity,
@@ -28,7 +31,10 @@ from pipeline.synthetic_village.local_textured_preview import (
     LocalTexturedPreviewError,
     LocalTexturedPreviewRequest,
     _expected_building_geometry,
+    _expected_glb_materials,
+    _expected_surface_realism,
     _publish_local_textured_training_build,
+    _verify_surface_realism_audit_agreement,
     build_local_textured_preview_manifest,
     build_local_textured_preview_request,
     canonical_local_glb_audit_bytes,
@@ -587,6 +593,31 @@ def test_local_blender_builds_four_registered_elevated_components(
         (staging / "build-report.json").read_text("utf-8"),
     )
     assert report["counts"]["canonical_roots"] == 130
+    assert report["surface_realism_profile_id"] == SURFACE_PROFILE_V1
+    surface = report["surface_realism"]
+    assert surface["terrain_resolution"] == [176, 126]
+    assert surface["terrain_triangle_count"] == 43_750
+    assert surface["detail_mesh_object_count"] == 18
+    assert surface["color_min"] <= 0.94
+    assert surface["color_max"] >= 1.04
+    assert report["counts"]["glb_triangles"] <= 125_000
+    assert report["counts"]["glb_primitives"] == 577
+    assert (staging / "village-canary.glb").stat().st_size <= 160_000_000
+    parsed_report = LocalTexturedBuildReport.model_validate_json(
+        (staging / "build-report.json").read_bytes(),
+    )
+    audit = audit_textured_glb(
+        staging / "village-canary.glb",
+        _expected_glb_materials(request),
+        expected_building_geometry=_expected_building_geometry(parsed_report),
+        expected_surface_realism=_expected_surface_realism(parsed_report),
+    )
+    _verify_surface_realism_audit_agreement(parsed_report, audit)
+    assert audit.surface_realism is not None
+    assert audit.surface_realism.color_primitive_count == 577
+    assert audit.triangle_count == report["counts"]["glb_triangles"]
+    assert audit.primitive_count == report["counts"]["glb_primitives"]
+    assert audit.byte_count == (staging / "village-canary.glb").stat().st_size
     probe = tmp_path / "probe-elevated.py"
     probe.write_text(
         """
@@ -658,9 +689,6 @@ print("NANTAI_ELEVATED_COMPONENTS_OK", flush=True)
     assert probe_result.returncode == 0, probe_result.stdout + probe_result.stderr
     assert "NANTAI_ELEVATED_COMPONENTS_OK" in probe_result.stdout
 
-    parsed_report = LocalTexturedBuildReport.model_validate_json(
-        (staging / "build-report.json").read_bytes(),
-    )
     frame_request = build_local_production_frame_request(
         plan=build_production_camera_plan(),
         camera_id="camera-elevated-pedestrian-001",
