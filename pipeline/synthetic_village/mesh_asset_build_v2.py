@@ -5,6 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import shutil
+import subprocess
+import uuid
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
@@ -17,19 +21,29 @@ from pydantic import (
     model_validator,
 )
 
-from pipeline.synthetic_village.canary import MaterialInputRecord
+from pipeline.studio_jobs import JobContractError, ProjectFileLock
+from pipeline.synthetic_village import canary
+from pipeline.synthetic_village.canary import CanaryBuildError, MaterialInputRecord
 from pipeline.synthetic_village.foliage_atlas import (
     ALPHA_CUTOFF,
+    FOLIAGE_ATLAS_MANIFEST,
+    FoliageAtlasError,
     FoliageAtlasSet,
     PreparedFoliageAtlasSet,
     _verify_prepared_atlas_set,
+    build_foliage_atlas_set,
+    canonical_foliage_atlas_set_bytes,
 )
 from pipeline.synthetic_village.glb_material_audit import ExpectedGlbMaterial
 from pipeline.synthetic_village.glb_shared_texture_audit import (
     SharedTextureGlbAuditError,
     audit_shared_textured_glb,
 )
-from pipeline.synthetic_village.local_textured_preview import LocalBlenderIdentity
+from pipeline.synthetic_village.local_textured_preview import (
+    LocalBlenderIdentity,
+    LocalTexturedPreviewError,
+    probe_local_blender_identity,
+)
 from pipeline.synthetic_village.material_bundle import (
     MaterialAlgorithmId,
     MaterialBundleError,
@@ -41,8 +55,10 @@ from pipeline.synthetic_village.mesh_asset_build import (
     EXPECTED_ASSET_IDS,
     AssetKind,
     MeshAssetBuildError,
+    _cleanup_owned_directory,
     _is_linklike,
     _material_input_registry,
+    _prepare_real_directory,
     _read_regular_file,
     _real_directory,
     _recipes_from_registry,
@@ -50,17 +66,22 @@ from pipeline.synthetic_village.mesh_asset_build import (
 )
 from pipeline.synthetic_village.mesh_asset_bundle import (
     GLB_COORDINATE_ENCODING,
+    MESH_ASSET_BUNDLE_MANIFEST,
     Bounds3,
     MeshAssetBundle,
+    MeshAssetBundleError,
+    MeshAssetBundleResult,
     canonical_mesh_asset_bundle_bytes,
     load_mesh_asset_bundle,
 )
 from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     LOD2_TRIANGLE_BANDS,
     MAX_MESH_TEXTURE_BYTES,
+    MeshAssetBundleV2,
     MeshAssetLod2SourceV2,
     TextureBindingV2,
     TextureObjectV2,
+    publish_mesh_asset_bundle_v2,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -69,6 +90,8 @@ MESH_ASSET_BUILD_V2_SCHEMA = "nantai.synthetic-village.mesh-asset-build.v2"
 MESH_ASSET_BUILD_REPORT_V2_SCHEMA = (
     "nantai.synthetic-village.mesh-asset-build-report.v2"
 )
+MAX_MESH_BUILD_REPORT_V2_BYTES = 16 * 1024 * 1024
+DEFAULT_MESH_BUILD_V2_TIMEOUT_SECONDS = 60 * 60
 
 NEAR_RECIPE_IDS = {
     "fence_wood_01": "weathered-timber-fence-near-v2",
@@ -289,6 +312,15 @@ class MeshAssetBuildReportV2(FrozenModel):
         return self
 
 
+@dataclass(frozen=True)
+class MeshAssetBuildResultV2:
+    request: MeshAssetBuildRequestV2
+    report: MeshAssetBuildReportV2
+    bundle: MeshAssetBundleResult
+    stdout: str
+    stderr: str
+
+
 def _jsonable(value: object) -> object:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
@@ -326,6 +358,34 @@ def canonical_mesh_asset_build_report_v2_bytes(
     report: MeshAssetBuildReportV2,
 ) -> bytes:
     return _canonical_json_bytes(report)
+
+
+def load_mesh_asset_build_report_v2(path: Path) -> MeshAssetBuildReportV2:
+    raw = _read_regular_file(
+        path,
+        label="near mesh build report",
+        maximum_bytes=MAX_MESH_BUILD_REPORT_V2_BYTES,
+    )
+    try:
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        report = MeshAssetBuildReportV2.model_validate_json(raw)
+    except (
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        ValueError,
+    ) as exc:
+        raise MeshAssetBuildError(
+            f"near mesh build report is invalid: {exc}",
+        ) from exc
+    if raw != canonical_mesh_asset_build_report_v2_bytes(report):
+        raise MeshAssetBuildError(
+            "near mesh build report is not canonical",
+        )
+    return report
 
 
 def _expected_texture_bindings(
@@ -742,3 +802,427 @@ def build_mesh_asset_request_v2(
         foliage_atlas_set.manifest,
     )
     return request
+
+
+def _collect_source_v1_snapshots(
+    source_root: Path,
+    request: MeshAssetBuildRequestV2,
+) -> tuple[canary._FileSnapshot, ...]:
+    bundle = load_mesh_asset_bundle(source_root)
+    if (
+        type(bundle) is not MeshAssetBundle
+        or bundle.bundle_id != request.source_v1_bundle_id
+    ):
+        raise MeshAssetBuildError(
+            "near mesh source bundle changed before invocation",
+        )
+    paths = {
+        source_root / MESH_ASSET_BUNDLE_MANIFEST,
+        *(
+            source_root / row.glb_object_path
+            for row in request.reused_lods
+        ),
+    }
+    snapshots = tuple(
+        canary._snapshot_regular_file(path)
+        for path in sorted(paths)
+    )
+    manifest = next(
+        row
+        for row in snapshots
+        if row.path.name == MESH_ASSET_BUNDLE_MANIFEST
+    )
+    if manifest.sha256 != request.source_v1_manifest_sha256:
+        raise MeshAssetBuildError(
+            "near mesh source manifest differs from its request",
+        )
+    return snapshots
+
+
+def _collect_foliage_atlas_snapshots(
+    prepared: PreparedFoliageAtlasSet,
+) -> tuple[canary._FileSnapshot, ...]:
+    _verify_prepared_atlas_set(prepared.root, prepared.manifest)
+    paths = {
+        prepared.root / FOLIAGE_ATLAS_MANIFEST,
+        *(
+            prepared.root / descriptor.object_path
+            for record in prepared.manifest.records
+            for descriptor in (
+                record.base_color,
+                record.normal,
+                record.orm,
+            )
+        ),
+    }
+    return tuple(
+        canary._snapshot_regular_file(path)
+        for path in sorted(paths)
+    )
+
+
+def _snapshot_foliage_atlas_inputs(
+    *,
+    prepared: PreparedFoliageAtlasSet,
+    invocation_root: Path,
+) -> tuple[canary._FileSnapshot, ...]:
+    atlas_root = invocation_root / "atlas-inputs"
+    if atlas_root.exists() or _is_linklike(atlas_root):
+        raise MeshAssetBuildError(
+            "near mesh atlas invocation snapshot must start absent",
+        )
+    atlas_root.mkdir()
+    (atlas_root / "textures").mkdir()
+    try:
+        canary._write_new_file(
+            atlas_root / FOLIAGE_ATLAS_MANIFEST,
+            canonical_foliage_atlas_set_bytes(prepared.manifest),
+        )
+        copied = []
+        descriptors = {
+            descriptor.sha256: descriptor
+            for record in prepared.manifest.records
+            for descriptor in (
+                record.base_color,
+                record.normal,
+                record.orm,
+            )
+        }
+        for sha256, descriptor in sorted(descriptors.items()):
+            copied.append(
+                canary._copy_material_snapshot(
+                    source=prepared.root / descriptor.object_path,
+                    destination=atlas_root / f"textures/{sha256}.png",
+                    expected_sha256=sha256,
+                ),
+            )
+        snapshots = (
+            canary._snapshot_regular_file(
+                atlas_root / FOLIAGE_ATLAS_MANIFEST,
+            ),
+            *copied,
+        )
+        canary._verify_snapshots_unchanged(snapshots)
+        return snapshots
+    except (CanaryBuildError, OSError):
+        if atlas_root.is_dir() and not _is_linklike(atlas_root):
+            shutil.rmtree(atlas_root, ignore_errors=True)
+        raise
+
+
+def _run_blender_process_v2(
+    *,
+    repo_root: Path,
+    executable: Path,
+    builder_script: Path,
+    request_path: Path,
+    material_root: Path,
+    atlas_root: Path,
+    staging: Path,
+    invocation_root: Path,
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    argv = [
+        str(executable),
+        "--background",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--python-exit-code",
+        "17",
+        "--python",
+        builder_script.relative_to(repo_root).as_posix(),
+        "--",
+        "--request",
+        str(request_path),
+        "--material-root",
+        str(material_root),
+        "--atlas-root",
+        str(atlas_root),
+        "--output-root",
+        str(staging),
+        "--report",
+        str(staging / "build-report.json"),
+    ]
+    try:
+        timeout_error = None
+        with (
+            canary._BoundedPipeCapture("stdout") as stdout,
+            canary._BoundedPipeCapture("stderr") as stderr,
+        ):
+            try:
+                completed = subprocess.run(
+                    argv,
+                    check=False,
+                    shell=False,
+                    cwd=str(repo_root),
+                    env=canary._minimum_blender_environment(
+                        invocation_root,
+                    ),
+                    timeout=timeout_seconds,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout.writer,
+                    stderr=stderr.writer,
+                )
+            except subprocess.TimeoutExpired as exc:
+                timeout_error = exc
+                completed = None
+        if timeout_error is not None:
+            raise MeshAssetBuildError(
+                "near mesh Blender build exceeded "
+                f"the {timeout_seconds}-second timeout",
+            ) from timeout_error
+        if completed is None:
+            raise MeshAssetBuildError(
+                "near mesh Blender build returned no completion status",
+            )
+        return completed.returncode, stdout.text(), stderr.text()
+    except MeshAssetBuildError:
+        raise
+    except (OSError, CanaryBuildError) as exc:
+        raise MeshAssetBuildError(
+            f"near mesh Blender process could not run: {exc}",
+        ) from exc
+
+
+def _verify_published_mesh_asset_build_v2(
+    *,
+    result: MeshAssetBundleResult,
+    request: MeshAssetBuildRequestV2,
+) -> None:
+    published = load_mesh_asset_bundle(result.final_directory)
+    if (
+        type(published) is not MeshAssetBundleV2
+        or published.bundle_id != result.bundle_id
+        or len(published.records) != result.record_count
+        or published.asset_ids != request.asset_ids
+        or published.source_v1_bundle_id != request.source_v1_bundle_id
+        or published.build_tool_id
+        != f"mesh-asset-build-v2-{request.build_id}"
+    ):
+        raise MeshAssetBuildError(
+            "published near mesh bundle disagrees with its build request",
+        )
+
+
+def run_mesh_asset_build_v2(
+    *,
+    repo_root: Path,
+    source_v1_bundle_root: Path,
+    material_bundle_root: Path,
+    blender_executable: Path,
+    builder_script: Path,
+    work_root: Path,
+    publication_root: Path,
+    foliage_atlas_set: PreparedFoliageAtlasSet | None = None,
+    timeout_seconds: int = DEFAULT_MESH_BUILD_V2_TIMEOUT_SECONDS,
+) -> MeshAssetBuildResultV2:
+    """Snapshot, invoke, audit, and publish one exact near-mesh v2 build."""
+
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or not 1 <= timeout_seconds <= 24 * 60 * 60
+    ):
+        raise MeshAssetBuildError(
+            "near mesh build timeout must be an integer from 1 to 86400 seconds",
+        )
+    repo = _real_directory(Path(repo_root), label="repository root")
+    source_root = _real_directory(
+        Path(source_v1_bundle_root),
+        label="source v1 mesh bundle",
+    )
+    material_root = _real_directory(
+        Path(material_bundle_root),
+        label="material bundle root",
+    )
+    work = _prepare_real_directory(
+        Path(work_root),
+        label="near mesh build work root",
+    )
+    publication = Path(publication_root).expanduser().absolute()
+    builder = _selected_builder(repo, builder_script)
+    blender = Path(blender_executable).expanduser().absolute()
+    invocation_root: Path | None = None
+    staging: Path | None = None
+    owned_atlas_root: Path | None = None
+    try:
+        with ProjectFileLock(
+            work / ".mesh-near-build.lock",
+            role="writer",
+        ):
+            prepared_atlas = foliage_atlas_set
+            if prepared_atlas is None:
+                owned_atlas_root = (
+                    work / f".mesh-near-atlas-{uuid.uuid4().hex}"
+                )
+                prepared_atlas = build_foliage_atlas_set(
+                    material_root,
+                    owned_atlas_root,
+                )
+            try:
+                blender_snapshot = canary._snapshot_regular_file(blender)
+                builder_snapshot = canary._snapshot_regular_file(builder)
+                registry_snapshot = canary._snapshot_regular_file(
+                    repo / "assets/registry.json",
+                )
+                material_snapshots = canary._collect_material_bundle_snapshots(
+                    material_root,
+                )
+                atlas_snapshots = _collect_foliage_atlas_snapshots(
+                    prepared_atlas,
+                )
+                blender_identity = probe_local_blender_identity(blender)
+            except (
+                CanaryBuildError,
+                FoliageAtlasError,
+                LocalTexturedPreviewError,
+            ) as exc:
+                raise MeshAssetBuildError(
+                    f"near mesh inputs cannot be snapshotted: {exc}",
+                ) from exc
+            if blender_identity.executable_sha256 != blender_snapshot.sha256:
+                raise MeshAssetBuildError(
+                    "near mesh Blender identity disagrees with executable bytes",
+                )
+            request = build_mesh_asset_request_v2(
+                repo_root=repo,
+                source_v1_bundle_root=source_root,
+                material_bundle_root=material_root,
+                foliage_atlas_set=prepared_atlas,
+                builder_script=builder,
+                blender_identity=blender_identity,
+            )
+            source_snapshots = _collect_source_v1_snapshots(
+                source_root,
+                request,
+            )
+            immutable_inputs = (
+                blender_snapshot,
+                builder_snapshot,
+                registry_snapshot,
+                *material_snapshots,
+                *atlas_snapshots,
+                *source_snapshots,
+            )
+            canary._verify_snapshots_unchanged(immutable_inputs)
+
+            nonce = uuid.uuid4().hex
+            invocation_root = work / f".mesh-near-invocation-{nonce}"
+            staging = work / f".mesh-near-builder-{nonce}"
+            invocation_root.mkdir(exist_ok=False)
+            if staging.exists() or _is_linklike(staging):
+                raise MeshAssetBuildError(
+                    "near mesh builder output must start absent",
+                )
+            request_path = invocation_root / "request.json"
+            try:
+                canary._write_new_file(
+                    request_path,
+                    canonical_mesh_asset_build_request_v2_bytes(request),
+                )
+                request_snapshot = canary._snapshot_regular_file(
+                    request_path,
+                )
+                material_copies = canary.snapshot_material_inputs(
+                    request=request,
+                    material_bundle_root=material_root,
+                    invocation_root=invocation_root,
+                )
+                atlas_copies = _snapshot_foliage_atlas_inputs(
+                    prepared=prepared_atlas,
+                    invocation_root=invocation_root,
+                )
+            except (CanaryBuildError, OSError) as exc:
+                raise MeshAssetBuildError(
+                    f"near mesh invocation snapshot failed: {exc}",
+                ) from exc
+            invocation_snapshots = (
+                *immutable_inputs,
+                request_snapshot,
+                *material_copies,
+                *atlas_copies,
+            )
+            canary._verify_snapshots_unchanged(invocation_snapshots)
+            returncode, stdout, stderr = _run_blender_process_v2(
+                repo_root=repo,
+                executable=blender,
+                builder_script=builder,
+                request_path=request_path,
+                material_root=invocation_root / "material-inputs",
+                atlas_root=invocation_root / "atlas-inputs",
+                staging=staging,
+                invocation_root=invocation_root,
+                timeout_seconds=timeout_seconds,
+            )
+            canary._verify_snapshots_unchanged(invocation_snapshots)
+            if returncode != 0:
+                raise MeshAssetBuildError(
+                    "near mesh Blender build failed "
+                    f"with exit code {returncode}",
+                )
+            report = load_mesh_asset_build_report_v2(
+                staging / "build-report.json",
+            )
+            lod2_sources, texture_objects = (
+                _report_sources_and_texture_objects(
+                    request=request,
+                    report=report,
+                    staging=staging,
+                )
+            )
+            canary._verify_snapshots_unchanged(invocation_snapshots)
+        bundle = publish_mesh_asset_bundle_v2(
+            source_v1_bundle_root=source_root,
+            lod2_sources=lod2_sources,
+            texture_root=staging,
+            texture_objects=texture_objects,
+            publication_root=publication,
+            work_root=work,
+            build_tool_id=f"mesh-asset-build-v2-{request.build_id}",
+            verification_level="L0",
+        )
+        _verify_published_mesh_asset_build_v2(
+            result=bundle,
+            request=request,
+        )
+        return MeshAssetBuildResultV2(
+            request=request,
+            report=report,
+            bundle=bundle,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except MeshAssetBuildError:
+        raise
+    except JobContractError as exc:
+        raise MeshAssetBuildError(
+            f"near mesh build lock is unavailable: {exc}",
+        ) from exc
+    except (
+        CanaryBuildError,
+        FoliageAtlasError,
+        MeshAssetBundleError,
+        OSError,
+        RuntimeError,
+        ValidationError,
+        ValueError,
+    ) as exc:
+        raise MeshAssetBuildError(
+            f"near mesh build failed safely: {exc}",
+        ) from exc
+    finally:
+        _cleanup_owned_directory(
+            staging,
+            work_root=work,
+            prefix=".mesh-near-builder-",
+        )
+        _cleanup_owned_directory(
+            invocation_root,
+            work_root=work,
+            prefix=".mesh-near-invocation-",
+        )
+        _cleanup_owned_directory(
+            owned_atlas_root,
+            work_root=work,
+            prefix=".mesh-near-atlas-",
+        )

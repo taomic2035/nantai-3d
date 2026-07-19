@@ -31,10 +31,12 @@ from pipeline.synthetic_village.mesh_asset_build_v2 import (
     build_mesh_asset_request_v2,
     canonical_mesh_asset_build_report_v2_bytes,
     canonical_mesh_asset_build_request_v2_bytes,
+    run_mesh_asset_build_v2,
 )
 from pipeline.synthetic_village.mesh_asset_bundle import (
     GLB_COORDINATE_ENCODING,
     MeshAssetBundle,
+    MeshAssetBundleResult,
     MeshAssetRecord,
     MeshTemplateLod,
     canonical_mesh_asset_bundle_bytes,
@@ -448,6 +450,140 @@ def test_report_crosscheck_produces_exact_lod2_and_texture_sources(
             report=tampered,
             staging=staging,
         )
+
+
+def test_run_near_build_snapshots_invokes_publishes_and_cleans(
+    request_inputs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = request_inputs["source_root"]
+    source_bundle = request_inputs["source_bundle"]
+    work_root = request_inputs["root"] / "orchestrator-work"
+    publication_root = request_inputs["root"] / "orchestrator-published"
+    blender = request_inputs["root"] / "Blender"
+    blender.write_bytes(b"verified-test-blender")
+    blender_identity = LOCAL_BLENDER.model_copy(
+        update={
+            "executable_sha256": hashlib.sha256(
+                blender.read_bytes(),
+            ).hexdigest(),
+        },
+    )
+    final_directory = publication_root / ("d" * 64)
+    calls = {}
+
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "load_mesh_asset_bundle",
+        lambda root: (
+            source_bundle
+            if Path(root) == source_root
+            else (_ for _ in ()).throw(AssertionError(root))
+        ),
+    )
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "_collect_source_v1_snapshots",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "probe_local_blender_identity",
+        lambda _path: blender_identity,
+    )
+
+    def run_process(**kwargs):
+        calls["process"] = kwargs
+        request = mesh_asset_build_v2.MeshAssetBuildRequestV2.model_validate_json(
+            kwargs["request_path"].read_bytes(),
+        )
+        kwargs["staging"].mkdir()
+        _write_fake_builder_outputs(
+            kwargs["staging"],
+            request,
+            request_inputs,
+        )
+        return 0, "fake Blender complete", ""
+
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "_run_blender_process_v2",
+        run_process,
+    )
+
+    def audit(path: Path, **_kwargs):
+        output_root = path.parents[2]
+        report = mesh_asset_build_v2.load_mesh_asset_build_report_v2(
+            output_root / "build-report.json",
+        )
+        row = next(
+            item
+            for item in report.artifacts
+            if path == output_root / item.artifact_path
+        )
+        payload = path.read_bytes()
+        return SimpleNamespace(
+            glb_sha256=hashlib.sha256(payload).hexdigest(),
+            byte_count=len(payload),
+            triangle_count=row.triangle_count,
+            primitive_count=row.primitive_count,
+            slot_ids=row.material_slot_ids,
+            topology=SimpleNamespace(aabb=row.local_enu_aabb),
+        )
+
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "audit_shared_textured_glb",
+        audit,
+    )
+
+    def publish(**kwargs):
+        calls["publish"] = kwargs
+        assert kwargs["source_v1_bundle_root"] == source_root
+        assert kwargs["texture_root"].is_dir()
+        assert len(kwargs["lod2_sources"]) == 11
+        assert len(kwargs["texture_objects"]) > 0
+        final_directory.mkdir(parents=True)
+        return MeshAssetBundleResult(
+            bundle_id="d" * 64,
+            final_directory=final_directory,
+            record_count=11,
+            reused=False,
+        )
+
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "publish_mesh_asset_bundle_v2",
+        publish,
+    )
+    monkeypatch.setattr(
+        mesh_asset_build_v2,
+        "_verify_published_mesh_asset_build_v2",
+        lambda **kwargs: calls.setdefault("verified", kwargs),
+    )
+
+    result = run_mesh_asset_build_v2(
+        repo_root=ROOT,
+        source_v1_bundle_root=source_root,
+        material_bundle_root=request_inputs["material_root"],
+        foliage_atlas_set=request_inputs["atlas"],
+        blender_executable=blender,
+        builder_script=Path("scripts/blender/build_mesh_asset_bundle.py"),
+        work_root=work_root,
+        publication_root=publication_root,
+        timeout_seconds=90,
+    )
+
+    assert result.bundle.bundle_id == "d" * 64
+    assert result.report.build_id == result.request.build_id
+    assert result.stdout == "fake Blender complete"
+    assert calls["process"]["timeout_seconds"] == 90
+    assert calls["publish"]["build_tool_id"] == (
+        f"mesh-asset-build-v2-{result.request.build_id}"
+    )
+    assert calls["verified"]["result"] == result.bundle
+    assert not tuple(work_root.glob(".mesh-near-invocation-*"))
+    assert not tuple(work_root.glob(".mesh-near-builder-*"))
 
 
 def test_report_requires_exact_sorted_lod2_matrix(
