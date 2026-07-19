@@ -9,7 +9,17 @@ import pytest
 
 import pipeline.synthetic_village.material_bundle_v2 as material_v2
 from pipeline.synthetic_village.h3_material_sources import H3_HERO_SLOTS
-from pipeline.synthetic_village.material_bundle import prepare_material_bundle
+from pipeline.synthetic_village.ktx2_toolchain import (
+    H3Ktx2MaterialRecord,
+    H3Ktx2Pack,
+    KtxDecodedQuality,
+    KtxTextureDescriptor,
+    canonical_h3_ktx2_pack_bytes,
+)
+from pipeline.synthetic_village.material_bundle import (
+    MaterialBundleError,
+    prepare_material_bundle,
+)
 from pipeline.synthetic_village.material_bundle_v2 import (
     H2_PROFILE_ID,
     H3_PROFILE_ID,
@@ -17,8 +27,13 @@ from pipeline.synthetic_village.material_bundle_v2 import (
     MaterialBundleV2Error,
     canonical_material_bundle_v2_bytes,
     compose_material_bundle_v2,
+    load_material_bundle_v2,
+    prepare_material_bundle_v2,
+    publish_material_bundle_v2,
+    read_verified_material_texture_v2,
 )
 from tests.synthetic_material_fixtures import write_material_visual_pack
+from tests.test_ktx2_toolchain import _fake_ktx2
 
 
 @pytest.fixture(scope="module")
@@ -68,6 +83,89 @@ def _fake_h3_pack(*, missing_last: bool = False):
             for slot_id in slots
         ),
     )
+
+
+def _write_fake_ktx_pack(root):
+    object_root = root / "objects"
+    object_root.mkdir(parents=True)
+    payloads = {}
+    records = []
+    for slot_id in H3_HERO_SLOTS:
+        descriptors = {}
+        for role in ("base_color", "normal", "orm"):
+            transfer = "srgb" if role == "base_color" else "linear"
+            payload = _fake_ktx2(
+                transfer=2 if transfer == "srgb" else 1,
+            )
+            digest = hashlib.sha256(payload).hexdigest()
+            payloads[digest] = payload
+            quality = {
+                "base_color": KtxDecodedQuality(
+                    role="base_color",
+                    base_colour_ssim=1.0,
+                ),
+                "normal": KtxDecodedQuality(
+                    role="normal",
+                    normal_mean_cosine=1.0,
+                    normal_p01_cosine=1.0,
+                ),
+                "orm": KtxDecodedQuality(
+                    role="orm",
+                    orm_max_channel_error=0.0,
+                ),
+            }[role]
+            descriptors[role] = KtxTextureDescriptor(
+                role=role,
+                source_sha256=hashlib.sha256(
+                    f"{slot_id}:{role}:source".encode(),
+                ).hexdigest(),
+                object_path=f"objects/{digest}.ktx2",
+                sha256=digest,
+                bytes=len(payload),
+                transfer=transfer,
+                codec="uastc",
+                toktx_sha256="4" * 64,
+                command_options=("--encode", "uastc"),
+                official_validation=True,
+                repeat_build_byte_equal=True,
+                orm_etc1s_fallback=role == "orm",
+                quality=quality,
+            )
+        records.append(
+            H3Ktx2MaterialRecord(
+                slot_id=slot_id,
+                **descriptors,
+            ),
+        )
+    provisional = H3Ktx2Pack.model_construct(
+        pack_id="0" * 64,
+        source_pack_id="1" * 64,
+        authored_pack_id="2" * 64,
+        package_sha256="3" * 64,
+        toktx_sha256="4" * 64,
+        ktx_sha256="5" * 64,
+        records=tuple(records),
+    )
+    pack = H3Ktx2Pack(
+        pack_id=hashlib.sha256(
+            canonical_h3_ktx2_pack_bytes(
+                provisional,
+                exclude_pack_id=True,
+            ),
+        ).hexdigest(),
+        source_pack_id=provisional.source_pack_id,
+        authored_pack_id=provisional.authored_pack_id,
+        package_sha256=provisional.package_sha256,
+        toktx_sha256=provisional.toktx_sha256,
+        ktx_sha256=provisional.ktx_sha256,
+        records=provisional.records,
+    )
+    for digest, payload in payloads.items():
+        (object_root / f"{digest}.ktx2").write_bytes(payload)
+    (root / "manifest.json").write_bytes(
+        canonical_h3_ktx2_pack_bytes(pack),
+    )
+    return pack
 
 
 def test_material_v2_binds_complete_h3_and_exact_h2_profiles(
@@ -152,3 +250,88 @@ def test_material_v2_rejects_wrong_h2_or_incomplete_h3(
             h2_bundle,
             _fake_h3_pack(missing_last=True),
         )
+
+
+def test_material_v2_prepares_loads_and_reads_exact_profile_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    visual = write_material_visual_pack(tmp_path / "visual")
+    h2_prepared = prepare_material_bundle(
+        visual_pack_root=visual,
+        staging_root=tmp_path / "h2",
+    )
+    ktx_root = tmp_path / "ktx"
+    ktx_pack = _write_fake_ktx_pack(ktx_root)
+    monkeypatch.setattr(
+        material_v2,
+        "ACCEPTED_H2_MATERIAL_BUNDLE_ID",
+        h2_prepared.manifest.bundle_id,
+    )
+    bundle = compose_material_bundle_v2(
+        h2_prepared.manifest,
+        ktx_pack,
+    )
+
+    prepared = prepare_material_bundle_v2(
+        h2_bundle_root=h2_prepared.staging_root,
+        ktx2_root=ktx_root,
+        bundle=bundle,
+        staging_root=tmp_path / "v2",
+    )
+    loaded = load_material_bundle_v2(prepared.staging_root)
+    assert loaded == bundle
+
+    unexpected = prepared.staging_root / "unexpected.bin"
+    unexpected.write_bytes(b"not declared")
+    with pytest.raises(MaterialBundleError, match="closure"):
+        load_material_bundle_v2(prepared.staging_root)
+    unexpected.unlink()
+
+    descriptor = next(
+        row
+        for row in loaded.profiles[H3_PROFILE_ID].textures
+        if row.media_type == "image/ktx2"
+    )
+    payload = read_verified_material_texture_v2(
+        prepared.staging_root,
+        bundle=loaded,
+        profile_id=H3_PROFILE_ID,
+        sha256=descriptor.sha256,
+        media_type="image/ktx2",
+    )
+    assert len(payload) == descriptor.bytes
+    assert hashlib.sha256(payload).hexdigest() == descriptor.sha256
+
+    with pytest.raises(MaterialBundleError, match="profile"):
+        read_verified_material_texture_v2(
+            prepared.staging_root,
+            bundle=loaded,
+            profile_id=H2_PROFILE_ID,
+            sha256=descriptor.sha256,
+            media_type="image/ktx2",
+        )
+
+    first = publish_material_bundle_v2(
+        h2_bundle_root=h2_prepared.staging_root,
+        ktx2_root=ktx_root,
+        bundle=bundle,
+        publication_root=tmp_path / "published",
+        work_root=tmp_path / "work",
+    )
+    second = publish_material_bundle_v2(
+        h2_bundle_root=h2_prepared.staging_root,
+        ktx2_root=ktx_root,
+        bundle=bundle,
+        publication_root=tmp_path / "published",
+        work_root=tmp_path / "work",
+    )
+    assert first.reused is False
+    assert second.reused is True
+    assert second.final_directory == first.final_directory
+    assert load_material_bundle_v2(first.final_directory) == bundle
+
+    target = prepared.staging_root / descriptor.object_path
+    target.write_bytes(payload + b"tampered")
+    with pytest.raises(MaterialBundleError, match="object|bundle"):
+        load_material_bundle_v2(prepared.staging_root)
