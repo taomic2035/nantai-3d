@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import struct
 from pathlib import Path
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from pipeline.synthetic_village.ktx2_toolchain import (
     KTX2_MAGIC,
@@ -17,7 +20,10 @@ from pipeline.synthetic_village.ktx2_toolchain import (
     KTX_TOOL_VERSION,
     KtxToolchainError,
     audit_ktx2_bytes,
+    extract_command,
+    measure_decoded_quality,
     toktx_command,
+    validation_command,
 )
 from scripts import setup_synthetic_tools
 
@@ -68,6 +74,17 @@ def _fake_ktx2(
         0,
     )
     return header + b"".join(levels) + bytes(dfd) + b"".join(level_payloads)
+
+
+def _png_bytes(pixels: np.ndarray) -> bytes:
+    output = io.BytesIO()
+    Image.fromarray(pixels, mode="RGB").save(
+        output,
+        format="PNG",
+        optimize=False,
+        compress_level=1,
+    )
+    return output.getvalue()
 
 
 def test_exact_khronos_darwin_arm64_pin() -> None:
@@ -146,6 +163,100 @@ def test_orm_starts_etc1s_and_can_fall_back_to_uastc() -> None:
     assert fallback[fallback.index("--encode") + 1] == "uastc"
 
 
+def test_official_validation_and_decode_commands_are_exact() -> None:
+    assert validation_command(
+        Path("/opt/ktx/bin/ktx"),
+        Path("texture.ktx2"),
+    ) == (
+        "/opt/ktx/bin/ktx",
+        "validate",
+        "--format",
+        "mini-json",
+        "--warnings-as-errors",
+        "--gltf-basisu",
+        "texture.ktx2",
+    )
+    assert extract_command(
+        Path("/opt/ktx/bin/ktx"),
+        source=Path("texture.ktx2"),
+        output=Path("decoded.png"),
+    ) == (
+        "/opt/ktx/bin/ktx",
+        "extract",
+        "--transcode",
+        "rgba8",
+        "--level",
+        "0",
+        "texture.ktx2",
+        "decoded.png",
+    )
+
+
+def test_decoded_quality_gates_are_role_exact() -> None:
+    size = 4096
+    horizontal = np.linspace(32, 224, size, dtype=np.uint8)
+    base = np.empty((size, size, 3), dtype=np.uint8)
+    base[..., 0] = horizontal
+    base[..., 1] = horizontal[:, None]
+    base[..., 2] = 127
+    base_quality = measure_decoded_quality(
+        _png_bytes(base),
+        _png_bytes(base.copy()),
+        role="base_color",
+    )
+    assert base_quality.base_colour_ssim == pytest.approx(1.0)
+    assert base_quality.passed is True
+
+    normal = np.empty_like(base)
+    normal[..., 0] = 128
+    normal[..., 1] = 128
+    normal[..., 2] = 255
+    normal_quality = measure_decoded_quality(
+        _png_bytes(normal),
+        _png_bytes(normal.copy()),
+        role="normal",
+    )
+    assert normal_quality.normal_mean_cosine == pytest.approx(1.0)
+    assert normal_quality.normal_p01_cosine == pytest.approx(1.0)
+    assert normal_quality.passed is True
+
+    orm = np.empty_like(base)
+    orm[..., 0] = 255
+    orm[..., 1] = 190
+    orm[..., 2] = 0
+    decoded_orm = np.clip(orm.astype(np.int16) + 12, 0, 255).astype(np.uint8)
+    orm_quality = measure_decoded_quality(
+        _png_bytes(orm),
+        _png_bytes(decoded_orm),
+        role="orm",
+    )
+    assert orm_quality.orm_max_channel_error == pytest.approx(12 / 255)
+    assert orm_quality.passed is True
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["base_color", "normal", "orm"],
+)
+def test_decoded_quality_rejects_role_specific_failure(role: str) -> None:
+    reference = np.zeros((4096, 4096, 3), dtype=np.uint8)
+    decoded = reference.copy()
+    if role == "base_color":
+        reference[..., 0] = 255
+    elif role == "normal":
+        reference[..., 2] = 255
+        decoded[..., 2] = 0
+    else:
+        decoded[..., 1] = 13
+
+    with pytest.raises(KtxToolchainError, match="decoded quality"):
+        measure_decoded_quality(
+            _png_bytes(reference),
+            _png_bytes(decoded),
+            role=role,
+        )
+
+
 def test_independent_ktx2_audit_reads_header_dfd_and_full_mip_chain() -> None:
     payload = _fake_ktx2()
     audit = audit_ktx2_bytes(
@@ -187,4 +298,3 @@ def test_setup_parser_exposes_exact_private_ktx_install() -> None:
         ["--install-ktx-4.4.2"],
     )
     assert args.install_ktx_4_4_2 is True
-

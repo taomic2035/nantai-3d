@@ -8,6 +8,7 @@ function, and universal codec cannot be inferred from filenames or commands.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import platform
@@ -18,6 +19,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
+import numpy as np
+from PIL import Image, UnidentifiedImageError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -27,6 +30,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from skimage.metrics import structural_similarity
 
 KTX_TOOL_VERSION = "4.4.2"
 KTX_DARWIN_ARM64_ASSET = "KTX-Software-4.4.2-Darwin-arm64.pkg"
@@ -64,6 +68,10 @@ KTX_DF_TRANSFER_LINEAR = 1
 KTX_DF_TRANSFER_SRGB = 2
 KTX_SS_BASIS_LZ = 1
 KTX_SS_ZSTD = 2
+KTX_BASE_COLOUR_MIN_SSIM = 0.97
+KTX_NORMAL_MIN_MEAN_COSINE = 0.98
+KTX_NORMAL_MIN_P01_COSINE = 0.90
+KTX_ORM_MAX_CHANNEL_ERROR = 12 / 255
 KTX_PACKAGE_SIGNER = "Developer ID Installer: The Khronos Group, Inc. (TD2656HYNK)"
 KTX_TEAM_ID = "TD2656HYNK"
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -179,6 +187,49 @@ class KtxBinaryAudit(FrozenModel):
     transfer: Transfer
     codec: Codec
     media_type: Literal["image/ktx2"] = "image/ktx2"
+
+
+class KtxDecodedQuality(FrozenModel):
+    role: TextureRole
+    base_colour_ssim: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    normal_mean_cosine: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    normal_p01_cosine: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    orm_max_channel_error: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    passed: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _only_role_metrics_are_present(self) -> KtxDecodedQuality:
+        present = {
+            "base_color": self.base_colour_ssim is not None,
+            "normal": (
+                self.normal_mean_cosine is not None
+                and self.normal_p01_cosine is not None
+            ),
+            "orm": self.orm_max_channel_error is not None,
+        }
+        if not present[self.role] or sum(present.values()) != 1:
+            raise ValueError("decoded quality metrics do not match texture role")
+        return self
 
 
 def _canonical_json_bytes(value: BaseModel) -> bytes:
@@ -297,6 +348,158 @@ def toktx_command(
         transfer,
         str(output),
         str(source),
+    )
+
+
+def validation_command(
+    executable: Path,
+    source: Path,
+) -> tuple[str, ...]:
+    return (
+        str(executable),
+        "validate",
+        "--format",
+        "mini-json",
+        "--warnings-as-errors",
+        "--gltf-basisu",
+        str(source),
+    )
+
+
+def extract_command(
+    executable: Path,
+    *,
+    source: Path,
+    output: Path,
+) -> tuple[str, ...]:
+    return (
+        str(executable),
+        "extract",
+        "--transcode",
+        "rgba8",
+        "--level",
+        "0",
+        str(source),
+        str(output),
+    )
+
+
+def _decode_quality_png(payload: bytes, *, label: str) -> np.ndarray:
+    if len(payload) < 1 or len(payload) > 128 * 1024 * 1024:
+        raise KtxToolchainError(f"{label} PNG byte length is invalid")
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image.load()
+            if image.format != "PNG" or image.size != (4096, 4096):
+                raise KtxToolchainError(
+                    f"{label} must be an exact 4096 by 4096 PNG",
+                )
+            if image.mode not in {"RGB", "RGBA"}:
+                raise KtxToolchainError(f"{label} must decode as RGB or RGBA")
+            return np.asarray(image.convert("RGB"), dtype=np.uint8)
+    except KtxToolchainError:
+        raise
+    except (OSError, UnidentifiedImageError) as exc:
+        raise KtxToolchainError(f"{label} is not a valid PNG") from exc
+
+
+def _tiled_base_colour_ssim(
+    reference: np.ndarray,
+    decoded: np.ndarray,
+) -> float:
+    scores = []
+    tile_size = 512
+    for y in range(0, 4096, tile_size):
+        for x in range(0, 4096, tile_size):
+            scores.append(
+                structural_similarity(
+                    reference[y : y + tile_size, x : x + tile_size],
+                    decoded[y : y + tile_size, x : x + tile_size],
+                    channel_axis=2,
+                    data_range=255,
+                ),
+            )
+    return float(np.mean(np.asarray(scores, dtype=np.float64)))
+
+
+def _normal_cosines(
+    reference: np.ndarray,
+    decoded: np.ndarray,
+) -> np.ndarray:
+    values = []
+    for start in range(0, 4096, 256):
+        reference_rows = (
+            reference[start : start + 256].astype(np.float32) / 127.5 - 1.0
+        )
+        decoded_rows = (
+            decoded[start : start + 256].astype(np.float32) / 127.5 - 1.0
+        )
+        reference_rows /= np.maximum(
+            np.linalg.norm(reference_rows, axis=2, keepdims=True),
+            1e-12,
+        )
+        decoded_rows /= np.maximum(
+            np.linalg.norm(decoded_rows, axis=2, keepdims=True),
+            1e-12,
+        )
+        values.append(
+            np.sum(reference_rows * decoded_rows, axis=2).reshape(-1),
+        )
+    return np.concatenate(values)
+
+
+def measure_decoded_quality(
+    reference_payload: bytes,
+    decoded_payload: bytes,
+    *,
+    role: TextureRole,
+) -> KtxDecodedQuality:
+    """Measure and enforce frozen decoded-quality gates for one level-0 PNG."""
+
+    if role not in {"base_color", "normal", "orm"}:
+        raise KtxToolchainError(f"unknown decoded texture role: {role}")
+    reference = _decode_quality_png(reference_payload, label="reference")
+    decoded = _decode_quality_png(decoded_payload, label="decoded KTX level")
+    if role == "base_color":
+        score = _tiled_base_colour_ssim(reference, decoded)
+        if score < KTX_BASE_COLOUR_MIN_SSIM:
+            raise KtxToolchainError(
+                "base_color decoded quality failed the SSIM gate",
+            )
+        return KtxDecodedQuality(
+            role=role,
+            base_colour_ssim=round(score, 8),
+        )
+    if role == "normal":
+        cosines = _normal_cosines(reference, decoded)
+        mean = float(np.mean(cosines, dtype=np.float64))
+        percentile = float(np.quantile(cosines, 0.01))
+        if (
+            mean < KTX_NORMAL_MIN_MEAN_COSINE
+            or percentile < KTX_NORMAL_MIN_P01_COSINE
+        ):
+            raise KtxToolchainError(
+                "normal decoded quality failed the cosine gates",
+            )
+        return KtxDecodedQuality(
+            role=role,
+            normal_mean_cosine=round(mean, 8),
+            normal_p01_cosine=round(percentile, 8),
+        )
+    maximum_error = float(
+        np.max(
+            np.abs(
+                reference.astype(np.int16) - decoded.astype(np.int16),
+            ),
+        ),
+    ) / 255.0
+    if maximum_error > KTX_ORM_MAX_CHANNEL_ERROR:
+        raise KtxToolchainError(
+            "orm decoded quality failed the channel-error gate",
+        )
+    return KtxDecodedQuality(
+        role=role,
+        orm_max_channel_error=round(maximum_error, 8),
     )
 
 
