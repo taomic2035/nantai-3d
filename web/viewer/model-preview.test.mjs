@@ -110,10 +110,12 @@ test('accepts only an explicitly synthetic preview-only GLB manifest', () => {
 test('accepts only a non-authoritative local L0 textured preview manifest', () => {
   const { validateModelPreviewManifest } = subject();
 
-  assert.deepEqual(
-    validateModelPreviewManifest(VALID_LOCAL_TEXTURED_MANIFEST),
-    VALID_LOCAL_TEXTURED_MANIFEST,
-  );
+  const manifest = validateModelPreviewManifest(VALID_LOCAL_TEXTURED_MANIFEST);
+  assert.deepEqual(manifest, VALID_LOCAL_TEXTURED_MANIFEST);
+  assert.equal(manifest.material_fidelity, 'synthetic-derived-pbr');
+  assert.equal(manifest.real_photo_textures, false);
+  assert.equal(manifest.geometry_usability, 'preview-only');
+  assert.equal('surface_shader' in manifest, false);
 
   for (const patch of [
     { verification_level: 'L2' },
