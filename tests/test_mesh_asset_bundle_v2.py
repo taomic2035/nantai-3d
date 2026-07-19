@@ -13,13 +13,23 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from pipeline.synthetic_village.mesh_asset_bundle import load_mesh_asset_bundle
+from pipeline.synthetic_village.mesh_asset_bundle import (
+    MeshAssetBundleError,
+    load_mesh_asset_bundle,
+)
 from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
     MESH_ASSET_BUNDLE_V2_SCHEMA,
     MeshAssetBundleV2,
+    MeshAssetLod2SourceV2,
     TextureBindingV2,
     TextureObjectV2,
     canonical_mesh_asset_bundle_v2_bytes,
+    prepare_mesh_asset_bundle_v2,
+    publish_mesh_asset_bundle_v2,
+    read_verified_mesh_texture,
+)
+from tests.test_glb_shared_texture_audit import (
+    _fixture as write_shared_texture_glb_fixture,
 )
 
 SLOT_ID = "material-fieldstone-01"
@@ -322,28 +332,172 @@ def test_v2_identity_binds_source_v1_bundle_id() -> None:
 
 
 def test_dispatch_loads_canonical_v2_manifest(tmp_path: Path) -> None:
-    bundle = make_v2_bundle_fixture()
-    bundle_root = tmp_path / "mesh-bundle-v2"
-    (bundle_root / "objects").mkdir(parents=True)
-    (bundle_root / "textures").mkdir()
-    for level in range(3):
-        descriptor = bundle.records[0].lod[str(level)]
-        (bundle_root / descriptor.glb_object_path).write_bytes(
-            f"glb-building-{level}".encode(),
-        )
-    for texture in bundle.texture_objects:
-        role = next(
-            binding.role
-            for binding in bundle.records[0].lod["2"].texture_bindings
-            if binding.sha256 == texture.sha256
-        )
-        (bundle_root / texture.object_path).write_bytes(
-            _texture_bytes(role),
-        )
-    manifest_bytes = canonical_mesh_asset_bundle_v2_bytes(bundle)
-    (bundle_root / "manifest.json").write_bytes(manifest_bytes)
+    prepared, _objects = _prepare_real_v2_fixture(tmp_path)
+    manifest_bytes = canonical_mesh_asset_bundle_v2_bytes(prepared.manifest)
 
-    loaded = load_mesh_asset_bundle(bundle_root)
+    loaded = load_mesh_asset_bundle(prepared.staging_root)
 
     assert type(loaded) is MeshAssetBundleV2
     assert canonical_mesh_asset_bundle_v2_bytes(loaded) == manifest_bytes
+
+
+def _grid_geometry(
+    *,
+    rows: int = 20,
+    columns: int = 25,
+) -> tuple[
+    tuple[tuple[float, float, float], ...],
+    tuple[int, ...],
+]:
+    positions = tuple(
+        (
+            -1.0 + 2.0 * column / columns,
+            0.0,
+            -1.0 + 2.0 * row / rows,
+        )
+        for row in range(rows + 1)
+        for column in range(columns + 1)
+    )
+    indices = []
+    stride = columns + 1
+    for row in range(rows):
+        for column in range(columns):
+            lower_left = row * stride + column
+            lower_right = lower_left + 1
+            upper_left = lower_left + stride
+            upper_right = upper_left + 1
+            indices.extend(
+                (
+                    lower_left,
+                    lower_right,
+                    upper_right,
+                    lower_left,
+                    upper_right,
+                    upper_left,
+                ),
+            )
+    return positions, tuple(indices)
+
+
+def _prepare_real_v2_fixture(tmp_path: Path):
+    from tests.test_mesh_asset_bundle import write_mesh_bundle_fixture
+
+    source_v1_root, _glb = write_mesh_bundle_fixture(
+        tmp_path / "source-v1",
+        asset_id="stone_lamp_01",
+        kind="prop",
+        triangle_counts=(1, 2, 3),
+    )
+    positions, indices = _grid_geometry()
+    (
+        near_glb,
+        _payload,
+        _document,
+        bindings,
+        objects,
+        _expected,
+    ) = write_shared_texture_glb_fixture(
+        tmp_path / "near",
+        kind="prop",
+        material_algorithm_id="mirror-sobel-orm-v1",
+        positions=positions,
+        indices=indices,
+    )
+    prepared = prepare_mesh_asset_bundle_v2(
+        source_v1_bundle_root=source_v1_root,
+        lod2_sources=(
+            MeshAssetLod2SourceV2(
+                asset_id="stone_lamp_01",
+                glb_path=near_glb,
+                recipe_id="stone-metal-lamp-near-v2",
+                texture_bindings=bindings,
+            ),
+        ),
+        texture_root=tmp_path / "near/texture-root",
+        texture_objects=objects,
+        staging_root=tmp_path / "staging-v2",
+        build_tool_id="pytest-near-builder-v2",
+    )
+    return prepared, objects
+
+
+def test_v2_preparation_reuses_v1_lod01_and_reads_exact_texture(
+    tmp_path: Path,
+) -> None:
+    prepared, objects = _prepare_real_v2_fixture(tmp_path)
+    bundle = prepared.manifest
+
+    assert bundle.source_v1_bundle_id == load_mesh_asset_bundle(
+        tmp_path / "source-v1/mesh-bundle",
+    ).bundle_id
+    assert bundle.records[0].lod["0"].mesh_algorithm_id == (
+        "synthetic-template-mesh-v1"
+    )
+    source = load_mesh_asset_bundle(tmp_path / "source-v1/mesh-bundle")
+    assert tuple(
+        bundle.records[0].lod[str(level)].glb_sha256
+        for level in (0, 1)
+    ) == tuple(
+        source.records[0].lod[str(level)].glb_sha256
+        for level in (0, 1)
+    )
+    assert bundle.records[0].lod["2"].triangle_count == 1_000
+    descriptor = objects[0]
+    payload = read_verified_mesh_texture(
+        prepared.staging_root,
+        bundle=bundle,
+        sha256=descriptor.sha256,
+    )
+    assert hashlib.sha256(payload).hexdigest() == descriptor.sha256
+
+
+def test_v2_publication_is_absent_only_and_reuses_exact_identity(
+    tmp_path: Path,
+) -> None:
+    from tests.test_mesh_asset_bundle import write_mesh_bundle_fixture
+
+    source_v1_root, _glb = write_mesh_bundle_fixture(
+        tmp_path / "source-v1",
+        asset_id="stone_lamp_01",
+        kind="prop",
+        triangle_counts=(1, 2, 3),
+    )
+    positions, indices = _grid_geometry()
+    near_glb, _payload, _document, bindings, objects, _expected = (
+        write_shared_texture_glb_fixture(
+            tmp_path / "near",
+            kind="prop",
+            material_algorithm_id="mirror-sobel-orm-v1",
+            positions=positions,
+            indices=indices,
+        )
+    )
+    kwargs = {
+        "source_v1_bundle_root": source_v1_root,
+        "lod2_sources": (
+            MeshAssetLod2SourceV2(
+                asset_id="stone_lamp_01",
+                glb_path=near_glb,
+                recipe_id="stone-metal-lamp-near-v2",
+                texture_bindings=bindings,
+            ),
+        ),
+        "texture_root": tmp_path / "near/texture-root",
+        "texture_objects": objects,
+        "publication_root": tmp_path / "published",
+        "work_root": tmp_path / "work",
+        "build_tool_id": "pytest-near-builder-v2",
+    }
+
+    first = publish_mesh_asset_bundle_v2(**kwargs)
+    second = publish_mesh_asset_bundle_v2(**kwargs)
+
+    assert first.reused is False
+    assert second.reused is True
+    assert second.bundle_id == first.bundle_id
+    assert load_mesh_asset_bundle(first.final_directory).bundle_id == first.bundle_id
+    texture = load_mesh_asset_bundle(first.final_directory).texture_objects[0]
+    target = first.final_directory / texture.object_path
+    target.write_bytes(target.read_bytes() + b"\0")
+    with pytest.raises(MeshAssetBundleError, match="texture"):
+        publish_mesh_asset_bundle_v2(**kwargs)

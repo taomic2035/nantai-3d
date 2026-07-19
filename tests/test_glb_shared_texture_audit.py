@@ -78,6 +78,7 @@ def _fixture(
     root: Path,
     *,
     kind: str = "building",
+    material_algorithm_id: str = "edge-feather-sobel-orm-v2",
     positions: tuple[tuple[float, float, float], ...] = (
         (0.0, 0.0, 0.0),
         (1.0, 0.0, 0.0),
@@ -235,7 +236,7 @@ def _fixture(
                     "slot_id": slot_id,
                     "source_sha256": SOURCE_SHA256,
                     "bundle_id": BUNDLE_ID,
-                    "algorithm_id": "edge-feather-sobel-orm-v2",
+                    "algorithm_id": material_algorithm_id,
                     "synthetic": True,
                     "uv_policy": "leaf-card" if foliage else "dominant-axis-box",
                 },
@@ -279,7 +280,7 @@ def _fixture(
             slot_id=slot_id,
             source_sha256=SOURCE_SHA256,
             bundle_id=BUNDLE_ID,
-            algorithm_id="edge-feather-sobel-orm-v2",
+            algorithm_id=material_algorithm_id,
         ),
     )
     return (
