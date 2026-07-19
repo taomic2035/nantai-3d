@@ -1,0 +1,750 @@
+const SHA256 = /^[0-9a-f]{64}$/;
+const TEXTURE_ROLES = new Set(['base_color', 'normal', 'orm']);
+const TRANSIENT_TEXTURE_PROPERTIES = [
+  'map',
+  'normalMap',
+  'roughnessMap',
+  'metalnessMap',
+  'aoMap',
+  'emissiveMap',
+  'alphaMap',
+  'bumpMap',
+  'displacementMap',
+  'lightMap',
+  'envMap',
+  'clearcoatMap',
+  'clearcoatNormalMap',
+  'clearcoatRoughnessMap',
+  'iridescenceMap',
+  'iridescenceThicknessMap',
+  'sheenColorMap',
+  'sheenRoughnessMap',
+  'specularColorMap',
+  'specularIntensityMap',
+  'transmissionMap',
+  'thicknessMap',
+];
+const FORBIDDEN_MATERIAL_TEXTURE_PROPERTIES = new Set(
+  TRANSIENT_TEXTURE_PROPERTIES.filter(
+    (name) => ![
+      'map',
+      'normalMap',
+      'roughnessMap',
+      'metalnessMap',
+      'aoMap',
+    ].includes(name),
+  ),
+);
+
+function bytesToHex(bytes) {
+  return [...new Uint8Array(bytes)]
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function arrayBufferFrom(bytes) {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  );
+}
+
+function contentType(response) {
+  return response.headers.get('content-type')?.split(';', 1)[0]
+    .trim()
+    .toLowerCase() ?? '';
+}
+
+function textureUri(loaded, texture) {
+  const association = loaded?.parser?.associations?.get(texture);
+  const textureIndex = association?.textures;
+  const textureRecord = Number.isInteger(textureIndex)
+    ? loaded?.parser?.json?.textures?.[textureIndex]
+    : null;
+  const imageRecord = Number.isInteger(textureRecord?.source)
+    ? loaded?.parser?.json?.images?.[textureRecord.source]
+    : null;
+  return typeof imageRecord?.uri === 'string' ? imageRecord.uri : null;
+}
+
+function expectedRelativeTextureUri(dependency) {
+  return `../textures/${dependency.sha256}.png`;
+}
+
+function templateKey(descriptor) {
+  return JSON.stringify([
+    descriptor.asset_id,
+    descriptor.lod,
+    descriptor.url,
+    descriptor.glb_sha256,
+    descriptor.glb_bytes,
+    descriptor.texture_dependencies.map((row) => [
+      row.url,
+      row.sha256,
+      row.bytes,
+      row.role,
+      row.colour_space,
+      row.material_slot_id,
+      row.derivation_algorithm_id,
+      row.min_filter,
+      row.mag_filter,
+      row.wrap_s,
+      row.wrap_t,
+    ]),
+  ]);
+}
+
+function descriptorIdentity(descriptor, mimeType) {
+  return {
+    url: descriptor.url,
+    sha256: descriptor.sha256,
+    bytes: descriptor.bytes,
+    mimeType,
+  };
+}
+
+function descriptorAgrees(record, identity) {
+  return (
+    record.url === identity.url
+    && record.sha256 === identity.sha256
+    && record.bytes === identity.bytes
+    && record.mimeType === identity.mimeType
+  );
+}
+
+function collectParsedResources(loaded) {
+  const geometries = new Set();
+  const materials = new Set();
+  const textures = new Set();
+  let meshCount = 0;
+  loaded?.scene?.traverse?.((object) => {
+    if (!object?.isMesh) return;
+    meshCount += 1;
+    if (object.geometry) geometries.add(object.geometry);
+    const objectMaterials = Array.isArray(object.material)
+      ? object.material
+      : [object.material];
+    for (const material of objectMaterials) {
+      if (!material) continue;
+      materials.add(material);
+      for (const property of TRANSIENT_TEXTURE_PROPERTIES) {
+        if (material[property]?.dispose) textures.add(material[property]);
+      }
+    }
+  });
+  for (const resource of loaded?.parser?.associations?.keys?.() ?? []) {
+    if (resource?.dispose) {
+      if (
+        !materials.has(resource)
+        && !geometries.has(resource)
+      ) {
+        textures.add(resource);
+      }
+    }
+  }
+  return {
+    meshCount,
+    geometries,
+    materials,
+    transientTextures: textures,
+  };
+}
+
+function disposeParsedResources(resources) {
+  for (const texture of resources.transientTextures) texture.dispose();
+  for (const material of resources.materials) material.dispose?.();
+  for (const geometry of resources.geometries) geometry.dispose?.();
+}
+
+function disposeTransientTextures(resources) {
+  for (const texture of resources.transientTextures) texture.dispose();
+  resources.transientTextures.clear();
+}
+
+function validateDependencyClosure(dependencies) {
+  if (!Array.isArray(dependencies) || dependencies.length === 0) {
+    throw new TypeError('verified mesh texture closure is absent');
+  }
+  const bySlot = new Map();
+  const semanticKeys = new Set();
+  for (const row of dependencies) {
+    if (
+      typeof row?.url !== 'string'
+      || !SHA256.test(row.sha256)
+      || !Number.isSafeInteger(row.bytes)
+      || row.bytes <= 0
+      || !TEXTURE_ROLES.has(row.role)
+      || !['srgb', 'non-color'].includes(row.colour_space)
+      || typeof row.material_slot_id !== 'string'
+      || row.material_slot_id.length === 0
+      || typeof row.derivation_algorithm_id !== 'string'
+      || row.derivation_algorithm_id.length === 0
+      || row.min_filter !== 9987
+      || row.mag_filter !== 9729
+      || row.wrap_s !== 10497
+      || row.wrap_t !== 10497
+    ) {
+      throw new TypeError('verified mesh texture descriptor is invalid');
+    }
+    const semanticKey = `${row.material_slot_id}:${row.role}`;
+    if (semanticKeys.has(semanticKey)) {
+      throw new TypeError('verified mesh texture closure is ambiguous');
+    }
+    semanticKeys.add(semanticKey);
+    if (!bySlot.has(row.material_slot_id)) {
+      bySlot.set(row.material_slot_id, new Map());
+    }
+    bySlot.get(row.material_slot_id).set(row.role, row);
+  }
+  for (const roles of bySlot.values()) {
+    if (
+      roles.size !== 3
+      || [...TEXTURE_ROLES].some((role) => !roles.has(role))
+    ) {
+      throw new TypeError('verified mesh material texture closure is incomplete');
+    }
+  }
+  return bySlot;
+}
+
+function materialPlan(loaded, resources, bySlot, THREE) {
+  if (resources.meshCount === 0) {
+    throw new TypeError('verified mesh template contains no renderable mesh');
+  }
+  const plans = [];
+  const consumedSlots = new Set();
+  for (const material of resources.materials) {
+    const slotId = material.userData?.slot_id;
+    const roles = bySlot.get(slotId);
+    if (!roles || consumedSlots.has(slotId)) {
+      throw new TypeError('GLTF material closure is missing or ambiguous');
+    }
+    consumedSlots.add(slotId);
+    if (
+      [...FORBIDDEN_MATERIAL_TEXTURE_PROPERTIES].some(
+        (property) => material[property] != null,
+      )
+      || material.map == null
+      || material.normalMap == null
+      || material.roughnessMap == null
+      || material.metalnessMap == null
+    ) {
+      throw new TypeError('GLTF material texture closure is invalid');
+    }
+    const expectedUris = {
+      base_color: expectedRelativeTextureUri(roles.get('base_color')),
+      normal: expectedRelativeTextureUri(roles.get('normal')),
+      orm: expectedRelativeTextureUri(roles.get('orm')),
+    };
+    if (
+      textureUri(loaded, material.map) !== expectedUris.base_color
+      || textureUri(loaded, material.normalMap) !== expectedUris.normal
+      || textureUri(loaded, material.roughnessMap) !== expectedUris.orm
+      || textureUri(loaded, material.metalnessMap) !== expectedUris.orm
+      || (
+        material.aoMap != null
+        && textureUri(loaded, material.aoMap) !== expectedUris.orm
+      )
+    ) {
+      throw new TypeError('GLTF material substituted a verified texture role');
+    }
+    let alphaMode;
+    if (
+      material.alphaTest === 0.45
+      && material.side === THREE.DoubleSide
+      && material.transparent === false
+    ) {
+      alphaMode = 'MASK';
+    } else if (
+      material.alphaTest === 0
+      && material.transparent === false
+    ) {
+      alphaMode = 'OPAQUE';
+    } else {
+      throw new TypeError('GLTF material alpha contract is invalid');
+    }
+    plans.push({ material, roles, alphaMode });
+  }
+  if (
+    consumedSlots.size !== bySlot.size
+    || [...bySlot.keys()].some((slotId) => !consumedSlots.has(slotId))
+  ) {
+    throw new TypeError('GLTF material closure disagrees with runtime evidence');
+  }
+  return plans;
+}
+
+export function semanticTextureKey(
+  dependency,
+  {
+    alphaMode,
+    flipY,
+  },
+) {
+  if (
+    !['MASK', 'OPAQUE'].includes(alphaMode)
+    || typeof flipY !== 'boolean'
+  ) {
+    throw new TypeError('semantic texture rendering state is invalid');
+  }
+  return [
+    dependency.sha256,
+    dependency.role,
+    dependency.colour_space,
+    [
+      dependency.min_filter,
+      dependency.mag_filter,
+      dependency.wrap_s,
+      dependency.wrap_t,
+    ].join(':'),
+    String(flipY),
+    alphaMode,
+  ].join(':');
+}
+
+export function createVerifiedMeshResourceStore({
+  THREE,
+  GLTFLoader,
+  fetchFn = globalThis.fetch,
+  cryptoSubtle = globalThis.crypto?.subtle,
+  createImageBitmapFn = globalThis.createImageBitmap,
+  BlobCtor = globalThis.Blob,
+  locationHref = globalThis.location?.href,
+  createObjectURL = globalThis.URL?.createObjectURL?.bind(globalThis.URL),
+  revokeObjectURL = globalThis.URL?.revokeObjectURL?.bind(globalThis.URL),
+} = {}) {
+  if (
+    typeof THREE?.LoadingManager !== 'function'
+    || typeof THREE?.Texture !== 'function'
+    || typeof GLTFLoader !== 'function'
+    || typeof fetchFn !== 'function'
+    || typeof cryptoSubtle?.digest !== 'function'
+    || typeof createImageBitmapFn !== 'function'
+    || typeof BlobCtor !== 'function'
+    || typeof locationHref !== 'string'
+    || typeof createObjectURL !== 'function'
+    || typeof revokeObjectURL !== 'function'
+  ) {
+    throw new TypeError('verified mesh resource dependencies are unavailable');
+  }
+
+  const byteObjects = new Map();
+  const decodedBitmaps = new Map();
+  const gpuTextures = new Map();
+  const templates = new Map();
+  const counters = {
+    network_fetches: 0,
+    bitmap_decodes: 0,
+    gpu_texture_creations: 0,
+  };
+
+  function deleteUnretainedByte(sha256) {
+    const record = byteObjects.get(sha256);
+    if (record?.refs === 0) byteObjects.delete(sha256);
+  }
+
+  async function fetchExactObject(descriptor, mimeType) {
+    const identity = descriptorIdentity(descriptor, mimeType);
+    if (
+      typeof identity.url !== 'string'
+      || !SHA256.test(identity.sha256)
+      || !Number.isSafeInteger(identity.bytes)
+      || identity.bytes <= 0
+    ) {
+      throw new TypeError('verified object descriptor is invalid');
+    }
+    const existing = byteObjects.get(identity.sha256);
+    if (existing) {
+      if (!descriptorAgrees(existing, identity)) {
+        throw new TypeError(
+          'content-addressed byte object descriptor disagrees',
+        );
+      }
+      return existing.promise;
+    }
+    const record = {
+      ...identity,
+      refs: 0,
+      promise: null,
+    };
+    record.promise = (async () => {
+      counters.network_fetches += 1;
+      const response = await fetchFn(identity.url, {
+        redirect: 'error',
+        credentials: 'same-origin',
+      });
+      if (!response?.ok) {
+        throw new Error(`verified object fetch failed: ${response?.status}`);
+      }
+      if (response.redirected !== false) {
+        throw new Error('verified object response redirected');
+      }
+      const expectedUrl = new URL(identity.url, locationHref).href;
+      if (response.url !== expectedUrl) {
+        throw new Error('verified object response URL changed');
+      }
+      if (contentType(response) !== mimeType) {
+        throw new Error('verified object content type disagrees');
+      }
+      const raw = await response.arrayBuffer();
+      const bytes = new Uint8Array(raw);
+      if (bytes.byteLength !== identity.bytes) {
+        throw new Error('verified object byte count disagrees');
+      }
+      const digest = bytesToHex(
+        await cryptoSubtle.digest('SHA-256', raw),
+      );
+      if (digest !== identity.sha256) {
+        throw new Error('verified object SHA-256 disagrees');
+      }
+      return bytes;
+    })();
+    byteObjects.set(identity.sha256, record);
+    record.promise.catch(() => {
+      if (byteObjects.get(identity.sha256) === record) {
+        byteObjects.delete(identity.sha256);
+      }
+    });
+    return record.promise;
+  }
+
+  function retainByte(sha256) {
+    const record = byteObjects.get(sha256);
+    if (!record) throw new Error('verified byte object disappeared');
+    record.refs += 1;
+  }
+
+  function releaseByte(sha256) {
+    const record = byteObjects.get(sha256);
+    if (!record || record.refs <= 0) return false;
+    record.refs -= 1;
+    if (record.refs === 0) byteObjects.delete(sha256);
+    return true;
+  }
+
+  function bitmapRecord(dependency) {
+    const existing = decodedBitmaps.get(dependency.sha256);
+    if (existing) return existing;
+    const record = {
+      refs: 0,
+      bitmap: null,
+      promise: null,
+    };
+    record.promise = (async () => {
+      const bytes = await fetchExactObject(dependency, 'image/png');
+      counters.bitmap_decodes += 1;
+      const bitmap = await createImageBitmapFn(
+        new BlobCtor([bytes], { type: 'image/png' }),
+        {
+          imageOrientation: 'flipY',
+          colorSpaceConversion: 'none',
+          premultiplyAlpha: 'none',
+        },
+      );
+      record.bitmap = bitmap;
+      retainByte(dependency.sha256);
+      return bitmap;
+    })();
+    decodedBitmaps.set(dependency.sha256, record);
+    record.promise.catch(() => {
+      if (decodedBitmaps.get(dependency.sha256) === record) {
+        decodedBitmaps.delete(dependency.sha256);
+      }
+      deleteUnretainedByte(dependency.sha256);
+    });
+    return record;
+  }
+
+  function releaseBitmap(sha256) {
+    const record = decodedBitmaps.get(sha256);
+    if (!record || record.refs <= 0) return false;
+    record.refs -= 1;
+    if (record.refs === 0) {
+      decodedBitmaps.delete(sha256);
+      if (record.bitmap) {
+        record.bitmap.close?.();
+      } else {
+        record.promise.then((bitmap) => bitmap.close?.());
+      }
+      releaseByte(sha256);
+    }
+    return true;
+  }
+
+  function discardUnusedBitmap(sha256, record) {
+    if (
+      record.refs !== 0
+      || decodedBitmaps.get(sha256) !== record
+    ) {
+      return;
+    }
+    decodedBitmaps.delete(sha256);
+    record.bitmap?.close?.();
+    if (!releaseByte(sha256)) deleteUnretainedByte(sha256);
+  }
+
+  async function acquireGpuTexture(dependency, rendering) {
+    await fetchExactObject(dependency, 'image/png');
+    const key = semanticTextureKey(dependency, rendering);
+    let record = gpuTextures.get(key);
+    if (!record) {
+      record = {
+        refs: 0,
+        sha256: dependency.sha256,
+        texture: null,
+        promise: null,
+      };
+      record.promise = (async () => {
+        const bitmapState = bitmapRecord(dependency);
+        const bitmap = await bitmapState.promise;
+        try {
+          const texture = new THREE.Texture(bitmap);
+          texture.flipY = rendering.flipY;
+          texture.colorSpace = dependency.colour_space === 'srgb'
+            ? THREE.SRGBColorSpace
+            : THREE.NoColorSpace;
+          texture.minFilter = THREE.LinearMipmapLinearFilter;
+          texture.magFilter = THREE.LinearFilter;
+          texture.wrapS = THREE.RepeatWrapping;
+          texture.wrapT = THREE.RepeatWrapping;
+          texture.generateMipmaps = true;
+          texture.needsUpdate = true;
+          record.texture = texture;
+          bitmapState.refs += 1;
+          counters.gpu_texture_creations += 1;
+          return texture;
+        } catch (error) {
+          discardUnusedBitmap(dependency.sha256, bitmapState);
+          throw error;
+        }
+      })();
+      gpuTextures.set(key, record);
+      record.promise.catch(() => {
+        if (gpuTextures.get(key) === record) gpuTextures.delete(key);
+      });
+    }
+    const texture = await record.promise;
+    record.refs += 1;
+    return { key, texture };
+  }
+
+  function releaseGpuTexture(key) {
+    const record = gpuTextures.get(key);
+    if (!record || record.refs <= 0) return false;
+    record.refs -= 1;
+    if (record.refs === 0) {
+      gpuTextures.delete(key);
+      if (record.texture) {
+        record.texture.dispose();
+      } else {
+        record.promise.then((texture) => texture.dispose());
+      }
+      releaseBitmap(record.sha256);
+    }
+    return true;
+  }
+
+  async function buildTemplate(descriptor) {
+    const dependencies = descriptor.texture_dependencies;
+    const bySlot = validateDependencyClosure(dependencies);
+    const glbDescriptor = {
+      url: descriptor.url,
+      sha256: descriptor.glb_sha256,
+      bytes: descriptor.glb_bytes,
+    };
+    const dependencyBytes = new Map();
+    const fetched = await Promise.all([
+      fetchExactObject(glbDescriptor, 'model/gltf-binary'),
+      ...dependencies.map((row) => fetchExactObject(row, 'image/png')),
+    ]);
+    const [glbBytes, ...textureBytes] = fetched;
+    dependencies.forEach((row, index) => {
+      dependencyBytes.set(row.sha256, textureBytes[index]);
+    });
+    const objectUrls = new Map();
+    const uriToObjectUrl = new Map();
+    let loaded = null;
+    let parsedResources = null;
+    const acquiredGpuKeys = new Set();
+    let retainedGlb = false;
+    try {
+      for (const row of dependencies) {
+        if (!objectUrls.has(row.sha256)) {
+          objectUrls.set(
+            row.sha256,
+            createObjectURL(
+              new BlobCtor(
+                [dependencyBytes.get(row.sha256)],
+                { type: 'image/png' },
+              ),
+            ),
+          );
+        }
+        uriToObjectUrl.set(
+          expectedRelativeTextureUri(row),
+          objectUrls.get(row.sha256),
+        );
+      }
+      const requestedUris = new Set();
+      const manager = new THREE.LoadingManager();
+      manager.setURLModifier((url) => {
+        if (!uriToObjectUrl.has(url)) {
+          throw new TypeError(
+            'GLTF requested a texture outside its verified closure',
+          );
+        }
+        requestedUris.add(url);
+        return uriToObjectUrl.get(url);
+      });
+      const loader = new GLTFLoader(manager);
+      loaded = await loader.parseAsync(arrayBufferFrom(glbBytes), '');
+      if (
+        requestedUris.size !== uriToObjectUrl.size
+        || [...uriToObjectUrl.keys()].some((uri) => !requestedUris.has(uri))
+      ) {
+        throw new TypeError('GLTF texture closure was not consumed exactly');
+      }
+      parsedResources = collectParsedResources(loaded);
+      const plans = materialPlan(loaded, parsedResources, bySlot, THREE);
+      const textureByKey = new Map();
+      for (const plan of plans) {
+        for (const row of plan.roles.values()) {
+          const key = semanticTextureKey(row, {
+            alphaMode: plan.alphaMode,
+            flipY: false,
+          });
+          if (!textureByKey.has(key)) {
+            const acquired = await acquireGpuTexture(row, {
+              alphaMode: plan.alphaMode,
+              flipY: false,
+            });
+            acquiredGpuKeys.add(acquired.key);
+            textureByKey.set(acquired.key, acquired.texture);
+          }
+        }
+      }
+      for (const plan of plans) {
+        const texture = (role) => textureByKey.get(
+          semanticTextureKey(plan.roles.get(role), {
+            alphaMode: plan.alphaMode,
+            flipY: false,
+          }),
+        );
+        plan.material.map = texture('base_color');
+        plan.material.normalMap = texture('normal');
+        plan.material.roughnessMap = texture('orm');
+        plan.material.metalnessMap = texture('orm');
+        if (plan.material.aoMap != null) {
+          plan.material.aoMap = texture('orm');
+        }
+        plan.material.needsUpdate = true;
+        if (
+          plan.material.map == null
+          || plan.material.normalMap == null
+          || plan.material.roughnessMap == null
+          || plan.material.metalnessMap == null
+          || plan.material.transparent !== false
+          || (
+            plan.alphaMode === 'MASK'
+            && (
+              plan.material.alphaTest !== 0.45
+              || plan.material.side !== THREE.DoubleSide
+            )
+          )
+        ) {
+          throw new TypeError('GLTF material rebinding failed');
+        }
+      }
+      disposeTransientTextures(parsedResources);
+      loaded.scene.traverse((object) => {
+        if (!object.isMesh) return;
+        object.castShadow = false;
+        object.receiveShadow = true;
+      });
+      loaded.scene.updateMatrixWorld(true);
+      retainByte(descriptor.glb_sha256);
+      retainedGlb = true;
+      return {
+        scene: loaded.scene,
+        parsedResources,
+        gpuKeys: acquiredGpuKeys,
+        glbSha256: descriptor.glb_sha256,
+      };
+    } catch (error) {
+      if (parsedResources) disposeParsedResources(parsedResources);
+      for (const key of acquiredGpuKeys) releaseGpuTexture(key);
+      if (retainedGlb) releaseByte(descriptor.glb_sha256);
+      throw error;
+    } finally {
+      for (const url of objectUrls.values()) revokeObjectURL(url);
+      deleteUnretainedByte(descriptor.glb_sha256);
+      for (const row of dependencies) deleteUnretainedByte(row.sha256);
+    }
+  }
+
+  function disposeTemplate(template) {
+    for (const key of template.gpuKeys) releaseGpuTexture(key);
+    template.parsedResources.transientTextures.clear();
+    for (const material of template.parsedResources.materials) {
+      material.dispose?.();
+    }
+    for (const geometry of template.parsedResources.geometries) {
+      geometry.dispose?.();
+    }
+    releaseByte(template.glbSha256);
+  }
+
+  async function loadTemplate(descriptor) {
+    const key = templateKey(descriptor);
+    let record = templates.get(key);
+    if (!record) {
+      record = {
+        refs: 0,
+        promise: null,
+      };
+      record.promise = buildTemplate(descriptor);
+      templates.set(key, record);
+      record.promise.catch(() => {
+        if (templates.get(key) === record) templates.delete(key);
+      });
+    }
+    const template = await record.promise;
+    record.template = template;
+    record.refs += 1;
+    return template.scene;
+  }
+
+  function releaseTemplate(descriptor) {
+    const key = templateKey(descriptor);
+    const record = templates.get(key);
+    if (!record || record.refs <= 0) return false;
+    record.refs -= 1;
+    if (record.refs === 0) {
+      templates.delete(key);
+      if (record.template) {
+        disposeTemplate(record.template);
+      } else {
+        record.promise.then(disposeTemplate);
+      }
+    }
+    return true;
+  }
+
+  function diagnostics() {
+    return {
+      byte_objects: byteObjects.size,
+      decoded_bitmaps: decodedBitmaps.size,
+      gpu_textures: gpuTextures.size,
+      templates: templates.size,
+      network_fetches: counters.network_fetches,
+      bitmap_decodes: counters.bitmap_decodes,
+      gpu_texture_creations: counters.gpu_texture_creations,
+    };
+  }
+
+  return {
+    loadTemplate,
+    releaseTemplate,
+    diagnostics,
+  };
+}
