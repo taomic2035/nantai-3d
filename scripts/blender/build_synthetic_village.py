@@ -2069,6 +2069,9 @@ def _apply_surface_color_attribute(obj, request, surface_runtime):
     ):
         raise RuntimeBuildError(f"surface color layer is invalid: {obj.name}")
     mesh.color_attributes.active_color = color_layer
+    color_index = tuple(mesh.color_attributes).index(color_layer)
+    mesh.color_attributes.active_color_index = color_index
+    mesh.color_attributes.render_color_index = color_index
     macro_object = _surface_object_uses_macro_color(obj)
     used_palettes = {}
     used_macro = False
