@@ -22,15 +22,25 @@ from pipeline.synthetic_village.material_bundle import (
     DerivedMaterialRecord,
     MaterialMapDescriptor,
 )
+from pipeline.synthetic_village.mesh_asset_build import (
+    ASSET_RECIPE_CONTRACTS,
+)
 from pipeline.synthetic_village.mesh_asset_bundle import (
     MESH_ASSET_BUNDLE_SCHEMA,
     MeshAssetBundle,
 )
+from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
+    MESH_ASSET_BUNDLE_V2_SCHEMA,
+    MeshAssetBundleV2,
+)
 from pipeline.synthetic_village.mesh_chunk import (
     MeshChunkError,
     MeshChunkManifest,
+    MeshChunkRuntimeManifest,
+    MeshChunkRuntimeManifestV2,
     build_mesh_chunk_manifest,
     canonical_mesh_chunk_bytes,
+    canonical_mesh_chunk_runtime_bytes,
     project_mesh_chunk_runtime,
 )
 
@@ -194,6 +204,126 @@ def _surface_material_bundle(bundle: MeshAssetBundle) -> DerivedMaterialBundle:
     return DerivedMaterialBundle.model_construct(
         bundle_id=bundle.material_bundle_id,
         records=tuple(records),
+    )
+
+
+def _bundle_v2() -> MeshAssetBundleV2:
+    source = _bundle()
+    texture_bindings = []
+    texture_objects = []
+    for role, colour_space in (
+        ("base_color", "srgb"),
+        ("normal", "non-color"),
+        ("orm", "non-color"),
+    ):
+        digest = hashlib.sha256(f"mesh-v2:{role}".encode()).hexdigest()
+        texture_bindings.append(
+            {
+                "uri": f"../textures/{digest}.png",
+                "sha256": digest,
+                "role": role,
+                "colour_space": colour_space,
+                "material_slot_id": "material-fieldstone-01",
+                "derivation_algorithm_id": "mirror-sobel-orm-v1",
+                "min_filter": 9987,
+                "mag_filter": 9729,
+                "wrap_s": 10497,
+                "wrap_t": 10497,
+            },
+        )
+        texture_objects.append(
+            {
+                "object_path": f"textures/{digest}.png",
+                "sha256": digest,
+                "bytes": 1024,
+                "mime_type": "image/png",
+                "width": 1024,
+                "height": 1024,
+            },
+        )
+    records = []
+    for source_record in source.records:
+        _, recipe_id, _ = ASSET_RECIPE_CONTRACTS[
+            source_record.asset_id
+        ]
+        lod = {}
+        for level in ("0", "1", "2"):
+            descriptor = source_record.lod[level].model_dump(mode="json")
+            is_near = level == "2"
+            descriptor.update(
+                {
+                    "triangle_count": (
+                        {
+                            "building": 8_000,
+                            "vegetation": 6_000,
+                            "prop": 1_000,
+                        }[source_record.kind]
+                        if is_near
+                        else descriptor["triangle_count"]
+                    ),
+                    "mesh_algorithm_id": (
+                        "synthetic-template-mesh-near-v2"
+                        if is_near
+                        else "synthetic-template-mesh-v1"
+                    ),
+                    "recipe_id": (
+                        recipe_id.removesuffix("-v1") + "-near-v2"
+                        if is_near
+                        else recipe_id
+                    ),
+                    "texture_storage": (
+                        "shared-content-addressed"
+                        if is_near
+                        else "embedded"
+                    ),
+                    "texture_bindings": (
+                        texture_bindings if is_near else []
+                    ),
+                },
+            )
+            lod[level] = descriptor
+        records.append(
+            {
+                "asset_id": source_record.asset_id,
+                "kind": source_record.kind,
+                "footprint_m": source_record.footprint_m,
+                "lod": lod,
+                "synthetic": True,
+                "geometry_usability": "preview-only",
+            },
+        )
+    unsigned = {
+        "schema_version": MESH_ASSET_BUNDLE_V2_SCHEMA,
+        "coordinate_encoding": "three-east-up-negative-north",
+        "source_v1_bundle_id": source.bundle_id,
+        "material_bundle_id": source.material_bundle_id,
+        "material_bundle_manifest_sha256": (
+            source.material_bundle_manifest_sha256
+        ),
+        "synthetic": True,
+        "real_photo_textures": False,
+        "build_tool_id": "pytest-mesh-template-v2",
+        "verification_level": "L0",
+        "texture_audit_profile": "verified-relative-content-addressed",
+        "material_registry": [
+            row.model_dump(mode="json")
+            for row in source.material_registry
+        ],
+        "texture_objects": sorted(
+            texture_objects,
+            key=lambda row: row["object_path"],
+        ),
+        "records": records,
+    }
+    return MeshAssetBundleV2.model_validate_json(
+        _canonical(
+            {
+                "bundle_id": hashlib.sha256(
+                    _canonical(unsigned),
+                ).hexdigest(),
+                **unsigned,
+            },
+        ),
     )
 
 
@@ -398,6 +528,201 @@ def test_runtime_projection_uses_only_exact_same_origin_asset_routes() -> None:
                 f"/api/world/material-maps/{bundle.material_bundle_id}/"
                 f"{material.slot_id}/{role}.png"
             )
+
+
+def test_v1_runtime_bytes_remain_exact() -> None:
+    bundle = _bundle()
+    chunk = build_mesh_chunk_manifest(
+        0,
+        0,
+        world_seed=42,
+        bundle=bundle,
+        lod=2,
+    )
+    runtime = project_mesh_chunk_runtime(
+        chunk,
+        bundle=bundle,
+        material_bundle=_surface_material_bundle(bundle),
+    )
+
+    raw = canonical_mesh_chunk_runtime_bytes(runtime)
+    reloaded = MeshChunkRuntimeManifest.model_validate_json(raw)
+
+    assert type(runtime) is MeshChunkRuntimeManifest
+    assert canonical_mesh_chunk_runtime_bytes(reloaded) == raw
+
+
+@pytest.mark.parametrize("lod", (0, 1, 2))
+def test_v2_runtime_projects_exact_lod_texture_closure(lod: int) -> None:
+    bundle = _bundle_v2()
+    chunk = build_mesh_chunk_manifest(
+        0,
+        0,
+        world_seed=42,
+        bundle=bundle,
+        lod=lod,
+    )
+    runtime = project_mesh_chunk_runtime(
+        chunk,
+        bundle=bundle,
+        material_bundle=_surface_material_bundle(bundle),
+    )
+
+    assert type(runtime) is MeshChunkRuntimeManifestV2
+    assert runtime.schema_version == (
+        "nantai.synthetic-village.mesh-chunk-runtime.v2"
+    )
+    objects = {row.sha256: row for row in bundle.texture_objects}
+    records = {row.asset_id: row for row in bundle.records}
+    for asset in runtime.asset_urls:
+        descriptor = records[asset.asset_id].lod[str(lod)]
+        expected = tuple(
+            (
+                binding.sha256,
+                binding.role,
+                binding.material_slot_id,
+                objects[binding.sha256].bytes,
+            )
+            for binding in sorted(
+                descriptor.texture_bindings,
+                key=lambda row: (
+                    row.sha256,
+                    row.role,
+                    row.material_slot_id,
+                ),
+            )
+        )
+        assert tuple(
+            (
+                row.sha256,
+                row.role,
+                row.material_slot_id,
+                row.bytes,
+            )
+            for row in asset.texture_dependencies
+        ) == expected
+        assert all(
+            row.url
+            == (
+                f"/api/world/mesh-assets/{bundle.bundle_id}/"
+                f"textures/{row.sha256}.png"
+            )
+            for row in asset.texture_dependencies
+        )
+        assert bool(asset.texture_dependencies) is (lod == 2)
+    raw = canonical_mesh_chunk_runtime_bytes(runtime)
+    reloaded = MeshChunkRuntimeManifestV2.model_validate_json(raw)
+    assert canonical_mesh_chunk_runtime_bytes(reloaded) == raw
+
+
+def test_v2_runtime_rejects_mutated_dependency_closures() -> None:
+    bundle = _bundle_v2()
+    chunk = build_mesh_chunk_manifest(
+        0,
+        0,
+        world_seed=42,
+        bundle=bundle,
+        lod=2,
+    )
+    runtime = project_mesh_chunk_runtime(
+        chunk,
+        bundle=bundle,
+        material_bundle=_surface_material_bundle(bundle),
+    )
+    payload = runtime.model_dump(mode="json")
+    payload["asset_urls"][0]["texture_dependencies"].reverse()
+
+    with pytest.raises(ValidationError, match="sorted"):
+        MeshChunkRuntimeManifestV2.model_validate_json(
+            _canonical(payload),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    payload["asset_urls"][0]["texture_dependencies"] = []
+    with pytest.raises(ValidationError, match="LOD2"):
+        MeshChunkRuntimeManifestV2.model_validate_json(
+            _canonical(payload),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    payload["asset_urls"][0]["texture_dependencies"][0]["url"] = (
+        "/api/world/mesh-assets/"
+        + "f" * 64
+        + "/textures/"
+        + payload["asset_urls"][0]["texture_dependencies"][0]["sha256"]
+        + ".png"
+    )
+    with pytest.raises(ValidationError, match="bundle"):
+        MeshChunkRuntimeManifestV2.model_validate_json(
+            _canonical(payload),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    del payload["asset_urls"][0]["texture_dependencies"][0]
+    with pytest.raises(ValidationError, match="roles"):
+        MeshChunkRuntimeManifestV2.model_validate_json(
+            _canonical(payload),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    duplicate = payload["asset_urls"][0]["texture_dependencies"][0]
+    payload["asset_urls"][0]["texture_dependencies"].append(duplicate)
+    payload["asset_urls"][0]["texture_dependencies"].sort(
+        key=lambda row: (
+            row["sha256"],
+            row["role"],
+            row["material_slot_id"],
+        ),
+    )
+    with pytest.raises(ValidationError, match="duplicate"):
+        MeshChunkRuntimeManifestV2.model_validate_json(
+            _canonical(payload),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    base_color = next(
+        row
+        for row in payload["asset_urls"][0]["texture_dependencies"]
+        if row["role"] == "base_color"
+    )
+    base_color["colour_space"] = "non-color"
+    with pytest.raises(ValidationError, match="colour space"):
+        MeshChunkRuntimeManifestV2.model_validate_json(
+            _canonical(payload),
+        )
+
+    with pytest.raises(ValidationError):
+        MeshChunkRuntimeManifest.model_validate_json(
+            canonical_mesh_chunk_runtime_bytes(runtime),
+        )
+
+    payload = runtime.model_dump(mode="json")
+    payload["surface_materials"].reverse()
+    with pytest.raises(ValidationError, match="surface closure"):
+        MeshChunkRuntimeManifestV2.model_validate_json(
+            _canonical(payload),
+        )
+
+
+def test_v2_runtime_rejects_missing_texture_object_evidence() -> None:
+    bundle = _bundle_v2()
+    chunk = build_mesh_chunk_manifest(
+        0,
+        0,
+        world_seed=42,
+        bundle=bundle,
+        lod=2,
+    )
+    incomplete = bundle.model_copy(
+        update={"texture_objects": bundle.texture_objects[:-1]},
+    )
+
+    with pytest.raises(MeshChunkError, match="texture object"):
+        project_mesh_chunk_runtime(
+            chunk,
+            bundle=incomplete,
+            material_bundle=_surface_material_bundle(bundle),
+        )
 
 
 def test_layout_asset_missing_from_bundle_fails_closed() -> None:

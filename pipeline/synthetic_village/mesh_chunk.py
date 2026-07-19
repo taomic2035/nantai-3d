@@ -32,13 +32,23 @@ from pipeline.synthetic_village.material_bundle import (
 from pipeline.synthetic_village.mesh_asset_bundle import (
     Bounds3,
     MeshAssetBundle,
+    MeshAssetBundleAny,
     MeshAssetRecord,
+)
+from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
+    MeshAssetBundleV2,
+    MeshAssetRecordV2,
+    MeshTemplateLodV2,
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+MeshAssetRecordAny = MeshAssetRecord | MeshAssetRecordV2
 
 MESH_CHUNK_SCHEMA = "nantai.synthetic-village.mesh-chunk.v1"
 MESH_CHUNK_RUNTIME_SCHEMA = "nantai.synthetic-village.mesh-chunk-runtime.v1"
+MESH_CHUNK_RUNTIME_V2_SCHEMA = (
+    "nantai.synthetic-village.mesh-chunk-runtime.v2"
+)
 LAYOUT_ALGORITHM_ID = "mock-layout-v1"
 RENDERER_CAPABILITY = "synthetic-textured-mesh-grid"
 CHUNK_SIZE_M = 200
@@ -204,6 +214,106 @@ class MeshAssetRuntimeUrl(FrozenModel):
         return self
 
 
+class MeshTextureRuntimeUrl(FrozenModel):
+    url: str = Field(min_length=1)
+    sha256: Sha256
+    bytes: int = Field(ge=1)
+    role: Literal["base_color", "normal", "orm"]
+    colour_space: Literal["srgb", "non-color"]
+    material_slot_id: str = Field(
+        pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
+    derivation_algorithm_id: str = Field(min_length=1)
+    min_filter: Literal[9987] = 9987
+    mag_filter: Literal[9729] = 9729
+    wrap_s: Literal[10497] = 10497
+    wrap_t: Literal[10497] = 10497
+
+    @model_validator(mode="after")
+    def _exact_texture_route_and_semantics(
+        self,
+    ) -> MeshTextureRuntimeUrl:
+        parts = self.url.split("/")
+        if (
+            len(parts) != 7
+            or parts[:4] != ["", "api", "world", "mesh-assets"]
+            or len(parts[4]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in parts[4]
+            )
+            or parts[5] != "textures"
+            or parts[6] != f"{self.sha256}.png"
+            or "\\" in self.url
+            or "?" in self.url
+            or "#" in self.url
+        ):
+            raise ValueError(
+                "mesh texture runtime URL is not an exact same-origin route",
+            )
+        expected_colour_space = (
+            "srgb" if self.role == "base_color" else "non-color"
+        )
+        if self.colour_space != expected_colour_space:
+            raise ValueError(
+                "mesh texture runtime colour space is invalid",
+            )
+        return self
+
+
+class MeshAssetRuntimeUrlV2(MeshAssetRuntimeUrl):
+    texture_dependencies: tuple[MeshTextureRuntimeUrl, ...]
+
+    @model_validator(mode="after")
+    def _exact_dependency_closure(self) -> MeshAssetRuntimeUrlV2:
+        order = tuple(
+            (
+                row.sha256,
+                row.role,
+                row.material_slot_id,
+            )
+            for row in self.texture_dependencies
+        )
+        semantic_keys = tuple(
+            (row.material_slot_id, row.role)
+            for row in self.texture_dependencies
+        )
+        if order != tuple(sorted(order)):
+            raise ValueError(
+                "mesh texture dependencies must be sorted",
+            )
+        if len(set(semantic_keys)) != len(semantic_keys):
+            raise ValueError(
+                "mesh texture dependencies contain duplicate semantics",
+            )
+        if self.lod in {0, 1} and self.texture_dependencies:
+            raise ValueError(
+                "embedded mesh LOD cannot declare texture dependencies",
+            )
+        if self.lod == 2:
+            if not self.texture_dependencies:
+                raise ValueError(
+                    "mesh LOD2 requires texture dependencies",
+                )
+            slots = {
+                row.material_slot_id
+                for row in self.texture_dependencies
+            }
+            if any(
+                {
+                    row.role
+                    for row in self.texture_dependencies
+                    if row.material_slot_id == slot_id
+                }
+                != {"base_color", "normal", "orm"}
+                for slot_id in slots
+            ):
+                raise ValueError(
+                    "mesh LOD2 texture dependency roles are incomplete",
+                )
+        return self
+
+
 class MaterialMapRuntimeUrl(FrozenModel):
     role: Literal["base_color", "normal", "orm"]
     url: str = Field(min_length=1)
@@ -261,6 +371,78 @@ class MeshChunkRuntimeManifest(FrozenModel):
     surface_materials: tuple[SurfaceMaterialRuntime, ...]
 
 
+class MeshChunkRuntimeManifestV2(FrozenModel):
+    schema_version: Literal[
+        "nantai.synthetic-village.mesh-chunk-runtime.v2"
+    ] = MESH_CHUNK_RUNTIME_V2_SCHEMA
+    chunk: MeshChunkManifest
+    asset_urls: tuple[MeshAssetRuntimeUrlV2, ...]
+    surface_materials: tuple[SurfaceMaterialRuntime, ...]
+
+    @model_validator(mode="after")
+    def _version_paired_runtime(self) -> MeshChunkRuntimeManifestV2:
+        asset_ids = tuple(row.asset_id for row in self.asset_urls)
+        required_ids = tuple(sorted({
+            instance.asset_id
+            for instance in self.chunk.instances
+        }))
+        if (
+            asset_ids != required_ids
+            or len(set(asset_ids)) != len(asset_ids)
+        ):
+            raise ValueError(
+                "mesh runtime v2 asset closure is incomplete or unsorted",
+            )
+        bundle_id = self.chunk.mesh_asset_bundle_id
+        for asset in self.asset_urls:
+            if (
+                asset.lod != self.chunk.selected_lod
+                or asset.url
+                != (
+                    f"/api/world/mesh-assets/{bundle_id}/"
+                    f"{asset.asset_id}/lod{asset.lod}.glb"
+                )
+            ):
+                raise ValueError(
+                    "mesh runtime v2 asset route or LOD is invalid",
+                )
+            if any(
+                dependency.url.split("/")[4] != bundle_id
+                for dependency in asset.texture_dependencies
+            ):
+                raise ValueError(
+                    "mesh runtime v2 texture bundle identity disagrees",
+                )
+        surface_slots = tuple(
+            row.slot_id for row in self.surface_materials
+        )
+        required_surface_slots = tuple(sorted({
+            self.chunk.terrain.material_slot_id,
+            *self.chunk.terrain.material_slot_ids,
+            *(
+                ribbon.material_slot_id
+                for ribbon in self.chunk.roads
+            ),
+            *(
+                ribbon.material_slot_id
+                for ribbon in self.chunk.water
+            ),
+        }))
+        if (
+            surface_slots != required_surface_slots
+            or len(set(surface_slots)) != len(surface_slots)
+        ):
+            raise ValueError(
+                "mesh runtime v2 surface closure is incomplete or unsorted",
+            )
+        return self
+
+
+MeshChunkRuntimeManifestAny = (
+    MeshChunkRuntimeManifest | MeshChunkRuntimeManifestV2
+)
+
+
 def _jsonable(value: object) -> object:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
@@ -295,7 +477,7 @@ def canonical_mesh_chunk_bytes(
 
 
 def canonical_mesh_chunk_runtime_bytes(
-    manifest: MeshChunkRuntimeManifest,
+    manifest: MeshChunkRuntimeManifestAny,
 ) -> bytes:
     return _canonical_json_bytes(manifest)
 
@@ -425,11 +607,11 @@ def _water_ribbons(layout) -> tuple[Ribbon, ...]:
 
 
 def _asset_record(
-    records: dict[str, MeshAssetRecord],
+    records: dict[str, MeshAssetRecordAny],
     asset_id: str,
     *,
     expected_kind: str,
-) -> MeshAssetRecord:
+) -> MeshAssetRecordAny:
     record = records.get(asset_id)
     if record is None:
         raise MeshChunkError(
@@ -442,7 +624,11 @@ def _asset_record(
     return record
 
 
-def _mesh_instances(layout, bundle: MeshAssetBundle, lod: int) -> tuple[MeshInstance, ...]:
+def _mesh_instances(
+    layout,
+    bundle: MeshAssetBundleAny,
+    lod: int,
+) -> tuple[MeshInstance, ...]:
     records = {record.asset_id: record for record in bundle.records}
     instances: list[MeshInstance] = []
     world_x = layout.chunk_id.x * CHUNK_SIZE_M
@@ -548,7 +734,7 @@ def _expand_bounds(
 
 def _instance_bounds(
     instance: MeshInstance,
-    record: MeshAssetRecord,
+    record: MeshAssetRecordAny,
     world_offset: tuple[float, float, float],
 ) -> tuple[tuple[float, float, float], ...]:
     bounds = record.lod[str(instance.template_lod)].aabb
@@ -582,7 +768,7 @@ def _chunk_bounds(
     roads: tuple[Ribbon, ...],
     water: tuple[Ribbon, ...],
     instances: tuple[MeshInstance, ...],
-    bundle: MeshAssetBundle,
+    bundle: MeshAssetBundleAny,
 ) -> Bounds3:
     lower = [world_offset[0], world_offset[1], float("inf")]
     upper = [
@@ -646,7 +832,7 @@ def build_mesh_chunk_manifest(
     chunk_y: int,
     *,
     world_seed: int,
-    bundle: MeshAssetBundle,
+    bundle: MeshAssetBundleAny,
     lod: int,
 ) -> MeshChunkManifest:
     """Derive one canonical mesh chunk from the shared deterministic layout."""
@@ -718,9 +904,9 @@ def build_mesh_chunk_manifest(
 def project_mesh_chunk_runtime(
     chunk: MeshChunkManifest,
     *,
-    bundle: MeshAssetBundle,
+    bundle: MeshAssetBundleAny,
     material_bundle: DerivedMaterialBundle,
-) -> MeshChunkRuntimeManifest:
+) -> MeshChunkRuntimeManifestAny:
     """Add exact runtime routes without changing the canonical chunk identity."""
 
     if (
@@ -730,24 +916,91 @@ def project_mesh_chunk_runtime(
     ):
         raise MeshChunkError("mesh chunk, asset, and material bundle identities disagree")
     records = {record.asset_id: record for record in bundle.records}
-    rows = []
+    rows: list[MeshAssetRuntimeUrl | MeshAssetRuntimeUrlV2] = []
+    texture_objects = (
+        {
+            row.sha256: row
+            for row in bundle.texture_objects
+        }
+        if type(bundle) is MeshAssetBundleV2
+        else {}
+    )
     for asset_id in sorted({instance.asset_id for instance in chunk.instances}):
         record = records.get(asset_id)
         if record is None:
             raise MeshChunkError("mesh chunk references an unavailable runtime asset")
         descriptor = record.lod[str(chunk.selected_lod)]
-        rows.append(
-            MeshAssetRuntimeUrl(
-                asset_id=asset_id,
-                lod=chunk.selected_lod,
-                url=(
-                    f"/api/world/mesh-assets/{bundle.bundle_id}/"
-                    f"{asset_id}/lod{chunk.selected_lod}.glb"
-                ),
-                glb_sha256=descriptor.glb_sha256,
-                glb_bytes=descriptor.glb_bytes,
-            ),
+        route = (
+            f"/api/world/mesh-assets/{bundle.bundle_id}/"
+            f"{asset_id}/lod{chunk.selected_lod}.glb"
         )
+        if type(bundle) is MeshAssetBundle:
+            rows.append(
+                MeshAssetRuntimeUrl(
+                    asset_id=asset_id,
+                    lod=chunk.selected_lod,
+                    url=route,
+                    glb_sha256=descriptor.glb_sha256,
+                    glb_bytes=descriptor.glb_bytes,
+                ),
+            )
+        elif type(bundle) is MeshAssetBundleV2:
+            if type(descriptor) is not MeshTemplateLodV2:
+                raise MeshChunkError(
+                    "mesh runtime v2 descriptor type disagrees",
+                )
+            dependencies = []
+            for binding in sorted(
+                descriptor.texture_bindings,
+                key=lambda row: (
+                    row.sha256,
+                    row.role,
+                    row.material_slot_id,
+                ),
+            ):
+                texture = texture_objects.get(binding.sha256)
+                if (
+                    texture is None
+                    or texture.object_path
+                    != f"textures/{binding.sha256}.png"
+                ):
+                    raise MeshChunkError(
+                        "mesh runtime v2 texture object is unavailable",
+                    )
+                dependencies.append(
+                    MeshTextureRuntimeUrl(
+                        url=(
+                            f"/api/world/mesh-assets/{bundle.bundle_id}/"
+                            f"textures/{binding.sha256}.png"
+                        ),
+                        sha256=binding.sha256,
+                        bytes=texture.bytes,
+                        role=binding.role,
+                        colour_space=binding.colour_space,
+                        material_slot_id=binding.material_slot_id,
+                        derivation_algorithm_id=(
+                            binding.derivation_algorithm_id
+                        ),
+                        min_filter=binding.min_filter,
+                        mag_filter=binding.mag_filter,
+                        wrap_s=binding.wrap_s,
+                        wrap_t=binding.wrap_t,
+                    ),
+                )
+            rows.append(
+                MeshAssetRuntimeUrlV2(
+                    asset_id=asset_id,
+                    lod=chunk.selected_lod,
+                    url=route,
+                    glb_sha256=descriptor.glb_sha256,
+                    glb_bytes=descriptor.glb_bytes,
+                    texture_dependencies=tuple(dependencies),
+                ),
+            )
+        else:
+            raise MeshChunkError(
+                "mesh runtime bundle schema is unsupported",
+            )
     material_records = {
         record.slot_id: record
         for record in material_bundle.records
@@ -775,11 +1028,19 @@ def project_mesh_chunk_runtime(
                 "mesh surface material is unavailable or disagrees with verified evidence",
             )
         surfaces.append(_surface_material_runtime(record, material_bundle.bundle_id))
-    return MeshChunkRuntimeManifest(
-        chunk=chunk,
-        asset_urls=tuple(rows),
-        surface_materials=tuple(surfaces),
-    )
+    if type(bundle) is MeshAssetBundle:
+        return MeshChunkRuntimeManifest(
+            chunk=chunk,
+            asset_urls=tuple(rows),
+            surface_materials=tuple(surfaces),
+        )
+    if type(bundle) is MeshAssetBundleV2:
+        return MeshChunkRuntimeManifestV2(
+            chunk=chunk,
+            asset_urls=tuple(rows),
+            surface_materials=tuple(surfaces),
+        )
+    raise MeshChunkError("mesh runtime bundle schema is unsupported")
 
 
 def _surface_material_runtime(
