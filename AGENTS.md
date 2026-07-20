@@ -20,16 +20,32 @@
 
 ## 当前协作与接管状态（2026-07-20）
 
-- **Opus 已恢复在线**。Codex 在其不可用期间完成了必要的跨 lane 取证与规格工作；核心
-  pipeline/registry/renderer 事项重新通过明确 HANDOFF 交由 Opus，UX/呈现/交互/审计仍由
-  Codex 负责，双方继续遵守设计门、TDD 和 fail-closed 合同。
+- **Opus 当前不可用；GLM-5.2 已作为临时接替 lane 加入。** Codex 独立完成
+  HANDOFF-006 Phase 1 的 production clearance 合同、Blender runtime、
+  frame identity v2 与 journal/runner 接入；GLM 提供 post-render quality/repose
+  草案与 Batch 6 environment-module 草案。GLM 未提交代码仍须 Codex review 后才能进入
+  main，不能以“测试绿”替代真实 layer/scene 证据。
 - 当前核心交办按顺序为：
-  1. `handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`；
+  1. `handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`
+     （Phase 1 已完成，Phase 2 仍未交付）；
   2. `handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`。
-  007 只有在与 006 路径不重叠时才可并行，否则先完成 006。
+  007 仅可在独立新路径上并行，触及 renderer/runtime/journal 时必须先协调。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
-  该实现仍等待用户确认方案 A。
+  用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
+
+### HANDOFF-006 Phase 1 fresh evidence
+
+- canonical 180-camera preflight：
+  `preflight_id=42f65291a55f58c5b064a2785b3ee868a5d9c77c107ad233a4f9f235d7f10b9a`；
+  report SHA
+  `0b63bc6759e8a36d7ace04d760e43d27862082d084cc0cd50b73e30449224418`。
+- 显式 `<2m / 5-of-15` operator policy 下仅 `ground-route-010`（15）与
+  `ground-route-039`（5）拒绝，其它 178 台为 0；`034=0` 仍只表示几何门未拒绝，
+  **不表示** post-render/training 通过。
+- 实现与边界见 `handoff/FEEDBACK-HANDOFF-CODEX-006-phase1.md`；GLM 006 草案的
+  阻断审计见 `handoff/REVIEW-CODEX-014-glm-006-quality-repose.md`；下一阶段计划见
+  `docs/superpowers/plans/2026-07-20-production-camera-postrender-quality.md`。
 
 ## Batch 6 image2 素材与 v2 场景差距（2026-07-20）
 
