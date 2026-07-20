@@ -40,7 +40,11 @@ function fakeRenderer() {
   return { capabilities: { isWebGL2: true } };
 }
 
-function loaderHarness({ decodeError = null, supportError = null } = {}) {
+function loaderHarness({
+  decodeError = null,
+  supportError = null,
+  stallDecode = false,
+} = {}) {
   const events = [];
   const texture = {
     dispose() {
@@ -59,6 +63,7 @@ function loaderHarness({ decodeError = null, supportError = null } = {}) {
     },
     parse(bytes, onLoad, onError) {
       events.push(['parse', bytes.byteLength]);
+      if (stallDecode) return;
       if (decodeError) onError(decodeError);
       else onLoad(texture);
     },
@@ -164,6 +169,26 @@ test('capability and decode failures freeze bounded honest fallbacks', async () 
       ['fallbackReason', 'profileId', 'state'],
     );
   }
+});
+
+test('a stalled KTX worker times out into explicit H2 fallback', async () => {
+  const { createMaterialProfileController } = subject();
+  const harness = loaderHarness({ stallDecode: true });
+  const controller = createMaterialProfileController({
+    createKtx2Loader: () => harness.loader,
+    verifyAndReadCanary: async () => CANARY_BYTES,
+    canaryDecodeTimeoutMs: 5,
+  });
+
+  const selected = await controller.select({
+    renderer: fakeRenderer(),
+    canary: canary(),
+    predictedCompressedBytes: 1024,
+  });
+
+  assert.equal(selected.profileId, H2);
+  assert.equal(selected.fallbackReason.code, 'canary_decode_failed');
+  assert.equal(harness.events.at(-1), 'loader-disposed');
 });
 
 test('verified canary rejects redirects, MIME, length, and SHA drift', async () => {

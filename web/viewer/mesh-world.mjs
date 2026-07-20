@@ -208,6 +208,12 @@ const TEXTURE_RUNTIME_V3_KEYS = new Set([
   'role',
   'transfer',
   'material_slot_id',
+  'min_filter',
+  'mag_filter',
+  'wrap_s',
+  'wrap_t',
+  'alpha_mode',
+  'flip_y',
 ]);
 const SURFACE_POLICY_V3_KEYS = new Set([
   'slot_id',
@@ -609,6 +615,12 @@ function validateTextureRuntimeV3(
     || !['base_color', 'normal', 'orm'].includes(descriptor.role)
     || descriptor.transfer !== expectedTransfer
     || !MATERIAL_SLOT_ID.test(descriptor.material_slot_id)
+    || descriptor.min_filter !== 9987
+    || descriptor.mag_filter !== 9729
+    || descriptor.wrap_s !== 10497
+    || descriptor.wrap_t !== 10497
+    || descriptor.alpha_mode !== 'opaque'
+    || descriptor.flip_y !== false
     || descriptor.url !== expectedProfileTexturePath(
       bundleId,
       profileId,

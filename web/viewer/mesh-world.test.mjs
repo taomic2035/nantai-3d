@@ -248,6 +248,12 @@ function profileTexture(
     role,
     transfer: role === 'base_color' ? 'srgb' : 'linear',
     material_slot_id: slotId,
+    min_filter: 9987,
+    mag_filter: 9729,
+    wrap_s: 10497,
+    wrap_t: 10497,
+    alpha_mode: 'opaque',
+    flip_y: false,
   };
 }
 

@@ -332,6 +332,12 @@ function normalizeDependency(row, materialProfile) {
       'role',
       'transfer',
       'material_slot_id',
+      'min_filter',
+      'mag_filter',
+      'wrap_s',
+      'wrap_t',
+      'alpha_mode',
+      'flip_y',
     ]);
     const actualKeys = (
       row !== null
@@ -378,6 +384,12 @@ function normalizeDependency(row, materialProfile) {
       || row.transfer !== expectedTransfer
       || typeof row.material_slot_id !== 'string'
       || row.material_slot_id.length === 0
+      || row.min_filter !== 9987
+      || row.mag_filter !== 9729
+      || row.wrap_s !== 10497
+      || row.wrap_t !== 10497
+      || row.alpha_mode !== 'opaque'
+      || row.flip_y !== false
     ) {
       throw new TypeError('verified mesh texture descriptor is invalid');
     }
@@ -385,10 +397,6 @@ function normalizeDependency(row, materialProfile) {
       ...row,
       colour_space: row.transfer === 'srgb' ? 'srgb' : 'non-color',
       derivation_algorithm_id: 'verified-profile-runtime-v3',
-      min_filter: 9987,
-      mag_filter: 9729,
-      wrap_s: 10497,
-      wrap_t: 10497,
       material_profile: materialProfile,
       source_descriptor: row,
     };
@@ -639,6 +647,12 @@ export function createVerifiedProfileTextureStore({
       'role',
       'transfer',
       'material_slot_id',
+      'min_filter',
+      'mag_filter',
+      'wrap_s',
+      'wrap_t',
+      'alpha_mode',
+      'flip_y',
     ]);
     const actualKeys = descriptor && typeof descriptor === 'object'
       ? Object.keys(descriptor)
@@ -673,6 +687,12 @@ export function createVerifiedProfileTextureStore({
       )
       || typeof descriptor.material_slot_id !== 'string'
       || descriptor.material_slot_id.length === 0
+      || descriptor.min_filter !== 9987
+      || descriptor.mag_filter !== 9729
+      || descriptor.wrap_s !== 10497
+      || descriptor.wrap_t !== 10497
+      || descriptor.alpha_mode !== 'opaque'
+      || descriptor.flip_y !== false
     ) {
       throw new TypeError(
         'verified profile texture descriptor is invalid',

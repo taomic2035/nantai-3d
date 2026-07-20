@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   threeToChunk,
@@ -87,6 +88,7 @@ import {
 import {
   meshInstanceThreeTransformInChunk,
   meshWorldAvailable,
+  resolveSelectedProfile,
   resolveMeshChunkUrl,
   ribbonGeometryThree,
   selectInitialPresentationMode,
@@ -95,7 +97,14 @@ import {
 } from './mesh-world.mjs';
 import {
   createVerifiedMeshResourceStore,
+  createVerifiedProfileTextureStore,
 } from './verified-mesh-resources.mjs';
+import {
+  createMaterialProfileController,
+} from './material-profile.mjs';
+import {
+  createAtomicMeshProfileWorld,
+} from './mesh-profile-world.mjs';
 import {
   createFrameIntervalSampler,
 } from './frame-performance.mjs';
@@ -154,6 +163,11 @@ const meshResourceStore = createVerifiedMeshResourceStore({
   GLTFLoader,
   mergeGeometriesFn: mergeGeometries,
 });
+let atomicMeshProfileWorld = null;
+let atomicMeshBatchPromise = null;
+let atomicMeshBatchSignature = null;
+let atomicMeshRetryAt = 0;
+let meshProfileEvent = null;
 const frameIntervalSampler = createFrameIntervalSampler();
 let viewerBridge = null;
 let splatLayer = null;
@@ -514,7 +528,63 @@ async function loadVerifiedMaterialMap(descriptor, nominalTileM) {
   return promise;
 }
 
-async function loadVerifiedSurfaceTextures(descriptor) {
+async function loadProfileSurfaceTextures(
+  descriptor,
+  profileLane,
+  record,
+) {
+  const cacheKey = descriptor.slot_id;
+  const cached = record.surfaceTexturePromises.get(cacheKey);
+  if (cached) return cached;
+  const promise = (async () => {
+    const acquired = [];
+    try {
+      for (const role of ['base_color', 'normal', 'orm']) {
+        const result = await profileLane.profileTextureStore.acquire(
+          descriptor[role],
+          { alphaMode: 'OPAQUE', flipY: false },
+        );
+        acquired.push([role, result]);
+      }
+      for (const [, result] of acquired) {
+        record.profileTextureKeys.push(result.key);
+        result.texture.anisotropy = Math.min(
+          8,
+          renderer.capabilities.getMaxAnisotropy(),
+        );
+      }
+      return {
+        map: acquired[0][1].texture,
+        normalMap: acquired[1][1].texture,
+        ormMap: acquired[2][1].texture,
+      };
+    } catch (error) {
+      for (const [, result] of acquired) {
+        profileLane.profileTextureStore.release(result.key);
+      }
+      throw error;
+    }
+  })();
+  record.surfaceTexturePromises.set(cacheKey, promise);
+  promise.catch(() => {
+    if (record.surfaceTexturePromises.get(cacheKey) === promise) {
+      record.surfaceTexturePromises.delete(cacheKey);
+    }
+  });
+  return promise;
+}
+
+async function loadVerifiedSurfaceTextures(
+  descriptor,
+  profileLane = null,
+  record = null,
+) {
+  if (descriptor.base_color?.media_type !== undefined) {
+    if (!profileLane || !record) {
+      throw new Error('Profile surface texture lane is unavailable');
+    }
+    return loadProfileSurfaceTextures(descriptor, profileLane, record);
+  }
   const [map, normalMap, ormMap] = await Promise.all([
     loadVerifiedMaterialMap(descriptor.base_color, descriptor.nominal_tile_m),
     loadVerifiedMaterialMap(descriptor.normal, descriptor.nominal_tile_m),
@@ -523,8 +593,17 @@ async function loadVerifiedSurfaceTextures(descriptor) {
   return { map, normalMap, ormMap };
 }
 
-async function meshSurfaceMaterial(descriptor, kind) {
-  const { map, normalMap, ormMap } = await loadVerifiedSurfaceTextures(descriptor);
+async function meshSurfaceMaterial(
+  descriptor,
+  kind,
+  profileLane = null,
+  record = null,
+) {
+  const { map, normalMap, ormMap } = await loadVerifiedSurfaceTextures(
+    descriptor,
+    profileLane,
+    record,
+  );
   const water = kind === 'water';
   return new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -545,6 +624,61 @@ async function meshSurfaceMaterial(descriptor, kind) {
     depthWrite: !water,
     side: THREE.DoubleSide,
   });
+}
+
+function scaleSurfaceUvs(data, nominalTileM) {
+  const uvs = new Float32Array(data.uvs.length);
+  for (let index = 0; index < data.uvs.length; index += 1) {
+    uvs[index] = data.uvs[index] / nominalTileM;
+  }
+  return { ...data, uvs };
+}
+
+function expandProfileTerrainUvs(data, materialDescriptors) {
+  const vertexCount = data.indices.length;
+  const positions = new Float32Array(vertexCount * 3);
+  const uvs = new Float32Array(vertexCount * 2);
+  const colors = data.colors
+    ? new Float32Array(vertexCount * 3)
+    : null;
+  const indices = new Uint32Array(vertexCount);
+  for (const group of data.groups) {
+    const nominalTileM = materialDescriptors[
+      group.materialIndex
+    ]?.nominal_tile_m;
+    if (!Number.isFinite(nominalTileM) || nominalTileM <= 0) {
+      throw new Error('Profile surface UV policy is invalid');
+    }
+    for (
+      let cursor = group.start;
+      cursor < group.start + group.count;
+      cursor += 1
+    ) {
+      const sourceIndex = data.indices[cursor];
+      positions.set(
+        data.positions.subarray(sourceIndex * 3, sourceIndex * 3 + 3),
+        cursor * 3,
+      );
+      uvs.set([
+        data.uvs[sourceIndex * 2] / nominalTileM,
+        data.uvs[sourceIndex * 2 + 1] / nominalTileM,
+      ], cursor * 2);
+      if (colors) {
+        colors.set(
+          data.colors.subarray(sourceIndex * 3, sourceIndex * 3 + 3),
+          cursor * 3,
+        );
+      }
+      indices[cursor] = cursor;
+    }
+  }
+  return {
+    ...data,
+    positions,
+    uvs,
+    colors,
+    indices,
+  };
 }
 
 function meshFromGeometryData(data, material, name) {
@@ -636,16 +770,54 @@ function disposeMeshWorldRecord(record) {
   scene.remove(record.group);
   for (const resource of record.ownedResources) resource.dispose();
   for (const descriptor of record.templateDescriptors) {
-    meshResourceStore.releaseTemplate(descriptor);
+    record.resourceStore.releaseTemplate(descriptor);
   }
+  for (const key of record.profileTextureKeys) {
+    record.profileTextureStore.release(key);
+  }
+  record.profileTextureKeys.length = 0;
+  record.surfaceTexturePromises.clear();
 }
 
-async function buildMeshWorldGroup(runtime) {
+function resolveSurfaceMaterialDescriptors(
+  surfaceMaterials,
+  profileTextures,
+) {
+  if (!Array.isArray(profileTextures)) return surfaceMaterials;
+  const textures = new Map(
+    profileTextures.map((descriptor) => [
+      `${descriptor.material_slot_id}:${descriptor.role}`,
+      descriptor,
+    ]),
+  );
+  return surfaceMaterials.map((policy) => {
+    const resolved = {
+      ...policy,
+      base_color: textures.get(`${policy.slot_id}:base_color`),
+      normal: textures.get(`${policy.slot_id}:normal`),
+      orm: textures.get(`${policy.slot_id}:orm`),
+    };
+    if (!resolved.base_color || !resolved.normal || !resolved.orm) {
+      throw new Error('Profile surface texture closure is incomplete');
+    }
+    return resolved;
+  });
+}
+
+async function buildMeshWorldGroup(runtime, profileLane = null) {
   const {
     chunk,
     asset_urls: assetUrls,
-    surface_materials: surfaceMaterials,
+    surface_materials: surfacePolicies,
+    textures: profileTextures,
+    profile_id: profileId = 'legacy-png',
   } = runtime;
+  const surfaceMaterials = resolveSurfaceMaterialDescriptors(
+    surfacePolicies,
+    profileTextures,
+  );
+  const resourceStore = profileLane?.meshResourceStore
+    ?? meshResourceStore;
   const descriptors = new Map(assetUrls.map((row) => [row.asset_id, row]));
   const materialDescriptors = new Map(
     surfaceMaterials.map((row) => [row.slot_id, row]),
@@ -661,11 +833,23 @@ async function buildMeshWorldGroup(runtime) {
     templateDescriptors,
     weatherMaterials,
     lod: chunk.selected_lod,
+    key: `${chunk.chunk_id.x}_${chunk.chunk_id.y}`,
+    profileId,
+    resourceStore,
+    profileTextureStore: profileLane?.profileTextureStore ?? {
+      release() {
+        return false;
+      },
+    },
+    profileTextureKeys: [],
+    surfaceTexturePromises: new Map(),
   };
   group.name = `mesh_world_${chunk.chunk_id.x}_${chunk.chunk_id.y}_lod${chunk.selected_lod}`;
   try {
     const templateResults = await Promise.allSettled(
-      assetUrls.map((descriptor) => meshResourceStore.loadTemplate(descriptor)),
+      assetUrls.map((descriptor) => (
+        resourceStore.loadTemplate(descriptor)
+      )),
     );
     const firstFailure = templateResults.find(
       (result) => result.status === 'rejected',
@@ -683,15 +867,27 @@ async function buildMeshWorldGroup(runtime) {
       ]),
     );
 
-    await Promise.all(surfaceMaterials.map(loadVerifiedSurfaceTextures));
-    const terrainGeometry = terrainGeometryThree(chunk);
+    let terrainGeometry = terrainGeometryThree(chunk);
+    const terrainMaterialDescriptors = terrainGeometry.materialSlotIds.map(
+      (slotId) => materialDescriptors.get(slotId),
+    );
+    if (profileLane) {
+      terrainGeometry = expandProfileTerrainUvs(
+        terrainGeometry,
+        terrainMaterialDescriptors,
+      );
+    }
     const terrainMaterials = await Promise.all(
-      terrainGeometry.materialSlotIds.map(async (slotId) => {
-        const descriptor = materialDescriptors.get(slotId);
+      terrainMaterialDescriptors.map(async (descriptor) => {
         if (!descriptor) {
           throw new Error('Mesh terrain lacks a zoned surface material');
         }
-        const material = await meshSurfaceMaterial(descriptor, 'terrain');
+        const material = await meshSurfaceMaterial(
+          descriptor,
+          'terrain',
+          profileLane,
+          record,
+        );
         return registerMeshWorldWeatherMaterial(
           material,
           weatherMaterials,
@@ -714,11 +910,23 @@ async function buildMeshWorldGroup(runtime) {
         throw new Error('Mesh ribbon lacks its surface material');
       }
       const material = registerMeshWorldWeatherMaterial(
-        await meshSurfaceMaterial(materialDescriptor, ribbon.kind),
+        await meshSurfaceMaterial(
+          materialDescriptor,
+          ribbon.kind,
+          profileLane,
+          record,
+        ),
         weatherMaterials,
       );
+      let ribbonGeometry = ribbonGeometryThree(chunk, ribbon);
+      if (profileLane) {
+        ribbonGeometry = scaleSurfaceUvs(
+          ribbonGeometry,
+          materialDescriptor.nominal_tile_m,
+        );
+      }
       const mesh = meshFromGeometryData(
-        ribbonGeometryThree(chunk, ribbon),
+        ribbonGeometry,
         material,
         `${group.name}_${ribbon.kind}_${ribbon.ribbon_id}`,
       );
@@ -758,6 +966,182 @@ async function buildMeshWorldGroup(runtime) {
   }
 }
 
+function meshRuntimeV3Active() {
+  return manifest?.mesh_grid?.runtime_schema
+    === 'nantai.synthetic-village.mesh-chunk-runtime.v3';
+}
+
+async function fetchValidatedMeshRuntime(chunkX, chunkY, lod) {
+  const url = resolveMeshChunkUrl(manifest, chunkX, chunkY, lod);
+  if (!url) throw new Error('Mesh chunk runtime route is unavailable');
+  const response = await fetch(url);
+  if (!response.ok) {
+    const error = new Error(`Mesh chunk load failed: ${response.status}`);
+    error.status = response.status;
+    error.apiCode = null;
+    if (response.headers.get('content-type')?.includes('application/json')) {
+      try {
+        error.apiCode = (await response.json())?.error?.code ?? null;
+      } catch {
+        error.apiCode = null;
+      }
+    }
+    throw error;
+  }
+  return validateMeshChunkRuntime(await response.json(), {
+    worldManifest: manifest,
+    chunkX,
+    chunkY,
+    lod,
+  });
+}
+
+function createMeshProfileLane(profileId, ktx2Loader) {
+  const profileTextureStore = createVerifiedProfileTextureStore({
+    THREE,
+    materialProfile: profileId,
+    ktx2Loader,
+    onProfileFailure() {
+      meshProfileEvent = 'runtime_h3_failure';
+    },
+  });
+  const profileMeshResourceStore = createVerifiedMeshResourceStore({
+    THREE,
+    GLTFLoader,
+    mergeGeometriesFn: mergeGeometries,
+    materialProfile: profileId,
+    profileTextureStore,
+  });
+  const profileLane = {
+    profileId,
+    profileTextureStore,
+    meshResourceStore: profileMeshResourceStore,
+    async build(selected, source) {
+      return buildMeshWorldGroup({
+        chunk: source.chunk,
+        profile_id: selected.profile_id,
+        asset_urls: selected.asset_urls,
+        textures: selected.textures,
+        surface_materials: selected.surface_materials,
+      }, profileLane);
+    },
+    async disposeTemplates() {
+      profileMeshResourceStore.dispose();
+    },
+    async disposeTextures() {
+      profileTextureStore.dispose();
+    },
+  };
+  return profileLane;
+}
+
+function createAtomicMeshWorldRuntime() {
+  const profileController = createMaterialProfileController({
+    createKtx2Loader: () => new KTX2Loader(),
+  });
+  return createAtomicMeshProfileWorld({
+    profileController,
+    renderer,
+    resolveSelectedProfile,
+    createLane: createMeshProfileLane,
+    async replaceVisible({ previous, next }) {
+      for (const record of next) scene.add(record.group);
+      for (const record of previous) disposeMeshWorldRecord(record);
+      meshWorldChunks.clear();
+      for (const record of next) {
+        meshWorldChunks.set(record.key, record);
+      }
+      meshWorldStats.loaded += next.length;
+      meshWorldStats.evicted += previous.length;
+      applyModelWeather();
+    },
+    disposeRecord: disposeMeshWorldRecord,
+    onEvent(code) {
+      meshProfileEvent = code;
+    },
+  });
+}
+
+function meshVisibleRequests(centerX, centerY) {
+  const requests = [];
+  for (let dx = -MESH_VIEW_RADIUS; dx <= MESH_VIEW_RADIUS; dx += 1) {
+    for (let dy = -MESH_VIEW_RADIUS; dy <= MESH_VIEW_RADIUS; dy += 1) {
+      const chunkX = centerX + dx;
+      const chunkY = centerY + dy;
+      requests.push({
+        chunkX,
+        chunkY,
+        lod: desiredLod(chunkX, chunkY, centerX, centerY),
+        key: `${chunkX}_${chunkY}`,
+      });
+    }
+  }
+  return requests;
+}
+
+function loadAtomicMeshWorld(requests) {
+  if (!atomicMeshProfileWorld) {
+    return Promise.reject(
+      new Error('Atomic mesh profile world is unavailable'),
+    );
+  }
+  const signature = JSON.stringify(
+    requests.map(({ chunkX, chunkY, lod }) => [chunkX, chunkY, lod]),
+  );
+  if (signature === atomicMeshBatchSignature) {
+    return Promise.resolve([...meshWorldChunks.values()]);
+  }
+  if (atomicMeshBatchPromise) return atomicMeshBatchPromise;
+  if (atomicMeshRetryAt > Date.now()) return Promise.resolve([]);
+
+  const tokens = requests.map((request) => {
+    const token = { lod: request.lod, atomic: true };
+    meshWorldLoading.set(request.key, token);
+    return [request.key, token];
+  });
+  atomicMeshBatchPromise = (async () => {
+    try {
+      const runtimes = await Promise.all(requests.map((request) => (
+        fetchValidatedMeshRuntime(
+          request.chunkX,
+          request.chunkY,
+          request.lod,
+        )
+      )));
+      const records = await atomicMeshProfileWorld.loadVisible(runtimes);
+      atomicMeshBatchSignature = signature;
+      atomicMeshRetryAt = 0;
+      for (const request of requests) {
+        meshWorldRetryAt.delete(request.key);
+        meshWorldTerminalFailures.delete(request.key);
+      }
+      return records;
+    } catch (error) {
+      atomicMeshRetryAt = Date.now() + 5000;
+      for (const request of requests) {
+        if (
+          error.status === 422
+          && error.apiCode === 'mesh_world_bounds_exceeded'
+        ) {
+          meshWorldTerminalFailures.add(request.key);
+        } else {
+          meshWorldRetryAt.set(request.key, atomicMeshRetryAt);
+        }
+      }
+      console.warn('原子纹理 mesh 视野加载失败:', error);
+      throw error;
+    } finally {
+      for (const [key, token] of tokens) {
+        if (meshWorldLoading.get(key) === token) {
+          meshWorldLoading.delete(key);
+        }
+      }
+      atomicMeshBatchPromise = null;
+    }
+  })();
+  return atomicMeshBatchPromise;
+}
+
 async function loadMeshWorldChunk(chunkX, chunkY, lod) {
   const key = `${chunkX}_${chunkY}`;
   if (meshWorldChunks.get(key)?.lod === lod) return;
@@ -765,30 +1149,10 @@ async function loadMeshWorldChunk(chunkX, chunkY, lod) {
   if ((meshWorldRetryAt.get(key) ?? 0) > Date.now()) return;
   const currentLoad = meshWorldLoading.get(key);
   if (currentLoad?.lod === lod) return;
-  const url = resolveMeshChunkUrl(manifest, chunkX, chunkY, lod);
-  if (!url) return;
   const token = { lod };
   meshWorldLoading.set(key, token);
   try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      const error = new Error(`Mesh chunk load failed: ${response.status}`);
-      error.status = response.status;
-      if (response.headers.get('content-type')?.includes('application/json')) {
-        try {
-          error.apiCode = (await response.json())?.error?.code ?? null;
-        } catch {
-          error.apiCode = null;
-        }
-      }
-      throw error;
-    }
-    const runtime = validateMeshChunkRuntime(await response.json(), {
-      worldManifest: manifest,
-      chunkX,
-      chunkY,
-      lod,
-    });
+    const runtime = await fetchValidatedMeshRuntime(chunkX, chunkY, lod);
     const record = await buildMeshWorldGroup(runtime);
     if (meshWorldLoading.get(key) !== token) {
       disposeMeshWorldRecord(record);
@@ -822,19 +1186,19 @@ function updateMeshWorldChunks(playerX, playerZ) {
   const anchorX = cameraMode === 'orbit' && controls ? controls.target.x : playerX;
   const anchorZ = cameraMode === 'orbit' && controls ? controls.target.z : playerZ;
   const [centerX, centerY] = threeToChunk([anchorX, 0, anchorZ], chunkSizeM);
+  const requests = meshVisibleRequests(centerX, centerY);
+  if (meshRuntimeV3Active()) {
+    loadAtomicMeshWorld(requests).catch(() => {});
+    return;
+  }
   const needed = new Set();
-  for (let dx = -MESH_VIEW_RADIUS; dx <= MESH_VIEW_RADIUS; dx += 1) {
-    for (let dy = -MESH_VIEW_RADIUS; dy <= MESH_VIEW_RADIUS; dy += 1) {
-      const chunkX = centerX + dx;
-      const chunkY = centerY + dy;
-      const key = `${chunkX}_${chunkY}`;
-      needed.add(key);
-      loadMeshWorldChunk(
-        chunkX,
-        chunkY,
-        desiredLod(chunkX, chunkY, centerX, centerY),
-      );
-    }
+  for (const request of requests) {
+    needed.add(request.key);
+    loadMeshWorldChunk(
+      request.chunkX,
+      request.chunkY,
+      request.lod,
+    );
   }
   for (const [key, record] of meshWorldChunks) {
     if (needed.has(key)) continue;
@@ -1524,6 +1888,7 @@ function init() {
   renderer.domElement.tabIndex = 0;
   renderer.domElement.setAttribute('aria-label', '3D 场景画布');
   document.getElementById('canvas-container').appendChild(renderer.domElement);
+  atomicMeshProfileWorld = createAtomicMeshWorldRuntime();
 
   splatLayer = createSplatLayer({ scene, renderer });
   spatialSplatLayer = createSpatialSplatLayer({ scene, renderer });
@@ -2231,7 +2596,13 @@ async function main() {
       chunkSizeM,
     );
     loadingText.textContent = '加载已校验的可替换纹理网格...';
-    await loadMeshWorldChunk(meshChunkX, meshChunkY, 2);
+    if (meshRuntimeV3Active()) {
+      await loadAtomicMeshWorld(
+        meshVisibleRequests(meshChunkX, meshChunkY),
+      );
+    } else {
+      await loadMeshWorldChunk(meshChunkX, meshChunkY, 2);
+    }
     updateMeshWorldChunks(camera.position.x, camera.position.z);
   } else if (initialPresentation === 'model') {
     setPresentationMode('model');

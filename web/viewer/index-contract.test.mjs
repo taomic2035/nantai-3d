@@ -235,8 +235,8 @@ test('mesh templates use the verified ref-counted store and bounded evidence', (
     /from ['"]three\/addons\/utils\/BufferGeometryUtils\.js['"]/,
   );
   assert.match(main, /mergeGeometriesFn:\s*mergeGeometries/);
-  assert.match(main, /meshResourceStore\.loadTemplate\(/);
-  assert.match(main, /meshResourceStore\.releaseTemplate\(/);
+  assert.match(main, /resourceStore\.loadTemplate\(/);
+  assert.match(main, /record\.resourceStore\.releaseTemplate\(/);
   assert.doesNotMatch(main, /meshAssetCache/);
   assert.doesNotMatch(main, /function loadVerifiedMeshAsset/);
   assert.match(main, /templateDescriptors/);
@@ -253,6 +253,31 @@ test('mesh templates use the verified ref-counted store and bounded evidence', (
   assert.match(main, /frameIntervalSampler\.snapshot\(\)/);
   assert.match(main, /renderer\.info\.memory\.geometries/);
   assert.match(main, /renderer\.info\.memory\.textures/);
+});
+
+test('runtime v3 uses one atomic renderer-selected material profile', () => {
+  assert.match(
+    main,
+    /from ['"]three\/addons\/loaders\/KTX2Loader\.js['"]/,
+  );
+  assert.match(
+    main,
+    /from ['"]\.\/material-profile\.mjs['"]/,
+  );
+  assert.match(
+    main,
+    /from ['"]\.\/mesh-profile-world\.mjs['"]/,
+  );
+  assert.match(main, /createMaterialProfileController\(/);
+  assert.match(main, /createAtomicMeshProfileWorld\(/);
+  assert.match(main, /createVerifiedProfileTextureStore\(/);
+  assert.match(main, /resolveSelectedProfile/);
+  assert.match(main, /atomicMeshProfileWorld\.loadVisible\(/);
+  assert.match(main, /profileTextureKeys:\s*\[\]/);
+  assert.match(main, /profileTextureKeys\.push\(result\.key\)/);
+  assert.match(main, /for \(const key of record\.profileTextureKeys\)/);
+  assert.match(main, /disposeTemplates/);
+  assert.match(main, /disposeTextures/);
 });
 
 test('mesh weather clones preserve maps alpha and side while changing scalars', () => {

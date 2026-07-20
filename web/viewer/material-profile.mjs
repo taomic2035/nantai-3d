@@ -176,22 +176,35 @@ function publicSelection(profileId, reason) {
   });
 }
 
-function parseCanary(loader, bytes) {
+function parseCanary(loader, bytes, timeoutMs) {
   const buffer = bytes.buffer.slice(
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength,
   );
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timer = null;
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
+      if (timer !== null) clearTimeout(timer);
       callback(value);
     };
+    timer = setTimeout(() => finish(
+      reject,
+      new MaterialProfileError(
+        'canary_decode_failed',
+        'KTX2 canary decode timed out',
+      ),
+    ), timeoutMs);
     try {
       loader.parse(
         buffer,
         (texture) => {
+          if (settled) {
+            texture?.dispose?.();
+            return;
+          }
           if (!texture || typeof texture.dispose !== 'function') {
             finish(
               reject,
@@ -230,10 +243,13 @@ export function createMaterialProfileController({
     descriptor,
   }),
   maxCompressedBytes = MAX_H3_COMPRESSED_TEXTURE_BYTES,
+  canaryDecodeTimeoutMs = 10_000,
 } = {}) {
   if (
     !Number.isSafeInteger(maxCompressedBytes)
     || maxCompressedBytes <= 0
+    || !Number.isSafeInteger(canaryDecodeTimeoutMs)
+    || canaryDecodeTimeoutMs <= 0
   ) {
     throw new TypeError('maxCompressedBytes must be a positive safe integer');
   }
@@ -336,7 +352,11 @@ export function createMaterialProfileController({
 
     let texture;
     try {
-      texture = await parseCanary(loader, bytes);
+      texture = await parseCanary(
+        loader,
+        bytes,
+        canaryDecodeTimeoutMs,
+      );
     } catch {
       return freezeFallback('canary_decode_failed');
     }
