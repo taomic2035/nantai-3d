@@ -919,7 +919,11 @@ def test_runtime_rejects_relative_argv_before_path_resolution(tmp_path: Path) ->
     )
 
     assert result.returncode == 17
-    assert "NANTAI_BUILD_ERROR request and staging paths must be absolute" in (
+    # The builder supports both legacy (--request/--staging) and textured
+    # (--request/--materials/--staging) argv shapes; the absolute-path
+    # guard covers all three paths, so the message mentions "material"
+    # even when --materials is absent.
+    assert "NANTAI_BUILD_ERROR request, material, and staging paths must be absolute" in (
         result.stdout + result.stderr
     )
     assert not (tmp_path / "staging").exists()
