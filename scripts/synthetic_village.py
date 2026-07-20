@@ -432,6 +432,33 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     render_production_local.add_argument(
+        "--clearance-near-distance-m",
+        type=float,
+        required=True,
+        help=(
+            "Operator-selected near-hit threshold in metres for the "
+            "versioned upper/middle 5x5 clearance policy. This filters "
+            "training suitability and never upgrades trust."
+        ),
+    )
+    render_production_local.add_argument(
+        "--min-upper-middle-near-hits",
+        type=int,
+        required=True,
+        help=(
+            "Operator-selected rejection count from the 15 upper/middle "
+            "samples. The audited synthetic-village candidate is 5."
+        ),
+    )
+    render_production_local.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help=(
+            "Run and journal the scene-bound clearance probe without "
+            "starting any six-layer frame renders."
+        ),
+    )
+    render_production_local.add_argument(
         "--timeout-seconds",
         type=int,
         default=15 * 60,
@@ -765,6 +792,11 @@ def main(argv: list[str] | None = None) -> int:
             material_bundle_root=args.material_bundle_root,
             visual_pack_root=args.visual_pack_root,
             minimum_valid_pixel_ratio=args.min_valid_pixel_ratio,
+            clearance_near_distance_m=args.clearance_near_distance_m,
+            minimum_upper_middle_near_hit_count=(
+                args.min_upper_middle_near_hits
+            ),
+            preflight_only=args.preflight_only,
             camera_ids=tuple(args.camera) if args.camera else None,
             timeout_seconds=args.timeout_seconds,
             render_root=args.render_root,
@@ -779,6 +811,14 @@ def main(argv: list[str] | None = None) -> int:
                     "rendered_count": result.rendered_count,
                     "rejected_count": result.rejected_count,
                     "reused_count": result.reused_count,
+                    "preflight_id": result.preflight_id,
+                    "preflight_report_path": str(
+                        result.preflight_report_path,
+                    ),
+                    "preflight_rejected_count": (
+                        result.preflight_rejected_count
+                    ),
+                    "preflight_only": result.preflight_only,
                     "verification_level": "L0",
                     "trust_effect": "none-quality-filter-only",
                 },

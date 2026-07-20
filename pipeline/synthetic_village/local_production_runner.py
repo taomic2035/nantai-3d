@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,16 @@ from .local_textured_preview import (
     probe_local_blender_identity,
     verify_local_textured_training_build_directory,
 )
+from .production_preflight import (
+    ProductionClearancePolicy,
+    ProductionClearanceReport,
+    ProductionClearanceRequest,
+    ProductionPreflightError,
+    build_production_clearance_request,
+    canonical_production_clearance_request_bytes,
+    parse_production_clearance_report_bytes,
+    verify_production_clearance_report,
+)
 from .production_profile import (
     ProductionCameraPlan,
     build_production_camera_plan,
@@ -40,6 +51,7 @@ from .production_render import (
     canonical_local_production_render_request_bytes,
     compute_local_production_journal_sha256,
     evaluate_local_production_frame_quality,
+    local_production_quality_policy_sha256,
     new_local_production_render_journal,
     transition_local_production_frame,
 )
@@ -59,8 +71,71 @@ class LocalProductionRenderResult:
     rendered_count: int
     rejected_count: int
     reused_count: int
+    preflight_id: str
+    preflight_report_path: Path
+    preflight_rejected_count: int
+    preflight_only: bool
     stdout: str
     stderr: str
+
+
+def _run_blender_preflight_process(
+    *,
+    repo_root: Path,
+    executable: Path,
+    blend_path: Path,
+    script_path: Path,
+    request_path: Path,
+    report_path: Path,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            [
+                str(executable),
+                "--background",
+                "--factory-startup",
+                "--disable-autoexec",
+                "--python-exit-code",
+                "17",
+                str(blend_path),
+                "--python",
+                str(script_path),
+                "--",
+                "--request",
+                str(request_path),
+                "--report",
+                str(report_path),
+            ],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise LocalTexturedPreviewError(
+            f"local production preflight exceeded the {timeout_seconds}s timeout",
+        ) from exc
+
+
+def _load_preflight_report(
+    path: Path,
+    *,
+    request: ProductionClearanceRequest,
+) -> tuple[ProductionClearanceReport, str]:
+    try:
+        raw = canary._read_stable_metadata(
+            path,
+            label="production clearance report",
+        )
+        report = parse_production_clearance_report_bytes(raw)
+        verify_production_clearance_report(report, request=request)
+        return report, hashlib.sha256(raw).hexdigest()
+    except (canary.CanaryBuildError, ProductionPreflightError) as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
 
 
 def _load_journal(path: Path) -> LocalProductionRenderJournal:
@@ -199,6 +274,8 @@ def _validate_camera_metadata(
         metadata.arc_length_m,
         metadata.audit_only,
         metadata.disclosure,
+        metadata.preflight_id,
+        metadata.quality_policy_sha256,
     )
     expected = (
         request.build_id,
@@ -220,6 +297,8 @@ def _validate_camera_metadata(
         camera.arc_length_m,
         camera.audit_only,
         camera.disclosure,
+        request.preflight_id,
+        request.quality_policy_sha256,
     )
     if immutable != expected:
         raise LocalTexturedPreviewError(
@@ -273,6 +352,8 @@ def _validate_frame_staging(
             report.elevated_topology_sha256,
             report.group_id,
             report.topology_ref,
+            report.preflight_id,
+            report.quality_policy_sha256,
         )
         expected = (
             request.build_id,
@@ -286,6 +367,8 @@ def _validate_frame_staging(
             request.elevated_topology_sha256,
             request.camera.group_id,
             request.camera.topology_ref,
+            request.preflight_id,
+            request.quality_policy_sha256,
         )
         if immutable != expected:
             raise LocalTexturedPreviewError(
@@ -368,6 +451,9 @@ def run_local_production_render(
     training_build_directory: Path,
     material_bundle_root: Path,
     minimum_valid_pixel_ratio: float,
+    clearance_near_distance_m: float,
+    minimum_upper_middle_near_hit_count: int,
+    preflight_only: bool = False,
     repo_root: Path = ROOT,
     visual_pack_root: Path | None = None,
     executable: Path = DEFAULT_LOCAL_BLENDER,
@@ -385,8 +471,18 @@ def run_local_production_render(
         raise LocalTexturedPreviewError(
             "local production timeout must be an integer from 1 to 86400 seconds",
         )
+    if type(preflight_only) is not bool:
+        raise LocalTexturedPreviewError(
+            "preflight-only must be an explicit boolean",
+        )
     quality_policy = LocalProductionQualityPolicy(
         minimum_valid_pixel_ratio=minimum_valid_pixel_ratio,
+    )
+    clearance_policy = ProductionClearancePolicy(
+        near_distance_m=clearance_near_distance_m,
+        minimum_upper_middle_near_hit_count=(
+            minimum_upper_middle_near_hit_count
+        ),
     )
     try:
         repo_root = canary._require_real_directory(
@@ -437,6 +533,13 @@ def run_local_production_render(
         renderer_snapshot = canary._snapshot_regular_file(
             repo_root / "scripts/blender/render_synthetic_village.py",
         )
+        preflight_script_path = (
+            repo_root
+            / "scripts/blender/preflight_production_cameras.py"
+        )
+        preflight_script_snapshot = canary._snapshot_regular_file(
+            preflight_script_path,
+        )
         build_snapshots = tuple(
             canary._snapshot_regular_file(training_build_directory / name)
             for name in LOCAL_TRAINING_BUILD_ENTRIES
@@ -469,7 +572,24 @@ def run_local_production_render(
     immutable_snapshots = (
         executable_snapshot,
         renderer_snapshot,
+        preflight_script_snapshot,
         *build_snapshots,
+    )
+    preflight_request = build_production_clearance_request(
+        plan=plan,
+        selected_camera_ids=selected_ids,
+        build_id=report.preview_id,
+        blender_executable_sha256=executable_snapshot.sha256,
+        preflight_script_sha256=preflight_script_snapshot.sha256,
+        blend_sha256=blend_snapshot.sha256,
+        build_report_sha256=report_snapshot.sha256,
+        object_registry=report.object_registry,
+        auxiliary_registry=report.auxiliary_registry,
+        semantic_registry=report.semantic_registry,
+        policy=clearance_policy,
+    )
+    quality_policy_sha256 = local_production_quality_policy_sha256(
+        quality_policy,
     )
     seed_request = build_local_production_frame_request(
         plan=plan,
@@ -482,6 +602,8 @@ def run_local_production_render(
         object_registry=report.object_registry,
         auxiliary_registry=report.auxiliary_registry,
         semantic_registry=report.semantic_registry,
+        preflight_id=preflight_request.preflight_id,
+        quality_policy_sha256=quality_policy_sha256,
     )
     try:
         selected_render_root = (
@@ -503,9 +625,12 @@ def run_local_production_render(
         ) from exc
 
     journal_path = selected_render_root / "render-journal.json"
+    preflight_request_path = selected_render_root / "preflight-request.json"
+    preflight_report_path = selected_render_root / "preflight-report.json"
     rendered_count = 0
     rejected_count = 0
     reused_count = 0
+    preflight_rejected_count = 0
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     try:
@@ -513,7 +638,44 @@ def run_local_production_render(
             selected_render_root / ".local-production-render.lock",
             role="writer",
         ):
+            preflight_request_bytes = (
+                canonical_production_clearance_request_bytes(
+                    preflight_request,
+                )
+            )
+            if (
+                preflight_request_path.exists()
+                or canary._is_linklike(preflight_request_path)
+            ):
+                existing_request = canary._read_stable_metadata(
+                    preflight_request_path,
+                    label="production clearance request",
+                )
+                if existing_request != preflight_request_bytes:
+                    raise LocalTexturedPreviewError(
+                        "existing clearance request belongs to different inputs",
+                    )
+            else:
+                canary._write_new_file(
+                    preflight_request_path,
+                    preflight_request_bytes,
+                )
+            preflight_request_snapshot = canary._snapshot_regular_file(
+                preflight_request_path,
+            )
             if journal_path.exists() or canary._is_linklike(journal_path):
+                if not preflight_report_path.is_file() or canary._is_linklike(
+                    preflight_report_path,
+                ):
+                    raise LocalTexturedPreviewError(
+                        "existing production journal has no bound preflight report",
+                    )
+                preflight_report, preflight_report_sha256 = (
+                    _load_preflight_report(
+                        preflight_report_path,
+                        request=preflight_request,
+                    )
+                )
                 journal = _load_journal(journal_path)
                 immutable = (
                     journal.render_id,
@@ -527,6 +689,12 @@ def run_local_production_render(
                     journal.build_report_sha256,
                     journal.object_registry_sha256,
                     journal.quality_policy,
+                    journal.quality_policy_sha256,
+                    journal.preflight_id,
+                    journal.preflight_request_sha256,
+                    journal.preflight_report_sha256,
+                    journal.clearance_policy_sha256,
+                    journal.preflight_camera_ids,
                 )
                 expected = (
                     seed_request.render_id,
@@ -540,20 +708,72 @@ def run_local_production_render(
                     seed_request.build_report_sha256,
                     seed_request.object_registry_sha256,
                     quality_policy,
+                    quality_policy_sha256,
+                    preflight_request.preflight_id,
+                    hashlib.sha256(preflight_request_bytes).hexdigest(),
+                    preflight_report_sha256,
+                    preflight_request.policy_sha256,
+                    preflight_request.selected_camera_ids,
                 )
                 if immutable != expected:
                     raise LocalTexturedPreviewError(
                         "existing local production journal belongs to different inputs",
                     )
             else:
+                if (
+                    preflight_report_path.exists()
+                    or canary._is_linklike(preflight_report_path)
+                ):
+                    raise LocalTexturedPreviewError(
+                        "orphaned preflight report has no journal; use a new render root",
+                    )
+                preflight_started = time.monotonic()
+                completed = _run_blender_preflight_process(
+                    repo_root=repo_root,
+                    executable=executable_snapshot.path,
+                    blend_path=blend_path,
+                    script_path=preflight_script_snapshot.path,
+                    request_path=preflight_request_path,
+                    report_path=preflight_report_path,
+                    timeout_seconds=timeout_seconds,
+                )
+                preflight_duration = time.monotonic() - preflight_started
+                stdout_parts.append(completed.stdout)
+                stderr_parts.append(completed.stderr)
+                canary._verify_snapshots_unchanged(
+                    (*immutable_snapshots, preflight_request_snapshot),
+                )
+                if completed.returncode != 0:
+                    raise LocalTexturedPreviewError(
+                        "local production Blender preflight failed with "
+                        f"exit code {completed.returncode}",
+                    )
+                preflight_report, preflight_report_sha256 = (
+                    _load_preflight_report(
+                        preflight_report_path,
+                        request=preflight_request,
+                    )
+                )
                 journal = new_local_production_render_journal(
                     seed_request,
                     quality_policy=quality_policy,
+                    preflight_request=preflight_request,
+                    preflight_report=preflight_report,
+                    preflight_report_sha256=preflight_report_sha256,
+                    preflight_wall_clock_seconds=preflight_duration,
                     timeout_limit_seconds=timeout_seconds,
                 )
                 canary._write_render_journal(journal_path, journal)
 
-            for camera_id in selected_ids:
+            preflight_rejected_count = sum(
+                1
+                for row in journal.frames
+                if (
+                    row.camera_id in set(selected_ids)
+                    and row.state == "preflight-rejected"
+                )
+            )
+            for camera_id in (() if preflight_only else selected_ids):
                 started = time.monotonic()
                 nonce = uuid.uuid4().hex[:12]
                 temporary_root = selected_render_root.parent
@@ -566,6 +786,16 @@ def run_local_production_render(
                     frame = next(
                         row for row in journal.frames if row.camera_id == camera_id
                     )
+                    if frame.state == "preflight-rejected":
+                        if canary._frame_has_any_output(
+                            selected_render_root,
+                            camera_id,
+                        ):
+                            canary._quarantine_frame_outputs(
+                                selected_render_root,
+                                camera_id,
+                            )
+                        continue
                     if frame.state in {"verified", "rejected"}:
                         try:
                             _verify_published_frame(
@@ -610,6 +840,8 @@ def run_local_production_render(
                         object_registry=report.object_registry,
                         auxiliary_registry=report.auxiliary_registry,
                         semantic_registry=report.semantic_registry,
+                        preflight_id=preflight_request.preflight_id,
+                        quality_policy_sha256=quality_policy_sha256,
                     )
                     request_path = invocation_root / "render-request.json"
                     canary._write_new_file(
@@ -719,6 +951,10 @@ def run_local_production_render(
         rendered_count=rendered_count,
         rejected_count=rejected_count,
         reused_count=reused_count,
+        preflight_id=preflight_request.preflight_id,
+        preflight_report_path=preflight_report_path,
+        preflight_rejected_count=preflight_rejected_count,
+        preflight_only=preflight_only,
         stdout="".join(stdout_parts),
         stderr="".join(stderr_parts),
     )

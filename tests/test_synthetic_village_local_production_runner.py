@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
 
 from pipeline.synthetic_village import canary
 from pipeline.synthetic_village.production_journal import ProductionArtifactRecord
+from pipeline.synthetic_village.production_preflight import (
+    ProductionCameraClearanceEvidence,
+    ProductionClearancePolicy,
+    ProductionClearanceRayEvidence,
+    build_production_clearance_report,
+    build_production_clearance_request,
+    canonical_production_clearance_report_bytes,
+)
 from pipeline.synthetic_village.production_render import (
     LocalProductionQualityPolicy,
+    build_local_production_frame_request,
     evaluate_local_production_frame_quality,
+    local_production_quality_policy_sha256,
     new_local_production_render_journal,
     transition_local_production_frame,
 )
@@ -50,6 +61,107 @@ def _artifacts(camera_id: str) -> tuple[ProductionArtifactRecord, ...]:
     )
 
 
+def _preflight_context(request, *, obstructed: bool):
+    policy = ProductionClearancePolicy(
+        near_distance_m=2.0,
+        minimum_upper_middle_near_hit_count=5,
+    )
+    preflight_request = build_production_clearance_request(
+        plan=request.production_plan,
+        selected_camera_ids=(request.camera.camera_id,),
+        build_id=request.build_id,
+        blender_executable_sha256=request.blender_executable_sha256,
+        preflight_script_sha256="6" * 64,
+        blend_sha256=request.blend_sha256,
+        build_report_sha256=request.build_report_sha256,
+        object_registry=request.object_registry,
+        auxiliary_registry=request.auxiliary_registry,
+        semantic_registry=request.semantic_registry,
+        policy=policy,
+    )
+    evidence = ProductionCameraClearanceEvidence(
+        camera_id=request.camera.camera_id,
+        rays=tuple(
+            ProductionClearanceRayEvidence(
+                sample_x=sample_x,
+                sample_y=sample_y,
+                hit=obstructed and sample_y >= 0.0,
+                distance_m=0.5 if obstructed and sample_y >= 0.0 else None,
+                object_name=(
+                    "nv__lower-bridge__deck"
+                    if obstructed and sample_y >= 0.0
+                    else None
+                ),
+                stable_id=(
+                    "lower-bridge"
+                    if obstructed and sample_y >= 0.0
+                    else None
+                ),
+                part_id=(
+                    "deck" if obstructed and sample_y >= 0.0 else None
+                ),
+                semantic_id=(
+                    4 if obstructed and sample_y >= 0.0 else None
+                ),
+            )
+            for sample_y in policy.sample_grid
+            for sample_x in policy.sample_grid
+        ),
+    )
+    report = build_production_clearance_report(
+        preflight_request,
+        evidence=(evidence,),
+    )
+    report_sha256 = hashlib.sha256(
+        canonical_production_clearance_report_bytes(report),
+    ).hexdigest()
+    return preflight_request, report, report_sha256
+
+
+def _new_journal(request, *, policy: LocalProductionQualityPolicy):
+    preflight_request, preflight_report, report_sha256 = _preflight_context(
+        request,
+        obstructed=False,
+    )
+    bound_request = _bound_render_request(
+        request,
+        preflight_request=preflight_request,
+        quality_policy=policy,
+    )
+    return new_local_production_render_journal(
+        bound_request,
+        quality_policy=policy,
+        preflight_request=preflight_request,
+        preflight_report=preflight_report,
+        preflight_report_sha256=report_sha256,
+        preflight_wall_clock_seconds=1.0,
+    )
+
+
+def _bound_render_request(
+    request,
+    *,
+    preflight_request,
+    quality_policy: LocalProductionQualityPolicy,
+):
+    return build_local_production_frame_request(
+        plan=request.production_plan,
+        camera_id=request.camera.camera_id,
+        build_id=request.build_id,
+        blender_executable_sha256=request.blender_executable_sha256,
+        renderer_script_sha256=request.renderer_script_sha256,
+        blend_sha256=request.blend_sha256,
+        build_report_sha256=request.build_report_sha256,
+        object_registry=request.object_registry,
+        auxiliary_registry=request.auxiliary_registry,
+        semantic_registry=request.semantic_registry,
+        preflight_id=preflight_request.preflight_id,
+        quality_policy_sha256=local_production_quality_policy_sha256(
+            quality_policy,
+        ),
+    )
+
+
 def test_valid_pixel_quality_gate_is_explicit_and_measured() -> None:
     policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
 
@@ -75,7 +187,7 @@ def test_local_production_journal_is_l0_and_covers_the_immutable_plan() -> None:
     request = _request()
     policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
 
-    journal = new_local_production_render_journal(request, quality_policy=policy)
+    journal = _new_journal(request, policy=policy)
 
     assert journal.verification_level == "L0"
     assert journal.synthetic is True
@@ -90,10 +202,85 @@ def test_local_production_journal_is_l0_and_covers_the_immutable_plan() -> None:
     assert {row.state for row in journal.frames} == {"planned"}
 
 
+def test_preflight_rejection_is_bound_without_six_layer_artifacts() -> None:
+    request = _request()
+    policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
+    preflight_request, preflight_report, report_sha256 = _preflight_context(
+        request,
+        obstructed=True,
+    )
+
+    bound_request = _bound_render_request(
+        request,
+        preflight_request=preflight_request,
+        quality_policy=policy,
+    )
+    journal = new_local_production_render_journal(
+        bound_request,
+        quality_policy=policy,
+        preflight_request=preflight_request,
+        preflight_report=preflight_report,
+        preflight_report_sha256=report_sha256,
+        preflight_wall_clock_seconds=1.25,
+    )
+
+    frame = next(
+        row
+        for row in journal.frames
+        if row.camera_id == request.camera.camera_id
+    )
+    assert journal.preflight_id == preflight_request.preflight_id
+    assert journal.preflight_report_sha256 == report_sha256
+    assert journal.preflight_wall_clock_seconds == 1.25
+    assert frame.state == "preflight-rejected"
+    assert frame.artifacts == ()
+    assert frame.runtime_report_sha256 is None
+    assert frame.statistics is None
+    assert frame.quality is None
+    assert frame.clearance_decision is not None
+    assert frame.clearance_decision.passes is False
+    assert frame.preflight_report_sha256 == report_sha256
+
+
+def test_geometry_preflight_pass_stays_planned_not_verified() -> None:
+    request = _request()
+    preflight_request, preflight_report, report_sha256 = _preflight_context(
+        request,
+        obstructed=False,
+    )
+
+    quality_policy = LocalProductionQualityPolicy(
+        minimum_valid_pixel_ratio=0.75,
+    )
+    bound_request = _bound_render_request(
+        request,
+        preflight_request=preflight_request,
+        quality_policy=quality_policy,
+    )
+    journal = new_local_production_render_journal(
+        bound_request,
+        quality_policy=quality_policy,
+        preflight_request=preflight_request,
+        preflight_report=preflight_report,
+        preflight_report_sha256=report_sha256,
+        preflight_wall_clock_seconds=1.0,
+    )
+
+    frame = next(
+        row
+        for row in journal.frames
+        if row.camera_id == request.camera.camera_id
+    )
+    assert frame.state == "planned"
+    assert frame.clearance_decision is not None
+    assert frame.clearance_decision.passes is True
+    assert frame.artifacts == ()
+
+
 def test_local_journal_separates_verified_and_quality_rejected_frames() -> None:
     request = _request()
     policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
-    journal = new_local_production_render_journal(request, quality_policy=policy)
+    journal = _new_journal(request, policy=policy)
     camera_id = request.camera.camera_id
 
     passing_statistics = _statistics(background_pixels=116_775)
@@ -153,5 +340,8 @@ def test_cli_requires_an_explicit_quality_threshold() -> None:
 
     assert completed.returncode == 0
     assert "--min-valid-pixel-ratio" in completed.stdout
+    assert "--clearance-near-distance-m" in completed.stdout
+    assert "--min-upper-middle-near-hits" in completed.stdout
+    assert "--preflight-only" in completed.stdout
     assert "--visual-pack-root" in completed.stdout
     assert "required" not in completed.stderr
