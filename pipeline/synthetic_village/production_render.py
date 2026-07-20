@@ -41,7 +41,7 @@ from .production_profile import (
 )
 
 LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v2"
+    "nantai.synthetic-village.local-production-render-frame-request.v3"
 )
 LOCAL_PRODUCTION_RENDER_REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v2"
@@ -50,7 +50,7 @@ LOCAL_PRODUCTION_CAMERA_METADATA_SCHEMA = (
     "nantai.synthetic-village.local-production-camera-metadata.v2"
 )
 LOCAL_PRODUCTION_RENDER_JOURNAL_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-journal.v2"
+    "nantai.synthetic-village.local-production-render-journal.v3"
 )
 
 Matrix4 = tuple[
@@ -58,6 +58,10 @@ Matrix4 = tuple[
     tuple[float, float, float, float],
     tuple[float, float, float, float],
     tuple[float, float, float, float],
+]
+ProductionBuildAdapter = Literal[
+    "mac-local-textured-preview-v1",
+    "windows-textured-v2",
 ]
 
 
@@ -260,11 +264,12 @@ class LocalProductionFrameRecord(FrozenModel):
 
 class LocalProductionRenderJournal(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-journal.v2"
+        "nantai.synthetic-village.local-production-render-journal.v3"
     ] = LOCAL_PRODUCTION_RENDER_JOURNAL_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = PRODUCTION_PROFILE_ID
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     journal_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_adapter: ProductionBuildAdapter
     build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     production_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     camera_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -409,6 +414,7 @@ def new_local_production_render_journal(
     journal = LocalProductionRenderJournal(
         render_id=request.render_id,
         journal_sha256="0" * 64,
+        build_adapter=request.build_adapter,
         build_id=request.build_id,
         production_plan_sha256=request.production_plan_sha256,
         camera_registry_sha256=request.camera_registry_sha256,
@@ -466,10 +472,22 @@ def transition_local_production_frame(
         raise ProductionProfileError(
             f"camera ID is not in the local production journal: {camera_id}",
         )
+    normalized_updates = dict(updates)
+    if normalized_updates.get("state") in {"planned", "rendering"}:
+        normalized_updates.update(
+            artifacts=(),
+            runtime_report_sha256=None,
+            statistics=None,
+            quality=None,
+            wall_clock_seconds=None,
+            error=None,
+        )
     moved = journal.model_copy(
         update={
             "frames": tuple(
-                row.model_copy(update=updates) if row.camera_id == camera_id else row
+                row.model_copy(update=normalized_updates)
+                if row.camera_id == camera_id
+                else row
                 for row in journal.frames
             ),
         },
@@ -488,7 +506,7 @@ def transition_local_production_frame(
 
 class LocalProductionRenderFrameRequest(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-request.v2"
+        "nantai.synthetic-village.local-production-render-frame-request.v3"
     ] = LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = PRODUCTION_PROFILE_ID
     production_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -496,6 +514,7 @@ class LocalProductionRenderFrameRequest(FrozenModel):
     elevated_topology_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     production_plan: ProductionCameraPlan
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_adapter: ProductionBuildAdapter
     build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     synthetic: Literal[True] = True
     verification_level: Literal["L0"] = "L0"
@@ -582,6 +601,7 @@ class LocalProductionRenderFrameRequest(FrozenModel):
             camera_registry_sha256=self.camera_registry_sha256,
             preflight_id=self.preflight_id,
             quality_policy_sha256=self.quality_policy_sha256,
+            build_adapter=self.build_adapter,
         )
         if self.render_id != expected_render_id:
             raise ValueError("render ID does not bind the production inputs")
@@ -690,6 +710,7 @@ def build_local_production_frame_request(
     *,
     plan: ProductionCameraPlan,
     camera_id: str,
+    build_adapter: ProductionBuildAdapter,
     build_id: str,
     blender_executable_sha256: str,
     renderer_script_sha256: str,
@@ -722,6 +743,7 @@ def build_local_production_frame_request(
         camera_registry_sha256=camera_registry_sha256,
         preflight_id=preflight_id,
         quality_policy_sha256=quality_policy_sha256,
+        build_adapter=build_adapter,
     )
     return LocalProductionRenderFrameRequest(
         production_plan_sha256=hashlib.sha256(
@@ -731,6 +753,7 @@ def build_local_production_frame_request(
         elevated_topology_sha256=plan.elevated_topology_sha256,
         production_plan=plan,
         render_id=render_id,
+        build_adapter=build_adapter,
         build_id=build_id,
         blender_executable_sha256=blender_executable_sha256,
         renderer_script_sha256=renderer_script_sha256,

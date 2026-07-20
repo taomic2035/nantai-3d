@@ -692,6 +692,7 @@ print("NANTAI_ELEVATED_COMPONENTS_OK", flush=True)
     frame_request = build_local_production_frame_request(
         plan=build_production_camera_plan(),
         camera_id="camera-elevated-pedestrian-001",
+        build_adapter="mac-local-textured-preview-v1",
         build_id=parsed_report.preview_id,
         blender_executable_sha256=_sha256_file(LOCAL_BLENDER),
         renderer_script_sha256=_sha256_file(BLENDER_RENDERER),

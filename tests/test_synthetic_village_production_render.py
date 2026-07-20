@@ -26,7 +26,11 @@ from pipeline.synthetic_village.scene_plan import build_scene_plan
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _request(camera_id: str = "camera-elevated-pedestrian-001"):
+def _request(
+    camera_id: str = "camera-elevated-pedestrian-001",
+    *,
+    build_adapter: str = "windows-textured-v2",
+):
     scene = build_scene_plan()
     topology = build_elevated_topology_plan(scene)
     plan = build_production_camera_plan(scene, topology)
@@ -36,6 +40,7 @@ def _request(camera_id: str = "camera-elevated-pedestrian-001"):
     return build_local_production_frame_request(
         plan=plan,
         camera_id=camera_id,
+        build_adapter=build_adapter,
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -53,6 +58,7 @@ def test_local_production_request_is_l0_and_binds_one_plan_camera() -> None:
     request = _request()
 
     assert request.schema_version == LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA
+    assert request.build_adapter == "windows-textured-v2"
     assert request.verification_level == "L0"
     assert request.profile_id == "synthetic-village-coverage-180-v1"
     assert request.camera.camera_id == "camera-elevated-pedestrian-001"
@@ -98,6 +104,7 @@ def test_preflight_and_quality_context_change_frame_render_identity() -> None:
     contextual = build_local_production_frame_request(
         plan=base.production_plan,
         camera_id=base.camera.camera_id,
+        build_adapter=base.build_adapter,
         build_id=base.build_id,
         blender_executable_sha256=base.blender_executable_sha256,
         renderer_script_sha256=base.renderer_script_sha256,
@@ -112,6 +119,7 @@ def test_preflight_and_quality_context_change_frame_render_identity() -> None:
     changed_policy = build_local_production_frame_request(
         plan=base.production_plan,
         camera_id=base.camera.camera_id,
+        build_adapter=base.build_adapter,
         build_id=base.build_id,
         blender_executable_sha256=base.blender_executable_sha256,
         renderer_script_sha256=base.renderer_script_sha256,
@@ -133,6 +141,22 @@ def test_preflight_and_quality_context_change_frame_render_identity() -> None:
         canonical_local_production_render_request_bytes(contextual),
     )
     payload["quality_policy_sha256"] = "a" * 64
+    with pytest.raises(ValidationError, match="render ID"):
+        LocalProductionRenderFrameRequest.model_validate_json(
+            json.dumps(payload),
+        )
+
+
+def test_build_adapter_is_bound_into_frame_render_identity() -> None:
+    windows = _request(build_adapter="windows-textured-v2")
+    local_preview = _request(build_adapter="mac-local-textured-preview-v1")
+
+    assert windows.render_id != local_preview.render_id
+
+    payload = json.loads(
+        canonical_local_production_render_request_bytes(windows),
+    )
+    payload["build_adapter"] = "mac-local-textured-preview-v1"
     with pytest.raises(ValidationError, match="render ID"):
         LocalProductionRenderFrameRequest.model_validate_json(
             json.dumps(payload),

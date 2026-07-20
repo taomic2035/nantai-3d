@@ -176,6 +176,7 @@ def production_render_id(
     preflight_id: str | None = None,
     quality_policy_sha256: str | None = None,
     repose_search_sha256: str | None = None,
+    build_adapter: str | None = None,
 ) -> str:
     """内容寻址的 render_id。
 
@@ -213,6 +214,8 @@ def production_render_id(
         payload["quality_policy_sha256"] = quality_policy_sha256
     if repose_search_sha256 is not None:
         payload["repose_search_sha256"] = repose_search_sha256
+    if build_adapter is not None:
+        payload["build_adapter"] = build_adapter
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 

@@ -147,6 +147,7 @@ def _bound_render_request(
     return build_local_production_frame_request(
         plan=request.production_plan,
         camera_id=request.camera.camera_id,
+        build_adapter=request.build_adapter,
         build_id=request.build_id,
         blender_executable_sha256=request.blender_executable_sha256,
         renderer_script_sha256=request.renderer_script_sha256,
@@ -322,6 +323,37 @@ def test_local_journal_separates_verified_and_quality_rejected_frames() -> None:
     assert frame.state == "rejected"
     assert frame.quality is not None
     assert frame.quality.passes is False
+
+
+def test_failed_frame_can_retry_without_stale_failure_evidence() -> None:
+    request = _request()
+    policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
+    journal = _new_journal(request, policy=policy)
+    camera_id = request.camera.camera_id
+
+    rendering = transition_local_production_frame(
+        journal,
+        camera_id,
+        state="rendering",
+    )
+    failed = transition_local_production_frame(
+        rendering,
+        camera_id,
+        state="failed",
+        error="Blender exited with code 17",
+        wall_clock_seconds=4.25,
+    )
+
+    retried = transition_local_production_frame(
+        failed,
+        camera_id,
+        state="rendering",
+    )
+
+    frame = next(row for row in retried.frames if row.camera_id == camera_id)
+    assert frame.state == "rendering"
+    assert frame.error is None
+    assert frame.wall_clock_seconds is None
 
 
 def test_cli_requires_an_explicit_quality_threshold() -> None:

@@ -691,6 +691,7 @@ def _run_production_render(
     seed_request = build_local_production_frame_request(
         plan=plan,
         camera_id=plan.cameras[0].camera_id,
+        build_adapter=verified_build.adapter,
         build_id=verified_build.build_id,
         blender_executable_sha256=executable_snapshot.sha256,
         renderer_script_sha256=renderer_snapshot.sha256,
@@ -933,6 +934,7 @@ def _run_production_render(
                     frame_request = build_local_production_frame_request(
                         plan=plan,
                         camera_id=camera_id,
+                        build_adapter=verified_build.adapter,
                         build_id=verified_build.build_id,
                         blender_executable_sha256=executable_snapshot.sha256,
                         renderer_script_sha256=renderer_snapshot.sha256,
@@ -972,8 +974,11 @@ def _run_production_render(
                     stdout_parts.append(stdout)
                     stderr_parts.append(stderr)
                     if returncode != 0:
+                        detail = (stderr or stdout).strip()
                         raise LocalTexturedPreviewError(
-                            f"local production Blender render failed with exit code {returncode}",
+                            "local production Blender render failed with exit code "
+                            f"{returncode}"
+                            + (f": {detail[-2000:]}" if detail else ""),
                         )
                     frame_report, frame_report_sha256 = _validate_frame_staging(
                         staging,

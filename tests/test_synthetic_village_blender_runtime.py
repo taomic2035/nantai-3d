@@ -377,6 +377,83 @@ def _production_clearance_request():
     )
 
 
+def _windows_production_frame_request():
+    from pipeline.synthetic_village.elevated_topology import (
+        build_elevated_topology_plan,
+    )
+    from pipeline.synthetic_village.production_profile import (
+        build_production_camera_plan,
+    )
+    from pipeline.synthetic_village.production_render import (
+        build_local_production_frame_request,
+    )
+    from pipeline.synthetic_village.scene_plan import build_scene_plan
+    from pipeline.synthetic_village.windows_production_build import (
+        verify_windows_production_build,
+    )
+
+    verified = verify_windows_production_build(
+        directory=TEXTURED_RUNTIME_BLEND.parent,
+        material_bundle_root=MATERIAL_BUNDLE_ROOT,
+        repo_root=ROOT,
+        surface_realism_profile_id="source-consistent-multiscale-surface-v1",
+    )
+    scene = build_scene_plan()
+    plan = build_production_camera_plan(
+        scene,
+        build_elevated_topology_plan(scene),
+    )
+    return build_local_production_frame_request(
+        plan=plan,
+        camera_id="camera-ground-route-034",
+        build_adapter=verified.adapter,
+        build_id=verified.build_id,
+        blender_executable_sha256=verified.blender_executable_sha256,
+        renderer_script_sha256=_sha256(RENDERER),
+        blend_sha256=verified.blend_sha256,
+        build_report_sha256=verified.build_report_sha256,
+        object_registry=verified.object_registry,
+        auxiliary_registry=verified.auxiliary_registry,
+        semantic_registry=verified.semantic_registry,
+        preflight_id="6" * 64,
+        quality_policy_sha256="7" * 64,
+    )
+
+
+@pytest.mark.skipif(
+    not TEXTURED_RUNTIME_BLEND.is_file(),
+    reason="verified private production Blender scene is unavailable",
+)
+def test_renderer_accepts_explicit_windows_production_scene_provenance(
+    tmp_path: Path,
+) -> None:
+    from pipeline.synthetic_village.production_render import (
+        canonical_local_production_render_request_bytes,
+    )
+
+    request = _windows_production_frame_request()
+    request_path = tmp_path / "windows-production-request.json"
+    request_path.write_bytes(
+        canonical_local_production_render_request_bytes(request),
+    )
+    source = (
+        _probe_prelude()
+        + "import json\n"
+        + f"request = json.loads(open({str(request_path)!r}, encoding='utf-8').read())\n"
+        + "ns['_validate_request'](request)\n"
+        + "print('NANTAI_WINDOWS_PROVENANCE_OK', flush=True)\n"
+    )
+
+    completed = _run_renderer_probe(
+        tmp_path,
+        source,
+        blend_path=TEXTURED_RUNTIME_BLEND,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "NANTAI_WINDOWS_PROVENANCE_OK" in completed.stdout
+
+
 def _read_exr_attributes(path: Path) -> dict[str, tuple[str, bytes]]:
     raw = path.read_bytes()
     assert raw[:4] == b"\x76\x2f\x31\x01"

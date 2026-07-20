@@ -41,7 +41,7 @@ LOCAL_CAMERA_SCHEMA = (
     "nantai.synthetic-village.local-textured-camera-metadata.v1"
 )
 LOCAL_PRODUCTION_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v2"
+    "nantai.synthetic-village.local-production-render-frame-request.v3"
 )
 LOCAL_PRODUCTION_REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v2"
@@ -486,6 +486,7 @@ def _validate_request(request):
                     "elevated_topology_sha256",
                     "production_plan",
                     "requested_c2w_blender",
+                    "build_adapter",
                     "preflight_id",
                     "quality_policy_sha256",
                 )
@@ -550,7 +551,31 @@ def _validate_request(request):
     ):
         raise RuntimeRenderError("executing Blender identity is not pinned 4.5.11 LTS")
     scene = bpy.context.scene
-    if local:
+    if production:
+        if request["build_adapter"] == "mac-local-textured-preview-v1":
+            if (
+                scene.get("nv_preview_id") != request["build_id"]
+                or scene.get("nv_authoritative") is not False
+                or scene.get("nv_release_channel") != "local-preview-only"
+            ):
+                raise RuntimeRenderError(
+                    "loaded local Blender scene provenance does not match request",
+                )
+        elif request["build_adapter"] == "windows-textured-v2":
+            if (
+                scene.get("nv_build_id") != request["build_id"]
+                or scene.get("nv_preview_id") is not None
+                or scene.get("nv_authoritative") is not None
+                or scene.get("nv_release_channel") is not None
+            ):
+                raise RuntimeRenderError(
+                    "loaded Windows Blender scene provenance does not match request",
+                )
+        else:
+            raise RuntimeRenderError(
+                "production build adapter is not explicitly supported",
+            )
+    elif local:
         if (
             scene.get("nv_preview_id") != request["build_id"]
             or scene.get("nv_authoritative") is not False
