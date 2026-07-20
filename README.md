@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位，均有 SHA、CAS 与来源证据 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 12 张路线设计输入，均有 SHA 与来源边界 |
 | 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
 | 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
@@ -140,6 +140,37 @@ Expand-Archive $archive `
 该补充包不是默认 registry payload，也不是可直接训练的“360 多视图”。它只补足 Blender 建模时容易遗漏的
 反向路线、结构背面、跨层通道和近景遮挡设计；必须经过显式模块建模、相机规划、碰撞/可行走审计和真实六层渲染，
 才能进入 Viewer 漫游场景。不得把图片边缘的宽幅构图解释为 equirectangular 全景。
+
+### Batch 9 侧向路线与隐藏结构补充包
+
+[Batch 9 Lateral-Route Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch9-2026-07-20)
+继续提供 6 张 image2 原始 PNG：中央院落横向巷口、桥区下游岸侧、水车对岸检修面、
+廊下下层反向通道、林果边界三岔路和下谷田边交叉口。它们与 Batch 8 形成前/后/侧向设计参考，
+但仍是相互独立的生成结果，不是同一相机系统的几何一致多视图。
+
+```powershell
+$releaseDir = ".nantai-studio\release-downloads\batch9-lateral-route"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download synthetic-village-design-inputs-batch9-2026-07-20 `
+  --pattern "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.zip" `
+  --pattern "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.SHA256SUMS.txt" `
+  --dir $releaseDir --clobber
+
+$archiveName = "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.zip"
+$archive = Join-Path $releaseDir $archiveName
+$sumFile = Join-Path $releaseDir "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 9 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch9" -Force
+```
+
+ZIP 只包含 6 张选中图片、6 份精确提示词、manifest、使用说明和 payload checksum。
+桥侧图额外出现一个小型泄水孔，因此只能指导主桥拱、桥面厚度、桥台和岸侧路线；canonical
+bridge topology 必须由版本化 recipe 决定。其余图片也只能指导建模，不能提升 coverage、
+metric、alignment 或 training 信任。
 
 ## 核心工作流
 
