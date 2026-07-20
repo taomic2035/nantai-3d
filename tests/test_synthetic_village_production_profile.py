@@ -482,6 +482,31 @@ def test_undelivered_requirements_never_fake_a_delivered_scalar() -> None:
         assert faked not in payload, f"未实现的检测不得以标量形式出现: {faked}"
 
 
+def test_req5_reason_distinguishes_delivered_frame_gate_from_missing_pose_gates() -> None:
+    """req 5 整体未交付，但 reason 不能抹掉已经存在的逐帧质量门。
+
+    `render-production-local` 已经把渲染失败/超时和 operator-selected
+    valid-pixel threshold 写入 180 帧 journal。计划仍不能声称 req 5 交付，
+    因为近重复阈值、孤立相机和只看天空/地面的语义坏帧检测尚未实现。
+    """
+
+    plan = build_production_camera_plan()
+    row = next(
+        r
+        for r in plan.undelivered_requirements
+        if r.requirement_id == "req-5-pose-quality-fail-closed"
+    )
+
+    assert row.status == "not-implemented"
+    assert "local production runner" in row.reason
+    assert "valid-pixel" in row.reason
+    assert "implemented" in row.reason
+    assert "near-duplicate" in row.reason
+    assert "isolated" in row.reason
+    assert "sky/ground" in row.reason
+    assert "no renderer exists" not in row.reason
+
+
 def test_req6_loop_closure_is_backed_by_two_verified_route_loops() -> None:
     plan = build_production_camera_plan()
     assert {

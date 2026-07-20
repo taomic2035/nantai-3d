@@ -907,14 +907,16 @@ def _undelivered_requirements() -> tuple[UndeliveredRequirement, ...]:
             requirement_id="req-5-pose-quality-fail-closed",
             status="not-implemented",
             reason=(
-                "near-duplicate pose / isolated camera / bad frame / low valid-pixel "
-                "ratio detection is not implemented: _validate_plan checks only camera "
-                "ID uniqueness, centre uniqueness and dense sequence indices, never pose "
-                "quality. Bad frames and valid-pixel ratio are undefined before rendering "
-                "(no renderer exists for this profile). For near-duplicate poses the raw "
-                "distribution is published by pose_separation_evidence(), but no "
-                "fail-closed threshold is declared because none is defensible on this "
-                "evidence — see that function's disclaimer."
+                "req 5 as a whole is not implemented. The macOS Apple Silicon local "
+                "production runner has implemented render failure / timeout recording and "
+                "an operator-selected valid-pixel rejection gate for frames it actually "
+                "renders, but this pre-render plan carries no completed 180-frame journal "
+                "and therefore cannot claim those frames passed. Missing gates are a "
+                "defensible near-duplicate pose threshold, isolated camera detection, and "
+                "sky/ground semantic bad-frame detection. _validate_plan rejects exact "
+                "duplicate centres only. pose_separation_evidence publishes the raw "
+                "distance distribution with threshold=None because this evidence cannot "
+                "justify a near-duplicate cutoff."
             ),
         ),
     )
