@@ -24,6 +24,7 @@
 ```text
 handoff/HANDOFF-CODEX-008-batch6-to-blender-modular-consumption.md
 handoff/REVIEW-CODEX-012-batch6-private-blender-prototype.md
+handoff/REVIEW-CODEX-013-central-cubemap-360-audit.md
 ```
 
 私有可复跑原型：
@@ -180,6 +181,8 @@ Codex 实渲已证明以下“最近相机”并不能看到完整模块：
 
 - 不得从相机到锚点距离宣称 coverage；
 - 必须从实际 instance/semantic/depth 层统计模块可见像素和反向观察；
+- 同点六向 cubemap 只能做 360° 视觉审计，不能替代具有平移基线的 SfM/3DGS
+  production camera network；
 - 新 pose 或重排必须遵守
   `HANDOFF-OPUS-006-production-camera-quality-gates.md` 的 registry/render/journal
   隔离合同；
