@@ -110,6 +110,20 @@ class PolylineTopologySource:
     points: tuple[tuple[float, float], ...]
     half_width_m: float
 
+    def __post_init__(self) -> None:
+        # Fail-closed: a degenerate polyline (empty or single point) has no
+        # arc length and no tangent.  ``_point_at_arc_length`` would otherwise
+        # return a fabricated ``(1.0, 0.0)`` tangent or raise IndexError,
+        # silently inventing pose data the caller did not measure.  Public
+        # API is exposed via ``search_replacement_pose``; reject at the entry.
+        if len(self.points) < 2:
+            raise ProductionProfileError(
+                "PolylineTopologySource.points must contain at least two "
+                "points to define an arc length and a tangent; "
+                f"got {len(self.points)} point(s) for topology_ref="
+                f"{self.topology_ref!r}",
+            )
+
     @property
     def length_m(self) -> float:
         return sum(math.dist(a, b) for a, b in zip(self.points, self.points[1:], strict=False))

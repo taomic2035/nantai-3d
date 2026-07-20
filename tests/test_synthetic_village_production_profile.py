@@ -26,6 +26,7 @@ from pipeline.synthetic_village.production_profile import (
     PRODUCTION_PROFILE_ID,
     TARGET_CAMERA_COUNT,
     ElevatedPolylineTopologySource,
+    PolylineTopologySource,
     ProductionProfileError,
     build_production_camera_plan,
     canonical_production_plan_bytes,
@@ -775,3 +776,49 @@ def test_production_intrinsics_match_the_coverage_audit_frame_contract() -> None
     for camera in plan.cameras:
         assert camera.intrinsics.width_px == FRAME_WIDTH_PX
         assert camera.intrinsics.height_px == FRAME_HEIGHT_PX
+
+
+# --------------------------------------------------------------------------
+# 铁律: PolylineTopologySource 必须 fail-closed 拒绝退化折线
+# --------------------------------------------------------------------------
+#
+# search_replacement_pose() 把外部 caller 传入的 PolylineTopologySource 当作
+# 真实可参数化的折线消费; _point_at_arc_length() 在退化 (空 / 单点) 折线上
+# 会返回虚构 tangent (1.0, 0.0) 或 IndexError, 既不报错也不提升 trust —— 这违反
+# AGENTS.md fail-closed / provenance safety 原则。生产路径 (resolve_topology_sources
+# 从 ScenePlan.PolylineTopology.points min_length=2 派生) 不会触发, 但 public API
+# 暴露了 dataclass 构造器, 必须在入口处硬拒绝。
+# --------------------------------------------------------------------------
+
+
+def test_polyline_topology_source_rejects_empty_points() -> None:
+    """空折线没有 arc length 也没有 tangent; 不能被假装可参数化。"""
+    with pytest.raises(ProductionProfileError, match="points"):
+        PolylineTopologySource(
+            group_id="ground-route",
+            topology_ref="path-network-001",
+            points=(),
+            half_width_m=1.5,
+        )
+
+
+def test_polyline_topology_source_rejects_single_point() -> None:
+    """单点折线没有 tangent; _point_at_arc_length 会返回虚构 (1.0, 0.0)。"""
+    with pytest.raises(ProductionProfileError, match="points"):
+        PolylineTopologySource(
+            group_id="ground-route",
+            topology_ref="path-network-001",
+            points=((0.0, 0.0),),
+            half_width_m=1.5,
+        )
+
+
+def test_polyline_topology_source_accepts_two_points() -> None:
+    """两点是最小合法折线 (有非零长度, 有明确 tangent); 不应被误拒。"""
+    source = PolylineTopologySource(
+        group_id="ground-route",
+        topology_ref="path-network-001",
+        points=((0.0, 0.0), (10.0, 0.0)),
+        half_width_m=1.5,
+    )
+    assert source.length_m == pytest.approx(10.0)
