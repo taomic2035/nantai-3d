@@ -23,8 +23,10 @@
 - **Opus 已恢复在线**。Codex 在其不可用期间完成了必要的跨 lane 取证与规格工作；核心
   pipeline/registry/renderer 事项重新通过明确 HANDOFF 交由 Opus，UX/呈现/交互/审计仍由
   Codex 负责，双方继续遵守设计门、TDD 和 fail-closed 合同。
-- 当前最新核心交办：
-  `handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`。
+- 当前核心交办按顺序为：
+  1. `handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`；
+  2. `handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`。
+  007 只有在与 006 路径不重叠时才可并行，否则先完成 006。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   该实现仍等待用户确认方案 A。
