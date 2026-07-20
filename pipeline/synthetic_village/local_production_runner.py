@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from pydantic import ValidationError
@@ -56,10 +57,23 @@ from .production_render import (
     transition_local_production_frame,
 )
 from .scene_plan import build_scene_plan
+from .surface_realism import (
+    LEGACY_SURFACE_PROFILE_ID,
+    SurfaceRealismProfileId,
+)
+from .windows_production_build import (
+    DEFAULT_WINDOWS_BLENDER,
+    VerifiedProductionBuild,
+    WindowsProductionBuildError,
+    verify_windows_production_build,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOCAL_PRODUCTION_RENDER_ROOT = (
     ROOT / ".nantai-studio/synthetic-village/hybrid-v3/local-production-renders"
+)
+DEFAULT_WINDOWS_PRODUCTION_RENDER_ROOT = (
+    ROOT / ".nantai-studio/sv-prod-win"
 )
 
 
@@ -446,17 +460,89 @@ def _normalize_camera_ids(
     return tuple(row for row in all_ids if row in selected)
 
 
-def run_local_production_render(
+def _verify_local_production_build(
+    *,
+    training_build_directory: Path,
+    material_bundle_root: Path,
+    repo_root: Path,
+    visual_pack_root: Path,
+    executable: Path,
+) -> VerifiedProductionBuild:
+    """Adapt the existing Mac L0 build without weakening its platform gate."""
+
+    identity = probe_local_blender_identity(executable)
+    scene = build_scene_plan()
+    request = build_local_textured_preview_request(
+        repo_root=repo_root,
+        scene_plan=scene,
+        visual_pack_root=visual_pack_root,
+        material_bundle_root=material_bundle_root,
+        tool_identity=identity,
+    )
+    report, _audit, _manifest = verify_local_textured_training_build_directory(
+        training_build_directory,
+        request=request,
+    )
+    try:
+        executable_snapshot = canary._snapshot_regular_file(executable)
+        report_snapshot = canary._snapshot_regular_file(
+            training_build_directory / "build-report.json",
+        )
+        blend_record = next(
+            row for row in report.artifacts if row.name == "village-canary.blend"
+        )
+        blend_path = training_build_directory / blend_record.name
+        blend_snapshot = canary._snapshot_regular_file(blend_path)
+    except (StopIteration, canary.CanaryBuildError) as exc:
+        raise LocalTexturedPreviewError(
+            "local production build evidence is incomplete",
+        ) from exc
+    if (
+        executable_snapshot.sha256 != report.tool_identity.executable_sha256
+        or report_snapshot.sha256 != training_build_directory.name
+        or blend_snapshot.sha256 != blend_record.sha256
+        or blend_snapshot.signature[2] != blend_record.size_bytes
+    ):
+        raise LocalTexturedPreviewError(
+            "local production build bytes disagree with verified evidence",
+        )
+    return VerifiedProductionBuild(
+        adapter="mac-local-textured-preview-v1",
+        directory=training_build_directory,
+        executable=executable_snapshot.path,
+        blend_path=blend_path,
+        build_id=report.preview_id,
+        build_report_sha256=report_snapshot.sha256,
+        blend_sha256=blend_snapshot.sha256,
+        blend_size_bytes=blend_snapshot.signature[2],
+        blender_executable_sha256=executable_snapshot.sha256,
+        verification_level=report.verification_level,
+        synthetic=report.synthetic,
+        geometry_usability=report.geometry_usability,
+        tool_identity=report.tool_identity,
+        source_hashes=report.source_hashes,
+        object_registry=report.object_registry,
+        auxiliary_registry=report.auxiliary_registry,
+        semantic_registry=report.semantic_registry,
+        entry_names=LOCAL_TRAINING_BUILD_ENTRIES,
+        report=report,
+        request=request,
+    )
+
+
+def _run_production_render(
     *,
     training_build_directory: Path,
     material_bundle_root: Path,
     minimum_valid_pixel_ratio: float,
     clearance_near_distance_m: float,
     minimum_upper_middle_near_hit_count: int,
+    build_adapter: Literal["mac-local-preview", "windows-textured-v2"],
+    surface_realism_profile_id: SurfaceRealismProfileId,
     preflight_only: bool = False,
     repo_root: Path = ROOT,
     visual_pack_root: Path | None = None,
-    executable: Path = DEFAULT_LOCAL_BLENDER,
+    executable: Path,
     render_root: Path | None = None,
     camera_ids: tuple[str, ...] | None = None,
     timeout_seconds: int = canary.DEFAULT_RENDER_TIMEOUT_SECONDS,
@@ -513,19 +599,33 @@ def run_local_production_render(
         ) from exc
 
     executable = Path(executable).absolute()
-    identity = probe_local_blender_identity(executable)
-    scene = build_scene_plan()
-    build_request = build_local_textured_preview_request(
-        repo_root=repo_root,
-        scene_plan=scene,
-        visual_pack_root=pack_root,
-        material_bundle_root=bundle_root,
-        tool_identity=identity,
-    )
-    report, _audit, _manifest = verify_local_textured_training_build_directory(
-        training_build_directory,
-        request=build_request,
-    )
+    try:
+        if build_adapter == "mac-local-preview":
+            verified_build = _verify_local_production_build(
+                training_build_directory=training_build_directory,
+                material_bundle_root=bundle_root,
+                repo_root=repo_root,
+                visual_pack_root=pack_root,
+                executable=executable,
+            )
+        elif build_adapter == "windows-textured-v2":
+            verified_build = verify_windows_production_build(
+                directory=training_build_directory,
+                material_bundle_root=bundle_root,
+                repo_root=repo_root,
+                visual_pack_root=pack_root,
+                executable=executable,
+                surface_realism_profile_id=surface_realism_profile_id,
+            )
+        else:
+            raise LocalTexturedPreviewError(
+                "production build adapter is not explicitly supported",
+            )
+    except WindowsProductionBuildError as exc:
+        raise LocalTexturedPreviewError(str(exc)) from exc
+    report = verified_build.report
+    build_request = verified_build.request
+    scene = build_request.scene_plan
     plan = build_production_camera_plan(scene, build_request.elevated_topology)
     selected_ids = _normalize_camera_ids(plan, camera_ids)
     try:
@@ -542,7 +642,7 @@ def run_local_production_render(
         )
         build_snapshots = tuple(
             canary._snapshot_regular_file(training_build_directory / name)
-            for name in LOCAL_TRAINING_BUILD_ENTRIES
+            for name in verified_build.entry_names
         )
     except canary.CanaryBuildError as exc:
         raise LocalTexturedPreviewError(str(exc)) from exc
@@ -550,10 +650,7 @@ def run_local_production_render(
     report_snapshot = next(
         row for row in build_snapshots if row.path == report_path
     )
-    if (
-        executable_snapshot.sha256 != report.tool_identity.executable_sha256
-        or report_snapshot.sha256 != training_build_directory.name
-    ):
+    if executable_snapshot.sha256 != verified_build.blender_executable_sha256:
         raise LocalTexturedPreviewError(
             "local production runtime or build identity disagrees",
         )
@@ -563,8 +660,8 @@ def run_local_production_render(
     blend_path = training_build_directory / blend_record.name
     blend_snapshot = next(row for row in build_snapshots if row.path == blend_path)
     if (
-        blend_snapshot.sha256 != blend_record.sha256
-        or blend_snapshot.signature[2] != blend_record.size_bytes
+        blend_snapshot.sha256 != verified_build.blend_sha256
+        or blend_snapshot.signature[2] != verified_build.blend_size_bytes
     ):
         raise LocalTexturedPreviewError(
             "local production Blender scene disagrees with build evidence",
@@ -578,7 +675,7 @@ def run_local_production_render(
     preflight_request = build_production_clearance_request(
         plan=plan,
         selected_camera_ids=selected_ids,
-        build_id=report.preview_id,
+        build_id=verified_build.build_id,
         blender_executable_sha256=executable_snapshot.sha256,
         preflight_script_sha256=preflight_script_snapshot.sha256,
         blend_sha256=blend_snapshot.sha256,
@@ -594,7 +691,7 @@ def run_local_production_render(
     seed_request = build_local_production_frame_request(
         plan=plan,
         camera_id=plan.cameras[0].camera_id,
-        build_id=report.preview_id,
+        build_id=verified_build.build_id,
         blender_executable_sha256=executable_snapshot.sha256,
         renderer_script_sha256=renderer_snapshot.sha256,
         blend_sha256=blend_snapshot.sha256,
@@ -609,7 +706,11 @@ def run_local_production_render(
         selected_render_root = (
             Path(render_root).absolute()
             if render_root is not None
-            else DEFAULT_LOCAL_PRODUCTION_RENDER_ROOT
+            else (
+                DEFAULT_LOCAL_PRODUCTION_RENDER_ROOT
+                if build_adapter == "mac-local-preview"
+                else DEFAULT_WINDOWS_PRODUCTION_RENDER_ROOT
+            )
             / report_snapshot.sha256
             / seed_request.render_id
         )
@@ -832,7 +933,7 @@ def run_local_production_render(
                     frame_request = build_local_production_frame_request(
                         plan=plan,
                         camera_id=camera_id,
-                        build_id=report.preview_id,
+                        build_id=verified_build.build_id,
                         blender_executable_sha256=executable_snapshot.sha256,
                         renderer_script_sha256=renderer_snapshot.sha256,
                         blend_sha256=blend_snapshot.sha256,
@@ -957,4 +1058,79 @@ def run_local_production_render(
         preflight_only=preflight_only,
         stdout="".join(stdout_parts),
         stderr="".join(stderr_parts),
+    )
+
+
+def run_local_production_render(
+    *,
+    training_build_directory: Path,
+    material_bundle_root: Path,
+    minimum_valid_pixel_ratio: float,
+    clearance_near_distance_m: float,
+    minimum_upper_middle_near_hit_count: int,
+    preflight_only: bool = False,
+    repo_root: Path = ROOT,
+    visual_pack_root: Path | None = None,
+    executable: Path = DEFAULT_LOCAL_BLENDER,
+    render_root: Path | None = None,
+    camera_ids: tuple[str, ...] | None = None,
+    timeout_seconds: int = canary.DEFAULT_RENDER_TIMEOUT_SECONDS,
+) -> LocalProductionRenderResult:
+    """Run production cameras from a separately verified Mac L0 preview build."""
+
+    return _run_production_render(
+        training_build_directory=training_build_directory,
+        material_bundle_root=material_bundle_root,
+        minimum_valid_pixel_ratio=minimum_valid_pixel_ratio,
+        clearance_near_distance_m=clearance_near_distance_m,
+        minimum_upper_middle_near_hit_count=(
+            minimum_upper_middle_near_hit_count
+        ),
+        build_adapter="mac-local-preview",
+        surface_realism_profile_id=LEGACY_SURFACE_PROFILE_ID,
+        preflight_only=preflight_only,
+        repo_root=repo_root,
+        visual_pack_root=visual_pack_root,
+        executable=executable,
+        render_root=render_root,
+        camera_ids=camera_ids,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def run_windows_production_render(
+    *,
+    verified_v2_build: Path,
+    material_bundle_root: Path,
+    surface_realism_profile_id: SurfaceRealismProfileId,
+    minimum_valid_pixel_ratio: float,
+    clearance_near_distance_m: float,
+    minimum_upper_middle_near_hit_count: int,
+    preflight_only: bool = False,
+    repo_root: Path = ROOT,
+    visual_pack_root: Path | None = None,
+    executable: Path = DEFAULT_WINDOWS_BLENDER,
+    render_root: Path | None = None,
+    camera_ids: tuple[str, ...] | None = None,
+    timeout_seconds: int = canary.DEFAULT_RENDER_TIMEOUT_SECONDS,
+) -> LocalProductionRenderResult:
+    """Run production cameras from an explicitly verified Windows v2 build."""
+
+    return _run_production_render(
+        training_build_directory=verified_v2_build,
+        material_bundle_root=material_bundle_root,
+        minimum_valid_pixel_ratio=minimum_valid_pixel_ratio,
+        clearance_near_distance_m=clearance_near_distance_m,
+        minimum_upper_middle_near_hit_count=(
+            minimum_upper_middle_near_hit_count
+        ),
+        build_adapter="windows-textured-v2",
+        surface_realism_profile_id=surface_realism_profile_id,
+        preflight_only=preflight_only,
+        repo_root=repo_root,
+        visual_pack_root=visual_pack_root,
+        executable=executable,
+        render_root=render_root,
+        camera_ids=camera_ids,
+        timeout_seconds=timeout_seconds,
     )

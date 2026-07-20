@@ -142,6 +142,16 @@ def _run_local_production_render():
     return run_local_production_render
 
 
+def _run_windows_production_render():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.local_production_runner import (
+        run_windows_production_render,
+    )
+
+    return run_windows_production_render
+
+
 def _audit_render_coverage():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -400,9 +410,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     render_production_local.add_argument(
+        "--local-preview-build",
         "--build-directory",
+        dest="build_directory",
         type=Path,
         required=True,
+        help=(
+            "Exact Mac local-preview training-build directory. "
+            "--build-directory remains a compatibility alias."
+        ),
     )
     render_production_local.add_argument(
         "--material-bundle-root",
@@ -464,6 +480,88 @@ def _parser() -> argparse.ArgumentParser:
         default=15 * 60,
     )
     render_production_local.add_argument("--render-root", type=Path)
+    render_production_windows = commands.add_parser(
+        "render-production-windows",
+        help=(
+            "Resume an L0 production-camera subset from one explicitly selected "
+            "and byte-verified Windows schema-v2 Blender build."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--verified-v2-build",
+        type=Path,
+        required=True,
+        help=(
+            "Exact private Windows schema-v2 build directory named by build ID."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--material-bundle-root",
+        type=Path,
+        required=True,
+    )
+    render_production_windows.add_argument(
+        "--surface-realism-profile",
+        required=True,
+        choices=(
+            "single-scale-derived-pbr-v0",
+            "source-consistent-multiscale-surface-v1",
+        ),
+        help="Explicit surface profile used to reconstruct the canonical request.",
+    )
+    render_production_windows.add_argument(
+        "--visual-pack-root",
+        type=Path,
+        help=(
+            "Verified visual-source pack bound to the selected build. Omit only "
+            "when the build uses the default private pack."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--camera",
+        action="append",
+        help="Production camera ID; repeat for a bounded subset. Omit for all 180.",
+    )
+    render_production_windows.add_argument(
+        "--min-valid-pixel-ratio",
+        type=float,
+        required=True,
+        help=(
+            "Operator-selected inclusive candidate threshold in (0, 1]. "
+            "This legacy gate will be superseded by measured v2 layer policy."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--clearance-near-distance-m",
+        type=float,
+        required=True,
+        help=(
+            "Operator-selected near-hit threshold in metres for the "
+            "versioned upper/middle 5x5 clearance policy."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--min-upper-middle-near-hits",
+        type=int,
+        required=True,
+        help=(
+            "Operator-selected rejection count from the 15 upper/middle samples."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help=(
+            "Run and journal the scene-bound clearance probe without "
+            "starting any six-layer frame renders."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=15 * 60,
+    )
+    render_production_windows.add_argument("--render-root", type=Path)
     weather_variants = commands.add_parser(
         "weather-variants",
         help=(
@@ -820,6 +918,50 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     "preflight_only": result.preflight_only,
                     "verification_level": "L0",
+                    "trust_effect": "none-quality-filter-only",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "render-production-windows":
+        result = _run_windows_production_render()(
+            verified_v2_build=args.verified_v2_build,
+            material_bundle_root=args.material_bundle_root,
+            surface_realism_profile_id=args.surface_realism_profile,
+            visual_pack_root=args.visual_pack_root,
+            minimum_valid_pixel_ratio=args.min_valid_pixel_ratio,
+            clearance_near_distance_m=args.clearance_near_distance_m,
+            minimum_upper_middle_near_hit_count=(
+                args.min_upper_middle_near_hits
+            ),
+            preflight_only=args.preflight_only,
+            camera_ids=tuple(args.camera) if args.camera else None,
+            timeout_seconds=args.timeout_seconds,
+            render_root=args.render_root,
+            repo_root=ROOT,
+        )
+        print(
+            json.dumps(
+                {
+                    "build_adapter": "windows-textured-v2",
+                    "journal_path": str(result.journal_path),
+                    "render_id": result.render_id,
+                    "render_root": str(result.render_root),
+                    "rendered_count": result.rendered_count,
+                    "rejected_count": result.rejected_count,
+                    "reused_count": result.reused_count,
+                    "preflight_id": result.preflight_id,
+                    "preflight_report_path": str(
+                        result.preflight_report_path,
+                    ),
+                    "preflight_rejected_count": (
+                        result.preflight_rejected_count
+                    ),
+                    "preflight_only": result.preflight_only,
+                    "build_verification_level": "L2",
+                    "frame_verification_level": "L0",
                     "trust_effect": "none-quality-filter-only",
                 },
                 ensure_ascii=False,
