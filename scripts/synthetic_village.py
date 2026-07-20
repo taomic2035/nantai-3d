@@ -152,6 +152,26 @@ def _run_windows_production_render():
     return run_windows_production_render
 
 
+def _run_environment_module_build():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.environment_module_runtime import (
+        run_environment_module_build,
+    )
+
+    return run_environment_module_build
+
+
+def _verify_windows_production_build():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.windows_production_build import (
+        verify_windows_production_build,
+    )
+
+    return verify_windows_production_build
+
+
 def _audit_render_coverage():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -562,6 +582,59 @@ def _parser() -> argparse.ArgumentParser:
         default=15 * 60,
     )
     render_production_windows.add_argument("--render-root", type=Path)
+    build_environment_modules = commands.add_parser(
+        "build-environment-modules",
+        help=(
+            "Apply the verified 45-part EnvironmentModulePlan to one "
+            "byte-verified Windows schema-v2 build, producing a private "
+            "modeled-unverified village-modules.blend scene. The plan is "
+            "additive; the base build is not modified."
+        ),
+    )
+    build_environment_modules.add_argument(
+        "--verified-v2-build",
+        type=Path,
+        required=True,
+        help=(
+            "Exact private Windows schema-v2 build directory named by build ID. "
+            "The base 130-root object_registry is reused as-is."
+        ),
+    )
+    build_environment_modules.add_argument(
+        "--material-bundle-root",
+        type=Path,
+        required=True,
+    )
+    build_environment_modules.add_argument(
+        "--surface-realism-profile",
+        required=True,
+        choices=(
+            "single-scale-derived-pbr-v0",
+            "source-consistent-multiscale-surface-v1",
+        ),
+        help="Explicit surface profile used to reconstruct the canonical base request.",
+    )
+    build_environment_modules.add_argument(
+        "--visual-pack-root",
+        type=Path,
+        help=(
+            "Verified visual-source pack bound to the selected build. Omit only "
+            "when the build uses the default private pack."
+        ),
+    )
+    build_environment_modules.add_argument(
+        "--build-root",
+        type=Path,
+        help=(
+            "Output root for the private module build. Defaults to "
+            ".nantai-studio/synthetic-village/hybrid-v4/work/environment-modules."
+        ),
+    )
+    build_environment_modules.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=20 * 60,
+    )
     weather_variants = commands.add_parser(
         "weather-variants",
         help=(
@@ -963,6 +1036,45 @@ def main(argv: list[str] | None = None) -> int:
                     "build_verification_level": "L2",
                     "frame_verification_level": "L0",
                     "trust_effect": "none-quality-filter-only",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "build-environment-modules":
+        verify_windows_production_build = _verify_windows_production_build()
+        verified_build = verify_windows_production_build(
+            directory=args.verified_v2_build,
+            material_bundle_root=args.material_bundle_root,
+            repo_root=ROOT,
+            visual_pack_root=args.visual_pack_root,
+            surface_realism_profile_id=args.surface_realism_profile,
+        )
+        result = _run_environment_module_build()(
+            base_build=verified_build,
+            repo_root=ROOT,
+            build_root=args.build_root,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(
+            json.dumps(
+                {
+                    "build_adapter": "environment-module-runtime-v1",
+                    "build_id": result.request.build_id,
+                    "final_directory": str(result.final_directory),
+                    "base_build_id": result.request.base_build_id,
+                    "environment_module_plan_sha256": (
+                        result.request.environment_module_plan_sha256
+                    ),
+                    "artifact_name": result.report.artifact.name,
+                    "artifact_sha256": result.report.artifact.sha256,
+                    "artifact_size_bytes": result.report.artifact.size_bytes,
+                    "counts": result.report.counts.model_dump(mode="json"),
+                    "verification_level": "L0",
+                    "geometry_usability": "preview-only",
+                    "stage": "modeled-unverified",
+                    "trust_effect": "none",
                 },
                 ensure_ascii=False,
                 sort_keys=True,

@@ -6,6 +6,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from pipeline.synthetic_village.environment_module_runtime import (
+    EnvironmentModuleArtifact,
+    EnvironmentModuleBuildCounts,
+)
 from pipeline.synthetic_village.material_bundle import MaterialBundleResult
 from pipeline.synthetic_village.mesh_asset_bundle import MeshAssetBundleResult
 from scripts import synthetic_village as synthetic_village_cli
@@ -299,3 +305,172 @@ def test_build_near_mesh_assets_prints_honest_stable_summary(
         "synthetic": True,
         "verification_level": "L0",
     }
+
+
+def test_build_environment_modules_prints_bounded_truth_summary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """The build-environment-modules CLI surfaces the fail-closed module
+    build contract without re-deriving any evidence at the UI layer."""
+
+    verify_calls = []
+    run_calls = []
+    verified_build = SimpleNamespace(directory=tmp_path / "verified-v2")
+    counts = EnvironmentModuleBuildCounts(module_mesh_objects=47)
+    artifact = EnvironmentModuleArtifact(
+        name="village-modules.blend",
+        kind="blender-scene",
+        sha256="e" * 64,
+        size_bytes=4096,
+    )
+    report = SimpleNamespace(counts=counts, artifact=artifact)
+    request = SimpleNamespace(
+        build_id="f" * 64,
+        base_build_id="a" * 64,
+        environment_module_plan_sha256="b" * 64,
+    )
+    result = SimpleNamespace(
+        final_directory=tmp_path / "modules" / ("f" * 64),
+        request=request,
+        report=report,
+    )
+
+    def verify_windows_production_build(
+        *,
+        directory: Path,
+        material_bundle_root: Path,
+        repo_root: Path,
+        visual_pack_root: Path | None,
+        surface_realism_profile_id: str,
+    ):
+        verify_calls.append(
+            {
+                "directory": directory,
+                "material_bundle_root": material_bundle_root,
+                "repo_root": repo_root,
+                "visual_pack_root": visual_pack_root,
+                "surface_realism_profile_id": surface_realism_profile_id,
+            },
+        )
+        return verified_build
+
+    def run_environment_module_build(
+        *,
+        base_build: object,
+        repo_root: Path,
+        build_root: Path | None,
+        timeout_seconds: int,
+    ):
+        run_calls.append(
+            {
+                "base_build": base_build,
+                "repo_root": repo_root,
+                "build_root": build_root,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+        return result
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_verify_windows_production_build",
+        lambda: verify_windows_production_build,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_environment_module_build",
+        lambda: run_environment_module_build,
+    )
+
+    assert synthetic_village_cli.main(
+        [
+            "build-environment-modules",
+            "--verified-v2-build",
+            str(tmp_path / "verified-v2"),
+            "--material-bundle-root",
+            str(tmp_path / "materials"),
+            "--surface-realism-profile",
+            "source-consistent-multiscale-surface-v1",
+            "--visual-pack-root",
+            str(tmp_path / "visual"),
+            "--build-root",
+            str(tmp_path / "modules"),
+            "--timeout-seconds",
+            "600",
+        ],
+    ) == 0
+
+    assert verify_calls == [
+        {
+            "directory": tmp_path / "verified-v2",
+            "material_bundle_root": tmp_path / "materials",
+            "repo_root": synthetic_village_cli.ROOT,
+            "visual_pack_root": tmp_path / "visual",
+            "surface_realism_profile_id": "source-consistent-multiscale-surface-v1",
+        },
+    ]
+    assert run_calls == [
+        {
+            "base_build": verified_build,
+            "repo_root": synthetic_village_cli.ROOT,
+            "build_root": tmp_path / "modules",
+            "timeout_seconds": 600,
+        },
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "build_adapter": "environment-module-runtime-v1",
+        "build_id": "f" * 64,
+        "final_directory": str(tmp_path / "modules" / ("f" * 64)),
+        "base_build_id": "a" * 64,
+        "environment_module_plan_sha256": "b" * 64,
+        "artifact_name": "village-modules.blend",
+        "artifact_sha256": "e" * 64,
+        "artifact_size_bytes": 4096,
+        "counts": {
+            "base_canonical_roots": 130,
+            "module_canonical_roots": 45,
+            "canonical_roots": 175,
+            "module_mesh_objects": 47,
+        },
+        "verification_level": "L0",
+        "geometry_usability": "preview-only",
+        "stage": "modeled-unverified",
+        "trust_effect": "none",
+    }
+
+
+def test_build_environment_modules_requires_explicit_operator_inputs(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """build-environment-modules fails closed when required flags are missing."""
+
+    def _no_call(*args, **kwargs):
+        raise AssertionError("verify_windows_production_build must not be called")
+
+    def _no_run(*args, **kwargs):
+        raise AssertionError("run_environment_module_build must not be called")
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_verify_windows_production_build",
+        lambda: _no_call,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_environment_module_build",
+        lambda: _no_run,
+    )
+
+    with pytest.raises(SystemExit):
+        synthetic_village_cli.main(
+            [
+                "build-environment-modules",
+                "--verified-v2-build",
+                str(tmp_path / "verified-v2"),
+                # missing --material-bundle-root and --surface-realism-profile
+            ],
+        )
