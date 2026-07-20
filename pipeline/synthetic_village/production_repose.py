@@ -1,298 +1,631 @@
-"""Deterministic repose for obstructed production cameras (HANDOFF-OPUS-006 §3).
+"""Topology-aware replacement-pose search for obstructed production cameras.
 
-A "repose" shifts the position of a known-bad camera along its forward and
-lateral axes by a fixed, content-addressed offset, then re-derives the
-``c2w_opencv`` matrix and the immutable plan contract.  It does **not** rename
-or reorder cameras: the camera ID stays, the sequence stays, the route loop
-evidence stays, only the pose moves.  This is the minimum change that lets a
-downstream re-render produce a fresh journal without reusing the old one.
+Replaces the legacy hardcoded ``{010, 039}`` whitelist + fixed world-coordinate
+offset with a content-addressed deterministic arc-length search along the
+camera's bound polyline topology (HANDOFF-OPUS-006 Task 5, REVIEW-CODEX-014
+P0 fix).
 
-Fail-closed contract:
-  * Only camera IDs explicitly named as obstructed are reposed.  ``034`` is
-    NOT reposeable here -- it must be either cleared by the six-layer gate
-    or rejected, never silently shifted (HANDOFF-OPUS-006 §3).
-  * Reposed positions must stay inside the scene extent, respect the
-    ground-route spacing limit, and remain unique centres.
-  * The plan digest, camera registry digest, and render_id MUST change --
-    if they did not, the repose was a no-op and the caller has lied about
-    the offset.
-  * Route loop evidence and group coverage are structurally unchanged: a
-    reposed camera keeps its topology_ref, group, sequence_index and audit
-    flag.  The 180-camera target and the two-loop topology contract are
-    therefore preserved.
+Fail-closed contract (HANDOFF-OPUS-006 §3 / Task 5 §1):
+
+  * The caller MUST supply a *failing* ``ProductionCameraClearanceDecision``
+    whose ``camera_id`` matches the requested camera and whose
+    ``policy_sha256`` matches ``candidate_policy.clearance_policy_sha256``.
+    A passing decision, a wrong camera ID, or a wrong policy SHA is rejected
+    -- we will not search a replacement for a camera that did not actually
+    fail this clearance policy.
+  * The caller MUST supply ``preflight_report_sha256`` -- the SHA of the
+    ``ProductionClearanceReport`` they have already bound into their journal.
+    This function does NOT open the journal; it records the SHA into every
+    emitted candidate so downstream verification can re-derive the chain.
+    A malformed SHA is rejected; an unbound SHA is the caller's lie to catch
+    later, not this function's.
+  * Each candidate is a deterministic ``(arc_length_offset, lateral_offset)``
+    pair drawn from ``candidate_policy``. No random search. No per-camera
+    hardcoding. No ``{010, 039}`` whitelist.
+  * A candidate that passes the geometry gates (scene extent, half-width
+    when required, spacing to other cameras, ground-route 30 m spacing,
+    unique centres, plan rebuild) is tagged ``passes_geometry_gates=True``.
+    The first such candidate becomes ``accepted_geometry_candidate``.
+  * Geometry viability is NOT acceptance (Task 5 §3). Acceptance requires
+    fresh Blender clearance, six-layer render, post-render policy, and
+    before/after RGB comparison. This function does none of those; it only
+    emits geometry-viable candidates for downstream to feed into the real
+    pipeline.
+
+The function does NOT mutate the input plan. ``accepted_geometry_candidate``
+carries ``predicted_plan_sha256`` and ``predicted_camera_registry_sha256``
+so the caller can verify, after building a fresh plan, that the result
+matches what this search predicted.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+from pydantic import ValidationError
 
 from .camera_plan import _look_at_c2w, _q3
+from .production_preflight import ProductionCameraClearanceDecision
 from .production_profile import (
     MAX_GROUND_ROUTE_CAMERA_SPACING_M,
+    PolylineTopologySource,
     ProductionCameraPlan,
     ProductionCameraPose,
     ProductionProfileError,
-    TARGET_CAMERA_COUNT,
     canonical_production_plan_bytes,
     production_camera_registry_digest,
 )
 from .scene_plan import ScenePlan, build_scene_plan, terrain_height_m
 
-#: The set of camera IDs that REVIEW-CODEX-011 confirmed as geometrically
-#: obstructed and that HANDOFF-OPUS-006 §3 named as reposeable.  ``034``
-#: is deliberately absent: its obstruction is oblique, not geometric, and
-#: must be ruled on by the six-layer gate.
-REPOSEABLE_OBSTRUCTED_CAMERA_IDS: frozenset[str] = frozenset(
-    {
-        "camera-ground-route-010",
-        "camera-ground-route-039",
-    },
-)
+#: Lookahead along the topology for the look-at target.  Must match
+#: ``production_profile.ROUTE_LOOKAHEAD_M`` so the reposed camera's look-at
+#: semantics stay consistent with the original placement.
+_ROUTE_LOOKAHEAD_M = 25.0
 
-#: Baseline offset.  Lateral shifts the camera sideways (away from the
-#: bridge parapet that dominates 010), forward shifts it past the
-#: parapet.  Both are content-addressed into the plan digest via the
-#: offset parameters of ``repose_obstructed_cameras``.
-DEFAULT_LATERAL_OFFSET_M = 1.5
-DEFAULT_FORWARD_OFFSET_M = 2.0
+_HEX_CHARS = frozenset("0123456789abcdef")
+
+
+# --------------------------------------------------------------------------- #
+# Content-addressed candidate policy
+# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
-class ReposeOffsets:
-    """Content-addressed offsets applied to every reposeable camera."""
+class ReposeCandidatePolicy:
+    """Content-addressed policy describing which offsets to try, in order.
 
-    lateral_offset_m: float
-    forward_offset_m: float
+    The order of ``arc_length_offsets_m`` and ``lateral_offsets_m`` defines
+    the deterministic candidate order: arc_length is the outer loop,
+    lateral is the inner loop.  The first candidate whose geometry gates
+    pass becomes ``accepted_geometry_candidate``.
 
-    def __post_init__(self) -> None:
-        if self.lateral_offset_m <= 0.0 or not math.isfinite(self.lateral_offset_m):
-            raise ProductionProfileError(
-                "lateral offset must be a strictly positive finite number",
-            )
-        if self.forward_offset_m <= 0.0 or not math.isfinite(self.forward_offset_m):
-            raise ProductionProfileError(
-                "forward offset must be a strictly positive finite number",
-            )
-
-
-@dataclass(frozen=True)
-class ReposedPlan:
-    """The repose result, carrying before/after digests for the journal."""
-
-    plan: ProductionCameraPlan
-    offsets: ReposeOffsets
-    reposeable_camera_ids: tuple[str, ...]
-    previous_plan_sha256: str
-    previous_camera_registry_sha256: str
-
-    @property
-    def plan_sha256(self) -> str:
-        import hashlib
-
-        return hashlib.sha256(
-            canonical_production_plan_bytes(self.plan),
-        ).hexdigest()
-
-    @property
-    def camera_registry_sha256(self) -> str:
-        return production_camera_registry_digest(self.plan)
-
-
-def _horizontal_forward(position_m: tuple[float, float, float],
-                        look_at_m: tuple[float, float, float]) -> tuple[float, float]:
-    """Forward direction on the XY plane, normalised; falls back to (1, 0)."""
-    dx = look_at_m[0] - position_m[0]
-    dy = look_at_m[1] - position_m[1]
-    norm = math.hypot(dx, dy)
-    if norm < 1e-9:
-        return (1.0, 0.0)
-    return (dx / norm, dy / norm)
-
-
-def _repose_pose(
-    pose: ProductionCameraPose,
-    *,
-    offsets: ReposeOffsets,
-    scene: ScenePlan,
-) -> ProductionCameraPose:
-    forward_xy = _horizontal_forward(pose.position_m, pose.look_at_m)
-    # Lateral = forward rotated +90 degrees (left of the view direction).
-    lateral_xy = (-forward_xy[1], forward_xy[0])
-    old_x, old_y, _ = pose.position_m
-    new_x = old_x + lateral_xy[0] * offsets.lateral_offset_m + (
-        forward_xy[0] * offsets.forward_offset_m
-    )
-    new_y = old_y + lateral_xy[1] * offsets.lateral_offset_m + (
-        forward_xy[1] * offsets.forward_offset_m
-    )
-    half_width = scene.extent.width_m / 2
-    half_depth = scene.extent.depth_m / 2
-    if not (-half_width + 1.0 <= new_x <= half_width - 1.0):
-        raise ProductionProfileError(
-            f"reposed camera {pose.camera_id} x={new_x:.3f} leaves the scene extent",
-        )
-    if not (-half_depth + 1.0 <= new_y <= half_depth - 1.0):
-        raise ProductionProfileError(
-            f"reposed camera {pose.camera_id} y={new_y:.3f} leaves the scene extent",
-        )
-    new_z = terrain_height_m(new_x, new_y, scene.extent) + pose.eye_height_m
-    # Look-at advances along the original forward by lookahead_m.
-    lookahead_xy = (
-        forward_xy[0] * 25.0,
-        forward_xy[1] * 25.0,
-    )
-    new_look_x = new_x + lookahead_xy[0]
-    new_look_y = new_y + lookahead_xy[1]
-    new_look_z = (
-        terrain_height_m(new_look_x, new_look_y, scene.extent)
-        + pose.eye_height_m
-    )
-    position_q = (_q3(new_x), _q3(new_y), _q3(new_z))
-    look_q = (_q3(new_look_x), _q3(new_look_y), _q3(new_look_z))
-    matrix = _look_at_c2w(
-        __import__("numpy").array(position_q, dtype=float),
-        __import__("numpy").array(look_q, dtype=float),
-    )
-    return pose.model_copy(
-        update={
-            "position_m": position_q,
-            "look_at_m": look_q,
-            "c2w_opencv": matrix,
-        },
-    )
-
-
-def _validate_unique_centres(cameras: tuple[ProductionCameraPose, ...]) -> None:
-    centres = [camera.position_m for camera in cameras]
-    if len(centres) != len(set(centres)):
-        duplicates = sorted({c for c in centres if centres.count(c) > 1})
-        raise ProductionProfileError(
-            f"reposed camera centres collide with an existing camera: {duplicates}",
-        )
-
-
-def _validate_route_spacing_unchanged_or_improved(
-    before: ProductionCameraPlan,
-    after: ProductionCameraPlan,
-) -> None:
-    """Reposed ground-route cameras must not violate the spacing limit."""
-    by_route: dict[str, list[ProductionCameraPose]] = {}
-    for camera in after.cameras:
-        if camera.group_id == "ground-route":
-            by_route.setdefault(camera.topology_ref, []).append(camera)
-    for topology_ref, rows in by_route.items():
-        ordered = sorted(rows, key=lambda c: c.arc_length_m or 0.0)
-        for left, right in zip(ordered, ordered[1:], strict=False):
-            gap = math.dist(left.position_m, right.position_m)
-            if gap > MAX_GROUND_ROUTE_CAMERA_SPACING_M:
-                raise ProductionProfileError(
-                    f"reposed ground-route spacing exceeds the declared maximum on "
-                    f"{topology_ref}: {left.camera_id} -> {right.camera_id} is "
-                    f"{gap:.3f} m > {MAX_GROUND_ROUTE_CAMERA_SPACING_M} m",
-                )
-
-
-def repose_obstructed_cameras(
-    plan: ProductionCameraPlan,
-    *,
-    obstructed_camera_ids: tuple[str, ...],
-    offsets: ReposeOffsets | None = None,
-    scene: ScenePlan | None = None,
-) -> ReposedPlan:
-    """Repose confirmed-obstructed cameras by fixed content-addressed offsets.
-
-    ``034`` is not reposeable here.  The caller must pass exactly the set of
-    camera IDs that the geometric clearance gate has rejected -- this
-    function does not re-evaluate clearance; it trusts the caller's set
-    and only fails closed on structural invariant violations.
+    ``clearance_policy_sha256`` MUST equal
+    ``failing_decision.policy_sha256``.  This binds the candidate search to
+    the exact clearance policy that rejected the camera -- a different
+    policy cannot authorize a replacement for a decision it did not make.
     """
 
-    duplicates = sorted(
-        {c for c in obstructed_camera_ids if obstructed_camera_ids.count(c) > 1}
-    )
-    if duplicates:
-        raise ProductionProfileError(
-            f"obstructed camera IDs must be unique: {duplicates}",
-        )
-    plan_camera_ids = {camera.camera_id for camera in plan.cameras}
-    missing = [
-        camera_id
-        for camera_id in obstructed_camera_ids
-        if camera_id not in plan_camera_ids
+    clearance_policy_sha256: str
+    arc_length_offsets_m: tuple[float, ...]
+    lateral_offsets_m: tuple[float, ...]
+    min_spacing_to_other_cameras_m: float
+    require_within_half_width: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.clearance_policy_sha256, str)
+            or len(self.clearance_policy_sha256) != 64
+            or any(c not in _HEX_CHARS for c in self.clearance_policy_sha256)
+        ):
+            raise ProductionProfileError(
+                "clearance_policy_sha256 must be a 64-hex-char SHA-256 string",
+            )
+        if not self.arc_length_offsets_m:
+            raise ProductionProfileError(
+                "arc_length_offsets_m must not be empty",
+            )
+        if not self.lateral_offsets_m:
+            raise ProductionProfileError(
+                "lateral_offsets_m must not be empty",
+            )
+        for value in self.arc_length_offsets_m:
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ProductionProfileError(
+                    "arc_length_offsets_m must be finite numbers",
+                )
+        for value in self.lateral_offsets_m:
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ProductionProfileError(
+                    "lateral_offsets_m must be finite numbers",
+                )
+        if (
+            not isinstance(self.min_spacing_to_other_cameras_m, (int, float))
+            or not math.isfinite(self.min_spacing_to_other_cameras_m)
+            or self.min_spacing_to_other_cameras_m <= 0.0
+        ):
+            raise ProductionProfileError(
+                "min_spacing_to_other_cameras_m must be a strictly positive finite number",
+            )
+
+    @property
+    def policy_sha256(self) -> str:
+        return hashlib.sha256(
+            canonical_repose_candidate_policy_bytes(self),
+        ).hexdigest()
+
+
+def canonical_repose_candidate_policy_bytes(
+    policy: ReposeCandidatePolicy,
+) -> bytes:
+    """Canonical JSON bytes for content addressing (deterministic, sorted)."""
+    payload: dict[str, Any] = {
+        "clearance_policy_sha256": policy.clearance_policy_sha256,
+        "arc_length_offsets_m": list(policy.arc_length_offsets_m),
+        "lateral_offsets_m": list(policy.lateral_offsets_m),
+        "min_spacing_to_other_cameras_m": policy.min_spacing_to_other_cameras_m,
+        "require_within_half_width": policy.require_within_half_width,
+    }
+    return (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Candidate and search result
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ReposeCandidate:
+    """One deterministic candidate position derived from the policy.
+
+    ``predicted_plan_sha256`` and ``predicted_camera_registry_sha256`` are
+    computed by rebuilding the full 180-camera plan with this candidate
+    substituted.  They are ``None`` only when the plan rebuild itself
+    failed (e.g. centre collision with another camera) -- in which case
+    ``passes_geometry_gates`` is also ``False``.
+    """
+
+    camera_id: str
+    arc_length_offset_m: float
+    lateral_offset_m: float
+    arc_length_m: float
+    position_m: tuple[float, float, float]
+    look_at_m: tuple[float, float, float]
+    c2w_opencv: tuple[
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
+        tuple[float, float, float, float],
     ]
-    if missing:
-        raise ProductionProfileError(
-            f"obstructed camera IDs are not in this plan: {missing}",
-        )
-    not_reposeable = [
-        camera_id
-        for camera_id in obstructed_camera_ids
-        if camera_id not in REPOSEABLE_OBSTRUCTED_CAMERA_IDS
-    ]
-    if not_reposeable:
-        raise ProductionProfileError(
-            f"obstructed camera IDs are not reposeable (034 must be cleared "
-            f"by the six-layer gate, not reposed): {not_reposeable}",
-        )
-    offsets = offsets or ReposeOffsets(
-        lateral_offset_m=DEFAULT_LATERAL_OFFSET_M,
-        forward_offset_m=DEFAULT_FORWARD_OFFSET_M,
+    passes_geometry_gates: bool
+    failure_reasons: tuple[str, ...] = ()
+    predicted_plan_sha256: str | None = None
+    predicted_camera_registry_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class ReplacementPoseSearch:
+    """The full deterministic candidate sequence plus the geometry-viable pick.
+
+    ``accepted_geometry_candidate`` is ``None`` when every candidate failed
+    the geometry gates.  A non-``None`` value means the candidate may
+    proceed to fresh Blender clearance + six-layer render + post-render
+    policy (Task 5 §3); it does NOT mean the canonical plan may change
+    yet.  The caller must run §3 and only then build a new canonical plan.
+    """
+
+    camera_id: str
+    failing_decision: ProductionCameraClearanceDecision
+    preflight_report_sha256: str
+    candidate_policy: ReposeCandidatePolicy
+    topology_ref: str
+    candidates: tuple[ReposeCandidate, ...]
+    accepted_geometry_candidate: ReposeCandidate | None
+    previous_plan_sha256: str
+    previous_camera_registry_sha256: str
+    previous_pose_sha256: str
+
+    @property
+    def search_sha256(self) -> str:
+        """Content-addressed SHA of the search inputs + candidate verdicts.
+
+        Same inputs -> same SHA.  Any input change (report SHA, policy,
+        camera, topology) -> different SHA.  Bind into the caller's
+        journal so downstream can verify which search produced which
+        candidate.
+        """
+        payload: dict[str, Any] = {
+            "camera_id": self.camera_id,
+            "failing_decision_sha256": _decision_sha256(self.failing_decision),
+            "preflight_report_sha256": self.preflight_report_sha256,
+            "candidate_policy_sha256": self.candidate_policy.policy_sha256,
+            "topology_ref": self.topology_ref,
+            "previous_plan_sha256": self.previous_plan_sha256,
+            "previous_camera_registry_sha256": self.previous_camera_registry_sha256,
+            "previous_pose_sha256": self.previous_pose_sha256,
+            "candidates": [
+                {
+                    "arc_length_offset_m": c.arc_length_offset_m,
+                    "lateral_offset_m": c.lateral_offset_m,
+                    "passes_geometry_gates": c.passes_geometry_gates,
+                    "failure_reasons": list(c.failure_reasons),
+                }
+                for c in self.candidates
+            ],
+        }
+        canonical = (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+
+def _decision_sha256(decision: ProductionCameraClearanceDecision) -> str:
+    payload = decision.model_dump(mode="json")
+    return hashlib.sha256(
+        (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    ).hexdigest()
+
+
+def _pose_sha256(pose: ProductionCameraPose) -> str:
+    """Stable SHA of the pose's mutable-on-repose fields only.
+
+    ``camera_id``/``group_id``/``sequence_index``/``topology_ref`` are
+    preserved by the search, so they are not part of the pose identity
+    here; only the fields a candidate actually changes enter the digest.
+    """
+    payload: dict[str, Any] = {
+        "camera_id": pose.camera_id,
+        "arc_length_m": pose.arc_length_m,
+        "position_m": list(pose.position_m),
+        "look_at_m": list(pose.look_at_m),
+        "c2w_opencv": [list(row) for row in pose.c2w_opencv],
+    }
+    return hashlib.sha256(
+        (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    ).hexdigest()
+
+
+def _point_at_arc_length(
+    source: PolylineTopologySource,
+    arc_length: float,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return ``(point, unit_tangent)`` at the given arc length on the polyline.
+
+    Arc length is clamped to ``[0, total_length]`` by the caller; this
+    helper assumes the input is already in range.
+    """
+    points = source.points
+    cumulative = [0.0]
+    for a, b in zip(points, points[1:], strict=False):
+        cumulative.append(cumulative[-1] + math.dist(a, b))
+    total = cumulative[-1]
+    target = max(0.0, min(total, arc_length))
+    for i in range(len(cumulative) - 1):
+        if cumulative[i] <= target <= cumulative[i + 1]:
+            span = cumulative[i + 1] - cumulative[i]
+            t = 0.0 if span <= 0 else (target - cumulative[i]) / span
+            start, end = points[i], points[i + 1]
+            point = (
+                start[0] + t * (end[0] - start[0]),
+                start[1] + t * (end[1] - start[1]),
+            )
+            tangent = (end[0] - start[0], end[1] - start[1])
+            norm = math.hypot(*tangent) or 1.0
+            return point, (tangent[0] / norm, tangent[1] / norm)
+    return points[-1], (1.0, 0.0)
+
+
+def _build_predicted_plan(
+    plan: ProductionCameraPlan,
+    camera_id: str,
+    new_pose: ProductionCameraPose,
+) -> tuple[str, str] | None:
+    """Rebuild the 180-camera plan with one camera substituted.
+
+    Returns ``(plan_sha256, camera_registry_sha256)`` or ``None`` if the
+    plan rebuild itself fails (e.g. unique-centre violation caught by the
+    frozen validator).  We do not invent a SHA -- the rebuild either
+    succeeds and we hash it, or it fails and we report None.
+    """
+    new_cameras = tuple(
+        new_pose if c.camera_id == camera_id else c for c in plan.cameras
     )
+    try:
+        candidate_plan = plan.model_copy(update={"cameras": new_cameras})
+        # Re-validate by round-tripping canonical JSON -- this is what the
+        # real plan builder does, and it forces every validator to rerun.
+        candidate_plan = ProductionCameraPlan.model_validate_json(
+            canonical_production_plan_bytes(candidate_plan),
+        )
+    except (ValidationError, ValueError, TypeError):
+        return None
+    plan_sha = hashlib.sha256(
+        canonical_production_plan_bytes(candidate_plan),
+    ).hexdigest()
+    registry_sha = production_camera_registry_digest(candidate_plan)
+    return plan_sha, registry_sha
+
+
+# --------------------------------------------------------------------------- #
+# Public API
+# --------------------------------------------------------------------------- #
+
+
+def search_replacement_pose(
+    *,
+    plan: ProductionCameraPlan,
+    camera_id: str,
+    failing_decision: ProductionCameraClearanceDecision,
+    preflight_report_sha256: str,
+    topology: PolylineTopologySource,
+    candidate_policy: ReposeCandidatePolicy,
+    scene: ScenePlan | None = None,
+) -> ReplacementPoseSearch:
+    """Search deterministic arc-length offsets for one obstructed camera.
+
+    See module docstring for the full fail-closed contract.  This function
+    does NOT mutate ``plan``; it returns a sequence of candidates plus the
+    first geometry-viable pick.  Acceptance requires Task 5 §3 evidence
+    (fresh Blender clearance + six-layer render + post-render policy +
+    before/after RGB) which is the caller's responsibility.
+    """
     scene = scene or build_scene_plan()
-    previous_plan_sha256 = __import__("hashlib").sha256(
-        canonical_production_plan_bytes(plan),
-    ).hexdigest()
-    previous_camera_registry_sha256 = production_camera_registry_digest(plan)
-    obstructed_set = set(obstructed_camera_ids)
-    new_cameras: list[ProductionCameraPose] = []
+
+    # ----- §1: input validation / fail-closed binding ---------------------- #
+
+    if failing_decision.passes:
+        raise ProductionProfileError(
+            "failing_decision.passes is True -- cannot search a replacement "
+            "for a camera that already passed clearance",
+        )
+    if failing_decision.camera_id != camera_id:
+        raise ProductionProfileError(
+            f"failing_decision.camera_id={failing_decision.camera_id} "
+            f"disagrees with requested camera_id={camera_id}",
+        )
+    if (
+        failing_decision.policy_sha256
+        != candidate_policy.clearance_policy_sha256
+    ):
+        raise ProductionProfileError(
+            "failing_decision.policy_sha256 disagrees with "
+            "candidate_policy.clearance_policy_sha256 -- cannot bind a "
+            "candidate search to a clearance policy that did not reject "
+            "the camera",
+        )
+    if (
+        not isinstance(preflight_report_sha256, str)
+        or len(preflight_report_sha256) != 64
+        or any(c not in _HEX_CHARS for c in preflight_report_sha256)
+    ):
+        raise ProductionProfileError(
+            "preflight_report_sha256 must be a 64-hex-char SHA-256 string",
+        )
+
+    # ----- locate the camera in the plan ----------------------------------- #
+
+    original_pose: ProductionCameraPose | None = None
     for camera in plan.cameras:
-        if camera.camera_id in obstructed_set:
-            new_cameras.append(_repose_pose(camera, offsets=offsets, scene=scene))
-        else:
-            new_cameras.append(camera)
-    _validate_unique_centres(tuple(new_cameras))
-    reposeable_camera_ids = tuple(
-        sorted(obstructed_set, key=lambda row: str(row))
-    )
-    # ``ProductionCameraPlan`` is frozen and validates on construction, so
-    # building a fresh plan from the reposed cameras re-runs every
-    # invariant: route loops, group coverage, declared target count,
-    # unique centres, and complete flag.
-    new_plan = plan.model_copy(
-        update={"cameras": tuple(new_cameras)},
-    )
-    # Re-run the heavy validators by re-validating canonical JSON.
-    new_plan = ProductionCameraPlan.model_validate_json(
-        canonical_production_plan_bytes(new_plan),
-    )
-    _validate_route_spacing_unchanged_or_improved(plan, new_plan)
-    if new_plan.camera_count != TARGET_CAMERA_COUNT:
+        if camera.camera_id == camera_id:
+            original_pose = camera
+            break
+    if original_pose is None:
         raise ProductionProfileError(
-            "reposed plan must still cover the declared 180 cameras",
+            f"camera_id={camera_id} is not present in this plan",
         )
-    if len({c.camera_id for c in new_plan.cameras}) != new_plan.camera_count:
+
+    # ----- bind topology to camera ----------------------------------------- #
+
+    if not isinstance(topology, PolylineTopologySource):
         raise ProductionProfileError(
-            "reposed plan camera IDs must remain unique",
+            f"topology must be a PolylineTopologySource for now; "
+            f"got {type(topology).__name__}. Elevated-pedestrian and "
+            f"perimeter repose are not yet implemented.",
         )
-    new_plan_sha256 = __import__("hashlib").sha256(
-        canonical_production_plan_bytes(new_plan),
-    ).hexdigest()
-    if new_plan_sha256 == previous_plan_sha256:
+    if topology.topology_ref != original_pose.topology_ref:
         raise ProductionProfileError(
-            "repose produced an identical plan digest -- the offset did not "
-            "actually change any camera position",
+            f"topology.topology_ref={topology.topology_ref} disagrees with "
+            f"camera's topology_ref={original_pose.topology_ref}",
         )
-    new_camera_registry_sha256 = production_camera_registry_digest(new_plan)
-    if new_camera_registry_sha256 == previous_camera_registry_sha256:
+    if original_pose.arc_length_m is None:
         raise ProductionProfileError(
-            "repose produced an identical camera registry digest -- "
-            "camera poses did not actually change",
+            f"camera {camera_id} has arc_length_m=None; cannot search "
+            f"along topology (audit-overview cameras are not reposeable)",
         )
-    return ReposedPlan(
-        plan=new_plan,
-        offsets=offsets,
-        reposeable_camera_ids=reposeable_camera_ids,
-        previous_plan_sha256=previous_plan_sha256,
-        previous_camera_registry_sha256=previous_camera_registry_sha256,
+    total_length = topology.length_m
+    if not (0.0 <= original_pose.arc_length_m <= total_length):
+        raise ProductionProfileError(
+            f"camera {camera_id} arc_length_m={original_pose.arc_length_m} "
+            f"is outside topology length [0, {total_length:.3f}]",
+        )
+
+    # ----- collect other cameras' positions for spacing checks ------------- #
+
+    other_positions: list[tuple[float, float, float]] = [
+        c.position_m for c in plan.cameras if c.camera_id != camera_id
+    ]
+    same_route_cameras: list[ProductionCameraPose] = []
+    if original_pose.group_id == "ground-route":
+        same_route_cameras = [
+            c for c in plan.cameras
+            if c.group_id == "ground-route"
+            and c.topology_ref == original_pose.topology_ref
+            and c.camera_id != camera_id
+        ]
+
+    half_width_extent = scene.extent.width_m / 2
+    half_depth_extent = scene.extent.depth_m / 2
+
+    # ----- §2: deterministic candidate search ------------------------------ #
+
+    candidates: list[ReposeCandidate] = []
+    accepted: ReposeCandidate | None = None
+
+    for arc_offset in candidate_policy.arc_length_offsets_m:
+        for lateral_offset in candidate_policy.lateral_offsets_m:
+            new_arc_length = (original_pose.arc_length_m or 0.0) + arc_offset
+            failure_reasons: list[str] = []
+
+            # Gate 1: arc length must stay on the polyline.
+            if new_arc_length < 0.0 or new_arc_length > total_length:
+                failure_reasons.append(
+                    f"arc_length={new_arc_length:.3f} outside topology "
+                    f"[0, {total_length:.3f}]",
+                )
+                # We still emit a candidate row (with zeroed pose fields)
+                # so the candidate sequence is complete and deterministic;
+                # the caller can see *why* each offset was rejected.
+                candidates.append(ReposeCandidate(
+                    camera_id=camera_id,
+                    arc_length_offset_m=arc_offset,
+                    lateral_offset_m=lateral_offset,
+                    arc_length_m=new_arc_length,
+                    position_m=(0.0, 0.0, 0.0),
+                    look_at_m=(0.0, 0.0, 0.0),
+                    c2w_opencv=(
+                        (1.0, 0.0, 0.0, 0.0),
+                        (0.0, 1.0, 0.0, 0.0),
+                        (0.0, 0.0, 1.0, 0.0),
+                        (0.0, 0.0, 0.0, 1.0),
+                    ),
+                    passes_geometry_gates=False,
+                    failure_reasons=tuple(failure_reasons),
+                ))
+                continue
+
+            point, tangent = _point_at_arc_length(topology, new_arc_length)
+            # Left normal = tangent rotated +90 degrees.
+            normal = (-tangent[1], tangent[0])
+
+            # Gate 2: lateral must stay inside corridor when required.
+            if (
+                candidate_policy.require_within_half_width
+                and abs(lateral_offset) > topology.half_width_m
+            ):
+                failure_reasons.append(
+                    f"|lateral_offset|={abs(lateral_offset):.3f} exceeds "
+                    f"half_width={topology.half_width_m:.3f}",
+                )
+
+            new_x = point[0] + normal[0] * lateral_offset
+            new_y = point[1] + normal[1] * lateral_offset
+
+            # Gate 3: scene extent (with 1 m safety margin).
+            if not (-half_width_extent + 1.0 <= new_x <= half_width_extent - 1.0):
+                failure_reasons.append(
+                    f"x={new_x:.3f} leaves scene extent "
+                    f"[-{half_width_extent - 1.0:.3f}, {half_width_extent - 1.0:.3f}]",
+                )
+            if not (-half_depth_extent + 1.0 <= new_y <= half_depth_extent - 1.0):
+                failure_reasons.append(
+                    f"y={new_y:.3f} leaves scene extent "
+                    f"[-{half_depth_extent - 1.0:.3f}, {half_depth_extent - 1.0:.3f}]",
+                )
+
+            new_z = terrain_height_m(
+                max(-half_width_extent, min(half_width_extent, new_x)),
+                max(-half_depth_extent, min(half_depth_extent, new_y)),
+                scene.extent,
+            ) + original_pose.eye_height_m
+
+            # Look-at: ahead on the same topology, offset by same lateral.
+            lookahead_arc = new_arc_length + _ROUTE_LOOKAHEAD_M
+            if lookahead_arc > total_length:
+                # Past route end: project forward using the local tangent.
+                ahead_x = new_x + tangent[0] * _ROUTE_LOOKAHEAD_M
+                ahead_y = new_y + tangent[1] * _ROUTE_LOOKAHEAD_M
+            else:
+                ahead_point, _ = _point_at_arc_length(topology, lookahead_arc)
+                ahead_x = ahead_point[0] + normal[0] * lateral_offset
+                ahead_y = ahead_point[1] + normal[1] * lateral_offset
+            ahead_x = max(-half_width_extent + 1.0, min(half_width_extent - 1.0, ahead_x))
+            ahead_y = max(-half_depth_extent + 1.0, min(half_depth_extent - 1.0, ahead_y))
+            ahead_z = terrain_height_m(ahead_x, ahead_y, scene.extent) + original_pose.eye_height_m
+
+            position_q = (_q3(new_x), _q3(new_y), _q3(new_z))
+            look_q = (_q3(ahead_x), _q3(ahead_y), _q3(ahead_z))
+            matrix = _look_at_c2w(
+                np.array(position_q, dtype=float),
+                np.array(look_q, dtype=float),
+            )
+
+            # Gate 4: unique centre (no collision with existing cameras).
+            if position_q in other_positions:
+                failure_reasons.append(
+                    "reposed centre collides with an existing camera",
+                )
+
+            # Gate 5: minimum 3D spacing to every OTHER camera.
+            if other_positions:
+                min_spacing = min(
+                    math.dist(position_q, other) for other in other_positions
+                )
+                if min_spacing < candidate_policy.min_spacing_to_other_cameras_m:
+                    failure_reasons.append(
+                        f"min spacing to other cameras={min_spacing:.3f} < "
+                        f"{candidate_policy.min_spacing_to_other_cameras_m:.3f}",
+                    )
+
+            # Gate 6: ground-route 30 m spacing on the same route.
+            if same_route_cameras:
+                sorted_arc = sorted(
+                    [(c.arc_length_m or 0.0, c.position_m) for c in same_route_cameras]
+                    + [(new_arc_length, position_q)]
+                )
+                for left, right in zip(sorted_arc, sorted_arc[1:], strict=False):
+                    gap = math.dist(left[1], right[1])
+                    if gap > MAX_GROUND_ROUTE_CAMERA_SPACING_M:
+                        failure_reasons.append(
+                            f"ground-route spacing violation: {gap:.3f}m > "
+                            f"{MAX_GROUND_ROUTE_CAMERA_SPACING_M:.3f}m",
+                        )
+                        break
+
+            passes = not failure_reasons
+
+            # Predicted plan SHA: only meaningful if geometry gates pass.
+            predicted_plan_sha: str | None = None
+            predicted_registry_sha: str | None = None
+            if passes:
+                new_pose = original_pose.model_copy(
+                    update={
+                        "position_m": position_q,
+                        "look_at_m": look_q,
+                        "arc_length_m": _q3(new_arc_length),
+                        "c2w_opencv": matrix,
+                    },
+                )
+                predicted = _build_predicted_plan(plan, camera_id, new_pose)
+                if predicted is None:
+                    # Plan rebuild failed -- this is itself a geometry
+                    # failure (e.g. a validator the gates above missed).
+                    failure_reasons.append(
+                        "predicted plan rebuild failed (validator rejected)",
+                    )
+                    passes = False
+                else:
+                    predicted_plan_sha, predicted_registry_sha = predicted
+
+            candidate = ReposeCandidate(
+                camera_id=camera_id,
+                arc_length_offset_m=arc_offset,
+                lateral_offset_m=lateral_offset,
+                arc_length_m=_q3(new_arc_length),
+                position_m=position_q,
+                look_at_m=look_q,
+                c2w_opencv=matrix,
+                passes_geometry_gates=passes,
+                failure_reasons=tuple(failure_reasons),
+                predicted_plan_sha256=predicted_plan_sha,
+                predicted_camera_registry_sha256=predicted_registry_sha,
+            )
+            candidates.append(candidate)
+            if passes and accepted is None:
+                accepted = candidate
+
+    return ReplacementPoseSearch(
+        camera_id=camera_id,
+        failing_decision=failing_decision,
+        preflight_report_sha256=preflight_report_sha256,
+        candidate_policy=candidate_policy,
+        topology_ref=topology.topology_ref,
+        candidates=tuple(candidates),
+        accepted_geometry_candidate=accepted,
+        previous_plan_sha256=hashlib.sha256(
+            canonical_production_plan_bytes(plan),
+        ).hexdigest(),
+        previous_camera_registry_sha256=production_camera_registry_digest(plan),
+        previous_pose_sha256=_pose_sha256(original_pose),
     )
