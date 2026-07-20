@@ -53,6 +53,7 @@ from .camera_plan import _look_at_c2w, _q3
 from .production_preflight import ProductionCameraClearanceDecision
 from .production_profile import (
     MAX_GROUND_ROUTE_CAMERA_SPACING_M,
+    ROUTE_LOOKAHEAD_M,
     PolylineTopologySource,
     ProductionCameraPlan,
     ProductionCameraPose,
@@ -61,11 +62,6 @@ from .production_profile import (
     production_camera_registry_digest,
 )
 from .scene_plan import ScenePlan, build_scene_plan, terrain_height_m
-
-#: Lookahead along the topology for the look-at target.  Must match
-#: ``production_profile.ROUTE_LOOKAHEAD_M`` so the reposed camera's look-at
-#: semantics stay consistent with the original placement.
-_ROUTE_LOOKAHEAD_M = 25.0
 
 _HEX_CHARS = frozenset("0123456789abcdef")
 
@@ -521,11 +517,11 @@ def search_replacement_pose(
             ) + original_pose.eye_height_m
 
             # Look-at: ahead on the same topology, offset by same lateral.
-            lookahead_arc = new_arc_length + _ROUTE_LOOKAHEAD_M
+            lookahead_arc = new_arc_length + ROUTE_LOOKAHEAD_M
             if lookahead_arc > total_length:
                 # Past route end: project forward using the local tangent.
-                ahead_x = new_x + tangent[0] * _ROUTE_LOOKAHEAD_M
-                ahead_y = new_y + tangent[1] * _ROUTE_LOOKAHEAD_M
+                ahead_x = new_x + tangent[0] * ROUTE_LOOKAHEAD_M
+                ahead_y = new_y + tangent[1] * ROUTE_LOOKAHEAD_M
             else:
                 ahead_point, _ = _point_at_arc_length(topology, lookahead_arc)
                 ahead_x = ahead_point[0] + normal[0] * lateral_offset
