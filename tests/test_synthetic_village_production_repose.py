@@ -26,6 +26,12 @@ from pipeline.synthetic_village.elevated_topology import (
 )
 from pipeline.synthetic_village.production_preflight import (
     ProductionCameraClearanceDecision,
+    ProductionCameraClearanceEvidence,
+    ProductionClearancePolicy,
+    ProductionClearanceRayEvidence,
+    build_production_clearance_report,
+    build_production_clearance_request,
+    canonical_production_clearance_report_bytes,
     production_clearance_policy_sha256,
 )
 from pipeline.synthetic_village.production_profile import (
@@ -42,6 +48,7 @@ from pipeline.synthetic_village.production_repose import (
     search_replacement_pose,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
+from tests.test_synthetic_village_production_render import _request as _render_request
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -695,3 +702,184 @@ def test_010_and_039_both_yield_geometry_viable_candidate() -> None:
             f"{camera_id} produced no geometry-viable candidate"
         )
         assert result.accepted_geometry_candidate.predicted_plan_sha256 is not None
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end binding smoke test
+# --------------------------------------------------------------------------- #
+
+
+def _real_clearance_report_with_010_failing():
+    """Build a real ProductionClearanceReport where 010 fails and 034/039 pass.
+
+    Reuses the same _render_request() pipeline as production_preflight tests
+    so the plan / object registry / build identities all come from one
+    canonical source instead of hand-filled hex strings.
+    """
+    render_request = _render_request()
+    plan = render_request.production_plan
+    policy = ProductionClearancePolicy(
+        near_distance_m=2.0,
+        minimum_upper_middle_near_hit_count=5,
+    )
+    clearance_request = build_production_clearance_request(
+        plan=plan,
+        selected_camera_ids=(
+            "camera-ground-route-010",
+            "camera-ground-route-034",
+            "camera-ground-route-039",
+        ),
+        build_id=render_request.build_id,
+        blender_executable_sha256=render_request.blender_executable_sha256,
+        preflight_script_sha256="6" * 64,
+        blend_sha256=render_request.blend_sha256,
+        build_report_sha256=render_request.build_report_sha256,
+        object_registry=render_request.object_registry,
+        auxiliary_registry=render_request.auxiliary_registry,
+        semantic_registry=render_request.semantic_registry,
+        policy=policy,
+    )
+    # 010: all 15 upper-middle rays hit at 0.5 m -> fails
+    # 034/039: no hits -> pass
+    hit_set = {
+        (sample_x, sample_y): 0.5
+        for sample_x in policy.sample_grid
+        for sample_y in (0.0, 0.45, 0.9)
+    }
+    evidence = tuple(
+        ProductionCameraClearanceEvidence(
+            camera_id=camera_id,
+            rays=tuple(
+                ProductionClearanceRayEvidence(
+                    sample_x=sample_x,
+                    sample_y=sample_y,
+                    hit=(camera_id == "camera-ground-route-010"
+                         and (sample_x, sample_y) in hit_set),
+                    distance_m=(
+                        0.5
+                        if camera_id == "camera-ground-route-010"
+                        and (sample_x, sample_y) in hit_set
+                        else None
+                    ),
+                    object_name=(
+                        "SV_Lower_Bridge"
+                        if camera_id == "camera-ground-route-010"
+                        and (sample_x, sample_y) in hit_set
+                        else None
+                    ),
+                    stable_id=(
+                        "lower-bridge"
+                        if camera_id == "camera-ground-route-010"
+                        and (sample_x, sample_y) in hit_set
+                        else None
+                    ),
+                    part_id=(
+                        "deck"
+                        if camera_id == "camera-ground-route-010"
+                        and (sample_x, sample_y) in hit_set
+                        else None
+                    ),
+                    semantic_id=(
+                        3
+                        if camera_id == "camera-ground-route-010"
+                        and (sample_x, sample_y) in hit_set
+                        else None
+                    ),
+                )
+                for sample_y in (-0.9, -0.45, 0.0, 0.45, 0.9)
+                for sample_x in (-0.9, -0.45, 0.0, 0.45, 0.9)
+            ),
+        )
+        for camera_id in clearance_request.selected_camera_ids
+    )
+    report = build_production_clearance_report(
+        clearance_request,
+        evidence=evidence,
+    )
+    return clearance_request, report
+
+
+def test_search_consumes_real_clearance_report_sha_end_to_end() -> None:
+    """End-to-end: preflight report -> failing decision -> repose search.
+
+    The existing _VALID_REPORT_SHA = "a"*64 tests prove the API accepts
+    a well-formed SHA, but they do NOT prove the SHA actually comes from a
+    real ProductionClearanceReport. This test builds a real report (with
+    canonical bytes, real policy SHA, real evidence, real decisions) and
+    feeds its SHA + the real failing decision into search_replacement_pose,
+    proving the repose search is content-bound to actual preflight output
+    rather than to a hand-filled string.
+    """
+    clearance_request, report = _real_clearance_report_with_010_failing()
+
+    # Sanity: 010 failed, 034/039 passed
+    decisions_by_id = {d.camera_id: d for d in report.decisions}
+    failing = decisions_by_id["camera-ground-route-010"]
+    assert failing.passes is False
+    assert failing.failed_rule_ids == ("upper-middle-near-hit-count",)
+    assert decisions_by_id["camera-ground-route-034"].passes is True
+    assert decisions_by_id["camera-ground-route-039"].passes is True
+
+    # The real report SHA (canonical bytes -> sha256)
+    real_report_sha = hashlib.sha256(
+        canonical_production_clearance_report_bytes(report),
+    ).hexdigest()
+
+    # The real policy SHA must match the decision's policy_sha256
+    real_policy_sha = production_clearance_policy_sha256(
+        clearance_request.policy,
+    )
+    assert failing.policy_sha256 == real_policy_sha
+    assert report.policy_sha256 == real_policy_sha
+
+    # Repose candidate policy bound to the REAL clearance policy SHA
+    plan = clearance_request.production_plan
+    topology = _topology_for_camera(plan, "camera-ground-route-010")
+    candidate_policy = ReposeCandidatePolicy(
+        clearance_policy_sha256=real_policy_sha,
+        arc_length_offsets_m=(-3.0, -2.0, 2.0, 3.0),
+        lateral_offsets_m=(0.0,),
+        min_spacing_to_other_cameras_m=2.5,
+        require_within_half_width=True,
+    )
+
+    result = search_replacement_pose(
+        plan=plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=failing,
+        preflight_report_sha256=real_report_sha,
+        topology=topology,
+        candidate_policy=candidate_policy,
+    )
+
+    # The repose search must carry the REAL report SHA verbatim -- not a
+    # hand-filled placeholder. This is the binding REVIEW-CODEX-014 P0
+    # asked for: repose cannot be searched without a real failing
+    # decision bound to a real preflight report.
+    assert result.preflight_report_sha256 == real_report_sha
+    assert result.failing_decision == failing
+    assert result.candidate_policy.clearance_policy_sha256 == real_policy_sha
+
+    # Geometry viability still works on the real plan
+    assert result.accepted_geometry_candidate is not None
+    assert result.accepted_geometry_candidate.passes_geometry_gates is True
+    assert result.accepted_geometry_candidate.predicted_plan_sha256 is not None
+    assert (
+        result.accepted_geometry_candidate.predicted_plan_sha256
+        != result.previous_plan_sha256
+    )
+
+    # The search_sha256 must bind the real report SHA into its canonical
+    # bytes -- swapping the report SHA for a different hex string must
+    # produce a different search_sha256.
+    different_report_sha = "b" * 64
+    different_result = search_replacement_pose(
+        plan=plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=failing,
+        preflight_report_sha256=different_report_sha,
+        topology=topology,
+        candidate_policy=candidate_policy,
+    )
+    assert different_result.search_sha256 != result.search_sha256
+
