@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
 const app = await readFile(new URL('./app.js', import.meta.url), 'utf8');
+const css = await readFile(new URL('./styles.css', import.meta.url), 'utf8');
 
 test('reset camera participates in capability-gated viewer controls', () => {
   assert.match(
@@ -92,4 +93,25 @@ test('asset workspace derives the current handoff from snapshot evidence', () =>
   assert.match(app, /assets\.current_handoff/);
   assert.match(app, /currentHandoff\.id/);
   assert.doesNotMatch(app, /asset_id:\s*['"]HANDOFF-001['"]/);
+});
+
+test('review inspector loads fail-closed production quality evidence', () => {
+  assert.match(
+    app,
+    /import\s*\{[^}]*loadProductionQualityEvidence[^}]*renderProductionQualityPanel[^}]*\}\s*from\s*['"]\.\/production-quality-panel\.mjs['"]/s,
+  );
+  assert.match(app, /loadProductionQualityEvidence\(\)\.catch\(\(\)\s*=>\s*null\)/);
+  assert.match(
+    app,
+    /renderProductionQualityPanel\(\s*productionQualityEvidence,\s*selectedQualityCameraId,\s*\)/,
+  );
+  assert.match(app, /byId\(['"]production-quality-camera['"]\)/);
+  assert.match(app, /selectedQualityCameraId\s*=\s*event\.target\.value/);
+});
+
+test('production quality evidence has compact stage and rule layouts', () => {
+  assert.match(css, /\.quality-stages\s*\{[^}]*grid-template-columns/s);
+  assert.match(css, /\.quality-rule\s*\{[^}]*grid-template-columns/s);
+  assert.match(css, /\.quality-hashes[^}]*overflow-wrap:\s*anywhere/s);
+  assert.match(css, /\[data-state="rejected"\][^{]*\{[^}]*var\(--red\)/s);
 });

@@ -18,6 +18,10 @@ import { loadOptionalCoverageAudit } from './coverage-audit-loader.mjs';
 import {
   loadOptionalProductionCameraPlan,
 } from './production-camera-plan-loader.mjs';
+import {
+  loadProductionQualityEvidence,
+  renderProductionQualityPanel,
+} from './production-quality-panel.mjs';
 import { JobController } from './job-controller.mjs';
 import {
   ingestConfirmationModel,
@@ -61,6 +65,8 @@ let rawSnapshot;
 let liveViewerCapabilities = null;
 let selectedStep = 'review';
 let selectedRunId = null;
+let selectedQualityCameraId = null;
+let productionQualityEvidence = null;
 let jobController = null;
 
 const byId = (id) => document.getElementById(id);
@@ -250,7 +256,11 @@ function reviewInspector() {
     ['可导出格式', blocked ? 'proxy-ply' : 'proxy-ply / 3dgs-ply'],
   ])}
   <p class="eyebrow">诊断</p>
-  ${derived.diagnostics.map((item) => `<div class="evidence-card"><p>${escapeHtml(item)}</p></div>`).join('') || '<div class="evidence-card"><p>无阻断诊断。</p></div>'}`;
+  ${derived.diagnostics.map((item) => `<div class="evidence-card"><p>${escapeHtml(item)}</p></div>`).join('') || '<div class="evidence-card"><p>无阻断诊断。</p></div>'}
+  ${renderProductionQualityPanel(
+    productionQualityEvidence,
+    selectedQualityCameraId,
+  )}`;
 }
 
 function renderInspector() {
@@ -272,6 +282,10 @@ function renderInspector() {
     byId('inspector-content').append(actions);
   }
   byId('rescan-sources')?.addEventListener('click', openIngestConfirmation);
+  byId('production-quality-camera')?.addEventListener('change', (event) => {
+    selectedQualityCameraId = event.target.value;
+    renderInspector();
+  });
   byId('validate-assets')?.addEventListener('click', async () => {
     const validation = commandCapability(serviceCapabilities, 'validate-assets');
     const currentHandoff = snapshot.assets?.current_handoff;
@@ -373,7 +387,10 @@ function announce(message) {
 }
 
 async function loadScenario({ focusError = false, refreshRuns = true } = {}) {
-  rawSnapshot = await adapter.loadProject();
+  [rawSnapshot, productionQualityEvidence] = await Promise.all([
+    adapter.loadProject(),
+    loadProductionQualityEvidence().catch(() => null),
+  ]);
   const evidenced = structuredClone(rawSnapshot);
   if (liveViewerCapabilities && evidenced.reconstruction) {
     evidenced.reconstruction.renderer_capabilities = viewerCapabilityTokens(

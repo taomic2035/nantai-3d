@@ -12,6 +12,7 @@ API contract:
 * ``GET /api/project`` -> Studio ``ProjectSnapshot`` schema version 2.
 * ``GET /api/runs`` -> ``{"items": [...], "cursor": "..."}``.
 * ``GET /api/capabilities`` -> explicit fail-closed operation capabilities.
+* ``GET /api/production-quality`` -> verified post-render evidence projection.
 * ``GET /api/world/chunk/{x}/{y}.ply`` -> opt-in, side-effect-free world chunk.
 * ``GET /api/world/mesh-chunk/{x}/{y}.json`` -> verified mesh chunk evidence.
 * ``GET /api/world/mesh-assets/...`` -> immutable audited GLB/texture bytes.
@@ -103,6 +104,17 @@ from pipeline.synthetic_village.mesh_chunk import (
 from pipeline.synthetic_village.production_profile import (
     build_production_camera_plan,
     canonical_production_plan_bytes,
+)
+from pipeline.synthetic_village.production_quality_gates import (
+    ProductionFrameQualityReportV2,
+    ProductionFrameQualityRequestV2,
+    canonical_production_frame_quality_request_v2_bytes,
+    verify_production_frame_quality_report_v2,
+)
+from pipeline.synthetic_village.production_render import (
+    LocalProductionRenderJournal,
+    canonical_local_production_render_journal_bytes,
+    compute_local_production_journal_sha256,
 )
 
 SNAPSHOT_SCHEMA_VERSION = 2
@@ -1262,6 +1274,247 @@ def _load_runs(root: Path) -> dict[str, Any]:
     }
 
 
+def _production_quality_snapshot(root: Path) -> dict[str, Any]:
+    """Project verified production-quality evidence without inventing it."""
+
+    awaiting = {
+        "schema_version": 1,
+        "status": "awaiting-evidence",
+        "message": "geometry preflight pass is not final frame pass",
+        "synthetic": True,
+        "verification_level": None,
+        "trust_effect": "none-quality-filter-only",
+        "report_sha256": None,
+        "stages": [
+            {"id": "preflight", "state": "awaiting-evidence"},
+            {"id": "rendering", "state": "awaiting-evidence"},
+            {"id": "post-render-quality", "state": "awaiting-evidence"},
+        ],
+        "cameras": [],
+    }
+    root = root.resolve()
+    render_boundary = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/local-production-renders"
+    )
+    if not render_boundary.exists():
+        return awaiting
+    if not _is_real_project_subtree(root, render_boundary):
+        return {
+            **awaiting,
+            "status": "invalid-evidence",
+            "stages": [
+                {"id": "preflight", "state": "invalid-evidence"},
+                {"id": "rendering", "state": "invalid-evidence"},
+                {"id": "post-render-quality", "state": "invalid-evidence"},
+            ],
+        }
+    invalid = {
+        **awaiting,
+        "status": "invalid-evidence",
+        "stages": [
+            {"id": "preflight", "state": "invalid-evidence"},
+            {"id": "rendering", "state": "invalid-evidence"},
+            {"id": "post-render-quality", "state": "invalid-evidence"},
+        ],
+    }
+    try:
+        render_directories = [
+            directory
+            for directory in render_boundary.iterdir()
+            if directory.is_dir() and not directory.is_symlink()
+        ]
+        if any(
+            (
+                directory.joinpath("quality-request.json").exists()
+                or directory.joinpath("quality-request.json").is_symlink()
+                or directory.joinpath("quality-report.json").exists()
+                or directory.joinpath("quality-report.json").is_symlink()
+            )
+            and not directory.joinpath("render-journal.json").is_file()
+            for directory in render_directories
+        ):
+            return invalid
+        journal_candidates = [
+            candidate
+            for directory in render_directories
+            for candidate in [directory / "render-journal.json"]
+            if candidate.is_file() and not candidate.is_symlink()
+        ]
+        journal_path = max(
+            journal_candidates,
+            key=lambda path: (path.stat().st_mtime_ns, path.parent.name),
+        )
+    except (OSError, ValueError):
+        return awaiting
+
+    journal_path = _resolve_real_evidence_file(
+        root,
+        journal_path,
+        approved_root=".nantai-studio",
+    )
+    if journal_path is None:
+        return invalid
+    try:
+        journal_raw = journal_path.read_bytes()
+        if len(journal_raw) > MAX_JSON_BYTES:
+            return invalid
+        journal = LocalProductionRenderJournal.model_validate_json(journal_raw)
+        if (
+            journal_raw
+            != canonical_local_production_render_journal_bytes(journal)
+            or journal.journal_sha256
+            != compute_local_production_journal_sha256(journal)
+            or journal_path.parent.name != journal.render_id
+        ):
+            return invalid
+    except (OSError, ValidationError):
+        return invalid
+
+    preflight_state = (
+        "rejected"
+        if any(frame.state == "preflight-rejected" for frame in journal.frames)
+        else "passed"
+    )
+    render_states = {frame.state for frame in journal.frames}
+    if render_states & {"failed", "timed-out"}:
+        rendering_state = "failed"
+    elif render_states & {"planned", "rendering"}:
+        rendering_state = "in-progress"
+    else:
+        rendering_state = "completed"
+    journal_snapshot = {
+        **awaiting,
+        "render_id": journal.render_id,
+        "journal_sha256": journal.journal_sha256,
+        "verification_level": journal.verification_level,
+        "stages": [
+            {"id": "preflight", "state": preflight_state},
+            {"id": "rendering", "state": rendering_state},
+            {"id": "post-render-quality", "state": "awaiting-evidence"},
+        ],
+    }
+
+    request_path = journal_path.parent / "quality-request.json"
+    report_path = journal_path.parent / "quality-report.json"
+    request_exists = request_path.exists() or request_path.is_symlink()
+    report_exists = report_path.exists() or report_path.is_symlink()
+    if not request_exists and not report_exists:
+        return journal_snapshot
+    if request_exists != report_exists:
+        return {
+            **journal_snapshot,
+            "status": "invalid-evidence",
+            "stages": [
+                *journal_snapshot["stages"][:2],
+                {"id": "post-render-quality", "state": "invalid-evidence"},
+            ],
+        }
+    request_path = _resolve_real_evidence_file(
+        root,
+        request_path,
+        approved_root=".nantai-studio",
+    )
+    report_path = _resolve_real_evidence_file(
+        root,
+        report_path,
+        approved_root=".nantai-studio",
+    )
+    if request_path is None or report_path is None:
+        return {
+            **journal_snapshot,
+            "status": "invalid-evidence",
+            "stages": [
+                *journal_snapshot["stages"][:2],
+                {"id": "post-render-quality", "state": "invalid-evidence"},
+            ],
+        }
+    try:
+        request_raw = request_path.read_bytes()
+        report_raw = report_path.read_bytes()
+        if max(len(request_raw), len(report_raw)) > MAX_JSON_BYTES:
+            raise ValueError("production quality evidence is too large")
+        request = ProductionFrameQualityRequestV2.model_validate_json(request_raw)
+        report = ProductionFrameQualityReportV2.model_validate_json(report_raw)
+        canonical_report = (
+            json.dumps(
+                report.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if (
+            request_raw
+            != canonical_production_frame_quality_request_v2_bytes(request)
+            or report_raw != canonical_report
+            or request.render_id != journal.render_id
+            or request.journal_sha256 != journal.journal_sha256
+        ):
+            raise ValueError("production quality evidence identity is invalid")
+        journal_frames = {frame.camera_id: frame for frame in journal.frames}
+        for binding in request.frames:
+            frame = journal_frames.get(binding.camera_id)
+            if (
+                frame is None
+                or frame.state not in {"verified", "rejected"}
+                or frame.runtime_report_sha256 != binding.runtime_report_sha256
+                or frame.artifacts != binding.artifacts
+            ):
+                raise ValueError(
+                    "production quality evidence is not bound to completed journal frames",
+                )
+        verify_production_frame_quality_report_v2(report, request=request)
+    except (OSError, ValidationError, ValueError):
+        return {
+            **journal_snapshot,
+            "status": "invalid-evidence",
+            "stages": [
+                *journal_snapshot["stages"][:2],
+                {"id": "post-render-quality", "state": "invalid-evidence"},
+            ],
+        }
+
+    bindings = {binding.camera_id: binding for binding in request.frames}
+    cameras = []
+    for decision in report.decisions:
+        binding = bindings[decision.camera_id]
+        cameras.append({
+            "camera_id": decision.camera_id,
+            "state": "passed" if decision.passes else "rejected",
+            "runtime_report_sha256": binding.runtime_report_sha256,
+            "statistics_sha256": decision.statistics_sha256,
+            "policy_sha256": decision.policy_sha256,
+            "rules": [
+                {
+                    "rule_id": rule.rule_id,
+                    "measured": rule.measured,
+                    "operator_threshold": rule.threshold,
+                    "comparison_direction": rule.comparison,
+                    "passes": rule.passes,
+                }
+                for rule in decision.rule_decisions
+            ],
+        })
+    all_pass = all(decision.passes for decision in report.decisions)
+    return {
+        **journal_snapshot,
+        "status": "available",
+        "report_sha256": hashlib.sha256(report_raw).hexdigest(),
+        "request_sha256": hashlib.sha256(request_raw).hexdigest(),
+        "stages": [
+            journal_snapshot["stages"][0],
+            {"id": "rendering", "state": "completed"},
+            {
+                "id": "post-render-quality",
+                "state": "passed" if all_pass else "rejected",
+            },
+        ],
+        "cameras": cameras,
+    }
+
+
 def _resolve_asset_payload(assets_root: Path, raw_path: Any) -> Path | None:
     if (
         not isinstance(raw_path, str)
@@ -2008,6 +2261,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 HTTPStatus.OK,
                 self.server.capabilities,
+                head_only=head_only,
+            )
+            return
+        if request_path == "/api/production-quality":
+            self._send_json(
+                HTTPStatus.OK,
+                _production_quality_snapshot(self.project_root),
                 head_only=head_only,
             )
             return

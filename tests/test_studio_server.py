@@ -66,6 +66,18 @@ from pipeline.synthetic_village.production_profile import (
     build_production_camera_plan,
     canonical_production_plan_bytes,
 )
+from pipeline.synthetic_village.production_quality_gates import (
+    ProductionFrameEvidenceBinding,
+    build_production_frame_quality_report_v2,
+    build_production_frame_quality_request_v2,
+    canonical_production_frame_quality_request_v2_bytes,
+)
+from pipeline.synthetic_village.production_render import (
+    LocalProductionQualityPolicy,
+    canonical_local_production_render_journal_bytes,
+    evaluate_local_production_frame_quality,
+    transition_local_production_frame,
+)
 from tests.test_glb_shared_texture_audit import (
     _fixture as _write_shared_texture_glb_fixture,
 )
@@ -75,6 +87,27 @@ from tests.test_glb_shared_texture_audit import (
 from tests.test_material_bundle_v2 import _write_fake_ktx_pack
 from tests.test_mesh_asset_bundle import _glb_payload
 from tests.test_mesh_chunk import _bundle
+from tests.test_synthetic_village_local_production_runner import (
+    _artifacts as _production_artifacts,
+)
+from tests.test_synthetic_village_local_production_runner import (
+    _new_journal as _new_production_journal,
+)
+from tests.test_synthetic_village_local_production_runner import (
+    _statistics as _legacy_production_statistics,
+)
+from tests.test_synthetic_village_production_quality_gates import (
+    CAMERA_ID as PRODUCTION_QUALITY_CAMERA_ID,
+)
+from tests.test_synthetic_village_production_quality_gates import (
+    _policy as _production_quality_policy,
+)
+from tests.test_synthetic_village_production_quality_gates import (
+    _statistics as _production_layer_statistics,
+)
+from tests.test_synthetic_village_production_render import (
+    _request as _production_render_request,
+)
 
 
 def _symlink_or_skip(link: Path, target, *, target_is_directory: bool = False) -> None:
@@ -326,6 +359,85 @@ def _write_local_textured_preview(
         canonical_local_textured_preview_manifest_bytes(manifest),
     )
     return directory, manifest
+
+
+def _write_production_quality_evidence(root: Path) -> tuple[Path, dict]:
+    render_request = _production_render_request(
+        camera_id=PRODUCTION_QUALITY_CAMERA_ID,
+    )
+    legacy_policy = LocalProductionQualityPolicy(
+        minimum_valid_pixel_ratio=0.75,
+    )
+    journal = _new_production_journal(render_request, policy=legacy_policy)
+    legacy_statistics = _legacy_production_statistics(background_pixels=100_000)
+    legacy_quality = evaluate_local_production_frame_quality(
+        legacy_statistics,
+        policy=legacy_policy,
+    )
+    artifacts = _production_artifacts(PRODUCTION_QUALITY_CAMERA_ID)
+    journal = transition_local_production_frame(
+        journal,
+        PRODUCTION_QUALITY_CAMERA_ID,
+        state="verified",
+        artifacts=artifacts,
+        runtime_report_sha256="7" * 64,
+        statistics=legacy_statistics,
+        quality=legacy_quality,
+        wall_clock_seconds=3.5,
+    )
+    quality_request = build_production_frame_quality_request_v2(
+        plan=render_request.production_plan,
+        selected_camera_ids=(PRODUCTION_QUALITY_CAMERA_ID,),
+        build_id=render_request.build_id,
+        render_id=journal.render_id,
+        blender_executable_sha256=render_request.blender_executable_sha256,
+        renderer_script_sha256=render_request.renderer_script_sha256,
+        blend_sha256=render_request.blend_sha256,
+        build_report_sha256=render_request.build_report_sha256,
+        object_registry=render_request.object_registry,
+        semantic_registry=render_request.semantic_registry,
+        journal_sha256=journal.journal_sha256,
+        frames=(
+            ProductionFrameEvidenceBinding(
+                camera_id=PRODUCTION_QUALITY_CAMERA_ID,
+                runtime_report_sha256="7" * 64,
+                artifacts=artifacts,
+            ),
+        ),
+        policy=_production_quality_policy(),
+    )
+    report = build_production_frame_quality_report_v2(
+        quality_request,
+        statistics=(_production_layer_statistics(),),
+    )
+    directory = (
+        root
+        / ".nantai-studio/synthetic-village/hybrid-v3/local-production-renders"
+        / journal.render_id
+    )
+    directory.mkdir(parents=True)
+    directory.joinpath("render-journal.json").write_bytes(
+        canonical_local_production_render_journal_bytes(journal),
+    )
+    directory.joinpath("quality-request.json").write_bytes(
+        canonical_production_frame_quality_request_v2_bytes(quality_request),
+    )
+    report_payload = (
+        json.dumps(
+            report.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    directory.joinpath("quality-report.json").write_bytes(report_payload)
+    return directory, {
+        "journal": journal,
+        "request": quality_request,
+        "report": report,
+        "report_sha256": hashlib.sha256(report_payload).hexdigest(),
+    }
 
 
 def _write_mesh_world_bundle(root: Path):
@@ -2344,6 +2456,139 @@ class TestHttpContract:
             assert "https://cdn.jsdelivr.net" in actual["content-security-policy"]
             assert "'wasm-unsafe-eval'" in actual["content-security-policy"]
             assert "connect-src 'self' data: blob:" in actual["content-security-policy"]
+
+    def test_production_quality_api_waits_for_verified_post_render_evidence(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, headers, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        assert headers["cache-control"] == "no-store"
+        assert json.loads(payload) == {
+            "schema_version": 1,
+            "status": "awaiting-evidence",
+            "message": "geometry preflight pass is not final frame pass",
+            "synthetic": True,
+            "verification_level": None,
+            "trust_effect": "none-quality-filter-only",
+            "report_sha256": None,
+            "stages": [
+                {"id": "preflight", "state": "awaiting-evidence"},
+                {"id": "rendering", "state": "awaiting-evidence"},
+                {"id": "post-render-quality", "state": "awaiting-evidence"},
+            ],
+            "cameras": [],
+        }
+
+    def test_production_quality_api_projects_bound_rules_and_evidence_shas(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        _, evidence = _write_production_quality_evidence(tmp_path)
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        snapshot = json.loads(payload)
+        assert snapshot["status"] == "available"
+        assert snapshot["render_id"] == evidence["journal"].render_id
+        assert snapshot["journal_sha256"] == evidence["journal"].journal_sha256
+        assert snapshot["report_sha256"] == evidence["report_sha256"]
+        assert snapshot["synthetic"] is True
+        assert snapshot["verification_level"] == "L0"
+        assert snapshot["trust_effect"] == "none-quality-filter-only"
+        assert snapshot["stages"] == [
+            {"id": "preflight", "state": "passed"},
+            {"id": "rendering", "state": "completed"},
+            {"id": "post-render-quality", "state": "passed"},
+        ]
+        assert len(snapshot["cameras"]) == 1
+        camera = snapshot["cameras"][0]
+        assert camera["camera_id"] == PRODUCTION_QUALITY_CAMERA_ID
+        assert camera["state"] == "passed"
+        assert camera["runtime_report_sha256"] == "7" * 64
+        assert camera["statistics_sha256"] == (
+            evidence["report"].decisions[0].statistics_sha256
+        )
+        assert len(camera["rules"]) == 8
+        assert camera["rules"][0] == {
+            "rule_id": "depth-near-concentration",
+            "measured": 0.08,
+            "operator_threshold": 0.35,
+            "comparison_direction": "maximum",
+            "passes": True,
+        }
+
+    def test_production_quality_api_fails_closed_on_incomplete_sidecars(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        directory, _ = _write_production_quality_evidence(tmp_path)
+        directory.joinpath("quality-report.json").unlink()
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        snapshot = json.loads(payload)
+        assert snapshot["status"] == "invalid-evidence"
+        assert snapshot["report_sha256"] is None
+        assert snapshot["stages"][-1] == {
+            "id": "post-render-quality",
+            "state": "invalid-evidence",
+        }
+        assert snapshot["cameras"] == []
+
+    def test_production_quality_api_rejects_orphaned_sidecars_without_journal(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        orphan = (
+            tmp_path
+            / ".nantai-studio/synthetic-village/hybrid-v3/local-production-renders"
+            / ("f" * 64)
+        )
+        orphan.mkdir(parents=True)
+        orphan.joinpath("quality-report.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        snapshot = json.loads(payload)
+        assert snapshot["status"] == "invalid-evidence"
+        assert snapshot["stages"] == [
+            {"id": "preflight", "state": "invalid-evidence"},
+            {"id": "rendering", "state": "invalid-evidence"},
+            {"id": "post-render-quality", "state": "invalid-evidence"},
+        ]
 
     def test_static_files_are_root_relative_with_mime_and_no_directory_listing(self, tmp_path):
         _write_v2_project(tmp_path)
