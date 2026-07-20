@@ -156,7 +156,10 @@ def test_atlas_rejects_output_overwrite_or_redirected_source(
         build_foliage_atlas_set(material_bundle_root, output)
 
     redirected = tmp_path / "redirected-materials"
-    redirected.symlink_to(material_bundle_root, target_is_directory=True)
+    try:
+        redirected.symlink_to(material_bundle_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable on this host: {exc}")
     with pytest.raises(FoliageAtlasError, match="source material bundle"):
         build_foliage_atlas_set(redirected, tmp_path / "redirect-output")
 

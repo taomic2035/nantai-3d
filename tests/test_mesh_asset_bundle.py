@@ -435,7 +435,10 @@ def test_bundle_rejects_redirected_template(tmp_path: Path) -> None:
     object_path = next((bundle_root / "objects").glob("*.glb"))
     target = tmp_path / "redirect-target.glb"
     object_path.rename(target)
-    object_path.symlink_to(target)
+    try:
+        object_path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable on this host: {exc}")
 
     with pytest.raises(MeshAssetBundleError, match="redirected"):
         load_mesh_asset_bundle(bundle_root)

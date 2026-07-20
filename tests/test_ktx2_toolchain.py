@@ -238,7 +238,7 @@ def test_uastc_commands_are_role_and_colour_space_exact(
         source=Path("source.png"),
         output=Path("output.ktx2"),
     ) == (
-        "/opt/ktx/bin/toktx",
+        str(Path("/opt/ktx/bin/toktx")),
         "--t2",
         "--encode",
         "uastc",
@@ -261,7 +261,7 @@ def test_orm_starts_etc1s_and_can_fall_back_to_uastc() -> None:
         source=Path("orm.png"),
         output=Path("orm.ktx2"),
     ) == (
-        "/opt/ktx/bin/toktx",
+        str(Path("/opt/ktx/bin/toktx")),
         "--t2",
         "--encode",
         "etc1s",
@@ -290,7 +290,7 @@ def test_official_validation_and_decode_commands_are_exact() -> None:
         Path("/opt/ktx/bin/ktx"),
         Path("texture.ktx2"),
     ) == (
-        "/opt/ktx/bin/ktx",
+        str(Path("/opt/ktx/bin/ktx")),
         "validate",
         "--format",
         "mini-json",
@@ -303,7 +303,7 @@ def test_official_validation_and_decode_commands_are_exact() -> None:
         source=Path("texture.ktx2"),
         output=Path("decoded.png"),
     ) == (
-        "/opt/ktx/bin/ktx",
+        str(Path("/opt/ktx/bin/ktx")),
         "extract",
         "--transcode",
         "rgba8",

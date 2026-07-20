@@ -381,7 +381,10 @@ def test_publish_rejects_redirected_bundle_object(
     descriptor = load_material_bundle(first.final_directory).records[0].base_color
     target = first.final_directory / descriptor.object_path
     target.unlink()
-    target.symlink_to(tmp_path / "outside.png")
+    try:
+        target.symlink_to(tmp_path / "outside.png")
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable on this host: {exc}")
 
     with pytest.raises(MaterialBundleError, match="redirected|object set"):
         load_material_bundle(first.final_directory)
@@ -397,7 +400,10 @@ def test_publish_rejects_symlinked_root(
     real_root = tmp_path / "real"
     real_root.mkdir()
     redirected = tmp_path / "redirected"
-    redirected.symlink_to(real_root, target_is_directory=True)
+    try:
+        redirected.symlink_to(real_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable on this host: {exc}")
 
     with pytest.raises(MaterialBundleError, match="real directory|redirected"):
         publish_material_bundle(

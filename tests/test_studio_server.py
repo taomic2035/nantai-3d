@@ -283,7 +283,7 @@ def _request(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
 ):
-    connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+    connection = http.client.HTTPConnection(*server.server_address, timeout=30)
     connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     payload = response.read()

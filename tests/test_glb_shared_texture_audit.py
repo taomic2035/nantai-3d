@@ -563,7 +563,10 @@ def test_shared_audit_rejects_tampered_redirected_or_bad_alpha_texture(
     target.write_bytes(original)
     redirected_target = tmp_path / "redirect.png"
     target.rename(redirected_target)
-    target.symlink_to(redirected_target)
+    try:
+        target.symlink_to(redirected_target)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable on this host: {exc}")
     with pytest.raises(SharedTextureGlbAuditError, match="redirect"):
         _audit(
             glb_path,

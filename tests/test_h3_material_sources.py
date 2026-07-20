@@ -91,36 +91,37 @@ def _write_selection_receipt(root: Path) -> Path:
             },
         )
     receipt = root / "selection-receipt.json"
-    receipt.write_text(
-        json.dumps(
-            {
-                "schema_version": (
-                    "nantai.h3-ai-material-selection-receipt.v1"
-                ),
-                "generation_policy_id": H3_GENERATION_POLICY_ID,
-                "synthetic": True,
-                "ai_generated": True,
-                "real_photo_textures": False,
-                "audit_policy": {
-                    "policy_id": "h3-ai-candidate-audit-policy-v1",
-                    "algorithm_id": H3_CANDIDATE_AUDIT_ALGORITHM_ID,
-                    "minimum_width": 1024,
-                    "minimum_height": 1024,
-                    "maximum_alpha_nonopaque_fraction": 0.0,
-                    "maximum_clipped_fraction": 0.02,
-                    "maximum_dominant_perspective_score": 0.35,
-                    "maximum_edge_energy": 1.0,
-                    "maximum_opposite_edge_disagreement": 1.0,
-                    "frozen_before_selection": True,
+    receipt.write_bytes(
+        (
+            json.dumps(
+                {
+                    "schema_version": (
+                        "nantai.h3-ai-material-selection-receipt.v1"
+                    ),
+                    "generation_policy_id": H3_GENERATION_POLICY_ID,
+                    "synthetic": True,
+                    "ai_generated": True,
+                    "real_photo_textures": False,
+                    "audit_policy": {
+                        "policy_id": "h3-ai-candidate-audit-policy-v1",
+                        "algorithm_id": H3_CANDIDATE_AUDIT_ALGORITHM_ID,
+                        "minimum_width": 1024,
+                        "minimum_height": 1024,
+                        "maximum_alpha_nonopaque_fraction": 0.0,
+                        "maximum_clipped_fraction": 0.02,
+                        "maximum_dominant_perspective_score": 0.35,
+                        "maximum_edge_energy": 1.0,
+                        "maximum_opposite_edge_disagreement": 1.0,
+                        "frozen_before_selection": True,
+                    },
+                    "records": records,
                 },
-                "records": records,
-            },
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
     )
     return receipt
 
@@ -146,9 +147,11 @@ def test_candidate_audit_is_deterministic_and_bounded(tmp_path: Path) -> None:
 def _mutate_receipt(path: Path, mutation) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     mutation(payload)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    path.write_bytes(
+        (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8"),
     )
 
 
@@ -267,9 +270,11 @@ def test_prepare_source_pack_rejects_nonopaque_candidate(tmp_path: Path) -> None
     descriptor = _write_candidate(candidate_path, colour=(20, 30, 40, 128))
     descriptor["source_path"] = candidate["source_path"]
     payload["records"][0]["candidates"][0] = descriptor
-    receipt.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    receipt.write_bytes(
+        (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8"),
     )
 
     with pytest.raises(H3MaterialSourceError, match="opaque"):
@@ -289,9 +294,11 @@ def test_prepare_source_pack_retains_opaque_rgba_mode_and_bytes(
     payload["records"][0]["selection"]["selected_candidate_sha256"] = (
         descriptor["sha256"]
     )
-    receipt.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    receipt.write_bytes(
+        (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8"),
     )
 
     prepared = prepare_h3_source_pack(receipt, tmp_path / "published")

@@ -1,6 +1,31 @@
 """共享 fixture: 合成输入图像目录 (顶层照片 + 视频抽帧子目录)"""
+
+import os
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pytest
+
+
+def pytest_configure(config):
+    """Keep content-addressed test paths below legacy Windows MAX_PATH."""
+
+    if os.name != "nt" or config.option.basetemp is not None:
+        return
+    session_temp = tempfile.TemporaryDirectory(
+        prefix="ntp-",
+        dir=Path(__file__).resolve().anchor,
+        ignore_cleanup_errors=True,
+    )
+    config._nantai_windows_session_temp = session_temp
+    config.option.basetemp = session_temp.name
+
+
+def pytest_unconfigure(config):
+    session_temp = getattr(config, "_nantai_windows_session_temp", None)
+    if session_temp is not None:
+        session_temp.cleanup()
 
 
 @pytest.fixture
