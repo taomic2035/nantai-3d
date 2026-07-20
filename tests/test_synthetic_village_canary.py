@@ -404,6 +404,18 @@ def test_builder_source_contains_verified_texture_uv_and_tangent_path() -> None:
         assert required in source
 
 
+def test_builder_does_not_reread_blender_uv_layer_name() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/blender/build_synthetic_village.py"
+    ).read_text("utf-8")
+
+    assert 'uv_layer_name = "nv_uv0"' in source
+    assert 'mesh.calc_tangents(uvmap=uv_layer_name)' in source
+    assert 'obj["nv_uv_layer"] = uv_layer_name' in source
+    assert "uv_layer.name" not in source
+
+
 def test_textured_builder_uses_baked_normal_strength_once_and_zones_terrain() -> None:
     source = (
         Path(__file__).resolve().parents[1]

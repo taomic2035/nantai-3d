@@ -2168,7 +2168,10 @@ def _apply_textured_uvs_and_tangents(
             or tile_scale <= 0
         ):
             raise RuntimeBuildError(f"textured mesh UV scale is invalid: {obj.name}")
-        uv_layer = mesh.uv_layers.get("nv_uv0") or mesh.uv_layers.new(name="nv_uv0")
+        uv_layer_name = "nv_uv0"
+        uv_layer = mesh.uv_layers.get(uv_layer_name) or mesh.uv_layers.new(
+            name=uv_layer_name,
+        )
         for polygon in mesh.polygons:
             if len(polygon.vertices) != 3 or polygon.material_index >= len(mesh.materials):
                 raise RuntimeBuildError(f"textured mesh primitive is invalid: {obj.name}")
@@ -2197,7 +2200,7 @@ def _apply_textured_uvs_and_tangents(
             surface_runtime,
         )
         try:
-            mesh.calc_tangents(uvmap=uv_layer.name)
+            mesh.calc_tangents(uvmap=uv_layer_name)
         except Exception as exc:
             raise RuntimeBuildError(f"mesh tangent generation failed: {obj.name}") from exc
         for loop in mesh.loops:
@@ -2206,7 +2209,7 @@ def _apply_textured_uvs_and_tangents(
                 or not math.isfinite(loop.bitangent_sign)
             ):
                 raise RuntimeBuildError(f"mesh tangent evidence is non-finite: {obj.name}")
-        obj["nv_uv_layer"] = uv_layer.name
+        obj["nv_uv_layer"] = uv_layer_name
         obj["nv_tangents"] = True
 
 
