@@ -175,6 +175,76 @@ def test_render_id_diverges_from_canary_via_schema_version(plan) -> None:
     assert PRODUCTION_JOURNAL_SCHEMA != canary.RENDER_JOURNAL_SCHEMA
 
 
+def test_render_id_binds_repose_search_sha_when_provided(plan, render_id) -> None:
+    """render_id must change when repose_search_sha256 is added.
+
+    Task 5 §3 callers use build_reposed_plan to rebuild a plan from a
+    ReplacementPoseSearch. The render_id for that rebuilt plan must
+    bind to the search that produced it, so a downstream verifier can
+    confirm "this render came from this specific repose search, not
+    from a fabricated plan that looks similar".
+    """
+    search_sha = "c" * 64
+    bound_render_id = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        repose_search_sha256=search_sha,
+    )
+    # Bound render_id differs from the unbound one.
+    assert bound_render_id != render_id
+
+
+def test_render_id_ignores_repose_search_sha_when_none(plan, render_id) -> None:
+    """render_id must be identical when repose_search_sha256 is None.
+
+    Optional binding means existing journals are unaffected: callers
+    that do not pass repose_search_sha256 get exactly the same render_id
+    they got before this parameter existed.
+    """
+    again = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        repose_search_sha256=None,
+    )
+    assert again == render_id
+
+
+def test_render_id_changes_when_repose_search_sha_changes(plan) -> None:
+    """Two different repose searches must yield two different render_ids.
+
+    Otherwise a caller could swap the search SHA between calling
+    build_reposed_plan and the render step, and the render_id would
+    not detect the substitution.
+    """
+    base = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        repose_search_sha256="d" * 64,
+    )
+    swapped = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        repose_search_sha256="e" * 64,
+    )
+    assert base != swapped
+
+
 def test_journal_sha256_covers_the_recorded_durations(plan, render_id) -> None:
     """journal 自摘要【包含】耗时 —— 它记录的是这一次真的跑了多久。
 

@@ -175,6 +175,7 @@ def production_render_id(
     camera_registry_sha256: str,
     preflight_id: str | None = None,
     quality_policy_sha256: str | None = None,
+    repose_search_sha256: str | None = None,
 ) -> str:
     """内容寻址的 render_id。
 
@@ -184,6 +185,16 @@ def production_render_id(
 
     【绝不】包含耗时: 耗时不可复现, 放进内容寻址会让同样的输入得到不同的
     render_id。
+
+    ``repose_search_sha256`` 是可选的 Task 5 §3 caller 绑定键: 如果一次
+    render 是从 ``build_reposed_plan`` 重建的 plan 跑出来的, caller 应该
+    把 ``ReplacementPoseSearch.search_sha256`` 传进来, 让 render_id 自动
+    内容绑定到产生这个 plan 的 repose search。这样下游可以验证: 这次
+    render 真的是从某个特定的 repose search 派生的, 不是被替换的 plan
+    跑出来的伪造 render。
+
+    绑定是【可选】的: 当 ``repose_search_sha256`` is None 时, render_id 与
+    既有行为完全相同, 既有 journal 不受影响。
     """
     payload = {
         "schema_version": PRODUCTION_JOURNAL_SCHEMA,
@@ -200,6 +211,8 @@ def production_render_id(
         payload["preflight_id"] = preflight_id
     if quality_policy_sha256 is not None:
         payload["quality_policy_sha256"] = quality_policy_sha256
+    if repose_search_sha256 is not None:
+        payload["repose_search_sha256"] = repose_search_sha256
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
