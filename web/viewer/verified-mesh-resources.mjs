@@ -604,6 +604,7 @@ export function createVerifiedProfileTextureStore({
   BlobCtor = globalThis.Blob,
   locationHref = globalThis.location?.href,
   onProfileFailure = () => {},
+  ktxDecodeTimeoutMs = 10_000,
 } = {}) {
   const profiles = new Set([
     'h3-ai-ktx2-4k',
@@ -616,6 +617,8 @@ export function createVerifiedProfileTextureStore({
     || typeof cryptoSubtle?.digest !== 'function'
     || typeof locationHref !== 'string'
     || typeof onProfileFailure !== 'function'
+    || !Number.isSafeInteger(ktxDecodeTimeoutMs)
+    || ktxDecodeTimeoutMs <= 0
     || (
       materialProfile === 'h3-ai-ktx2-4k'
       && typeof ktx2Loader?.parse !== 'function'
@@ -783,15 +786,27 @@ export function createVerifiedProfileTextureStore({
     const buffer = arrayBufferFrom(bytes);
     return new Promise((resolve, reject) => {
       let settled = false;
+      let timer = null;
       const finish = (callback, value) => {
         if (settled) return;
         settled = true;
+        if (timer !== null) clearTimeout(timer);
         callback(value);
       };
+      timer = setTimeout(() => finish(
+        reject,
+        new Error('KTX2 profile texture failed'),
+      ), ktxDecodeTimeoutMs);
       try {
         ktx2Loader.parse(
           buffer,
-          (texture) => finish(resolve, texture),
+          (texture) => {
+            if (settled) {
+              texture?.dispose?.();
+              return;
+            }
+            finish(resolve, texture);
+          },
           () => finish(
             reject,
             new Error('KTX2 profile texture failed'),

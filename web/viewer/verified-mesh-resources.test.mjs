@@ -937,6 +937,64 @@ test('profile texture store verifies and shares one KTX transcode per semantic k
   assert.equal(store.diagnostics().active_textures, 0);
 });
 
+test('stalled profile KTX decode times out and disposes a late texture', async () => {
+  const { createVerifiedProfileTextureStore } = subject();
+  const bytes = new TextEncoder().encode('stalled-profile-ktx2');
+  const descriptor = profileDependency(bytes);
+  const failures = [];
+  let lateOnLoad = null;
+  const store = createVerifiedProfileTextureStore({
+    THREE: fakeThree(),
+    materialProfile: 'h3-ai-ktx2-4k',
+    ktx2Loader: {
+      parse(_buffer, onLoad) {
+        lateOnLoad = onLoad;
+      },
+    },
+    ktxDecodeTimeoutMs: 5,
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      redirected: false,
+      url: new URL(descriptor.url, ORIGIN).href,
+      headers: {
+        get(name) {
+          if (name.toLowerCase() === 'content-type') return 'image/ktx2';
+          if (name.toLowerCase() === 'content-length') {
+            return String(bytes.byteLength);
+          }
+          return null;
+        },
+      },
+      async arrayBuffer() {
+        return bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        );
+      },
+    }),
+    cryptoSubtle: webcrypto.subtle,
+    locationHref: ORIGIN,
+    onProfileFailure(reason) {
+      failures.push(reason);
+    },
+  });
+
+  await assert.rejects(
+    store.acquire(descriptor, {
+      alphaMode: 'OPAQUE',
+      flipY: false,
+    }),
+    /KTX2 profile texture failed/,
+  );
+  assert.deepEqual(failures, [{ code: 'runtime_h3_failure' }]);
+  assert.equal(store.diagnostics().active_textures, 0);
+
+  const lateTexture = new FakeTexture(null);
+  lateOnLoad(lateTexture);
+  assert.equal(lateTexture.disposals, 1);
+});
+
 test('profile texture store rejects profile drift and reports bounded H3 failure', async () => {
   const { createVerifiedProfileTextureStore } = subject();
   const bytes = new TextEncoder().encode('verified-profile-ktx2');
