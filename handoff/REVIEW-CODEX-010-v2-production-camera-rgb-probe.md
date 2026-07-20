@@ -114,6 +114,42 @@ OpenCV camera 的本地 `+Z` 是前向；下表 pitch 由 `c2w_opencv` 的世界
 
 正式 runner 应保留该坏帧的六层证据并拒绝训练用途，不能移动相机后覆盖原问题。
 
+### 九宫格射线复核
+
+为区分“画面像贴墙”和“相机确实被桥体近距离遮挡”，又从四个相机的视野九宫格方向
+调用 Blender `scene.ray_cast`，记录第一命中。
+
+`camera-ground-route-010` 的结果是确定的：
+
+| 视野区域 | 第一命中 | 距离 |
+|---|---|---:|
+| 左上、中上、右上 | `bridge-lower-001 / stone-deck-parapets-piers` | `0.483–0.574m` |
+| 左中、中心、右中 | `bridge-lower-001 / stone-deck-parapets-piers` | `0.433–0.516m` |
+| 左下 | `aux-terrain / terrain-4m-grid` | `8.440m` |
+| 中下、右下 | `path-network-001 / terrain-conform-ribbon` | `4.643–5.259m` |
+
+因此上部和中心共 `6/9` 探针被同一桥体部件在不足 `0.6m` 处截断。中心射线具体为：
+
+```json
+{
+  "camera_id": "camera-ground-route-010",
+  "stable_id": "bridge-lower-001",
+  "part_id": "stone-deck-parapets-piers",
+  "semantic_id": 4,
+  "distance_m": 0.432877
+}
+```
+
+其它三张样本没有相同模式：
+
+- `011` 的上排三条和中左射线无命中；中心到建筑平台 `80.846m`；
+- `025` 的上排三条无命中；中心到建筑墙面 `27.780m`；
+- `026` 的上排三条和中右无命中；中心到上游桥体 `124.648m`。
+
+它们的下排射线正常命中脚下路径/地形约 `2.787–10.897m`，符合人眼视野下部看见
+地面的预期。这个对照使 `010` 的近桥遮挡成为可机器区分的异常，而非所有 ground-route
+相机的共同性质。
+
 ### `camera-ground-route-011` — 桥区，可读但稀疏
 
 - 能看到路线、坡面、房屋、挡墙和远处山体；
@@ -173,6 +209,9 @@ OpenCV camera 的本地 `+Z` 是前向；下表 pitch 由 `c2w_opencv` 的世界
    模糊度猜测。
 4. 加入相机与 walkable/collision geometry 的最小净空预检候选。
 5. 所有新质量门只做 training suitability，不提升 geometry trust。
+
+九宫格射线是净空预检的一项可行输入，但当前四张样本不足以制定通用阈值。不能直接把
+`0.6m` 或 `6/9` 写成产品门限；应先对 180 相机测分布，再选择并公开 operator policy。
 
 ### 下一版 Blender 场景
 
