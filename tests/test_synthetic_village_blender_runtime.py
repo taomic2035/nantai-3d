@@ -202,6 +202,78 @@ def _decode_canonical_png(path: Path) -> tuple[int, int, int, int, bytes]:
     return width, height, bit_depth, color_type, bytes(pixels)
 
 
+def test_production_layer_counts_are_raw_region_aware_and_deterministic(
+    tmp_path: Path,
+) -> None:
+    source = (
+        _probe_prelude()
+        + "import json\n"
+        + "fn = ns['_production_layer_counts']\n"
+        + "fn.__globals__.update(WIDTH=4, HEIGHT=4, PIXELS=16)\n"
+        + "depth = [0,1,1,3, 1.5,.5,2,4, 5,5,5,5, 5,5,5,5]\n"
+        + "normals = [0,0,0] + [0,0,1] * 15\n"
+        + "instances = [0,0,1,1, 0,1,1,2, 1,1,2,2, 1,2,2,2]\n"
+        + "semantics = [0,1,3,3, 1,3,3,4, 3,3,4,4, 3,4,4,4]\n"
+        + "policy = {'near_depth_m': 2.0, "
+        + "'upper_region_end_row_exclusive': 2, "
+        + "'ground_semantic_ids': [1], 'sky_semantic_id': 0}\n"
+        + "objects = [{'instance_id': 1, 'semantic_id': 3}, "
+        + "{'instance_id': 2, 'semantic_id': 4}]\n"
+        + "semantics_registry = [{'semantic_id': i} for i in [0,1,2,3,4]]\n"
+        + "result = ns['_production_layer_counts']("
+        + "depth, normals, instances, semantics, policy=policy, "
+        + "object_registry=objects, semantic_registry=semantics_registry)\n"
+        + "print('NANTAI_COUNTS ' + json.dumps(result, sort_keys=True))\n"
+    )
+
+    completed = _run_renderer_probe(tmp_path, source)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    line = next(
+        row
+        for row in completed.stdout.splitlines()
+        if row.startswith("NANTAI_COUNTS ")
+    )
+    counts = json.loads(line.removeprefix("NANTAI_COUNTS "))
+    assert counts == {
+        "dominant_near_instance_id": 1,
+        "dominant_near_instance_pixel_count": 2,
+        "dominant_upper_instance_id": 1,
+        "dominant_upper_instance_pixel_count": 4,
+        "near_depth_pixel_count": 4,
+        "registered_instance_pixel_count": 13,
+        "sky_pixel_count": 1,
+        "total_pixel_count": 16,
+        "upper_ground_pixel_count": 2,
+        "upper_pixel_count": 8,
+        "valid_depth_pixel_count": 15,
+        "valid_normal_pixel_count": 15,
+        "valid_semantic_pixel_count": 15,
+    }
+
+
+def test_production_layer_counts_reject_unknown_mask_ids(
+    tmp_path: Path,
+) -> None:
+    source = (
+        _probe_prelude()
+        + "fn = ns['_production_layer_counts']\n"
+        + "fn.__globals__.update(WIDTH=1, HEIGHT=1, PIXELS=1)\n"
+        + "fn("
+        + "[1.0], [0.0,0.0,1.0], [99], [3], "
+        + "policy={'near_depth_m': 2.0, "
+        + "'upper_region_end_row_exclusive': 1, "
+        + "'ground_semantic_ids': [1], 'sky_semantic_id': 0}, "
+        + "object_registry=[{'instance_id': 1, 'semantic_id': 3}], "
+        + "semantic_registry=[{'semantic_id': i} for i in [0,1,2,3]])\n"
+    )
+
+    completed = _run_renderer_probe(tmp_path, source)
+
+    assert completed.returncode == 17
+    assert "unregistered instance ID" in (completed.stdout + completed.stderr)
+
+
 def _formal_render_request():
     import pipeline.synthetic_village.canary as canary
     from pipeline.synthetic_village.camera_plan import build_camera_plan

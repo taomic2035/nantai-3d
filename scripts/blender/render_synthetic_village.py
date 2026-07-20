@@ -1559,6 +1559,173 @@ def _validate_cross_layer_pixels(depth, normals, instances, semantics):
             raise RuntimeRenderError("canonical instance pixel has a non-canonical semantic ID")
 
 
+def _production_layer_counts(
+    depth,
+    normals,
+    instances,
+    semantics,
+    *,
+    policy,
+    object_registry,
+    semantic_registry,
+):
+    """Measure raw integer counts from already decoded production buffers."""
+
+    if not (
+        len(depth) == PIXELS
+        and len(normals) == PIXELS * 3
+        and len(instances) == PIXELS
+        and len(semantics) == PIXELS
+    ):
+        raise RuntimeRenderError(
+            "production layer buffers do not share one pixel grid",
+        )
+    expected_policy_keys = {
+        "near_depth_m",
+        "upper_region_end_row_exclusive",
+        "ground_semantic_ids",
+        "sky_semantic_id",
+    }
+    if (
+        not isinstance(policy, dict)
+        or set(policy) != expected_policy_keys
+        or not isinstance(policy["near_depth_m"], (int, float))
+        or isinstance(policy["near_depth_m"], bool)
+        or not math.isfinite(float(policy["near_depth_m"]))
+        or float(policy["near_depth_m"]) <= 0.0
+        or not isinstance(policy["upper_region_end_row_exclusive"], int)
+        or isinstance(policy["upper_region_end_row_exclusive"], bool)
+        or not 1 <= policy["upper_region_end_row_exclusive"] <= HEIGHT
+        or not isinstance(policy["ground_semantic_ids"], list)
+        or not policy["ground_semantic_ids"]
+        or any(type(row) is not int for row in policy["ground_semantic_ids"])
+        or policy["ground_semantic_ids"]
+        != sorted(set(policy["ground_semantic_ids"]))
+        or type(policy["sky_semantic_id"]) is not int
+    ):
+        raise RuntimeRenderError(
+            "production layer statistics policy is invalid",
+        )
+    semantic_ids = {
+        row.get("semantic_id")
+        for row in semantic_registry
+        if isinstance(row, dict)
+    }
+    if (
+        len(semantic_ids) != len(semantic_registry)
+        or policy["sky_semantic_id"] not in semantic_ids
+        or not set(policy["ground_semantic_ids"]) <= semantic_ids
+    ):
+        raise RuntimeRenderError(
+            "production layer policy references an unregistered semantic ID",
+        )
+    semantic_by_instance = {
+        row.get("instance_id"): row.get("semantic_id")
+        for row in object_registry
+        if isinstance(row, dict)
+    }
+    if (
+        len(semantic_by_instance) != len(object_registry)
+        or None in semantic_by_instance
+        or any(
+            type(instance_id) is not int
+            or instance_id <= 0
+            or semantic_id not in semantic_ids
+            for instance_id, semantic_id in semantic_by_instance.items()
+        )
+    ):
+        raise RuntimeRenderError(
+            "production layer object registry is invalid",
+        )
+
+    upper_rows = policy["upper_region_end_row_exclusive"]
+    upper_pixels = WIDTH * upper_rows
+    near_depth_m = float(policy["near_depth_m"])
+    sky_semantic_id = policy["sky_semantic_id"]
+    ground_semantic_ids = set(policy["ground_semantic_ids"])
+    counts = {
+        "total_pixel_count": PIXELS,
+        "upper_pixel_count": upper_pixels,
+        "valid_depth_pixel_count": 0,
+        "valid_normal_pixel_count": 0,
+        "registered_instance_pixel_count": 0,
+        "valid_semantic_pixel_count": 0,
+        "sky_pixel_count": 0,
+        "upper_ground_pixel_count": 0,
+        "near_depth_pixel_count": 0,
+    }
+    near_instances = {}
+    upper_instances = {}
+    for pixel_index in range(PIXELS):
+        depth_value = float(depth[pixel_index])
+        normal = normals[pixel_index * 3 : pixel_index * 3 + 3]
+        normal_length = math.sqrt(
+            sum(float(component) ** 2 for component in normal),
+        )
+        instance_id = instances[pixel_index]
+        semantic_id = semantics[pixel_index]
+        if (
+            type(instance_id) is not int
+            or type(semantic_id) is not int
+            or semantic_id not in semantic_ids
+        ):
+            raise RuntimeRenderError(
+                "production layer contains an unregistered semantic ID",
+            )
+        if instance_id > 0:
+            if instance_id not in semantic_by_instance:
+                raise RuntimeRenderError(
+                    f"production layer contains unregistered instance ID {instance_id}",
+                )
+            if semantic_by_instance[instance_id] != semantic_id:
+                raise RuntimeRenderError(
+                    "production layer instance and semantic registries disagree",
+                )
+            counts["registered_instance_pixel_count"] += 1
+        elif instance_id != 0:
+            raise RuntimeRenderError(
+                "production layer contains a negative instance ID",
+            )
+        if math.isfinite(depth_value) and depth_value > 0.0:
+            counts["valid_depth_pixel_count"] += 1
+            if depth_value < near_depth_m:
+                counts["near_depth_pixel_count"] += 1
+                if instance_id > 0:
+                    near_instances[instance_id] = (
+                        near_instances.get(instance_id, 0) + 1
+                    )
+        if math.isfinite(normal_length) and abs(normal_length - 1.0) <= 0.001:
+            counts["valid_normal_pixel_count"] += 1
+        if semantic_id == sky_semantic_id:
+            counts["sky_pixel_count"] += 1
+        else:
+            counts["valid_semantic_pixel_count"] += 1
+        if pixel_index // WIDTH < upper_rows:
+            if semantic_id in ground_semantic_ids:
+                counts["upper_ground_pixel_count"] += 1
+            if instance_id > 0:
+                upper_instances[instance_id] = (
+                    upper_instances.get(instance_id, 0) + 1
+                )
+
+    def dominant(rows):
+        if not rows:
+            return None, 0
+        return min(rows.items(), key=lambda row: (-row[1], row[0]))
+
+    near_id, near_count = dominant(near_instances)
+    upper_id, upper_count = dominant(upper_instances)
+    counts.update(
+        {
+            "dominant_near_instance_id": near_id,
+            "dominant_near_instance_pixel_count": near_count,
+            "dominant_upper_instance_id": upper_id,
+            "dominant_upper_instance_pixel_count": upper_count,
+        },
+    )
+    return counts
+
+
 def _matrix_payload(matrix):
     return [[float(matrix[row][column]) for column in range(4)] for row in range(4)]
 
