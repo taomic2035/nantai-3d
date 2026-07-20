@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 30 张路线/包络/跨分块过渡/方向参考设计输入，均有 SHA 与来源边界 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 36 张路线/包络/跨分块过渡/方向/模块板设计输入，均有 SHA 与来源边界 |
 | 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
 | 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
@@ -265,6 +265,38 @@ ZIP 严格只有 6 张图片、6 份精确 prompt、manifest、使用说明和 p
 参考图约束只能提高视觉家族一致性，不能证明六张图共享精确几何。它们尺寸与相机内参不一致，
 不是 cubemap、全景或已标定多视图，不得拼接后声称 360° coverage，也不得直接送入 SfM/3DGS。
 真实方向、共享锚点、碰撞和可行走结论必须来自版本化 3D recipe 与 fresh Blender 六层实渲。
+
+### Batch 13 模块化资产建模参考板
+
+[Batch 13 Modular Asset Reference Boards Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch13-2026-07-21)
+六张 `1536×1024` 板把整景素材拆成可复用部件：住宅构造、桥涵/挡墙/排水、步道/台阶/
+坡道/架空通行、梯田/灌溉/水车、植被/岩石/围栏，以及电杆/灯/井/推车/棚架/小道具。
+每张同时展示大量隔离部件和隐藏侧、底面、接头、基础或细节建议，面向 Blender recipe、
+instancing、LOD、collision proxy 和可行走拓扑建模。
+
+```powershell
+$releaseDir = ".nantai-studio\release-downloads\batch13-modular-assets"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download synthetic-village-design-inputs-batch13-2026-07-21 `
+  --pattern "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.zip" `
+  --pattern "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.SHA256SUMS.txt" `
+  --dir $releaseDir --clobber
+
+$archiveName = "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.zip"
+$archive = Join-Path $releaseDir $archiveName
+$sumFile = Join-Path $releaseDir "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 13 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch13" -Force
+```
+
+模块板是设计参考，不是有尺寸的工程图、精确 turntable 或已完成 3D 资产；同一部件在一张板上的
+多个视图也不能证明共享同一个 mesh。画面材质不是 seamless PBR atlas，不得裁切后登记为真实
+texture payload。最终尺度、连接锚点、拓扑、碰撞、材质图和实例身份必须在版本化 recipe 中声明
+并经过 Blender 实测。
 
 ## 核心工作流
 
