@@ -883,3 +883,149 @@ def test_search_consumes_real_clearance_report_sha_end_to_end() -> None:
     )
     assert different_result.search_sha256 != result.search_sha256
 
+
+# --------------------------------------------------------------------------- #
+# Adversarial boundary tests
+# --------------------------------------------------------------------------- #
+
+
+def test_search_binds_previous_pose_sha256_of_original_camera() -> None:
+    """previous_pose_sha256 must be the SHA of the original camera's pose.
+
+    If the original camera's pose changes (e.g. someone tampered with its
+    position before invoking the search), previous_pose_sha256 must change
+    too -- otherwise a caller could silently substitute a different
+    starting pose and the journal would not detect it.
+    """
+    plan = _plan()
+    topology = _topology_for_camera(plan, "camera-ground-route-010")
+    result = search_replacement_pose(
+        plan=plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=_failing_decision(),
+        preflight_report_sha256=_VALID_REPORT_SHA,
+        topology=topology,
+        candidate_policy=_policy(),
+    )
+
+    # Tamper with the original camera's position_m.  We cannot use
+    # model_copy on the plan directly because plan.cameras is a tuple;
+    # rebuild the tuple with one substituted camera.
+    original_camera = next(
+        c for c in plan.cameras if c.camera_id == "camera-ground-route-010"
+    )
+    tampered_camera = original_camera.model_copy(
+        update={"position_m": (
+            original_camera.position_m[0] + 0.001,
+            original_camera.position_m[1],
+            original_camera.position_m[2],
+        )},
+    )
+    # Re-validate via canonical bytes so the new pose is actually a
+    # ProductionCameraPose, not an unvalidated copy.
+    tampered_cameras = tuple(
+        tampered_camera if c.camera_id == "camera-ground-route-010" else c
+        for c in plan.cameras
+    )
+    tampered_plan = plan.model_copy(update={"cameras": tampered_cameras})
+    tampered_plan = type(plan).model_validate_json(
+        canonical_production_plan_bytes(tampered_plan),
+    )
+
+    tampered_result = search_replacement_pose(
+        plan=tampered_plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=_failing_decision(),
+        preflight_report_sha256=_VALID_REPORT_SHA,
+        topology=topology,
+        candidate_policy=_policy(),
+    )
+
+    assert (
+        tampered_result.previous_pose_sha256
+        != result.previous_pose_sha256
+    ), (
+        "previous_pose_sha256 must change when the original camera's pose "
+        "changes; otherwise a caller could substitute a different starting "
+        "pose and the journal would not detect the substitution"
+    )
+
+
+def test_search_sha_changes_when_candidate_verdicts_change() -> None:
+    """search_sha256 must bind the candidate verdict sequence, not just inputs.
+
+    Two searches with the same plan/policy/report SHA but different
+    candidate verdict sequences must produce different search_sha256.
+    We force different verdicts by shifting the original camera's
+    arc_length near the topology end so positive arc offsets fall outside.
+    """
+    plan = _plan()
+    topology = _topology_for_camera(plan, "camera-ground-route-010")
+    original_camera = next(
+        c for c in plan.cameras if c.camera_id == "camera-ground-route-010"
+    )
+    # Move 010's arc_length to near the end of the topology so +2.0/+3.0
+    # offsets fall outside the topology and produce failing candidates.
+    new_arc = topology.length_m - 1.0
+    moved_camera = original_camera.model_copy(
+        update={"arc_length_m": new_arc},
+    )
+    moved_cameras = tuple(
+        moved_camera if c.camera_id == "camera-ground-route-010" else c
+        for c in plan.cameras
+    )
+    moved_plan = plan.model_copy(update={"cameras": moved_cameras})
+    moved_plan = type(plan).model_validate_json(
+        canonical_production_plan_bytes(moved_plan),
+    )
+
+    # Sanity: the moved plan still has 010 as a valid camera with a
+    # non-null arc_length within the topology range.
+    moved_camera_after = next(
+        c for c in moved_plan.cameras
+        if c.camera_id == "camera-ground-route-010"
+    )
+    assert moved_camera_after.arc_length_m == new_arc
+    assert 0.0 <= new_arc <= topology.length_m
+
+    result_original = search_replacement_pose(
+        plan=plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=_failing_decision(),
+        preflight_report_sha256=_VALID_REPORT_SHA,
+        topology=topology,
+        candidate_policy=_policy(),
+    )
+    result_moved = search_replacement_pose(
+        plan=moved_plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=_failing_decision(),
+        preflight_report_sha256=_VALID_REPORT_SHA,
+        topology=topology,
+        candidate_policy=_policy(),
+    )
+
+    # Both searches use the same policy and report SHA.  The candidate
+    # verdicts MUST differ: in result_moved, the +2.0 and +3.0 offsets
+    # should now fall outside topology length and fail Gate 1.
+    original_verdicts = tuple(
+        c.passes_geometry_gates for c in result_original.candidates
+    )
+    moved_verdicts = tuple(
+        c.passes_geometry_gates for c in result_moved.candidates
+    )
+    assert original_verdicts != moved_verdicts, (
+        "test setup failed: moving the camera near topology end should "
+        "change which candidates pass geometry gates"
+    )
+
+    # search_sha256 must differ because the candidate verdict sequence
+    # is part of the canonical bytes.  If it didn't, a caller could
+    # alter the plan to produce different verdicts and reuse an old
+    # search_sha256 in the journal.
+    assert result_original.search_sha256 != result_moved.search_sha256, (
+        "search_sha256 must change when candidate verdicts change, even "
+        "if the policy / report SHA / camera_id are identical"
+    )
+
+
