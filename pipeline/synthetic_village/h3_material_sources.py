@@ -836,11 +836,6 @@ def _verified_candidates(
                 raise H3MaterialSourceError(
                     f"{record.slot_id} candidate {index} audit disagrees",
                 )
-            _verify_candidate_audit_policy(
-                measured_audit,
-                receipt.audit_policy,
-                label=f"{record.slot_id} candidate {index}",
-            )
             payloads[digest] = payload
     if len(payloads) != len(H3_HERO_SLOTS) * 3:
         raise H3MaterialSourceError(
@@ -860,6 +855,11 @@ def _pack_from_receipt(
             descriptor
             for descriptor in receipt_record.candidates
             if descriptor.sha256 == selected_sha
+        )
+        _verify_candidate_audit_policy(
+            selected.audit,
+            receipt.audit_policy,
+            label=f"{receipt_record.slot_id} selected candidate",
         )
         payload = candidate_payloads[selected_sha]
         selected_mode = _verify_candidate_image(

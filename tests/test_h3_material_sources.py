@@ -43,6 +43,39 @@ def _write_candidate(path: Path, *, colour: tuple[int, ...]) -> dict[str, object
     return descriptor
 
 
+def _replace_candidate_with_edge_outlier(
+    receipt: Path,
+    *,
+    selected: bool,
+) -> None:
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    record = payload["records"][0]
+    candidate = record["candidates"][0]
+    candidate_path = receipt.parent / candidate["source_path"]
+    image = Image.new("RGB", (1024, 1024), (16, 16, 16))
+    image.paste((240, 240, 240), (512, 0, 1024, 1024))
+    image.save(candidate_path, format="PNG")
+    descriptor = {
+        "source_path": candidate["source_path"],
+        "sha256": _sha256(candidate_path.read_bytes()),
+        "bytes": candidate_path.stat().st_size,
+        "width": 1024,
+        "height": 1024,
+        "media_type": "image/png",
+        "audit": audit_h3_candidate(candidate_path).model_dump(mode="json"),
+    }
+    record["candidates"][0] = descriptor
+    payload["audit_policy"]["maximum_opposite_edge_disagreement"] = 0.1
+    if selected:
+        record["selection"]["selected_candidate_sha256"] = descriptor["sha256"]
+    receipt.write_bytes(
+        (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8"),
+    )
+
+
 def _write_selection_receipt(root: Path) -> Path:
     candidates_root = root / "candidates"
     candidates_root.mkdir(parents=True)
@@ -142,6 +175,31 @@ def test_candidate_audit_is_deterministic_and_bounded(tmp_path: Path) -> None:
     assert 0.0 <= first.edge_energy <= 1.0
     assert 0.0 <= first.dominant_perspective_score <= 1.0
     assert 0.0 <= first.opposite_edge_disagreement <= 1.0
+
+
+def test_nonselected_audit_outlier_stays_private_without_blocking_pack(
+    tmp_path: Path,
+) -> None:
+    receipt = _write_selection_receipt(tmp_path / "input")
+    _replace_candidate_with_edge_outlier(receipt, selected=False)
+
+    prepared = prepare_h3_source_pack(receipt, tmp_path / "published")
+
+    first_record = prepared.manifest.records[0]
+    assert first_record.selection.selected_candidate_sha256 != json.loads(
+        receipt.read_text(encoding="utf-8"),
+    )["records"][0]["candidates"][0]["sha256"]
+
+
+def test_selected_audit_outlier_fails_closed(tmp_path: Path) -> None:
+    receipt = _write_selection_receipt(tmp_path / "input")
+    _replace_candidate_with_edge_outlier(receipt, selected=True)
+
+    with pytest.raises(
+        H3MaterialSourceError,
+        match="selected candidate exceeds the frozen opposite-edge threshold",
+    ):
+        prepare_h3_source_pack(receipt, tmp_path / "published")
 
 
 def _mutate_receipt(path: Path, mutation) -> None:
