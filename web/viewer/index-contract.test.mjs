@@ -182,6 +182,27 @@ test('viewer loads coverage audit independently from reconstruction artifacts', 
   assert.match(main, /absoluteUrl\.origin\s*!==\s*window\.location\.origin/);
 });
 
+test('production camera plan has a dedicated incomplete HUD and dynamic consumer', () => {
+  const production = html.match(
+    /<div class="production-plan"[^>]*>([\s\S]*?)<\/div>\s*<div class="coverage"/,
+  )?.[1];
+  assert.ok(production, 'production camera plan HUD must exist before coverage');
+  for (const id of [
+    'hud-production-status',
+    'hud-production-unplaced',
+    'hud-production-requirements',
+    'hud-production-provenance',
+  ]) {
+    assert.match(production, new RegExp(`id="${id}"`));
+  }
+  assert.match(main, /from ['"]\.\/production-camera-plan\.mjs['"]/);
+  assert.match(main, /kind\s*===\s*['"]production-camera-plan['"]/);
+  assert.match(main, /isProductionCameraPlan\(/);
+  assert.match(main, /productionCameraPlanViewModel\(/);
+  assert.match(main, /production_plan:\s*productionCameraPlanViewModel\(/);
+  assert.doesNotMatch(production, /360.?ready|360.?coverage|production.?ready/i);
+});
+
 test('terminal world-envelope failures do not enter the chunk retry loop', () => {
   assert.match(main, /shouldRetryWorldChunkFailure/);
   assert.match(main, /terminalChunkFailures/);

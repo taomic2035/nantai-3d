@@ -64,9 +64,18 @@ test('start announces same-origin ready with honest DC point capabilities', () =
   assert.equal(VIEWER_CAPABILITIES.renderer.anisotropic_covariance, false);
   assert.deepEqual(
     VIEWER_CAPABILITIES.dynamic_artifact_kinds,
-    ['recon-manifest', 'chunk-manifest', 'coverage-audit'],
+    [
+      'recon-manifest',
+      'chunk-manifest',
+      'coverage-audit',
+      'production-camera-plan',
+    ],
   );
   assert.equal(VIEWER_CAPABILITIES.artifact_kinds.includes('coverage-audit'), false);
+  assert.equal(
+    VIEWER_CAPABILITIES.artifact_kinds.includes('production-camera-plan'),
+    false,
+  );
   assert.deepEqual(VIEWER_CAPABILITIES.three_dgs_properties.consumed, []);
   assert.ok(VIEWER_CAPABILITIES.commands.includes('resetCamera'));
   assert.ok(VIEWER_CAPABILITIES.commands.includes('setBounds'));

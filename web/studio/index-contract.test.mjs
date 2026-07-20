@@ -65,6 +65,20 @@ test('Studio quietly probes and loads the canonical coverage audit after Viewer 
   assert.match(app, /result\.status\s*===\s*['"]loaded['"]/);
 });
 
+test('Studio quietly probes the canonical production camera plan after Viewer readiness', () => {
+  assert.match(
+    app,
+    /import\s*\{[^}]*loadOptionalProductionCameraPlan[^}]*\}\s*from\s*['"]\.\/production-camera-plan-loader\.mjs['"]/s,
+  );
+  assert.match(
+    app,
+    /next\s*===\s*['"]ready['"][\s\S]*loadOptionalProductionCameraPlan\(\{\s*bridge/s,
+  );
+  assert.match(app, /production_plan\.status/);
+  assert.match(app, /production_plan\.placed/);
+  assert.match(app, /production_plan\.target/);
+});
+
 test('B1 ingest uses an explicit confirmation without command or path fields', () => {
   assert.match(html, /id="ingest-dialog"/);
   assert.match(html, /id="ingest-cancel-notice"/);

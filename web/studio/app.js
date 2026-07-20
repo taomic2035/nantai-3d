@@ -15,6 +15,9 @@ import { selectStudioAdapter } from './adapter-factory.mjs';
 import { SCENARIO_NAMES } from './mock-adapter.mjs';
 import { StudioViewerBridge } from './viewer-bridge.mjs';
 import { loadOptionalCoverageAudit } from './coverage-audit-loader.mjs';
+import {
+  loadOptionalProductionCameraPlan,
+} from './production-camera-plan-loader.mjs';
 import { JobController } from './job-controller.mjs';
 import {
   ingestConfirmationModel,
@@ -525,6 +528,7 @@ function setupViewerBridge() {
   const frame = byId('viewer-frame');
   const status = byId('viewer-status');
   let coverageProbe = null;
+  let productionPlanProbe = null;
   const viewerButtons = [...document.querySelectorAll('[data-viewer-command]')];
   viewerButtons.forEach((button) => { button.disabled = true; });
   const bridge = new StudioViewerBridge({
@@ -565,6 +569,25 @@ function setupViewerBridge() {
             })
             .finally(() => {
               coverageProbe = null;
+            });
+        }
+        if (!productionPlanProbe) {
+          productionPlanProbe = loadOptionalProductionCameraPlan({ bridge })
+            .then((result) => {
+              if (result.status === 'loaded') {
+                const { production_plan } = result;
+                announce(
+                  `Production plan: ${production_plan.status}`
+                  + ` · ${production_plan.placed}/${production_plan.target} poses`,
+                );
+              }
+              return result;
+            })
+            .catch((error) => {
+              announce(`Production plan load failed: ${error.message}`);
+            })
+            .finally(() => {
+              productionPlanProbe = null;
             });
         }
       }

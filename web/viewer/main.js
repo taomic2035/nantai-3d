@@ -67,6 +67,10 @@ import {
   isCoverageAudit,
 } from './coverage-audit.mjs';
 import {
+  isProductionCameraPlan,
+  productionCameraPlanViewModel,
+} from './production-camera-plan.mjs';
+import {
   atmosphereLightForRenderer,
   environmentNotice,
   meshWeatherResponse,
@@ -138,6 +142,8 @@ let reconManifest = null;            // 重建预览 artifact (recon_manifest.js
 let reconManifestUrl = new URL('../data/recon/recon_manifest.json', import.meta.url).href;
 let coverageAudit = null;             // 独立覆盖审计，不改变重建 artifact
 let coverageAuditUrl = null;
+let productionCameraPlan = null;       // 机位规划证据，不提升重建或覆盖可信度
+let productionCameraPlanUrl = null;
 let reconMesh = null;
 let reconLodLoaded = -1;
 let reconVisible = true;
@@ -2471,6 +2477,20 @@ function updateHUD() {
     if (element) element.textContent = value;
   }
 
+  const productionPlan = productionCameraPlanViewModel(productionCameraPlan);
+  const productionFields = {
+    'hud-production-status': productionPlan.summary,
+    'hud-production-unplaced': productionPlan.unplaced_label,
+    'hud-production-requirements': productionPlan.requirements_label,
+    'hud-production-provenance': productionPlan.provenance_label,
+  };
+  for (const [id, value] of Object.entries(productionFields)) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.textContent = value;
+    element.style.color = productionPlan.color;
+  }
+
   const coverage = coverageAuditViewModel(coverageAudit);
   const coverageFields = {
     'hud-coverage-status': {
@@ -2717,6 +2737,7 @@ async function main() {
       bounds: currentFrame?.bounds ?? null,
       artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
       coverage: coverageAuditViewModel(coverageAudit),
+      production_plan: productionCameraPlanViewModel(productionCameraPlan),
       camera: { position: { east, north, up }, mode: cameraMode },
       mesh_resources: {
         ...meshResourceStore.diagnostics(),
@@ -2815,6 +2836,7 @@ async function main() {
           kind !== 'recon-manifest'
           && kind !== 'chunk-manifest'
           && kind !== 'coverage-audit'
+          && kind !== 'production-camera-plan'
         ) {
           throw new Error(`不支持的 artifact kind: ${kind}`);
         }
@@ -2845,6 +2867,36 @@ async function main() {
             kind,
             url: coverageAuditUrl,
             coverage: coverageAuditViewModel(coverageAudit),
+            state: readState(),
+          };
+        }
+        if (kind === 'production-camera-plan') {
+          let nextPlan = artifact;
+          let nextUrl = window.location.href;
+          if (url) {
+            const absoluteUrl = new URL(url, window.location.href);
+            if (absoluteUrl.origin !== window.location.origin) {
+              throw new Error('artifact URL 必须与 viewer 同源');
+            }
+            const response = await fetch(absoluteUrl.href);
+            if (!response.ok) {
+              throw new Error(`无法加载 production camera plan: ${response.status}`);
+            }
+            nextPlan = await response.json();
+            nextUrl = absoluteUrl.href;
+          } else if (!artifact) {
+            throw new Error('loadArtifact 需要 url 或 manifest');
+          }
+          if (!isProductionCameraPlan(nextPlan)) {
+            throw new Error('无效的 production-camera-plan artifact');
+          }
+          productionCameraPlan = nextPlan;
+          productionCameraPlanUrl = nextUrl;
+          updateHUD();
+          return {
+            kind,
+            url: productionCameraPlanUrl,
+            production_plan: productionCameraPlanViewModel(productionCameraPlan),
             state: readState(),
           };
         }

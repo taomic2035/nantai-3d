@@ -49,7 +49,7 @@
   #hud .stat b { color: #fff; font-weight: 600; }
   #hud .legend { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
   #hud .provenance { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
-  #hud .coverage { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
+  #hud .production-plan, #hud .coverage { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
   #hud .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #bbb; margin: 2px 0; }
   #hud .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
   #controls {
@@ -170,6 +170,12 @@
     <div class="stat">材质配置: <b id="hud-material-profile">未启用（非 runtime-v3）</b></div>
     <div class="stat">真实性: <b id="hud-material-truth">unknown · fail-closed</b></div>
     <div class="stat">压缩纹理: <b id="hud-compressed-textures">unknown / 512 MiB</b></div>
+  </div>
+  <div class="production-plan" aria-label="Production camera plan">
+    <div class="stat">Production poses: <b id="hud-production-status">production camera plan not loaded</b></div>
+    <div class="stat">Unplaced groups: <b id="hud-production-unplaced">unknown</b></div>
+    <div class="stat">Undelivered evidence: <b id="hud-production-requirements">unknown</b></div>
+    <div class="stat">Plan provenance: <b id="hud-production-provenance">unknown · fail-closed</b></div>
   </div>
   <div class="coverage" aria-label="覆盖审计">
     <div class="stat">覆盖审计: <b id="hud-coverage-status">coverage audit not loaded</b></div>
