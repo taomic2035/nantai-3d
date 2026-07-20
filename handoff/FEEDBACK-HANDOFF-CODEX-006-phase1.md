@@ -1,7 +1,7 @@
 # FEEDBACK-HANDOFF-CODEX-006 Phase 1 — production 相机几何预检
 
-> 日期：2026-07-20  
-> 角色：Codex（实现 / UX / visual-quality / audit lane）  
+> 日期：2026-07-20
+> 角色：Codex（实现 / UX / visual-quality / audit lane）
 > 对应：`handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`
 
 ## 结论
@@ -100,4 +100,3 @@ git diff --check: clean
 - `010/039` 尚未执行证据绑定的 route-aware 重排与再次 preflight；
 - Studio 尚未展示 per-rule measured/threshold/reason；
 - `req-5-pose-quality-fail-closed` 必须继续保持未交付。
-
