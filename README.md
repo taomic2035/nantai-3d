@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 18 张路线/包络设计输入，均有 SHA 与来源边界 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 24 张路线/包络/跨分块过渡设计输入，均有 SHA 与来源边界 |
 | 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
 | 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
@@ -203,6 +203,37 @@ Expand-Archive $archive `
 SfM/3DGS，不能证明 360° coverage、任意坐标几何、碰撞安全、米制尺度或 training
 适用性。桥拱、水车轴承、排水和基础的最终拓扑必须来自版本化 recipe，并经过 fresh
 Blender topology/collision、standing-eye 六层实渲和 post-render v2 policy。
+
+### Batch 11 跨分块连续过渡补充包
+
+[Batch 11 Boundary-Transition Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch11-2026-07-21)
+补充 6 张通用 image2 设计输入：东西向等高道路、南北向折返步道与道路交会、连续溪流/岸路/
+桥涵、梯田与灌溉、森林/竹林/果园到聚落，以及下谷道路/步道/溪流/田地/民居汇合。
+它们面向跨 chunk transition module，不绑定某一个具体村庄，可以被真实素材逐槽替换。
+
+```powershell
+$releaseDir = ".nantai-studio\release-downloads\batch11-boundary-transition"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download synthetic-village-design-inputs-batch11-2026-07-21 `
+  --pattern "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.zip" `
+  --pattern "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.SHA256SUMS.txt" `
+  --dir $releaseDir --clobber
+
+$archiveName = "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.zip"
+$archive = Join-Path $releaseDir $archiveName
+$sumFile = Join-Path $releaseDir "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 11 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch11" -Force
+```
+
+ZIP 严格只有 6 张图片、6 份精确 prompt、manifest、使用说明和 payload checksum。
+这些图片只指导跨分块道路、步道、水系、梯田、植被和聚落过渡的建模；共享边界坐标必须来自
+确定性的 world-edge anchor，不能从像素推断。即使画面看起来连续，也不代表六张图共享相机或
+几何，更不能作为 SfM/3DGS 多视图、360° coverage 或任意坐标场景完成度的证据。
 
 ## 核心工作流
 
