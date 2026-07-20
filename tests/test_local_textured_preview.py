@@ -700,6 +700,8 @@ print("NANTAI_ELEVATED_COMPONENTS_OK", flush=True)
         object_registry=parsed_report.object_registry,
         auxiliary_registry=parsed_report.auxiliary_registry,
         semantic_registry=parsed_report.semantic_registry,
+        preflight_id="6" * 64,
+        quality_policy_sha256="7" * 64,
     )
     frame_request_path = tmp_path / "production-render-request.json"
     frame_request_path.write_bytes(

@@ -41,13 +41,13 @@ LOCAL_CAMERA_SCHEMA = (
     "nantai.synthetic-village.local-textured-camera-metadata.v1"
 )
 LOCAL_PRODUCTION_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v1"
+    "nantai.synthetic-village.local-production-render-frame-request.v2"
 )
 LOCAL_PRODUCTION_REPORT_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-report.v1"
+    "nantai.synthetic-village.local-production-render-frame-report.v2"
 )
 LOCAL_PRODUCTION_CAMERA_SCHEMA = (
-    "nantai.synthetic-village.local-production-camera-metadata.v1"
+    "nantai.synthetic-village.local-production-camera-metadata.v2"
 )
 DEPTH_ENCODING = "euclidean-camera-center-range-m"
 NORMAL_ENCODING = "world-space-unit-vector"
@@ -486,6 +486,8 @@ def _validate_request(request):
                     "elevated_topology_sha256",
                     "production_plan",
                     "requested_c2w_blender",
+                    "preflight_id",
+                    "quality_policy_sha256",
                 )
                 if production
                 else ("measured_c2w_blender",)
@@ -522,6 +524,8 @@ def _validate_request(request):
                 "production_plan_sha256",
                 "camera_registry_sha256",
                 "elevated_topology_sha256",
+                "preflight_id",
+                "quality_policy_sha256",
             )
             if production
             else ()
@@ -1621,6 +1625,10 @@ def _write_camera_metadata(request, path, measured_c2w_blender):
                 "arc_length_m": camera["arc_length_m"],
                 "audit_only": camera["audit_only"],
                 "disclosure": camera["disclosure"],
+                "preflight_id": request["preflight_id"],
+                "quality_policy_sha256": request[
+                    "quality_policy_sha256"
+                ],
             },
         )
     else:
@@ -1781,6 +1789,10 @@ def _execute_render(request, staging_path):
                     "elevated_topology_sha256": request["elevated_topology_sha256"],
                     "group_id": request["camera"]["group_id"],
                     "topology_ref": request["camera"]["topology_ref"],
+                    "preflight_id": request["preflight_id"],
+                    "quality_policy_sha256": request[
+                        "quality_policy_sha256"
+                    ],
                 },
             )
         report["content_sha256"] = hashlib.sha256(_canonical_bytes(report)).hexdigest()

@@ -173,6 +173,8 @@ def production_render_id(
     blend_sha256: str,
     build_report_sha256: str,
     camera_registry_sha256: str,
+    preflight_id: str | None = None,
+    quality_policy_sha256: str | None = None,
 ) -> str:
     """内容寻址的 render_id。
 
@@ -194,6 +196,10 @@ def production_render_id(
         "scene_plan_sha256": plan.scene_plan_sha256,
         "camera_ids": [camera.camera_id for camera in plan.cameras],
     }
+    if preflight_id is not None:
+        payload["preflight_id"] = preflight_id
+    if quality_policy_sha256 is not None:
+        payload["quality_policy_sha256"] = quality_policy_sha256
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 

@@ -23,6 +23,14 @@ from .production_journal import (
     expected_production_artifacts,
     production_render_id,
 )
+from .production_preflight import (
+    ProductionCameraClearanceDecision,
+    ProductionClearanceReport,
+    ProductionClearanceRequest,
+    canonical_production_clearance_report_bytes,
+    production_clearance_request_sha256,
+    verify_production_clearance_report,
+)
 from .production_profile import (
     PRODUCTION_PROFILE_ID,
     ProductionCameraPlan,
@@ -33,16 +41,16 @@ from .production_profile import (
 )
 
 LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v1"
+    "nantai.synthetic-village.local-production-render-frame-request.v2"
 )
 LOCAL_PRODUCTION_RENDER_REPORT_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-report.v1"
+    "nantai.synthetic-village.local-production-render-frame-report.v2"
 )
 LOCAL_PRODUCTION_CAMERA_METADATA_SCHEMA = (
-    "nantai.synthetic-village.local-production-camera-metadata.v1"
+    "nantai.synthetic-village.local-production-camera-metadata.v2"
 )
 LOCAL_PRODUCTION_RENDER_JOURNAL_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-journal.v1"
+    "nantai.synthetic-village.local-production-render-journal.v2"
 )
 
 Matrix4 = tuple[
@@ -80,6 +88,12 @@ class LocalProductionQualityPolicy(FrozenModel):
         le=1.0,
         allow_inf_nan=False,
     )
+
+
+def local_production_quality_policy_sha256(
+    policy: LocalProductionQualityPolicy,
+) -> str:
+    return hashlib.sha256(_canonical(policy.model_dump(mode="json"))).hexdigest()
 
 
 class LocalProductionFrameQuality(FrozenModel):
@@ -130,6 +144,7 @@ class LocalProductionFrameRecord(FrozenModel):
     camera_id: str = Field(pattern=r"^camera-[a-z0-9-]+-[0-9]{3}$")
     state: Literal[
         "planned",
+        "preflight-rejected",
         "rendering",
         "verified",
         "rejected",
@@ -143,6 +158,11 @@ class LocalProductionFrameRecord(FrozenModel):
     )
     statistics: canary.RenderStatistics | None = None
     quality: LocalProductionFrameQuality | None = None
+    preflight_report_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    clearance_decision: ProductionCameraClearanceDecision | None = None
     wall_clock_seconds: float | None = Field(
         default=None,
         ge=0.0,
@@ -153,6 +173,46 @@ class LocalProductionFrameRecord(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_state(self) -> LocalProductionFrameRecord:
+        if (self.preflight_report_sha256 is None) != (
+            self.clearance_decision is None
+        ):
+            raise ValueError(
+                "frame preflight report and decision must appear together",
+            )
+        if (
+            self.clearance_decision is not None
+            and self.clearance_decision.camera_id != self.camera_id
+        ):
+            raise ValueError(
+                "frame clearance decision belongs to another camera",
+            )
+        if self.state == "preflight-rejected":
+            if (
+                self.clearance_decision is None
+                or self.clearance_decision.passes
+                or self.preflight_report_sha256 is None
+            ):
+                raise ValueError(
+                    "preflight-rejected frame lacks a failing bound decision",
+                )
+            if (
+                self.artifacts
+                or self.runtime_report_sha256 is not None
+                or self.statistics is not None
+                or self.quality is not None
+                or self.wall_clock_seconds is not None
+                or self.error is not None
+            ):
+                raise ValueError(
+                    "preflight-rejected frame cannot claim render evidence",
+                )
+        elif (
+            self.clearance_decision is not None
+            and not self.clearance_decision.passes
+        ):
+            raise ValueError(
+                "failing clearance decision must use preflight-rejected state",
+            )
         if self.state in {"verified", "rejected"}:
             if tuple((row.kind, row.path) for row in self.artifacts) != (
                 expected_production_artifacts(self.camera_id)
@@ -186,7 +246,7 @@ class LocalProductionFrameRecord(FrozenModel):
                 and self.wall_clock_seconds < self.timeout_limit_seconds
             ):
                 raise ValueError("timed-out frame ran less than its declared timeout")
-        elif (
+        elif self.state != "preflight-rejected" and (
             self.artifacts
             or self.runtime_report_sha256 is not None
             or self.statistics is not None
@@ -200,7 +260,7 @@ class LocalProductionFrameRecord(FrozenModel):
 
 class LocalProductionRenderJournal(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-journal.v1"
+        "nantai.synthetic-village.local-production-render-journal.v2"
     ] = LOCAL_PRODUCTION_RENDER_JOURNAL_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = PRODUCTION_PROFILE_ID
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -214,12 +274,25 @@ class LocalProductionRenderJournal(FrozenModel):
     blend_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     object_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    clearance_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_camera_ids: tuple[str, ...] = Field(
+        min_length=1,
+        max_length=180,
+    )
+    preflight_wall_clock_seconds: float = Field(
+        ge=0.0,
+        allow_inf_nan=False,
+    )
     synthetic: Literal[True] = True
     verification_level: Literal["L0"] = "L0"
     geometry_trust: Literal["simplified-pbr-not-render-parity"] = (
         "simplified-pbr-not-render-parity"
     )
     quality_policy: LocalProductionQualityPolicy
+    quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     frames: tuple[LocalProductionFrameRecord, ...] = Field(
         min_length=180,
         max_length=180,
@@ -230,6 +303,42 @@ class LocalProductionRenderJournal(FrozenModel):
         camera_ids = tuple(row.camera_id for row in self.frames)
         if len(set(camera_ids)) != 180:
             raise ValueError("local production journal camera IDs must be unique")
+        selected = set(self.preflight_camera_ids)
+        if (
+            len(selected) != len(self.preflight_camera_ids)
+            or self.preflight_camera_ids
+            != tuple(row for row in camera_ids if row in selected)
+        ):
+            raise ValueError(
+                "journal preflight camera IDs must be a unique plan-ordered subset",
+            )
+        for frame in self.frames:
+            selected_frame = frame.camera_id in selected
+            if selected_frame != (frame.clearance_decision is not None):
+                raise ValueError(
+                    "journal frame preflight evidence set is incomplete",
+                )
+            if (
+                selected_frame
+                and frame.preflight_report_sha256
+                != self.preflight_report_sha256
+            ):
+                raise ValueError(
+                    "frame preflight report digest disagrees with journal",
+                )
+            if (
+                selected_frame
+                and frame.clearance_decision is not None
+                and frame.clearance_decision.policy_sha256
+                != self.clearance_policy_sha256
+            ):
+                raise ValueError(
+                    "frame clearance policy digest disagrees with journal",
+                )
+        if self.quality_policy_sha256 != local_production_quality_policy_sha256(
+            self.quality_policy,
+        ):
+            raise ValueError("journal quality policy digest is invalid")
         return self
 
 
@@ -251,8 +360,52 @@ def new_local_production_render_journal(
     request: LocalProductionRenderFrameRequest,
     *,
     quality_policy: LocalProductionQualityPolicy,
+    preflight_request: ProductionClearanceRequest,
+    preflight_report: ProductionClearanceReport,
+    preflight_report_sha256: str,
+    preflight_wall_clock_seconds: float,
     timeout_limit_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
 ) -> LocalProductionRenderJournal:
+    verify_production_clearance_report(
+        preflight_report,
+        request=preflight_request,
+    )
+    expected_report_sha256 = hashlib.sha256(
+        canonical_production_clearance_report_bytes(preflight_report),
+    ).hexdigest()
+    if preflight_report_sha256 != expected_report_sha256:
+        raise ValueError("preflight report digest is invalid")
+    immutable = (
+        preflight_request.production_plan,
+        preflight_request.production_plan_sha256,
+        preflight_request.camera_registry_sha256,
+        preflight_request.build_id,
+        preflight_request.blender_executable_sha256,
+        preflight_request.blend_sha256,
+        preflight_request.build_report_sha256,
+        preflight_request.object_registry_sha256,
+        preflight_request.preflight_id,
+        local_production_quality_policy_sha256(quality_policy),
+    )
+    expected = (
+        request.production_plan,
+        request.production_plan_sha256,
+        request.camera_registry_sha256,
+        request.build_id,
+        request.blender_executable_sha256,
+        request.blend_sha256,
+        request.build_report_sha256,
+        request.object_registry_sha256,
+        request.preflight_id,
+        request.quality_policy_sha256,
+    )
+    if immutable != expected:
+        raise ValueError(
+            "preflight request disagrees with local production render inputs",
+        )
+    decisions = {
+        row.camera_id: row for row in preflight_report.decisions
+    }
     journal = LocalProductionRenderJournal(
         render_id=request.render_id,
         journal_sha256="0" * 64,
@@ -265,11 +418,33 @@ def new_local_production_render_journal(
         blend_sha256=request.blend_sha256,
         build_report_sha256=request.build_report_sha256,
         object_registry_sha256=request.object_registry_sha256,
+        preflight_id=preflight_request.preflight_id,
+        preflight_request_sha256=production_clearance_request_sha256(
+            preflight_request,
+        ),
+        preflight_report_sha256=preflight_report_sha256,
+        clearance_policy_sha256=preflight_request.policy_sha256,
+        preflight_camera_ids=preflight_request.selected_camera_ids,
+        preflight_wall_clock_seconds=preflight_wall_clock_seconds,
         quality_policy=quality_policy,
+        quality_policy_sha256=local_production_quality_policy_sha256(
+            quality_policy,
+        ),
         frames=tuple(
             LocalProductionFrameRecord(
                 camera_id=row.camera_id,
-                state="planned",
+                state=(
+                    "preflight-rejected"
+                    if row.camera_id in decisions
+                    and not decisions[row.camera_id].passes
+                    else "planned"
+                ),
+                preflight_report_sha256=(
+                    preflight_report_sha256
+                    if row.camera_id in decisions
+                    else None
+                ),
+                clearance_decision=decisions.get(row.camera_id),
                 timeout_limit_seconds=timeout_limit_seconds,
             )
             for row in request.production_plan.cameras
@@ -313,7 +488,7 @@ def transition_local_production_frame(
 
 class LocalProductionRenderFrameRequest(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-request.v1"
+        "nantai.synthetic-village.local-production-render-frame-request.v2"
     ] = LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = PRODUCTION_PROFILE_ID
     production_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -332,6 +507,8 @@ class LocalProductionRenderFrameRequest(FrozenModel):
     blend_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     object_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     settings: canary.RenderSettings
     camera: ProductionCameraPose
     requested_c2w_blender: Matrix4
@@ -403,6 +580,8 @@ class LocalProductionRenderFrameRequest(FrozenModel):
             blend_sha256=self.blend_sha256,
             build_report_sha256=self.build_report_sha256,
             camera_registry_sha256=self.camera_registry_sha256,
+            preflight_id=self.preflight_id,
+            quality_policy_sha256=self.quality_policy_sha256,
         )
         if self.render_id != expected_render_id:
             raise ValueError("render ID does not bind the production inputs")
@@ -411,7 +590,7 @@ class LocalProductionRenderFrameRequest(FrozenModel):
 
 class LocalProductionRenderFrameReport(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-report.v1"
+        "nantai.synthetic-village.local-production-render-frame-report.v2"
     ] = LOCAL_PRODUCTION_RENDER_REPORT_SCHEMA
     build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -444,6 +623,8 @@ class LocalProductionRenderFrameReport(FrozenModel):
     elevated_topology_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     group_id: str = Field(min_length=1)
     topology_ref: str = Field(min_length=1)
+    preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _validate_artifacts(self) -> LocalProductionRenderFrameReport:
@@ -456,7 +637,7 @@ class LocalProductionRenderFrameReport(FrozenModel):
 
 class LocalProductionCameraMetadata(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-camera-metadata.v1"
+        "nantai.synthetic-village.local-production-camera-metadata.v2"
     ] = LOCAL_PRODUCTION_CAMERA_METADATA_SCHEMA
     build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -501,6 +682,8 @@ class LocalProductionCameraMetadata(FrozenModel):
     arc_length_m: float | None = Field(default=None, allow_inf_nan=False)
     audit_only: bool
     disclosure: str = Field(min_length=10)
+    preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 def build_local_production_frame_request(
@@ -515,6 +698,8 @@ def build_local_production_frame_request(
     object_registry: tuple[canary.ObjectRegistryEntry, ...],
     auxiliary_registry: tuple[canary.AuxiliaryRegistryEntry, ...],
     semantic_registry: tuple[canary.SemanticRegistryEntry, ...],
+    preflight_id: str,
+    quality_policy_sha256: str,
 ) -> LocalProductionRenderFrameRequest:
     camera = next(
         (row for row in plan.cameras if row.camera_id == camera_id),
@@ -535,6 +720,8 @@ def build_local_production_frame_request(
         blend_sha256=blend_sha256,
         build_report_sha256=build_report_sha256,
         camera_registry_sha256=camera_registry_sha256,
+        preflight_id=preflight_id,
+        quality_policy_sha256=quality_policy_sha256,
     )
     return LocalProductionRenderFrameRequest(
         production_plan_sha256=hashlib.sha256(
@@ -550,6 +737,8 @@ def build_local_production_frame_request(
         blend_sha256=blend_sha256,
         build_report_sha256=build_report_sha256,
         object_registry_sha256=object_registry_sha256,
+        preflight_id=preflight_id,
+        quality_policy_sha256=quality_policy_sha256,
         settings=canary.RenderSettings(),
         camera=camera,
         requested_c2w_blender=_opencv_c2w_to_blender(camera.c2w_opencv),

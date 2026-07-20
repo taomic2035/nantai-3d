@@ -44,6 +44,8 @@ def _request(camera_id: str = "camera-elevated-pedestrian-001"):
         object_registry=objects,
         auxiliary_registry=canary.AUXILIARY_REGISTRY,
         semantic_registry=semantics,
+        preflight_id="6" * 64,
+        quality_policy_sha256="7" * 64,
     )
 
 
@@ -86,6 +88,52 @@ def test_renderer_declares_separate_local_production_schema_and_dynamic_camera()
     )
 
     assert LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA in source
-    assert "local-production-render-frame-report.v1" in source
-    assert "local-production-camera-metadata.v1" in source
+    assert "local-production-render-frame-report.v2" in source
+    assert "local-production-camera-metadata.v2" in source
     assert "_create_production_camera" in source
+
+
+def test_preflight_and_quality_context_change_frame_render_identity() -> None:
+    base = _request()
+    contextual = build_local_production_frame_request(
+        plan=base.production_plan,
+        camera_id=base.camera.camera_id,
+        build_id=base.build_id,
+        blender_executable_sha256=base.blender_executable_sha256,
+        renderer_script_sha256=base.renderer_script_sha256,
+        blend_sha256=base.blend_sha256,
+        build_report_sha256=base.build_report_sha256,
+        object_registry=base.object_registry,
+        auxiliary_registry=base.auxiliary_registry,
+        semantic_registry=base.semantic_registry,
+        preflight_id="8" * 64,
+        quality_policy_sha256="7" * 64,
+    )
+    changed_policy = build_local_production_frame_request(
+        plan=base.production_plan,
+        camera_id=base.camera.camera_id,
+        build_id=base.build_id,
+        blender_executable_sha256=base.blender_executable_sha256,
+        renderer_script_sha256=base.renderer_script_sha256,
+        blend_sha256=base.blend_sha256,
+        build_report_sha256=base.build_report_sha256,
+        object_registry=base.object_registry,
+        auxiliary_registry=base.auxiliary_registry,
+        semantic_registry=base.semantic_registry,
+        preflight_id="8" * 64,
+        quality_policy_sha256="9" * 64,
+    )
+
+    assert contextual.preflight_id == "8" * 64
+    assert contextual.quality_policy_sha256 == "7" * 64
+    assert contextual.render_id != base.render_id
+    assert changed_policy.render_id != contextual.render_id
+
+    payload = json.loads(
+        canonical_local_production_render_request_bytes(contextual),
+    )
+    payload["quality_policy_sha256"] = "a" * 64
+    with pytest.raises(ValidationError, match="render ID"):
+        LocalProductionRenderFrameRequest.model_validate_json(
+            json.dumps(payload),
+        )
