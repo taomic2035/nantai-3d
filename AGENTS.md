@@ -18,6 +18,46 @@
 - **单一 main 分支，无其它分支/worktree**；多 agent 共享工作树 → **路径限定提交**（`git add <明确文件>` + `git commit -- <路径>`，禁用 `git add -A`/`commit -a`，避免卷入他人 WIP）。
 - 提交仅在完成且验证（门禁绿）后；消息尾行 `Co-Authored-By`。push 时机需协调（他人可能有未推送/未提交工作）。
 
+## 当前协作与接管状态（2026-07-20）
+
+- **Opus 暂不可用**，不得把可推进事项笼统标成“等待 Opus”。后续状态须明确区分：
+  `Codex 可独立推进`、`原 Opus 职责且 Codex 可接管`、`必须等待外部条件`。
+- Codex 继续负责 UX、呈现、设计、交互和审计；已接管必要的跨 lane 取证与规格工作。
+  改动 pipeline/registry/Blender 构建合同前仍须遵守既有设计门和 TDD，不得因为 Opus
+  不在线而削弱 fail-closed 合同。
+- Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
+  验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
+  该实现仍等待用户确认方案 A。
+
+## Batch 6 image2 素材与 v2 场景差距（2026-07-20）
+
+Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未注册候选区：
+
+```text
+.nantai-studio/synthetic-village/hybrid-v4-candidates/
+```
+
+| 素材 | SHA-256 |
+|---|---|
+| `design-route-central-courtyard-eye-01.png` | `19b40a84322ab7d343716bd684fc83a3207ae42ad94993d28446707f7a5537df` |
+| `design-detail-bridge-undercroft-01.png` | `16b9f390f4550b2ec64bd98e4ccd799e05c4f44cd924a5da1503eec73ae8b4be` |
+| `design-detail-rear-service-courtyard-01.png` | `2c3900ab686cb45252538c8bdb6e507396ec9084ca7809a44fa3524810ab8b51` |
+
+- 三张图均为独立 `design-only` 参考；`camera_calibration=unknown`、
+  `geometry_consistency=not-verified`、`training_use=forbidden-as-multiview`、
+  `trust_effect=none`。不得组合成 SfM/NeRF/3DGS 多视图训练集。
+- 精确提示词、SHA、字节数和 queue/manifest 位于同一私有候选区；Release 不放候选中间态。
+- image2 的 generation 与 reference-edit 端点均出现间歇网络错误：允许低频重试；失败请求
+  不占候选记录、不写空文件。
+- 模块拆分、现有 ScenePlan/Topology 绑定和 180 相机验收候选见
+  `handoff/HANDOFF-CODEX-008-batch6-to-blender-modular-consumption.md`。
+- 当前 Windows textured L2 build
+  `4f38ecf49ff8182e02c426df314dab90b91502673164330d3b704f234d02f1dc`
+  确实包含 Blender 几何、PBR 材质和四张实渲预览，但仍是稀疏块体村庄：
+  中央院落、石拱/水车桥底节点和建筑后场尚未进入正式几何。它继续声明
+  `geometry_usability=preview-only`、`fidelity=simplified-pbr-not-render-parity`。
+  机器身份和逐图差距见 `handoff/REVIEW-CODEX-008-batch6-vs-v2-blender-preview.md`。
+
 ## ⚠️ 机器现实与重建能力边界（2026-07-15，已确认）
 
 - **开发机无 NVIDIA GPU**：仅 Intel UHD Graphics 770 集显（无 CUDA），i7-14700 / 32GB / D盘 1.4TB。
@@ -115,6 +155,8 @@ Opus lane 近期补齐的能力与**已知边界**（均 TDD 锁定）：
 - `handoff/FEEDBACK-HANDOFF-CODEX-003.md` — Codex 集成回执（运行时开闸决策 + 真实素材未决项）。
 - `handoff/REVIEW-CODEX-003-render-on-demand-integration.md` — Opus review 回执（字节/纯度/投影 sign-off + 4 项待处理：真实素材密度断崖 CRITICAL、布局引擎不对称 HIGH、投影 fail-open MEDIUM、越界码 LOW）。
 - `handoff/HANDOFF-CODEX-004-stream-large-reconstructions.md` — 大重建分块流式交办（`chunks.json` 契约；与合成村庄 manifest 同构但**无 `grid`**、坐标绝对、`source` 是标注信任的唯一依据）。
+- `handoff/HANDOFF-CODEX-008-batch6-to-blender-modular-consumption.md` — Batch 6 三张设计参考到 Blender 模块、现有 topology 与 180 相机验收候选的消费规格。
+- `handoff/REVIEW-CODEX-008-batch6-vs-v2-blender-preview.md` — 三张 Batch 6 参考与当前 Windows v2 Blender 四张实渲预览的机器身份绑定差距审计。
 - `docs/verification/2026-07-16-pipeline-reproducibility-audit.md` — pipeline 可复现性审计（随机源/字节/平台三维度）。
 - `docs/verification/2026-07-16-failclosed-audit-and-fixes.md` — fail-closed/provenance 审计 + 四项 TDD 修复（含 1 项 medium fail-open：矛盾对齐证据不再被提升为 metric）。
 - `handoff/` — Claude↔GPT 素材交办/回执（HANDOFF-00x）。
