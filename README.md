@@ -2,7 +2,7 @@
 
 照片与视频驱动的 3D 重建、Gaussian Splat 拼接和可替换村庄素材工作台。
 
-当前仓库交付的是一条可在本机复现的编排与审计链：混合媒体归一化、联合配准、显式坐标契约、外部 3DGS 导入、拼接/区域增清/LOD、素材版本替换、Web Viewer 与 Studio。没有 COLMAP 或 GPU 时会使用明确标注的 synthetic/proxy 数据，不把演示产物冒充实测重建。
+当前仓库交付的是一条可在本机复现的编排与审计链：混合媒体归一化、联合配准、显式坐标契约、外部训练器 3DGS 导入、拼接/区域增清/LOD、素材版本替换、Web Viewer 与 Studio。没有可用重建运行时时会使用明确标注的 synthetic/proxy 数据，不把演示产物冒充实测重建。
 
 ## 能力矩阵
 
@@ -17,8 +17,9 @@
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
 | 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位，均有 SHA、CAS 与来源证据 |
-| Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制；本地 adapter 只读，任务仍从 CLI 启动 |
-| GPU 训练真实 3DGS | **external** | 仓库支持标准 PLY 导入，但不内置训练器或训练完成声明 |
+| 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
+| Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
+| 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
 
 ## 快速开始
 
@@ -231,8 +232,9 @@ make assets PY=.venv/bin/python
 - Studio：`/web/studio/`
 - 独立 Viewer：`/web/viewer/`
 - API：`GET /api/project`、`GET /api/runs`
+- 无落盘 production plan：`GET /web/data/production-camera-plan.json`
 
-Studio 通过 bridge 读取 Viewer 的实际 runtime capability。只有 Spark 初始化成功后才显示 anisotropic covariance、alpha composite 和 spherical harmonics；否则显示降级预览。实现固定使用 [Spark 2.1.0](https://sparkjs.dev/docs/) 与兼容 Three.js 版本。
+Studio 通过 bridge 读取 Viewer 的实际 runtime capability。只有 Spark 初始化成功后才显示 anisotropic covariance、alpha composite 和 spherical harmonics；否则显示降级预览。Production plan 与 coverage audit 是独立证据层，不会提升 reconstruction provenance。实现固定使用 [Spark 2.1.0](https://sparkjs.dev/docs/) 与兼容 Three.js 版本。
 
 ## 目录
 
@@ -254,6 +256,7 @@ verification/             独立技术验证脚本
 - `recon/scene_full.ply`：审计用完整 3DGS PLY。
 - `web/data/recon/recon_manifest.json`：artifact、LOD、ancestry、transform chain、requested/actual engine、synthetic 与 fidelity。
 - `web/data/manifest.json`：world bounds、chunk LOD 和 `asset_consumption`。
+- `/web/data/production-camera-plan.json`：Studio server 从当前 deterministic 180 机位契约按需投影；不写入 `web/data/`，未交付证据仍保留在 plan 中。
 - `assets/registry.json`：素材 active/history、版本、SHA 与来源。
 
 可信度从机器字段推导，不从文件名或 engine 名推断：
