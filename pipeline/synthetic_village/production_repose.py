@@ -300,7 +300,17 @@ def _point_at_arc_length(
             tangent = (end[0] - start[0], end[1] - start[1])
             norm = math.hypot(*tangent) or 1.0
             return point, (tangent[0] / norm, tangent[1] / norm)
-    return points[-1], (1.0, 0.0)
+    # Unreachable when ``PolylineTopologySource.__post_init__`` has rejected
+    # degenerate and adjacent-duplicate inputs (``total > 0`` and the final
+    # segment always contains ``target == total``).  Fail closed instead of
+    # returning a fabricated ``(points[-1], (1.0, 0.0))`` tangent -- a silent
+    # fallback here would invent orientation data the caller did not measure.
+    raise ProductionProfileError(
+        "_point_at_arc_length could not locate arc_length="
+        f"{arc_length!r} on topology_ref={source.topology_ref!r} "
+        f"(total_length={total!r}, point_count={len(points)}); "
+        "this should be impossible after PolylineTopologySource validation",
+    )
 
 
 def _build_predicted_plan(
