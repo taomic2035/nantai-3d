@@ -629,3 +629,147 @@ def search_replacement_pose(
         previous_camera_registry_sha256=production_camera_registry_digest(plan),
         previous_pose_sha256=_pose_sha256(original_pose),
     )
+
+
+def build_reposed_plan(
+    search: ReplacementPoseSearch,
+    *,
+    plan: ProductionCameraPlan,
+) -> tuple[ProductionCameraPlan, str, str]:
+    """Rebuild the 180-camera plan from a search's accepted candidate.
+
+    This is the public helper for Task 5 §3 callers: given a
+    ``ReplacementPoseSearch`` whose ``accepted_geometry_candidate`` is not
+    None, rebuild ``plan`` with the accepted candidate's pose substituted
+    in, and verify the rebuilt plan's SHA matches what the search
+    predicted.  If the SHA does not match, fail closed -- the caller has
+    a different plan than what the search validated, and must not proceed
+    to Blender clearance / six-layer render.
+
+    The caller MUST pass the same plan instance it passed to
+    ``search_replacement_pose``.  If a different or mutated plan is
+    passed, the rebuilt SHA will differ from
+    ``accepted.predicted_plan_sha256`` and the function will fail closed.
+
+    Returns ``(new_plan, new_plan_sha256, new_camera_registry_sha256)``.
+
+    Raises ``ProductionProfileError`` if:
+
+    * ``search.accepted_geometry_candidate`` is None (geometry search
+      found no viable candidate -- caller must not call this function);
+    * the rebuilt plan fails pydantic re-validation (e.g. a validator
+      the geometry gates missed caught the substitution);
+    * the rebuilt plan's SHA does not match
+      ``accepted.predicted_plan_sha256`` (caller passed a different or
+      mutated plan between calling ``search_replacement_pose`` and this
+      function);
+    * the rebuilt plan's camera registry SHA does not match
+      ``accepted.predicted_camera_registry_sha256``.
+
+    This function does NOT run Blender, does NOT render, and does NOT
+    approve the reposed plan for canonical use.  It only rebuilds the
+    plan and verifies its identity against what the search predicted.
+    """
+    accepted = search.accepted_geometry_candidate
+    if accepted is None:
+        raise ProductionProfileError(
+            "cannot build a reposed plan: search.accepted_geometry_candidate "
+            "is None (geometry search found no viable candidate)",
+        )
+    if accepted.predicted_plan_sha256 is None:
+        raise ProductionProfileError(
+            "cannot build a reposed plan: accepted candidate has "
+            "predicted_plan_sha256=None (geometry gates passed but the "
+            "plan rebuild inside search_replacement_pose failed -- this "
+            "should be impossible, please report)",
+        )
+    if accepted.predicted_camera_registry_sha256 is None:
+        raise ProductionProfileError(
+            "cannot build a reposed plan: accepted candidate has "
+            "predicted_camera_registry_sha256=None (same as above)",
+        )
+
+    # Verify the caller passed the same plan that produced this search.
+    # The search recorded the plan's SHA as previous_plan_sha256; if the
+    # caller passed a different plan, this check fails closed before we
+    # even try to rebuild.
+    actual_plan_sha = hashlib.sha256(
+        canonical_production_plan_bytes(plan),
+    ).hexdigest()
+    if actual_plan_sha != search.previous_plan_sha256:
+        raise ProductionProfileError(
+            f"cannot build a reposed plan: the plan passed to this "
+            f"function has SHA {actual_plan_sha}, but the search was "
+            f"performed on a plan with SHA {search.previous_plan_sha256}. "
+            f"Pass the same plan instance you passed to "
+            f"search_replacement_pose.",
+        )
+
+    # Locate the original camera in the plan.
+    original_pose: ProductionCameraPose | None = None
+    for camera in plan.cameras:
+        if camera.camera_id == search.camera_id:
+            original_pose = camera
+            break
+    if original_pose is None:
+        raise ProductionProfileError(
+            f"cannot build a reposed plan: camera_id={search.camera_id} "
+            f"is not present in the plan",
+        )
+
+    # Reconstruct the new pose by copying mutable-on-repose fields from
+    # the candidate.  Other fields (topology_ref, group_id, sequence_index,
+    # eye_height_m, fov_x_deg, intrinsics, audit_only, disclosure) are
+    # preserved from the original camera.
+    new_pose = original_pose.model_copy(
+        update={
+            "position_m": accepted.position_m,
+            "look_at_m": accepted.look_at_m,
+            "arc_length_m": accepted.arc_length_m,
+            "c2w_opencv": accepted.c2w_opencv,
+        },
+    )
+
+    new_cameras = tuple(
+        new_pose if c.camera_id == search.camera_id else c
+        for c in plan.cameras
+    )
+    try:
+        candidate_plan = plan.model_copy(update={"cameras": new_cameras})
+        # Re-validate by round-tripping canonical JSON -- this forces
+        # every validator to rerun, exactly like _build_predicted_plan did
+        # inside search_replacement_pose.
+        candidate_plan = ProductionCameraPlan.model_validate_json(
+            canonical_production_plan_bytes(candidate_plan),
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise ProductionProfileError(
+            f"cannot build a reposed plan: the rebuilt plan failed "
+            f"pydantic re-validation: {exc}",
+        ) from exc
+
+    plan_sha = hashlib.sha256(
+        canonical_production_plan_bytes(candidate_plan),
+    ).hexdigest()
+    registry_sha = production_camera_registry_digest(candidate_plan)
+
+    if plan_sha != accepted.predicted_plan_sha256:
+        raise ProductionProfileError(
+            f"cannot build a reposed plan: rebuilt plan SHA {plan_sha} "
+            f"does not match the search's predicted_plan_sha256 "
+            f"{accepted.predicted_plan_sha256}.  The caller has either "
+            f"mutated the plan between search_replacement_pose and "
+            f"build_reposed_plan, or the search was constructed by hand "
+            f"with a fabricated predicted_plan_sha256.",
+        )
+    if registry_sha != accepted.predicted_camera_registry_sha256:
+        raise ProductionProfileError(
+            f"cannot build a reposed plan: rebuilt camera registry SHA "
+            f"{registry_sha} does not match the search's "
+            f"predicted_camera_registry_sha256 "
+            f"{accepted.predicted_camera_registry_sha256}.",
+        )
+
+    return candidate_plan, plan_sha, registry_sha
+
+

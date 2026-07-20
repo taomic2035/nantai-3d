@@ -44,6 +44,7 @@ from pipeline.synthetic_village.production_profile import (
 )
 from pipeline.synthetic_village.production_repose import (
     ReposeCandidatePolicy,
+    build_reposed_plan,
     canonical_repose_candidate_policy_bytes,
     search_replacement_pose,
 )
@@ -1027,5 +1028,183 @@ def test_search_sha_changes_when_candidate_verdicts_change() -> None:
         "search_sha256 must change when candidate verdicts change, even "
         "if the policy / report SHA / camera_id are identical"
     )
+
+
+# --------------------------------------------------------------------------- #
+# build_reposed_plan: public helper for Task 5 §3 callers
+# --------------------------------------------------------------------------- #
+
+
+def _successful_search(plan=None):
+    """Run search_replacement_pose for 010 and return (plan, search)."""
+    if plan is None:
+        plan = _plan()
+    topology = _topology_for_camera(plan, "camera-ground-route-010")
+    search = search_replacement_pose(
+        plan=plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=_failing_decision(),
+        preflight_report_sha256=_VALID_REPORT_SHA,
+        topology=topology,
+        candidate_policy=_policy(),
+    )
+    assert search.accepted_geometry_candidate is not None
+    return plan, search
+
+
+def test_build_reposed_plan_rebuilds_with_accepted_candidate() -> None:
+    """build_reposed_plan returns a plan whose SHA matches predicted."""
+    plan, search = _successful_search()
+    accepted = search.accepted_geometry_candidate
+
+    new_plan, plan_sha, registry_sha = build_reposed_plan(
+        search=search, plan=plan,
+    )
+
+    assert plan_sha == accepted.predicted_plan_sha256
+    assert registry_sha == accepted.predicted_camera_registry_sha256
+    # The new plan is not the same as the old plan (different SHA).
+    assert plan_sha != search.previous_plan_sha256
+
+    # The new plan is a valid ProductionCameraPlan (already enforced by
+    # model_validate_json inside build_reposed_plan, but double-check).
+    new_plan_sha = hashlib.sha256(
+        canonical_production_plan_bytes(new_plan),
+    ).hexdigest()
+    assert new_plan_sha == plan_sha
+
+
+def test_build_reposed_plan_substitutes_reposed_camera() -> None:
+    """The new plan has the reposed camera substituted in, others preserved."""
+    plan, search = _successful_search()
+    accepted = search.accepted_geometry_candidate
+    new_plan, _, _ = build_reposed_plan(search=search, plan=plan)
+
+    # The reposed camera in the new plan has the accepted candidate's pose.
+    new_camera = next(
+        c for c in new_plan.cameras
+        if c.camera_id == "camera-ground-route-010"
+    )
+    assert new_camera.position_m == accepted.position_m
+    assert new_camera.look_at_m == accepted.look_at_m
+    assert new_camera.arc_length_m == accepted.arc_length_m
+    assert new_camera.c2w_opencv == accepted.c2w_opencv
+
+    # The other 179 cameras are unchanged.
+    original_by_id = {c.camera_id: c for c in plan.cameras}
+    for camera in new_plan.cameras:
+        if camera.camera_id == "camera-ground-route-010":
+            continue
+        assert camera == original_by_id[camera.camera_id], (
+            f"camera {camera.camera_id} changed when only 010 should have"
+        )
+
+
+def test_build_reposed_plan_preserves_camera_metadata() -> None:
+    """The reposed camera keeps topology_ref/group_id/intrinsics/etc."""
+    plan, search = _successful_search()
+    accepted = search.accepted_geometry_candidate
+    new_plan, _, _ = build_reposed_plan(search=search, plan=plan)
+
+    original_camera = next(
+        c for c in plan.cameras if c.camera_id == "camera-ground-route-010"
+    )
+    new_camera = next(
+        c for c in new_plan.cameras
+        if c.camera_id == "camera-ground-route-010"
+    )
+    # Mutable-on-repose fields are substituted.
+    assert new_camera.position_m == accepted.position_m
+    assert new_camera.look_at_m == accepted.look_at_m
+    assert new_camera.arc_length_m == accepted.arc_length_m
+    assert new_camera.c2w_opencv == accepted.c2w_opencv
+    # Metadata fields are preserved.
+    assert new_camera.camera_id == original_camera.camera_id
+    assert new_camera.group_id == original_camera.group_id
+    assert new_camera.sequence_index == original_camera.sequence_index
+    assert new_camera.topology_ref == original_camera.topology_ref
+    assert new_camera.eye_height_m == original_camera.eye_height_m
+    assert new_camera.fov_x_deg == original_camera.fov_x_deg
+    assert new_camera.intrinsics == original_camera.intrinsics
+    assert new_camera.audit_only == original_camera.audit_only
+    assert new_camera.disclosure == original_camera.disclosure
+
+
+def test_build_reposed_plan_rejects_none_accepted_candidate() -> None:
+    """If the search found no viable candidate, build_reposed_plan fails."""
+    plan = _plan()
+    topology = _topology_for_camera(plan, "camera-ground-route-010")
+    absurd_policy = ReposeCandidatePolicy(
+        clearance_policy_sha256="0" * 64,
+        arc_length_offsets_m=(1_000_000.0,),
+        lateral_offsets_m=(0.0,),
+        min_spacing_to_other_cameras_m=2.5,
+        require_within_half_width=True,
+    )
+    search = search_replacement_pose(
+        plan=plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=_failing_decision(),
+        preflight_report_sha256=_VALID_REPORT_SHA,
+        topology=topology,
+        candidate_policy=absurd_policy,
+    )
+    assert search.accepted_geometry_candidate is None
+    with pytest.raises(ProductionProfileError, match="accepted_geometry_candidate"):
+        build_reposed_plan(search=search, plan=plan)
+
+
+def test_build_reposed_plan_rejects_wrong_plan() -> None:
+    """If the caller passes a different plan, fail closed."""
+    plan_a, search = _successful_search()
+    # Build a different plan: 180 cameras but with one moved.
+    # We construct it by mutating plan_a through the canonical round-trip.
+    original_camera = next(
+        c for c in plan_a.cameras if c.camera_id == "camera-ground-route-010"
+    )
+    moved_camera = original_camera.model_copy(
+        update={"position_m": (
+            original_camera.position_m[0] + 0.001,
+            original_camera.position_m[1],
+            original_camera.position_m[2],
+        )},
+    )
+    moved_cameras = tuple(
+        moved_camera if c.camera_id == "camera-ground-route-010" else c
+        for c in plan_a.cameras
+    )
+    plan_b = plan_a.model_copy(update={"cameras": moved_cameras})
+    plan_b = type(plan_a).model_validate_json(
+        canonical_production_plan_bytes(plan_b),
+    )
+
+    # Sanity: plan_b has a different SHA than plan_a.
+    plan_a_sha = hashlib.sha256(
+        canonical_production_plan_bytes(plan_a),
+    ).hexdigest()
+    plan_b_sha = hashlib.sha256(
+        canonical_production_plan_bytes(plan_b),
+    ).hexdigest()
+    assert plan_a_sha != plan_b_sha
+
+    with pytest.raises(ProductionProfileError, match="SHA"):
+        build_reposed_plan(search=search, plan=plan_b)
+
+
+def test_build_reposed_plan_returns_revalidated_plan() -> None:
+    """The returned plan has been through model_validate_json round-trip."""
+    plan, search = _successful_search()
+    new_plan, _, _ = build_reposed_plan(search=search, plan=plan)
+
+    # model_validate_json enforces strict mode + re-runs all model
+    # validators. If the reposed camera violated any invariant the plan
+    # builder relies on, build_reposed_plan would have raised. So just
+    # by returning successfully, the new_plan is a fully validated plan.
+    # We can assert it has the right camera count and is frozen.
+    assert len(new_plan.cameras) == len(plan.cameras)
+    # Pydantic frozen models raise on setattr.
+    with pytest.raises((TypeError, ValueError, AttributeError)):
+        new_plan.cameras = new_plan.cameras[:1]  # type: ignore[misc]
+
 
 
