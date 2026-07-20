@@ -16,10 +16,17 @@ ROOT = Path(__file__).resolve().parents[1]
 BLENDER = ROOT / "third" / "blender" / "blender.exe"
 BUILDER = ROOT / "scripts" / "blender" / "build_synthetic_village.py"
 RENDERER = ROOT / "scripts" / "blender" / "render_synthetic_village.py"
+PREFLIGHT = ROOT / "scripts" / "blender" / "preflight_production_cameras.py"
 FORMAL_BLEND = (
     ROOT
     / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
     / "344e643c81753e986d8945ca2b4a8713f26efedc755ab2055bd4235b1c656d1b"
+    / "village-canary.blend"
+)
+PRODUCTION_BLEND = (
+    ROOT
+    / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
+    / "4f38ecf49ff8182e02c426df314dab90b91502673164330d3b704f234d02f1dc"
     / "village-canary.blend"
 )
 
@@ -75,6 +82,35 @@ def _run_renderer(
             str(blend_path),
             "--python",
             str(RENDERER),
+            "--",
+            *runtime_args,
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def _run_preflight(
+    blend_path: Path,
+    *runtime_args: str,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            str(BLENDER),
+            "--background",
+            "--factory-startup",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "17",
+            str(blend_path),
+            "--python",
+            str(PREFLIGHT),
             "--",
             *runtime_args,
         ],
@@ -228,6 +264,49 @@ def _formal_render_request():
     )
 
 
+def _production_clearance_request():
+    from pipeline.synthetic_village import canary
+    from pipeline.synthetic_village.elevated_topology import (
+        build_elevated_topology_plan,
+    )
+    from pipeline.synthetic_village.production_preflight import (
+        ProductionClearancePolicy,
+        build_production_clearance_request,
+    )
+    from pipeline.synthetic_village.production_profile import (
+        build_production_camera_plan,
+    )
+    from pipeline.synthetic_village.scene_plan import build_scene_plan
+
+    report_path = PRODUCTION_BLEND.parent / "build-report.json"
+    report = canary.load_textured_build_report(report_path)
+    scene = build_scene_plan()
+    plan = build_production_camera_plan(
+        scene,
+        build_elevated_topology_plan(scene),
+    )
+    return build_production_clearance_request(
+        plan=plan,
+        selected_camera_ids=(
+            "camera-ground-route-010",
+            "camera-ground-route-034",
+            "camera-ground-route-039",
+        ),
+        build_id=report.build_id,
+        blender_executable_sha256=_sha256(BLENDER),
+        preflight_script_sha256=_sha256(PREFLIGHT),
+        blend_sha256=_sha256(PRODUCTION_BLEND),
+        build_report_sha256=_sha256(report_path),
+        object_registry=report.object_registry,
+        auxiliary_registry=report.auxiliary_registry,
+        semantic_registry=report.semantic_registry,
+        policy=ProductionClearancePolicy(
+            near_distance_m=2.0,
+            minimum_upper_middle_near_hit_count=5,
+        ),
+    )
+
+
 def _read_exr_attributes(path: Path) -> dict[str, tuple[str, bytes]]:
     raw = path.read_bytes()
     assert raw[:4] == b"\x76\x2f\x31\x01"
@@ -249,6 +328,98 @@ def _read_exr_attributes(path: Path) -> dict[str, tuple[str, bytes]]:
         offset += size
         attributes[name] = (attribute_type, value)
     return attributes
+
+
+@pytest.mark.skipif(
+    not PRODUCTION_BLEND.is_file(),
+    reason="verified private production Blender scene is unavailable",
+)
+def test_preflight_runtime_measures_bound_production_camera_clearance(
+    tmp_path: Path,
+) -> None:
+    from pipeline.synthetic_village.production_preflight import (
+        ProductionClearanceReport,
+        canonical_production_clearance_report_bytes,
+        canonical_production_clearance_request_bytes,
+        verify_production_clearance_report,
+    )
+
+    request = _production_clearance_request()
+    request_path = tmp_path / "preflight-request.json"
+    report_path = tmp_path / "preflight-report.json"
+    request_path.write_bytes(
+        canonical_production_clearance_request_bytes(request),
+    )
+
+    completed = _run_preflight(
+        PRODUCTION_BLEND,
+        "--request",
+        str(request_path),
+        "--report",
+        str(report_path),
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = ProductionClearanceReport.model_validate_json(
+        report_path.read_bytes(),
+    )
+    assert report_path.read_bytes() == (
+        canonical_production_clearance_report_bytes(report)
+    )
+    verify_production_clearance_report(report, request=request)
+    decisions = {row.camera_id: row for row in report.decisions}
+    assert decisions["camera-ground-route-010"].passes is False
+    assert (
+        decisions[
+            "camera-ground-route-010"
+        ].measured_upper_middle_near_hit_count
+        == 15
+    )
+    assert decisions["camera-ground-route-034"].passes is True
+    assert (
+        decisions[
+            "camera-ground-route-034"
+        ].measured_upper_middle_near_hit_count
+        == 0
+    )
+    assert decisions["camera-ground-route-039"].passes is False
+    assert (
+        decisions[
+            "camera-ground-route-039"
+        ].measured_upper_middle_near_hit_count
+        == 5
+    )
+    assert report.synthetic is True
+    assert report.geometry_trust == "simplified-pbr-not-render-parity"
+    assert report.trust_effect == "none-quality-filter-only"
+
+
+@pytest.mark.skipif(
+    not PRODUCTION_BLEND.is_file(),
+    reason="verified private production Blender scene is unavailable",
+)
+def test_preflight_runtime_rejects_duplicate_request_keys_without_report(
+    tmp_path: Path,
+) -> None:
+    request_path = tmp_path / "duplicate-request.json"
+    report_path = tmp_path / "must-not-exist.json"
+    request_path.write_bytes(
+        b'{"schema_version":"first","schema_version":"second"}\n',
+    )
+
+    completed = _run_preflight(
+        PRODUCTION_BLEND,
+        "--request",
+        str(request_path),
+        "--report",
+        str(report_path),
+    )
+
+    assert completed.returncode == 17
+    assert "duplicate JSON key: schema_version" in (
+        completed.stdout + completed.stderr
+    )
+    assert not report_path.exists()
 
 
 def test_runtime_redecodes_written_masks_and_rejects_bad_crc(tmp_path: Path) -> None:

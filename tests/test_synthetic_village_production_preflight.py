@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 
@@ -12,11 +13,23 @@ from pipeline.synthetic_village.production_preflight import (
     ProductionCameraClearanceEvidence,
     ProductionClearancePolicy,
     ProductionClearanceRayEvidence,
+    ProductionClearanceReport,
+    ProductionClearanceRequest,
+    ProductionPreflightError,
+    build_production_clearance_report,
+    build_production_clearance_request,
     canonical_production_camera_clearance_evidence_bytes,
+    canonical_production_clearance_report_bytes,
+    canonical_production_clearance_request_bytes,
     evaluate_production_camera_clearance,
+    parse_production_clearance_report_bytes,
     production_camera_clearance_evidence_sha256,
     production_clearance_policy_sha256,
+    production_clearance_preflight_id,
+    production_clearance_request_sha256,
+    verify_production_clearance_report,
 )
+from tests.test_synthetic_village_production_render import _request
 
 
 def _evidence_with_hits(
@@ -37,8 +50,12 @@ def _evidence_with_hits(
                     if (sample_x, sample_y) in hits
                     else None
                 ),
-                stable_id=10 if (sample_x, sample_y) in hits else None,
-                part_id=2 if (sample_x, sample_y) in hits else None,
+                stable_id=(
+                    "lower-bridge"
+                    if (sample_x, sample_y) in hits
+                    else None
+                ),
+                part_id="deck" if (sample_x, sample_y) in hits else None,
                 semantic_id=3 if (sample_x, sample_y) in hits else None,
             )
             for sample_y in (-0.9, -0.45, 0.0, 0.45, 0.9)
@@ -162,6 +179,31 @@ def test_hit_may_preserve_unknown_registry_fields_without_inference() -> None:
     assert ray.semantic_id is None
 
 
+def test_hit_registry_identity_uses_scene_string_ids() -> None:
+    ray = ProductionClearanceRayEvidence(
+        sample_x=0.0,
+        sample_y=0.0,
+        hit=True,
+        distance_m=1.25,
+        object_name="nv__lower-bridge__deck",
+        stable_id="lower-bridge",
+        part_id="deck",
+        semantic_id=4,
+    )
+
+    assert ray.stable_id == "lower-bridge"
+    assert ray.part_id == "deck"
+    with pytest.raises(ValidationError):
+        ProductionClearanceRayEvidence(
+            sample_x=0.0,
+            sample_y=0.0,
+            hit=True,
+            distance_m=1.25,
+            stable_id=10,
+            part_id=2,
+        )
+
+
 def test_evidence_canonical_bytes_and_sha_are_cross_process_stable() -> None:
     evidence = _evidence_with_hits(
         camera_id="camera-ground-route-001",
@@ -212,3 +254,204 @@ def test_evidence_canonical_bytes_and_sha_are_cross_process_stable() -> None:
 def test_malformed_operator_policy_fails_closed(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         ProductionClearancePolicy(**kwargs)
+
+
+def _clearance_request() -> ProductionClearanceRequest:
+    render_request = _request()
+    return build_production_clearance_request(
+        plan=render_request.production_plan,
+        selected_camera_ids=(
+            "camera-ground-route-010",
+            "camera-ground-route-034",
+            "camera-ground-route-039",
+        ),
+        build_id=render_request.build_id,
+        blender_executable_sha256=render_request.blender_executable_sha256,
+        preflight_script_sha256="6" * 64,
+        blend_sha256=render_request.blend_sha256,
+        build_report_sha256=render_request.build_report_sha256,
+        object_registry=render_request.object_registry,
+        auxiliary_registry=render_request.auxiliary_registry,
+        semantic_registry=render_request.semantic_registry,
+        policy=ProductionClearancePolicy(
+            near_distance_m=2.0,
+            minimum_upper_middle_near_hit_count=5,
+        ),
+    )
+
+
+def test_clearance_request_binds_every_scene_and_policy_identity() -> None:
+    request = _clearance_request()
+
+    assert request.production_plan_sha256 == (
+        _request().production_plan_sha256
+    )
+    assert request.camera_registry_sha256 == (
+        _request().camera_registry_sha256
+    )
+    assert request.object_registry_sha256 == _request().object_registry_sha256
+    assert request.policy_sha256 == production_clearance_policy_sha256(
+        request.policy,
+    )
+    assert request.preflight_id == production_clearance_preflight_id(request)
+    assert production_clearance_request_sha256(request) == (
+        production_clearance_request_sha256(request)
+    )
+    assert request.synthetic is True
+    assert request.geometry_trust == "simplified-pbr-not-render-parity"
+    assert request.trust_effect == "none-quality-filter-only"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "production_plan_sha256",
+        "camera_registry_sha256",
+        "object_registry_sha256",
+        "policy_sha256",
+        "blend_sha256",
+    ],
+)
+def test_clearance_request_rejects_readdressed_inputs(field: str) -> None:
+    request = _clearance_request()
+    payload = json.loads(canonical_production_clearance_request_bytes(request))
+    payload[field] = "f" * 64
+
+    with pytest.raises(ValidationError):
+        ProductionClearanceRequest.model_validate_json(json.dumps(payload))
+
+
+def test_clearance_request_requires_unique_plan_ordered_camera_subset() -> None:
+    request = _clearance_request()
+    payload = json.loads(canonical_production_clearance_request_bytes(request))
+    payload["selected_camera_ids"] = [
+        "camera-ground-route-039",
+        "camera-ground-route-010",
+        "camera-ground-route-010",
+    ]
+
+    with pytest.raises(ValidationError, match="unique plan-ordered subset"):
+        ProductionClearanceRequest.model_validate_json(json.dumps(payload))
+
+
+def test_report_recomputes_every_decision_from_bound_raw_evidence() -> None:
+    request = _clearance_request()
+    evidence = tuple(
+        _evidence_with_hits(
+            camera_id=camera_id,
+            hits=(
+                {
+                    (sample_x, sample_y): 0.5
+                    for sample_x in request.policy.sample_grid
+                    for sample_y in (0.0, 0.45, 0.9)
+                }
+                if camera_id == "camera-ground-route-010"
+                else {}
+            ),
+        )
+        for camera_id in request.selected_camera_ids
+    )
+    report = build_production_clearance_report(request, evidence=evidence)
+
+    verify_production_clearance_report(report, request=request)
+
+    assert report.request_sha256 == production_clearance_request_sha256(request)
+    assert tuple(row.camera_id for row in report.decisions) == (
+        request.selected_camera_ids
+    )
+    assert report.decisions[0].passes is False
+    assert report.decisions[1].passes is True
+    assert report.decisions[2].passes is True
+
+
+def test_report_fails_closed_on_missing_camera_or_fabricated_decision() -> None:
+    request = _clearance_request()
+    evidence = tuple(
+        _evidence_with_hits(camera_id=camera_id, hits={})
+        for camera_id in request.selected_camera_ids
+    )
+    report = build_production_clearance_report(request, evidence=evidence)
+    missing = report.model_copy(
+        update={
+            "evidence": report.evidence[:-1],
+            "decisions": report.decisions[:-1],
+        },
+    )
+    fabricated = report.model_copy(
+        update={
+            "decisions": (
+                report.decisions[0].model_copy(
+                    update={
+                        "passes": False,
+                        "failed_rule_ids": ("upper-middle-near-hit-count",),
+                    },
+                ),
+                *report.decisions[1:],
+            ),
+        },
+    )
+
+    with pytest.raises(ProductionPreflightError, match="camera set"):
+        verify_production_clearance_report(missing, request=request)
+    with pytest.raises(ProductionPreflightError, match="decision"):
+        verify_production_clearance_report(fabricated, request=request)
+
+
+def test_report_rejects_request_or_runtime_identity_mismatch() -> None:
+    request = _clearance_request()
+    evidence = tuple(
+        _evidence_with_hits(camera_id=camera_id, hits={})
+        for camera_id in request.selected_camera_ids
+    )
+    report = build_production_clearance_report(request, evidence=evidence)
+
+    for field in (
+        "request_sha256",
+        "build_id",
+        "blender_executable_sha256",
+        "preflight_script_sha256",
+        "blend_sha256",
+        "build_report_sha256",
+        "object_registry_sha256",
+    ):
+        altered = report.model_copy(update={field: "f" * 64})
+        with pytest.raises(ProductionPreflightError, match="identity"):
+            verify_production_clearance_report(altered, request=request)
+
+
+def test_report_contract_rejects_unknown_fields() -> None:
+    request = _clearance_request()
+    report = build_production_clearance_report(
+        request,
+        evidence=tuple(
+            _evidence_with_hits(camera_id=camera_id, hits={})
+            for camera_id in request.selected_camera_ids
+        ),
+    )
+    payload = report.model_dump(mode="json")
+    payload["untrusted_note"] = "looks good"
+
+    with pytest.raises(ValidationError):
+        ProductionClearanceReport.model_validate(payload)
+
+
+def test_report_parser_rejects_duplicate_keys_and_noncanonical_bytes() -> None:
+    request = _clearance_request()
+    report = build_production_clearance_report(
+        request,
+        evidence=tuple(
+            _evidence_with_hits(camera_id=camera_id, hits={})
+            for camera_id in request.selected_camera_ids
+        ),
+    )
+    canonical = canonical_production_clearance_report_bytes(report)
+
+    assert parse_production_clearance_report_bytes(canonical) == report
+    with pytest.raises(ProductionPreflightError, match="duplicate JSON key"):
+        parse_production_clearance_report_bytes(
+            b'{"schema_version":"first","schema_version":"second"}\n',
+        )
+    with pytest.raises(ProductionPreflightError, match="canonical JSON"):
+        parse_production_clearance_report_bytes(
+            json.dumps(report.model_dump(mode="json")).encode("utf-8"),
+        )
