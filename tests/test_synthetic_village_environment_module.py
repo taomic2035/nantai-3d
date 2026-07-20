@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 from typing import Any, cast
 
 import pytest
@@ -53,11 +52,9 @@ from pipeline.synthetic_village.environment_module import (
     REAR_SERVICE_INSTANCE_RANGE,
     CentralCourtyardRecipe,
     CreekCrossSectionSpec,
-    EnvironmentModule,
     EnvironmentModuleError,
     EnvironmentModulePart,
     EnvironmentModulePlan,
-    EnvironmentModuleSummary,
     LowerBridgeRecipe,
     RearServiceCourtyardRecipe,
     WaterwheelPartSpec,
@@ -71,7 +68,6 @@ from pipeline.synthetic_village.scene_plan import (
     build_scene_plan,
     canonical_scene_plan_bytes,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Fixtures.
@@ -97,7 +93,7 @@ def plan(scene: ScenePlan, topology: ElevatedTopologyPlan) -> EnvironmentModuleP
 
 
 def _plan_payload(plan: EnvironmentModulePlan) -> dict[str, Any]:
-    return json.loads(canonical_environment_module_plan_bytes(plan))
+    return copy.deepcopy(plan.model_dump())
 
 
 # --------------------------------------------------------------------------- #
@@ -131,10 +127,12 @@ def test_canonical_bytes_are_stable_across_processes(
     topology: ElevatedTopologyPlan,
 ) -> None:
     plan_a = build_default_environment_module_plan(
-        scene=scene, elevated_topology=topology,
+        scene=scene,
+        elevated_topology=topology,
     )
     plan_b = build_default_environment_module_plan(
-        scene=scene, elevated_topology=topology,
+        scene=scene,
+        elevated_topology=topology,
     )
     bytes_a = canonical_environment_module_plan_bytes(plan_a)
     bytes_b = canonical_environment_module_plan_bytes(plan_b)
@@ -171,7 +169,9 @@ def test_tampered_scene_sha256_fails_closed(
     )
     with pytest.raises(EnvironmentModuleError):
         verify_environment_module_plan(
-            tampered, scene=scene, elevated_topology=topology,
+            tampered,
+            scene=scene,
+            elevated_topology=topology,
         )
 
 
@@ -185,7 +185,9 @@ def test_tampered_topology_sha256_fails_closed(
     )
     with pytest.raises(EnvironmentModuleError):
         verify_environment_module_plan(
-            tampered, scene=scene, elevated_topology=topology,
+            tampered,
+            scene=scene,
+            elevated_topology=topology,
         )
 
 
@@ -198,15 +200,8 @@ def test_tampered_design_source_sha256_fails_closed(plan: EnvironmentModulePlan)
         EnvironmentModulePlan.model_validate(tampered_payload)
 
 
-def test_verify_rejects_plan_bound_to_a_different_scene(
-    plan: EnvironmentModulePlan,
-) -> None:
-    # Build a different scene by perturbing the recipe (build_scene_plan is
-    # deterministic, so we mutate one field on a copy).
+def test_verify_rejects_plan_bound_to_a_different_scene() -> None:
     original_scene = build_scene_plan()
-    different_scene = original_scene.model_copy(
-        update={"plan_id": "synthetic-mountain-village-scene-v1"},
-    )
     # The plan was bound to original_scene's SHA.  Feeding it back the
     # canonical scene (which equals original_scene) is fine, but the
     # verification function must still reject if the bound SHA does not
@@ -219,7 +214,8 @@ def test_verify_rejects_plan_bound_to_a_different_scene(
     )
     # Sanity: bound to original_scene.
     verify_environment_module_plan(
-        fresh_plan, scene=original_scene,
+        fresh_plan,
+        scene=original_scene,
         elevated_topology=build_elevated_topology_plan(original_scene),
     )
     # Now break it: mutate the plan's bound SHA to a foreign value.
@@ -228,7 +224,8 @@ def test_verify_rejects_plan_bound_to_a_different_scene(
     )
     with pytest.raises(EnvironmentModuleError):
         verify_environment_module_plan(
-            foreign, scene=original_scene,
+            foreign,
+            scene=original_scene,
             elevated_topology=build_elevated_topology_plan(original_scene),
         )
 
@@ -256,29 +253,32 @@ def test_module_instance_id_partition_is_locked(plan: EnvironmentModulePlan) -> 
         }[module.module_id]
         for part in module.parts:
             assert part.instance_id in expected_range, (
-                f"{part.part_id} instance {part.instance_id} not in "
-                f"{module.module_id} segment"
+                f"{part.part_id} instance {part.instance_id} not in {module.module_id} segment"
             )
 
 
 def test_full_instance_segment_occupied_exactly(plan: EnvironmentModulePlan) -> None:
-    all_instances = sorted(
-        part.instance_id
-        for module in plan.modules
-        for part in module.parts
-    )
+    all_instances = sorted(part.instance_id for module in plan.modules for part in module.parts)
     assert all_instances == list(range(131, 176))
     # No overlap with elevated components (127-130).
     assert all(instance >= 131 for instance in all_instances)
 
 
 def test_part_ids_unique_across_plan(plan: EnvironmentModulePlan) -> None:
-    part_ids = [
-        part.part_id
-        for module in plan.modules
-        for part in module.parts
-    ]
+    part_ids = [part.part_id for module in plan.modules for part in module.parts]
     assert len(set(part_ids)) == len(part_ids)
+
+
+def test_plan_rejects_duplicate_part_id_across_modules(
+    plan: EnvironmentModulePlan,
+) -> None:
+    payload = _plan_payload(plan)
+    central_part = payload["modules"][0]["parts"][0]
+    service_part = payload["modules"][2]["parts"][0]
+    service_part["part_id"] = central_part["part_id"]
+
+    with pytest.raises(ValidationError):
+        EnvironmentModulePlan.model_validate(payload)
 
 
 def test_material_slot_ids_are_stable(plan: EnvironmentModulePlan) -> None:
@@ -296,6 +296,16 @@ def test_summary_part_count_matches(plan: EnvironmentModulePlan) -> None:
     assert plan.summary.module_count == 3
     assert plan.summary.instance_id_segment_start == 131
     assert plan.summary.instance_id_segment_end == 175
+
+
+def test_plan_rejects_incorrect_summary_part_count(
+    plan: EnvironmentModulePlan,
+) -> None:
+    payload = _plan_payload(plan)
+    payload["summary"]["part_count"] = plan.summary.part_count - 1
+
+    with pytest.raises(ValidationError):
+        EnvironmentModulePlan.model_validate(payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -320,9 +330,9 @@ def test_creek_section_rejects_water_above_terrain() -> None:
     with pytest.raises(ValidationError):
         CreekCrossSectionSpec(
             arc_length_m=10.0,
-            terrain_z_m=-1.0,   # terrain below water
+            terrain_z_m=-1.0,  # terrain below water
             bank_z_m=-0.4,
-            water_z_m=0.5,      # water above terrain
+            water_z_m=0.5,  # water above terrain
             arch_soffit_z_m=2.6,
             deck_z_m=2.4,
         )
@@ -334,7 +344,7 @@ def test_creek_section_rejects_water_above_bank() -> None:
             arc_length_m=10.0,
             terrain_z_m=0.5,
             bank_z_m=-0.4,
-            water_z_m=0.0,      # water above bank
+            water_z_m=0.0,  # water above bank
             arch_soffit_z_m=2.6,
             deck_z_m=2.4,
         )
@@ -347,15 +357,13 @@ def test_creek_section_rejects_soffit_below_deck() -> None:
             terrain_z_m=0.0,
             bank_z_m=-0.4,
             water_z_m=-0.8,
-            arch_soffit_z_m=2.0,   # soffit below deck
+            arch_soffit_z_m=2.0,  # soffit below deck
             deck_z_m=2.4,
         )
 
 
 def test_lower_bridge_module_has_at_least_three_sections(plan: EnvironmentModulePlan) -> None:
-    bridge = next(
-        m for m in plan.modules if m.module_id == "lower-bridge-waterwheel"
-    )
+    bridge = next(m for m in plan.modules if m.module_id == "lower-bridge-waterwheel")
     assert isinstance(bridge.recipe, LowerBridgeRecipe)
     assert len(bridge.recipe.creek_sections) >= 3
     # Every section is non-penetrating (validated at construction; sanity here).
@@ -373,9 +381,7 @@ def test_lower_bridge_module_has_at_least_three_sections(plan: EnvironmentModule
 def test_central_courtyard_thresholds_match_spec(
     plan: EnvironmentModulePlan,
 ) -> None:
-    courtyard = next(
-        m for m in plan.modules if m.module_id == "central-courtyard"
-    )
+    courtyard = next(m for m in plan.modules if m.module_id == "central-courtyard")
     assert isinstance(courtyard.recipe, CentralCourtyardRecipe)
     assert courtyard.recipe.gallery.clear_width_m >= MIN_GALLERY_CLEAR_WIDTH_M
     assert courtyard.recipe.gallery.clear_height_m >= MIN_GALLERY_CLEAR_HEIGHT_M
@@ -388,9 +394,7 @@ def test_central_courtyard_rejects_undersized_gallery() -> None:
         scene=build_scene_plan(),
         elevated_topology=build_elevated_topology_plan(build_scene_plan()),
     )
-    courtyard = next(
-        m for m in base_recipe.modules if m.module_id == "central-courtyard"
-    )
+    courtyard = next(m for m in base_recipe.modules if m.module_id == "central-courtyard")
     assert isinstance(courtyard.recipe, CentralCourtyardRecipe)
     bad_gallery = courtyard.recipe.gallery.model_copy(
         update={"clear_width_m": MIN_GALLERY_CLEAR_WIDTH_M - 0.1},
@@ -403,12 +407,33 @@ def test_central_courtyard_rejects_undersized_gallery() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("section", "field"),
+    (
+        ("gallery", "drainage_channel_present"),
+        ("stair", "continuous_collision"),
+        ("ramp", "continuous_collision"),
+        ("props", "planter_tree_non_collision"),
+    ),
+)
+def test_central_courtyard_rejects_false_safety_declarations(
+    plan: EnvironmentModulePlan,
+    section: str,
+    field: str,
+) -> None:
+    courtyard = next(module for module in plan.modules if module.module_id == "central-courtyard")
+    assert isinstance(courtyard.recipe, CentralCourtyardRecipe)
+    payload = courtyard.recipe.model_dump()
+    cast(dict[str, Any], payload[section])[field] = False
+
+    with pytest.raises(ValidationError):
+        CentralCourtyardRecipe.model_validate(payload)
+
+
 def test_central_courtyard_entries_bind_path_network_002_and_003(
     plan: EnvironmentModulePlan,
 ) -> None:
-    courtyard = next(
-        m for m in plan.modules if m.module_id == "central-courtyard"
-    )
+    courtyard = next(m for m in plan.modules if m.module_id == "central-courtyard")
     assert isinstance(courtyard.recipe, CentralCourtyardRecipe)
     assert courtyard.recipe.gallery.west_entry_connects_to == "path-network-002"
     assert courtyard.recipe.gallery.east_entry_connects_to == "path-network-003"
@@ -478,9 +503,7 @@ def test_central_courtyard_rejects_duplicate_ground_attachments() -> None:
 def test_rear_service_recipe_props_do_not_carry_topology(
     plan: EnvironmentModulePlan,
 ) -> None:
-    service = next(
-        m for m in plan.modules if m.module_id == "rear-service-courtyard"
-    )
+    service = next(m for m in plan.modules if m.module_id == "rear-service-courtyard")
     assert isinstance(service.recipe, RearServiceCourtyardRecipe)
     assert service.recipe.props_do_not_carry_topology is True
     assert service.recipe.props_do_not_block_paths is True
@@ -492,14 +515,35 @@ def test_rear_service_recipe_props_do_not_carry_topology(
     assert len(set(variant_ids)) == len(variant_ids)
 
 
+@pytest.mark.parametrize(
+    "field",
+    (
+        "paving_conform_to_terrain",
+        "door_window_eaves_gutter_declared",
+        "elevated_access_deck_present",
+    ),
+)
+def test_rear_service_recipe_rejects_false_geometry_declarations(
+    plan: EnvironmentModulePlan,
+    field: str,
+) -> None:
+    service = next(
+        module for module in plan.modules if module.module_id == "rear-service-courtyard"
+    )
+    assert isinstance(service.recipe, RearServiceCourtyardRecipe)
+    payload = service.recipe.model_dump()
+    payload[field] = False
+
+    with pytest.raises(ValidationError):
+        RearServiceCourtyardRecipe.model_validate(payload)
+
+
 def test_rear_service_recipe_rejects_missing_variants() -> None:
     base_recipe = build_default_environment_module_plan(
         scene=build_scene_plan(),
         elevated_topology=build_elevated_topology_plan(build_scene_plan()),
     )
-    service = next(
-        m for m in base_recipe.modules if m.module_id == "rear-service-courtyard"
-    )
+    service = next(m for m in base_recipe.modules if m.module_id == "rear-service-courtyard")
     assert isinstance(service.recipe, RearServiceCourtyardRecipe)
     bad_recipe = service.recipe.model_copy(
         update={"variants": service.recipe.variants[:2]},
@@ -530,10 +574,8 @@ def test_plan_rejects_duplicate_module(plan: EnvironmentModulePlan) -> None:
 def test_plan_rejects_out_of_order_modules(plan: EnvironmentModulePlan) -> None:
     payload = _plan_payload(plan)
     # Swap module 0 and module 1 -- order must be central -> bridge -> service.
-    payload["modules"][0], payload["modules"][1] = (
-        payload["modules"][1],
-        payload["modules"][0],
-    )
+    modules = payload["modules"]
+    payload["modules"] = (modules[1], modules[0], *modules[2:])
     with pytest.raises(ValidationError):
         EnvironmentModulePlan.model_validate(payload)
 
@@ -546,9 +588,7 @@ def test_plan_rejects_unknown_module_id(plan: EnvironmentModulePlan) -> None:
 
 
 def test_module_rejects_part_in_wrong_segment(plan: EnvironmentModulePlan) -> None:
-    courtyard = next(
-        m for m in plan.modules if m.module_id == "central-courtyard"
-    )
+    courtyard = next(m for m in plan.modules if m.module_id == "central-courtyard")
     bad_part = courtyard.parts[0].model_copy(
         update={"instance_id": 200},  # outside 131-175 entirely
     )
@@ -559,9 +599,7 @@ def test_module_rejects_part_in_wrong_segment(plan: EnvironmentModulePlan) -> No
 def test_module_rejects_part_in_other_module_segment(
     plan: EnvironmentModulePlan,
 ) -> None:
-    courtyard = next(
-        m for m in plan.modules if m.module_id == "central-courtyard"
-    )
+    courtyard = next(m for m in plan.modules if m.module_id == "central-courtyard")
     # Put a courtyard part_id in the bridge segment.
     bad_part = courtyard.parts[0].model_copy(
         update={"instance_id": 150},  # in lower-bridge segment
@@ -580,22 +618,19 @@ def test_deterministic_canonical_bytes(
     topology: ElevatedTopologyPlan,
 ) -> None:
     plan_a = build_default_environment_module_plan(
-        scene=scene, elevated_topology=topology,
+        scene=scene,
+        elevated_topology=topology,
     )
     plan_b = build_default_environment_module_plan(
-        scene=scene, elevated_topology=topology,
+        scene=scene,
+        elevated_topology=topology,
     )
     assert plan_a == plan_b
-    assert (
-        environment_module_plan_sha256(plan_a)
-        == environment_module_plan_sha256(plan_b)
-    )
+    assert environment_module_plan_sha256(plan_a) == environment_module_plan_sha256(plan_b)
 
 
 def test_plan_sha_changes_when_a_part_changes(plan: EnvironmentModulePlan) -> None:
-    courtyard = next(
-        m for m in plan.modules if m.module_id == "central-courtyard"
-    )
+    courtyard = next(m for m in plan.modules if m.module_id == "central-courtyard")
     # Mutate one part's material slot id; this must change the plan digest.
     new_part = courtyard.parts[0].model_copy(
         update={"material_slot_id": "material-courtyard-flagstone-02"},
@@ -604,10 +639,7 @@ def test_plan_sha_changes_when_a_part_changes(plan: EnvironmentModulePlan) -> No
     new_module = courtyard.model_copy(update={"parts": new_parts})
     new_modules = (new_module,) + tuple(plan.modules[1:])
     new_plan = plan.model_copy(update={"modules": new_modules})
-    assert (
-        environment_module_plan_sha256(new_plan)
-        != environment_module_plan_sha256(plan)
-    )
+    assert environment_module_plan_sha256(new_plan) != environment_module_plan_sha256(plan)
 
 
 # --------------------------------------------------------------------------- #
@@ -622,9 +654,7 @@ def test_bridge_waterwheel_courtyard_service_props_have_distinct_semantics(
     # is distinguishable from the others at the instance layer.
     semantic_sets: dict[str, set[int]] = {}
     for module in plan.modules:
-        semantic_sets[module.module_id] = {
-            part.semantic_id for part in module.parts
-        }
+        semantic_sets[module.module_id] = {part.semantic_id for part in module.parts}
     # All four functional classes (bridge structure, waterwheel, courtyard,
     # service) have at least one distinguishable semantic slot.
     assert semantic_sets["central-courtyard"]  # not empty
@@ -633,22 +663,75 @@ def test_bridge_waterwheel_courtyard_service_props_have_distinct_semantics(
     # Bridge structure (146-154) and waterwheel (155-160) must have
     # distinguishable instance ranges -- this is the precondition for the
     # six-layer frame to tell them apart.
-    bridge = next(
-        m for m in plan.modules if m.module_id == "lower-bridge-waterwheel"
-    )
-    bridge_struct_ids = {
-        p.instance_id for p in bridge.parts if p.instance_id <= 154
-    }
-    waterwheel_ids = {
-        p.instance_id for p in bridge.parts if p.instance_id >= 155
-    }
+    bridge = next(m for m in plan.modules if m.module_id == "lower-bridge-waterwheel")
+    bridge_struct_ids = {p.instance_id for p in bridge.parts if p.instance_id <= 154}
+    waterwheel_ids = {p.instance_id for p in bridge.parts if p.instance_id >= 155}
     assert bridge_struct_ids.isdisjoint(waterwheel_ids)
 
 
+def test_default_parts_use_canonical_v1_semantic_ids(
+    plan: EnvironmentModulePlan,
+) -> None:
+    expected_by_instance = {
+        # central courtyard: building=3, creek=5, path=7,
+        # courtyard=11, retaining-wall=12, prop=13
+        131: 11,
+        132: 7,
+        133: 3,
+        134: 7,
+        135: 7,
+        136: 5,
+        137: 12,
+        138: 12,
+        139: 3,
+        140: 3,
+        141: 13,
+        142: 13,
+        143: 13,
+        144: 13,
+        145: 12,
+        # lower bridge: bridge=4, creek=5, prop=13
+        146: 4,
+        147: 4,
+        148: 4,
+        149: 4,
+        150: 4,
+        151: 4,
+        152: 5,
+        153: 5,
+        154: 5,
+        155: 13,
+        156: 13,
+        157: 13,
+        158: 5,
+        159: 5,
+        160: 5,
+        # rear service courtyard: building=3, creek=5, path=7, prop=13
+        161: 7,
+        162: 3,
+        163: 3,
+        164: 3,
+        165: 3,
+        166: 3,
+        167: 3,
+        168: 3,
+        169: 5,
+        170: 7,
+        171: 3,
+        172: 3,
+        173: 13,
+        174: 13,
+        175: 13,
+    }
+    actual_by_instance = {
+        part.instance_id: part.semantic_id for module in plan.modules for part in module.parts
+    }
+
+    assert actual_by_instance == expected_by_instance
+
+
 def test_waterwheel_parts_have_independent_identity(plan: EnvironmentModulePlan) -> None:
-    bridge = next(
-        m for m in plan.modules if m.module_id == "lower-bridge-waterwheel"
-    )
+    bridge = next(m for m in plan.modules if m.module_id == "lower-bridge-waterwheel")
     assert isinstance(bridge.recipe, LowerBridgeRecipe)
     # Six independent parts with unique part_id and instance_id.
     assert len(bridge.recipe.waterwheel_parts) >= 6
@@ -670,11 +753,10 @@ def test_waterwheel_recipe_must_match_parts_list() -> None:
     scene = build_scene_plan()
     topology = build_elevated_topology_plan(scene)
     plan = build_default_environment_module_plan(
-        scene=scene, elevated_topology=topology,
+        scene=scene,
+        elevated_topology=topology,
     )
-    bridge = next(
-        m for m in plan.modules if m.module_id == "lower-bridge-waterwheel"
-    )
+    bridge = next(m for m in plan.modules if m.module_id == "lower-bridge-waterwheel")
     assert isinstance(bridge.recipe, LowerBridgeRecipe)
     # Tamper: change one waterwheel part's instance id in the recipe only.
     bad_wheel = bridge.recipe.waterwheel_parts[0].model_copy(
@@ -688,17 +770,57 @@ def test_waterwheel_recipe_must_match_parts_list() -> None:
         LowerBridgeRecipe.model_validate(bad_recipe.model_dump())
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("semantic_id", 10),
+        ("material_slot_id", "material-waterwheel-wood-variant-02"),
+    ),
+)
+def test_waterwheel_recipe_identity_must_match_module_part(
+    plan: EnvironmentModulePlan,
+    field: str,
+    value: int | str,
+) -> None:
+    payload = _plan_payload(plan)
+    bridge = payload["modules"][1]
+    bridge["recipe"]["waterwheel_parts"][0][field] = value
+
+    with pytest.raises(ValidationError):
+        EnvironmentModulePlan.model_validate(payload)
+
+
+def test_waterwheel_recipe_rejects_non_waterwheel_module_part(
+    plan: EnvironmentModulePlan,
+) -> None:
+    payload = _plan_payload(plan)
+    bridge = payload["modules"][1]
+    bridge_arch = bridge["parts"][0]
+    extra_recipe_part = {
+        "part_id": bridge_arch["part_id"],
+        "instance_id": bridge_arch["instance_id"],
+        "material_slot_id": bridge_arch["material_slot_id"],
+        "semantic_id": bridge_arch["semantic_id"],
+    }
+    bridge["recipe"]["waterwheel_parts"] = (
+        *bridge["recipe"]["waterwheel_parts"],
+        extra_recipe_part,
+    )
+
+    with pytest.raises(ValidationError):
+        EnvironmentModulePlan.model_validate(payload)
+
+
 def test_waterwheel_recipe_part_id_must_appear_in_parts_list() -> None:
     """If the recipe declares a waterwheel part_id that the parts list
     doesn't have, the EnvironmentModule must fail closed."""
     scene = build_scene_plan()
     topology = build_elevated_topology_plan(scene)
     plan = build_default_environment_module_plan(
-        scene=scene, elevated_topology=topology,
+        scene=scene,
+        elevated_topology=topology,
     )
-    bridge = next(
-        m for m in plan.modules if m.module_id == "lower-bridge-waterwheel"
-    )
+    bridge = next(m for m in plan.modules if m.module_id == "lower-bridge-waterwheel")
     assert isinstance(bridge.recipe, LowerBridgeRecipe)
     # Add a phantom waterwheel part_id that doesn't exist in the parts list.
     phantom = WaterwheelPartSpec(
@@ -716,8 +838,7 @@ def test_waterwheel_recipe_part_id_must_appear_in_parts_list() -> None:
     bad_module = bridge.model_copy(update={"recipe": bad_recipe})
     # Build modules tuple with the bad one in place.
     new_modules = tuple(
-        bad_module if m.module_id == "lower-bridge-waterwheel" else m
-        for m in plan.modules
+        bad_module if m.module_id == "lower-bridge-waterwheel" else m for m in plan.modules
     )
     bad_plan = plan.model_copy(update={"modules": new_modules})
     with pytest.raises(ValidationError):

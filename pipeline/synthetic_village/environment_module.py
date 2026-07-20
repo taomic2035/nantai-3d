@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -54,7 +53,7 @@ from .elevated_topology import (
     ElevatedTopologyPlan,
     canonical_elevated_topology_bytes,
 )
-from .scene_plan import ScenePlan, canonical_scene_plan_bytes
+from .scene_plan import SEMANTIC_ORDER, ScenePlan, canonical_scene_plan_bytes
 
 ENVIRONMENT_MODULE_SCHEMA = "nantai.synthetic-village.environment-module.v1"
 ENVIRONMENT_MODULE_RECIPE_VERSION = "v1"
@@ -62,12 +61,8 @@ ENVIRONMENT_MODULE_RECIPE_VERSION = "v1"
 #: Stable SHA-256 of the three private ``design-only`` image sources.
 #: These are bound for provenance only; they are NOT multi-view training
 #: evidence and never contribute to coverage or orientation.
-CENTRAL_COURTYARD_SOURCE_SHA256 = (
-    "19b40a84322ab7d343716bd684fc83a3207ae42ad94993d28446707f7a5537df"
-)
-BRIDGE_UNDERCROFT_SOURCE_SHA256 = (
-    "16b9f390f4550b2ec64bd98e4ccd799e05c4f44cd924a5da1503eec73ae8b4be"
-)
+CENTRAL_COURTYARD_SOURCE_SHA256 = "19b40a84322ab7d343716bd684fc83a3207ae42ad94993d28446707f7a5537df"
+BRIDGE_UNDERCROFT_SOURCE_SHA256 = "16b9f390f4550b2ec64bd98e4ccd799e05c4f44cd924a5da1503eec73ae8b4be"
 REAR_SERVICE_COURTYARD_SOURCE_SHA256 = (
     "2c3900ab686cb45252538c8bdb6e507396ec9084ca7809a44fa3524810ab8b51"
 )
@@ -80,15 +75,22 @@ DESIGN_SOURCE_SHA256S = (
 #: Instance ID segments.  Elevated components own 127-130 (locked in
 #: elevated_topology.py).  Environment modules own 131-175, partitioned
 #: as follows.  Changing these numbers changes the plan digest.
-CENTRAL_COURTYARD_INSTANCE_RANGE = range(131, 146)   # 131..145 (15 parts)
-LOWER_BRIDGE_INSTANCE_RANGE = range(146, 161)        # 146..160 (15 parts)
-REAR_SERVICE_INSTANCE_RANGE = range(161, 176)        # 161..175 (15 parts)
+CENTRAL_COURTYARD_INSTANCE_RANGE = range(131, 146)  # 131..145 (15 parts)
+LOWER_BRIDGE_INSTANCE_RANGE = range(146, 161)  # 146..160 (15 parts)
+REAR_SERVICE_INSTANCE_RANGE = range(161, 176)  # 161..175 (15 parts)
 
 #: Hard geometric thresholds (HANDOFF-OPUS-007 §1).
 MIN_GALLERY_CLEAR_WIDTH_M = 2.6
 MIN_GALLERY_CLEAR_HEIGHT_M = 2.4
 MIN_STAIR_CLEAR_WIDTH_M = 2.4
 MIN_RAMP_CLEAR_WIDTH_M = 3.0
+
+# BuildReport v1 reserves 0/1/2 for sky, terrain, and terrain-support,
+# then assigns ScenePlan semantic classes from 3 in SEMANTIC_ORDER order.
+SEMANTIC_ID_BY_CLASS = {
+    semantic_class: semantic_id
+    for semantic_id, semantic_class in enumerate(SEMANTIC_ORDER, start=3)
+}
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 ModuleId = Literal[
@@ -108,9 +110,9 @@ class FrozenModel(BaseModel):
 
 
 def _canonical(payload: object) -> bytes:
-    return (
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    return (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -122,31 +124,35 @@ class CourtyardGallerySpec(FrozenModel):
     """Continuous covered gallery along the courtyard perimeter."""
 
     clear_width_m: float = Field(
-        ge=MIN_GALLERY_CLEAR_WIDTH_M, allow_inf_nan=False,
+        ge=MIN_GALLERY_CLEAR_WIDTH_M,
+        allow_inf_nan=False,
     )
     clear_height_m: float = Field(
-        ge=MIN_GALLERY_CLEAR_HEIGHT_M, allow_inf_nan=False,
+        ge=MIN_GALLERY_CLEAR_HEIGHT_M,
+        allow_inf_nan=False,
     )
     deck_segment_count: int = Field(ge=2)
-    drainage_channel_present: bool
+    drainage_channel_present: Literal[True] = True
     east_entry_connects_to: Literal["path-network-003"]
     west_entry_connects_to: Literal["path-network-002"]
 
 
 class CourtyardStairSpec(FrozenModel):
     clear_width_m: float = Field(
-        ge=MIN_STAIR_CLEAR_WIDTH_M, allow_inf_nan=False,
+        ge=MIN_STAIR_CLEAR_WIDTH_M,
+        allow_inf_nan=False,
     )
     tread_count: int = Field(ge=3)
     tread_depth_m: float = Field(gt=0.25, allow_inf_nan=False)
-    continuous_collision: bool
+    continuous_collision: Literal[True] = True
 
 
 class CourtyardRampSpec(FrozenModel):
     clear_width_m: float = Field(
-        ge=MIN_RAMP_CLEAR_WIDTH_M, allow_inf_nan=False,
+        ge=MIN_RAMP_CLEAR_WIDTH_M,
+        allow_inf_nan=False,
     )
-    continuous_collision: bool
+    continuous_collision: Literal[True] = True
     slope_pct: float = Field(gt=0.0, le=8.3, allow_inf_nan=False)
 
 
@@ -154,7 +160,7 @@ class CourtyardPropSpec(FrozenModel):
     workshed_count: int = Field(ge=1)
     workbench_count: int = Field(ge=1)
     replaceable_prop_slot_count: int = Field(ge=1)
-    planter_tree_non_collision: bool
+    planter_tree_non_collision: Literal[True] = True
 
 
 class CentralCourtyardRecipe(FrozenModel):
@@ -267,6 +273,10 @@ class LowerBridgeRecipe(FrozenModel):
         part_ids = tuple(part.part_id for part in self.waterwheel_parts)
         if len(set(part_ids)) != len(part_ids):
             raise ValueError("waterwheel part IDs must be unique")
+        if set(ids) != set(range(155, 161)):
+            raise ValueError(
+                "waterwheel recipe must declare exactly instances 155..160",
+            )
         # Waterwheel parts MUST stay inside the bridge module's instance
         # segment (146-160).  An instance ID outside this segment means
         # the waterwheel is stealing another module's identity.
@@ -297,9 +307,9 @@ class ServiceCourtyardVariantSpec(FrozenModel):
 class RearServiceCourtyardRecipe(FrozenModel):
     module_id: Literal["rear-service-courtyard"] = "rear-service-courtyard"
     bound_building_object_id: Literal["building-central-008"]
-    paving_conform_to_terrain: bool
-    door_window_eaves_gutter_declared: bool
-    elevated_access_deck_present: bool
+    paving_conform_to_terrain: Literal[True] = True
+    door_window_eaves_gutter_declared: Literal[True] = True
+    elevated_access_deck_present: Literal[True] = True
     service_shed_count: int = Field(ge=1)
     storage_rack_count: int = Field(ge=1)
     wood_pile_count: int = Field(ge=1)
@@ -360,11 +370,7 @@ class EnvironmentModule(FrozenModel):
     recipe_version: Literal["v1"] = ENVIRONMENT_MODULE_RECIPE_VERSION
     design_source_sha256: Sha256
     parts: tuple[EnvironmentModulePart, ...] = Field(min_length=1)
-    recipe: (
-        CentralCourtyardRecipe
-        | LowerBridgeRecipe
-        | RearServiceCourtyardRecipe
-    )
+    recipe: CentralCourtyardRecipe | LowerBridgeRecipe | RearServiceCourtyardRecipe
 
     @model_validator(mode="after")
     def _recipe_matches_module(self) -> EnvironmentModule:
@@ -402,6 +408,18 @@ class EnvironmentModule(FrozenModel):
                         f"id disagrees: recipe={wheel_part.instance_id} "
                         f"parts={actual.instance_id}",
                     )
+                if actual.semantic_id != wheel_part.semantic_id:
+                    raise ValueError(
+                        f"waterwheel part {wheel_part.part_id} semantic "
+                        f"id disagrees: recipe={wheel_part.semantic_id} "
+                        f"parts={actual.semantic_id}",
+                    )
+                if actual.material_slot_id != wheel_part.material_slot_id:
+                    raise ValueError(
+                        f"waterwheel part {wheel_part.part_id} material "
+                        f"slot disagrees: recipe={wheel_part.material_slot_id} "
+                        f"parts={actual.material_slot_id}",
+                    )
         return self
 
 
@@ -434,9 +452,9 @@ class EnvironmentModulePlan(FrozenModel):
     object registry, and downstream render identity.
     """
 
-    schema_version: Literal[
-        "nantai.synthetic-village.environment-module.v1"
-    ] = ENVIRONMENT_MODULE_SCHEMA
+    schema_version: Literal["nantai.synthetic-village.environment-module.v1"] = (
+        ENVIRONMENT_MODULE_SCHEMA
+    )
     plan_id: Literal["synthetic-village-environment-module-v1"] = (
         "synthetic-village-environment-module-v1"
     )
@@ -449,17 +467,15 @@ class EnvironmentModulePlan(FrozenModel):
     bridge_undercroft_source_sha256: Literal[BRIDGE_UNDERCROFT_SOURCE_SHA256] = (
         BRIDGE_UNDERCROFT_SOURCE_SHA256
     )
-    rear_service_courtyard_source_sha256: Literal[
+    rear_service_courtyard_source_sha256: Literal[REAR_SERVICE_COURTYARD_SOURCE_SHA256] = (
         REAR_SERVICE_COURTYARD_SOURCE_SHA256
-    ] = REAR_SERVICE_COURTYARD_SOURCE_SHA256
+    )
     synthetic: Literal[True] = True
     geometry_usability: Literal["preview-only"] = "preview-only"
     verification_level: Literal["L0"] = "L0"
     metric_alignment: Literal[False] = False
     real_photo_textures: Literal[False] = False
-    geometry_trust: Literal["simplified-pbr-not-render-parity"] = (
-        "simplified-pbr-not-render-parity"
-    )
+    geometry_trust: Literal["simplified-pbr-not-render-parity"] = "simplified-pbr-not-render-parity"
     trust_effect: Literal["none"] = "none"
     modules: tuple[EnvironmentModule, ...] = Field(min_length=3, max_length=3)
     summary: EnvironmentModuleSummary
@@ -478,12 +494,18 @@ class EnvironmentModulePlan(FrozenModel):
             )
         # Instance IDs are partitioned across modules -- no overlaps.
         all_instances: list[int] = []
+        all_part_ids: list[str] = []
         for module in self.modules:
             for part in module.parts:
                 all_instances.append(part.instance_id)
+                all_part_ids.append(part.part_id)
         if len(set(all_instances)) != len(all_instances):
             raise ValueError(
                 "environment module part instance IDs must not overlap",
+            )
+        if len(set(all_part_ids)) != len(all_part_ids):
+            raise ValueError(
+                "environment module part IDs must be unique across the plan",
             )
         # The full instance segment is exactly 131..175.
         expected_segment = set(range(131, 176))
@@ -491,6 +513,10 @@ class EnvironmentModulePlan(FrozenModel):
             raise ValueError(
                 "environment module parts must collectively occupy exactly "
                 "the 131..175 instance segment",
+            )
+        if self.summary.part_count != len(all_instances):
+            raise ValueError(
+                "environment module summary part_count disagrees with modules",
             )
         return self
 
@@ -525,8 +551,7 @@ def verify_environment_module_plan(
     ).hexdigest()
     if plan.elevated_topology_sha256 != expected_topology_sha:
         raise EnvironmentModuleError(
-            "environment module plan elevated_topology_sha256 disagrees "
-            "with topology",
+            "environment module plan elevated_topology_sha256 disagrees with topology",
         )
     # Re-validate canonical bytes (re-runs every model_validator).
     revalidated = EnvironmentModulePlan.model_validate_json(
@@ -598,37 +623,37 @@ def _default_lower_bridge_recipe() -> LowerBridgeRecipe:
             part_id="waterwheel-wheel-001",
             instance_id=155,
             material_slot_id="material-waterwheel-wood-01",
-            semantic_id=4,
+            semantic_id=SEMANTIC_ID_BY_CLASS["prop"],
         ),
         WaterwheelPartSpec(
             part_id="waterwheel-axle-001",
             instance_id=156,
             material_slot_id="material-waterwheel-iron-01",
-            semantic_id=4,
+            semantic_id=SEMANTIC_ID_BY_CLASS["prop"],
         ),
         WaterwheelPartSpec(
             part_id="waterwheel-bracket-001",
             instance_id=157,
             material_slot_id="material-waterwheel-iron-01",
-            semantic_id=4,
+            semantic_id=SEMANTIC_ID_BY_CLASS["prop"],
         ),
         WaterwheelPartSpec(
             part_id="waterwheel-millrace-001",
             instance_id=158,
             material_slot_id="material-waterwheel-wood-01",
-            semantic_id=4,
+            semantic_id=SEMANTIC_ID_BY_CLASS["creek"],
         ),
         WaterwheelPartSpec(
             part_id="waterwheel-spill-001",
             instance_id=159,
             material_slot_id="material-stone-block-01",
-            semantic_id=4,
+            semantic_id=SEMANTIC_ID_BY_CLASS["creek"],
         ),
         WaterwheelPartSpec(
             part_id="waterwheel-tailwater-001",
             instance_id=160,
             material_slot_id="material-stone-block-01",
-            semantic_id=4,
+            semantic_id=SEMANTIC_ID_BY_CLASS["creek"],
         ),
     )
     return LowerBridgeRecipe(
@@ -675,59 +700,234 @@ def _default_module(module_id: ModuleId) -> EnvironmentModule:
     if module_id == "central-courtyard":
         recipe = _default_central_courtyard_recipe()
         part_specs = (
-            ("courtyard-paving-001", 131, 2, "material-courtyard-flagstone-01"),
-            ("courtyard-gallery-deck-001", 132, 4, "material-courtyard-timber-01"),
-            ("courtyard-gallery-roof-001", 133, 4, "material-courtyard-tile-01"),
-            ("courtyard-stair-run-001", 134, 4, "material-courtyard-stone-01"),
-            ("courtyard-ramp-run-001", 135, 4, "material-courtyard-stone-01"),
-            ("courtyard-drainage-channel-001", 136, 6, "material-courtyard-drain-01"),
-            ("courtyard-segment-wall-001", 137, 5, "material-courtyard-stone-01"),
-            ("courtyard-segment-wall-002", 138, 5, "material-courtyard-stone-01"),
-            ("courtyard-workshed-001", 139, 4, "material-courtyard-timber-01"),
-            ("courtyard-workshed-002", 140, 4, "material-courtyard-timber-01"),
-            ("courtyard-workbench-001", 141, 4, "material-courtyard-timber-01"),
-            ("courtyard-workbench-002", 142, 4, "material-courtyard-timber-01"),
-            ("courtyard-replaceable-prop-001", 143, 10, "material-courtyard-timber-01"),
-            ("courtyard-replaceable-prop-002", 144, 10, "material-courtyard-timber-01"),
-            ("courtyard-curb-edge-001", 145, 6, "material-courtyard-stone-01"),
+            (
+                "courtyard-paving-001",
+                131,
+                SEMANTIC_ID_BY_CLASS["courtyard"],
+                "material-courtyard-flagstone-01",
+            ),
+            (
+                "courtyard-gallery-deck-001",
+                132,
+                SEMANTIC_ID_BY_CLASS["path"],
+                "material-courtyard-timber-01",
+            ),
+            (
+                "courtyard-gallery-roof-001",
+                133,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-courtyard-tile-01",
+            ),
+            (
+                "courtyard-stair-run-001",
+                134,
+                SEMANTIC_ID_BY_CLASS["path"],
+                "material-courtyard-stone-01",
+            ),
+            (
+                "courtyard-ramp-run-001",
+                135,
+                SEMANTIC_ID_BY_CLASS["path"],
+                "material-courtyard-stone-01",
+            ),
+            (
+                "courtyard-drainage-channel-001",
+                136,
+                SEMANTIC_ID_BY_CLASS["creek"],
+                "material-courtyard-drain-01",
+            ),
+            (
+                "courtyard-segment-wall-001",
+                137,
+                SEMANTIC_ID_BY_CLASS["retaining-wall"],
+                "material-courtyard-stone-01",
+            ),
+            (
+                "courtyard-segment-wall-002",
+                138,
+                SEMANTIC_ID_BY_CLASS["retaining-wall"],
+                "material-courtyard-stone-01",
+            ),
+            (
+                "courtyard-workshed-001",
+                139,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-courtyard-timber-01",
+            ),
+            (
+                "courtyard-workshed-002",
+                140,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-courtyard-timber-01",
+            ),
+            (
+                "courtyard-workbench-001",
+                141,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-courtyard-timber-01",
+            ),
+            (
+                "courtyard-workbench-002",
+                142,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-courtyard-timber-01",
+            ),
+            (
+                "courtyard-replaceable-prop-001",
+                143,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-courtyard-timber-01",
+            ),
+            (
+                "courtyard-replaceable-prop-002",
+                144,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-courtyard-timber-01",
+            ),
+            (
+                "courtyard-curb-edge-001",
+                145,
+                SEMANTIC_ID_BY_CLASS["retaining-wall"],
+                "material-courtyard-stone-01",
+            ),
         )
     elif module_id == "lower-bridge-waterwheel":
         recipe = _default_lower_bridge_recipe()
         part_specs = (
-            ("bridge-arch-001", 146, 4, "material-stone-block-01"),
-            ("bridge-abutment-001", 147, 4, "material-stone-block-01"),
-            ("bridge-abutment-002", 148, 4, "material-stone-block-01"),
-            ("bridge-deck-slabs-001", 149, 4, "material-stone-block-01"),
-            ("bridge-parapet-001", 150, 4, "material-stone-block-01"),
-            ("bridge-parapet-002", 151, 4, "material-stone-block-01"),
-            ("creek-bed-cut-001", 152, 6, "material-creek-stone-01"),
-            ("creek-bank-stone-001", 153, 6, "material-creek-stone-01"),
-            ("creek-water-surface-001", 154, 6, "material-water-01"),
-            ("waterwheel-wheel-001", 155, 4, "material-waterwheel-wood-01"),
-            ("waterwheel-axle-001", 156, 4, "material-waterwheel-iron-01"),
-            ("waterwheel-bracket-001", 157, 4, "material-waterwheel-iron-01"),
-            ("waterwheel-millrace-001", 158, 4, "material-waterwheel-wood-01"),
-            ("waterwheel-spill-001", 159, 4, "material-stone-block-01"),
-            ("waterwheel-tailwater-001", 160, 4, "material-stone-block-01"),
+            ("bridge-arch-001", 146, SEMANTIC_ID_BY_CLASS["bridge"], "material-stone-block-01"),
+            ("bridge-abutment-001", 147, SEMANTIC_ID_BY_CLASS["bridge"], "material-stone-block-01"),
+            ("bridge-abutment-002", 148, SEMANTIC_ID_BY_CLASS["bridge"], "material-stone-block-01"),
+            (
+                "bridge-deck-slabs-001",
+                149,
+                SEMANTIC_ID_BY_CLASS["bridge"],
+                "material-stone-block-01",
+            ),
+            ("bridge-parapet-001", 150, SEMANTIC_ID_BY_CLASS["bridge"], "material-stone-block-01"),
+            ("bridge-parapet-002", 151, SEMANTIC_ID_BY_CLASS["bridge"], "material-stone-block-01"),
+            ("creek-bed-cut-001", 152, SEMANTIC_ID_BY_CLASS["creek"], "material-creek-stone-01"),
+            ("creek-bank-stone-001", 153, SEMANTIC_ID_BY_CLASS["creek"], "material-creek-stone-01"),
+            ("creek-water-surface-001", 154, SEMANTIC_ID_BY_CLASS["creek"], "material-water-01"),
+            (
+                "waterwheel-wheel-001",
+                155,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-waterwheel-wood-01",
+            ),
+            (
+                "waterwheel-axle-001",
+                156,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-waterwheel-iron-01",
+            ),
+            (
+                "waterwheel-bracket-001",
+                157,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-waterwheel-iron-01",
+            ),
+            (
+                "waterwheel-millrace-001",
+                158,
+                SEMANTIC_ID_BY_CLASS["creek"],
+                "material-waterwheel-wood-01",
+            ),
+            ("waterwheel-spill-001", 159, SEMANTIC_ID_BY_CLASS["creek"], "material-stone-block-01"),
+            (
+                "waterwheel-tailwater-001",
+                160,
+                SEMANTIC_ID_BY_CLASS["creek"],
+                "material-stone-block-01",
+            ),
         )
     else:
         recipe = _default_rear_service_recipe()
         part_specs = (
-            ("service-paving-001", 161, 6, "material-service-stone-01"),
-            ("service-back-wall-001", 162, 5, "material-stone-block-01"),
-            ("service-side-wall-001", 163, 5, "material-stone-block-01"),
-            ("service-side-wall-002", 164, 5, "material-stone-block-01"),
-            ("service-door-assembly-001", 165, 5, "material-service-timber-01"),
-            ("service-window-assembly-001", 166, 5, "material-service-timber-01"),
-            ("service-eaves-001", 167, 5, "material-service-tile-01"),
-            ("service-gutter-001", 168, 6, "material-service-iron-01"),
-            ("service-drain-outlet-001", 169, 6, "material-service-stone-01"),
-            ("service-access-deck-001", 170, 4, "material-service-timber-01"),
-            ("service-shed-001", 171, 4, "material-service-timber-01"),
-            ("service-shed-002", 172, 4, "material-service-timber-01"),
-            ("service-storage-rack-001", 173, 10, "material-service-timber-01"),
-            ("service-wood-pile-001", 174, 10, "material-service-timber-01"),
-            ("service-wash-basin-001", 175, 10, "material-service-stone-01"),
+            ("service-paving-001", 161, SEMANTIC_ID_BY_CLASS["path"], "material-service-stone-01"),
+            (
+                "service-back-wall-001",
+                162,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-stone-block-01",
+            ),
+            (
+                "service-side-wall-001",
+                163,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-stone-block-01",
+            ),
+            (
+                "service-side-wall-002",
+                164,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-stone-block-01",
+            ),
+            (
+                "service-door-assembly-001",
+                165,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-service-timber-01",
+            ),
+            (
+                "service-window-assembly-001",
+                166,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-service-timber-01",
+            ),
+            (
+                "service-eaves-001",
+                167,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-service-tile-01",
+            ),
+            (
+                "service-gutter-001",
+                168,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-service-iron-01",
+            ),
+            (
+                "service-drain-outlet-001",
+                169,
+                SEMANTIC_ID_BY_CLASS["creek"],
+                "material-service-stone-01",
+            ),
+            (
+                "service-access-deck-001",
+                170,
+                SEMANTIC_ID_BY_CLASS["path"],
+                "material-service-timber-01",
+            ),
+            (
+                "service-shed-001",
+                171,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-service-timber-01",
+            ),
+            (
+                "service-shed-002",
+                172,
+                SEMANTIC_ID_BY_CLASS["building"],
+                "material-service-timber-01",
+            ),
+            (
+                "service-storage-rack-001",
+                173,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-service-timber-01",
+            ),
+            (
+                "service-wood-pile-001",
+                174,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-service-timber-01",
+            ),
+            (
+                "service-wash-basin-001",
+                175,
+                SEMANTIC_ID_BY_CLASS["prop"],
+                "material-service-stone-01",
+            ),
         )
     parts = tuple(
         EnvironmentModulePart(
