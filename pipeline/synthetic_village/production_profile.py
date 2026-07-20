@@ -123,6 +123,20 @@ class PolylineTopologySource:
                 f"got {len(self.points)} point(s) for topology_ref="
                 f"{self.topology_ref!r}",
             )
+        # Adjacent duplicate points produce a zero-length segment.  In
+        # ``_point_at_arc_length`` the tangent becomes (0, 0), ``norm`` is
+        # 0, and ``or 1.0`` then normalises to a fabricated unit tangent
+        # (0, 0) -- which silently invents orientation data.  A closed ring
+        # (points[0] == points[-1]) is legitimate and is not blocked here:
+        # only *adjacent* duplicates inside the open segments are.
+        for index in range(len(self.points) - 1):
+            if self.points[index] == self.points[index + 1]:
+                raise ProductionProfileError(
+                    "PolylineTopologySource.points has adjacent duplicate "
+                    f"points at index {index} and {index + 1} for "
+                    f"topology_ref={self.topology_ref!r}; a zero-length "
+                    "segment has no tangent and cannot be parameterised",
+                )
 
     @property
     def length_m(self) -> float:

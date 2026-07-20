@@ -822,3 +822,28 @@ def test_polyline_topology_source_accepts_two_points() -> None:
         half_width_m=1.5,
     )
     assert source.length_m == pytest.approx(10.0)
+
+
+def test_polyline_topology_source_rejects_adjacent_duplicate_points() -> None:
+    """相邻重复点产生 zero-length segment, _point_at_arc_length 会归一化
+    (0, 0) tangent 后返回虚构 unit tangent (0, 0); 不能被假装可参数化。"""
+    with pytest.raises(ProductionProfileError, match="adjacent"):
+        PolylineTopologySource(
+            group_id="ground-route",
+            topology_ref="path-network-001",
+            points=((0.0, 0.0), (0.0, 0.0), (10.0, 0.0)),
+            half_width_m=1.5,
+        )
+
+
+def test_polyline_topology_source_accepts_closed_ring() -> None:
+    """闭合 ring (首尾相同) 是合法拓扑, perimeter-inward 真实使用;
+    不能被相邻重复点检查误拒。"""
+    source = PolylineTopologySource(
+        group_id="perimeter-inward",
+        topology_ref="building-hull-001",
+        points=((0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)),
+        half_width_m=1.5,
+    )
+    # 闭合 ring 的总长 = 4 * 10 = 40, 不是 0
+    assert source.length_m == pytest.approx(40.0)
