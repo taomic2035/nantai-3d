@@ -16,6 +16,7 @@ API contract:
 * ``GET /api/world/mesh-chunk/{x}/{y}.json`` -> verified mesh chunk evidence.
 * ``GET /api/world/mesh-assets/...`` -> immutable audited GLB/texture bytes.
 * ``GET /api/world/material-maps/...`` -> immutable verified PBR map bytes.
+* ``GET /web/data/production-camera-plan.json`` -> deterministic synthetic plan.
 * ``GET``/``HEAD`` below approved static roots -> project-relative files.
 * every mutating method -> structured HTTP 405; no job is started.
 """
@@ -32,6 +33,7 @@ import re
 import secrets
 import time
 from datetime import UTC, datetime
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -97,6 +99,10 @@ from pipeline.synthetic_village.mesh_chunk import (
     canonical_mesh_chunk_runtime_bytes,
     project_mesh_chunk_runtime,
     project_mesh_chunk_runtime_v3,
+)
+from pipeline.synthetic_village.production_profile import (
+    build_production_camera_plan,
+    canonical_production_plan_bytes,
 )
 
 SNAPSHOT_SCHEMA_VERSION = 2
@@ -1512,6 +1518,13 @@ def _read_world_manifest(root: Path) -> dict[str, Any] | None:
     if error is not None or not isinstance(manifest, dict):
         return None
     return manifest
+
+
+@lru_cache(maxsize=1)
+def _canonical_production_camera_plan_payload() -> bytes:
+    """Build the deterministic synthetic production plan without persisting it."""
+
+    return canonical_production_plan_bytes(build_production_camera_plan())
 
 
 def _valid_on_demand_world_manifest(
@@ -3062,6 +3075,37 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self._security_headers()
             self.end_headers()
+            return
+        if request_path == "/web/data/production-camera-plan.json":
+            try:
+                payload = _canonical_production_camera_plan_payload()
+            except (ArithmeticError, RuntimeError, ValueError):
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "production_camera_plan_unavailable",
+                    "The production camera plan could not be derived safely.",
+                    head_only=head_only,
+                )
+                return
+            digest = hashlib.sha256(payload).hexdigest()
+            etag = f'"sha256:{digest}"'
+            cache_control = "public, max-age=0, must-revalidate"
+            request_etags = {
+                candidate.strip()
+                for candidate in self.headers.get("If-None-Match", "").split(",")
+                if candidate.strip()
+            }
+            if "*" in request_etags or etag in request_etags:
+                self._send_not_modified(etag, cache_control=cache_control)
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                payload,
+                content_type="application/json; charset=utf-8",
+                cache_control=cache_control,
+                head_only=head_only,
+                extra_headers={"ETag": etag},
+            )
             return
         if request_path == "/web/data/manifest.json":
             world_manifest = _read_world_manifest(self.project_root)

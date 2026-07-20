@@ -61,6 +61,11 @@ from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
 from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
     publish_mesh_asset_bundle_v3,
 )
+from pipeline.synthetic_village.production_profile import (
+    ProductionCameraPlan,
+    build_production_camera_plan,
+    canonical_production_plan_bytes,
+)
 from tests.test_glb_shared_texture_audit import (
     _fixture as _write_shared_texture_glb_fixture,
 )
@@ -1368,6 +1373,46 @@ class TestHttpContract:
         assert glb_headers["cache-control"] == "public, max-age=0, must-revalidate"
         assert glb_headers["etag"] == head_headers["etag"] == cached_headers["etag"]
         assert glb_headers["content-length"] == head_headers["content-length"]
+
+    def test_production_camera_plan_is_canonical_cacheable_and_stream_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        _write_v2_project(tmp_path)
+        static_plan = tmp_path / "web/data/production-camera-plan.json"
+        expected = canonical_production_plan_bytes(build_production_camera_plan())
+
+        with _running_server(tmp_path) as server:
+            status, headers, payload = _request(
+                server,
+                "GET",
+                "/web/data/production-camera-plan.json",
+            )
+            head_status, head_headers, head_payload = _request(
+                server,
+                "HEAD",
+                "/web/data/production-camera-plan.json",
+            )
+            cached_status, cached_headers, cached_payload = _request(
+                server,
+                "GET",
+                "/web/data/production-camera-plan.json",
+                headers={"If-None-Match": headers["etag"]},
+            )
+
+        plan = ProductionCameraPlan.model_validate_json(payload)
+        assert status == head_status == 200
+        assert cached_status == 304
+        assert payload == expected
+        assert plan.camera_count == plan.declared_target_count == 180
+        assert plan.complete is True
+        assert len(plan.undelivered_requirements) == 2
+        assert head_payload == cached_payload == b""
+        assert headers["content-type"] == "application/json; charset=utf-8"
+        assert headers["cache-control"] == "public, max-age=0, must-revalidate"
+        assert headers["etag"] == head_headers["etag"] == cached_headers["etag"]
+        assert headers["content-length"] == head_headers["content-length"]
+        assert static_plan.exists() is False
 
     @pytest.mark.parametrize(
         "path",
