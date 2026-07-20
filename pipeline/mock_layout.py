@@ -8,6 +8,7 @@ L2 Mock 布局生成器
 - 边界对齐 (相邻 chunk 道路接续)
 - 真实村庄结构模拟 (建筑/道路/植被/水系)
 """
+import hashlib
 import random
 from pathlib import Path
 
@@ -39,13 +40,71 @@ class MockLayoutGenerator:
     def __init__(self, world_seed: int = 42, assets: dict | None = None):
         self.world_seed = world_seed
         self.assets = assets or DEFAULT_ASSETS
-        # 全局道路网 (跨 chunk 主路)
-        self.global_road_y = 100  # 主路东西向, y=100
 
     def _rng(self, chunk_x: int, chunk_y: int) -> random.Random:
         """确定性 RNG: 相同 seed+坐标 → 相同结果"""
         seed = (self.world_seed * 100003 + chunk_x * 1009 + chunk_y) & 0xFFFFFFFF
         return random.Random(seed)
+
+    def _shared_edge_anchor(
+        self,
+        namespace: str,
+        boundary_x: int,
+        boundary_y: int,
+        lane: int,
+        low: int,
+        high: int,
+    ) -> int:
+        """返回由世界边界身份决定的跨进程稳定整数锚点。
+
+        相邻 chunk 必须用同一条世界网格线身份调用本函数，不能从各自的
+        chunk RNG 猜测接缝。SHA-256 避免 Python ``hash`` 的进程随机化，
+        并让负坐标与任意 world seed 保持相同字节语义。
+        """
+        if low > high:
+            raise ValueError("shared edge anchor range is invalid")
+        identity = (
+            f"{self.world_seed}:{namespace}:{boundary_x}:{boundary_y}:{lane}"
+        ).encode("ascii")
+        value = int.from_bytes(hashlib.sha256(identity).digest()[:8], "big")
+        return low + value % (high - low + 1)
+
+    def _main_road_boundary_y(self, boundary_x: int, chunk_y: int) -> int:
+        return self._shared_edge_anchor(
+            "main-road-y",
+            boundary_x,
+            chunk_y,
+            0,
+            90,
+            110,
+        )
+
+    def _trail_boundary_x(
+        self,
+        chunk_x: int,
+        boundary_y: int,
+        lane: int,
+    ) -> int:
+        ranges = ((40, 85), (115, 160))
+        low, high = ranges[lane]
+        return self._shared_edge_anchor(
+            "trail-x",
+            chunk_x,
+            boundary_y,
+            lane,
+            low,
+            high,
+        )
+
+    def _stream_boundary_y(self, boundary_x: int, chunk_y: int) -> int:
+        return self._shared_edge_anchor(
+            "stream-y",
+            boundary_x,
+            chunk_y,
+            0,
+            25,
+            65,
+        )
 
     def generate_chunk(
         self, chunk_x: int, chunk_y: int, climate: dict | None = None
@@ -100,24 +159,37 @@ class MockLayoutGenerator:
 
     def _generate_roads(self, cx: int, cy: int, rng: random.Random) -> list[Road]:
         """生成道路 - 主路贯通 + 村内小路"""
-        roads = []
+        del rng  # 道路拓扑只由共享世界边界身份决定。
 
-        # 主路: 东西向贯通 (与相邻 chunk 接续)
-        roads.append(Road(
+        # 主路: 东西向贯通。东侧锚点就是相邻 chunk 的西侧锚点。
+        main_start_y = self._main_road_boundary_y(cx, cy)
+        main_end_y = self._main_road_boundary_y(cx + 1, cy)
+        roads = [Road(
             id=f"road_main_{cx}_{cy}",
             type="main",
             width=4.0,
-            points=[[0, 100 + (cx * 7) % 10], [200, 105 + (cx * 7) % 10]],
-        ))
+            points=[[0, main_start_y], [200, main_end_y]],
+        )]
 
-        # 小路: 南北向, 连接到主路
-        for i in range(rng.randint(1, 2)):
-            x = rng.randint(40, 160)
+        # 两条南北小路使用分离 lane，南北边界锚点由相邻 chunk 共享；
+        # 中点精确落在主路中心线上，避免只在视觉上“看起来接上”。
+        for lane in range(2):
+            start_x = self._trail_boundary_x(cx, cy, lane)
+            end_x = self._trail_boundary_x(cx, cy + 1, lane)
+            intersection_x = (start_x + end_x) / 2
+            intersection_y = (
+                main_start_y
+                + (main_end_y - main_start_y) * intersection_x / 200
+            )
             roads.append(Road(
-                id=f"road_trail_{cx}_{cy}_{i}",
+                id=f"road_trail_{cx}_{cy}_{lane}",
                 type="trail",
                 width=1.5,
-                points=[[x, 0], [x, 100], [x + rng.randint(-10, 10), 200]],
+                points=[
+                    [start_x, 0],
+                    [intersection_x, intersection_y],
+                    [end_x, 200],
+                ],
             ))
 
         return roads
@@ -177,16 +249,29 @@ class MockLayoutGenerator:
     def _generate_water(
         self, cx: int, cy: int, rng: random.Random = None
     ) -> list[WaterFeature]:
-        """偶发水系 (chunk_id 决定, 保证确定性)"""
-        if rng is None:
-            rng = self._rng(cx, cy)
-        if (cx * 7 + cy * 13) % 3 != 0:  # 1/3 概率有溪流
+        """生成贯穿整行的偶发水系，不在东西 chunk 边界凭空终止。"""
+        del rng  # 保留兼容形参；水系拓扑只由共享世界身份决定。
+        if (self.world_seed * 31 + cy * 13) % 3 != 0:
             return []
+        start_y = self._stream_boundary_y(cx, cy)
+        end_y = self._stream_boundary_y(cx + 1, cy)
+        bend = self._shared_edge_anchor(
+            "stream-bend",
+            cx,
+            cy,
+            0,
+            -8,
+            8,
+        )
         return [WaterFeature(
             id=f"stream_{cx}_{cy}",
             type="stream",
             width=2.0,
-            points=[[0, 30 + (cy * 5) % 40], [100, 35 + (cy * 5) % 40], [200, 40 + (cy * 5) % 40]],
+            points=[
+                [0, start_y],
+                [100, (start_y + end_y) / 2 + bend],
+                [200, end_y],
+            ],
         )]
 
     def _generate_props(
