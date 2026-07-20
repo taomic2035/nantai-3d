@@ -24,6 +24,7 @@ import pytest
 from pipeline.synthetic_village.elevated_topology import (
     build_elevated_topology_plan,
 )
+from pipeline.synthetic_village.production_journal import production_render_id
 from pipeline.synthetic_village.production_preflight import (
     ProductionCameraClearanceDecision,
     ProductionCameraClearanceEvidence,
@@ -1205,6 +1206,121 @@ def test_build_reposed_plan_returns_revalidated_plan() -> None:
     # Pydantic frozen models raise on setattr.
     with pytest.raises((TypeError, ValueError, AttributeError)):
         new_plan.cameras = new_plan.cameras[:1]  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end pipeline: search -> build_reposed_plan -> production_render_id
+# --------------------------------------------------------------------------- #
+
+
+def test_search_to_build_to_render_id_end_to_end() -> None:
+    """End-to-end: search -> build_reposed_plan -> production_render_id.
+
+    This is the full Task 5 §3 caller pipeline up to (but NOT
+    including) the actual Blender clearance / six-layer render step.
+    Every §3 caller must do these three things in order:
+
+    1. search_replacement_pose(plan, ...) -> search
+    2. build_reposed_plan(search, plan=plan) -> new_plan, plan_sha, reg_sha
+    3. production_render_id(new_plan, ..., repose_search_sha256=search.search_sha256)
+       -> render_id
+
+    The render_id must:
+    * differ from the render_id of the original plan (because the
+      plan's camera list changed, even if by one camera);
+    * differ from the render_id of the rebuilt plan WITHOUT the
+      repose_search_sha256 binding (because the binding is content-
+      addressed into the render_id);
+    * be deterministic -- running the same search + build + render_id
+      chain twice must yield the same render_id.
+
+    This test does NOT verify Blender clearance, six-layer render, or
+    post-render policy. Those are explicitly §3's downstream
+    responsibilities and are NOT part of this test's scope.
+    """
+    plan = _plan()
+    topology = _topology_for_camera(plan, "camera-ground-route-010")
+    search = search_replacement_pose(
+        plan=plan,
+        camera_id="camera-ground-route-010",
+        failing_decision=_failing_decision(),
+        preflight_report_sha256=_VALID_REPORT_SHA,
+        topology=topology,
+        candidate_policy=_policy(),
+    )
+    assert search.accepted_geometry_candidate is not None
+
+    new_plan, plan_sha, registry_sha = build_reposed_plan(
+        search=search, plan=plan,
+    )
+    # Original plan's registry SHA differs from the rebuilt plan's.
+    original_registry_sha = production_camera_registry_digest(plan)
+
+    # Common render inputs (use dummy SHAs -- this is a unit test, not
+    # a real Blender run).
+    dummy_sha = "f" * 64
+    original_render_id = production_render_id(
+        plan,
+        blender_executable_sha256=dummy_sha,
+        renderer_script_sha256=dummy_sha,
+        blend_sha256=dummy_sha,
+        build_report_sha256=dummy_sha,
+        camera_registry_sha256=original_registry_sha,
+    )
+    rebuilt_unbound_render_id = production_render_id(
+        new_plan,
+        blender_executable_sha256=dummy_sha,
+        renderer_script_sha256=dummy_sha,
+        blend_sha256=dummy_sha,
+        build_report_sha256=dummy_sha,
+        camera_registry_sha256=registry_sha,
+    )
+    rebuilt_bound_render_id = production_render_id(
+        new_plan,
+        blender_executable_sha256=dummy_sha,
+        renderer_script_sha256=dummy_sha,
+        blend_sha256=dummy_sha,
+        build_report_sha256=dummy_sha,
+        camera_registry_sha256=registry_sha,
+        repose_search_sha256=search.search_sha256,
+    )
+
+    # 1. Rebuilt plan's render_id differs from original plan's render_id.
+    #    (The camera registry SHA changed, since the reposed camera's
+    #    pose is part of the registry digest.)
+    assert rebuilt_unbound_render_id != original_render_id
+
+    # 2. Bound render_id differs from unbound render_id.
+    #    (The repose_search_sha256 is content-addressed into the payload.)
+    assert rebuilt_bound_render_id != rebuilt_unbound_render_id
+
+    # 3. Deterministic: same inputs -> same render_id.
+    same_again = production_render_id(
+        new_plan,
+        blender_executable_sha256=dummy_sha,
+        renderer_script_sha256=dummy_sha,
+        blend_sha256=dummy_sha,
+        build_report_sha256=dummy_sha,
+        camera_registry_sha256=registry_sha,
+        repose_search_sha256=search.search_sha256,
+    )
+    assert same_again == rebuilt_bound_render_id
+
+    # 4. Swapping the search SHA changes the bound render_id -- so a
+    #    caller cannot substitute a different search between build_reposed_plan
+    #    and the render step without the render_id detecting it.
+    fake_search_sha = "e" * 64
+    fake_bound = production_render_id(
+        new_plan,
+        blender_executable_sha256=dummy_sha,
+        renderer_script_sha256=dummy_sha,
+        blend_sha256=dummy_sha,
+        build_report_sha256=dummy_sha,
+        camera_registry_sha256=registry_sha,
+        repose_search_sha256=fake_search_sha,
+    )
+    assert fake_bound != rebuilt_bound_render_id
+
 
 
 
