@@ -17,17 +17,16 @@ BLENDER = ROOT / "third" / "blender" / "blender.exe"
 BUILDER = ROOT / "scripts" / "blender" / "build_synthetic_village.py"
 RENDERER = ROOT / "scripts" / "blender" / "render_synthetic_village.py"
 PREFLIGHT = ROOT / "scripts" / "blender" / "preflight_production_cameras.py"
-FORMAL_BLEND = (
-    ROOT
-    / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
-    / "344e643c81753e986d8945ca2b4a8713f26efedc755ab2055bd4235b1c656d1b"
-    / "village-canary.blend"
-)
-PRODUCTION_BLEND = (
+TEXTURED_RUNTIME_BLEND = (
     ROOT
     / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
     / "4f38ecf49ff8182e02c426df314dab90b91502673164330d3b704f234d02f1dc"
     / "village-canary.blend"
+)
+MATERIAL_BUNDLE_ROOT = (
+    ROOT
+    / ".nantai-studio/synthetic-village/hybrid-v3/material-bundles"
+    / "88e35afe5ed57b7d0187956d601b1470662aaf964f593a2fc08c543c7da2e2a3"
 )
 
 
@@ -274,32 +273,31 @@ def test_production_layer_counts_reject_unknown_mask_ids(
     assert "unregistered instance ID" in (completed.stdout + completed.stderr)
 
 
-def _formal_render_request():
+def _textured_render_request():
     import pipeline.synthetic_village.canary as canary
-    from pipeline.synthetic_village.camera_plan import build_camera_plan
-    from pipeline.synthetic_village.scene_plan import build_scene_plan
-
-    build_directory = FORMAL_BLEND.parent
-    report_path = build_directory / "build-report.json"
-    scene = build_scene_plan()
-    build_request = canary.build_canary_request(
-        repo_root=ROOT,
-        scene_plan=scene,
-        camera_plan=build_camera_plan(scene),
-        visual_pack_root=ROOT / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources",
+    from pipeline.synthetic_village.windows_production_build import (
+        verify_windows_production_build,
     )
-    report = canary.load_build_report(report_path)
-    canary.verify_build_report(report, request=build_request, staging=build_directory)
+
+    build_directory = TEXTURED_RUNTIME_BLEND.parent
+    verified = verify_windows_production_build(
+        directory=build_directory,
+        material_bundle_root=MATERIAL_BUNDLE_ROOT,
+        repo_root=ROOT,
+        surface_realism_profile_id="source-consistent-multiscale-surface-v1",
+    )
+    report = verified.report
+    build_request = verified.request
     camera = build_request.camera_plan.cameras[0]
     measured = next(
         row.measured_c2w_blender
         for row in report.camera_registry
         if row.camera_id == camera.camera_id
     )
-    executable_sha256 = _sha256(BLENDER)
+    executable_sha256 = verified.blender_executable_sha256
     renderer_sha256 = _sha256(RENDERER)
-    blend_sha256 = _sha256(FORMAL_BLEND)
-    report_sha256 = _sha256(report_path)
+    blend_sha256 = verified.blend_sha256
+    report_sha256 = verified.build_report_sha256
     registry_sha256 = hashlib.sha256(
         canary._canonical_json_bytes(  # noqa: SLF001 - contract-level integration test
             [row.model_dump(mode="json") for row in report.object_registry],
@@ -350,7 +348,7 @@ def _production_clearance_request():
     )
     from pipeline.synthetic_village.scene_plan import build_scene_plan
 
-    report_path = PRODUCTION_BLEND.parent / "build-report.json"
+    report_path = TEXTURED_RUNTIME_BLEND.parent / "build-report.json"
     report = canary.load_textured_build_report(report_path)
     scene = build_scene_plan()
     plan = build_production_camera_plan(
@@ -367,7 +365,7 @@ def _production_clearance_request():
         build_id=report.build_id,
         blender_executable_sha256=_sha256(BLENDER),
         preflight_script_sha256=_sha256(PREFLIGHT),
-        blend_sha256=_sha256(PRODUCTION_BLEND),
+        blend_sha256=_sha256(TEXTURED_RUNTIME_BLEND),
         build_report_sha256=_sha256(report_path),
         object_registry=report.object_registry,
         auxiliary_registry=report.auxiliary_registry,
@@ -403,7 +401,7 @@ def _read_exr_attributes(path: Path) -> dict[str, tuple[str, bytes]]:
 
 
 @pytest.mark.skipif(
-    not PRODUCTION_BLEND.is_file(),
+    not TEXTURED_RUNTIME_BLEND.is_file(),
     reason="verified private production Blender scene is unavailable",
 )
 def test_preflight_runtime_measures_bound_production_camera_clearance(
@@ -424,7 +422,7 @@ def test_preflight_runtime_measures_bound_production_camera_clearance(
     )
 
     completed = _run_preflight(
-        PRODUCTION_BLEND,
+        TEXTURED_RUNTIME_BLEND,
         "--request",
         str(request_path),
         "--report",
@@ -467,7 +465,7 @@ def test_preflight_runtime_measures_bound_production_camera_clearance(
 
 
 @pytest.mark.skipif(
-    not PRODUCTION_BLEND.is_file(),
+    not TEXTURED_RUNTIME_BLEND.is_file(),
     reason="verified private production Blender scene is unavailable",
 )
 def test_preflight_runtime_rejects_duplicate_request_keys_without_report(
@@ -480,7 +478,7 @@ def test_preflight_runtime_rejects_duplicate_request_keys_without_report(
     )
 
     completed = _run_preflight(
-        PRODUCTION_BLEND,
+        TEXTURED_RUNTIME_BLEND,
         "--request",
         str(request_path),
         "--report",
@@ -560,9 +558,9 @@ def test_runtime_writes_canonical_rgb_and_exr_metadata(tmp_path: Path) -> None:
 
 
 def test_runtime_registry_requires_exact_renderable_coverage(tmp_path: Path) -> None:
-    if not FORMAL_BLEND.is_file():
-        pytest.skip("formal Task 7 canary blend is unavailable")
-    report_path = FORMAL_BLEND.with_name("build-report.json")
+    if not TEXTURED_RUNTIME_BLEND.is_file():
+        pytest.skip("textured Windows runtime blend is unavailable")
+    report_path = TEXTURED_RUNTIME_BLEND.with_name("build-report.json")
     result = _run_renderer_probe(
         tmp_path,
         _probe_prelude()
@@ -605,7 +603,7 @@ def test_runtime_registry_requires_exact_renderable_coverage(tmp_path: Path) -> 
         + "else:\n"
         + "    raise AssertionError('mesh registry tag mismatch was accepted')\n"
         + "print('NANTAI_REGISTRY_COVERAGE_OK', flush=True)\n",
-        blend_path=FORMAL_BLEND,
+        blend_path=TEXTURED_RUNTIME_BLEND,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -688,11 +686,11 @@ def test_runtime_rejects_scene_contract_tampering_before_staging(
     tmp_path: Path,
     mutation: str,
 ) -> None:
-    if not FORMAL_BLEND.is_file():
-        pytest.skip("formal Task 7 canary blend is unavailable")
+    if not TEXTURED_RUNTIME_BLEND.is_file():
+        pytest.skip("textured Windows runtime blend is unavailable")
     import pipeline.synthetic_village.canary as canary
 
-    request = _formal_render_request()
+    request = _textured_render_request()
     request_path = tmp_path / "render-request.json"
     request_path.write_bytes(canary.canonical_render_request_bytes(request))
     staging = tmp_path / "staging"
@@ -720,7 +718,7 @@ def test_runtime_rejects_scene_contract_tampering_before_staging(
         + "    staging.mkdir()\n"
         + "    raise AssertionError('tampered scene contract was accepted')\n"
         + "print('NANTAI_SCENE_TAMPER_REJECTED', flush=True)\n",
-        blend_path=FORMAL_BLEND,
+        blend_path=TEXTURED_RUNTIME_BLEND,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -752,18 +750,18 @@ def test_runtime_derives_measured_opencv_pose(tmp_path: Path) -> None:
     reason="set NANTAI_RUN_BLENDER_RUNTIME_TESTS=1 for the real Blender render",
 )
 def test_runtime_renders_one_formal_camera_with_repeatable_private_outputs() -> None:
-    if not FORMAL_BLEND.is_file():
-        pytest.skip("formal Task 7 canary blend is unavailable")
+    if not TEXTURED_RUNTIME_BLEND.is_file():
+        pytest.skip("textured Windows runtime blend is unavailable")
     import pipeline.synthetic_village.canary as canary
 
-    request = _formal_render_request()
+    request = _textured_render_request()
     ignored_root = ROOT / ".nantai-studio/synthetic-village/hybrid-v3/runtime-tests"
     ignored_root.mkdir(parents=True, exist_ok=True)
     container = ignored_root / uuid.uuid4().hex
     container.mkdir()
     try:
         isolated_blend = container / "village-canary.blend"
-        shutil.copy2(FORMAL_BLEND, isolated_blend)
+        shutil.copy2(TEXTURED_RUNTIME_BLEND, isolated_blend)
         request_path = container / "render-request.json"
         request_path.write_bytes(canary.canonical_render_request_bytes(request))
         staging_paths = (container / "run-a", container / "run-b")
@@ -882,10 +880,10 @@ def test_runtime_renders_one_formal_camera_with_repeatable_private_outputs() -> 
 
 
 def test_render_runtime_rejects_missing_request_before_staging(tmp_path: Path) -> None:
-    if not FORMAL_BLEND.is_file():
-        pytest.skip("formal Task 7 canary blend is unavailable")
+    if not TEXTURED_RUNTIME_BLEND.is_file():
+        pytest.skip("textured Windows runtime blend is unavailable")
     result = _run_renderer(
-        FORMAL_BLEND,
+        TEXTURED_RUNTIME_BLEND,
         "--request",
         str(tmp_path / "missing.json"),
         "--staging",
