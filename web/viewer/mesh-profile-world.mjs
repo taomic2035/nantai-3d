@@ -21,6 +21,7 @@ function validateLane(lane) {
     || typeof lane.build !== 'function'
     || typeof lane.disposeTemplates !== 'function'
     || typeof lane.disposeTextures !== 'function'
+    || typeof lane.diagnostics !== 'function'
   ) {
     throw new TypeError('mesh profile resource lane is invalid');
   }
@@ -233,6 +234,12 @@ export function createAtomicMeshProfileWorld({
 
   const snapshot = () => {
     const profile = profileController.snapshot();
+    let resources = null;
+    try {
+      resources = lane?.diagnostics() ?? null;
+    } catch {
+      // Diagnostics are observational and cannot alter rendering state.
+    }
     return Object.freeze({
       state: profile.state,
       profileId: profile.profileId,
@@ -242,6 +249,7 @@ export function createAtomicMeshProfileWorld({
         activeRecords.map((record) => record.profileId),
       ).size > 1,
       loading: loadingPromise !== null,
+      resources,
     });
   };
 

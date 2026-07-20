@@ -28,6 +28,8 @@ import {
   artifactProvenance,
   createViewerCapabilities,
   createViewerBridge,
+  materialProfileEvidence,
+  materialProfileHud,
   resolveArtifactUrl,
 } from './bridge.mjs';
 import {
@@ -168,6 +170,7 @@ let atomicMeshBatchPromise = null;
 let atomicMeshBatchSignature = null;
 let atomicMeshRetryAt = 0;
 let meshProfileEvent = null;
+let meshProfileRuntimeEvidence = null;
 const frameIntervalSampler = createFrameIntervalSampler();
 let viewerBridge = null;
 let splatLayer = null;
@@ -1031,6 +1034,12 @@ function createMeshProfileLane(profileId, ktx2Loader) {
     async disposeTextures() {
       profileTextureStore.dispose();
     },
+    diagnostics() {
+      return {
+        profile_textures: profileTextureStore.diagnostics(),
+        mesh_templates: profileMeshResourceStore.diagnostics(),
+      };
+    },
   };
   return profileLane;
 }
@@ -1109,6 +1118,7 @@ function loadAtomicMeshWorld(requests) {
         )
       )));
       const records = await atomicMeshProfileWorld.loadVisible(runtimes);
+      meshProfileRuntimeEvidence = runtimes[0];
       atomicMeshBatchSignature = signature;
       atomicMeshRetryAt = 0;
       for (const request of requests) {
@@ -2447,6 +2457,20 @@ function updateHUD() {
     if (element) element.textContent = String(value);
   }
 
+  const profileHud = materialProfileHud(materialProfileEvidence({
+    snapshot: atomicMeshProfileWorld?.snapshot(),
+    runtime: meshProfileRuntimeEvidence,
+  }));
+  const profileFields = {
+    'hud-material-profile': profileHud.profile,
+    'hud-material-truth': profileHud.truth,
+    'hud-compressed-textures': profileHud.compressed,
+  };
+  for (const [id, value] of Object.entries(profileFields)) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  }
+
   const coverage = coverageAuditViewModel(coverageAudit);
   const coverageFields = {
     'hud-coverage-status': {
@@ -2703,6 +2727,10 @@ async function main() {
           ...meshWorldTerminalFailures,
         ]).size,
       },
+      material_profile: materialProfileEvidence({
+        snapshot: atomicMeshProfileWorld?.snapshot(),
+        runtime: meshProfileRuntimeEvidence,
+      }),
       frame_performance: {
         ...frameIntervalSampler.snapshot(),
         geometries: renderer.info.memory.geometries,

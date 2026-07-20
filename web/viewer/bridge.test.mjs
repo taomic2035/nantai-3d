@@ -134,6 +134,136 @@ test('spark chunk capabilities keep full 3DGS fidelity with reconstruction LOD',
   assert.equal(capabilities.artifact_kinds.includes('3dgs-ply'), true);
 });
 
+test('material profile evidence is allowlisted bounded and presentation-ready', () => {
+  const {
+    materialProfileEvidence,
+    materialProfileHud,
+  } = subject();
+  const evidence = materialProfileEvidence({
+    snapshot: {
+      profileId: 'h3-ai-ktx2-4k',
+      fallbackCode: null,
+      resources: {
+        profile_textures: {
+          active_textures: 24,
+          network_fetches: 24,
+          ktx_transcodes: 24,
+          png_bitmap_decodes: 0,
+          gpu_texture_creations: 24,
+          compressed_mip_bytes: 7340032,
+          raw_url: 'https://must-not-leak.example/texture.ktx2',
+        },
+        mesh_templates: {
+          templates: 11,
+          network_fetches: 11,
+          bitmap_decodes: 0,
+          gpu_texture_creations: 0,
+          last_error: 'must-not-leak',
+        },
+      },
+    },
+    runtime: {
+      mesh_asset_bundle_id: 'a'.repeat(64),
+      material_bundle_id: 'b'.repeat(64),
+      fallback_material_bundle_id: 'c'.repeat(64),
+      predicted_compressed_texture_bytes: 8388608,
+      synthetic: true,
+      ai_generated: true,
+      real_photo_textures: false,
+      geometry_usability: 'preview-only',
+      metric_alignment: false,
+      verification_level: 'L0',
+    },
+  });
+
+  assert.deepEqual(evidence, {
+    profile_id: 'h3-ai-ktx2-4k',
+    fallback_code: null,
+    mesh_asset_bundle_id: 'a'.repeat(64),
+    material_bundle_id: 'b'.repeat(64),
+    predicted_compressed_texture_bytes: 8388608,
+    observed_compressed_texture_bytes: 7340032,
+    truth: {
+      synthetic: true,
+      ai_generated: true,
+      real_photo_textures: false,
+      geometry_usability: 'preview-only',
+      metric_alignment: false,
+      verification_level: 'L0',
+    },
+    counters: {
+      active_textures: 24,
+      texture_network_fetches: 24,
+      ktx_transcodes: 24,
+      png_bitmap_decodes: 0,
+      texture_gpu_creations: 24,
+      mesh_templates: 11,
+      mesh_network_fetches: 11,
+      mesh_bitmap_decodes: 0,
+      mesh_gpu_texture_creations: 0,
+    },
+  });
+  assert.equal(
+    JSON.stringify(evidence).includes('must-not-leak'),
+    false,
+  );
+  assert.deepEqual(materialProfileHud(evidence), {
+    profile: 'AI 合成 4K · KTX2',
+    truth: 'synthetic · preview-only · not real-photo',
+    compressed: '7.0 MiB / 512 MiB',
+  });
+});
+
+test('material profile evidence names an H2 fallback without leaking errors', () => {
+  const {
+    materialProfileEvidence,
+    materialProfileHud,
+  } = subject();
+  const evidence = materialProfileEvidence({
+    snapshot: {
+      profileId: 'h2-png-1k-fallback',
+      fallbackCode: 'canary_decode_failed',
+      resources: {
+        profile_textures: {
+          active_textures: 3,
+          network_fetches: 3,
+          ktx_transcodes: 0,
+          png_bitmap_decodes: 3,
+          gpu_texture_creations: 3,
+          compressed_mip_bytes: 0,
+        },
+        mesh_templates: {
+          templates: 1,
+          network_fetches: 1,
+          bitmap_decodes: 3,
+          gpu_texture_creations: 3,
+        },
+      },
+    },
+    runtime: {
+      mesh_asset_bundle_id: 'a'.repeat(64),
+      material_bundle_id: 'b'.repeat(64),
+      fallback_material_bundle_id: 'c'.repeat(64),
+      predicted_compressed_texture_bytes: 8388608,
+      synthetic: true,
+      ai_generated: true,
+      real_photo_textures: false,
+      geometry_usability: 'preview-only',
+      metric_alignment: false,
+      verification_level: 'L0',
+    },
+  });
+
+  assert.equal(evidence.material_bundle_id, 'c'.repeat(64));
+  assert.equal(evidence.predicted_compressed_texture_bytes, 0);
+  assert.equal(evidence.observed_compressed_texture_bytes, 0);
+  assert.deepEqual(materialProfileHud(evidence), {
+    profile: 'H2 1K 回退 · KTX2 探针解码失败',
+    truth: 'synthetic · preview-only · not real-photo',
+    compressed: '0.0 MiB / 512 MiB',
+  });
+});
+
 test('bridge resolves capabilities at announcement time and can report a renderer change', () => {
   const { createViewerBridge, createViewerCapabilities } = subject();
   const fake = fakeWindow();

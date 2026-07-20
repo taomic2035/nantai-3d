@@ -28,6 +28,25 @@ const MESH_ARTIFACT_KINDS = Object.freeze([
   ...POINT_ARTIFACT_KINDS, 'synthetic-model-preview',
 ]);
 const LOD_LEVELS = Object.freeze([0, 1, 2]);
+const SHA256 = /^[0-9a-f]{64}$/;
+const H3_PROFILE_ID = 'h3-ai-ktx2-4k';
+const H2_PROFILE_ID = 'h2-png-1k-fallback';
+const MAX_H3_COMPRESSED_TEXTURE_BYTES = 512 * 1024 * 1024;
+const MAX_DIAGNOSTIC_COUNTER = 1_000_000_000;
+const MATERIAL_PROFILE_FALLBACK_LABELS = Object.freeze({
+  compressed_memory_budget: '压缩纹理超过 512 MiB 预算',
+  invalid_selection_evidence: '材质配置证据不完整',
+  ktx2_capability_unavailable: '当前渲染器无法确认 KTX2 支持',
+  canary_descriptor_invalid: 'KTX2 探针描述无效',
+  canary_fetch_failed: 'KTX2 探针不可用',
+  canary_redirect_rejected: 'KTX2 探针发生未授权跳转',
+  canary_mime_mismatch: 'KTX2 探针媒体类型不符',
+  canary_length_mismatch: 'KTX2 探针字节数不符',
+  canary_sha256_mismatch: 'KTX2 探针完整性校验失败',
+  canary_verification_failed: 'KTX2 探针无法验证',
+  canary_decode_failed: 'KTX2 探针解码失败',
+  runtime_h3_failure: 'H3 运行时加载失败',
+});
 
 const DC_POINT_RENDERER = Object.freeze({
   id: 'three-points',
@@ -116,6 +135,132 @@ export function createViewerCapabilities(mode = 'dc-point-preview') {
 }
 
 export const VIEWER_CAPABILITIES = createViewerCapabilities();
+
+function boundedInteger(value, maximum = MAX_DIAGNOSTIC_COUNTER) {
+  return (
+    Number.isSafeInteger(value)
+    && value >= 0
+    && value <= maximum
+  ) ? value : null;
+}
+
+function exactMaterialTruth(runtime) {
+  if (
+    runtime?.synthetic !== true
+    || runtime.ai_generated !== true
+    || runtime.real_photo_textures !== false
+    || runtime.geometry_usability !== 'preview-only'
+    || runtime.metric_alignment !== false
+    || runtime.verification_level !== 'L0'
+  ) {
+    return null;
+  }
+  return {
+    synthetic: true,
+    ai_generated: true,
+    real_photo_textures: false,
+    geometry_usability: 'preview-only',
+    metric_alignment: false,
+    verification_level: 'L0',
+  };
+}
+
+export function materialProfileEvidence({
+  snapshot,
+  runtime,
+} = {}) {
+  const profileId = snapshot?.profileId;
+  const truth = exactMaterialTruth(runtime);
+  if (
+    ![H3_PROFILE_ID, H2_PROFILE_ID].includes(profileId)
+    || !truth
+    || !SHA256.test(runtime?.mesh_asset_bundle_id)
+  ) {
+    return null;
+  }
+  const materialBundleId = profileId === H3_PROFILE_ID
+    ? runtime.material_bundle_id
+    : runtime.fallback_material_bundle_id;
+  if (!SHA256.test(materialBundleId)) return null;
+
+  const textures = snapshot.resources?.profile_textures ?? {};
+  const templates = snapshot.resources?.mesh_templates ?? {};
+  const fallbackCode = profileId === H2_PROFILE_ID
+    && Object.hasOwn(
+      MATERIAL_PROFILE_FALLBACK_LABELS,
+      snapshot.fallbackCode,
+    )
+    ? snapshot.fallbackCode
+    : null;
+  const predictedBytes = profileId === H3_PROFILE_ID
+    ? boundedInteger(
+      runtime.predicted_compressed_texture_bytes,
+      MAX_H3_COMPRESSED_TEXTURE_BYTES,
+    )
+    : 0;
+  const observedBytes = profileId === H3_PROFILE_ID
+    ? boundedInteger(
+      textures.compressed_mip_bytes,
+      MAX_H3_COMPRESSED_TEXTURE_BYTES,
+    )
+    : 0;
+
+  return {
+    profile_id: profileId,
+    fallback_code: fallbackCode,
+    mesh_asset_bundle_id: runtime.mesh_asset_bundle_id,
+    material_bundle_id: materialBundleId,
+    predicted_compressed_texture_bytes: predictedBytes,
+    observed_compressed_texture_bytes: observedBytes,
+    truth,
+    counters: {
+      active_textures: boundedInteger(textures.active_textures),
+      texture_network_fetches: boundedInteger(textures.network_fetches),
+      ktx_transcodes: boundedInteger(textures.ktx_transcodes),
+      png_bitmap_decodes: boundedInteger(textures.png_bitmap_decodes),
+      texture_gpu_creations: boundedInteger(
+        textures.gpu_texture_creations,
+      ),
+      mesh_templates: boundedInteger(templates.templates),
+      mesh_network_fetches: boundedInteger(templates.network_fetches),
+      mesh_bitmap_decodes: boundedInteger(templates.bitmap_decodes),
+      mesh_gpu_texture_creations: boundedInteger(
+        templates.gpu_texture_creations,
+      ),
+    },
+  };
+}
+
+export function materialProfileHud(evidence) {
+  if (!evidence) {
+    return {
+      profile: '未启用（非 runtime-v3）',
+      truth: 'unknown · fail-closed',
+      compressed: 'unknown / 512 MiB',
+    };
+  }
+  const fallback = MATERIAL_PROFILE_FALLBACK_LABELS[
+    evidence.fallback_code
+  ] ?? '回退原因未知';
+  const profile = evidence.profile_id === H3_PROFILE_ID
+    ? 'AI 合成 4K · KTX2'
+    : `H2 1K 回退 · ${fallback}`;
+  const truthful = (
+    evidence.truth?.synthetic === true
+    && evidence.truth?.real_photo_textures === false
+    && evidence.truth?.geometry_usability === 'preview-only'
+  );
+  const observed = evidence.observed_compressed_texture_bytes;
+  return {
+    profile,
+    truth: truthful
+      ? 'synthetic · preview-only · not real-photo'
+      : 'unknown · fail-closed',
+    compressed: Number.isSafeInteger(observed)
+      ? `${(observed / 1024 / 1024).toFixed(1)} MiB / 512 MiB`
+      : 'unknown / 512 MiB',
+  };
+}
 
 function unknown(value) {
   return value ?? 'unknown';

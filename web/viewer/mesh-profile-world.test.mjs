@@ -84,6 +84,17 @@ function harness({
         },
         async disposeTemplates() {},
         async disposeTextures() {},
+        diagnostics() {
+          return {
+            profile_textures: {
+              active_textures: profileId === H3 ? 3 : 2,
+              compressed_mip_bytes: profileId === H3 ? 4096 : 0,
+            },
+            mesh_templates: {
+              templates: 3,
+            },
+          };
+        },
       };
     },
     async replaceVisible() {},
@@ -125,6 +136,15 @@ test('one H3 failure clears the whole batch before one H2 reload', async () => {
     activeRecords: 3,
     mixedProfiles: false,
     loading: false,
+    resources: {
+      profile_textures: {
+        active_textures: 2,
+        compressed_mip_bytes: 0,
+      },
+      mesh_templates: {
+        templates: 3,
+      },
+    },
   });
 });
 

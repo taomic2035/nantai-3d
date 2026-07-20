@@ -280,6 +280,24 @@ test('runtime v3 uses one atomic renderer-selected material profile', () => {
   assert.match(main, /disposeTextures/);
 });
 
+test('material profile truth and bounded compression evidence reach HUD and bridge', () => {
+  for (const id of [
+    'hud-material-profile',
+    'hud-material-truth',
+    'hud-compressed-textures',
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(main, /materialProfileEvidence/);
+  assert.match(main, /materialProfileHud/);
+  assert.match(main, /material_profile:\s*materialProfileEvidence\(/);
+  assert.match(main, /profileTextureStore\.diagnostics\(\)/);
+  assert.match(main, /profileMeshResourceStore\.diagnostics\(\)/);
+  assert.match(main, /hud-material-profile/);
+  assert.match(main, /hud-material-truth/);
+  assert.match(main, /hud-compressed-textures/);
+});
+
 test('mesh weather clones preserve maps alpha and side while changing scalars', () => {
   assert.match(main, /cloneMeshWorldWeatherMaterials/);
   assert.match(main, /clone\.map\s*===\s*material\.map/);
