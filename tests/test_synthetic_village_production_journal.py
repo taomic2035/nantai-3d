@@ -561,3 +561,193 @@ def test_every_unverified_state_is_rerendered_not_only_planned(plan, render_id) 
     )
     # verified 是唯一【不】重跑的状态
     assert "camera-ground-route-005" not in frames_needing_render(resumed)
+
+
+# --------------------------------------------------------------------------- #
+# environment_module_build_report_sha256 可选绑定 (Task 5 §3 caller 预留)
+# --------------------------------------------------------------------------- #
+# 与 repose_search_sha256 同样是可选绑定键: 当 §3 caller 把 175-root
+# EnvironmentModuleBuildReport 的实测 SHA 传进来时, render_id 自动内容绑定
+# 到该 module build; 不传时既有 journal 完全不受影响。
+#
+# 严格约束 (与 repose_search_sha256 一致):
+#   * 只接受 64-hex SHA-256, 非法值 fail-closed
+#   * 进入 canonical identity payload, 任一位变化改变 render_id
+#   * 只能绑定【实测 build report SHA】, 不能从目录名/build_id/engine 名推断
+
+
+def test_render_id_ignores_environment_module_build_report_sha_when_none(
+    plan,
+    render_id,
+) -> None:
+    """未提供 environment_module_build_report_sha256 时 render_id 完全不变。
+
+    可选绑定意味着既有 journal / 既有 caller 完全不受影响。
+    """
+    again = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256=None,
+    )
+    assert again == render_id
+
+
+def test_render_id_rejects_non_hex_environment_module_build_report_sha(
+    plan,
+) -> None:
+    """非法 SHA (非 64-hex) 必须被拒绝, 不能进入 canonical payload。
+
+    防止 caller 把目录名 / build_id / engine 名等非 SHA 字符串当 SHA 绑定。
+    """
+    with pytest.raises(ProductionProfileError):
+        production_render_id(
+            plan,
+            blender_executable_sha256=DIGEST,
+            renderer_script_sha256=DIGEST,
+            blend_sha256=DIGEST,
+            build_report_sha256=DIGEST,
+            camera_registry_sha256=production_camera_registry_digest(plan),
+            environment_module_build_report_sha256="not-a-sha",
+        )
+
+
+def test_render_id_rejects_short_environment_module_build_report_sha(
+    plan,
+) -> None:
+    """长度不足的 SHA 必须被拒绝。"""
+    with pytest.raises(ProductionProfileError):
+        production_render_id(
+            plan,
+            blender_executable_sha256=DIGEST,
+            renderer_script_sha256=DIGEST,
+            blend_sha256=DIGEST,
+            build_report_sha256=DIGEST,
+            camera_registry_sha256=production_camera_registry_digest(plan),
+            environment_module_build_report_sha256="a" * 63,
+        )
+
+
+def test_render_id_changes_when_environment_module_build_report_sha_changes(
+    plan,
+) -> None:
+    """两位不同的 module build report SHA 必须产生不同的 render_id。
+
+    否则 caller 可以在 build 与 render 之间偷换 module build report,
+    而 render_id 无法检测。
+    """
+    base = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="b" * 64,
+    )
+    swapped = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="c" * 64,
+    )
+    assert base != swapped
+
+
+def test_render_id_environment_module_binding_is_deterministic_across_processes(
+    plan,
+) -> None:
+    """相同输入必须产生相同 render_id (跨进程 / 跨调用确定性)。
+
+    内容寻址的基本契约: 同样的输入永远得到同样的 render_id。
+    """
+    left = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="d" * 64,
+    )
+    right = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="d" * 64,
+    )
+    assert left == right
+
+
+def test_render_id_binds_environment_module_and_repose_simultaneously(plan) -> None:
+    """environment_module_build_report_sha256 与 repose_search_sha256 必须同时绑定。
+
+    当 §3 caller 同时使用 repose (重建 plan) 和 module build (175-root scene)
+    时, 两个 SHA 必须同时进入 canonical identity, 缺一不可。
+    """
+    only_module = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="e" * 64,
+        repose_search_sha256=None,
+    )
+    only_repose = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256=None,
+        repose_search_sha256="f" * 64,
+    )
+    both = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="e" * 64,
+        repose_search_sha256="f" * 64,
+    )
+    # 两者同时绑定的 render_id 必须与只绑一个的不同
+    assert both != only_module
+    assert both != only_repose
+    # 两个 SHA 都影响 canonical identity —— 篡改任一位必须改变 render_id。
+    # 注意: 必须用合法 hex 字符 (0-9a-f), 否则 _require_64_hex_sha 会先拒绝。
+    tampered_module = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="0" * 64,
+        repose_search_sha256="f" * 64,
+    )
+    tampered_repose = production_render_id(
+        plan,
+        blender_executable_sha256=DIGEST,
+        renderer_script_sha256=DIGEST,
+        blend_sha256=DIGEST,
+        build_report_sha256=DIGEST,
+        camera_registry_sha256=production_camera_registry_digest(plan),
+        environment_module_build_report_sha256="e" * 64,
+        repose_search_sha256="1" * 64,
+    )
+    assert tampered_module != both
+    assert tampered_repose != both

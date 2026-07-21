@@ -33,6 +33,24 @@ from .production_profile import (
 # "如实报告实际耗时"。生产档沿用同一个默认限额。
 DEFAULT_RENDER_TIMEOUT_SECONDS = 15 * 60
 
+_HEX_CHARS = frozenset("0123456789abcdef")
+
+
+def _require_64_hex_sha(value: str, field_name: str) -> None:
+    """Fail-closed 校验: 可选 SHA 绑定键必须是严格 64-hex SHA-256。
+
+    防止 caller 把目录名 / build_id / engine 名等非 SHA 字符串当 SHA 绑定进
+    canonical identity —— 那会让 render_id 内容寻址失效。
+    """
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(c not in _HEX_CHARS for c in value)
+    ):
+        raise ProductionProfileError(
+            f"{field_name} must be a 64-hex-char SHA-256 string",
+        )
+
 FrameState = Literal["planned", "rendering", "verified", "failed", "timed-out"]
 
 
@@ -177,6 +195,7 @@ def production_render_id(
     quality_policy_sha256: str | None = None,
     repose_search_sha256: str | None = None,
     build_adapter: str | None = None,
+    environment_module_build_report_sha256: str | None = None,
 ) -> str:
     """内容寻址的 render_id。
 
@@ -194,9 +213,27 @@ def production_render_id(
     render 真的是从某个特定的 repose search 派生的, 不是被替换的 plan
     跑出来的伪造 render。
 
-    绑定是【可选】的: 当 ``repose_search_sha256`` is None 时, render_id 与
+    ``environment_module_build_report_sha256`` 是可选的 Task 5 §3 caller
+    绑定键: 当 §3 caller 把 175-root ``EnvironmentModuleBuildReport`` 的
+    实测 SHA 传进来时, render_id 自动内容绑定到该 module build。这样下游可以
+    验证: 这次 render 真的是从某个特定的 175-root module scene 派生的,
+    不是被替换的 base blend 跑出来的伪造 render。
+
+    严格 fail-closed (与 ``repose_search_sha256`` 的可选语义不同):
+      * 必须是严格 64-hex SHA-256 —— 防止 caller 把目录名 / build_id /
+        engine 名等非 SHA 字符串当 SHA 绑定。
+      * 只能绑定【实测】build report SHA, 不能从任何元数据推断 —— provenance
+        safety 要求可信度只从机器可验证字段推导。
+
+    绑定是【可选】的: 当 ``repose_search_sha256`` /
+    ``environment_module_build_report_sha256`` is None 时, render_id 与
     既有行为完全相同, 既有 journal 不受影响。
     """
+    if environment_module_build_report_sha256 is not None:
+        _require_64_hex_sha(
+            environment_module_build_report_sha256,
+            "environment_module_build_report_sha256",
+        )
     payload = {
         "schema_version": PRODUCTION_JOURNAL_SCHEMA,
         "profile_id": plan.profile_id,
@@ -216,6 +253,10 @@ def production_render_id(
         payload["repose_search_sha256"] = repose_search_sha256
     if build_adapter is not None:
         payload["build_adapter"] = build_adapter
+    if environment_module_build_report_sha256 is not None:
+        payload["environment_module_build_report_sha256"] = (
+            environment_module_build_report_sha256
+        )
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
