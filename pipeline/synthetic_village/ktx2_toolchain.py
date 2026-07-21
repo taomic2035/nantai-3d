@@ -55,6 +55,21 @@ KTX_DARWIN_ARM64_URL = (
 KTX_DARWIN_ARM64_SHA256 = (
     "500bd8f9d63358c3f3a0d83b724c8574436a72c37dc0e4bad90ec1ca38032c3c"
 )
+KTX_WINDOWS_X64_ASSET = "KTX-Software-4.4.2-Windows-x64.exe"
+KTX_WINDOWS_X64_URL = (
+    "https://github.com/KhronosGroup/KTX-Software/releases/download/"
+    "v4.4.2/KTX-Software-4.4.2-Windows-x64.exe"
+)
+KTX_WINDOWS_X64_SHA256 = (
+    "1f323b0fec19794f5e6c0425a61d4b1da396872a10be862d105f4f4b2d2957fe"
+)
+KTX_WINDOWS_SIGNER_SUBJECT = (
+    "CN=The Khronos Group Inc, O=The Khronos Group Inc, L=Beaverton, "
+    "S=Oregon, C=US, SERIALNUMBER=2568818, OID.2.5.4.15=Private "
+    "Organization, OID.1.3.6.1.4.1.311.60.2.1.2=California, "
+    "OID.1.3.6.1.4.1.311.60.2.1.3=US"
+)
+KTX_WINDOWS_SIGNER_THUMBPRINT = "CA07F94EBD7402F3F563FE5C3DF71DF1B88C1B06"
 KTX2_MAGIC = b"\xabKTX 20\xbb\r\n\x1a\n"
 KTX_LEVEL_DIMENSIONS = (
     4096,
@@ -72,6 +87,7 @@ KTX_LEVEL_DIMENSIONS = (
     1,
 )
 KTX_RECEIPT_SCHEMA = "nantai.ktx-tool-receipt.v1"
+KTX_WINDOWS_RECEIPT_SCHEMA = "nantai.ktx-windows-tool-receipt.v1"
 H3_KTX2_PACK_SCHEMA = "nantai.h3-ktx2-pack.v1"
 H3_KTX2_PACK_MANIFEST = "manifest.json"
 KTX_RECEIPT_NAME = "receipt.json"
@@ -192,6 +208,92 @@ class KtxToolReceipt(FrozenModel):
         if "4.4.2" not in self.ktx.version_output:
             raise ValueError("ktx receipt version output is not 4.4.2")
         return self
+
+
+class WindowsKtxToolBinary(KtxToolFile):
+    version_output: str | None = Field(default=None, min_length=1, max_length=4096)
+    authenticode_status: Literal["Valid"] = "Valid"
+    signer_subject: Literal[
+        "CN=The Khronos Group Inc, O=The Khronos Group Inc, L=Beaverton, "
+        "S=Oregon, C=US, SERIALNUMBER=2568818, OID.2.5.4.15=Private "
+        "Organization, OID.1.3.6.1.4.1.311.60.2.1.2=California, "
+        "OID.1.3.6.1.4.1.311.60.2.1.3=US"
+    ] = KTX_WINDOWS_SIGNER_SUBJECT
+    signer_thumbprint: Literal[
+        "CA07F94EBD7402F3F563FE5C3DF71DF1B88C1B06"
+    ] = KTX_WINDOWS_SIGNER_THUMBPRINT
+
+
+class WindowsKtxToolReceipt(FrozenModel):
+    schema_version: Literal[
+        "nantai.ktx-windows-tool-receipt.v1"
+    ] = KTX_WINDOWS_RECEIPT_SCHEMA
+    version: Literal["4.4.2"] = KTX_TOOL_VERSION
+    platform: Literal["windows-x64"] = "windows-x64"
+    package_asset: Literal[
+        "KTX-Software-4.4.2-Windows-x64.exe"
+    ] = KTX_WINDOWS_X64_ASSET
+    package_url: Literal[
+        "https://github.com/KhronosGroup/KTX-Software/releases/download/"
+        "v4.4.2/KTX-Software-4.4.2-Windows-x64.exe"
+    ] = KTX_WINDOWS_X64_URL
+    package_sha256: Literal[
+        "1f323b0fec19794f5e6c0425a61d4b1da396872a10be862d105f4f4b2d2957fe"
+    ] = KTX_WINDOWS_X64_SHA256
+    package_file: KtxToolFile
+    package_signature_status: Literal["trusted"] = "trusted"
+    package_signer_subject: Literal[
+        "CN=The Khronos Group Inc, O=The Khronos Group Inc, L=Beaverton, "
+        "S=Oregon, C=US, SERIALNUMBER=2568818, OID.2.5.4.15=Private "
+        "Organization, OID.1.3.6.1.4.1.311.60.2.1.2=California, "
+        "OID.1.3.6.1.4.1.311.60.2.1.3=US"
+    ] = KTX_WINDOWS_SIGNER_SUBJECT
+    package_signer_thumbprint: Literal[
+        "CA07F94EBD7402F3F563FE5C3DF71DF1B88C1B06"
+    ] = KTX_WINDOWS_SIGNER_THUMBPRINT
+    installation_scope: Literal[
+        "project-private-installed-signed-exe"
+    ] = "project-private-installed-signed-exe"
+    system_installed: Literal[False] = False
+    toktx: WindowsKtxToolBinary
+    ktx: WindowsKtxToolBinary
+    library: WindowsKtxToolBinary
+    license: KtxToolFile
+
+    @model_validator(mode="after")
+    def _paths_are_exact(self) -> WindowsKtxToolReceipt:
+        paths = (
+            self.package_file.relative_path,
+            self.toktx.relative_path,
+            self.ktx.relative_path,
+            self.library.relative_path,
+            self.license.relative_path,
+        )
+        if paths != (
+            f"downloads/{KTX_WINDOWS_X64_ASSET}",
+            "bin/toktx.exe",
+            "bin/ktx.exe",
+            "bin/ktx.dll",
+            "share/doc/KTX-Software/html/license.html",
+        ):
+            raise ValueError("Windows KTX receipt runtime paths are not exact")
+        if self.package_file.sha256 != self.package_sha256:
+            raise ValueError("Windows KTX receipt package file SHA disagrees with pin")
+        if (
+            self.toktx.version_output is None
+            or "4.4.2" not in self.toktx.version_output
+        ):
+            raise ValueError("Windows toktx receipt version output is not 4.4.2")
+        if self.ktx.version_output is None or "4.4.2" not in self.ktx.version_output:
+            raise ValueError("Windows ktx receipt version output is not 4.4.2")
+        if self.library.version_output is not None:
+            raise ValueError(
+                "Windows KTX library must not claim version command output"
+            )
+        return self
+
+
+AnyKtxToolReceipt = KtxToolReceipt | WindowsKtxToolReceipt
 
 
 class KtxBinaryAudit(FrozenModel):
@@ -352,7 +454,7 @@ def _canonical_json_bytes(value: BaseModel) -> bytes:
     ).encode("utf-8")
 
 
-def canonical_ktx_tool_receipt_bytes(receipt: KtxToolReceipt) -> bytes:
+def canonical_ktx_tool_receipt_bytes(receipt: AnyKtxToolReceipt) -> bytes:
     return _canonical_json_bytes(receipt)
 
 
@@ -1404,19 +1506,34 @@ def prepare_private_ktx_runtime(
     return receipt
 
 
-def load_ktx_tool_receipt(path: Path) -> KtxToolReceipt:
+def load_ktx_tool_receipt(path: Path) -> AnyKtxToolReceipt:
     path = Path(path).expanduser().absolute()
     try:
         raw = path.read_bytes()
         if len(raw) < 1 or len(raw) > KTX_MAX_PROCESS_OUTPUT:
             raise KtxToolchainError("KTX receipt byte length is invalid")
-        receipt = KtxToolReceipt.model_validate_json(raw)
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise KtxToolchainError("KTX receipt root must be an object")
+        receipt_platform = payload.get("platform")
+        if receipt_platform == "darwin-arm64":
+            receipt = KtxToolReceipt.model_validate_json(raw)
+        elif receipt_platform == "windows-x64":
+            receipt = WindowsKtxToolReceipt.model_validate_json(raw)
+        else:
+            raise KtxToolchainError(
+                f"unsupported KTX receipt platform: {receipt_platform}"
+            )
     except KtxToolchainError:
         raise
     except (OSError, ValidationError, ValueError) as exc:
         raise KtxToolchainError(f"KTX receipt cannot be trusted: {exc}") from exc
     if raw != canonical_ktx_tool_receipt_bytes(receipt):
         raise KtxToolchainError("KTX receipt is not canonical JSON")
+    if isinstance(receipt, WindowsKtxToolReceipt):
+        raise KtxToolchainError(
+            "Windows KTX runtime verification is not implemented"
+        )
     root = path.parent
     environment = _runtime_environment(root)
     actual_toktx = _binary_evidence(

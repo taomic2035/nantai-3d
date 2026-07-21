@@ -135,6 +135,38 @@ def _fake_receipt() -> KtxToolReceipt:
     )
 
 
+def _fake_windows_receipt() -> ktx2_toolchain.WindowsKtxToolReceipt:
+    return ktx2_toolchain.WindowsKtxToolReceipt(
+        package_file=KtxToolFile(
+            relative_path="downloads/KTX-Software-4.4.2-Windows-x64.exe",
+            sha256=ktx2_toolchain.KTX_WINDOWS_X64_SHA256,
+            bytes=6_417_024,
+        ),
+        toktx=ktx2_toolchain.WindowsKtxToolBinary(
+            relative_path="bin/toktx.exe",
+            sha256="1" * 64,
+            bytes=100,
+            version_output="toktx v4.4.2",
+        ),
+        ktx=ktx2_toolchain.WindowsKtxToolBinary(
+            relative_path="bin/ktx.exe",
+            sha256="2" * 64,
+            bytes=100,
+            version_output="ktx version: v4.4.2",
+        ),
+        library=ktx2_toolchain.WindowsKtxToolBinary(
+            relative_path="bin/ktx.dll",
+            sha256="3" * 64,
+            bytes=100,
+        ),
+        license=KtxToolFile(
+            relative_path="share/doc/KTX-Software/html/license.html",
+            sha256="4" * 64,
+            bytes=100,
+        ),
+    )
+
+
 class _FakeCompilerRunner:
     def __init__(
         self,
@@ -219,6 +251,108 @@ def test_exact_khronos_darwin_arm64_pin() -> None:
     assert KTX_DARWIN_ARM64_SHA256 == (
         "500bd8f9d63358c3f3a0d83b724c8574436a72c37dc0e4bad90ec1ca38032c3c"
     )
+
+
+def test_windows_ktx_receipt_contract_is_exact() -> None:
+    assert ktx2_toolchain.KTX_WINDOWS_X64_ASSET == (
+        "KTX-Software-4.4.2-Windows-x64.exe"
+    )
+    assert ktx2_toolchain.KTX_WINDOWS_X64_URL == (
+        "https://github.com/KhronosGroup/KTX-Software/releases/download/"
+        "v4.4.2/KTX-Software-4.4.2-Windows-x64.exe"
+    )
+    assert ktx2_toolchain.KTX_WINDOWS_X64_SHA256 == (
+        "1f323b0fec19794f5e6c0425a61d4b1da396872a10be862d105f4f4b2d2957fe"
+    )
+    assert ktx2_toolchain.KTX_WINDOWS_SIGNER_THUMBPRINT == (
+        "CA07F94EBD7402F3F563FE5C3DF71DF1B88C1B06"
+    )
+
+    receipt = ktx2_toolchain.WindowsKtxToolReceipt(
+        package_file=KtxToolFile(
+            relative_path="downloads/KTX-Software-4.4.2-Windows-x64.exe",
+            sha256=ktx2_toolchain.KTX_WINDOWS_X64_SHA256,
+            bytes=6_417_024,
+        ),
+        toktx=ktx2_toolchain.WindowsKtxToolBinary(
+            relative_path="bin/toktx.exe",
+            sha256="1" * 64,
+            bytes=100,
+            version_output="toktx v4.4.2",
+        ),
+        ktx=ktx2_toolchain.WindowsKtxToolBinary(
+            relative_path="bin/ktx.exe",
+            sha256="2" * 64,
+            bytes=100,
+            version_output="ktx version: v4.4.2",
+        ),
+        library=ktx2_toolchain.WindowsKtxToolBinary(
+            relative_path="bin/ktx.dll",
+            sha256="3" * 64,
+            bytes=100,
+        ),
+        license=KtxToolFile(
+            relative_path="share/doc/KTX-Software/html/license.html",
+            sha256="4" * 64,
+            bytes=100,
+        ),
+    )
+    assert receipt.platform == "windows-x64"
+    assert receipt.package_signature_status == "trusted"
+    assert receipt.package_signer_thumbprint == (
+        ktx2_toolchain.KTX_WINDOWS_SIGNER_THUMBPRINT
+    )
+
+def test_load_receipt_rejects_unknown_platform_explicitly(tmp_path: Path) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text(
+        json.dumps({"platform": "linux-x64"}) + chr(10),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        KtxToolchainError,
+        match="unsupported KTX receipt platform: linux-x64",
+    ):
+        ktx2_toolchain.load_ktx_tool_receipt(receipt_path)
+
+
+def test_load_receipt_rejects_noncanonical_windows_json(tmp_path: Path) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text(
+        json.dumps(_fake_windows_receipt().model_dump(mode="json")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KtxToolchainError, match="not canonical JSON"):
+        ktx2_toolchain.load_ktx_tool_receipt(receipt_path)
+
+
+@pytest.mark.parametrize(
+    ("field_path", "tampered_value"),
+    [
+        ("platform", "linux-x64"),
+        ("package_sha256", "0" * 64),
+        ("package_file.sha256", "0" * 64),
+        ("package_signer_subject", "CN=Untrusted Publisher"),
+        ("package_signer_thumbprint", "0" * 40),
+        ("toktx.relative_path", "runtime/bin/toktx"),
+        ("toktx.signer_thumbprint", "0" * 40),
+    ],
+)
+def test_windows_receipt_rejects_tampered_contract(
+    field_path: str,
+    tampered_value: str,
+) -> None:
+    payload = _fake_windows_receipt().model_dump(mode="python")
+    target = payload
+    parts = field_path.split(".")
+    for part in parts[:-1]:
+        target = target[part]
+    target[parts[-1]] = tampered_value
+
+    with pytest.raises(ValueError):
+        ktx2_toolchain.WindowsKtxToolReceipt.model_validate(payload)
 
 
 @pytest.mark.parametrize(
