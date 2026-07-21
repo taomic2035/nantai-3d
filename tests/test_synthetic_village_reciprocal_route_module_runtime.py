@@ -1,16 +1,22 @@
-"""Reciprocal-route runtime runtime_request/report schema tests (HANDOFF-OPUS-009 Phase 2).
+"""Reciprocal-route runtime schema + bridge tests (HANDOFF-OPUS-009 Phase 2 + 3).
 
-Phase 2 is schema-only: ``build_reciprocal_route_runtime_request`` and
-``run_reciprocal_route_build`` are deferred until Codex writes the
-Blender runtime script.  These tests construct legal payloads directly
-via ``model_validate_json`` round-trips and exercise the verifier's
+Phase 2 (schema-only) constructs legal payloads directly via
+``model_validate_json`` round-trips and exercises the verifier's
 identity-pair comparison.
+
+Phase 3 covers ``build_reciprocal_route_runtime_request`` (the
+content-addressed constructor) and ``run_reciprocal_route_build`` (the
+Blender subprocess bridge with content-addressed reuse + atomic
+publication).  Subprocess is mocked so tests do not depend on a real
+Blender runtime.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,13 +39,17 @@ from pipeline.synthetic_village.reciprocal_route_module_runtime import (
     RECIPROCAL_ROUTE_BUILD_REPORT_SCHEMA,
     RECIPROCAL_ROUTE_FULL_CANONICAL_ROOTS,
     RECIPROCAL_ROUTE_MODULE_CANONICAL_ROOTS,
+    RECIPROCAL_ROUTE_REPORT_NAME,
     RECIPROCAL_ROUTE_RUNTIME_SCHEMA,
     ReciprocalRouteBuildReport,
+    ReciprocalRouteBuildResult,
     ReciprocalRouteMaterialBinding,
     ReciprocalRouteRuntimeError,
     ReciprocalRouteRuntimeRequest,
+    build_reciprocal_route_runtime_request,
     canonical_reciprocal_route_runtime_request_bytes,
     load_reciprocal_route_build_report,
+    run_reciprocal_route_build,
     verify_reciprocal_route_build_report,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
@@ -609,3 +619,416 @@ def test_load_report_rejects_non_canonical_bytes(
     report_path.write_bytes(text.encode("utf-8"))
     with pytest.raises(ReciprocalRouteRuntimeError, match="not canonical JSON|validation failed"):
         load_reciprocal_route_build_report(report_path)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: build_reciprocal_route_runtime_request (content-addressed constructor).
+# --------------------------------------------------------------------------- #
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_build_request_constructs_valid_request_from_verified_base(
+    base: SimpleNamespace,
+) -> None:
+    request = build_reciprocal_route_runtime_request(
+        base_build=base,
+        repo_root=_REPO_ROOT,
+    )
+    assert request.schema_version == RECIPROCAL_ROUTE_RUNTIME_SCHEMA
+    assert request.verification_level == "L0"
+    assert request.geometry_usability == "preview-only"
+    assert request.stage == "modeled-unverified"
+    assert request.trust_effect == "none"
+    assert len(request.object_registry) == RECIPROCAL_ROUTE_FULL_CANONICAL_ROOTS
+    assert request.requested_artifact == RECIPROCAL_ROUTE_ARTIFACT_NAME
+    # Runtime script SHA is measured from the real script on disk.
+    assert request.runtime_script_sha256 == _sha256_file(
+        _REPO_ROOT / "scripts/blender/apply_reciprocal_route_modules.py",
+    )
+    # The 43 module parts extend the 175-root base without overlap.
+    instances = tuple(row.instance_id for row in request.object_registry)
+    assert instances == tuple(range(1, 219))
+
+
+def test_build_request_build_id_is_canonical_and_matches_validator(
+    base: SimpleNamespace,
+) -> None:
+    """The constructor's build_id must equal the validator's recomputation."""
+
+    request = build_reciprocal_route_runtime_request(
+        base_build=base,
+        repo_root=_REPO_ROOT,
+    )
+    # If build_id were wrong, model_validate would have rejected the
+    # request.  Re-assert explicitly for documentation.
+    payload = request.model_dump(mode="json")
+    payload.pop("build_id")
+    recomputed = hashlib.sha256(
+        canary._canonical_json_bytes(payload),
+    ).hexdigest()
+    assert request.build_id == recomputed
+
+
+def test_build_request_is_deterministic_across_calls(
+    base: SimpleNamespace,
+) -> None:
+    left = build_reciprocal_route_runtime_request(
+        base_build=base,
+        repo_root=_REPO_ROOT,
+    )
+    right = build_reciprocal_route_runtime_request(
+        base_build=base,
+        repo_root=_REPO_ROOT,
+    )
+    assert left.build_id == right.build_id
+    assert left == right
+
+
+def test_build_request_rejects_registry_that_is_not_exact_175(
+    tmp_path: Path,
+) -> None:
+    base = _base_build(tmp_path)
+    # Truncate to 130 roots (the pre-env-module registry).
+    truncated = SimpleNamespace(**base.__dict__)
+    truncated.object_registry = base.object_registry[:130]
+    with pytest.raises(
+        ReciprocalRouteRuntimeError,
+        match="exact 1..175",
+    ):
+        build_reciprocal_route_runtime_request(
+            base_build=truncated,
+            repo_root=_REPO_ROOT,
+        )
+
+
+def test_build_request_rejects_mismatched_reciprocal_route_plan(
+    base: SimpleNamespace,
+) -> None:
+    """A plan whose scene SHA differs from the base scene must be rejected."""
+
+    from pipeline.synthetic_village.reciprocal_route_module import (
+        ReciprocalRouteModuleSummary,
+    )
+    # Re-use the default plan but tamper with scene_plan_sha256 so
+    # verify_reciprocal_route_module_plan fails.
+    good_plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    )
+    tampered = good_plan.model_copy(
+        update={
+            "scene_plan_sha256": "0" * 64,
+            "summary": ReciprocalRouteModuleSummary(
+                part_count=good_plan.summary.part_count,
+            ),
+        },
+    )
+    with pytest.raises(
+        ReciprocalRouteRuntimeError,
+        match="does not match verified base scene",
+    ):
+        build_reciprocal_route_runtime_request(
+            base_build=base,
+            repo_root=_REPO_ROOT,
+            reciprocal_route_plan=tampered,
+        )
+
+
+def test_build_request_rejects_absent_runtime_script(
+    base: SimpleNamespace,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ReciprocalRouteRuntimeError,
+        match="runtime script is absent",
+    ):
+        build_reciprocal_route_runtime_request(
+            base_build=base,
+            repo_root=tmp_path,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: run_reciprocal_route_build (Blender subprocess bridge, mocked).
+# --------------------------------------------------------------------------- #
+
+
+def _private_build_root() -> Path:
+    """A real private directory under the repo's .nantai-studio root."""
+
+    return (
+        _REPO_ROOT
+        / ".nantai-studio/synthetic-village/hybrid-v4/work/tests"
+        / uuid.uuid4().hex
+    )
+
+
+def _fake_blender_success(request_path: Path, staging: Path) -> None:
+    """Write a valid report + artifact into staging, mimicking Blender."""
+
+    request_bytes = request_path.read_bytes()
+    request = ReciprocalRouteRuntimeRequest.model_validate_json(
+        request_bytes,
+    )
+    artifact_path = staging / RECIPROCAL_ROUTE_ARTIFACT_NAME
+    artifact_path.write_bytes(b"reciprocal-route-build-artifact")
+    report_path = staging / RECIPROCAL_ROUTE_REPORT_NAME
+    report_payload = {
+        "schema_version": RECIPROCAL_ROUTE_BUILD_REPORT_SCHEMA,
+        "build_id": request.build_id,
+        "synthetic": True,
+        "verification_level": "L0",
+        "geometry_usability": "preview-only",
+        "stage": "modeled-unverified",
+        "trust_effect": "none",
+        "base_build_id": request.base_build_id,
+        "base_build_report_sha256": request.base_build_report_sha256,
+        "base_blend_sha256": request.base_blend_sha256,
+        "base_environment_module_plan_sha256": (
+            request.base_environment_module_plan_sha256
+        ),
+        "runtime_script_sha256": request.runtime_script_sha256,
+        "reciprocal_route_module_plan_sha256": (
+            request.reciprocal_route_module_plan_sha256
+        ),
+        "object_registry": [
+            row.model_dump(mode="json")
+            for row in request.object_registry
+        ],
+        "material_bindings": [
+            row.model_dump(mode="json")
+            for row in request.material_bindings
+        ],
+        "counts": {
+            "base_canonical_roots": 175,
+            "module_canonical_roots": 43,
+            "canonical_roots": 218,
+            "module_mesh_objects": 43,
+        },
+        "validation": {
+            "base_registry_matches": True,
+            "module_registry_matches": True,
+            "finite_nonempty_module_meshes": True,
+            "material_bindings_match": True,
+            "design_sources_are_provenance_only": True,
+        },
+        "artifact": {
+            "name": RECIPROCAL_ROUTE_ARTIFACT_NAME,
+            "kind": "blender-scene",
+            "sha256": _sha256_file(artifact_path),
+            "size_bytes": artifact_path.stat().st_size,
+        },
+    }
+    report_path.write_bytes(
+        canary._canonical_json_bytes(report_payload),
+    )
+
+
+def _make_fake_run(request_captured: dict | None = None):
+    """Return a subprocess.run replacement that writes valid outputs."""
+
+    def _fake_run(args, **kwargs):
+        # args = [exe, --background, blend, --python, script, --, request, staging]
+        sep = args.index("--")
+        request_path = Path(args[sep + 1])
+        staging = Path(args[sep + 2])
+        if request_captured is not None:
+            request_captured["request_path"] = request_path
+            request_captured["staging"] = staging
+            request_captured["args"] = list(args)
+        _fake_blender_success(request_path, staging)
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="NANTAI_RECIPROCAL_ROUTE_MODULE_BUILD=ok",
+            stderr="",
+        )
+
+    return _fake_run
+
+
+def test_run_build_publishes_content_addressed_directory(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_root = _private_build_root()
+    build_root.mkdir(parents=True)
+    try:
+        monkeypatch.setattr(
+            subprocess, "run", _make_fake_run(),
+        )
+        result = run_reciprocal_route_build(
+            base_build=base,
+            repo_root=_REPO_ROOT,
+            build_root=build_root,
+        )
+        assert isinstance(result, ReciprocalRouteBuildResult)
+        assert result.final_directory == build_root / result.request.build_id
+        assert result.final_directory.is_dir()
+        # Three-file layout.
+        entries = {p.name for p in result.final_directory.iterdir()}
+        assert entries == set(RECIPROCAL_ROUTE_BUILD_ENTRIES)
+        # Report identity matches request.
+        verify_reciprocal_route_build_report(
+            result.report,
+            request=result.request,
+            output_path=result.final_directory / RECIPROCAL_ROUTE_ARTIFACT_NAME,
+        )
+    finally:
+        import shutil
+
+        shutil.rmtree(build_root, ignore_errors=True)
+
+
+def test_run_build_reuses_existing_content_addressed_directory(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_root = _private_build_root()
+    build_root.mkdir(parents=True)
+    try:
+        monkeypatch.setattr(subprocess, "run", _make_fake_run())
+        first = run_reciprocal_route_build(
+            base_build=base,
+            repo_root=_REPO_ROOT,
+            build_root=build_root,
+        )
+        # Second call must NOT invoke Blender; reuse the existing directory.
+        blender_calls = 0
+
+        def forbidden(*args, **kwargs):
+            nonlocal blender_calls
+            blender_calls += 1
+            raise AssertionError("Blender must not run on reuse")
+
+        monkeypatch.setattr(subprocess, "run", forbidden)
+        second = run_reciprocal_route_build(
+            base_build=base,
+            repo_root=_REPO_ROOT,
+            build_root=build_root,
+        )
+        assert blender_calls == 0
+        assert second.final_directory == first.final_directory
+        assert second.report == first.report
+        assert second.stdout == ""
+        assert second.stderr == ""
+    finally:
+        import shutil
+
+        shutil.rmtree(build_root, ignore_errors=True)
+
+
+def test_run_build_rejects_nonzero_exit_and_cleans_staging(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_root = _private_build_root()
+    build_root.mkdir(parents=True)
+    try:
+
+        def failing(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=1,
+                stdout="",
+                stderr="Blender crashed",
+            )
+
+        monkeypatch.setattr(subprocess, "run", failing)
+        with pytest.raises(
+            ReciprocalRouteRuntimeError,
+            match="Blender reciprocal-route build failed",
+        ):
+            run_reciprocal_route_build(
+                base_build=base,
+                repo_root=_REPO_ROOT,
+                build_root=build_root,
+            )
+        # No final directory published.
+        children = [p for p in build_root.iterdir()]
+        assert all(p.name.startswith(".staging-") is False for p in children), (
+            f"staging not cleaned: {children}"
+        )
+        assert not any(
+            p.is_dir() and not p.name.startswith(".") for p in children
+        )
+    finally:
+        import shutil
+
+        shutil.rmtree(build_root, ignore_errors=True)
+
+
+def test_run_build_rejects_timeout_and_cleans_staging(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_root = _private_build_root()
+    build_root.mkdir(parents=True)
+    try:
+
+        def slow(args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args, timeout=1)
+
+        monkeypatch.setattr(subprocess, "run", slow)
+        with pytest.raises(
+            ReciprocalRouteRuntimeError,
+            match="exceeded",
+        ):
+            run_reciprocal_route_build(
+                base_build=base,
+                repo_root=_REPO_ROOT,
+                build_root=build_root,
+                timeout_seconds=1,
+            )
+        # No final directory published; staging cleaned in finally.
+        children = list(build_root.iterdir())
+        assert not any(
+            p.is_dir() and not p.name.startswith(".") for p in children
+        ), f"unexpected directory: {children}"
+    finally:
+        import shutil
+
+        shutil.rmtree(build_root, ignore_errors=True)
+
+
+def test_run_build_rejects_tampered_report_identity(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If Blender emits a report with a wrong build_id, publication must fail."""
+
+    build_root = _private_build_root()
+    build_root.mkdir(parents=True)
+    try:
+
+        def tampered(args, **kwargs):
+            sep = args.index("--")
+            request_path = Path(args[sep + 1])
+            staging = Path(args[sep + 2])
+            _fake_blender_success(request_path, staging)
+            # Tamper the report's build_id after writing.
+            report_path = staging / RECIPROCAL_ROUTE_REPORT_NAME
+            raw = report_path.read_bytes()
+            payload = json.loads(raw)
+            payload["build_id"] = "f" * 64
+            report_path.write_bytes(
+                canary._canonical_json_bytes(payload),
+            )
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", tampered)
+        with pytest.raises(ReciprocalRouteRuntimeError):
+            run_reciprocal_route_build(
+                base_build=base,
+                repo_root=_REPO_ROOT,
+                build_root=build_root,
+            )
+    finally:
+        import shutil
+
+        shutil.rmtree(build_root, ignore_errors=True)
