@@ -274,3 +274,105 @@ def test_report_rejects_identity_substitution(tmp_path: Path) -> None:
             request=request,
             output_path=output,
         )
+
+
+def test_report_rejects_tampered_module_object_registry(tmp_path: Path) -> None:
+    """Swap one module part's material_id in the report's object_registry.
+
+    The schema's own ``_registry_is_complete`` only checks instance_id range;
+    it does not cross-check material_bindings against module part material_id.
+    But ``verify_environment_module_build_report`` must reject any byte that
+    disagrees with the request's canonical object_registry, so a tampered
+    material_id surfaces as an identity mismatch at verification time.
+    """
+
+    request = build_environment_module_runtime_request(
+        base_build=_base_build(tmp_path),
+        repo_root=Path(__file__).resolve().parents[1],
+    )
+    output = tmp_path / "village-modules.blend"
+    output.write_bytes(b"module-build")
+    payload = _report_payload(request, output)
+    tampered_registry = list(payload["object_registry"])
+    original_row = tampered_registry[130]
+    tampered_registry[130] = original_row.model_copy(
+        update={"material_id": (original_row.material_id % 11) + 1},
+    )
+    payload["object_registry"] = tuple(tampered_registry)
+    report = EnvironmentModuleBuildReport.model_validate(payload)
+
+    with pytest.raises(
+        EnvironmentModuleRuntimeError,
+        match="report identity",
+    ):
+        verify_environment_module_build_report(
+            report,
+            request=request,
+            output_path=output,
+        )
+
+
+def test_report_rejects_tampered_material_binding(tmp_path: Path) -> None:
+    """Swap one material_binding's material_id in the report.
+
+    The report schema does not re-derive ``material_bindings`` from the
+    environment_module_plan (it only has the plan's sha256, not the plan
+    itself).  But the verifier compares ``report.material_bindings`` against
+    ``request.material_bindings`` as an identity pair, so a single swapped
+    material_id must surface as a mismatch.
+    """
+
+    request = build_environment_module_runtime_request(
+        base_build=_base_build(tmp_path),
+        repo_root=Path(__file__).resolve().parents[1],
+    )
+    output = tmp_path / "village-modules.blend"
+    output.write_bytes(b"module-build")
+    payload = _report_payload(request, output)
+    tampered_bindings = list(payload["material_bindings"])
+    first = tampered_bindings[0]
+    tampered_bindings[0] = first.model_copy(
+        update={"material_id": (first.material_id % 11) + 1},
+    )
+    payload["material_bindings"] = tuple(tampered_bindings)
+    report = EnvironmentModuleBuildReport.model_validate(payload)
+
+    with pytest.raises(
+        EnvironmentModuleRuntimeError,
+        match="report identity",
+    ):
+        verify_environment_module_build_report(
+            report,
+            request=request,
+            output_path=output,
+        )
+
+
+def test_report_rejects_tampered_base_blend_sha(tmp_path: Path) -> None:
+    """Swap base_blend_sha256 to a different 64-hex string.
+
+    ``base_blend_sha256`` is only a 64-hex string at the schema level; the
+    schema cannot know whether it matches the real base build.  The verifier
+    compares it against ``request.base_blend_sha256``, so any substitution
+    must surface as a report identity mismatch.
+    """
+
+    request = build_environment_module_runtime_request(
+        base_build=_base_build(tmp_path),
+        repo_root=Path(__file__).resolve().parents[1],
+    )
+    output = tmp_path / "village-modules.blend"
+    output.write_bytes(b"module-build")
+    payload = _report_payload(request, output)
+    payload["base_blend_sha256"] = "d" * 64
+    report = EnvironmentModuleBuildReport.model_validate(payload)
+
+    with pytest.raises(
+        EnvironmentModuleRuntimeError,
+        match="report identity",
+    ):
+        verify_environment_module_build_report(
+            report,
+            request=request,
+            output_path=output,
+        )
