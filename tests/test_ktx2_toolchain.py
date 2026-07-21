@@ -253,6 +253,262 @@ def test_exact_khronos_darwin_arm64_pin() -> None:
     )
 
 
+def _write_fake_windows_runtime(tmp_path: Path) -> tuple[Path, Path]:
+    package = tmp_path / ktx2_toolchain.KTX_WINDOWS_X64_ASSET
+    package.write_bytes(b"fake signed installer")
+    root = tmp_path / "installed"
+    (root / "bin").mkdir(parents=True)
+    (root / "share/doc/KTX-Software/html").mkdir(parents=True)
+    (root / "bin/toktx.exe").write_bytes(b"fake toktx")
+    (root / "bin/ktx.exe").write_bytes(b"fake ktx")
+    (root / "bin/ktx.dll").write_bytes(b"fake library")
+    (root / "share/doc/KTX-Software/html/license.html").write_bytes(b"license")
+    return package, root
+
+
+def test_powershell_authenticode_passes_path_via_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "signed tool.exe"
+    target.write_bytes(b"signed")
+    expected = {
+        "status": "Valid",
+        "signer_subject": ktx2_toolchain.KTX_WINDOWS_SIGNER_SUBJECT,
+        "signer_thumbprint": ktx2_toolchain.KTX_WINDOWS_SIGNER_THUMBPRINT,
+    }
+
+    def process_runner(
+        command,
+        *,
+        environment,
+        label,
+        **_kwargs,
+    ):
+        assert label.endswith("Authenticode verification")
+        assert str(target) not in command
+        assert "$env:NANTAI_AUTHENTICODE_PATH" in command[-1]
+        assert environment["NANTAI_AUTHENTICODE_PATH"] == str(target)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(expected),
+            "",
+        )
+
+    monkeypatch.setattr(ktx2_toolchain, "_require_success", process_runner)
+
+    assert ktx2_toolchain._powershell_authenticode_signature(target) == expected
+
+
+def test_prepare_private_windows_runtime_writes_canonical_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, root = _write_fake_windows_runtime(tmp_path)
+    real_sha256_file = ktx2_toolchain._sha256_file
+
+    def measured_file(path: Path) -> tuple[str, int]:
+        path = Path(path)
+        if ktx2_toolchain.KTX_WINDOWS_X64_ASSET in path.name:
+            return (
+                ktx2_toolchain.KTX_WINDOWS_X64_SHA256,
+                path.stat().st_size,
+            )
+        return real_sha256_file(path)
+
+    def signature_runner(path: Path) -> dict[str, str]:
+        assert Path(path).is_file()
+        return {
+            "status": "Valid",
+            "signer_subject": ktx2_toolchain.KTX_WINDOWS_SIGNER_SUBJECT,
+            "signer_thumbprint": (
+                ktx2_toolchain.KTX_WINDOWS_SIGNER_THUMBPRINT
+            ),
+        }
+
+    def process_runner(command, **_kwargs):
+        executable = Path(command[0]).name.lower()
+        output = {
+            "toktx.exe": "toktx v4.4.2",
+            "ktx.exe": "ktx version: v4.4.2",
+        }[executable]
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(ktx2_toolchain, "_sha256_file", measured_file)
+    monkeypatch.setattr(ktx2_toolchain, "_require_success", process_runner)
+
+    receipt = ktx2_toolchain.prepare_private_windows_ktx_runtime(
+        package,
+        root,
+        signature_runner=signature_runner,
+    )
+
+    assert receipt.platform == "windows-x64"
+    assert (
+        root / "downloads" / ktx2_toolchain.KTX_WINDOWS_X64_ASSET
+    ).read_bytes() == package.read_bytes()
+    receipt_path = root / ktx2_toolchain.KTX_RECEIPT_NAME
+    assert receipt_path.read_bytes() == (
+        ktx2_toolchain.canonical_ktx_tool_receipt_bytes(receipt)
+    )
+    assert ktx2_toolchain.load_ktx_tool_receipt(
+        receipt_path,
+        windows_signature_runner=signature_runner,
+    ) == receipt
+    assert ktx2_toolchain.prepare_private_windows_ktx_runtime(
+        package,
+        root,
+        signature_runner=signature_runner,
+    ) == receipt
+
+
+def _configure_windows_runtime_test_doubles(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    signature_overrides: dict[str, dict[str, str]] | None = None,
+    version_overrides: dict[str, str] | None = None,
+    changed_name: str | None = None,
+):
+    real_sha256_file = ktx2_toolchain._sha256_file
+    counts: dict[str, int] = {}
+
+    def measured_file(path: Path) -> tuple[str, int]:
+        path = Path(path)
+        if ktx2_toolchain.KTX_WINDOWS_X64_ASSET in path.name:
+            evidence = (
+                ktx2_toolchain.KTX_WINDOWS_X64_SHA256,
+                path.stat().st_size,
+            )
+        else:
+            evidence = real_sha256_file(path)
+        counts[path.name] = counts.get(path.name, 0) + 1
+        if path.name == changed_name and counts[path.name] >= 2:
+            return ("f" * 64, evidence[1])
+        return evidence
+
+    def signature_runner(path: Path) -> dict[str, str]:
+        payload = {
+            "status": "Valid",
+            "signer_subject": ktx2_toolchain.KTX_WINDOWS_SIGNER_SUBJECT,
+            "signer_thumbprint": (
+                ktx2_toolchain.KTX_WINDOWS_SIGNER_THUMBPRINT
+            ),
+        }
+        if signature_overrides is not None:
+            payload.update(signature_overrides.get(Path(path).name, {}))
+        return payload
+
+    def process_runner(command, **_kwargs):
+        executable = Path(command[0]).name.lower()
+        output = {
+            "toktx.exe": "toktx v4.4.2",
+            "ktx.exe": "ktx version: v4.4.2",
+        }[executable]
+        if version_overrides is not None:
+            output = version_overrides.get(executable, output)
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(ktx2_toolchain, "_sha256_file", measured_file)
+    monkeypatch.setattr(ktx2_toolchain, "_require_success", process_runner)
+    return signature_runner
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("status", "NotSigned", "status is not Valid"),
+        ("signer_subject", "CN=Untrusted", "signer is not trusted"),
+        (
+            "signer_thumbprint",
+            "0" * 40,
+            "certificate thumbprint is not trusted",
+        ),
+    ],
+)
+def test_prepare_windows_runtime_rejects_bad_authenticode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    package, root = _write_fake_windows_runtime(tmp_path)
+    signature_runner = _configure_windows_runtime_test_doubles(
+        monkeypatch,
+        signature_overrides={"toktx.exe": {field: value}},
+    )
+
+    with pytest.raises(KtxToolchainError, match=message):
+        ktx2_toolchain.prepare_private_windows_ktx_runtime(
+            package,
+            root,
+            signature_runner=signature_runner,
+        )
+
+
+def test_prepare_windows_runtime_rejects_missing_dll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, root = _write_fake_windows_runtime(tmp_path)
+    (root / "bin/ktx.dll").unlink()
+    signature_runner = _configure_windows_runtime_test_doubles(monkeypatch)
+
+    with pytest.raises(KtxToolchainError, match="runtime file is missing"):
+        ktx2_toolchain.prepare_private_windows_ktx_runtime(
+            package,
+            root,
+            signature_runner=signature_runner,
+        )
+
+
+def test_windows_runtime_path_cannot_escape_root(tmp_path: Path) -> None:
+    root = tmp_path / "installed"
+    root.mkdir()
+    outside = tmp_path / "outside.exe"
+    outside.write_bytes(b"outside")
+
+    with pytest.raises(KtxToolchainError, match="escapes root"):
+        ktx2_toolchain._windows_runtime_file(root, "../outside.exe")
+
+
+def test_prepare_windows_runtime_rejects_wrong_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, root = _write_fake_windows_runtime(tmp_path)
+    signature_runner = _configure_windows_runtime_test_doubles(
+        monkeypatch,
+        version_overrides={"toktx.exe": "toktx v4.4.1"},
+    )
+
+    with pytest.raises(KtxToolchainError, match="version is not 4.4.2"):
+        ktx2_toolchain.prepare_private_windows_ktx_runtime(
+            package,
+            root,
+            signature_runner=signature_runner,
+        )
+
+
+def test_prepare_windows_runtime_rejects_changed_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, root = _write_fake_windows_runtime(tmp_path)
+    signature_runner = _configure_windows_runtime_test_doubles(
+        monkeypatch,
+        changed_name="toktx.exe",
+    )
+
+    with pytest.raises(KtxToolchainError, match="changed during verification"):
+        ktx2_toolchain.prepare_private_windows_ktx_runtime(
+            package,
+            root,
+            signature_runner=signature_runner,
+        )
+
+
 def test_windows_ktx_receipt_contract_is_exact() -> None:
     assert ktx2_toolchain.KTX_WINDOWS_X64_ASSET == (
         "KTX-Software-4.4.2-Windows-x64.exe"
@@ -750,6 +1006,51 @@ def test_independent_ktx2_audit_fails_closed(mutation, message: str) -> None:
             expected_transfer="srgb",
             expected_codec="uastc",
         )
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "asset", "relative_root", "prepare_name"),
+    [
+        (
+            "Darwin",
+            "arm64",
+            ktx2_toolchain.KTX_DARWIN_ARM64_ASSET,
+            ".nantai-studio/tools/ktx-4.4.2",
+            "prepare_private_ktx_runtime",
+        ),
+        (
+            "Windows",
+            "AMD64",
+            ktx2_toolchain.KTX_WINDOWS_X64_ASSET,
+            ".nantai-studio/tools/ktx-4.4.2-windows-x64",
+            "prepare_private_windows_ktx_runtime",
+        ),
+    ],
+)
+def test_setup_selects_ktx_runtime_from_measured_host(
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    machine: str,
+    asset: str,
+    relative_root: str,
+    prepare_name: str,
+) -> None:
+    monkeypatch.setattr(
+        setup_synthetic_tools.platform,
+        "system",
+        lambda: system,
+    )
+    monkeypatch.setattr(
+        setup_synthetic_tools.platform,
+        "machine",
+        lambda: machine,
+    )
+
+    selected = setup_synthetic_tools._current_ktx_runtime()
+
+    assert selected[0] == asset
+    assert selected[1] == relative_root
+    assert selected[2].__name__ == prepare_name
 
 
 def test_setup_parser_exposes_exact_private_ktx_install() -> None:

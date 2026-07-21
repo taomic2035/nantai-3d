@@ -1415,6 +1415,221 @@ def _require_same_private_runtime(first: Path, second: Path) -> None:
             )
 
 
+WindowsSignatureRunner = Callable[[Path], dict[str, str]]
+
+
+def _powershell_authenticode_signature(path: Path) -> dict[str, str]:
+    system_root = os.environ.get("SystemRoot")
+    if not system_root:
+        raise KtxToolchainError(
+            "SystemRoot is required for Authenticode verification"
+        )
+    powershell = (
+        Path(system_root)
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    script = (
+        "$signature = Get-AuthenticodeSignature -LiteralPath $env:NANTAI_AUTHENTICODE_PATH; "
+        "[ordered]@{status=[string]$signature.Status; "
+        "signer_subject=[string]$signature.SignerCertificate.Subject; "
+        "signer_thumbprint=[string]$signature.SignerCertificate.Thumbprint} "
+        "| ConvertTo-Json -Compress"
+    )
+    result = _require_success(
+        (
+            str(powershell),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ),
+        environment={
+            **os.environ,
+            "NANTAI_AUTHENTICODE_PATH": str(path),
+        },
+        label=f"{path.name} Authenticode verification",
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise KtxToolchainError(
+            f"{path.name} Authenticode evidence is not valid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise KtxToolchainError(
+            f"{path.name} Authenticode evidence root must be an object"
+        )
+    return payload
+
+
+def _validate_windows_signature(
+    path: Path,
+    signature_runner: WindowsSignatureRunner,
+) -> None:
+    payload = signature_runner(path)
+    if not isinstance(payload, dict) or set(payload) != {
+        "status",
+        "signer_subject",
+        "signer_thumbprint",
+    }:
+        raise KtxToolchainError(
+            f"{path.name} Authenticode evidence fields are not exact"
+        )
+    if payload["status"] != "Valid":
+        raise KtxToolchainError(
+            f"{path.name} Authenticode status is not Valid"
+        )
+    if payload["signer_subject"] != KTX_WINDOWS_SIGNER_SUBJECT:
+        raise KtxToolchainError(
+            f"{path.name} Authenticode signer is not trusted"
+        )
+    if payload["signer_thumbprint"] != KTX_WINDOWS_SIGNER_THUMBPRINT:
+        raise KtxToolchainError(
+            f"{path.name} Authenticode certificate thumbprint is not trusted"
+        )
+
+
+def _windows_runtime_file(root: Path, relative_path: str) -> Path:
+    path = root / relative_path
+    if path.is_symlink() or not path.is_file():
+        raise KtxToolchainError(
+            f"Windows KTX runtime file is missing: {relative_path}"
+        )
+    resolved_root = root.resolve(strict=True)
+    resolved_path = path.resolve(strict=True)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise KtxToolchainError(
+            f"Windows KTX runtime path escapes root: {relative_path}"
+        ) from exc
+    return path
+
+
+def _windows_binary_evidence(
+    root: Path,
+    relative_path: str,
+    *,
+    version_args: tuple[str, ...] | None,
+    signature_runner: WindowsSignatureRunner,
+) -> WindowsKtxToolBinary:
+    path = _windows_runtime_file(root, relative_path)
+    before = _sha256_file(path)
+    _validate_windows_signature(path, signature_runner)
+    version_output = None
+    if version_args is not None:
+        probe = _require_success(
+            (str(path), *version_args),
+            environment=dict(os.environ),
+            label=f"{path.name} version probe",
+        )
+        version_output = (probe.stdout + probe.stderr).strip()
+        if KTX_TOOL_VERSION not in version_output:
+            raise KtxToolchainError(
+                f"{path.name} version is not {KTX_TOOL_VERSION}"
+            )
+    after = _sha256_file(path)
+    if before != after:
+        raise KtxToolchainError(f"{path.name} changed during verification")
+    return WindowsKtxToolBinary(
+        relative_path=relative_path,
+        sha256=before[0],
+        bytes=before[1],
+        version_output=version_output,
+    )
+
+
+def prepare_private_windows_ktx_runtime(
+    package: Path,
+    installed_root: Path,
+    *,
+    signature_runner: WindowsSignatureRunner = _powershell_authenticode_signature,
+) -> WindowsKtxToolReceipt:
+    """Adopt and verify the signed project-private Windows x64 runtime."""
+
+    package = Path(package).expanduser().absolute()
+    installed_root = Path(installed_root).expanduser().absolute()
+    package_before = _sha256_file(package)
+    if package_before[0] != KTX_WINDOWS_X64_SHA256:
+        raise KtxToolchainError(
+            "KTX package SHA-256 is not the approved Windows pin"
+        )
+    _validate_windows_signature(package, signature_runner)
+    if _sha256_file(package) != package_before:
+        raise KtxToolchainError(
+            "KTX Windows package changed during verification"
+        )
+
+    downloads = installed_root / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    copied_package = downloads / KTX_WINDOWS_X64_ASSET
+    if copied_package.exists():
+        copied_evidence = _sha256_file(copied_package)
+        if copied_evidence != package_before:
+            raise KtxToolchainError(
+                "existing copied KTX Windows package disagrees with "
+                "approved package"
+            )
+    else:
+        temporary = downloads / f".{KTX_WINDOWS_X64_ASSET}.partial"
+        if temporary.exists():
+            raise KtxToolchainError(
+                "stale KTX Windows package staging file exists"
+            )
+        shutil.copyfile(package, temporary)
+        if _sha256_file(temporary) != package_before:
+            raise KtxToolchainError(
+                "copied KTX Windows package bytes changed"
+            )
+        os.replace(temporary, copied_package)
+    _validate_windows_signature(copied_package, signature_runner)
+
+    receipt = WindowsKtxToolReceipt(
+        package_file=_file_evidence(
+            installed_root,
+            f"downloads/{KTX_WINDOWS_X64_ASSET}",
+        ),
+        toktx=_windows_binary_evidence(
+            installed_root,
+            "bin/toktx.exe",
+            version_args=("--version",),
+            signature_runner=signature_runner,
+        ),
+        ktx=_windows_binary_evidence(
+            installed_root,
+            "bin/ktx.exe",
+            version_args=("--version",),
+            signature_runner=signature_runner,
+        ),
+        library=_windows_binary_evidence(
+            installed_root,
+            "bin/ktx.dll",
+            version_args=None,
+            signature_runner=signature_runner,
+        ),
+        license=_file_evidence(
+            installed_root,
+            "share/doc/KTX-Software/html/license.html",
+        ),
+    )
+    receipt_path = installed_root / KTX_RECEIPT_NAME
+    canonical = canonical_ktx_tool_receipt_bytes(receipt)
+    if receipt_path.exists():
+        if receipt_path.read_bytes() != canonical:
+            raise KtxToolchainError(
+                "existing Windows KTX receipt disagrees with runtime"
+            )
+    else:
+        with receipt_path.open("xb") as stream:
+            stream.write(canonical)
+            stream.flush()
+            os.fsync(stream.fileno())
+    return receipt
+
+
 def prepare_private_ktx_runtime(
     package: Path,
     output_root: Path,
@@ -1506,7 +1721,13 @@ def prepare_private_ktx_runtime(
     return receipt
 
 
-def load_ktx_tool_receipt(path: Path) -> AnyKtxToolReceipt:
+def load_ktx_tool_receipt(
+    path: Path,
+    *,
+    windows_signature_runner: WindowsSignatureRunner = (
+        _powershell_authenticode_signature
+    ),
+) -> AnyKtxToolReceipt:
     path = Path(path).expanduser().absolute()
     try:
         raw = path.read_bytes()
@@ -1531,8 +1752,10 @@ def load_ktx_tool_receipt(path: Path) -> AnyKtxToolReceipt:
     if raw != canonical_ktx_tool_receipt_bytes(receipt):
         raise KtxToolchainError("KTX receipt is not canonical JSON")
     if isinstance(receipt, WindowsKtxToolReceipt):
-        raise KtxToolchainError(
-            "Windows KTX runtime verification is not implemented"
+        return prepare_private_windows_ktx_runtime(
+            path.parent / receipt.package_file.relative_path,
+            path.parent,
+            signature_runner=windows_signature_runner,
         )
     root = path.parent
     environment = _runtime_environment(root)

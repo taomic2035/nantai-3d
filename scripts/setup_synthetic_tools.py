@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -17,7 +18,7 @@ def _parser() -> argparse.ArgumentParser:
         dest="install_ktx_4_4_2",
         action="store_true",
         help=(
-            "Verify the cached official signed Darwin arm64 package and "
+            "Verify the cached official signed package for the measured host and "
             "prepare a project-private KTX 4.4.2 runtime."
         ),
     )
@@ -46,6 +47,34 @@ def _tool_lock_api():
     return tool_lock
 
 
+def _current_ktx_runtime():
+    from pipeline.synthetic_village.ktx2_toolchain import (
+        KTX_DARWIN_ARM64_ASSET,
+        KTX_WINDOWS_X64_ASSET,
+        KtxToolchainError,
+        prepare_private_ktx_runtime,
+        prepare_private_windows_ktx_runtime,
+    )
+
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Darwin" and machine == "arm64":
+        return (
+            KTX_DARWIN_ARM64_ASSET,
+            ".nantai-studio/tools/ktx-4.4.2",
+            prepare_private_ktx_runtime,
+        )
+    if system == "Windows" and machine in {"amd64", "x86_64"}:
+        return (
+            KTX_WINDOWS_X64_ASSET,
+            ".nantai-studio/tools/ktx-4.4.2-windows-x64",
+            prepare_private_windows_ktx_runtime,
+        )
+    raise KtxToolchainError(
+        f"KTX 4.4.2 private install does not support {system} {machine}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.install_ktx_4_4_2:
@@ -57,16 +86,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
-        from pipeline.synthetic_village.ktx2_toolchain import (
-            KTX_DARWIN_ARM64_ASSET,
-            KtxToolchainError,
-            prepare_private_ktx_runtime,
-        )
+        from pipeline.synthetic_village.ktx2_toolchain import KtxToolchainError
 
-        output_root = ROOT / ".nantai-studio/tools/ktx-4.4.2"
-        package = output_root / "downloads" / KTX_DARWIN_ARM64_ASSET
         try:
-            receipt = prepare_private_ktx_runtime(package, output_root)
+            asset, relative_root, prepare_runtime = _current_ktx_runtime()
+            output_root = ROOT / relative_root
+            package = output_root / "downloads" / asset
+            receipt = prepare_runtime(package, output_root)
         except KtxToolchainError as exc:
             print(f"synthetic tool setup failed: {exc}", file=sys.stderr)
             return 2
