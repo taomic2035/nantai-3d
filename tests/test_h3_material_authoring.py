@@ -17,8 +17,12 @@ from pipeline.synthetic_village.h3_material_authoring import (
     H3AuthoredMaterialError,
     _author_master,
     _blend_patch,
+    _flatten_low_frequency_illumination,
+    _mean_rgb_delta,
     _minimum_error_path,
+    _source_similarity,
     _srgb_to_linear,
+    _verify_source_preservation,
     build_h3_authored_material_pack,
     canonical_h3_authored_pack_bytes,
     load_h3_authored_material_pack,
@@ -77,6 +81,60 @@ def test_small_master_quilting_is_byte_deterministic_and_seamless() -> None:
     assert not np.array_equal(first_pixels, first_pixels[:, ::-1])
 
 
+def test_low_frequency_flattening_preserves_large_image_channel_means() -> None:
+    pixels = np.empty((512, 512, 3), dtype=np.uint8)
+    pixels[:] = (121, 115, 83)
+
+    corrected = _flatten_low_frequency_illumination(pixels)
+
+    assert corrected.reshape(-1, 3).mean(axis=0, dtype=np.float64) == (
+        pytest.approx((121.0, 115.0, 83.0), abs=1e-9)
+    )
+
+
+def test_quilting_preserves_source_feature_scale_at_higher_resolution() -> None:
+    source_size = 128
+    stripe_width = 16
+    columns = np.arange(source_size)
+    stripe = np.where(
+        (columns // stripe_width) % 2 == 0,
+        32,
+        224,
+    ).astype(np.uint8)
+    pixels = np.repeat(stripe[None, :, None], source_size, axis=0)
+    pixels = np.repeat(pixels, 3, axis=2)
+    source = Image.fromarray(pixels, mode="RGB")
+    source_sha256 = hashlib.sha256(source.tobytes()).hexdigest()
+
+    authored = _author_master(
+        source,
+        source_sha256=source_sha256,
+        output_size=256,
+        patch_size=64,
+        overlap=16,
+        edge_band=12,
+    )
+
+    horizontal_signal = np.asarray(authored).mean(axis=(0, 2))
+    smoothed = np.convolve(horizontal_signal, np.ones(5) / 5.0, mode="same")
+    transitions = int(
+        np.count_nonzero(
+            (smoothed[:-1] - 128.0) * (smoothed[1:] - 128.0) < 0.0,
+        ),
+    )
+    assert transitions <= 12
+    full_ssim, interior_ssim = _source_similarity(source, authored)
+    assert full_ssim >= 0.90
+    assert interior_ssim >= 0.94
+
+
+def test_mean_rgb_delta_measures_normalized_channel_drift() -> None:
+    source = Image.new("RGB", (32, 32), (100, 100, 100))
+    master = Image.new("RGB", (32, 32), (105, 95, 100))
+
+    assert _mean_rgb_delta(source, master) == pytest.approx(5.0 / 255.0)
+
+
 def test_quilting_uses_linear_light_minimum_error_cuts() -> None:
     linear = _srgb_to_linear(
         np.array([0.0, 128.0, 255.0], dtype=np.float32),
@@ -114,6 +172,27 @@ def test_quilting_uses_linear_light_minimum_error_cuts() -> None:
     assert np.all(covered)
 
 
+@pytest.mark.parametrize(
+    "full_ssim, interior_ssim, mean_rgb_delta",
+    (
+        (0.89999999, 1.0, 0.0),
+        (1.0, 0.93999999, 0.0),
+        (1.0, 1.0, 0.01000001),
+    ),
+)
+def test_source_preservation_thresholds_fail_closed(
+    full_ssim: float,
+    interior_ssim: float,
+    mean_rgb_delta: float,
+) -> None:
+    with pytest.raises(H3AuthoredMaterialError, match="source-preservation"):
+        _verify_source_preservation(
+            full_ssim,
+            interior_ssim,
+            mean_rgb_delta,
+        )
+
+
 def test_authored_pack_has_exact_4k_roles_and_truth(authored_pack) -> None:
     source_pack, authored = authored_pack
     pack = authored.manifest
@@ -127,6 +206,9 @@ def test_authored_pack_has_exact_4k_roles_and_truth(authored_pack) -> None:
     assert pack.geometry_usability == "preview-only"
     assert pack.metric_alignment is False
     assert pack.verification_level == "L0"
+    assert pack.minimum_full_source_ssim == 0.90
+    assert pack.minimum_interior_source_ssim == 0.94
+    assert pack.maximum_mean_rgb_delta == 0.01
     assert tuple(record.slot_id for record in pack.records) == H3_HERO_SLOTS
 
     expected_mips = tuple(
@@ -141,8 +223,9 @@ def test_authored_pack_has_exact_4k_roles_and_truth(authored_pack) -> None:
         assert record.metalness_policy == "slot-constant-or-zero"
         assert record.master.sha256 == record.base_color.sha256
         assert record.seam_discontinuity == 0.0
-        assert 0.0 <= record.full_source_ssim <= 1.0
-        assert 0.0 <= record.interior_source_ssim <= 1.0
+        assert 0.90 <= record.full_source_ssim <= 1.0
+        assert 0.94 <= record.interior_source_ssim <= 1.0
+        assert 0.0 <= record.mean_rgb_delta <= 0.01
         for role, descriptor in (
             ("master", record.master),
             ("base_color", record.base_color),

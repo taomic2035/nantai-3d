@@ -59,6 +59,9 @@ H3_PATCH_SIZE = 768
 H3_PATCH_OVERLAP = 128
 H3_EDGE_BAND = 192
 H3_MACRO_VARIATION_LIMIT = 0.04
+H3_MIN_FULL_SOURCE_SSIM = 0.90
+H3_MIN_INTERIOR_SOURCE_SSIM = 0.94
+H3_MAX_MEAN_RGB_DELTA = 0.01
 H3_MIP_DIMENSIONS = tuple(
     (size, size)
     for size in (4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1)
@@ -145,6 +148,11 @@ class H3AuthoredMaterialRecord(FrozenModel):
         le=1.0,
         allow_inf_nan=False,
     )
+    mean_rgb_delta: float = Field(
+        ge=0.0,
+        le=H3_MAX_MEAN_RGB_DELTA,
+        allow_inf_nan=False,
+    )
     material_measurement: Literal["none"] = "none"
     normal_derivation: Literal[
         "synthetic-image-gradient"
@@ -200,6 +208,9 @@ class H3AuthoredMaterialPack(FrozenModel):
     patch_overlap: Literal[128] = H3_PATCH_OVERLAP
     edge_band: Literal[192] = H3_EDGE_BAND
     macro_variation_limit: Literal[0.04] = H3_MACRO_VARIATION_LIMIT
+    minimum_full_source_ssim: Literal[0.9] = H3_MIN_FULL_SOURCE_SSIM
+    minimum_interior_source_ssim: Literal[0.94] = H3_MIN_INTERIOR_SOURCE_SSIM
+    maximum_mean_rgb_delta: Literal[0.01] = H3_MAX_MEAN_RGB_DELTA
     records: tuple[H3AuthoredMaterialRecord, ...]
 
     @model_validator(mode="after")
@@ -282,7 +293,10 @@ def _flatten_low_frequency_illumination(pixels: np.ndarray) -> np.ndarray:
         dtype=np.float32,
     )
     values = pixels.astype(np.float32)
-    target = low.reshape(-1, 3).mean(axis=0)
+    target = low.reshape(-1, 3).mean(
+        axis=0,
+        dtype=np.float64,
+    ).astype(np.float32)
     correction = np.clip(target - low, -20.4, 20.4)
     return np.clip(values + correction, 0.0, 255.0)
 
@@ -450,12 +464,12 @@ def _author_master(
     ):
         raise H3AuthoredMaterialError("authoring dimensions are invalid")
     source_rgb = source.convert("RGB")
-    if min(source_rgb.size) < patch_size:
-        scale = patch_size / min(source_rgb.size)
+    if min(source_rgb.size) != output_size:
+        scale = output_size / min(source_rgb.size)
         source_rgb = source_rgb.resize(
             (
-                max(patch_size, round(source_rgb.width * scale)),
-                max(patch_size, round(source_rgb.height * scale)),
+                max(output_size, round(source_rgb.width * scale)),
+                max(output_size, round(source_rgb.height * scale)),
             ),
             Image.Resampling.LANCZOS,
         )
@@ -476,6 +490,8 @@ def _author_master(
     covered = np.zeros((output_size, output_size), dtype=bool)
     rng = np.random.default_rng(int(source_sha256[:16], 16))
     positions = _positions(output_size, patch_size, overlap)
+    source_offset_x = max(0, (corrected.shape[1] - output_size) // 2)
+    source_offset_y = max(0, (corrected.shape[0] - output_size) // 2)
     for y in positions:
         for x in positions:
             region = canvas[y : y + patch_size, x : x + patch_size]
@@ -483,11 +499,19 @@ def _author_master(
                 y : y + patch_size,
                 x : x + patch_size,
             ]
-            candidates = _candidate_origins(
+            reference_origin = (
+                min(source_offset_x + x, corrected.shape[1] - patch_size),
+                min(source_offset_y + y, corrected.shape[0] - patch_size),
+            )
+            random_origins = _candidate_origins(
                 rng,
                 source_width=corrected.shape[1],
                 source_height=corrected.shape[0],
                 patch_size=patch_size,
+            )
+            candidates = (
+                reference_origin,
+                *(origin for origin in random_origins if origin != reference_origin),
             )
             scored = []
             for source_x, source_y in candidates:
@@ -498,14 +522,15 @@ def _author_master(
                 scored.append(
                     (
                         _overlap_energy(region, patch, region_covered),
+                        0 if (source_x, source_y) == reference_origin else 1,
                         source_y,
                         source_x,
                         patch,
                     ),
                 )
-            _, _, _, selected = min(
+            _, _, _, _, selected = min(
                 scored,
-                key=lambda item: (item[0], item[1], item[2]),
+                key=lambda item: (item[0], item[1], item[2], item[3]),
             )
             _blend_patch(
                 region,
@@ -685,6 +710,55 @@ def _source_similarity(
     )
 
 
+def _mean_rgb_delta(
+    source: Image.Image,
+    master: Image.Image,
+    *,
+    comparison_size: int = 512,
+) -> float:
+    source_pixels = np.asarray(
+        source.convert("RGB").resize(
+            (comparison_size, comparison_size),
+            Image.Resampling.LANCZOS,
+        ),
+        dtype=np.uint8,
+    )
+    master_pixels = np.asarray(
+        master.resize(
+            (comparison_size, comparison_size),
+            Image.Resampling.LANCZOS,
+        ),
+        dtype=np.uint8,
+    )
+    source_mean = source_pixels.reshape(-1, 3).mean(
+        axis=0,
+        dtype=np.float64,
+    )
+    master_mean = master_pixels.reshape(-1, 3).mean(
+        axis=0,
+        dtype=np.float64,
+    )
+    return round(
+        float(np.max(np.abs(master_mean - source_mean)) / 255.0),
+        8,
+    )
+
+
+def _verify_source_preservation(
+    full_ssim: float,
+    interior_ssim: float,
+    mean_rgb_delta: float,
+) -> None:
+    if (
+        full_ssim < H3_MIN_FULL_SOURCE_SSIM
+        or interior_ssim < H3_MIN_INTERIOR_SOURCE_SSIM
+        or mean_rgb_delta > H3_MAX_MEAN_RGB_DELTA
+    ):
+        raise H3AuthoredMaterialError(
+            "authored master fails the frozen source-preservation thresholds",
+        )
+
+
 def _seam_discontinuity(pixels: np.ndarray) -> float:
     horizontal = np.abs(
         pixels[:, 0].astype(np.int16) - pixels[:, -1].astype(np.int16),
@@ -818,6 +892,12 @@ def _build_record(
     ):
         _write_object(object_root.parent, descriptor, payload)
     full_ssim, interior_ssim = _source_similarity(source, master)
+    mean_rgb_delta = _mean_rgb_delta(source, master)
+    _verify_source_preservation(
+        full_ssim,
+        interior_ssim,
+        mean_rgb_delta,
+    )
     return H3AuthoredMaterialRecord(
         slot_id=slot_id,
         source_sha256=source_record.native_source.sha256,
@@ -832,6 +912,7 @@ def _build_record(
         seam_discontinuity=_seam_discontinuity(base_pixels),
         full_source_ssim=full_ssim,
         interior_source_ssim=interior_ssim,
+        mean_rgb_delta=mean_rgb_delta,
         replacement=H3ReplacementContract(
             uv_policy=parameters.uv_policy,
             nominal_tile_m=parameters.nominal_tile_m,
@@ -1076,6 +1157,11 @@ def build_h3_authored_material_pack(
                     "patch_overlap": H3_PATCH_OVERLAP,
                     "edge_band": H3_EDGE_BAND,
                     "macro_variation_limit": H3_MACRO_VARIATION_LIMIT,
+                    "minimum_full_source_ssim": H3_MIN_FULL_SOURCE_SSIM,
+                    "minimum_interior_source_ssim": (
+                        H3_MIN_INTERIOR_SOURCE_SSIM
+                    ),
+                    "maximum_mean_rgb_delta": H3_MAX_MEAN_RGB_DELTA,
                     "records": records,
                 }
                 pack_id = hashlib.sha256(
