@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT_WRAPPER = (
     ROOT / "scripts/blender/preflight_reciprocal_route_cameras.py"
 )
+RENDER_WRAPPER = ROOT / "scripts/blender/render_reciprocal_route_production.py"
 
 
 def _load_wrapper(path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
@@ -57,6 +58,26 @@ def _boundary_payload(script_path: Path) -> dict[str, object]:
         ).hexdigest(),
         "build_id": "a" * 64,
         "reciprocal_route_module_plan_sha256": "b" * 64,
+        "object_registry": registry,
+        "object_registry_sha256": hashlib.sha256(
+            canary._canonical_json_bytes(registry),  # noqa: SLF001
+        ).hexdigest(),
+    }
+
+
+def _render_boundary_payload(script_path: Path) -> dict[str, object]:
+    registry = _registry_payload()
+    return {
+        "schema_version": (
+            "nantai.synthetic-village.local-production-render-frame-request.v5"
+        ),
+        "renderer_script_sha256": hashlib.sha256(
+            script_path.read_bytes(),
+        ).hexdigest(),
+        "build_id": "a" * 64,
+        "reciprocal_route_module_plan_sha256": "b" * 64,
+        "environment_module_build_report_sha256": "c" * 64,
+        "build_adapter": "windows-reciprocal-route-v1",
         "object_registry": registry,
         "object_registry_sha256": hashlib.sha256(
             canary._canonical_json_bytes(registry),  # noqa: SLF001
@@ -145,6 +166,69 @@ def test_preflight_wrapper_rejects_executing_script_mismatch(
     with pytest.raises(wrapper.RuntimePreflightError, match="script digest"):
         wrapper._validate_reciprocal_boundary(
             _boundary_payload(PREFLIGHT_WRAPPER),
+            scene=_scene_lineage(),
+            script_path=other_script,
+        )
+
+
+def test_render_wrapper_accepts_exact_218_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+
+    wrapper._validate_reciprocal_boundary(
+        _render_boundary_payload(RENDER_WRAPPER),
+        scene=_scene_lineage(),
+        script_path=RENDER_WRAPPER,
+    )
+
+
+@pytest.mark.parametrize("count", (130, 175, 217, 219))
+def test_render_wrapper_rejects_non_218_registry(
+    count: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    request = _render_boundary_payload(RENDER_WRAPPER)
+    request["object_registry"] = _registry_payload(count)
+    request["object_registry_sha256"] = hashlib.sha256(
+        canary._canonical_json_bytes(request["object_registry"]),  # noqa: SLF001
+    ).hexdigest()
+
+    with pytest.raises(wrapper.RuntimeRenderError, match=r"1\.\.218"):
+        wrapper._validate_reciprocal_boundary(
+            request,
+            scene=_scene_lineage(),
+            script_path=RENDER_WRAPPER,
+        )
+
+
+def test_render_wrapper_rejects_scene_plan_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    request = _render_boundary_payload(RENDER_WRAPPER)
+    request["reciprocal_route_module_plan_sha256"] = "f" * 64
+
+    with pytest.raises(wrapper.RuntimeRenderError, match="scene plan digest"):
+        wrapper._validate_reciprocal_boundary(
+            request,
+            scene=_scene_lineage(),
+            script_path=RENDER_WRAPPER,
+        )
+
+
+def test_render_wrapper_rejects_executing_script_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    other_script = tmp_path / "renderer.py"
+    other_script.write_bytes(b"different renderer")
+
+    with pytest.raises(wrapper.RuntimeRenderError, match="script digest"):
+        wrapper._validate_reciprocal_boundary(
+            _render_boundary_payload(RENDER_WRAPPER),
             scene=_scene_lineage(),
             script_path=other_script,
         )

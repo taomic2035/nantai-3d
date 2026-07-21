@@ -35,6 +35,10 @@ from .production_quality_gates import (
     ProductionFrameQualityPolicyV2,
     production_frame_quality_policy_v2_sha256,
 )
+from .production_render import (
+    LocalProductionCameraMetadata,
+    LocalProductionRenderFrameReport,
+)
 from .reciprocal_route_module_runtime import (
     ReciprocalRouteRuntimeRequest,
     load_reciprocal_route_build_report,
@@ -43,6 +47,12 @@ from .reciprocal_route_module_runtime import (
 
 RECIPROCAL_RENDER_REQUEST_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-request.v5"
+)
+RECIPROCAL_RENDER_REPORT_SCHEMA = (
+    "nantai.synthetic-village.local-production-render-frame-report.v4"
+)
+RECIPROCAL_CAMERA_METADATA_SCHEMA = (
+    "nantai.synthetic-village.local-production-camera-metadata.v4"
 )
 RECIPROCAL_CLEARANCE_REQUEST_SCHEMA = (
     "nantai.synthetic-village.reciprocal-production-clearance-request.v1"
@@ -577,6 +587,24 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
         if self.render_id != expected_render_id:
             raise ValueError("render ID does not bind the production inputs")
         return self
+
+
+class ReciprocalProductionRenderFrameReport(
+    LocalProductionRenderFrameReport,
+):
+    """Six measured layers emitted by the additive exact-218 renderer."""
+
+    schema_version: Literal[
+        "nantai.synthetic-village.local-production-render-frame-report.v4"
+    ] = RECIPROCAL_RENDER_REPORT_SCHEMA
+
+
+class ReciprocalProductionCameraMetadata(LocalProductionCameraMetadata):
+    """Measured camera metadata emitted by the additive v5 renderer."""
+
+    schema_version: Literal[
+        "nantai.synthetic-village.local-production-camera-metadata.v4"
+    ] = RECIPROCAL_CAMERA_METADATA_SCHEMA
 
 
 def build_reciprocal_production_frame_request(

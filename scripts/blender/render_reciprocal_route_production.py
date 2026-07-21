@@ -1,0 +1,244 @@
+"""Render six production layers from one verified exact-218 Blender build."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+import bpy
+
+REQUEST_SCHEMA = (
+    "nantai.synthetic-village.local-production-render-frame-request.v5"
+)
+REPORT_SCHEMA = (
+    "nantai.synthetic-village.local-production-render-frame-report.v4"
+)
+CAMERA_SCHEMA = (
+    "nantai.synthetic-village.local-production-camera-metadata.v4"
+)
+RECIPROCAL_BUILD_ADAPTER = "windows-reciprocal-route-v1"
+EXPECTED_INSTANCE_IDS = list(range(1, 219))
+LINEAGE_KEYS = {
+    "build_id",
+    "reciprocal_route_module_plan_sha256",
+    "geometry_usability",
+    "module_root_count",
+    "stage",
+    "trust_effect",
+}
+
+
+class RuntimeRenderError(RuntimeError):
+    """Stable failure raised before reciprocal frame publication."""
+
+
+def _canonical_bytes(payload):
+    return (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_sha256(value):
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    )
+
+
+def _parse_scene_lineage(scene):
+    raw = scene.get("nv_reciprocal_route_module_build")
+    try:
+        lineage = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeRenderError(
+            "reciprocal-route scene lineage is absent or invalid",
+        ) from exc
+    if not isinstance(lineage, dict) or set(lineage) != LINEAGE_KEYS:
+        raise RuntimeRenderError(
+            "reciprocal-route scene lineage has unknown or missing fields",
+        )
+    if raw != json.dumps(lineage, separators=(",", ":"), sort_keys=True):
+        raise RuntimeRenderError(
+            "reciprocal-route scene lineage is not canonical JSON",
+        )
+    if (
+        lineage["geometry_usability"] != "preview-only"
+        or lineage["module_root_count"] != 43
+        or lineage["stage"] != "modeled-unverified"
+        or lineage["trust_effect"] != "none"
+    ):
+        raise RuntimeRenderError(
+            "reciprocal-route scene lineage trust contract is invalid",
+        )
+    return lineage
+
+
+def _validate_reciprocal_boundary(request, *, scene, script_path):
+    """Validate identities unique to the additive exact-218 renderer."""
+
+    if request.get("schema_version") != REQUEST_SCHEMA:
+        raise RuntimeRenderError("reciprocal-route render schema is invalid")
+    if request.get("build_adapter") != RECIPROCAL_BUILD_ADAPTER:
+        raise RuntimeRenderError(
+            "reciprocal-route build adapter is invalid",
+        )
+    for key in (
+        "renderer_script_sha256",
+        "build_id",
+        "reciprocal_route_module_plan_sha256",
+        "environment_module_build_report_sha256",
+        "object_registry_sha256",
+    ):
+        if not _is_sha256(request.get(key)):
+            raise RuntimeRenderError(f"request {key} is not a SHA-256")
+    if _sha256_file(script_path) != request["renderer_script_sha256"]:
+        raise RuntimeRenderError(
+            "renderer script digest does not match executing script",
+        )
+    registry = request.get("object_registry")
+    if (
+        not isinstance(registry, list)
+        or [row.get("instance_id") for row in registry]
+        != EXPECTED_INSTANCE_IDS
+    ):
+        raise RuntimeRenderError("object registry is not exact 1..218")
+    if hashlib.sha256(_canonical_bytes(registry)).hexdigest() != request[
+        "object_registry_sha256"
+    ]:
+        raise RuntimeRenderError("object registry digest is invalid")
+    lineage = _parse_scene_lineage(scene)
+    if lineage["build_id"] != request["build_id"]:
+        raise RuntimeRenderError(
+            "reciprocal-route scene build ID does not match request",
+        )
+    if lineage["reciprocal_route_module_plan_sha256"] != request[
+        "reciprocal_route_module_plan_sha256"
+    ]:
+        raise RuntimeRenderError(
+            "reciprocal-route scene plan digest does not match request",
+        )
+
+
+def _load_engine():
+    path = Path(__file__).with_name("render_synthetic_village.py")
+    spec = importlib.util.spec_from_file_location(
+        "nantai_frozen_production_renderer_v4",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeRenderError("frozen render engine cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _prepare_engine(engine):
+    """Adapt only the loaded module object; the frozen script bytes stay intact."""
+
+    engine.LOCAL_PRODUCTION_REQUEST_SCHEMA = REQUEST_SCHEMA
+    engine.LOCAL_PRODUCTION_REPORT_SCHEMA = REPORT_SCHEMA
+    engine.LOCAL_PRODUCTION_CAMERA_SCHEMA = CAMERA_SCHEMA
+    engine.__file__ = __file__
+
+    def validate_registry(object_registry):
+        engine._expect_list(object_registry, 218, "object_registry")
+        actual_instances = [
+            row.get("instance_id")
+            for row in object_registry
+            if isinstance(row, dict)
+        ]
+        if actual_instances != EXPECTED_INSTANCE_IDS:
+            raise engine.RuntimeRenderError(
+                "object registry instance IDs are not stable 1 through 218",
+            )
+        stable_ids = []
+        for row in object_registry:
+            engine._expect_keys(
+                row,
+                (
+                    "object_id",
+                    "instance_id",
+                    "semantic_id",
+                    "material_id",
+                    "variant_id",
+                ),
+                "object registry row",
+            )
+            if (
+                not isinstance(row["object_id"], str)
+                or re.fullmatch(
+                    r"[a-z0-9]+(?:-[a-z0-9]+)*",
+                    row["object_id"],
+                )
+                is None
+                or isinstance(row["semantic_id"], bool)
+                or not isinstance(row["semantic_id"], int)
+                or not 3 <= row["semantic_id"] < len(engine.SEMANTIC_CLASSES)
+                or isinstance(row["material_id"], bool)
+                or not isinstance(row["material_id"], int)
+                or not 1 <= row["material_id"] <= 255
+            ):
+                raise engine.RuntimeRenderError(
+                    "object registry row is invalid",
+                )
+            stable_ids.append(row["object_id"])
+        if len(set(stable_ids)) != 218:
+            raise engine.RuntimeRenderError(
+                "object registry stable IDs are not unique",
+            )
+
+    engine._validate_object_registry_contract = validate_registry
+    return engine
+
+
+def _validate_request(request, engine):
+    _validate_reciprocal_boundary(
+        request,
+        scene=bpy.context.scene,
+        script_path=Path(__file__),
+    )
+    internal = copy.deepcopy(request)
+    internal.pop("environment_module_build_report_sha256")
+    internal.pop("reciprocal_route_module_plan_sha256")
+    internal["build_adapter"] = "windows-textured-v2"
+    internal["build_id"] = bpy.context.scene.get("nv_build_id")
+    try:
+        engine._validate_request(internal)
+    except engine.RuntimeRenderError as exc:
+        raise RuntimeRenderError(str(exc)) from exc
+    return request
+
+
+def main():
+    engine = _prepare_engine(_load_engine())
+    try:
+        request_path, staging_path = engine._runtime_argv(sys.argv)
+        request = engine._load_request(request_path)
+    except engine.RuntimeRenderError as exc:
+        raise RuntimeRenderError(str(exc)) from exc
+    request = _validate_request(request, engine)
+    try:
+        engine._execute_render(request, staging_path)
+    except engine.RuntimeRenderError as exc:
+        raise RuntimeRenderError(str(exc)) from exc
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except RuntimeRenderError as exc:
+        print(f"NANTAI_RECIPROCAL_RENDER_ERROR {exc}", flush=True)
+        raise SystemExit(17) from None

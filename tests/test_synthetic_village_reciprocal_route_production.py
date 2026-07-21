@@ -30,12 +30,16 @@ from pipeline.synthetic_village.production_quality_gates import (
 )
 from pipeline.synthetic_village.reciprocal_route_production import (
     RECIPROCAL_BUILD_ADAPTER,
+    RECIPROCAL_CAMERA_METADATA_SCHEMA,
     RECIPROCAL_CLEARANCE_REPORT_SCHEMA,
     RECIPROCAL_CLEARANCE_REQUEST_SCHEMA,
+    RECIPROCAL_RENDER_REPORT_SCHEMA,
     RECIPROCAL_RENDER_REQUEST_SCHEMA,
+    ReciprocalProductionCameraMetadata,
     ReciprocalProductionClearanceReport,
     ReciprocalProductionClearanceRequest,
     ReciprocalProductionError,
+    ReciprocalProductionRenderFrameReport,
     ReciprocalProductionRenderFrameRequest,
     build_reciprocal_production_clearance_report,
     build_reciprocal_production_clearance_request,
@@ -368,3 +372,18 @@ def test_clearance_report_rejects_changed_lineage() -> None:
 
     with pytest.raises(ReciprocalProductionError, match="identity disagrees"):
         verify_reciprocal_production_clearance_report(report, request=request)
+
+
+def test_reciprocal_render_output_schemas_are_additive() -> None:
+    assert (
+        ReciprocalProductionRenderFrameReport.model_fields[
+            "schema_version"
+        ].default
+        == RECIPROCAL_RENDER_REPORT_SCHEMA
+    )
+    assert (
+        ReciprocalProductionCameraMetadata.model_fields[
+            "schema_version"
+        ].default
+        == RECIPROCAL_CAMERA_METADATA_SCHEMA
+    )
