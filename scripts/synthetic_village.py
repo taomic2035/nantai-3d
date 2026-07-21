@@ -152,6 +152,10 @@ def _run_windows_production_render():
     return run_windows_production_render
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+
 def _load_post_render_policy(path: Path):
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -165,12 +169,12 @@ def _load_post_render_policy(path: Path):
         Path(path).absolute(),
         label="post-render quality policy",
     )
-    parsed = json.loads(
+    json.loads(
         raw.decode("utf-8"),
         object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
-        parse_constant=canary._reject_constant,  # noqa: SLF001
+        parse_constant=_reject_json_constant,
     )
-    policy = ProductionFrameQualityPolicyV2.model_validate(parsed)
+    policy = ProductionFrameQualityPolicyV2.model_validate_json(raw)
     if raw != canonical_production_frame_quality_policy_v2_bytes(policy):
         raise ValueError("post-render quality policy is not canonical JSON")
     return policy

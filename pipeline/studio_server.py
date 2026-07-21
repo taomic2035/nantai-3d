@@ -108,6 +108,7 @@ from pipeline.synthetic_village.production_profile import (
 from pipeline.synthetic_village.production_quality_gates import (
     ProductionFrameQualityReportV2,
     ProductionFrameQualityRequestV2,
+    canonical_production_frame_quality_report_v2_bytes,
     canonical_production_frame_quality_request_v2_bytes,
     verify_production_frame_quality_report_v2,
 )
@@ -1293,13 +1294,25 @@ def _production_quality_snapshot(root: Path) -> dict[str, Any]:
         "cameras": [],
     }
     root = root.resolve()
-    render_boundary = (
-        root
-        / ".nantai-studio/synthetic-village/hybrid-v3/local-production-renders"
+    render_boundaries = (
+        (
+            root
+            / ".nantai-studio/synthetic-village/hybrid-v3/local-production-renders",
+            1,
+        ),
+        (root / ".nantai-studio/sv-prod-win", 2),
     )
-    if not render_boundary.exists():
+    existing_boundaries = tuple(
+        (boundary, depth)
+        for boundary, depth in render_boundaries
+        if boundary.exists()
+    )
+    if not existing_boundaries:
         return awaiting
-    if not _is_real_project_subtree(root, render_boundary):
+    if any(
+        not _is_real_project_subtree(root, boundary)
+        for boundary, _ in existing_boundaries
+    ):
         return {
             **awaiting,
             "status": "invalid-evidence",
@@ -1319,11 +1332,22 @@ def _production_quality_snapshot(root: Path) -> dict[str, Any]:
         ],
     }
     try:
-        render_directories = [
-            directory
-            for directory in render_boundary.iterdir()
-            if directory.is_dir() and not directory.is_symlink()
-        ]
+        render_directories = []
+        for boundary, depth in existing_boundaries:
+            if depth == 1:
+                render_directories.extend(
+                    directory
+                    for directory in boundary.iterdir()
+                    if directory.is_dir() and not directory.is_symlink()
+                )
+                continue
+            render_directories.extend(
+                render_directory
+                for build_directory in boundary.iterdir()
+                if build_directory.is_dir() and not build_directory.is_symlink()
+                for render_directory in build_directory.iterdir()
+                if render_directory.is_dir() and not render_directory.is_symlink()
+            )
         if any(
             (
                 directory.joinpath("quality-request.json").exists()
@@ -1436,15 +1460,9 @@ def _production_quality_snapshot(root: Path) -> dict[str, Any]:
             raise ValueError("production quality evidence is too large")
         request = ProductionFrameQualityRequestV2.model_validate_json(request_raw)
         report = ProductionFrameQualityReportV2.model_validate_json(report_raw)
-        canonical_report = (
-            json.dumps(
-                report.model_dump(mode="json"),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
+        canonical_report = canonical_production_frame_quality_report_v2_bytes(
+            report,
+        )
         if (
             request_raw
             != canonical_production_frame_quality_request_v2_bytes(request)

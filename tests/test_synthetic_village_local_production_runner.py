@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 
 from pipeline.synthetic_village import canary
+from pipeline.synthetic_village.local_production_runner import (
+    persist_local_production_state,
+    publish_production_frame_quality_evidence,
+)
 from pipeline.synthetic_village.production_journal import ProductionArtifactRecord
 from pipeline.synthetic_village.production_preflight import (
     ProductionCameraClearanceEvidence,
@@ -19,15 +23,22 @@ from pipeline.synthetic_village.production_preflight import (
 )
 from pipeline.synthetic_village.production_quality_gates import (
     ProductionFrameLayerStatistics,
+    ProductionFrameQualityReportV2,
+    ProductionFrameQualityRequestV2,
+    canonical_production_frame_quality_policy_v2_bytes,
+    canonical_production_frame_quality_report_v2_bytes,
+    canonical_production_frame_quality_request_v2_bytes,
 )
 from pipeline.synthetic_village.production_render import (
     LocalProductionQualityPolicy,
     build_local_production_frame_request,
+    canonical_local_production_render_journal_bytes,
     evaluate_local_production_frame_quality,
     local_production_quality_policy_sha256,
     new_local_production_render_journal,
     transition_local_production_frame,
 )
+from scripts import synthetic_village as synthetic_village_cli
 from tests.test_synthetic_village_production_render import _request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -350,6 +361,217 @@ def test_local_journal_separates_verified_and_quality_rejected_frames() -> None:
     assert frame.quality.passes is False
 
 
+def test_completed_frames_publish_canonical_v2_quality_sidecars(tmp_path) -> None:
+    request = _request()
+    policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
+    preflight_request, _, _ = _preflight_context(request, obstructed=False)
+    bound_request = _bound_render_request(
+        request,
+        preflight_request=preflight_request,
+        quality_policy=policy,
+    )
+    journal = _new_journal(request, policy=policy)
+    camera_id = request.camera.camera_id
+    statistics = _statistics(background_pixels=116_775)
+    quality = evaluate_local_production_frame_quality(
+        statistics,
+        policy=policy,
+    )
+    journal = transition_local_production_frame(
+        journal,
+        camera_id,
+        state="verified",
+        artifacts=_artifacts(camera_id),
+        runtime_report_sha256="b" * 64,
+        statistics=statistics,
+        layer_statistics=_layer_statistics(camera_id),
+        quality=quality,
+        wall_clock_seconds=11.19,
+    )
+
+    publication = publish_production_frame_quality_evidence(
+        render_root=tmp_path,
+        frame_request=bound_request,
+        journal=journal,
+    )
+
+    assert publication is not None
+    assert publication.selected_camera_ids == (camera_id,)
+    quality_request = ProductionFrameQualityRequestV2.model_validate_json(
+        publication.request_path.read_bytes(),
+    )
+    quality_report = ProductionFrameQualityReportV2.model_validate_json(
+        publication.report_path.read_bytes(),
+    )
+    assert quality_request.journal_sha256 == journal.journal_sha256
+    assert quality_request.frames[0].runtime_report_sha256 == "b" * 64
+    assert publication.request_path.read_bytes() == (
+        canonical_production_frame_quality_request_v2_bytes(quality_request)
+    )
+    assert publication.report_path.read_bytes() == (
+        canonical_production_frame_quality_report_v2_bytes(quality_report)
+    )
+    assert quality_report.request_id == quality_request.request_id
+    assert quality_report.statistics == (_layer_statistics(camera_id),)
+
+
+def test_quality_sidecars_refresh_when_the_bound_journal_changes(tmp_path) -> None:
+    request = _request()
+    policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
+    preflight_request, _, _ = _preflight_context(request, obstructed=False)
+    bound_request = _bound_render_request(
+        request,
+        preflight_request=preflight_request,
+        quality_policy=policy,
+    )
+    journal = _new_journal(request, policy=policy)
+    camera_id = request.camera.camera_id
+    statistics = _statistics(background_pixels=116_775)
+    quality = evaluate_local_production_frame_quality(statistics, policy=policy)
+    journal = transition_local_production_frame(
+        journal,
+        camera_id,
+        state="verified",
+        artifacts=_artifacts(camera_id),
+        runtime_report_sha256="b" * 64,
+        statistics=statistics,
+        layer_statistics=_layer_statistics(camera_id),
+        quality=quality,
+        wall_clock_seconds=11.19,
+    )
+    first = publish_production_frame_quality_evidence(
+        render_root=tmp_path,
+        frame_request=bound_request,
+        journal=journal,
+    )
+    assert first is not None
+    first_request = ProductionFrameQualityRequestV2.model_validate_json(
+        first.request_path.read_bytes(),
+    )
+
+    changed = transition_local_production_frame(
+        journal,
+        camera_id,
+        state="verified",
+        artifacts=tuple(
+            artifact.model_copy(update={"sha256": "c" * 64})
+            for artifact in _artifacts(camera_id)
+        ),
+        runtime_report_sha256="d" * 64,
+        statistics=statistics,
+        layer_statistics=_layer_statistics(camera_id),
+        quality=quality,
+        wall_clock_seconds=12.0,
+    )
+    second = publish_production_frame_quality_evidence(
+        render_root=tmp_path,
+        frame_request=bound_request,
+        journal=changed,
+    )
+
+    assert second is not None
+    second_request = ProductionFrameQualityRequestV2.model_validate_json(
+        second.request_path.read_bytes(),
+    )
+    assert second_request.journal_sha256 == changed.journal_sha256
+    assert second_request.request_id != first_request.request_id
+    assert second_request.frames[0].runtime_report_sha256 == "d" * 64
+
+
+def test_quality_sidecars_are_removed_when_no_completed_frame_remains(tmp_path) -> None:
+    request = _request()
+    policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
+    preflight_request, _, _ = _preflight_context(request, obstructed=False)
+    bound_request = _bound_render_request(
+        request,
+        preflight_request=preflight_request,
+        quality_policy=policy,
+    )
+    journal = _new_journal(request, policy=policy)
+    camera_id = request.camera.camera_id
+    statistics = _statistics(background_pixels=116_775)
+    journal = transition_local_production_frame(
+        journal,
+        camera_id,
+        state="verified",
+        artifacts=_artifacts(camera_id),
+        runtime_report_sha256="b" * 64,
+        statistics=statistics,
+        layer_statistics=_layer_statistics(camera_id),
+        quality=evaluate_local_production_frame_quality(
+            statistics,
+            policy=policy,
+        ),
+        wall_clock_seconds=11.19,
+    )
+    assert publish_production_frame_quality_evidence(
+        render_root=tmp_path,
+        frame_request=bound_request,
+        journal=journal,
+    ) is not None
+
+    rendering = transition_local_production_frame(
+        journal,
+        camera_id,
+        state="rendering",
+    )
+    publication = publish_production_frame_quality_evidence(
+        render_root=tmp_path,
+        frame_request=bound_request,
+        journal=rendering,
+    )
+
+    assert publication is None
+    assert not tmp_path.joinpath("quality-request.json").exists()
+    assert not tmp_path.joinpath("quality-report.json").exists()
+
+
+def test_persisted_runner_state_binds_sidecars_to_written_journal(tmp_path) -> None:
+    request = _request()
+    policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
+    preflight_request, _, _ = _preflight_context(request, obstructed=False)
+    bound_request = _bound_render_request(
+        request,
+        preflight_request=preflight_request,
+        quality_policy=policy,
+    )
+    journal = _new_journal(request, policy=policy)
+    camera_id = request.camera.camera_id
+    statistics = _statistics(background_pixels=116_775)
+    journal = transition_local_production_frame(
+        journal,
+        camera_id,
+        state="verified",
+        artifacts=_artifacts(camera_id),
+        runtime_report_sha256="b" * 64,
+        statistics=statistics,
+        layer_statistics=_layer_statistics(camera_id),
+        quality=evaluate_local_production_frame_quality(
+            statistics,
+            policy=policy,
+        ),
+        wall_clock_seconds=11.19,
+    )
+
+    publication = persist_local_production_state(
+        journal_path=tmp_path / "render-journal.json",
+        frame_request=bound_request,
+        journal=journal,
+    )
+
+    assert publication is not None
+    written_journal = publication.request_path.parent.joinpath(
+        "render-journal.json",
+    ).read_bytes()
+    assert written_journal == canonical_local_production_render_journal_bytes(
+        journal,
+    )
+    quality_request = ProductionFrameQualityRequestV2.model_validate_json(
+        publication.request_path.read_bytes(),
+    )
+    assert quality_request.journal_sha256 == journal.journal_sha256
+
+
 def test_failed_frame_can_retry_without_stale_failure_evidence() -> None:
     request = _request()
     policy = LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.75)
@@ -403,3 +625,13 @@ def test_cli_requires_an_explicit_quality_threshold() -> None:
     assert "--preflight-only" in completed.stdout
     assert "--visual-pack-root" in completed.stdout
     assert "required" not in completed.stderr
+
+
+def test_cli_loads_a_canonical_explicit_post_render_policy(tmp_path) -> None:
+    policy = _request().post_render_policy
+    path = tmp_path / "policy.json"
+    path.write_bytes(
+        canonical_production_frame_quality_policy_v2_bytes(policy),
+    )
+
+    assert synthetic_village_cli._load_post_render_policy(path) == policy

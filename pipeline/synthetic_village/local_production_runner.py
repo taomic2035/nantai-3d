@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -39,7 +40,14 @@ from .production_profile import (
     ProductionCameraPlan,
     build_production_camera_plan,
 )
-from .production_quality_gates import ProductionFrameQualityPolicyV2
+from .production_quality_gates import (
+    ProductionFrameEvidenceBinding,
+    ProductionFrameQualityPolicyV2,
+    build_production_frame_quality_report_v2,
+    build_production_frame_quality_request_v2,
+    canonical_production_frame_quality_report_v2_bytes,
+    canonical_production_frame_quality_request_v2_bytes,
+)
 from .production_render import (
     LocalProductionCameraMetadata,
     LocalProductionQualityPolicy,
@@ -92,6 +100,193 @@ class LocalProductionRenderResult:
     preflight_only: bool
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class ProductionFrameQualityEvidencePublication:
+    request_path: Path
+    report_path: Path
+    selected_camera_ids: tuple[str, ...]
+
+
+def _replace_quality_sidecars(
+    *,
+    root: Path,
+    request_payload: bytes,
+    report_payload: bytes,
+) -> tuple[Path, Path]:
+    request_path = root / "quality-request.json"
+    report_path = root / "quality-report.json"
+    if canary._is_linklike(request_path) or canary._is_linklike(report_path):
+        raise LocalTexturedPreviewError(
+            "production quality evidence path is redirected",
+        )
+    nonce = uuid.uuid4().hex
+    temporary_request = root / f".quality-request-{nonce}.tmp"
+    temporary_report = root / f".quality-report-{nonce}.tmp"
+    try:
+        canary._write_new_file(temporary_request, request_payload)
+        canary._write_new_file(temporary_report, report_payload)
+        os.replace(temporary_request, request_path)
+        os.replace(temporary_report, report_path)
+        canary._flush_file(request_path)
+        canary._flush_file(report_path)
+        canary._flush_directory(root)
+    except OSError as exc:
+        raise LocalTexturedPreviewError(
+            f"cannot durably update production quality evidence: {exc}",
+        ) from exc
+    finally:
+        for temporary in (temporary_request, temporary_report):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return request_path, report_path
+
+
+def publish_production_frame_quality_evidence(
+    *,
+    render_root: Path,
+    frame_request: LocalProductionRenderFrameRequest,
+    journal: LocalProductionRenderJournal,
+) -> ProductionFrameQualityEvidencePublication | None:
+    immutable = (
+        journal.render_id,
+        journal.build_id,
+        journal.production_plan_sha256,
+        journal.camera_registry_sha256,
+        journal.blender_executable_sha256,
+        journal.renderer_script_sha256,
+        journal.blend_sha256,
+        journal.build_report_sha256,
+        journal.object_registry_sha256,
+        journal.preflight_id,
+        journal.quality_policy_sha256,
+        journal.post_render_policy_sha256,
+    )
+    expected = (
+        frame_request.render_id,
+        frame_request.build_id,
+        frame_request.production_plan_sha256,
+        frame_request.camera_registry_sha256,
+        frame_request.blender_executable_sha256,
+        frame_request.renderer_script_sha256,
+        frame_request.blend_sha256,
+        frame_request.build_report_sha256,
+        frame_request.object_registry_sha256,
+        frame_request.preflight_id,
+        frame_request.quality_policy_sha256,
+        frame_request.post_render_policy_sha256,
+    )
+    if immutable != expected:
+        raise LocalTexturedPreviewError(
+            "production quality evidence disagrees with the render journal",
+        )
+    root = canary._require_real_directory(
+        Path(render_root).absolute(),
+        label="local production render root",
+    )
+    completed = tuple(
+        frame for frame in journal.frames if frame.state in {"verified", "rejected"}
+    )
+    if not completed:
+        sidecars = (
+            root / "quality-request.json",
+            root / "quality-report.json",
+        )
+        if any(canary._is_linklike(path) for path in sidecars):
+            raise LocalTexturedPreviewError(
+                "production quality evidence path is redirected",
+            )
+        try:
+            changed = False
+            for path in sidecars:
+                if path.exists():
+                    path.unlink()
+                    changed = True
+            if changed:
+                canary._flush_directory(root)
+        except OSError as exc:
+            raise LocalTexturedPreviewError(
+                f"cannot remove stale production quality evidence: {exc}",
+            ) from exc
+        return None
+    if any(
+        frame.runtime_report_sha256 is None or frame.layer_statistics is None
+        for frame in completed
+    ):
+        raise LocalTexturedPreviewError(
+            "completed production frames lack bound quality evidence",
+        )
+    selected_camera_ids = tuple(frame.camera_id for frame in completed)
+    request = build_production_frame_quality_request_v2(
+        plan=frame_request.production_plan,
+        selected_camera_ids=selected_camera_ids,
+        build_id=frame_request.build_id,
+        render_id=frame_request.render_id,
+        blender_executable_sha256=frame_request.blender_executable_sha256,
+        renderer_script_sha256=frame_request.renderer_script_sha256,
+        blend_sha256=frame_request.blend_sha256,
+        build_report_sha256=frame_request.build_report_sha256,
+        object_registry=frame_request.object_registry,
+        semantic_registry=frame_request.semantic_registry,
+        journal_sha256=journal.journal_sha256,
+        frames=tuple(
+            ProductionFrameEvidenceBinding(
+                camera_id=frame.camera_id,
+                runtime_report_sha256=frame.runtime_report_sha256,
+                artifacts=frame.artifacts,
+            )
+            for frame in completed
+        ),
+        policy=journal.post_render_policy,
+    )
+    report = build_production_frame_quality_report_v2(
+        request,
+        statistics=tuple(
+            frame.layer_statistics
+            for frame in completed
+            if frame.layer_statistics is not None
+        ),
+    )
+    request_path, report_path = _replace_quality_sidecars(
+        root=root,
+        request_payload=(
+            canonical_production_frame_quality_request_v2_bytes(request)
+        ),
+        report_payload=canonical_production_frame_quality_report_v2_bytes(
+            report,
+        ),
+    )
+    return ProductionFrameQualityEvidencePublication(
+        request_path=request_path,
+        report_path=report_path,
+        selected_camera_ids=selected_camera_ids,
+    )
+
+
+def persist_local_production_state(
+    *,
+    journal_path: Path,
+    frame_request: LocalProductionRenderFrameRequest,
+    journal: LocalProductionRenderJournal,
+) -> ProductionFrameQualityEvidencePublication | None:
+    path = Path(journal_path).absolute()
+    root = canary._require_real_directory(
+        path.parent,
+        label="local production render root",
+    )
+    if path.parent != root or canary._is_linklike(path):
+        raise LocalTexturedPreviewError(
+            "local production journal path is redirected",
+        )
+    canary._write_render_journal(path, journal)
+    return publish_production_frame_quality_evidence(
+        render_root=root,
+        frame_request=frame_request,
+        journal=journal,
+    )
 
 
 def _run_blender_preflight_process(
@@ -876,7 +1071,11 @@ def _run_production_render(
                     preflight_wall_clock_seconds=preflight_duration,
                     timeout_limit_seconds=timeout_seconds,
                 )
-                canary._write_render_journal(journal_path, journal)
+                persist_local_production_state(
+                    journal_path=journal_path,
+                    frame_request=seed_request,
+                    journal=journal,
+                )
 
             preflight_rejected_count = sum(
                 1
@@ -938,7 +1137,11 @@ def _run_production_render(
                         camera_id,
                         state="rendering",
                     )
-                    canary._write_render_journal(journal_path, journal)
+                    persist_local_production_state(
+                        journal_path=journal_path,
+                        frame_request=seed_request,
+                        journal=journal,
+                    )
 
                     invocation_root.mkdir(exist_ok=False)
                     canary._flush_directory(temporary_root)
@@ -1024,7 +1227,11 @@ def _run_production_render(
                         quality=quality,
                         wall_clock_seconds=duration,
                     )
-                    canary._write_render_journal(journal_path, journal)
+                    persist_local_production_state(
+                        journal_path=journal_path,
+                        frame_request=seed_request,
+                        journal=journal,
+                    )
                     rendered_count += 1
                     if state == "rejected":
                         rejected_count += 1
@@ -1048,7 +1255,11 @@ def _run_production_render(
                         wall_clock_seconds=duration,
                         error=canary._sanitize_render_error(error),
                     )
-                    canary._write_render_journal(journal_path, journal)
+                    persist_local_production_state(
+                        journal_path=journal_path,
+                        frame_request=seed_request,
+                        journal=journal,
+                    )
                     if error is exc:
                         raise
                     raise error from exc
@@ -1059,6 +1270,11 @@ def _run_production_render(
                             work_root=temporary_root,
                             expected_name=owned.name,
                         )
+            persist_local_production_state(
+                journal_path=journal_path,
+                frame_request=seed_request,
+                journal=journal,
+            )
     except LocalTexturedPreviewError:
         raise
     except (canary.CanaryBuildError, JobContractError) as exc:

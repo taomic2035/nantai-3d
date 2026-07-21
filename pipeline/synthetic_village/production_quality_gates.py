@@ -642,6 +642,12 @@ class ProductionFrameQualityReportV2(FrozenModel):
     )
 
 
+def canonical_production_frame_quality_report_v2_bytes(
+    report: ProductionFrameQualityReportV2,
+) -> bytes:
+    return _canonical(report.model_dump(mode="json"))
+
+
 def build_production_frame_quality_report_v2(
     request: ProductionFrameQualityRequestV2,
     *,

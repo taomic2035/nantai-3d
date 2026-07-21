@@ -382,6 +382,7 @@ def _write_production_quality_evidence(root: Path) -> tuple[Path, dict]:
         artifacts=artifacts,
         runtime_report_sha256="7" * 64,
         statistics=legacy_statistics,
+        layer_statistics=_production_layer_statistics(),
         quality=legacy_quality,
         wall_clock_seconds=3.5,
     )
@@ -2532,6 +2533,34 @@ class TestHttpContract:
             "comparison_direction": "maximum",
             "passes": True,
         }
+
+    def test_production_quality_api_discovers_windows_v2_runner_evidence(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        directory, evidence = _write_production_quality_evidence(tmp_path)
+        windows_directory = (
+            tmp_path
+            / ".nantai-studio/sv-prod-win"
+            / ("e" * 64)
+            / directory.name
+        )
+        windows_directory.parent.mkdir(parents=True)
+        directory.rename(windows_directory)
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        snapshot = json.loads(payload)
+        assert snapshot["status"] == "available"
+        assert snapshot["render_id"] == evidence["journal"].render_id
+        assert snapshot["report_sha256"] == evidence["report_sha256"]
 
     def test_production_quality_api_fails_closed_on_incomplete_sidecars(
         self,
