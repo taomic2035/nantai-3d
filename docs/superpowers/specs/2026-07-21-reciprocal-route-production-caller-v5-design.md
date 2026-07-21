@@ -1,7 +1,7 @@
 # Reciprocal-route 218-root production caller v5 design
 
-> Date: 2026-07-21  
-> Decision: additive scheme A, already approved for the Windows production lane  
+> Date: 2026-07-21
+> Decision: additive scheme A, already approved for the Windows production lane
 > Inputs: `HANDOFF-OPUS-008`, `HANDOFF-OPUS-009`, `REVIEW-CODEX-019`
 
 ## Goal
