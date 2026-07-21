@@ -8,15 +8,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
+import time
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from . import canary
-from .production_journal import production_render_id
+from .production_journal import (
+    ProductionArtifactRecord,
+    expected_production_artifacts,
+    production_render_id,
+)
 from .production_preflight import (
     ProductionCameraClearanceDecision,
     ProductionCameraClearanceEvidence,
@@ -32,12 +41,23 @@ from .production_profile import (
     production_camera_registry_digest,
 )
 from .production_quality_gates import (
+    ProductionFrameEvidenceBinding,
+    ProductionFrameLayerStatistics,
     ProductionFrameQualityPolicyV2,
+    build_production_frame_quality_report_v2,
+    build_production_frame_quality_request_v2,
+    canonical_production_frame_quality_report_v2_bytes,
+    canonical_production_frame_quality_request_v2_bytes,
     production_frame_quality_policy_v2_sha256,
+    verify_production_frame_quality_report_v2,
 )
 from .production_render import (
     LocalProductionCameraMetadata,
+    LocalProductionFrameQuality,
+    LocalProductionQualityPolicy,
     LocalProductionRenderFrameReport,
+    evaluate_local_production_frame_quality,
+    local_production_quality_policy_sha256,
 )
 from .reciprocal_route_module_runtime import (
     ReciprocalRouteRuntimeRequest,
@@ -90,6 +110,22 @@ class VerifiedReciprocalProductionBuild:
     environment_module_build_report_sha256: str
     reciprocal_route_module_plan_sha256: str
     object_registry: tuple[canary.ObjectRegistryEntry, ...]
+
+
+@dataclass(frozen=True)
+class ReciprocalProductionCameraResult:
+    """One atomically published, quality-accepted camera evidence bundle."""
+
+    render_id: str
+    camera_id: str
+    frame_root: Path
+    preflight_request_sha256: str
+    preflight_report_sha256: str
+    render_request_sha256: str
+    render_report_sha256: str
+    journal_sha256: str
+    quality_request_sha256: str
+    quality_report_sha256: str
 
 
 def _sha256_file(path: Path) -> str:
@@ -408,6 +444,40 @@ def canonical_reciprocal_production_clearance_report_bytes(
     return _canonical(report.model_dump(mode="json"))
 
 
+def load_reciprocal_production_clearance_report(
+    path: Path,
+) -> ReciprocalProductionClearanceReport:
+    """Load one bounded canonical reciprocal clearance report."""
+
+    try:
+        raw = canary._read_stable_metadata(  # noqa: SLF001
+            Path(path),
+            label="reciprocal production clearance report",
+        )
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
+        )
+        report = ReciprocalProductionClearanceReport.model_validate_json(raw)
+        if raw != canonical_reciprocal_production_clearance_report_bytes(report):
+            raise ReciprocalProductionError(
+                "reciprocal clearance report is not canonical JSON",
+            )
+        return report
+    except ReciprocalProductionError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        canary.CanaryBuildError,
+    ) as exc:
+        raise ReciprocalProductionError(
+            f"reciprocal clearance report validation failed: {exc}",
+        ) from exc
+
+
 def verify_reciprocal_production_clearance_report(
     report: ReciprocalProductionClearanceReport,
     *,
@@ -644,6 +714,725 @@ class ReciprocalProductionCameraMetadata(LocalProductionCameraMetadata):
     schema_version: Literal[
         "nantai.synthetic-village.local-production-camera-metadata.v4"
     ] = RECIPROCAL_CAMERA_METADATA_SCHEMA
+
+
+def canonical_reciprocal_production_camera_metadata_bytes(
+    metadata: ReciprocalProductionCameraMetadata,
+) -> bytes:
+    """Serialize measured v4 camera metadata as canonical JSON."""
+
+    return _canonical(metadata.model_dump(mode="json"))
+
+
+def load_reciprocal_production_camera_metadata(
+    path: Path,
+) -> ReciprocalProductionCameraMetadata:
+    """Load one canonical measured-camera sidecar."""
+
+    try:
+        raw = canary._read_stable_metadata(  # noqa: SLF001
+            Path(path),
+            label="reciprocal production camera metadata",
+        )
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
+        )
+        metadata = ReciprocalProductionCameraMetadata.model_validate_json(raw)
+        if raw != canonical_reciprocal_production_camera_metadata_bytes(
+            metadata,
+        ):
+            raise ReciprocalProductionError(
+                "reciprocal camera metadata is not canonical JSON",
+            )
+        return metadata
+    except ReciprocalProductionError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        canary.CanaryBuildError,
+    ) as exc:
+        raise ReciprocalProductionError(
+            f"reciprocal camera metadata validation failed: {exc}",
+        ) from exc
+
+
+def verify_reciprocal_production_camera_metadata(
+    metadata: ReciprocalProductionCameraMetadata,
+    *,
+    request: ReciprocalProductionRenderFrameRequest,
+) -> None:
+    """Cross-check measured camera identity and pose against the request."""
+
+    expected_settings_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(  # noqa: SLF001
+            request.settings.model_dump(mode="json"),
+        ),
+    ).hexdigest()
+    camera = request.camera
+    immutable = (
+        metadata.build_id,
+        metadata.render_id,
+        metadata.blender_executable_sha256,
+        metadata.camera_id,
+        metadata.settings_sha256,
+        metadata.intrinsics,
+        metadata.requested_c2w_opencv,
+        metadata.requested_c2w_blender,
+        metadata.object_registry_sha256,
+        metadata.semantic_registry,
+        metadata.profile_id,
+        metadata.production_plan_sha256,
+        metadata.camera_registry_sha256,
+        metadata.elevated_topology_sha256,
+        metadata.group_id,
+        metadata.topology_ref,
+        metadata.arc_length_m,
+        metadata.audit_only,
+        metadata.disclosure,
+        metadata.preflight_id,
+        metadata.quality_policy_sha256,
+        metadata.post_render_policy_sha256,
+    )
+    expected = (
+        request.build_id,
+        request.render_id,
+        request.blender_executable_sha256,
+        camera.camera_id,
+        expected_settings_sha256,
+        camera.intrinsics,
+        camera.c2w_opencv,
+        request.requested_c2w_blender,
+        request.object_registry_sha256,
+        request.semantic_registry,
+        request.profile_id,
+        request.production_plan_sha256,
+        request.camera_registry_sha256,
+        request.elevated_topology_sha256,
+        camera.group_id,
+        camera.topology_ref,
+        camera.arc_length_m,
+        camera.audit_only,
+        camera.disclosure,
+        request.preflight_id,
+        request.quality_policy_sha256,
+        request.post_render_policy_sha256,
+    )
+    if immutable != expected or not np.allclose(
+        metadata.measured_c2w_opencv,
+        camera.c2w_opencv,
+        atol=4e-5,
+        rtol=0,
+    ) or not np.allclose(
+        metadata.measured_c2w_blender,
+        request.requested_c2w_blender,
+        atol=4e-5,
+        rtol=0,
+    ):
+        raise ReciprocalProductionError(
+            "reciprocal camera metadata disagrees with render request",
+        )
+
+
+RECIPROCAL_CAMERA_JOURNAL_SCHEMA = (
+    "nantai.synthetic-village.reciprocal-production-camera-journal.v1"
+)
+
+
+class ReciprocalProductionCameraJournal(FrozenModel):
+    """Durable L0 journal for the first independently testable camera slice."""
+
+    schema_version: Literal[
+        "nantai.synthetic-village.reciprocal-production-camera-journal.v1"
+    ] = RECIPROCAL_CAMERA_JOURNAL_SCHEMA
+    journal_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    environment_module_build_report_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    reciprocal_route_module_plan_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    render_request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    render_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    camera_id: str = Field(pattern=r"^camera-[a-z0-9-]+-[0-9]{3}$")
+    artifacts: tuple[ProductionArtifactRecord, ...] = Field(
+        min_length=6,
+        max_length=6,
+    )
+    statistics: ReciprocalRenderStatistics
+    layer_statistics: ProductionFrameLayerStatistics
+    clearance_decision: ProductionCameraClearanceDecision
+    local_quality: LocalProductionFrameQuality
+    preflight_wall_clock_seconds: float = Field(ge=0.0, allow_inf_nan=False)
+    render_wall_clock_seconds: float = Field(ge=0.0, allow_inf_nan=False)
+    synthetic: Literal[True] = True
+    verification_level: Literal["L0"] = "L0"
+    geometry_trust: Literal["simplified-pbr-not-render-parity"] = (
+        "simplified-pbr-not-render-parity"
+    )
+    trust_effect: Literal["none-quality-filter-only"] = (
+        "none-quality-filter-only"
+    )
+
+    @model_validator(mode="after")
+    def _validate_journal(self) -> ReciprocalProductionCameraJournal:
+        if tuple((row.kind, row.path) for row in self.artifacts) != (
+            expected_production_artifacts(self.camera_id)
+        ):
+            raise ValueError("camera journal artifact contract is invalid")
+        if (
+            self.layer_statistics.camera_id != self.camera_id
+            or self.clearance_decision.camera_id != self.camera_id
+            or not self.clearance_decision.passes
+            or not self.local_quality.passes
+        ):
+            raise ValueError("camera journal contains rejected or foreign evidence")
+        payload = self.model_dump(mode="json", exclude={"journal_sha256"})
+        if self.journal_sha256 != hashlib.sha256(_canonical(payload)).hexdigest():
+            raise ValueError("camera journal SHA-256 is invalid")
+        return self
+
+
+def canonical_reciprocal_production_camera_journal_bytes(
+    journal: ReciprocalProductionCameraJournal,
+) -> bytes:
+    return _canonical(journal.model_dump(mode="json"))
+
+
+def _build_reciprocal_camera_journal(
+    *,
+    request: ReciprocalProductionRenderFrameRequest,
+    preflight_request_sha256: str,
+    preflight_report_sha256: str,
+    render_request_sha256: str,
+    render_report_sha256: str,
+    report: ReciprocalProductionRenderFrameReport,
+    decision: ProductionCameraClearanceDecision,
+    local_quality: LocalProductionFrameQuality,
+    preflight_wall_clock_seconds: float,
+    render_wall_clock_seconds: float,
+) -> ReciprocalProductionCameraJournal:
+    payload = {
+        "schema_version": RECIPROCAL_CAMERA_JOURNAL_SCHEMA,
+        "render_id": request.render_id,
+        "build_id": request.build_id,
+        "build_report_sha256": request.build_report_sha256,
+        "environment_module_build_report_sha256": (
+            request.environment_module_build_report_sha256
+        ),
+        "reciprocal_route_module_plan_sha256": (
+            request.reciprocal_route_module_plan_sha256
+        ),
+        "preflight_id": request.preflight_id,
+        "preflight_request_sha256": preflight_request_sha256,
+        "preflight_report_sha256": preflight_report_sha256,
+        "render_request_sha256": render_request_sha256,
+        "render_report_sha256": render_report_sha256,
+        "camera_id": request.camera.camera_id,
+        "artifacts": report.artifacts,
+        "statistics": report.statistics,
+        "layer_statistics": report.layer_statistics,
+        "clearance_decision": decision,
+        "local_quality": local_quality,
+        "preflight_wall_clock_seconds": preflight_wall_clock_seconds,
+        "render_wall_clock_seconds": render_wall_clock_seconds,
+        "synthetic": True,
+        "verification_level": "L0",
+        "geometry_trust": "simplified-pbr-not-render-parity",
+        "trust_effect": "none-quality-filter-only",
+    }
+    unsigned = ReciprocalProductionCameraJournal.model_construct(
+        journal_sha256="0" * 64,
+        **payload,
+    )
+    digest = hashlib.sha256(
+        _canonical(
+            unsigned.model_dump(mode="json", exclude={"journal_sha256"}),
+        ),
+    ).hexdigest()
+    return ReciprocalProductionCameraJournal(
+        journal_sha256=digest,
+        **payload,
+    )
+
+
+def canonical_reciprocal_production_render_report_bytes(
+    report: ReciprocalProductionRenderFrameReport,
+    *,
+    exclude_sha256: bool = False,
+) -> bytes:
+    """Serialize one v4 frame report with optional self-digest exclusion."""
+
+    exclude = {"content_sha256"} if exclude_sha256 else None
+    return _canonical(report.model_dump(mode="json", exclude=exclude))
+
+
+def load_reciprocal_production_render_report(
+    path: Path,
+) -> ReciprocalProductionRenderFrameReport:
+    """Load canonical report bytes and recompute the report self-digest."""
+
+    try:
+        raw = canary._read_stable_metadata(  # noqa: SLF001
+            Path(path),
+            label="reciprocal production frame report",
+        )
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
+        )
+        report = ReciprocalProductionRenderFrameReport.model_validate_json(raw)
+        if raw != canonical_reciprocal_production_render_report_bytes(report):
+            raise ReciprocalProductionError(
+                "reciprocal production frame report is not canonical JSON",
+            )
+        expected = hashlib.sha256(
+            canonical_reciprocal_production_render_report_bytes(
+                report,
+                exclude_sha256=True,
+            ),
+        ).hexdigest()
+        if report.content_sha256 != expected:
+            raise ReciprocalProductionError(
+                "reciprocal production frame report SHA-256 is invalid",
+            )
+        return report
+    except ReciprocalProductionError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        canary.CanaryBuildError,
+    ) as exc:
+        raise ReciprocalProductionError(
+            f"reciprocal production frame report validation failed: {exc}",
+        ) from exc
+
+
+def verify_reciprocal_production_render_frame(
+    report: ReciprocalProductionRenderFrameReport,
+    *,
+    request: ReciprocalProductionRenderFrameRequest,
+    frame_root: Path,
+) -> None:
+    """Verify runtime identities and all six measured artifact bytes."""
+
+    expected_settings_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(  # noqa: SLF001
+            request.settings.model_dump(mode="json"),
+        ),
+    ).hexdigest()
+    identity_pairs = (
+        (report.build_id, request.build_id),
+        (report.render_id, request.render_id),
+        (
+            report.blender_executable_sha256,
+            request.blender_executable_sha256,
+        ),
+        (report.camera_id, request.camera.camera_id),
+        (report.settings_sha256, expected_settings_sha256),
+        (report.production_plan_sha256, request.production_plan_sha256),
+        (report.camera_registry_sha256, request.camera_registry_sha256),
+        (report.elevated_topology_sha256, request.elevated_topology_sha256),
+        (report.group_id, request.camera.group_id),
+        (report.topology_ref, request.camera.topology_ref),
+        (report.preflight_id, request.preflight_id),
+        (report.quality_policy_sha256, request.quality_policy_sha256),
+        (
+            report.post_render_policy_sha256,
+            request.post_render_policy_sha256,
+        ),
+    )
+    if any(left != right for left, right in identity_pairs):
+        raise ReciprocalProductionError(
+            "reciprocal production frame report identity disagrees",
+        )
+    frame_root = Path(frame_root).resolve(strict=True)
+    for artifact in report.artifacts:
+        artifact_path = frame_root / Path(artifact.path)
+        try:
+            resolved = artifact_path.resolve(strict=True)
+            resolved.relative_to(frame_root)
+        except (OSError, ValueError) as exc:
+            raise ReciprocalProductionError(
+                f"reciprocal render artifact path is invalid: {artifact.path}",
+            ) from exc
+        if canary._is_linklike(resolved):  # noqa: SLF001
+            raise ReciprocalProductionError(
+                f"reciprocal render artifact is redirected: {artifact.path}",
+            )
+        if (
+            resolved.stat().st_size != artifact.size_bytes
+            or _sha256_file(resolved) != artifact.sha256
+        ):
+            raise ReciprocalProductionError(
+                f"reciprocal render artifact digest disagrees: {artifact.path}",
+            )
+
+
+def _remove_private_staging(path: Path, *, parent: Path) -> None:
+    """Remove only a proven direct child staging directory."""
+
+    path = Path(path).absolute()
+    parent = Path(parent).resolve(strict=True)
+    if path.parent.resolve(strict=True) != parent or not path.name.startswith(
+        ".staging-",
+    ):
+        raise ReciprocalProductionError(
+            "refusing to remove unverified reciprocal staging directory",
+        )
+    if canary._is_linklike(path):  # noqa: SLF001
+        raise ReciprocalProductionError(
+            "reciprocal staging directory is redirected",
+        )
+    shutil.rmtree(path)
+
+
+def run_reciprocal_production_camera(
+    *,
+    verified_build: VerifiedReciprocalProductionBuild,
+    plan: ProductionCameraPlan,
+    camera_id: str,
+    blender_executable: Path,
+    output_root: Path,
+    clearance_policy: ProductionClearancePolicy,
+    quality_policy: LocalProductionQualityPolicy,
+    post_render_policy: ProductionFrameQualityPolicyV2,
+    process_runner: Callable[..., subprocess.CompletedProcess[str]] = (
+        subprocess.run
+    ),
+    timeout_seconds: int = 1800,
+) -> ReciprocalProductionCameraResult:
+    """Preflight, render, verify, quality-check and atomically publish one frame."""
+
+    if timeout_seconds <= 0:
+        raise ReciprocalProductionError("runner timeout must be positive")
+    blender_executable = Path(blender_executable).resolve(strict=True)
+    output_root = Path(output_root).absolute()
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_root = output_root.resolve(strict=True)
+    if canary._is_linklike(output_root):  # noqa: SLF001
+        raise ReciprocalProductionError("reciprocal render root is redirected")
+    repo_root = Path(__file__).resolve().parents[2]
+    preflight_script = (
+        repo_root / "scripts/blender/preflight_reciprocal_route_cameras.py"
+    ).resolve(strict=True)
+    if (
+        _sha256_file(verified_build.report_path)
+        != verified_build.report_sha256
+        or _sha256_file(verified_build.blend_path)
+        != verified_build.blend_sha256
+    ):
+        raise ReciprocalProductionError(
+            "verified reciprocal build changed before preflight",
+        )
+    request = build_reciprocal_production_clearance_request(
+        plan=plan,
+        selected_camera_ids=(camera_id,),
+        build_id=verified_build.build_id,
+        blender_executable_sha256=_sha256_file(blender_executable),
+        preflight_script_sha256=_sha256_file(preflight_script),
+        blend_sha256=verified_build.blend_sha256,
+        build_report_sha256=verified_build.report_sha256,
+        environment_module_build_report_sha256=(
+            verified_build.environment_module_build_report_sha256
+        ),
+        reciprocal_route_module_plan_sha256=(
+            verified_build.reciprocal_route_module_plan_sha256
+        ),
+        object_registry=verified_build.object_registry,
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),  # noqa: SLF001
+        policy=clearance_policy,
+    )
+    staging = output_root / f".staging-{uuid.uuid4().hex}"
+    staging.mkdir()
+    try:
+        request_path = staging / "preflight-request.json"
+        report_path = staging / "preflight-report.json"
+        canary._write_new_file(  # noqa: SLF001
+            request_path,
+            canonical_reciprocal_production_clearance_request_bytes(request),
+        )
+        snapshots = (
+            canary._snapshot_regular_file(blender_executable),  # noqa: SLF001
+            canary._snapshot_regular_file(verified_build.blend_path),  # noqa: SLF001
+            canary._snapshot_regular_file(verified_build.report_path),  # noqa: SLF001
+            canary._snapshot_regular_file(preflight_script),  # noqa: SLF001
+            canary._snapshot_regular_file(request_path),  # noqa: SLF001
+        )
+        started = time.monotonic()
+        try:
+            completed = process_runner(
+                [
+                    str(blender_executable),
+                    "--background",
+                    str(verified_build.blend_path),
+                    "--python",
+                    str(preflight_script),
+                    "--",
+                    "--request",
+                    str(request_path),
+                    "--report",
+                    str(report_path),
+                ],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ReciprocalProductionError(
+                f"reciprocal preflight exceeded {timeout_seconds} seconds",
+            ) from exc
+        preflight_wall_clock_seconds = time.monotonic() - started
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise ReciprocalProductionError(
+                "reciprocal Blender preflight failed"
+                + (f": {detail[-2000:]}" if detail else ""),
+            )
+        canary._verify_snapshots_unchanged(snapshots)  # noqa: SLF001
+        report = load_reciprocal_production_clearance_report(report_path)
+        verify_reciprocal_production_clearance_report(
+            report,
+            request=request,
+        )
+        decision = report.decisions[0]
+        if not decision.passes:
+            raise ReciprocalProductionError(
+                f"preflight rejected camera: {camera_id}",
+            )
+        preflight_request_sha256 = hashlib.sha256(
+            canonical_reciprocal_production_clearance_request_bytes(request),
+        ).hexdigest()
+        preflight_report_sha256 = _sha256_file(report_path)
+        renderer_script = (
+            repo_root / "scripts/blender/render_reciprocal_route_production.py"
+        ).resolve(strict=True)
+        render_request = build_reciprocal_production_frame_request(
+            plan=plan,
+            camera_id=camera_id,
+            build_id=verified_build.build_id,
+            blender_executable_sha256=_sha256_file(blender_executable),
+            renderer_script_sha256=_sha256_file(renderer_script),
+            blend_sha256=verified_build.blend_sha256,
+            build_report_sha256=verified_build.report_sha256,
+            environment_module_build_report_sha256=(
+                verified_build.environment_module_build_report_sha256
+            ),
+            reciprocal_route_module_plan_sha256=(
+                verified_build.reciprocal_route_module_plan_sha256
+            ),
+            object_registry=verified_build.object_registry,
+            auxiliary_registry=canary.AUXILIARY_REGISTRY,
+            semantic_registry=canary._semantic_registry(),  # noqa: SLF001
+            preflight_id=request.preflight_id,
+            quality_policy_sha256=local_production_quality_policy_sha256(
+                quality_policy,
+            ),
+            post_render_policy=post_render_policy,
+        )
+        render_request_bytes = (
+            canonical_reciprocal_production_render_request_bytes(
+                render_request,
+            )
+        )
+        render_request_sha256 = hashlib.sha256(
+            render_request_bytes,
+        ).hexdigest()
+        render_request_path = staging / "render-request.json"
+        canary._write_new_file(  # noqa: SLF001
+            render_request_path,
+            render_request_bytes,
+        )
+        frame_output = staging / "frame"
+        render_snapshots = (
+            canary._snapshot_regular_file(blender_executable),  # noqa: SLF001
+            canary._snapshot_regular_file(verified_build.blend_path),  # noqa: SLF001
+            canary._snapshot_regular_file(verified_build.report_path),  # noqa: SLF001
+            canary._snapshot_regular_file(renderer_script),  # noqa: SLF001
+            canary._snapshot_regular_file(render_request_path),  # noqa: SLF001
+        )
+        render_started = time.monotonic()
+        try:
+            rendered = process_runner(
+                [
+                    str(blender_executable),
+                    "--background",
+                    str(verified_build.blend_path),
+                    "--python",
+                    str(renderer_script),
+                    "--",
+                    "--request",
+                    str(render_request_path),
+                    "--staging",
+                    str(frame_output),
+                ],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ReciprocalProductionError(
+                f"reciprocal render exceeded {timeout_seconds} seconds",
+            ) from exc
+        render_wall_clock_seconds = time.monotonic() - render_started
+        if rendered.returncode != 0:
+            detail = (rendered.stderr or rendered.stdout).strip()
+            raise ReciprocalProductionError(
+                "reciprocal Blender render failed"
+                + (f": {detail[-2000:]}" if detail else ""),
+            )
+        canary._verify_snapshots_unchanged(render_snapshots)  # noqa: SLF001
+        frame_report_path = frame_output / "frame-report.json"
+        frame_report = load_reciprocal_production_render_report(
+            frame_report_path,
+        )
+        verify_reciprocal_production_render_frame(
+            frame_report,
+            request=render_request,
+            frame_root=frame_output,
+        )
+        metadata = load_reciprocal_production_camera_metadata(
+            frame_output / f"cameras/{camera_id}.json",
+        )
+        verify_reciprocal_production_camera_metadata(
+            metadata,
+            request=render_request,
+        )
+        local_quality = evaluate_local_production_frame_quality(
+            frame_report.statistics,
+            policy=quality_policy,
+        )
+        if not local_quality.passes:
+            raise ReciprocalProductionError(
+                f"local quality rejected camera: {camera_id}",
+            )
+        render_report_sha256 = _sha256_file(frame_report_path)
+        journal = _build_reciprocal_camera_journal(
+            request=render_request,
+            preflight_request_sha256=preflight_request_sha256,
+            preflight_report_sha256=preflight_report_sha256,
+            render_request_sha256=render_request_sha256,
+            render_report_sha256=render_report_sha256,
+            report=frame_report,
+            decision=decision,
+            local_quality=local_quality,
+            preflight_wall_clock_seconds=preflight_wall_clock_seconds,
+            render_wall_clock_seconds=render_wall_clock_seconds,
+        )
+        quality_request = build_production_frame_quality_request_v2(
+            plan=plan,
+            selected_camera_ids=(camera_id,),
+            build_id=render_request.build_id,
+            render_id=render_request.render_id,
+            blender_executable_sha256=(
+                render_request.blender_executable_sha256
+            ),
+            renderer_script_sha256=render_request.renderer_script_sha256,
+            blend_sha256=render_request.blend_sha256,
+            build_report_sha256=render_request.build_report_sha256,
+            object_registry=render_request.object_registry,
+            semantic_registry=render_request.semantic_registry,
+            journal_sha256=journal.journal_sha256,
+            frames=(
+                ProductionFrameEvidenceBinding(
+                    camera_id=camera_id,
+                    runtime_report_sha256=render_report_sha256,
+                    artifacts=frame_report.artifacts,
+                ),
+            ),
+            policy=post_render_policy,
+        )
+        quality_report = build_production_frame_quality_report_v2(
+            quality_request,
+            statistics=(frame_report.layer_statistics,),
+        )
+        verify_production_frame_quality_report_v2(
+            quality_report,
+            request=quality_request,
+        )
+        if quality_report.rejected_camera_ids:
+            raise ReciprocalProductionError(
+                f"post-render quality rejected camera: {camera_id}",
+            )
+        evidence_root = frame_output / "evidence"
+        evidence_root.mkdir()
+        evidence_payloads = {
+            "preflight-request.json": (
+                canonical_reciprocal_production_clearance_request_bytes(
+                    request,
+                )
+            ),
+            "preflight-report.json": (
+                canonical_reciprocal_production_clearance_report_bytes(report)
+            ),
+            "render-request.json": render_request_bytes,
+            "journal.json": (
+                canonical_reciprocal_production_camera_journal_bytes(journal)
+            ),
+            "quality-request.json": (
+                canonical_production_frame_quality_request_v2_bytes(
+                    quality_request,
+                )
+            ),
+            "quality-report.json": (
+                canonical_production_frame_quality_report_v2_bytes(
+                    quality_report,
+                )
+            ),
+        }
+        for name, payload in evidence_payloads.items():
+            canary._write_new_file(evidence_root / name, payload)  # noqa: SLF001
+        final_parent = output_root / render_request.render_id
+        final_parent.mkdir(exist_ok=True)
+        if canary._is_linklike(final_parent):  # noqa: SLF001
+            raise ReciprocalProductionError(
+                "reciprocal final render parent is redirected",
+            )
+        final = final_parent / camera_id
+        if final.exists() or canary._is_linklike(final):  # noqa: SLF001
+            raise ReciprocalProductionError(
+                "reciprocal final camera directory already exists",
+            )
+        frame_output.rename(final)
+        canary._flush_directory(final_parent)  # noqa: SLF001
+        quality_request_bytes = evidence_payloads["quality-request.json"]
+        quality_report_bytes = evidence_payloads["quality-report.json"]
+        return ReciprocalProductionCameraResult(
+            render_id=render_request.render_id,
+            camera_id=camera_id,
+            frame_root=final,
+            preflight_request_sha256=preflight_request_sha256,
+            preflight_report_sha256=preflight_report_sha256,
+            render_request_sha256=render_request_sha256,
+            render_report_sha256=render_report_sha256,
+            journal_sha256=journal.journal_sha256,
+            quality_request_sha256=hashlib.sha256(
+                quality_request_bytes,
+            ).hexdigest(),
+            quality_report_sha256=hashlib.sha256(
+                quality_report_bytes,
+            ).hexdigest(),
+        )
+    finally:
+        if staging.exists():
+            _remove_private_staging(staging, parent=output_root)
 
 
 def build_reciprocal_production_frame_request(
