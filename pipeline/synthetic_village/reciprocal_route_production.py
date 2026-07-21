@@ -18,7 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from . import canary
 from .production_journal import production_render_id
 from .production_preflight import (
+    ProductionCameraClearanceDecision,
+    ProductionCameraClearanceEvidence,
     ProductionClearancePolicy,
+    evaluate_production_camera_clearance,
     production_clearance_policy_sha256,
 )
 from .production_profile import (
@@ -43,6 +46,9 @@ RECIPROCAL_RENDER_REQUEST_SCHEMA = (
 )
 RECIPROCAL_CLEARANCE_REQUEST_SCHEMA = (
     "nantai.synthetic-village.reciprocal-production-clearance-request.v1"
+)
+RECIPROCAL_CLEARANCE_REPORT_SCHEMA = (
+    "nantai.synthetic-village.reciprocal-production-clearance-report.v1"
 )
 RECIPROCAL_BUILD_ADAPTER = "windows-reciprocal-route-v1"
 
@@ -292,6 +298,160 @@ def canonical_reciprocal_production_clearance_request_bytes(
     """Serialize one exact-218 preflight request as canonical JSON."""
 
     return _canonical(request.model_dump(mode="json"))
+
+
+def reciprocal_production_clearance_request_sha256(
+    request: ReciprocalProductionClearanceRequest,
+) -> str:
+    """Hash the complete canonical exact-218 preflight request."""
+
+    return hashlib.sha256(
+        canonical_reciprocal_production_clearance_request_bytes(request),
+    ).hexdigest()
+
+
+class ReciprocalProductionClearanceReport(FrozenModel):
+    """Measured ray evidence bound to one exact reciprocal-route request."""
+
+    schema_version: Literal[
+        "nantai.synthetic-village.reciprocal-production-clearance-report.v1"
+    ] = RECIPROCAL_CLEARANCE_REPORT_SCHEMA
+    profile_id: Literal["synthetic-village-coverage-180-v1"] = (
+        PRODUCTION_PROFILE_ID
+    )
+    preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    production_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    camera_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    blender_executable_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preflight_script_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    blend_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    environment_module_build_report_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    reciprocal_route_module_plan_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    object_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence: tuple[ProductionCameraClearanceEvidence, ...] = Field(
+        min_length=1,
+        max_length=180,
+    )
+    decisions: tuple[ProductionCameraClearanceDecision, ...] = Field(
+        min_length=1,
+        max_length=180,
+    )
+    synthetic: Literal[True] = True
+    geometry_trust: Literal["simplified-pbr-not-render-parity"] = (
+        "simplified-pbr-not-render-parity"
+    )
+    trust_effect: Literal["none-quality-filter-only"] = (
+        "none-quality-filter-only"
+    )
+
+
+def build_reciprocal_production_clearance_report(
+    request: ReciprocalProductionClearanceRequest,
+    *,
+    evidence: tuple[ProductionCameraClearanceEvidence, ...],
+) -> ReciprocalProductionClearanceReport:
+    """Build a report from raw rays using only the bound request policy."""
+
+    if tuple(row.camera_id for row in evidence) != request.selected_camera_ids:
+        raise ReciprocalProductionError(
+            "clearance evidence camera set disagrees with request",
+        )
+    return ReciprocalProductionClearanceReport(
+        preflight_id=request.preflight_id,
+        request_sha256=reciprocal_production_clearance_request_sha256(request),
+        production_plan_sha256=request.production_plan_sha256,
+        camera_registry_sha256=request.camera_registry_sha256,
+        build_id=request.build_id,
+        blender_executable_sha256=request.blender_executable_sha256,
+        preflight_script_sha256=request.preflight_script_sha256,
+        blend_sha256=request.blend_sha256,
+        build_report_sha256=request.build_report_sha256,
+        environment_module_build_report_sha256=(
+            request.environment_module_build_report_sha256
+        ),
+        reciprocal_route_module_plan_sha256=(
+            request.reciprocal_route_module_plan_sha256
+        ),
+        object_registry_sha256=request.object_registry_sha256,
+        policy_sha256=request.policy_sha256,
+        evidence=evidence,
+        decisions=tuple(
+            evaluate_production_camera_clearance(row, policy=request.policy)
+            for row in evidence
+        ),
+    )
+
+
+def canonical_reciprocal_production_clearance_report_bytes(
+    report: ReciprocalProductionClearanceReport,
+) -> bytes:
+    """Serialize one reciprocal clearance report as canonical JSON."""
+
+    return _canonical(report.model_dump(mode="json"))
+
+
+def verify_reciprocal_production_clearance_report(
+    report: ReciprocalProductionClearanceReport,
+    *,
+    request: ReciprocalProductionClearanceRequest,
+) -> None:
+    """Cross-check runtime evidence against every immutable request identity."""
+
+    identity_pairs = (
+        (report.preflight_id, request.preflight_id),
+        (
+            report.request_sha256,
+            reciprocal_production_clearance_request_sha256(request),
+        ),
+        (report.production_plan_sha256, request.production_plan_sha256),
+        (report.camera_registry_sha256, request.camera_registry_sha256),
+        (report.build_id, request.build_id),
+        (
+            report.blender_executable_sha256,
+            request.blender_executable_sha256,
+        ),
+        (report.preflight_script_sha256, request.preflight_script_sha256),
+        (report.blend_sha256, request.blend_sha256),
+        (report.build_report_sha256, request.build_report_sha256),
+        (
+            report.environment_module_build_report_sha256,
+            request.environment_module_build_report_sha256,
+        ),
+        (
+            report.reciprocal_route_module_plan_sha256,
+            request.reciprocal_route_module_plan_sha256,
+        ),
+        (report.object_registry_sha256, request.object_registry_sha256),
+        (report.policy_sha256, request.policy_sha256),
+    )
+    if any(left != right for left, right in identity_pairs):
+        raise ReciprocalProductionError(
+            "reciprocal clearance report identity disagrees with request",
+        )
+    if tuple(row.camera_id for row in report.evidence) != (
+        request.selected_camera_ids
+    ) or tuple(row.camera_id for row in report.decisions) != (
+        request.selected_camera_ids
+    ):
+        raise ReciprocalProductionError(
+            "reciprocal clearance report camera set disagrees",
+        )
+    expected_decisions = tuple(
+        evaluate_production_camera_clearance(row, policy=request.policy)
+        for row in report.evidence
+    )
+    if report.decisions != expected_decisions:
+        raise ReciprocalProductionError(
+            "reciprocal clearance decisions disagree with measured evidence",
+        )
 
 
 class ReciprocalProductionRenderFrameRequest(FrozenModel):

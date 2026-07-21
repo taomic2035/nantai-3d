@@ -15,7 +15,10 @@ from pipeline.synthetic_village.elevated_topology import (
 )
 from pipeline.synthetic_village.production_journal import production_render_id
 from pipeline.synthetic_village.production_preflight import (
+    PRODUCTION_CLEARANCE_SAMPLE_POINTS,
+    ProductionCameraClearanceEvidence,
     ProductionClearancePolicy,
+    ProductionClearanceRayEvidence,
 )
 from pipeline.synthetic_village.production_profile import (
     build_production_camera_plan,
@@ -27,18 +30,23 @@ from pipeline.synthetic_village.production_quality_gates import (
 )
 from pipeline.synthetic_village.reciprocal_route_production import (
     RECIPROCAL_BUILD_ADAPTER,
+    RECIPROCAL_CLEARANCE_REPORT_SCHEMA,
     RECIPROCAL_CLEARANCE_REQUEST_SCHEMA,
     RECIPROCAL_RENDER_REQUEST_SCHEMA,
+    ReciprocalProductionClearanceReport,
     ReciprocalProductionClearanceRequest,
     ReciprocalProductionError,
     ReciprocalProductionRenderFrameRequest,
+    build_reciprocal_production_clearance_report,
     build_reciprocal_production_clearance_request,
     build_reciprocal_production_frame_request,
+    canonical_reciprocal_production_clearance_report_bytes,
     canonical_reciprocal_production_clearance_request_bytes,
     canonical_reciprocal_production_render_request_bytes,
     reciprocal_object_registry_sha256,
     require_exact_reciprocal_object_registry,
     verify_reciprocal_production_build,
+    verify_reciprocal_production_clearance_report,
 )
 from pipeline.synthetic_village.scene_plan import build_scene_plan
 
@@ -274,3 +282,89 @@ def test_clearance_request_binds_exact_218_build_lineage() -> None:
         ReciprocalProductionClearanceRequest.model_validate_json(
             json.dumps(payload),
         )
+
+
+def test_clearance_report_round_trip_verifies_request_lineage() -> None:
+    scene = build_scene_plan()
+    topology = build_elevated_topology_plan(scene)
+    plan = build_production_camera_plan(scene, topology)
+    request = build_reciprocal_production_clearance_request(
+        plan=plan,
+        selected_camera_ids=("camera-ground-route-011",),
+        build_id="1" * 64,
+        blender_executable_sha256="2" * 64,
+        preflight_script_sha256="3" * 64,
+        blend_sha256="4" * 64,
+        build_report_sha256="5" * 64,
+        environment_module_build_report_sha256="6" * 64,
+        reciprocal_route_module_plan_sha256="7" * 64,
+        object_registry=_registry(218),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),  # noqa: SLF001
+        policy=_clearance_policy(),
+    )
+    evidence = ProductionCameraClearanceEvidence(
+        camera_id="camera-ground-route-011",
+        rays=tuple(
+            ProductionClearanceRayEvidence(
+                sample_x=sample_x,
+                sample_y=sample_y,
+                hit=False,
+            )
+            for sample_x, sample_y in PRODUCTION_CLEARANCE_SAMPLE_POINTS
+        ),
+    )
+
+    report = build_reciprocal_production_clearance_report(
+        request,
+        evidence=(evidence,),
+    )
+
+    assert report.schema_version == RECIPROCAL_CLEARANCE_REPORT_SCHEMA
+    assert report.environment_module_build_report_sha256 == "6" * 64
+    assert report.reciprocal_route_module_plan_sha256 == "7" * 64
+    verify_reciprocal_production_clearance_report(report, request=request)
+    assert ReciprocalProductionClearanceReport.model_validate_json(
+        canonical_reciprocal_production_clearance_report_bytes(report),
+    ) == report
+
+
+def test_clearance_report_rejects_changed_lineage() -> None:
+    scene = build_scene_plan()
+    topology = build_elevated_topology_plan(scene)
+    plan = build_production_camera_plan(scene, topology)
+    request = build_reciprocal_production_clearance_request(
+        plan=plan,
+        selected_camera_ids=("camera-ground-route-011",),
+        build_id="1" * 64,
+        blender_executable_sha256="2" * 64,
+        preflight_script_sha256="3" * 64,
+        blend_sha256="4" * 64,
+        build_report_sha256="5" * 64,
+        environment_module_build_report_sha256="6" * 64,
+        reciprocal_route_module_plan_sha256="7" * 64,
+        object_registry=_registry(218),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),  # noqa: SLF001
+        policy=_clearance_policy(),
+    )
+    evidence = ProductionCameraClearanceEvidence(
+        camera_id="camera-ground-route-011",
+        rays=tuple(
+            ProductionClearanceRayEvidence(
+                sample_x=sample_x,
+                sample_y=sample_y,
+                hit=False,
+            )
+            for sample_x, sample_y in PRODUCTION_CLEARANCE_SAMPLE_POINTS
+        ),
+    )
+    report = build_reciprocal_production_clearance_report(
+        request,
+        evidence=(evidence,),
+    ).model_copy(
+        update={"environment_module_build_report_sha256": "a" * 64},
+    )
+
+    with pytest.raises(ReciprocalProductionError, match="identity disagrees"):
+        verify_reciprocal_production_clearance_report(report, request=request)
