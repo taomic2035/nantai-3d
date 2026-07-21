@@ -455,10 +455,26 @@ def _tag(obj, row):
     obj["nv_instance_id"] = row["instance_id"]
     obj["nv_semantic_id"] = row["semantic_id"]
     obj["nv_material_id"] = row["material_id"]
-    obj["nv_variant_id"] = row.get("variant_id")
+    obj["nv_variant_id"] = row.get("variant_id") or ""
     obj["nv_stage"] = "modeled-unverified"
     obj["nv_trust_effect"] = "none"
     obj["nv_geometry_usability"] = "preview-only"
+    obj.pass_index = row["instance_id"]
+
+
+def _tag_render_mesh(obj, row):
+    """Bind a module mesh to the frozen six-layer renderer contract."""
+
+    obj["nv_stable_id"] = row["object_id"]
+    obj["nv_root_id"] = row["object_id"]
+    obj["nv_instance_id"] = row["instance_id"]
+    obj["nv_semantic_id"] = row["semantic_id"]
+    obj["nv_material_id"] = row["material_id"]
+    obj["nv_variant_id"] = row.get("variant_id") or ""
+    obj["nv_stage"] = "modeled-unverified"
+    obj["nv_trust_effect"] = "none"
+    obj["nv_geometry_usability"] = "preview-only"
+    obj.pass_index = row["instance_id"]
 
 
 def _new_module_root(module, part, registry, collection):
@@ -493,6 +509,7 @@ def _link_mesh(root, assembler, material, registry, collection):
     obj = bpy.data.objects.new(f"mesh__{registry['object_id']}", mesh)
     collection.objects.link(obj)
     obj.parent = root
+    _tag_render_mesh(obj, registry)
     mesh.materials.append(material)
     _assign_uvs_and_tangents(obj)
     return obj
@@ -585,10 +602,21 @@ def _validate_built_modules(request, base_roots, module_roots, module_meshes):
     if len(module_meshes) != EXPECTED_MODULE_ROOTS:
         raise RuntimeBuildError("reciprocal-route mesh count is not exact 43")
     for root, mesh in zip(module_roots, module_meshes, strict=True):
+        stable_id = root.get("nv_stable_id")
         if (
             root.get("nv_stage") != "modeled-unverified"
             or root.get("nv_trust_effect") != "none"
             or root.get("nv_geometry_usability") != "preview-only"
+            or root.get("nv_variant_id") != ""
+            or root.pass_index != root.get("nv_instance_id")
+            or mesh.parent is not root
+            or mesh.get("nv_stable_id") != stable_id
+            or mesh.get("nv_root_id") != stable_id
+            or mesh.get("nv_instance_id") != root.get("nv_instance_id")
+            or mesh.get("nv_semantic_id") != root.get("nv_semantic_id")
+            or mesh.get("nv_material_id") != root.get("nv_material_id")
+            or mesh.get("nv_variant_id") != root.get("nv_variant_id")
+            or mesh.pass_index != root.pass_index
             or not mesh.data.vertices
             or not mesh.data.polygons
             or mesh.get("nv_tangents") is not True

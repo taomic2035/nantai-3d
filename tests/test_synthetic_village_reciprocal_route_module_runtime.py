@@ -697,6 +697,47 @@ def test_blender_runtime_accepts_canonical_host_request(
     assert runtime._validate_request(payload) == payload
 
 
+def test_blender_runtime_tags_module_root_and_mesh_for_six_layer_rendering(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every new root and mesh must satisfy the frozen renderer tag contract."""
+
+    request = build_reciprocal_route_runtime_request(
+        base_build=base,
+        repo_root=_REPO_ROOT,
+    )
+    script_path = _REPO_ROOT / "scripts/blender/apply_reciprocal_route_modules.py"
+    spec = importlib.util.spec_from_file_location(
+        "_test_apply_reciprocal_route_render_tags",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace())
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+
+    class FakeObject(dict):
+        pass_index = 0
+
+    row = request.object_registry[175].model_dump(mode="json")
+    root = FakeObject()
+    mesh = FakeObject()
+    runtime._tag(root, row)
+    runtime._tag_render_mesh(mesh, row)
+
+    assert root["nv_root"] is True
+    assert root["nv_variant_id"] == ""
+    assert root.pass_index == row["instance_id"]
+    assert mesh["nv_stable_id"] == row["object_id"]
+    assert mesh["nv_root_id"] == row["object_id"]
+    assert mesh["nv_instance_id"] == row["instance_id"]
+    assert mesh["nv_semantic_id"] == row["semantic_id"]
+    assert mesh["nv_material_id"] == row["material_id"]
+    assert mesh["nv_variant_id"] == ""
+    assert mesh.pass_index == row["instance_id"]
+
+
 def test_build_request_is_deterministic_across_calls(
     base: SimpleNamespace,
 ) -> None:
