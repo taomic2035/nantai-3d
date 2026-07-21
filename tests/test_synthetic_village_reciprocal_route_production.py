@@ -41,6 +41,7 @@ from pipeline.synthetic_village.reciprocal_route_production import (
     ReciprocalProductionError,
     ReciprocalProductionRenderFrameReport,
     ReciprocalProductionRenderFrameRequest,
+    ReciprocalRenderStatistics,
     build_reciprocal_production_clearance_report,
     build_reciprocal_production_clearance_request,
     build_reciprocal_production_frame_request,
@@ -387,3 +388,22 @@ def test_reciprocal_render_output_schemas_are_additive() -> None:
         ].default
         == RECIPROCAL_CAMERA_METADATA_SCHEMA
     )
+
+
+def test_reciprocal_render_statistics_accept_instance_218() -> None:
+    statistics = ReciprocalRenderStatistics(
+        depth_min_m=0.0,
+        depth_max_m=10.0,
+        depth_background_pixels=1,
+        depth_max_range_error_m=0.0,
+        normal_max_unit_error=0.0,
+        instance_ids=(0, 176, 218),
+        semantic_ids=(0, 3, 7),
+    )
+
+    assert statistics.instance_ids == (0, 176, 218)
+
+    with pytest.raises(ValueError, match="0 through 130"):
+        canary.RenderStatistics.model_validate(
+            statistics.model_dump(mode="python"),
+        )

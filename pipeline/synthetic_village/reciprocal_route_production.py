@@ -589,6 +589,44 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
         return self
 
 
+class ReciprocalRenderStatistics(FrozenModel):
+    """Layer summary whose registered instance range includes 0..218."""
+
+    depth_min_m: float = Field(ge=0.0, le=1200.0, allow_inf_nan=False)
+    depth_max_m: float = Field(gt=0.0, le=2000.0, allow_inf_nan=False)
+    depth_background_pixels: int = Field(ge=0, le=1024 * 576)
+    depth_max_range_error_m: float = Field(
+        ge=0.0,
+        le=0.01,
+        allow_inf_nan=False,
+    )
+    normal_max_unit_error: float = Field(
+        ge=0.0,
+        le=0.001,
+        allow_inf_nan=False,
+    )
+    instance_ids: tuple[int, ...] = Field(min_length=1)
+    semantic_ids: tuple[int, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_ids(self) -> ReciprocalRenderStatistics:
+        if self.instance_ids != tuple(sorted(set(self.instance_ids))) or any(
+            value < 0 or value > 218 for value in self.instance_ids
+        ):
+            raise ValueError(
+                "observed instance IDs must be unique stable IDs from 0 through 218",
+            )
+        if self.semantic_ids != tuple(sorted(set(self.semantic_ids))) or any(
+            value < 0 or value > 14 for value in self.semantic_ids
+        ):
+            raise ValueError(
+                "observed semantic IDs must be unique stable IDs from 0 through 14",
+            )
+        if self.depth_max_m < self.depth_min_m:
+            raise ValueError("depth statistics are inverted")
+        return self
+
+
 class ReciprocalProductionRenderFrameReport(
     LocalProductionRenderFrameReport,
 ):
@@ -597,6 +635,7 @@ class ReciprocalProductionRenderFrameReport(
     schema_version: Literal[
         "nantai.synthetic-village.local-production-render-frame-report.v4"
     ] = RECIPROCAL_RENDER_REPORT_SCHEMA
+    statistics: ReciprocalRenderStatistics
 
 
 class ReciprocalProductionCameraMetadata(LocalProductionCameraMetadata):
