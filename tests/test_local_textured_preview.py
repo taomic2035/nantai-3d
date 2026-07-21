@@ -57,6 +57,7 @@ from pipeline.synthetic_village.surface_realism import (
     canonical_surface_realism_plan_bytes,
 )
 from tests.synthetic_material_fixtures import publish_material_fixture
+from tests.test_synthetic_village_production_render import _post_render_policy
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_BLENDER = Path("/Applications/Blender.app/Contents/MacOS/Blender")
@@ -703,6 +704,7 @@ print("NANTAI_ELEVATED_COMPONENTS_OK", flush=True)
         semantic_registry=parsed_report.semantic_registry,
         preflight_id="6" * 64,
         quality_policy_sha256="7" * 64,
+        post_render_policy=_post_render_policy(),
     )
     frame_request_path = tmp_path / "production-render-request.json"
     frame_request_path.write_bytes(

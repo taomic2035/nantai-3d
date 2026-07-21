@@ -39,18 +39,23 @@ from .production_profile import (
     canonical_production_plan_bytes,
     production_camera_registry_digest,
 )
+from .production_quality_gates import (
+    ProductionFrameLayerStatistics,
+    ProductionFrameQualityPolicyV2,
+    production_frame_quality_policy_v2_sha256,
+)
 
 LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v3"
+    "nantai.synthetic-village.local-production-render-frame-request.v4"
 )
 LOCAL_PRODUCTION_RENDER_REPORT_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-report.v2"
+    "nantai.synthetic-village.local-production-render-frame-report.v3"
 )
 LOCAL_PRODUCTION_CAMERA_METADATA_SCHEMA = (
-    "nantai.synthetic-village.local-production-camera-metadata.v2"
+    "nantai.synthetic-village.local-production-camera-metadata.v3"
 )
 LOCAL_PRODUCTION_RENDER_JOURNAL_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-journal.v3"
+    "nantai.synthetic-village.local-production-render-journal.v4"
 )
 
 Matrix4 = tuple[
@@ -161,6 +166,7 @@ class LocalProductionFrameRecord(FrozenModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     statistics: canary.RenderStatistics | None = None
+    layer_statistics: ProductionFrameLayerStatistics | None = None
     quality: LocalProductionFrameQuality | None = None
     preflight_report_sha256: str | None = Field(
         default=None,
@@ -203,6 +209,7 @@ class LocalProductionFrameRecord(FrozenModel):
                 self.artifacts
                 or self.runtime_report_sha256 is not None
                 or self.statistics is not None
+                or self.layer_statistics is not None
                 or self.quality is not None
                 or self.wall_clock_seconds is not None
                 or self.error is not None
@@ -225,12 +232,15 @@ class LocalProductionFrameRecord(FrozenModel):
             if (
                 self.runtime_report_sha256 is None
                 or self.statistics is None
+                or self.layer_statistics is None
                 or self.quality is None
                 or self.wall_clock_seconds is None
             ):
                 raise ValueError("completed frame lacks runtime or quality evidence")
             if self.error is not None:
                 raise ValueError("completed frame cannot carry an execution error")
+            if self.layer_statistics.camera_id != self.camera_id:
+                raise ValueError("completed frame layer statistics belong elsewhere")
             if self.state == "verified" and not self.quality.passes:
                 raise ValueError("verified frame does not pass its quality threshold")
             if self.state == "rejected" and self.quality.passes:
@@ -240,6 +250,7 @@ class LocalProductionFrameRecord(FrozenModel):
                 self.artifacts
                 or self.runtime_report_sha256 is not None
                 or self.statistics is not None
+                or self.layer_statistics is not None
                 or self.quality is not None
             ):
                 raise ValueError("failed frame cannot publish verified evidence")
@@ -254,6 +265,7 @@ class LocalProductionFrameRecord(FrozenModel):
             self.artifacts
             or self.runtime_report_sha256 is not None
             or self.statistics is not None
+            or self.layer_statistics is not None
             or self.quality is not None
             or self.wall_clock_seconds is not None
             or self.error is not None
@@ -264,7 +276,7 @@ class LocalProductionFrameRecord(FrozenModel):
 
 class LocalProductionRenderJournal(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-journal.v3"
+        "nantai.synthetic-village.local-production-render-journal.v4"
     ] = LOCAL_PRODUCTION_RENDER_JOURNAL_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = PRODUCTION_PROFILE_ID
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -298,6 +310,8 @@ class LocalProductionRenderJournal(FrozenModel):
     )
     quality_policy: LocalProductionQualityPolicy
     quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    post_render_policy: ProductionFrameQualityPolicyV2
+    post_render_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     frames: tuple[LocalProductionFrameRecord, ...] = Field(
         min_length=180,
         max_length=180,
@@ -344,6 +358,12 @@ class LocalProductionRenderJournal(FrozenModel):
             self.quality_policy,
         ):
             raise ValueError("journal quality policy digest is invalid")
+        if self.post_render_policy_sha256 != (
+            production_frame_quality_policy_v2_sha256(
+                self.post_render_policy,
+            )
+        ):
+            raise ValueError("journal post-render policy digest is invalid")
         return self
 
 
@@ -436,6 +456,8 @@ def new_local_production_render_journal(
         quality_policy_sha256=local_production_quality_policy_sha256(
             quality_policy,
         ),
+        post_render_policy=request.post_render_policy,
+        post_render_policy_sha256=request.post_render_policy_sha256,
         frames=tuple(
             LocalProductionFrameRecord(
                 camera_id=row.camera_id,
@@ -478,6 +500,7 @@ def transition_local_production_frame(
             artifacts=(),
             runtime_report_sha256=None,
             statistics=None,
+            layer_statistics=None,
             quality=None,
             wall_clock_seconds=None,
             error=None,
@@ -506,7 +529,7 @@ def transition_local_production_frame(
 
 class LocalProductionRenderFrameRequest(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-request.v3"
+        "nantai.synthetic-village.local-production-render-frame-request.v4"
     ] = LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = PRODUCTION_PROFILE_ID
     production_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -528,6 +551,8 @@ class LocalProductionRenderFrameRequest(FrozenModel):
     object_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    post_render_policy: ProductionFrameQualityPolicyV2
+    post_render_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     settings: canary.RenderSettings
     camera: ProductionCameraPose
     requested_c2w_blender: Matrix4
@@ -592,6 +617,12 @@ class LocalProductionRenderFrameRequest(FrozenModel):
             raise ValueError("auxiliary registry is not stable")
         if self.semantic_registry != canary._semantic_registry():
             raise ValueError("semantic registry is not stable")
+        if self.post_render_policy_sha256 != (
+            production_frame_quality_policy_v2_sha256(
+                self.post_render_policy,
+            )
+        ):
+            raise ValueError("post-render policy digest is invalid")
         expected_render_id = production_render_id(
             self.production_plan,
             blender_executable_sha256=self.blender_executable_sha256,
@@ -601,6 +632,7 @@ class LocalProductionRenderFrameRequest(FrozenModel):
             camera_registry_sha256=self.camera_registry_sha256,
             preflight_id=self.preflight_id,
             quality_policy_sha256=self.quality_policy_sha256,
+            post_render_policy_sha256=self.post_render_policy_sha256,
             build_adapter=self.build_adapter,
         )
         if self.render_id != expected_render_id:
@@ -610,7 +642,7 @@ class LocalProductionRenderFrameRequest(FrozenModel):
 
 class LocalProductionRenderFrameReport(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-report.v2"
+        "nantai.synthetic-village.local-production-render-frame-report.v3"
     ] = LOCAL_PRODUCTION_RENDER_REPORT_SCHEMA
     build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -636,6 +668,7 @@ class LocalProductionRenderFrameReport(FrozenModel):
         max_length=6,
     )
     statistics: canary.RenderStatistics
+    layer_statistics: ProductionFrameLayerStatistics
     validation: canary.RenderValidation
     profile_id: Literal["synthetic-village-coverage-180-v1"] = PRODUCTION_PROFILE_ID
     production_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -645,6 +678,7 @@ class LocalProductionRenderFrameReport(FrozenModel):
     topology_ref: str = Field(min_length=1)
     preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    post_render_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _validate_artifacts(self) -> LocalProductionRenderFrameReport:
@@ -652,12 +686,14 @@ class LocalProductionRenderFrameReport(FrozenModel):
             expected_production_artifacts(self.camera_id)
         ):
             raise ValueError("frame report does not have the exact six-file contract")
+        if self.layer_statistics.camera_id != self.camera_id:
+            raise ValueError("layer statistics belong to another camera")
         return self
 
 
 class LocalProductionCameraMetadata(FrozenModel):
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-camera-metadata.v2"
+        "nantai.synthetic-village.local-production-camera-metadata.v3"
     ] = LOCAL_PRODUCTION_CAMERA_METADATA_SCHEMA
     build_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -704,6 +740,7 @@ class LocalProductionCameraMetadata(FrozenModel):
     disclosure: str = Field(min_length=10)
     preflight_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     quality_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    post_render_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 def build_local_production_frame_request(
@@ -721,6 +758,7 @@ def build_local_production_frame_request(
     semantic_registry: tuple[canary.SemanticRegistryEntry, ...],
     preflight_id: str,
     quality_policy_sha256: str,
+    post_render_policy: ProductionFrameQualityPolicyV2,
 ) -> LocalProductionRenderFrameRequest:
     camera = next(
         (row for row in plan.cameras if row.camera_id == camera_id),
@@ -734,6 +772,9 @@ def build_local_production_frame_request(
             [row.model_dump(mode="json") for row in object_registry],
         ),
     ).hexdigest()
+    post_render_policy_sha256 = production_frame_quality_policy_v2_sha256(
+        post_render_policy,
+    )
     render_id = production_render_id(
         plan,
         blender_executable_sha256=blender_executable_sha256,
@@ -743,6 +784,7 @@ def build_local_production_frame_request(
         camera_registry_sha256=camera_registry_sha256,
         preflight_id=preflight_id,
         quality_policy_sha256=quality_policy_sha256,
+        post_render_policy_sha256=post_render_policy_sha256,
         build_adapter=build_adapter,
     )
     return LocalProductionRenderFrameRequest(
@@ -762,6 +804,8 @@ def build_local_production_frame_request(
         object_registry_sha256=object_registry_sha256,
         preflight_id=preflight_id,
         quality_policy_sha256=quality_policy_sha256,
+        post_render_policy=post_render_policy,
+        post_render_policy_sha256=post_render_policy_sha256,
         settings=canary.RenderSettings(),
         camera=camera,
         requested_c2w_blender=_opencv_c2w_to_blender(camera.c2w_opencv),

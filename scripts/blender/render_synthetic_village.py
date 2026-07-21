@@ -41,13 +41,16 @@ LOCAL_CAMERA_SCHEMA = (
     "nantai.synthetic-village.local-textured-camera-metadata.v1"
 )
 LOCAL_PRODUCTION_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v3"
+    "nantai.synthetic-village.local-production-render-frame-request.v4"
 )
 LOCAL_PRODUCTION_REPORT_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-report.v2"
+    "nantai.synthetic-village.local-production-render-frame-report.v3"
 )
 LOCAL_PRODUCTION_CAMERA_SCHEMA = (
-    "nantai.synthetic-village.local-production-camera-metadata.v2"
+    "nantai.synthetic-village.local-production-camera-metadata.v3"
+)
+PRODUCTION_LAYER_STATISTICS_SCHEMA = (
+    "nantai.synthetic-village.production-frame-layer-statistics.v2"
 )
 DEPTH_ENCODING = "euclidean-camera-center-range-m"
 NORMAL_ENCODING = "world-space-unit-vector"
@@ -489,6 +492,8 @@ def _validate_request(request):
                     "build_adapter",
                     "preflight_id",
                     "quality_policy_sha256",
+                    "post_render_policy",
+                    "post_render_policy_sha256",
                 )
                 if production
                 else ("measured_c2w_blender",)
@@ -527,6 +532,7 @@ def _validate_request(request):
                 "elevated_topology_sha256",
                 "preflight_id",
                 "quality_policy_sha256",
+                "post_render_policy_sha256",
             )
             if production
             else ()
@@ -536,6 +542,83 @@ def _validate_request(request):
             raise RuntimeRenderError(f"request {key} is not a SHA-256")
     if request["renderer_script_sha256"] != _sha256_file(Path(__file__)):
         raise RuntimeRenderError("renderer script digest does not match executing script")
+    if production:
+        policy = request["post_render_policy"]
+        expected_policy_keys = {
+            "schema_version",
+            "policy_id",
+            "near_depth_m",
+            "upper_region_end_row_exclusive",
+            "ground_semantic_ids",
+            "sky_semantic_id",
+            "ratio_round_digits",
+            "near_depth_denominator",
+            "upper_dominance_denominator",
+            "near_instance_dominance_denominator",
+            "rules",
+        }
+        expected_rule_ids = [
+            "depth-near-concentration",
+            "near-instance-dominance",
+            "sky-dominance",
+            "upper-ground-dominance",
+            "upper-instance-dominance",
+            "valid-depth-pixel-ratio",
+            "valid-normal-pixel-ratio",
+            "valid-semantic-pixel-ratio",
+        ]
+        rules = policy.get("rules") if isinstance(policy, dict) else None
+        if (
+            not isinstance(policy, dict)
+            or set(policy) != expected_policy_keys
+            or policy.get("schema_version")
+            != "nantai.synthetic-village.production-frame-quality-policy.v2"
+            or policy.get("policy_id")
+            != "synthetic-village-frame-quality-v2"
+            or policy.get("ratio_round_digits") != 6
+            or policy.get("near_depth_denominator")
+            != "valid-depth-pixels"
+            or policy.get("upper_dominance_denominator")
+            != "upper-region-pixels"
+            or policy.get("near_instance_dominance_denominator")
+            != "near-depth-pixels"
+            or not isinstance(policy.get("rules"), list)
+            or len(rules) != 8
+            or [row.get("rule_id") for row in rules] != expected_rule_ids
+            or any(
+                not isinstance(row, dict)
+                or set(row)
+                != {"rule_id", "rule_version", "threshold", "description"}
+                or row.get("rule_version") != "v2"
+                or not isinstance(row.get("threshold"), (int, float))
+                or isinstance(row.get("threshold"), bool)
+                or not math.isfinite(float(row["threshold"]))
+                or not 0.0 <= float(row["threshold"]) <= 1.0
+                or not isinstance(row.get("description"), str)
+                or len(row["description"]) < 20
+                for row in rules
+            )
+            or not isinstance(policy.get("near_depth_m"), (int, float))
+            or isinstance(policy.get("near_depth_m"), bool)
+            or not math.isfinite(float(policy["near_depth_m"]))
+            or not 0.0 < float(policy["near_depth_m"]) <= 100.0
+            or type(policy.get("upper_region_end_row_exclusive")) is not int
+            or not 1 <= policy["upper_region_end_row_exclusive"] < HEIGHT
+            or not isinstance(policy.get("ground_semantic_ids"), list)
+            or not policy["ground_semantic_ids"]
+            or any(
+                type(row) is not int or not 1 <= row <= 255
+                for row in policy["ground_semantic_ids"]
+            )
+            or policy["ground_semantic_ids"]
+            != sorted(set(policy["ground_semantic_ids"]))
+            or policy.get("sky_semantic_id") != 0
+            or hashlib.sha256(_canonical_bytes(policy)).hexdigest()
+            != request["post_render_policy_sha256"]
+        ):
+            raise RuntimeRenderError(
+                "post-render policy or digest is invalid",
+            )
     executable_path = Path(bpy.app.binary_path).absolute()
     if (
         not executable_path.is_file()
@@ -1821,6 +1904,9 @@ def _write_camera_metadata(request, path, measured_c2w_blender):
                 "quality_policy_sha256": request[
                     "quality_policy_sha256"
                 ],
+                "post_render_policy_sha256": request[
+                    "post_render_policy_sha256"
+                ],
             },
         )
     else:
@@ -1914,6 +2000,30 @@ def _execute_render(request, staging_path):
             instance_pixels,
             semantic_pixels,
         )
+        layer_statistics = None
+        if _is_production_request(request):
+            policy = request["post_render_policy"]
+            counts = _production_layer_counts(
+                depth_pixels,
+                normal_pixels,
+                instance_pixels,
+                semantic_pixels,
+                policy={
+                    "near_depth_m": policy["near_depth_m"],
+                    "upper_region_end_row_exclusive": policy[
+                        "upper_region_end_row_exclusive"
+                    ],
+                    "ground_semantic_ids": policy["ground_semantic_ids"],
+                    "sky_semantic_id": policy["sky_semantic_id"],
+                },
+                object_registry=request["object_registry"],
+                semantic_registry=request["semantic_registry"],
+            )
+            layer_statistics = {
+                "schema_version": PRODUCTION_LAYER_STATISTICS_SCHEMA,
+                "camera_id": camera_id,
+                **counts,
+            }
         measured_c2w_blender = _matrix_payload(camera_obj.matrix_world)
         _write_camera_metadata(
             request,
@@ -1975,6 +2085,7 @@ def _execute_render(request, staging_path):
         if production:
             report.update(
                 {
+                    "layer_statistics": layer_statistics,
                     "profile_id": request["profile_id"],
                     "production_plan_sha256": request["production_plan_sha256"],
                     "camera_registry_sha256": request["camera_registry_sha256"],
@@ -1984,6 +2095,9 @@ def _execute_render(request, staging_path):
                     "preflight_id": request["preflight_id"],
                     "quality_policy_sha256": request[
                         "quality_policy_sha256"
+                    ],
+                    "post_render_policy_sha256": request[
+                        "post_render_policy_sha256"
                     ],
                 },
             )

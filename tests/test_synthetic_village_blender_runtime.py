@@ -391,6 +391,9 @@ def _windows_production_frame_request():
     from pipeline.synthetic_village.windows_production_build import (
         verify_windows_production_build,
     )
+    from tests.test_synthetic_village_production_render import (
+        _post_render_policy,
+    )
 
     verified = verify_windows_production_build(
         directory=TEXTURED_RUNTIME_BLEND.parent,
@@ -417,6 +420,7 @@ def _windows_production_frame_request():
         semantic_registry=verified.semantic_registry,
         preflight_id="6" * 64,
         quality_policy_sha256="7" * 64,
+        post_render_policy=_post_render_policy(),
     )
 
 
@@ -452,6 +456,113 @@ def test_renderer_accepts_explicit_windows_production_scene_provenance(
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "NANTAI_WINDOWS_PROVENANCE_OK" in completed.stdout
+
+
+@pytest.mark.skipif(
+    not TEXTURED_RUNTIME_BLEND.is_file(),
+    reason="verified private production Blender scene is unavailable",
+)
+def test_renderer_rejects_rewritten_post_render_rules(tmp_path: Path) -> None:
+    from pipeline.synthetic_village.production_render import (
+        canonical_local_production_render_request_bytes,
+    )
+
+    request_path = tmp_path / "windows-production-request.json"
+    request_path.write_bytes(
+        canonical_local_production_render_request_bytes(
+            _windows_production_frame_request(),
+        ),
+    )
+    source = (
+        _probe_prelude()
+        + "import hashlib, json\n"
+        + f"request = json.loads(open({str(request_path)!r}, encoding='utf-8').read())\n"
+        + "request['post_render_policy']['rules'][0]['rule_id'] = "
+        + "request['post_render_policy']['rules'][1]['rule_id']\n"
+        + "request['post_render_policy_sha256'] = hashlib.sha256("
+        + "ns['_canonical_bytes'](request['post_render_policy'])).hexdigest()\n"
+        + "try:\n"
+        + "    ns['_validate_request'](request)\n"
+        + "except ns['RuntimeRenderError']:\n"
+        + "    print('NANTAI_POST_POLICY_REJECTED', flush=True)\n"
+        + "else:\n"
+        + "    raise AssertionError('rewritten post-render rules were accepted')\n"
+    )
+
+    completed = _run_renderer_probe(
+        tmp_path,
+        source,
+        blend_path=TEXTURED_RUNTIME_BLEND,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "NANTAI_POST_POLICY_REJECTED" in completed.stdout
+
+
+@pytest.mark.skipif(
+    not RUN_END_TO_END,
+    reason="set NANTAI_RUN_BLENDER_RUNTIME_TESTS=1 for the real Blender render",
+)
+def test_runtime_embeds_measured_production_layer_statistics() -> None:
+    from pipeline.synthetic_village.production_render import (
+        LocalProductionRenderFrameReport,
+        canonical_local_production_render_report_bytes,
+        canonical_local_production_render_request_bytes,
+    )
+
+    request = _windows_production_frame_request()
+    private_root = ROOT / ".nantai-studio/synthetic-village/hybrid-v3/runtime-tests"
+    private_root.mkdir(parents=True, exist_ok=True)
+    container = private_root / uuid.uuid4().hex
+    container.mkdir()
+    try:
+        blend_path = container / "village-canary.blend"
+        shutil.copy2(TEXTURED_RUNTIME_BLEND, blend_path)
+        request_path = container / "render-request.json"
+        request_path.write_bytes(
+            canonical_local_production_render_request_bytes(request),
+        )
+        staging = container / "frame"
+        completed = _run_renderer(
+            blend_path,
+            "--request",
+            str(request_path),
+            "--staging",
+            str(staging),
+            timeout=600,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        report_path = staging / "frame-report.json"
+        report = LocalProductionRenderFrameReport.model_validate_json(
+            report_path.read_bytes(),
+        )
+        assert report_path.read_bytes() == (
+            canonical_local_production_render_report_bytes(report)
+        )
+        assert report.post_render_policy_sha256 == (
+            request.post_render_policy_sha256
+        )
+        assert report.layer_statistics.model_dump(mode="json") == {
+            "schema_version": (
+                "nantai.synthetic-village.production-frame-layer-statistics.v2"
+            ),
+            "camera_id": "camera-ground-route-034",
+            "total_pixel_count": 589824,
+            "upper_pixel_count": 294912,
+            "valid_depth_pixel_count": 406487,
+            "valid_normal_pixel_count": 406487,
+            "registered_instance_pixel_count": 319103,
+            "valid_semantic_pixel_count": 406487,
+            "sky_pixel_count": 183337,
+            "upper_ground_pixel_count": 7833,
+            "near_depth_pixel_count": 43493,
+            "dominant_near_instance_id": 130,
+            "dominant_near_instance_pixel_count": 43493,
+            "dominant_upper_instance_id": 130,
+            "dominant_upper_instance_pixel_count": 87345,
+        }
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
 
 
 def _read_exr_attributes(path: Path) -> dict[str, tuple[str, bytes]]:

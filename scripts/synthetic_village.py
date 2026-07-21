@@ -152,6 +152,30 @@ def _run_windows_production_render():
     return run_windows_production_render
 
 
+def _load_post_render_policy(path: Path):
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village import canary
+    from pipeline.synthetic_village.production_quality_gates import (
+        ProductionFrameQualityPolicyV2,
+        canonical_production_frame_quality_policy_v2_bytes,
+    )
+
+    raw = canary._read_stable_metadata(  # noqa: SLF001
+        Path(path).absolute(),
+        label="post-render quality policy",
+    )
+    parsed = json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
+        parse_constant=canary._reject_constant,  # noqa: SLF001
+    )
+    policy = ProductionFrameQualityPolicyV2.model_validate(parsed)
+    if raw != canonical_production_frame_quality_policy_v2_bytes(policy):
+        raise ValueError("post-render quality policy is not canonical JSON")
+    return policy
+
+
 def _run_environment_module_build():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -468,6 +492,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     render_production_local.add_argument(
+        "--post-render-policy",
+        type=Path,
+        required=True,
+        help=(
+            "Canonical explicit v2 post-render policy JSON. No candidate "
+            "threshold is selected implicitly."
+        ),
+    )
+    render_production_local.add_argument(
         "--clearance-near-distance-m",
         type=float,
         required=True,
@@ -549,6 +582,15 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "Operator-selected inclusive candidate threshold in (0, 1]. "
             "This legacy gate will be superseded by measured v2 layer policy."
+        ),
+    )
+    render_production_windows.add_argument(
+        "--post-render-policy",
+        type=Path,
+        required=True,
+        help=(
+            "Canonical explicit v2 post-render policy JSON. No candidate "
+            "threshold is selected implicitly."
         ),
     )
     render_production_windows.add_argument(
@@ -967,6 +1009,9 @@ def main(argv: list[str] | None = None) -> int:
             minimum_upper_middle_near_hit_count=(
                 args.min_upper_middle_near_hits
             ),
+            post_render_policy=_load_post_render_policy(
+                args.post_render_policy,
+            ),
             preflight_only=args.preflight_only,
             camera_ids=tuple(args.camera) if args.camera else None,
             timeout_seconds=args.timeout_seconds,
@@ -1008,6 +1053,9 @@ def main(argv: list[str] | None = None) -> int:
             clearance_near_distance_m=args.clearance_near_distance_m,
             minimum_upper_middle_near_hit_count=(
                 args.min_upper_middle_near_hits
+            ),
+            post_render_policy=_load_post_render_policy(
+                args.post_render_policy,
             ),
             preflight_only=args.preflight_only,
             camera_ids=tuple(args.camera) if args.camera else None,

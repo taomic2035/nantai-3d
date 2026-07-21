@@ -247,6 +247,7 @@ def test_windows_production_cli_selects_v2_build_explicitly() -> None:
     assert completed.returncode == 0
     assert "--verified-v2-build" in completed.stdout
     assert "--surface-realism-profile" in completed.stdout
+    assert "--post-render-policy" in completed.stdout
     assert "--local-preview-build" not in completed.stdout
 
 

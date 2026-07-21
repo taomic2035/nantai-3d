@@ -15,6 +15,10 @@ from pipeline.synthetic_village.production_profile import (
     build_production_camera_plan,
     canonical_production_plan_bytes,
 )
+from pipeline.synthetic_village.production_quality_gates import (
+    candidate_synthetic_village_frame_quality_policy_v2,
+    production_frame_quality_policy_v2_sha256,
+)
 from pipeline.synthetic_village.production_render import (
     LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA,
     LocalProductionRenderFrameRequest,
@@ -24,6 +28,22 @@ from pipeline.synthetic_village.production_render import (
 from pipeline.synthetic_village.scene_plan import build_scene_plan
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _post_render_policy(*, maximum_near_depth_pixel_ratio: float = 1.0):
+    return candidate_synthetic_village_frame_quality_policy_v2(
+        minimum_valid_depth_pixel_ratio=0.0,
+        minimum_valid_normal_pixel_ratio=0.0,
+        minimum_valid_semantic_pixel_ratio=0.0,
+        maximum_sky_pixel_ratio=1.0,
+        maximum_upper_ground_pixel_ratio=1.0,
+        maximum_near_depth_pixel_ratio=maximum_near_depth_pixel_ratio,
+        maximum_near_instance_dominance_ratio=1.0,
+        maximum_upper_instance_dominance_ratio=1.0,
+        near_depth_m=2.0,
+        upper_region_end_row_exclusive=288,
+        ground_semantic_ids=(1,),
+    )
 
 
 def _request(
@@ -51,6 +71,7 @@ def _request(
         semantic_registry=semantics,
         preflight_id="6" * 64,
         quality_policy_sha256="7" * 64,
+        post_render_policy=_post_render_policy(),
     )
 
 
@@ -63,6 +84,9 @@ def test_local_production_request_is_l0_and_binds_one_plan_camera() -> None:
     assert request.profile_id == "synthetic-village-coverage-180-v1"
     assert request.camera.camera_id == "camera-elevated-pedestrian-001"
     assert request.camera.group_id == "elevated-pedestrian"
+    assert request.post_render_policy_sha256 == (
+        production_frame_quality_policy_v2_sha256(request.post_render_policy)
+    )
     assert request.requested_c2w_blender[0][3] == request.camera.position_m[0]
     assert request.requested_c2w_blender[1][3] == request.camera.position_m[1]
     assert request.requested_c2w_blender[2][3] == request.camera.position_m[2]
@@ -94,9 +118,11 @@ def test_renderer_declares_separate_local_production_schema_and_dynamic_camera()
     )
 
     assert LOCAL_PRODUCTION_RENDER_REQUEST_SCHEMA in source
-    assert "local-production-render-frame-report.v2" in source
-    assert "local-production-camera-metadata.v2" in source
+    assert "local-production-render-frame-report.v3" in source
+    assert "local-production-camera-metadata.v3" in source
     assert "_create_production_camera" in source
+    assert "_production_layer_counts(" in source
+    assert '"layer_statistics"' in source
 
 
 def test_preflight_and_quality_context_change_frame_render_identity() -> None:
@@ -115,6 +141,7 @@ def test_preflight_and_quality_context_change_frame_render_identity() -> None:
         semantic_registry=base.semantic_registry,
         preflight_id="8" * 64,
         quality_policy_sha256="7" * 64,
+        post_render_policy=base.post_render_policy,
     )
     changed_policy = build_local_production_frame_request(
         plan=base.production_plan,
@@ -130,18 +157,47 @@ def test_preflight_and_quality_context_change_frame_render_identity() -> None:
         semantic_registry=base.semantic_registry,
         preflight_id="8" * 64,
         quality_policy_sha256="9" * 64,
+        post_render_policy=base.post_render_policy,
+    )
+    changed_post_render_policy = build_local_production_frame_request(
+        plan=base.production_plan,
+        camera_id=base.camera.camera_id,
+        build_adapter=base.build_adapter,
+        build_id=base.build_id,
+        blender_executable_sha256=base.blender_executable_sha256,
+        renderer_script_sha256=base.renderer_script_sha256,
+        blend_sha256=base.blend_sha256,
+        build_report_sha256=base.build_report_sha256,
+        object_registry=base.object_registry,
+        auxiliary_registry=base.auxiliary_registry,
+        semantic_registry=base.semantic_registry,
+        preflight_id="8" * 64,
+        quality_policy_sha256="7" * 64,
+        post_render_policy=_post_render_policy(
+            maximum_near_depth_pixel_ratio=0.9,
+        ),
     )
 
     assert contextual.preflight_id == "8" * 64
     assert contextual.quality_policy_sha256 == "7" * 64
     assert contextual.render_id != base.render_id
     assert changed_policy.render_id != contextual.render_id
+    assert changed_post_render_policy.render_id != contextual.render_id
 
     payload = json.loads(
         canonical_local_production_render_request_bytes(contextual),
     )
     payload["quality_policy_sha256"] = "a" * 64
     with pytest.raises(ValidationError, match="render ID"):
+        LocalProductionRenderFrameRequest.model_validate_json(
+            json.dumps(payload),
+        )
+
+    payload = json.loads(
+        canonical_local_production_render_request_bytes(contextual),
+    )
+    payload["post_render_policy"]["near_depth_m"] = 3.0
+    with pytest.raises(ValidationError, match="post-render policy digest"):
         LocalProductionRenderFrameRequest.model_validate_json(
             json.dumps(payload),
         )

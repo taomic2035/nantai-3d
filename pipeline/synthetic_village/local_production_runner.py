@@ -39,6 +39,7 @@ from .production_profile import (
     ProductionCameraPlan,
     build_production_camera_plan,
 )
+from .production_quality_gates import ProductionFrameQualityPolicyV2
 from .production_render import (
     LocalProductionCameraMetadata,
     LocalProductionQualityPolicy,
@@ -290,6 +291,7 @@ def _validate_camera_metadata(
         metadata.disclosure,
         metadata.preflight_id,
         metadata.quality_policy_sha256,
+        metadata.post_render_policy_sha256,
     )
     expected = (
         request.build_id,
@@ -313,6 +315,7 @@ def _validate_camera_metadata(
         camera.disclosure,
         request.preflight_id,
         request.quality_policy_sha256,
+        request.post_render_policy_sha256,
     )
     if immutable != expected:
         raise LocalTexturedPreviewError(
@@ -368,6 +371,7 @@ def _validate_frame_staging(
             report.topology_ref,
             report.preflight_id,
             report.quality_policy_sha256,
+            report.post_render_policy_sha256,
         )
         expected = (
             request.build_id,
@@ -383,6 +387,7 @@ def _validate_frame_staging(
             request.camera.topology_ref,
             request.preflight_id,
             request.quality_policy_sha256,
+            request.post_render_policy_sha256,
         )
         if immutable != expected:
             raise LocalTexturedPreviewError(
@@ -537,6 +542,7 @@ def _run_production_render(
     minimum_valid_pixel_ratio: float,
     clearance_near_distance_m: float,
     minimum_upper_middle_near_hit_count: int,
+    post_render_policy: ProductionFrameQualityPolicyV2,
     build_adapter: Literal["mac-local-preview", "windows-textured-v2"],
     surface_realism_profile_id: SurfaceRealismProfileId,
     preflight_only: bool = False,
@@ -702,6 +708,7 @@ def _run_production_render(
         semantic_registry=report.semantic_registry,
         preflight_id=preflight_request.preflight_id,
         quality_policy_sha256=quality_policy_sha256,
+        post_render_policy=post_render_policy,
     )
     try:
         selected_render_root = (
@@ -792,6 +799,8 @@ def _run_production_render(
                     journal.object_registry_sha256,
                     journal.quality_policy,
                     journal.quality_policy_sha256,
+                    journal.post_render_policy,
+                    journal.post_render_policy_sha256,
                     journal.preflight_id,
                     journal.preflight_request_sha256,
                     journal.preflight_report_sha256,
@@ -811,6 +820,8 @@ def _run_production_render(
                     seed_request.object_registry_sha256,
                     quality_policy,
                     quality_policy_sha256,
+                    post_render_policy,
+                    seed_request.post_render_policy_sha256,
                     preflight_request.preflight_id,
                     hashlib.sha256(preflight_request_bytes).hexdigest(),
                     preflight_report_sha256,
@@ -945,6 +956,7 @@ def _run_production_render(
                         semantic_registry=report.semantic_registry,
                         preflight_id=preflight_request.preflight_id,
                         quality_policy_sha256=quality_policy_sha256,
+                        post_render_policy=post_render_policy,
                     )
                     request_path = invocation_root / "render-request.json"
                     canary._write_new_file(
@@ -1008,6 +1020,7 @@ def _run_production_render(
                         artifacts=frame_report.artifacts,
                         runtime_report_sha256=frame_report_sha256,
                         statistics=frame_report.statistics,
+                        layer_statistics=frame_report.layer_statistics,
                         quality=quality,
                         wall_clock_seconds=duration,
                     )
@@ -1073,6 +1086,7 @@ def run_local_production_render(
     minimum_valid_pixel_ratio: float,
     clearance_near_distance_m: float,
     minimum_upper_middle_near_hit_count: int,
+    post_render_policy: ProductionFrameQualityPolicyV2,
     preflight_only: bool = False,
     repo_root: Path = ROOT,
     visual_pack_root: Path | None = None,
@@ -1091,6 +1105,7 @@ def run_local_production_render(
         minimum_upper_middle_near_hit_count=(
             minimum_upper_middle_near_hit_count
         ),
+        post_render_policy=post_render_policy,
         build_adapter="mac-local-preview",
         surface_realism_profile_id=LEGACY_SURFACE_PROFILE_ID,
         preflight_only=preflight_only,
@@ -1111,6 +1126,7 @@ def run_windows_production_render(
     minimum_valid_pixel_ratio: float,
     clearance_near_distance_m: float,
     minimum_upper_middle_near_hit_count: int,
+    post_render_policy: ProductionFrameQualityPolicyV2,
     preflight_only: bool = False,
     repo_root: Path = ROOT,
     visual_pack_root: Path | None = None,
@@ -1129,6 +1145,7 @@ def run_windows_production_render(
         minimum_upper_middle_near_hit_count=(
             minimum_upper_middle_near_hit_count
         ),
+        post_render_policy=post_render_policy,
         build_adapter="windows-textured-v2",
         surface_realism_profile_id=surface_realism_profile_id,
         preflight_only=preflight_only,

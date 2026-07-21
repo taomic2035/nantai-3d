@@ -17,6 +17,9 @@ from pipeline.synthetic_village.production_preflight import (
     build_production_clearance_request,
     canonical_production_clearance_report_bytes,
 )
+from pipeline.synthetic_village.production_quality_gates import (
+    ProductionFrameLayerStatistics,
+)
 from pipeline.synthetic_village.production_render import (
     LocalProductionQualityPolicy,
     build_local_production_frame_request,
@@ -58,6 +61,24 @@ def _artifacts(camera_id: str) -> tuple[ProductionArtifactRecord, ...]:
             ("semantic-mask", f"semantic/{camera_id}.png"),
             ("camera-metadata", f"cameras/{camera_id}.json"),
         )
+    )
+
+
+def _layer_statistics(camera_id: str) -> ProductionFrameLayerStatistics:
+    return ProductionFrameLayerStatistics(
+        camera_id=camera_id,
+        upper_pixel_count=1024 * 288,
+        valid_depth_pixel_count=500_000,
+        valid_normal_pixel_count=500_000,
+        registered_instance_pixel_count=120_000,
+        valid_semantic_pixel_count=500_000,
+        sky_pixel_count=(1024 * 576) - 500_000,
+        upper_ground_pixel_count=20_000,
+        near_depth_pixel_count=40_000,
+        dominant_near_instance_id=1,
+        dominant_near_instance_pixel_count=10_000,
+        dominant_upper_instance_id=1,
+        dominant_upper_instance_pixel_count=30_000,
     )
 
 
@@ -160,6 +181,7 @@ def _bound_render_request(
         quality_policy_sha256=local_production_quality_policy_sha256(
             quality_policy,
         ),
+        post_render_policy=request.post_render_policy,
     )
 
 
@@ -237,6 +259,7 @@ def test_preflight_rejection_is_bound_without_six_layer_artifacts() -> None:
     assert frame.artifacts == ()
     assert frame.runtime_report_sha256 is None
     assert frame.statistics is None
+    assert frame.layer_statistics is None
     assert frame.quality is None
     assert frame.clearance_decision is not None
     assert frame.clearance_decision.passes is False
@@ -296,6 +319,7 @@ def test_local_journal_separates_verified_and_quality_rejected_frames() -> None:
         artifacts=_artifacts(camera_id),
         runtime_report_sha256="b" * 64,
         statistics=passing_statistics,
+        layer_statistics=_layer_statistics(camera_id),
         quality=passing_quality,
         wall_clock_seconds=11.19,
     )
@@ -316,6 +340,7 @@ def test_local_journal_separates_verified_and_quality_rejected_frames() -> None:
         artifacts=_artifacts(camera_id),
         runtime_report_sha256="c" * 64,
         statistics=rejected_statistics,
+        layer_statistics=_layer_statistics(camera_id),
         quality=rejected_quality,
         wall_clock_seconds=12.0,
     )
@@ -372,6 +397,7 @@ def test_cli_requires_an_explicit_quality_threshold() -> None:
 
     assert completed.returncode == 0
     assert "--min-valid-pixel-ratio" in completed.stdout
+    assert "--post-render-policy" in completed.stdout
     assert "--clearance-near-distance-m" in completed.stdout
     assert "--min-upper-middle-near-hits" in completed.stdout
     assert "--preflight-only" in completed.stdout
