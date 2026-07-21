@@ -31,6 +31,7 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     RECIPROCAL_ROUTE_RECIPE_VERSION,
     RECIPROCAL_ROUTE_SCHEMA,
     WATERMILL_TAILRACE_INSTANCE_RANGE,
+    PartLayoutSpec,
     ReciprocalRouteError,
     ReciprocalRouteModule,
     ReciprocalRouteModulePart,
@@ -300,6 +301,7 @@ def test_plan_rejects_part_outside_module_segment(plan) -> None:
             instance_id=999,  # outside all segments
             semantic_id=first_part.semantic_id,
             material_slot_id=first_part.material_slot_id,
+            part_layout=first_part.part_layout,
         )
 
 
@@ -474,3 +476,130 @@ def test_plan_does_not_promote_trust(plan) -> None:
     assert plan.real_photo_textures is False
     assert plan.trust_effect == "none"
     assert plan.synthetic is True
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.1: PartLayoutSpec canonical layout (REVIEW-CODEX-018 item 1).
+# --------------------------------------------------------------------------- #
+
+
+def test_plan_carries_part_layout_on_every_part(plan) -> None:
+    """Every reciprocal-route part must carry a canonical part_layout."""
+
+    for module in plan.modules:
+        for part in module.parts:
+            assert isinstance(part.part_layout, PartLayoutSpec)
+            assert len(part.part_layout.center_m) == 3
+            assert len(part.part_layout.extent_m) == 3
+            assert part.part_layout.orientation_deg == 0.0
+
+
+def test_part_layout_rejects_negative_extent() -> None:
+    """extent_m must be positive on every axis."""
+
+    with pytest.raises(ValidationError, match="extent_m"):
+        PartLayoutSpec(
+            center_m=(0.0, 0.0, 0.0),
+            extent_m=(1.6, -1.6, 0.6),
+            orientation_deg=0.0,
+        )
+
+
+def test_part_layout_rejects_zero_extent() -> None:
+    """extent_m must be strictly positive (zero-size mesh is not finite)."""
+
+    with pytest.raises(ValidationError, match="extent_m"):
+        PartLayoutSpec(
+            center_m=(0.0, 0.0, 0.0),
+            extent_m=(1.6, 0.0, 0.6),
+            orientation_deg=0.0,
+        )
+
+
+def test_part_layout_rejects_non_finite_center() -> None:
+    """center_m must be finite on every axis."""
+
+    with pytest.raises(ValidationError, match="center_m"):
+        PartLayoutSpec(
+            center_m=(float("inf"), 0.0, 0.0),
+            extent_m=(1.6, 1.6, 0.6),
+            orientation_deg=0.0,
+        )
+
+
+def test_part_layout_rejects_orientation_out_of_range() -> None:
+    """orientation_deg must be in [0, 360)."""
+
+    with pytest.raises(ValidationError):
+        PartLayoutSpec(
+            center_m=(0.0, 0.0, 0.0),
+            extent_m=(1.6, 1.6, 0.6),
+            orientation_deg=360.0,
+        )
+
+
+def test_part_layout_rejects_wrong_tuple_length() -> None:
+    """center_m / extent_m must be 3-tuples."""
+
+    with pytest.raises(ValidationError):
+        PartLayoutSpec(
+            center_m=(0.0, 0.0),
+            extent_m=(1.6, 1.6, 0.6),
+            orientation_deg=0.0,
+        )
+
+
+def test_plan_sha_changes_when_part_layout_changes(plan, scene, topology, env_module_plan) -> None:
+    """Tampering a part's center_m must change plan_sha256 (tamper detection)."""
+
+    first_part = plan.modules[0].parts[0]
+    original_center = first_part.part_layout.center_m
+    tampered_layout = first_part.part_layout.model_copy(
+        update={"center_m": (original_center[0] + 100.0, original_center[1], original_center[2])},
+    )
+    tampered_part = first_part.model_copy(update={"part_layout": tampered_layout})
+    tampered_module = plan.modules[0].model_copy(
+        update={"parts": (tampered_part, *plan.modules[0].parts[1:])},
+    )
+    tampered_plan = plan.model_copy(
+        update={"modules": (tampered_module, *plan.modules[1:])},
+    )
+    assert (
+        reciprocal_route_module_plan_sha256(tampered_plan)
+        != reciprocal_route_module_plan_sha256(plan)
+    )
+
+
+def test_default_part_layout_preserves_phase3_aabb(plan) -> None:
+    """The default layout must preserve the exact AABB that Phase 3 produced.
+
+    REVIEW-CODEX-018 measured mesh AABB: min=(-180.8, -98.3, 44.7),
+    max=(120.8, 168.3, 78.3).  The 0.8/0.3 offsets come from box
+    half-extent (1.6/2, 0.6/2).  The part *centers* must therefore be:
+      min_center = (-180.0, -97.5, 45.0)
+      max_center = (120.0, 167.5, 78.0)
+    """
+
+    centers = [
+        part.part_layout.center_m
+        for module in plan.modules
+        for part in module.parts
+    ]
+    min_x = min(c[0] for c in centers)
+    max_x = max(c[0] for c in centers)
+    min_y = min(c[1] for c in centers)
+    max_y = max(c[1] for c in centers)
+    min_z = min(c[2] for c in centers)
+    max_z = max(c[2] for c in centers)
+    # watermill base_x = -180; forest base_x = 120.
+    assert min_x == -180.0
+    assert max_x == 120.0
+    # watermill base_y = -130; first watermill part (instance 189):
+    #   -130 + (189-176)*2.5 = -130 + 32.5 = -97.5
+    # forest base_y = 80; last forest part (instance 211):
+    #   80 + (211-176)*2.5 = 80 + 87.5 = 167.5
+    assert min_y == -97.5
+    assert max_y == 167.5
+    # watermill base_z = 45; gallery base_z = 78.
+    assert min_z == 45.0
+    assert max_z == 78.0

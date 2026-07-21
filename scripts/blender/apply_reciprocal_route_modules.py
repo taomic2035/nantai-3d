@@ -102,20 +102,11 @@ MATERIAL_BINDINGS = {
 }
 
 #: Module-id segment offsets for simplified geometry placement.
-#: Each module's parts are placed along a deterministic line so that no
-#: two parts overlap and the build is reproducible.  Coordinates are
-#: far from the base 175-root scene so the new geometry does not visually
-#: collide with existing structures; precise layout is deferred to a
-#: future refinement once fresh RGB audit confirms the simplified
-#: geometry reads correctly.
-MODULE_BASE_POSITION = {
-    "central-courtyard-downhill": (40.0, 30.0, 70.0),
-    "bridge-deck-crossing": (-150.0, -100.0, 50.0),
-    "watermill-tailrace": (-180.0, -130.0, 45.0),
-    "covered-gallery-underpass": (60.0, -25.0, 78.0),
-    "forest-orchard-boundary": (120.0, 80.0, 75.0),
-    "lower-valley-uphill": (-90.0, 60.0, 55.0),
-}
+#: The actual per-part layout (center, extent, orientation) is now
+#: carried by ``ReciprocalRouteModulePart.part_layout`` in the plan
+#: (Phase 4.1, responding to REVIEW-CODEX-018 §"Phase 4 必须处理的
+#: 边界" item 1).  The runtime script reads it verbatim from the
+#: request and may NOT invent its own layout.
 
 
 class RuntimeBuildError(RuntimeError):
@@ -350,7 +341,53 @@ def _validate_request(request):
             or registry_row.get("variant_id") is not None
         ):
             raise RuntimeBuildError("module registry disagrees with plan")
+    # Phase 4.1: every part must carry a canonical part_layout so the
+    # runtime does not invent its own layout (REVIEW-CODEX-018 item 1).
+    for part in parts:
+        _validate_part_layout(part)
     return request
+
+
+def _validate_part_layout(part):
+    layout = part.get("part_layout")
+    if not isinstance(layout, dict):
+        raise RuntimeBuildError(
+            f"part {part.get('part_id')} is missing part_layout",
+        )
+    if set(layout.keys()) != {"center_m", "extent_m", "orientation_deg"}:
+        raise RuntimeBuildError(
+            f"part {part.get('part_id')} part_layout keys are not exact",
+        )
+    center = layout["center_m"]
+    size = layout["extent_m"]
+    orientation = layout["orientation_deg"]
+    if (
+        not isinstance(center, list)
+        or len(center) != 3
+        or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in center)
+    ):
+        raise RuntimeBuildError(
+            f"part {part.get('part_id')} part_layout center_m is invalid",
+        )
+    if (
+        not isinstance(size, list)
+        or len(size) != 3
+        or not all(
+            isinstance(v, (int, float)) and math.isfinite(v) and v > 0.0
+            for v in size
+        )
+    ):
+        raise RuntimeBuildError(
+            f"part {part.get('part_id')} part_layout extent_m is invalid",
+        )
+    if (
+        not isinstance(orientation, (int, float))
+        or not math.isfinite(orientation)
+        or not (0.0 <= orientation < 360.0)
+    ):
+        raise RuntimeBuildError(
+            f"part {part.get('part_id')} part_layout orientation_deg is invalid",
+        )
 
 
 class MeshAssembler:
@@ -392,26 +429,22 @@ class MeshAssembler:
         )
 
 
-def _module_geometry(module_id, part_id, instance_id):
+def _module_geometry(part):
     """Return a simplified but finite non-empty mesh for one part.
 
-    Each part is placed at a deterministic position derived from the module's
-    base offset and the part's instance id, so the build is reproducible and
-    no two parts overlap.  Sizes are conservative boxes (1.6 m wide) that
-    satisfy the plan's geometric thresholds without attempting to model the
-    full reciprocal-route geometry -- the runtime contract only requires a
-    finite, non-empty mesh with proper UVs/tangents/material slot.
+    The part's spatial layout (center, extent, orientation) is read
+    verbatim from ``part["part_layout"]`` in the canonical request.
+    The runtime does NOT invent its own layout (Phase 4.1).
+    ``_validate_request`` has already validated the layout, so this
+    function only reads it.
     """
 
-    if module_id not in MODULE_BASE_POSITION:
-        raise RuntimeBuildError(f"unknown reciprocal-route module: {module_id}")
-    base_x, base_y, base_z = MODULE_BASE_POSITION[module_id]
-    # Space parts 2.5 m apart along the +y axis within each module.
-    offset_y = (instance_id - 176) * 2.5
+    layout = part["part_layout"]
     assembler = MeshAssembler()
     assembler.add_box(
-        (base_x, base_y + offset_y, base_z),
-        (1.6, 1.6, 0.6),
+        tuple(float(value) for value in layout["center_m"]),
+        tuple(float(value) for value in layout["extent_m"]),
+        math.radians(float(layout["orientation_deg"])),
     )
     return assembler
 
@@ -524,11 +557,7 @@ def _build_modules(request):
                     f"verified runtime material is absent: {binding['runtime_slot_id']}",
                 )
             root = _new_module_root(module, part, row, collection)
-            assembler = _module_geometry(
-                module["module_id"],
-                part["part_id"],
-                part["instance_id"],
-            )
+            assembler = _module_geometry(part)
             mesh = _link_mesh(
                 root,
                 assembler,

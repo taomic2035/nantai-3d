@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -157,6 +158,23 @@ MIN_GALLERY_UNDERPASS_CLEAR_WIDTH_M = 1.8
 MIN_TRAIL_SHELTER_CLEAR_WIDTH_M = 1.5
 MIN_LOWER_VALLEY_TRAIL_WIDTH_M = 1.2
 MAX_RETAINING_STEP_RISE_M = 0.18
+
+#: Default spatial layout for the simplified v1 build (Phase 4.1).
+#: Used only by ``_default_part_layout`` to populate ``PartLayoutSpec``;
+#: the Blender runtime script never reads these constants.  Any change
+#: here changes ``reciprocal_route_module_plan_sha256`` and therefore
+#: ``build_id`` and the downstream render identity.
+_DEFAULT_MODULE_BASE_POSITION: dict[ModuleId, tuple[float, float, float]] = {
+    "central-courtyard-downhill": (40.0, 30.0, 70.0),
+    "bridge-deck-crossing": (-150.0, -100.0, 50.0),
+    "watermill-tailrace": (-180.0, -130.0, 45.0),
+    "covered-gallery-underpass": (60.0, -25.0, 78.0),
+    "forest-orchard-boundary": (120.0, 80.0, 75.0),
+    "lower-valley-uphill": (-90.0, 60.0, 55.0),
+}
+_DEFAULT_PART_SPACING_Y_M = 2.5
+_DEFAULT_PART_EXTENT_M: tuple[float, float, float] = (1.6, 1.6, 0.6)
+_DEFAULT_PART_ORIENTATION_DEG = 0.0
 
 # BuildReport v1 reserves 0/1/2 for sky, terrain, and terrain-support,
 # then assigns ScenePlan semantic classes from 3 in SEMANTIC_ORDER order.
@@ -513,12 +531,44 @@ class LowerValleyUphillRecipe(FrozenModel):
 # --------------------------------------------------------------------------- #
 
 
+class PartLayoutSpec(FrozenModel):
+    """Canonical spatial placement of one reciprocal-route part.
+
+    Coordinates are scene-local meters relative to the scene origin.
+    The Blender runtime script must consume these fields verbatim from
+    the canonical request; it may NOT invent its own layout, spacing,
+    extent, or orientation (HANDOFF-OPUS-009 Phase 4.1, responding to
+    REVIEW-CODEX-018 §"Phase 4 必须处理的边界" item 1).
+
+    The layout is ``modeled-unverified``: it carries honest placement
+    for the simplified box geometry, not measured survey coordinates.
+    """
+
+    center_m: tuple[float, float, float]
+    extent_m: tuple[float, float, float]
+    orientation_deg: float = Field(ge=0.0, lt=360.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _layout_is_finite_and_positive(self) -> PartLayoutSpec:
+        if len(self.center_m) != 3:
+            raise ValueError("center_m must be a 3-tuple")
+        if len(self.extent_m) != 3:
+            raise ValueError("extent_m must be a 3-tuple")
+        for axis, value in zip(("x", "y", "z"), self.center_m, strict=True):
+            if not math.isfinite(value):
+                raise ValueError(f"center_m {axis} must be finite")
+        for axis, value in zip(("x", "y", "z"), self.extent_m, strict=True):
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"extent_m {axis} must be positive and finite")
+        return self
+
+
 class ReciprocalRouteModulePart(FrozenModel):
     """One stable part declared by a reciprocal-route module.
 
     Every part carries an instance id in the module's locked segment, a
-    part id, a semantic id, and a material slot id.  Unknown fields stay
-    unknown; no inference is made from names.
+    part id, a semantic id, a material slot id, and a canonical spatial
+    layout.  Unknown fields stay unknown; no inference is made from names.
     """
 
     module_id: ModuleId
@@ -526,6 +576,7 @@ class ReciprocalRouteModulePart(FrozenModel):
     instance_id: int
     semantic_id: int = Field(ge=0, le=14)
     material_slot_id: PartId
+    part_layout: PartLayoutSpec
 
     @model_validator(mode="after")
     def _instance_in_module_segment(self) -> ReciprocalRouteModulePart:
@@ -573,6 +624,28 @@ def _module_batch9_source(module_id: ModuleId) -> str:
         "forest-orchard-boundary": BATCH9_FOREST_ORCHARD_LATERAL_FORK_SHA256,
         "lower-valley-uphill": BATCH9_LOWER_VALLEY_FIELD_EDGE_SHA256,
     }[module_id]
+
+
+def _default_part_layout(
+    module_id: ModuleId,
+    instance_id: int,
+) -> PartLayoutSpec:
+    """Build the canonical default layout for one part.
+
+    Preserves the exact spatial layout that Phase 3 hardcoded inside
+    ``apply_reciprocal_route_modules.MODULE_BASE_POSITION`` so the AABB
+    reported by REVIEW-CODEX-018 stays identical.  The runtime script
+    now reads these values verbatim from the plan instead of inventing
+    them.
+    """
+
+    base_x, base_y, base_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
+    offset_y = (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M
+    return PartLayoutSpec(
+        center_m=(base_x, base_y + offset_y, base_z),
+        extent_m=_DEFAULT_PART_EXTENT_M,
+        orientation_deg=_DEFAULT_PART_ORIENTATION_DEG,
+    )
 
 
 Recipe = (
@@ -1221,6 +1294,7 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
             instance_id=instance_id,
             semantic_id=semantic_id,
             material_slot_id=material_slot_id,
+            part_layout=_default_part_layout(module_id, instance_id),
         )
         for part_id, instance_id, semantic_id, material_slot_id in part_specs
     )
