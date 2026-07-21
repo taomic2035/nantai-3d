@@ -751,3 +751,64 @@ def test_render_id_binds_environment_module_and_repose_simultaneously(plan) -> N
     )
     assert tampered_module != both
     assert tampered_repose != both
+
+
+# --------------------------------------------------------------------------- #
+# 其它可选 SHA 绑定键的 fail-closed 一致性
+# --------------------------------------------------------------------------- #
+# `production_render_id` 是公开 API (被 production_render / production_repose /
+# tests 多处导入)。即使 caller 端 Pydantic schema 已校验 64-hex, 函数自身也
+# 必须 fail-closed —— 否则绕过 schema 直接调用就会让非 SHA 字符串静默进入
+# canonical payload, 破坏内容寻址。
+#
+# 这与 `environment_module_build_report_sha256` / `post_render_policy_sha256`
+# 已有的 `_require_64_hex_sha` 校验保持一致。
+
+def test_render_id_rejects_non_hex_preflight_id(plan) -> None:
+    """preflight_id 必须是 64-hex SHA-256。
+
+    字段名表明它是 SHA-256 (production_preflight.py:229 也有 pattern 校验),
+    production_render_id 自身必须独立校验, 不依赖 caller。
+    """
+    with pytest.raises(ProductionProfileError):
+        production_render_id(
+            plan,
+            blender_executable_sha256=DIGEST,
+            renderer_script_sha256=DIGEST,
+            blend_sha256=DIGEST,
+            build_report_sha256=DIGEST,
+            camera_registry_sha256=production_camera_registry_digest(plan),
+            preflight_id="not-a-sha",
+        )
+
+
+def test_render_id_rejects_non_hex_quality_policy_sha(plan) -> None:
+    """quality_policy_sha256 必须是 64-hex SHA-256。"""
+    with pytest.raises(ProductionProfileError):
+        production_render_id(
+            plan,
+            blender_executable_sha256=DIGEST,
+            renderer_script_sha256=DIGEST,
+            blend_sha256=DIGEST,
+            build_report_sha256=DIGEST,
+            camera_registry_sha256=production_camera_registry_digest(plan),
+            quality_policy_sha256="z" * 64,
+        )
+
+
+def test_render_id_rejects_non_hex_repose_search_sha(plan) -> None:
+    """repose_search_sha256 必须是 64-hex SHA-256。
+
+    与 environment_module_build_report_sha256 一致: 字段名声明为 SHA-256,
+    函数自身必须 fail-closed。
+    """
+    with pytest.raises(ProductionProfileError):
+        production_render_id(
+            plan,
+            blender_executable_sha256=DIGEST,
+            renderer_script_sha256=DIGEST,
+            blend_sha256=DIGEST,
+            build_report_sha256=DIGEST,
+            camera_registry_sha256=production_camera_registry_digest(plan),
+            repose_search_sha256="0" * 63,
+        )

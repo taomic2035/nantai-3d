@@ -193,6 +193,7 @@ def production_render_id(
     camera_registry_sha256: str,
     preflight_id: str | None = None,
     quality_policy_sha256: str | None = None,
+    post_render_policy_sha256: str | None = None,
     repose_search_sha256: str | None = None,
     build_adapter: str | None = None,
     environment_module_build_report_sha256: str | None = None,
@@ -219,15 +220,18 @@ def production_render_id(
     验证: 这次 render 真的是从某个特定的 175-root module scene 派生的,
     不是被替换的 base blend 跑出来的伪造 render。
 
-    严格 fail-closed (与 ``repose_search_sha256`` 的可选语义不同):
-      * 必须是严格 64-hex SHA-256 —— 防止 caller 把目录名 / build_id /
-        engine 名等非 SHA 字符串当 SHA 绑定。
-      * 只能绑定【实测】build report SHA, 不能从任何元数据推断 —— provenance
-        safety 要求可信度只从机器可验证字段推导。
+    严格 fail-closed (所有可选 SHA 绑定键一律校验):
+      * ``preflight_id`` / ``quality_policy_sha256`` /
+        ``post_render_policy_sha256`` / ``repose_search_sha256`` /
+        ``environment_module_build_report_sha256`` 必须是严格 64-hex SHA-256
+        —— 防止 caller 把目录名 / build_id / engine 名等非 SHA 字符串当 SHA
+        绑定。``production_render_id`` 是公开 API, 即便 caller 端 Pydantic
+        schema 已校验, 函数自身也独立 fail-closed。
+      * 只能绑定【实测】SHA, 不能从任何元数据推断 —— provenance safety 要求
+        可信度只从机器可验证字段推导。
 
-    绑定是【可选】的: 当 ``repose_search_sha256`` /
-    ``environment_module_build_report_sha256`` is None 时, render_id 与
-    既有行为完全相同, 既有 journal 不受影响。
+    绑定是【可选】的: 当所有可选绑定键均为 None 时, render_id 与既有行为
+    完全相同, 既有 journal 不受影响。
     """
     if environment_module_build_report_sha256 is not None:
         _require_64_hex_sha(
@@ -246,10 +250,19 @@ def production_render_id(
         "camera_ids": [camera.camera_id for camera in plan.cameras],
     }
     if preflight_id is not None:
+        _require_64_hex_sha(preflight_id, "preflight_id")
         payload["preflight_id"] = preflight_id
     if quality_policy_sha256 is not None:
+        _require_64_hex_sha(quality_policy_sha256, "quality_policy_sha256")
         payload["quality_policy_sha256"] = quality_policy_sha256
+    if post_render_policy_sha256 is not None:
+        _require_64_hex_sha(
+            post_render_policy_sha256,
+            "post_render_policy_sha256",
+        )
+        payload["post_render_policy_sha256"] = post_render_policy_sha256
     if repose_search_sha256 is not None:
+        _require_64_hex_sha(repose_search_sha256, "repose_search_sha256")
         payload["repose_search_sha256"] = repose_search_sha256
     if build_adapter is not None:
         payload["build_adapter"] = build_adapter
