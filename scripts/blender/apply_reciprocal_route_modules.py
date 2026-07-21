@@ -151,7 +151,7 @@ def _canonical_bytes(payload):
 
 
 def _sha256_bytes(payload):
-    return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _sha256_file(path):

@@ -14,8 +14,10 @@ Blender runtime.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -669,6 +671,30 @@ def test_build_request_build_id_is_canonical_and_matches_validator(
         canary._canonical_json_bytes(payload),
     ).hexdigest()
     assert request.build_id == recomputed
+
+
+def test_blender_runtime_accepts_canonical_host_request(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Blender-side validator must accept the host's canonical request."""
+
+    request = build_reciprocal_route_runtime_request(
+        base_build=base,
+        repo_root=_REPO_ROOT,
+    )
+    script_path = _REPO_ROOT / "scripts/blender/apply_reciprocal_route_modules.py"
+    spec = importlib.util.spec_from_file_location(
+        "_test_apply_reciprocal_route_modules",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace())
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+
+    payload = request.model_dump(mode="json")
+    assert runtime._validate_request(payload) == payload
 
 
 def test_build_request_is_deterministic_across_calls(
