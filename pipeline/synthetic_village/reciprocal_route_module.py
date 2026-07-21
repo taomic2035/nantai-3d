@@ -790,7 +790,7 @@ def _default_central_courtyard_downhill_recipe() -> CentralCourtyardDownhillReci
             connects_to_topology="path-network-003",
         ),
         gallery_post_run_material_slot_id="material-courtyard-timber-01",
-        gallery_guard_material_slot_id="material-courtyard-iron-01",
+        gallery_guard_material_slot_id="material-service-iron-01",
     )
 
 
@@ -975,7 +975,7 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
                 "courtyard-gallery-guard-001",
                 182,
                 SEMANTIC_ID_BY_CLASS["prop"],
-                "material-courtyard-iron-01",
+                "material-service-iron-01",
             ),
         )
     elif module_id == "bridge-deck-crossing":
@@ -1095,7 +1095,7 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
                 "gallery-guard-run-001",
                 200,
                 SEMANTIC_ID_BY_CLASS["prop"],
-                "material-courtyard-iron-01",
+                "material-service-iron-01",
             ),
             (
                 "gallery-side-door-001",
@@ -1129,13 +1129,13 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
                 "forest-boundary-path-fork-001",
                 205,
                 SEMANTIC_ID_BY_CLASS["path"],
-                "material-forest-soil-01",
+                "material-stone-block-01",
             ),
             (
                 "forest-orchard-transition-001",
                 206,
                 SEMANTIC_ID_BY_CLASS["path"],
-                "material-forest-soil-01",
+                "material-stone-block-01",
             ),
             (
                 "forest-retaining-drain-001",
@@ -1147,25 +1147,25 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
                 "forest-trail-shelter-001",
                 208,
                 SEMANTIC_ID_BY_CLASS["building"],
-                "material-forest-timber-01",
+                "material-courtyard-timber-01",
             ),
             (
                 "forest-route-attachment-inbound-001",
                 209,
                 SEMANTIC_ID_BY_CLASS["path"],
-                "material-forest-soil-01",
+                "material-stone-block-01",
             ),
             (
                 "forest-route-attachment-outbound-001",
                 210,
                 SEMANTIC_ID_BY_CLASS["path"],
-                "material-forest-soil-01",
+                "material-stone-block-01",
             ),
             (
                 "forest-edge-vegetation-band-001",
                 211,
                 SEMANTIC_ID_BY_CLASS["prop"],
-                "material-forest-foliage-01",
+                "material-water-01",
             ),
         )
     else:  # lower-valley-uphill
