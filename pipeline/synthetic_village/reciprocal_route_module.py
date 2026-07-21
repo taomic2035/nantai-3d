@@ -896,10 +896,12 @@ REPLACEMENT_OBSTRUCTED_CAMERA_IDS: frozenset[str] = frozenset(
 #: Phase 4.4 (P0-2 item 3): the canonical module order, used to map a
 #: ``role_module_id`` to its 1-based role index for ``RoleCameraId``.
 #: This must match the order validated by ``ReciprocalRouteModulePlan``'s
-#: ``_modules_are_ordered_six`` validator (see ``expected`` tuple there).
-#: Changing this order would change the role index assignment and break
-#: the candidate's ``camera_id`` mapping.
-_RECIPROCAL_ROUTE_MODULE_ORDER: tuple[ModuleId, ...] = (
+#: ``_modules_are_exact_and_ordered`` validator (see ``expected`` tuple
+#: there).  Changing this order would change the role index assignment
+#: and break the candidate's ``camera_id`` mapping.  TDD
+#: ``test_reciprocal_route_module_order_matches_plan_module_order`` locks
+#: the two tuples to the same value so they cannot drift apart.
+RECIPROCAL_ROUTE_MODULE_ORDER: tuple[ModuleId, ...] = (
     "central-courtyard-downhill",
     "bridge-deck-crossing",
     "watermill-tailrace",
@@ -969,6 +971,20 @@ def build_ground_route_replacement_candidate(
             f"the reposeable obstructed cameras "
             f"{sorted(REPLACEMENT_OBSTRUCTED_CAMERA_IDS)}",
         )
+    # Phase 4.4 fail-closed audit (REVIEW-OPUS-006): probe_clearance_min_m
+    # must be a finite real number.  NaN and Inf silently bypass the
+    # ``< MIN_ROUTE_CLEARANCE_M`` comparison (``nan < 2.4`` is False,
+    # ``inf < 2.4`` is False), so a caller passing NaN or Inf would
+    # construct a replacement candidate without verified clearance --
+    # a fail-open hole.  Reject explicitly before the comparison.
+    if not isinstance(probe_clearance_min_m, (int, float)) or not math.isfinite(
+        probe_clearance_min_m,
+    ):
+        raise ReciprocalRouteError(
+            f"probe_clearance_min_m={probe_clearance_min_m!r} must be a "
+            f"finite real number; NaN/Inf silently bypass the clearance "
+            f"gate and are rejected"
+        )
     if probe_clearance_min_m < MIN_ROUTE_CLEARANCE_M:
         raise ReciprocalRouteError(
             f"probe_clearance_min_m={probe_clearance_min_m:.3f} < "
@@ -976,10 +992,10 @@ def build_ground_route_replacement_candidate(
             f"place a standing-eye replacement candidate on a passage "
             f"with insufficient clearance",
         )
-    if role_module_id not in _RECIPROCAL_ROUTE_MODULE_ORDER:
+    if role_module_id not in RECIPROCAL_ROUTE_MODULE_ORDER:
         raise ReciprocalRouteError(
             f"role_module_id {role_module_id!r} is not one of the "
-            f"reciprocal-route modules {_RECIPROCAL_ROUTE_MODULE_ORDER}",
+            f"reciprocal-route modules {RECIPROCAL_ROUTE_MODULE_ORDER}",
         )
     if bound_walkable_node.level != "ground":
         raise ReciprocalRouteError(
@@ -987,7 +1003,7 @@ def build_ground_route_replacement_candidate(
             f"walkable node; got level={bound_walkable_node.level!r}. "
             f"Elevated replacements are not yet supported.",
         )
-    role_index = _RECIPROCAL_ROUTE_MODULE_ORDER.index(role_module_id) + 1
+    role_index = RECIPROCAL_ROUTE_MODULE_ORDER.index(role_module_id) + 1
     camera_id: RoleCameraId = f"camera-reciprocal-role-{role_index:03d}"  # type: ignore[assignment]
     node_pos = bound_walkable_node.node_position_m
     position_m = (

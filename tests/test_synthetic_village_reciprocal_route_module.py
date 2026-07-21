@@ -35,6 +35,7 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     LOWER_VALLEY_UPHILL_INSTANCE_RANGE,
     MIN_ROUTE_CLEARANCE_M,
     RECIPROCAL_ROLE_TARGET_GROUP_IDS,
+    RECIPROCAL_ROUTE_MODULE_ORDER,
     RECIPROCAL_ROUTE_RECIPE_VERSION,
     RECIPROCAL_ROUTE_SCHEMA,
     REPLACEMENT_OBSTRUCTED_CAMERA_IDS,
@@ -1556,3 +1557,64 @@ def test_build_replacement_candidate_can_be_materialized_to_target_pose(
     assert pose.sequence_index == 10
     assert pose.audit_only is False
     assert pose.topology_ref == "path-network-003"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.4 fail-closed audit (REVIEW-OPUS-006) fixes
+# --------------------------------------------------------------------------- #
+
+
+def test_reciprocal_route_module_order_matches_plan_module_order(plan) -> None:
+    """``RECIPROCAL_ROUTE_MODULE_ORDER`` must exactly match the module
+    order validated by ``ReciprocalRouteModulePlan``'s
+    ``_modules_are_exact_and_ordered`` validator.  If the two tuples
+    drift apart, ``build_ground_route_replacement_candidate`` would
+    map a module to the wrong role index, producing a candidate with
+    a wrong ``camera_id``.  This TDD locks the two tuples together."""
+
+    plan_module_order = tuple(module.module_id for module in plan.modules)
+    assert RECIPROCAL_ROUTE_MODULE_ORDER == plan_module_order
+
+
+@pytest.mark.parametrize(
+    "bad_clearance,label",
+    [
+        (float("nan"), "nan"),
+        (float("inf"), "inf"),
+        (float("-inf"), "-inf"),
+    ],
+)
+def test_build_replacement_candidate_rejects_non_finite_clearance(
+    topology, bad_clearance, label,
+) -> None:
+    """``probe_clearance_min_m`` must be a finite real number.  NaN and
+    Inf silently bypass the ``< MIN_ROUTE_CLEARANCE_M`` comparison
+    (``nan < 2.4`` is False, ``inf < 2.4`` is False), so a caller
+    passing NaN or Inf would construct a replacement candidate without
+    verified clearance -- a fail-open hole.  This TDD locks the fix."""
+
+    ground_node = next(
+        node for node in topology.nodes if node.level == "ground"
+    )
+    binding = WalkableNodeBinding(
+        node_id=ground_node.node_id,
+        node_position_m=ground_node.position_m,
+        level="ground",
+    )
+    look_at = (
+        ground_node.position_m[0],
+        ground_node.position_m[1] + 25.0,
+        ground_node.position_m[2] + 1.6,
+    )
+    with pytest.raises(ReciprocalRouteError, match="finite real number"):
+        build_ground_route_replacement_candidate(
+            obstructed_camera_id="camera-ground-route-010",
+            role_module_id="central-courtyard-downhill",
+            topology_ref="path-network-003",
+            bound_walkable_node=binding,
+            look_at_m=look_at,
+            bound_production_plan_sha256="a" * 64,
+            bound_camera_registry_sha256="b" * 64,
+            probe_clearance_min_m=bad_clearance,
+            disclosure="modeled-unverified replacement; fresh preflight required",
+        )
