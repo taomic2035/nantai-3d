@@ -33,8 +33,12 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     FOREST_BOUNDARY_INSTANCE_RANGE,
     GALLERY_UNDERPASS_INSTANCE_RANGE,
     LOWER_VALLEY_UPHILL_INSTANCE_RANGE,
+    MIN_ROUTE_CLEARANCE_M,
+    RECIPROCAL_ROLE_TARGET_GROUP_IDS,
     RECIPROCAL_ROUTE_RECIPE_VERSION,
     RECIPROCAL_ROUTE_SCHEMA,
+    REPLACEMENT_OBSTRUCTED_CAMERA_IDS,
+    ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M,
     WATERMILL_TAILRACE_INSTANCE_RANGE,
     PartLayoutSpec,
     ReciprocalRoleCameraCandidate,
@@ -42,8 +46,11 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     ReciprocalRouteModule,
     ReciprocalRouteModulePart,
     ReciprocalRouteModulePlan,
+    WalkableNodeBinding,
     build_default_reciprocal_route_module_plan,
+    build_ground_route_replacement_candidate,
     canonical_reciprocal_route_module_plan_bytes,
+    materialize_reciprocal_role_candidate,
     reciprocal_route_module_plan_sha256,
     verify_reciprocal_route_module_plan,
 )
@@ -913,3 +920,639 @@ def test_role_camera_candidates_bind_to_production_plan_sha(
     # Sanity: the bound SHAs are NOT all-zero placeholders.
     assert expected_plan_sha != "0" * 64
     assert expected_registry_sha != "0" * 64
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.4 (P0-2 item 1): WalkableNodeBinding schema upgrade.
+# --------------------------------------------------------------------------- #
+
+
+def test_walkable_node_binding_accepts_valid_node() -> None:
+    """A WalkableNodeBinding with a valid node_id (matching
+    ``^[a-z0-9]+(?:-[a-z0-9]+)*$``), finite position, and Literal-locked
+    level must be accepted."""
+
+    binding = WalkableNodeBinding(
+        node_id="central-ground-east",
+        node_position_m=(30.0, 27.0, 71.0),
+        level="ground",
+    )
+    assert binding.node_id == "central-ground-east"
+    assert binding.node_position_m == (30.0, 27.0, 71.0)
+    assert binding.level == "ground"
+
+
+def test_walkable_node_binding_rejects_invalid_node_id_pattern() -> None:
+    """node_id must match ``^[a-z0-9]+(?:-[a-z0-9]+)*$`` (no underscores,
+    no uppercase, no leading dash)."""
+
+    with pytest.raises(ValidationError):
+        WalkableNodeBinding(
+            node_id="Central_Ground_East",  # uppercase + underscore
+            node_position_m=(30.0, 27.0, 71.0),
+            level="ground",
+        )
+
+
+def test_walkable_node_binding_rejects_non_finite_position() -> None:
+    """NaN/Inf in node_position_m must be rejected at schema level."""
+
+    with pytest.raises(ValidationError):
+        WalkableNodeBinding(
+            node_id="central-ground-east",
+            node_position_m=(float("nan"), 27.0, 71.0),
+            level="ground",
+        )
+
+
+def test_walkable_node_binding_rejects_unknown_level() -> None:
+    """level must be Literal-locked to ``"ground"`` or ``"elevated"``;
+    other values (e.g. ``"aerial"``) must be rejected."""
+
+    with pytest.raises(ValidationError):
+        WalkableNodeBinding(
+            node_id="central-ground-east",
+            node_position_m=(30.0, 27.0, 71.0),
+            level="aerial",  # not in Literal
+        )
+
+
+def test_candidate_defaults_to_no_walkable_node_binding(plan) -> None:
+    """Default candidates must have ``bound_walkable_node=None`` so the
+    Phase 4.4 upgrade is additive and does not change Phase 4.2's plan
+    SHA.  Caller chain populates the binding only when a canonical
+    WalkableNode is matched to the candidate's placement."""
+
+    for candidate in plan.role_camera_candidates:
+        assert candidate.bound_walkable_node is None
+
+
+def test_candidate_accepts_walkable_node_binding_within_distance() -> None:
+    """When bound_walkable_node is populated and the candidate's
+    position_m is within ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M of
+    the node, the candidate must be accepted."""
+
+    # Candidate at (40, 30, 71) bound to node at (30, 27, 71):
+    # 3D distance = sqrt(100 + 9 + 0) = ~10.44 m, well under 30 m.
+    candidate = ReciprocalRoleCameraCandidate(
+        role_module_id="central-courtyard-downhill",
+        camera_id="camera-reciprocal-role-001",
+        topology_ref="path-network-003",
+        arc_length_m=None,
+        position_m=(40.0, 30.0, 71.0),
+        look_at_m=(40.0, 5.0, 70.0),
+        eye_height_m=1.6,
+        fov_x_deg=65.0,
+        audit_only=False,
+        disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+        bound_production_plan_sha256="0" * 64,
+        bound_camera_registry_sha256="0" * 64,
+        bound_walkable_node=WalkableNodeBinding(
+            node_id="central-ground-east",
+            node_position_m=(30.0, 27.0, 71.0),
+            level="ground",
+        ),
+    )
+    assert candidate.bound_walkable_node is not None
+    assert candidate.bound_walkable_node.node_id == "central-ground-east"
+
+
+def test_candidate_rejects_walkable_node_beyond_max_distance() -> None:
+    """When bound_walkable_node is populated but the candidate's
+    position_m is beyond ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M of
+    the node, the candidate must be rejected (a candidate claiming to
+    bind a node it is clearly not near)."""
+
+    # Candidate at (40, 30, 71) bound to node at (300, 300, 71):
+    # 3D distance ~370 m, far over 30 m threshold.
+    with pytest.raises(ValidationError, match="ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M"):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 71.0),
+            look_at_m=(40.0, 5.0, 70.0),
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+            bound_walkable_node=WalkableNodeBinding(
+                node_id="central-ground-east",
+                node_position_m=(300.0, 300.0, 71.0),
+                level="ground",
+            ),
+        )
+
+
+def test_plan_sha_changes_when_walkable_node_binding_changes(plan) -> None:
+    """Populating bound_walkable_node on any candidate must change
+    plan_sha256 (content-addressed binding: any field change alters
+    the plan SHA so render identity flows from the binding)."""
+
+    first_candidate = plan.role_camera_candidates[0]
+    bound_candidate = first_candidate.model_copy(
+        update={
+            "bound_walkable_node": WalkableNodeBinding(
+                node_id="central-ground-east",
+                node_position_m=(30.0, 27.0, first_candidate.position_m[2]),
+                level="ground",
+            ),
+        },
+    )
+    bound_plan = plan.model_copy(
+        update={
+            "role_camera_candidates": (
+                bound_candidate,
+                *plan.role_camera_candidates[1:],
+            ),
+        },
+    )
+    assert (
+        reciprocal_route_module_plan_sha256(bound_plan)
+        != reciprocal_route_module_plan_sha256(plan)
+    )
+
+
+def test_walkable_node_max_distance_constant_is_locked() -> None:
+    """ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M must equal
+    ROLE_CAMERA_LOOKAHEAD_M + 5.0 = 30.0 m.  Locking the constant
+    prevents silent drift in the geometry gate."""
+
+    assert ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M == 30.0
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.4 (P0-2 item 2): materialize_reciprocal_role_candidate
+# --------------------------------------------------------------------------- #
+
+
+def test_reciprocal_role_target_group_ids_constant_is_locked() -> None:
+    """RECIPROCAL_ROLE_TARGET_GROUP_IDS must be exactly the four
+    standing-eye-compatible groups, excluding ``audit-overview`` (which
+    is an aerial overview group, not a pedestrian viewpoint).  Locking
+    the set prevents silent admission of audit-overview."""
+
+    assert RECIPROCAL_ROLE_TARGET_GROUP_IDS == frozenset(
+        {"ground-route", "elevated-pedestrian", "perimeter-inward", "environment-corridor"}
+    )
+    assert "audit-overview" not in RECIPROCAL_ROLE_TARGET_GROUP_IDS
+
+
+def test_materialize_reciprocal_role_candidate_produces_valid_ground_route_pose(
+    plan,
+) -> None:
+    """Materializing a candidate to ``ground-route`` produces a
+    ``ProductionCameraPose`` whose placement, disclosure, topology_ref,
+    eye_height, and FOV come from the candidate, whose ``audit_only``
+    is ``False`` (locked by candidate schema + non-audit group), and
+    whose ``intrinsics`` + ``c2w_opencv`` are computed by the same
+    private ``_pose`` helper used by the 180-camera plan."""
+
+    candidate = plan.role_camera_candidates[0]
+    pose = materialize_reciprocal_role_candidate(
+        candidate,
+        target_group_id="ground-route",
+        target_sequence_index=180,
+        target_camera_id="camera-ground-route-180",
+    )
+    assert pose.camera_id == "camera-ground-route-180"
+    assert pose.group_id == "ground-route"
+    assert pose.sequence_index == 180
+    assert pose.topology_ref == candidate.topology_ref
+    assert pose.disclosure == candidate.disclosure
+    assert pose.eye_height_m == candidate.eye_height_m
+    assert pose.fov_x_deg == candidate.fov_x_deg
+    assert pose.audit_only is False
+    # Position is quantized to 3 decimals via _q3 (matches 180-camera plan).
+    for axis_idx in range(3):
+        assert round(pose.position_m[axis_idx], 3) == pose.position_m[axis_idx]
+        assert round(pose.look_at_m[axis_idx], 3) == pose.look_at_m[axis_idx]
+    # Intrinsics + c2w_opencv are finite and non-identity (computed by
+    # _look_at_c2w + _intrinsics).  c2w_opencv is a 4x4 finite matrix.
+    assert len(pose.c2w_opencv) == 4
+    assert all(len(row) == 4 for row in pose.c2w_opencv)
+    # The pose's arc_length_m is carried through (None for default candidates).
+    assert pose.arc_length_m is None
+
+
+@pytest.mark.parametrize(
+    "target_group_id,target_camera_id",
+    [
+        ("elevated-pedestrian", "camera-elevated-pedestrian-180"),
+        ("perimeter-inward", "camera-perimeter-inward-180"),
+        ("environment-corridor", "camera-environment-corridor-180"),
+    ],
+)
+def test_materialize_reciprocal_role_candidate_accepts_all_non_audit_groups(
+    plan,
+    target_group_id,
+    target_camera_id,
+) -> None:
+    """The helper accepts every group in
+    ``RECIPROCAL_ROLE_TARGET_GROUP_IDS`` (every standing-eye-compatible
+    group) and produces a pose whose ``group_id`` matches the request."""
+
+    candidate = plan.role_camera_candidates[0]
+    pose = materialize_reciprocal_role_candidate(
+        candidate,
+        target_group_id=target_group_id,
+        target_sequence_index=180,
+        target_camera_id=target_camera_id,
+    )
+    assert pose.group_id == target_group_id
+    assert pose.camera_id == target_camera_id
+    assert pose.audit_only is False
+
+
+def test_materialize_reciprocal_role_candidate_rejects_audit_overview_group(
+    plan,
+) -> None:
+    """``audit-overview`` is an aerial overview group (altitude ~190 m),
+    not a pedestrian viewpoint (1.6 m).  Materializing a standing-eye
+    candidate as audit-overview would silently lie about the viewpoint,
+    so the helper must fail-closed with ``ReciprocalRouteError``."""
+
+    candidate = plan.role_camera_candidates[0]
+    with pytest.raises(ReciprocalRouteError, match="audit-overview"):
+        materialize_reciprocal_role_candidate(
+            candidate,
+            target_group_id="audit-overview",
+            target_sequence_index=180,
+            target_camera_id="camera-audit-overview-180",
+        )
+
+
+def test_materialize_reciprocal_role_candidate_rejects_invalid_target_camera_id_pattern(
+    plan,
+) -> None:
+    """The ``target_camera_id`` must match the ``ProductionCameraPose``
+    camera_id regex.  Passing a candidate-style id
+    (``camera-reciprocal-role-001``) must be rejected by the
+    ``ProductionCameraPose`` validator inside ``_pose``."""
+
+    candidate = plan.role_camera_candidates[0]
+    with pytest.raises(ValidationError):
+        materialize_reciprocal_role_candidate(
+            candidate,
+            target_group_id="ground-route",
+            target_sequence_index=180,
+            target_camera_id="camera-reciprocal-role-001",
+        )
+
+
+@pytest.mark.parametrize("bad_sequence_index", [0, 181, -1, 200])
+def test_materialize_reciprocal_role_candidate_rejects_sequence_index_out_of_range(
+    plan,
+    bad_sequence_index,
+) -> None:
+    """``sequence_index`` must be in ``[1, 180]`` (the production camera
+    count).  Out-of-range values must be rejected by the
+    ``ProductionCameraPose`` validator inside ``_pose``."""
+
+    candidate = plan.role_camera_candidates[0]
+    with pytest.raises(ValidationError):
+        materialize_reciprocal_role_candidate(
+            candidate,
+            target_group_id="ground-route",
+            target_sequence_index=bad_sequence_index,
+            target_camera_id="camera-ground-route-180",
+        )
+
+
+def test_materialize_reciprocal_role_candidate_quantizes_position_to_3_decimals(
+    plan,
+) -> None:
+    """The materialized pose's ``position_m`` + ``look_at_m`` must be
+    quantized to 3 decimals via ``_q3`` (same as the 180-camera plan).
+    The default plan's candidates are built from
+    ``terrain_height_m`` whose values may have >3 decimal places; the
+    materialization must round them so the pose is byte-stable across
+    processes."""
+
+    from pipeline.synthetic_village.camera_plan import _q3
+
+    candidate = plan.role_camera_candidates[0]
+    pose = materialize_reciprocal_role_candidate(
+        candidate,
+        target_group_id="ground-route",
+        target_sequence_index=180,
+        target_camera_id="camera-ground-route-180",
+    )
+    expected_position = tuple(_q3(v) for v in candidate.position_m)
+    expected_look_at = tuple(_q3(v) for v in candidate.look_at_m)
+    assert pose.position_m == expected_position
+    assert pose.look_at_m == expected_look_at
+
+
+def test_materialize_reciprocal_role_candidate_computes_intrinsics_and_c2w_consistently(
+    plan,
+) -> None:
+    """The materialized pose's ``intrinsics`` + ``c2w_opencv`` must be
+    computed by the same private ``_intrinsics`` + ``_look_at_c2w``
+    helpers used by the 180-camera plan, so the materialized pose is
+    byte-identical to what the plan would have produced for the same
+    placement."""
+
+    import numpy as np
+
+    from pipeline.synthetic_village.camera_plan import _intrinsics, _look_at_c2w, _q3
+
+    candidate = plan.role_camera_candidates[0]
+    pose = materialize_reciprocal_role_candidate(
+        candidate,
+        target_group_id="ground-route",
+        target_sequence_index=180,
+        target_camera_id="camera-ground-route-180",
+    )
+    # Intrinsics: fx == fy == _intrinsics(fov_x_deg).fx (the helper builds
+    # a square-focal intrinsics from FOV).
+    expected_intrinsics = _intrinsics(candidate.fov_x_deg)
+    assert pose.intrinsics.fx == expected_intrinsics.fx
+    assert pose.intrinsics.fy == expected_intrinsics.fy
+    # c2w_opencv: matches _look_at_c2w(quantized_position, quantized_look_at).
+    position_q = np.array(
+        tuple(_q3(v) for v in candidate.position_m), dtype=float,
+    )
+    look_q = np.array(
+        tuple(_q3(v) for v in candidate.look_at_m), dtype=float,
+    )
+    expected_c2w = _look_at_c2w(position_q, look_q)
+    assert pose.c2w_opencv == expected_c2w
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.4 (P0-2 item 3): build_ground_route_replacement_candidate
+# --------------------------------------------------------------------------- #
+
+
+def test_replacement_obstructed_camera_ids_constant_is_locked() -> None:
+    """``REPLACEMENT_OBSTRUCTED_CAMERA_IDS`` must be exactly the two
+    cameras rejected by the 180-camera clearance audit
+    (REVIEW-CODEX-011).  Locking the set prevents silent admission of
+    cameras that were not actually rejected."""
+
+    assert REPLACEMENT_OBSTRUCTED_CAMERA_IDS == frozenset(
+        {"camera-ground-route-010", "camera-ground-route-039"}
+    )
+
+
+def test_min_route_clearance_m_constant_is_locked() -> None:
+    """``MIN_ROUTE_CLEARANCE_M`` must equal 2.4 m, matching the probe's
+    threshold.  Locking the constant prevents silent drift in the
+    clearance gate."""
+
+    assert MIN_ROUTE_CLEARANCE_M == 2.4
+
+
+def test_build_replacement_candidate_produces_valid_candidate(
+    plan, topology,
+) -> None:
+    """Building a replacement candidate with valid inputs produces a
+    ``ReciprocalRoleCameraCandidate`` whose ``position_m`` is the bound
+    walkable node's ground position + standing-eye height, whose
+    ``camera_id`` maps to the module's role index, and whose
+    ``bound_walkable_node`` is populated."""
+
+    ground_node = next(
+        node for node in topology.nodes
+        if node.level == "ground" and node.node_id == "central-ground-east"
+    )
+    binding = WalkableNodeBinding(
+        node_id=ground_node.node_id,
+        node_position_m=ground_node.position_m,
+        level="ground",
+    )
+    look_at = (
+        ground_node.position_m[0],
+        ground_node.position_m[1] + 25.0,
+        ground_node.position_m[2] + 1.6,
+    )
+    candidate = build_ground_route_replacement_candidate(
+        obstructed_camera_id="camera-ground-route-010",
+        role_module_id="central-courtyard-downhill",
+        topology_ref="path-network-003",
+        bound_walkable_node=binding,
+        look_at_m=look_at,
+        bound_production_plan_sha256="a" * 64,
+        bound_camera_registry_sha256="b" * 64,
+        probe_clearance_min_m=2.475,
+        disclosure=(
+            "modeled-unverified replacement for camera-ground-route-010 on "
+            "central-courtyard-downhill passage; fresh preflight required"
+        ),
+    )
+    # position_m = node_position + (0, 0, 1.6)
+    assert candidate.position_m == (
+        ground_node.position_m[0],
+        ground_node.position_m[1],
+        ground_node.position_m[2] + 1.6,
+    )
+    # camera_id maps to role index 1 (central-courtyard-downhill is first)
+    assert candidate.camera_id == "camera-reciprocal-role-001"
+    # bound_walkable_node is populated
+    assert candidate.bound_walkable_node is not None
+    assert candidate.bound_walkable_node.node_id == "central-ground-east"
+    # role_module_id, topology_ref, disclosure carried verbatim
+    assert candidate.role_module_id == "central-courtyard-downhill"
+    assert candidate.topology_ref == "path-network-003"
+    assert candidate.fov_x_deg == 65.0
+    assert candidate.eye_height_m == 1.6
+    assert candidate.audit_only is False
+
+
+@pytest.mark.parametrize("obstructed_id", ["camera-ground-route-010", "camera-ground-route-039"])
+def test_build_replacement_candidate_accepts_both_obstructed_ids(
+    plan, topology, obstructed_id,
+) -> None:
+    """Both obstructed camera ids from the clearance audit are accepted."""
+
+    ground_node = next(
+        node for node in topology.nodes
+        if node.level == "ground" and node.node_id == "central-ground-east"
+    )
+    binding = WalkableNodeBinding(
+        node_id=ground_node.node_id,
+        node_position_m=ground_node.position_m,
+        level="ground",
+    )
+    look_at = (
+        ground_node.position_m[0],
+        ground_node.position_m[1] + 25.0,
+        ground_node.position_m[2] + 1.6,
+    )
+    candidate = build_ground_route_replacement_candidate(
+        obstructed_camera_id=obstructed_id,
+        role_module_id="central-courtyard-downhill",
+        topology_ref="path-network-003",
+        bound_walkable_node=binding,
+        look_at_m=look_at,
+        bound_production_plan_sha256="a" * 64,
+        bound_camera_registry_sha256="b" * 64,
+        probe_clearance_min_m=2.475,
+        disclosure=(
+            f"modeled-unverified replacement for {obstructed_id}; "
+            f"fresh preflight required"
+        ),
+    )
+    assert candidate.bound_walkable_node is not None
+
+
+def test_build_replacement_candidate_rejects_unknown_obstructed_camera_id(
+    topology,
+) -> None:
+    """An obstructed_camera_id not in
+    ``REPLACEMENT_OBSTRUCTED_CAMERA_IDS`` must be rejected -- we will
+    not search a replacement for a camera that was not actually
+    rejected by the clearance audit."""
+
+    ground_node = next(
+        node for node in topology.nodes if node.level == "ground"
+    )
+    binding = WalkableNodeBinding(
+        node_id=ground_node.node_id,
+        node_position_m=ground_node.position_m,
+        level="ground",
+    )
+    look_at = (
+        ground_node.position_m[0],
+        ground_node.position_m[1] + 25.0,
+        ground_node.position_m[2] + 1.6,
+    )
+    with pytest.raises(ReciprocalRouteError, match="reposeable obstructed"):
+        build_ground_route_replacement_candidate(
+            obstructed_camera_id="camera-ground-route-099",
+            role_module_id="central-courtyard-downhill",
+            topology_ref="path-network-003",
+            bound_walkable_node=binding,
+            look_at_m=look_at,
+            bound_production_plan_sha256="a" * 64,
+            bound_camera_registry_sha256="b" * 64,
+            probe_clearance_min_m=2.475,
+            disclosure="modeled-unverified replacement; fresh preflight required",
+        )
+
+
+def test_build_replacement_candidate_rejects_insufficient_clearance(
+    topology,
+) -> None:
+    """``probe_clearance_min_m < MIN_ROUTE_CLEARANCE_M`` (2.4 m) must be
+    rejected -- a passage with insufficient clearance cannot host a
+    standing-eye candidate."""
+
+    ground_node = next(
+        node for node in topology.nodes if node.level == "ground"
+    )
+    binding = WalkableNodeBinding(
+        node_id=ground_node.node_id,
+        node_position_m=ground_node.position_m,
+        level="ground",
+    )
+    look_at = (
+        ground_node.position_m[0],
+        ground_node.position_m[1] + 25.0,
+        ground_node.position_m[2] + 1.6,
+    )
+    with pytest.raises(ReciprocalRouteError, match="insufficient clearance"):
+        build_ground_route_replacement_candidate(
+            obstructed_camera_id="camera-ground-route-010",
+            role_module_id="central-courtyard-downhill",
+            topology_ref="path-network-003",
+            bound_walkable_node=binding,
+            look_at_m=look_at,
+            bound_production_plan_sha256="a" * 64,
+            bound_camera_registry_sha256="b" * 64,
+            probe_clearance_min_m=2.0,
+            disclosure="modeled-unverified replacement; fresh preflight required",
+        )
+
+
+def test_build_replacement_candidate_rejects_elevated_walkable_node(
+    topology,
+) -> None:
+    """An elevated walkable node must be rejected -- ground-route
+    replacements require a ground-level node (standing-eye on a path
+    network), not an elevated walkway."""
+
+    elevated_node = next(
+        node for node in topology.nodes if node.level == "elevated"
+    )
+    binding = WalkableNodeBinding(
+        node_id=elevated_node.node_id,
+        node_position_m=elevated_node.position_m,
+        level="elevated",
+    )
+    look_at = (
+        elevated_node.position_m[0],
+        elevated_node.position_m[1] + 25.0,
+        elevated_node.position_m[2],
+    )
+    with pytest.raises(ReciprocalRouteError, match="ground-level walkable node"):
+        build_ground_route_replacement_candidate(
+            obstructed_camera_id="camera-ground-route-010",
+            role_module_id="central-courtyard-downhill",
+            topology_ref="path-network-003",
+            bound_walkable_node=binding,
+            look_at_m=look_at,
+            bound_production_plan_sha256="a" * 64,
+            bound_camera_registry_sha256="b" * 64,
+            probe_clearance_min_m=2.475,
+            disclosure="modeled-unverified replacement; fresh preflight required",
+        )
+
+
+def test_build_replacement_candidate_can_be_materialized_to_target_pose(
+    plan, topology,
+) -> None:
+    """The replacement candidate can be materialized via
+    ``materialize_reciprocal_role_candidate`` to a ``ProductionCameraPose``
+    whose ``camera_id`` is the obstructed camera's id (e.g.,
+    ``camera-ground-route-010``) and whose ``group_id`` is ``ground-route``.
+
+    This closes the P0-2 item 3 loop: the replacement candidate built by
+    ``build_ground_route_replacement_candidate`` can be fed into
+    ``materialize_reciprocal_role_candidate`` to produce the
+    ``ProductionCameraPose`` that replaces the obstructed pose in the
+    180-camera plan."""
+
+    ground_node = next(
+        node for node in topology.nodes
+        if node.level == "ground" and node.node_id == "central-ground-east"
+    )
+    binding = WalkableNodeBinding(
+        node_id=ground_node.node_id,
+        node_position_m=ground_node.position_m,
+        level="ground",
+    )
+    look_at = (
+        ground_node.position_m[0],
+        ground_node.position_m[1] + 25.0,
+        ground_node.position_m[2] + 1.6,
+    )
+    candidate = build_ground_route_replacement_candidate(
+        obstructed_camera_id="camera-ground-route-010",
+        role_module_id="central-courtyard-downhill",
+        topology_ref="path-network-003",
+        bound_walkable_node=binding,
+        look_at_m=look_at,
+        bound_production_plan_sha256="a" * 64,
+        bound_camera_registry_sha256="b" * 64,
+        probe_clearance_min_m=2.475,
+        disclosure=(
+            "modeled-unverified replacement for camera-ground-route-010; "
+            "fresh preflight + six-layer render required"
+        ),
+    )
+    pose = materialize_reciprocal_role_candidate(
+        candidate,
+        target_group_id="ground-route",
+        target_sequence_index=10,
+        target_camera_id="camera-ground-route-010",
+    )
+    assert pose.camera_id == "camera-ground-route-010"
+    assert pose.group_id == "ground-route"
+    assert pose.sequence_index == 10
+    assert pose.audit_only is False
+    assert pose.topology_ref == "path-network-003"

@@ -75,7 +75,10 @@ from .environment_module import (
     canonical_environment_module_plan_bytes,
 )
 from .production_profile import (
+    CameraGroupId,
     ProductionCameraPlan,
+    ProductionCameraPose,
+    _pose,
     canonical_production_plan_bytes,
     production_camera_registry_digest,
 )
@@ -650,6 +653,58 @@ ROLE_CAMERA_FOV_X_DEG = 65.0
 #: consistent with how the 180-camera plan places ground-route cameras.
 ROLE_CAMERA_LOOKAHEAD_M = 25.0
 
+#: Phase 4.4 (P0-2 item 1): maximum 3D distance from a candidate's
+#: ``position_m`` to its ``bound_walkable_node_position_m`` when the
+#: optional canonical walkable-node binding is populated.  A standing-eye
+#: candidate placed at the role camera lookahead (25 m) may legitimately
+#: sit up to ~30 m from the closest walkable node along the same route,
+#: so the threshold is ``ROLE_CAMERA_LOOKAHEAD_M + 5.0 m`` to allow a
+#: small over-scan without admitting candidates that are clearly off the
+#: bound topology.  This is a geometry gate, not a trust gate: it does
+#: not promote ``modeled-unverified`` geometry to ``measured``.
+ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M = ROLE_CAMERA_LOOKAHEAD_M + 5.0
+
+
+class WalkableNodeBinding(FrozenModel):
+    """Phase 4.4 (P0-2 item 1): optional canonical topology binding.
+
+    When populated, this binds a ``ReciprocalRoleCameraCandidate`` to a
+    specific ``WalkableNode`` in ``ElevatedTopologyPlan``.  The binding
+    is content-addressed: it stores the node's ``node_id`` (pattern-
+    validated), ``position_m`` (3-tuple of finite scene-local metres),
+    and ``level`` (Literal-locked to ``"ground"`` or ``"elevated"``).
+
+    The binding does NOT replace ``topology_ref`` (which still names the
+    path network the candidate is placed along for backward compat with
+    Phase 4.2 callers).  It augments the candidate with a canonical
+    node reference so downstream §3 callers can verify the candidate's
+    placement against the surveyed topology graph rather than only the
+    path-network string.
+
+    The candidate's ``position_m`` to ``node_position_m`` 3D distance
+    must be within ``ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M``; this
+    is checked by ``ReciprocalRoleCameraCandidate``'s validator, not
+    here, because the distance depends on the candidate's position
+    which lives on the parent model.
+    """
+
+    node_id: str = Field(
+        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        min_length=1,
+        max_length=64,
+    )
+    node_position_m: tuple[float, float, float]
+    level: Literal["ground", "elevated"]
+
+    @model_validator(mode="after")
+    def _node_position_is_finite(self) -> WalkableNodeBinding:
+        for axis, value in zip(("x", "y", "z"), self.node_position_m, strict=True):
+            if not math.isfinite(value):
+                raise ValueError(f"node_position_m {axis} must be finite")
+        if len(self.node_position_m) != 3:
+            raise ValueError("node_position_m must be a 3-tuple")
+        return self
+
 
 class ReciprocalRoleCameraCandidate(FrozenModel):
     """One standing-eye camera candidate for one reciprocal role.
@@ -667,6 +722,16 @@ class ReciprocalRoleCameraCandidate(FrozenModel):
     from the canonical pose computation.  The candidate also binds to
     the reciprocal-route module plan via ``role_module_id`` so a render
     cannot claim a role camera without the matching module plan.
+
+    Phase 4.4 (P0-2 item 1): ``bound_walkable_node`` is the optional
+    canonical topology upgrade.  When ``None`` (default), the candidate
+    is bound only to its ``topology_ref`` path-network string (Phase 4.2
+    behaviour).  When populated, the candidate additionally binds to a
+    specific ``WalkableNode`` in ``ElevatedTopologyPlan`` via the
+    node's ``node_id`` + ``position_m`` + ``level`` triple, and the
+    candidate's ``position_m`` to ``node_position_m`` 3D distance must
+    be within ``ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M``.  The
+    binding is content-addressed: any field change alters the plan SHA.
     """
 
     role_module_id: ModuleId
@@ -685,6 +750,7 @@ class ReciprocalRoleCameraCandidate(FrozenModel):
     disclosure: str = Field(min_length=10)
     bound_production_plan_sha256: Sha256
     bound_camera_registry_sha256: Sha256
+    bound_walkable_node: WalkableNodeBinding | None = None
 
     @model_validator(mode="after")
     def _candidate_is_finite_and_standing_eye(self) -> ReciprocalRoleCameraCandidate:
@@ -705,7 +771,245 @@ class ReciprocalRoleCameraCandidate(FrozenModel):
                 "position_m and look_at_m must differ by at least 1.0 m "
                 "to form a valid standing-eye view direction",
             )
+        # Phase 4.4 (P0-2 item 1): if the optional canonical walkable
+        # node binding is populated, the candidate's position must be
+        # within the standing-eye lookahead envelope of the bound node.
+        # This is a geometry gate that catches a candidate claiming to
+        # bind a node it is clearly not near -- it does NOT promote the
+        # candidate to measured/metric/aligned.
+        if self.bound_walkable_node is not None:
+            distance = math.dist(
+                self.position_m,
+                self.bound_walkable_node.node_position_m,
+            )
+            if distance > ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M:
+                raise ValueError(
+                    f"candidate position_m to bound_walkable_node "
+                    f"distance {distance:.3f} m exceeds "
+                    f"ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M "
+                    f"{ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M:.3f} m",
+                )
         return self
+
+
+#: Phase 4.4 (P0-2 item 2): the set of production ``CameraGroupId`` values a
+#: reciprocal-role candidate may legally materialize into.  ``audit-overview``
+#: is excluded because audit-overview poses are aerial (altitude ~190 m), not
+#: standing-eye (1.6 m); materializing a 1.6 m candidate as an aerial overview
+#: would silently lie about the camera's true viewpoint.  This is a trust gate:
+#: it does not promote ``modeled-unverified`` geometry to ``measured``, but it
+#: does fail-closed a clearly-wrong group assignment.
+RECIPROCAL_ROLE_TARGET_GROUP_IDS: frozenset[CameraGroupId] = frozenset(
+    {"ground-route", "elevated-pedestrian", "perimeter-inward", "environment-corridor"}
+)
+
+
+def materialize_reciprocal_role_candidate(
+    candidate: ReciprocalRoleCameraCandidate,
+    *,
+    target_group_id: CameraGroupId,
+    target_sequence_index: int,
+    target_camera_id: str,
+) -> ProductionCameraPose:
+    """Phase 4.4 (P0-2 item 2): materialize a candidate to a ``ProductionCameraPose``.
+
+    The candidate carries standing-eye placement (``position_m``, ``look_at_m``,
+    ``eye_height_m``, ``fov_x_deg``, ``disclosure``) and content-addressed
+    binding to the production camera plan + camera registry, but it is NOT a
+    ``ProductionCameraPose``: it omits ``intrinsics`` and ``c2w_opencv`` because
+    those are caller-computed.  This helper computes them via the same private
+    ``_pose`` used by the 180-camera plan (``_look_at_c2w`` + ``_intrinsics``
+    from ``camera_plan``, re-exported via ``production_profile``), so the
+    materialized pose is byte-identical to what the 180-camera plan would have
+    produced for the same placement.
+
+    The candidate's ``camera_id`` (``RoleCameraId``, Literal-locked to
+    ``camera-reciprocal-role-001``..``006``) is NOT carried to the production
+    pose because ``ProductionCameraPose.camera_id``'s regex rejects the
+    ``reciprocal-role`` prefix.  The caller must supply a ``target_camera_id``
+    matching ``^camera-(?:ground-route|elevated-pedestrian|perimeter-inward|
+    environment-corridor|audit-overview)-[0-9]{3}$`` and a
+    ``target_sequence_index`` in ``[1, 180]``; the resulting pose's
+    ``camera_id``/``sequence_index``/``group_id`` come from these arguments,
+    NOT from the candidate.
+
+    ``target_group_id == "audit-overview"`` is rejected: a 1.6 m standing-eye
+    candidate cannot honestly materialize as a ~190 m aerial overview.  The
+    candidate's ``audit_only: Literal[False] = False`` is honoured verbatim --
+    the materialized pose carries ``audit_only=False`` regardless of group
+    (this is what ``_pose`` already does for any non-audit-overview group).
+
+    The resulting pose carries the candidate's ``disclosure`` verbatim -- no
+    trust is added or implied.  The pose's content addressing via
+    ``canonical_production_plan_bytes`` is the caller's responsibility, not
+    this helper's; the helper only constructs a single pose, not a full plan.
+    """
+    if target_group_id == "audit-overview":
+        raise ReciprocalRouteError(
+            "refusing to materialize a standing-eye candidate as "
+            "audit-overview: audit-overview is an aerial overview group "
+            "(altitude ~190 m), not a pedestrian viewpoint (1.6 m)",
+        )
+    if target_group_id not in RECIPROCAL_ROLE_TARGET_GROUP_IDS:
+        # Defensive: CameraGroupId is a Literal so this branch should be
+        # unreachable for valid type-checked callers, but a runtime caller
+        # passing a raw string would otherwise reach ``_pose`` and produce
+        # a ProductionCameraPose with an unexpected group_id.
+        raise ReciprocalRouteError(
+            f"target_group_id {target_group_id!r} is not one of the "
+            f"reciprocal-role target groups "
+            f"{sorted(RECIPROCAL_ROLE_TARGET_GROUP_IDS)}",
+        )
+    return _pose(
+        camera_id=target_camera_id,
+        group_id=target_group_id,
+        sequence_index=target_sequence_index,
+        topology_ref=candidate.topology_ref,
+        arc_length_m=candidate.arc_length_m,
+        position=candidate.position_m,
+        look_at=candidate.look_at_m,
+        eye_height_m=candidate.eye_height_m,
+        fov_x_deg=candidate.fov_x_deg,
+        disclosure=candidate.disclosure,
+    )
+
+
+#: Phase 4.4 (P0-2 item 3): minimum route clearance (metres) that a
+#: reciprocal-route module passage must provide before a replacement
+#: candidate may be placed on it.  Matches the probe's threshold in
+#: ``scripts/blender/probe_reciprocal_route_modules.py`` (MIN_ROUTE_CLEARANCE_M).
+#: This is a geometry gate, not a trust gate: it verifies the passage has
+#: standing-eye clearance but does NOT promote the geometry to measured/metric.
+MIN_ROUTE_CLEARANCE_M = 2.4
+
+#: Phase 4.4 (P0-2 item 3): the set of obstructed production camera ids
+#: that may be replaced by a reciprocal-role candidate.  These are the
+#: two cameras that the 180-camera clearance audit (REVIEW-CODEX-011)
+#: rejected due to near-surface occlusion (bridge-lower-001 / stone-deck-
+#: parapets-piers at 0.433-0.574 m).  A replacement candidate sits on a
+#: reciprocal-route module passage whose clearance has been verified by
+#: the Phase 4.3 probe (``probe_clearance_min_m >= MIN_ROUTE_CLEARANCE_M``).
+REPLACEMENT_OBSTRUCTED_CAMERA_IDS: frozenset[str] = frozenset(
+    {"camera-ground-route-010", "camera-ground-route-039"}
+)
+
+#: Phase 4.4 (P0-2 item 3): the canonical module order, used to map a
+#: ``role_module_id`` to its 1-based role index for ``RoleCameraId``.
+#: This must match the order validated by ``ReciprocalRouteModulePlan``'s
+#: ``_modules_are_ordered_six`` validator (see ``expected`` tuple there).
+#: Changing this order would change the role index assignment and break
+#: the candidate's ``camera_id`` mapping.
+_RECIPROCAL_ROUTE_MODULE_ORDER: tuple[ModuleId, ...] = (
+    "central-courtyard-downhill",
+    "bridge-deck-crossing",
+    "watermill-tailrace",
+    "covered-gallery-underpass",
+    "forest-orchard-boundary",
+    "lower-valley-uphill",
+)
+
+
+def build_ground_route_replacement_candidate(
+    *,
+    obstructed_camera_id: str,
+    role_module_id: ModuleId,
+    topology_ref: str,
+    bound_walkable_node: WalkableNodeBinding,
+    look_at_m: tuple[float, float, float],
+    bound_production_plan_sha256: Sha256,
+    bound_camera_registry_sha256: Sha256,
+    probe_clearance_min_m: float,
+    disclosure: str,
+) -> ReciprocalRoleCameraCandidate:
+    """Phase 4.4 (P0-2 item 3): build a replacement candidate for an obstructed ground-route camera.
+
+    The 180-camera clearance audit (REVIEW-CODEX-011) rejected
+    ``camera-ground-route-010`` and ``camera-ground-route-039`` due to
+    near-surface occlusion.  This helper builds a replacement
+    ``ReciprocalRoleCameraCandidate`` that sits on a reciprocal-route
+    module passage whose clearance has been verified by the Phase 4.3
+    probe (``probe_clearance_min_m >= MIN_ROUTE_CLEARANCE_M``).
+
+    The candidate's ``position_m`` is derived from the bound walkable
+    node's ground position + standing-eye height (1.6 m).  The candidate's
+    ``look_at_m`` is supplied by the caller (computed from the module's
+    route direction).  The candidate's ``camera_id`` reuses the role's
+    ``RoleCameraId`` (e.g., ``camera-reciprocal-role-001`` for
+    ``central-courtyard-downhill``); this is safe because the replacement
+    candidate is standalone, NOT part of the plan's
+    ``role_camera_candidates`` tuple.  When materialized via
+    ``materialize_reciprocal_role_candidate``, the resulting
+    ``ProductionCameraPose`` carries the obstructed camera's id (e.g.,
+    ``camera-ground-route-010``) as ``target_camera_id``.
+
+    Fail-closed contract:
+
+      * ``obstructed_camera_id`` must be in
+        ``REPLACEMENT_OBSTRUCTED_CAMERA_IDS``.  An unknown id is rejected
+        -- we will not search a replacement for a camera that was not
+        actually rejected by the clearance audit.
+      * ``probe_clearance_min_m`` must be ``>= MIN_ROUTE_CLEARANCE_M``
+        (2.4 m).  A passage with unverified or insufficient clearance
+        cannot host a standing-eye candidate.  The caller MUST supply the
+        real measured value from the Phase 4.3 probe report; inferring
+        clearance from file names or module names is forbidden.
+      * The candidate's ``position_m`` to ``bound_walkable_node.node_position_m``
+        3D distance is exactly ``ROLE_CAMERA_EYE_HEIGHT_M`` (1.6 m), well
+        within ``ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M`` (30.0 m).  The
+        ``ReciprocalRoleCameraCandidate`` validator enforces this.
+
+    The resulting candidate is ``modeled-unverified``: it does NOT promote
+    the geometry to measured/metric/aligned.  Acceptance requires fresh
+    preflight + six-layer render + post-render policy, which is the §3
+    caller's responsibility.
+    """
+    if obstructed_camera_id not in REPLACEMENT_OBSTRUCTED_CAMERA_IDS:
+        raise ReciprocalRouteError(
+            f"obstructed_camera_id {obstructed_camera_id!r} is not one of "
+            f"the reposeable obstructed cameras "
+            f"{sorted(REPLACEMENT_OBSTRUCTED_CAMERA_IDS)}",
+        )
+    if probe_clearance_min_m < MIN_ROUTE_CLEARANCE_M:
+        raise ReciprocalRouteError(
+            f"probe_clearance_min_m={probe_clearance_min_m:.3f} < "
+            f"MIN_ROUTE_CLEARANCE_M={MIN_ROUTE_CLEARANCE_M:.3f}; cannot "
+            f"place a standing-eye replacement candidate on a passage "
+            f"with insufficient clearance",
+        )
+    if role_module_id not in _RECIPROCAL_ROUTE_MODULE_ORDER:
+        raise ReciprocalRouteError(
+            f"role_module_id {role_module_id!r} is not one of the "
+            f"reciprocal-route modules {_RECIPROCAL_ROUTE_MODULE_ORDER}",
+        )
+    if bound_walkable_node.level != "ground":
+        raise ReciprocalRouteError(
+            f"build_ground_route_replacement_candidate requires a ground-level "
+            f"walkable node; got level={bound_walkable_node.level!r}. "
+            f"Elevated replacements are not yet supported.",
+        )
+    role_index = _RECIPROCAL_ROUTE_MODULE_ORDER.index(role_module_id) + 1
+    camera_id: RoleCameraId = f"camera-reciprocal-role-{role_index:03d}"  # type: ignore[assignment]
+    node_pos = bound_walkable_node.node_position_m
+    position_m = (
+        node_pos[0],
+        node_pos[1],
+        node_pos[2] + ROLE_CAMERA_EYE_HEIGHT_M,
+    )
+    return ReciprocalRoleCameraCandidate(
+        role_module_id=role_module_id,
+        camera_id=camera_id,
+        topology_ref=topology_ref,
+        arc_length_m=None,
+        position_m=position_m,
+        look_at_m=look_at_m,
+        eye_height_m=ROLE_CAMERA_EYE_HEIGHT_M,
+        fov_x_deg=ROLE_CAMERA_FOV_X_DEG,
+        audit_only=False,
+        disclosure=disclosure,
+        bound_production_plan_sha256=bound_production_plan_sha256,
+        bound_camera_registry_sha256=bound_camera_registry_sha256,
+        bound_walkable_node=bound_walkable_node,
+    )
 
 
 class ReciprocalRouteModulePart(FrozenModel):
