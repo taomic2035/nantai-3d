@@ -39,9 +39,17 @@ import json
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from . import canary
+from .environment_module_runtime import _MATERIAL_BINDING_ROWS
 from .reciprocal_route_module import (
     ReciprocalRouteModulePlan,
     reciprocal_route_module_plan_sha256,
@@ -163,10 +171,15 @@ class ReciprocalRouteRuntimeRequest(FrozenModel):
 
     # Material bindings inherited from the base 175-root scene.  These
     # are the same aliases the environment-module runtime locked; the
-    # reciprocal-route parts reuse them.
+    # reciprocal-route parts reuse them.  Length is hard-locked to the
+    # 14-row alias table so a non-default plan cannot bypass the binding
+    # table by passing fewer slots.
     material_bindings: tuple[
         ReciprocalRouteMaterialBinding, ...
-    ] = Field(min_length=1)
+    ] = Field(
+        min_length=len(_MATERIAL_BINDING_ROWS),
+        max_length=len(_MATERIAL_BINDING_ROWS),
+    )
 
     # Full 218-root object registry.  Indices 0..174 must equal the
     # verified base registry; indices 175..217 must equal the
@@ -364,7 +377,10 @@ class ReciprocalRouteBuildReport(FrozenModel):
     ] = Field(min_length=218, max_length=218)
     material_bindings: tuple[
         ReciprocalRouteMaterialBinding, ...
-    ] = Field(min_length=1)
+    ] = Field(
+        min_length=len(_MATERIAL_BINDING_ROWS),
+        max_length=len(_MATERIAL_BINDING_ROWS),
+    )
 
     counts: ReciprocalRouteBuildCounts
     validation: ReciprocalRouteBuildValidation
@@ -460,7 +476,13 @@ def load_reciprocal_route_build_report(
         return ReciprocalRouteBuildReport.model_validate_json(raw)
     except ReciprocalRouteRuntimeError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, canary.CanaryBuildError) as exc:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        ValidationError,
+        canary.CanaryBuildError,
+    ) as exc:
         raise ReciprocalRouteRuntimeError(
             "reciprocal-route build report validation failed",
         ) from exc
