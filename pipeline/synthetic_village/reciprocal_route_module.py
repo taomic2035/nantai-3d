@@ -74,7 +74,12 @@ from .environment_module import (
     EnvironmentModulePlan,
     canonical_environment_module_plan_bytes,
 )
-from .scene_plan import SEMANTIC_ORDER, ScenePlan, canonical_scene_plan_bytes
+from .production_profile import (
+    ProductionCameraPlan,
+    canonical_production_plan_bytes,
+    production_camera_registry_digest,
+)
+from .scene_plan import SEMANTIC_ORDER, ScenePlan, canonical_scene_plan_bytes, terrain_height_m
 
 RECIPROCAL_ROUTE_SCHEMA = "nantai.synthetic-village.reciprocal-route-module.v1"
 RECIPROCAL_ROUTE_RECIPE_VERSION = "v1"
@@ -563,6 +568,109 @@ class PartLayoutSpec(FrozenModel):
         return self
 
 
+# --------------------------------------------------------------------------- #
+# Standing-eye camera candidate per reciprocal role (Phase 4.2, responding to
+# HANDOFF-CODEX-010 §"Opus camera 输出清单" + HANDOFF-OPUS-009 requirement
+# "六个角色各自存在 standing-eye ground-route camera").
+#
+# The candidate is a *proposal* for the §3 caller chain, not a canonical
+# ProductionCameraPose.  The caller is responsible for:
+#   - materialising the candidate into a full ProductionCameraPose
+#     (computing intrinsics + c2w_opencv via _look_at_c2w / _intrinsics);
+#   - running fresh exact-218 preflight + six-layer render + post-render
+#     policy + before/after RGB verification.
+# The candidate only declares the standing-eye geometry, the topology ref,
+# and the content-addressed binding to the production camera plan so the
+# downstream chain can verify "this render really came from this candidate".
+# --------------------------------------------------------------------------- #
+
+
+#: Camera IDs for the six reciprocal roles.  ``reciprocal-role`` namespace
+#: is intentionally separate from the production ``ground-route`` group to
+#: keep candidate lineage traceable in the journal.  The caller may later
+#: promote an accepted candidate into the ``ground-route`` group via the
+#: existing repose/search contract.
+RoleCameraId = Literal[
+    "camera-reciprocal-role-001",
+    "camera-reciprocal-role-002",
+    "camera-reciprocal-role-003",
+    "camera-reciprocal-role-004",
+    "camera-reciprocal-role-005",
+    "camera-reciprocal-role-006",
+]
+
+#: Standing-eye height shared with production_profile.EYE_HEIGHT_M.
+#: Literal-locked to fail-closed any drift away from standing-eye.
+ROLE_CAMERA_EYE_HEIGHT_M = 1.6
+
+#: Default horizontal field of view for reciprocal-role candidates.
+#: Matches production_profile ground-route FOV (65 deg) so the candidate
+#: lines up with the existing ``_FOV_BY_CATEGORY["ground"]`` baseline.
+ROLE_CAMERA_FOV_X_DEG = 65.0
+
+#: Lookahead distance for the standing-eye target point.  Matches
+#: production_profile.ROUTE_LOOKAHEAD_M so the candidate's look_at_m is
+#: consistent with how the 180-camera plan places ground-route cameras.
+ROLE_CAMERA_LOOKAHEAD_M = 25.0
+
+
+class ReciprocalRoleCameraCandidate(FrozenModel):
+    """One standing-eye camera candidate for one reciprocal role.
+
+    The candidate is ``modeled-unverified`` geometry, not a surveyed
+    viewpoint.  It carries honest placement (scene-local meters, finite,
+    standing-eye height) and content-addressed binding to the production
+    camera plan + camera registry, so the §3 caller chain can verify the
+    render's lineage back to this exact candidate.
+
+    The candidate is NOT a ``ProductionCameraPose``: it omits intrinsics
+    and the c2w_opencv matrix because those are caller-computed from
+    ``position_m`` + ``look_at_m`` via ``_look_at_c2w``.  Adding them here
+    would duplicate caller responsibility and let the plan drift away
+    from the canonical pose computation.  The candidate also binds to
+    the reciprocal-route module plan via ``role_module_id`` so a render
+    cannot claim a role camera without the matching module plan.
+    """
+
+    role_module_id: ModuleId
+    camera_id: RoleCameraId
+    topology_ref: str = Field(min_length=1)
+    arc_length_m: float | None = Field(default=None, allow_inf_nan=False)
+    position_m: tuple[float, float, float]
+    look_at_m: tuple[float, float, float]
+    eye_height_m: Literal[ROLE_CAMERA_EYE_HEIGHT_M] = ROLE_CAMERA_EYE_HEIGHT_M
+    fov_x_deg: float = Field(
+        gt=0.0,
+        lt=180.0,
+        allow_inf_nan=False,
+    )
+    audit_only: Literal[False] = False
+    disclosure: str = Field(min_length=10)
+    bound_production_plan_sha256: Sha256
+    bound_camera_registry_sha256: Sha256
+
+    @model_validator(mode="after")
+    def _candidate_is_finite_and_standing_eye(self) -> ReciprocalRoleCameraCandidate:
+        for axis, value in zip(("x", "y", "z"), self.position_m, strict=True):
+            if not math.isfinite(value):
+                raise ValueError(f"position_m {axis} must be finite")
+        for axis, value in zip(("x", "y", "z"), self.look_at_m, strict=True):
+            if not math.isfinite(value):
+                raise ValueError(f"look_at_m {axis} must be finite")
+        if len(self.position_m) != 3:
+            raise ValueError("position_m must be a 3-tuple")
+        if len(self.look_at_m) != 3:
+            raise ValueError("look_at_m must be a 3-tuple")
+        # A standing-eye candidate must not sit on the same point as its
+        # target: that produces a degenerate c2w with no forward axis.
+        if math.dist(self.position_m, self.look_at_m) < 1.0:
+            raise ValueError(
+                "position_m and look_at_m must differ by at least 1.0 m "
+                "to form a valid standing-eye view direction",
+            )
+        return self
+
+
 class ReciprocalRouteModulePart(FrozenModel):
     """One stable part declared by a reciprocal-route module.
 
@@ -740,6 +848,17 @@ class ReciprocalRouteModulePlan(FrozenModel):
     trust_effect: Literal["none"] = "none"
     modules: tuple[ReciprocalRouteModule, ...] = Field(min_length=6, max_length=6)
     summary: ReciprocalRouteModuleSummary
+    #: Six standing-eye camera candidates, one per reciprocal role
+    #: (HANDOFF-OPUS-009 Phase 4.2 / HANDOFF-CODEX-010 §"Opus camera
+    #: 输出清单").  Candidates are additive: they bind to the production
+    #: camera plan + camera registry SHAs but do NOT promote
+    #: ``modeled-unverified`` trust or replace the canonical 180-camera
+    #: plan.  The §3 caller chain materialises them into
+    #: ``ProductionCameraPose`` instances and runs fresh preflight +
+    #: six-layer render + post-render policy before any acceptance.
+    role_camera_candidates: tuple[ReciprocalRoleCameraCandidate, ...] = (
+        Field(min_length=6, max_length=6)
+    )
 
     @model_validator(mode="after")
     def _modules_are_exact_and_ordered(self) -> ReciprocalRouteModulePlan:
@@ -781,6 +900,29 @@ class ReciprocalRouteModulePlan(FrozenModel):
         if self.summary.part_count != len(all_instances):
             raise ValueError(
                 "reciprocal-route module summary part_count disagrees with modules",
+            )
+        # Role camera candidates: exactly six, one per module, unique IDs,
+        # in module order.  This is the Phase 4.2 fail-closed gate:
+        # a plan with a missing / duplicate / mis-ordered candidate is
+        # rejected at schema level, not at caller level.
+        if len(self.role_camera_candidates) != 6:
+            raise ValueError(
+                "reciprocal-route plan must carry exactly six role camera candidates",
+            )
+        candidate_role_ids = tuple(
+            candidate.role_module_id for candidate in self.role_camera_candidates
+        )
+        if candidate_role_ids != expected:
+            raise ValueError(
+                "reciprocal-route role camera candidates must be ordered "
+                "one-per-module matching the six module IDs",
+            )
+        candidate_camera_ids = tuple(
+            candidate.camera_id for candidate in self.role_camera_candidates
+        )
+        if len(set(candidate_camera_ids)) != len(candidate_camera_ids):
+            raise ValueError(
+                "reciprocal-route role camera candidate IDs must be unique",
             )
         return self
 
@@ -1307,13 +1449,175 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
     )
 
 
+#: Default standing-eye placement per reciprocal role (Phase 4.2).
+#: Each entry is (role_module_id, topology_ref, position_xy, look_at_xy).
+#: ``position`` sits at standing-eye height above terrain; ``look_at`` is
+#: the lookahead point along the role's bound path network so the
+#: candidate lines up with how production_profile._place_route_group
+#: places ground-route cameras.  Coordinates are scene-local meters.
+#: Any change here changes ``reciprocal_route_module_plan_sha256`` and
+#: therefore ``build_id`` and the downstream render identity.
+_DEFAULT_ROLE_CAMERA_PLACEMENT: tuple[
+    tuple[ModuleId, str, tuple[float, float], tuple[float, float]],
+    ...,
+] = (
+    # central courtyard: standing-eye at courtyard edge looking down the
+    # downhill gate toward path-network-003.
+    (
+        "central-courtyard-downhill",
+        "path-network-003",
+        (40.0, 30.0),
+        (40.0, 5.0),
+    ),
+    # bridge deck: standing-eye mid-deck looking upstream along
+    # path-network-001.
+    (
+        "bridge-deck-crossing",
+        "path-network-001",
+        (-150.0, -100.0),
+        (-150.0, -125.0),
+    ),
+    # watermill tailrace: standing-eye at the tailrace service stair
+    # looking along path-network-001 toward the creek.
+    (
+        "watermill-tailrace",
+        "path-network-001",
+        (-180.0, -130.0),
+        (-180.0, -105.0),
+    ),
+    # covered gallery underpass: standing-eye at the lower lane entry
+    # looking along path-network-005 toward the gallery interior.
+    (
+        "covered-gallery-underpass",
+        "path-network-005",
+        (60.0, -25.0),
+        (60.0, 0.0),
+    ),
+    # forest orchard boundary: standing-eye at the orchard edge looking
+    # along path-network-002 into the forest band.
+    (
+        "forest-orchard-boundary",
+        "path-network-002",
+        (120.0, 80.0),
+        (120.0, 55.0),
+    ),
+    # lower valley uphill: standing-eye at the lower retaining step
+    # looking along path-network-001 back toward the village.
+    (
+        "lower-valley-uphill",
+        "path-network-001",
+        (-90.0, 60.0),
+        (-90.0, 85.0),
+    ),
+)
+
+#: Default disclosure strings per role (Phase 4.2).  Each disclosure is
+#: honest about the candidate being modeled-unverified geometry, not a
+#: surveyed viewpoint.  The §3 caller chain must not accept a candidate
+#: without running fresh preflight + six-layer render + post-render policy.
+_ROLE_CAMERA_DISCLOSURE: dict[ModuleId, str] = {
+    "central-courtyard-downhill": (
+        "modeled-unverified standing-eye at the courtyard downhill gate; "
+        "fresh preflight + six-layer render required before acceptance"
+    ),
+    "bridge-deck-crossing": (
+        "modeled-unverified standing-eye on the bridge deck mid-span; "
+        "fresh preflight + six-layer render required before acceptance"
+    ),
+    "watermill-tailrace": (
+        "modeled-unverified standing-eye at the watermill tailrace "
+        "service stair; fresh preflight + six-layer render required before acceptance"
+    ),
+    "covered-gallery-underpass": (
+        "modeled-unverified standing-eye at the covered gallery "
+        "underpass lower lane; fresh preflight + six-layer render required before acceptance"
+    ),
+    "forest-orchard-boundary": (
+        "modeled-unverified standing-eye at the forest orchard boundary "
+        "edge; fresh preflight + six-layer render required before acceptance"
+    ),
+    "lower-valley-uphill": (
+        "modeled-unverified standing-eye at the lower valley retaining "
+        "step; fresh preflight + six-layer render required before acceptance"
+    ),
+}
+
+
+def _default_role_camera_candidates(
+    *,
+    scene: ScenePlan,
+    plan_sha: str,
+    registry_sha: str,
+) -> tuple[ReciprocalRoleCameraCandidate, ...]:
+    """Build the canonical six standing-eye camera candidates.
+
+    Each candidate sits at standing-eye height (1.6 m) above terrain at
+    the role's bound placement, with the look_at point ahead along the
+    role's topology ref.  The candidate's ``bound_production_plan_sha256``
+    + ``bound_camera_registry_sha256`` are content-addressed bindings to
+    the canonical 180-camera plan, so the §3 caller chain can verify the
+    render's lineage back to this exact candidate.
+
+    ``plan_sha`` / ``registry_sha`` may be ``"0" * 64`` placeholder when
+    the plan is constructed without a production camera plan (unit tests);
+    the caller is expected to supply real SHAs before publishing.  This
+    keeps the plan constructible for tests that do not exercise the §3
+    caller chain.
+    """
+
+    candidates: list[ReciprocalRoleCameraCandidate] = []
+    for index, (module_id, topology_ref, position_xy, look_at_xy) in enumerate(
+        _DEFAULT_ROLE_CAMERA_PLACEMENT,
+        start=1,
+    ):
+        terrain_z = terrain_height_m(position_xy[0], position_xy[1], scene.extent)
+        look_z = terrain_height_m(look_at_xy[0], look_at_xy[1], scene.extent)
+        position_m = (
+            position_xy[0],
+            position_xy[1],
+            terrain_z + ROLE_CAMERA_EYE_HEIGHT_M,
+        )
+        look_at_m = (
+            look_at_xy[0],
+            look_at_xy[1],
+            look_z + ROLE_CAMERA_EYE_HEIGHT_M,
+        )
+        candidates.append(
+            ReciprocalRoleCameraCandidate(
+                role_module_id=module_id,
+                camera_id=f"camera-reciprocal-role-{index:03d}",
+                topology_ref=topology_ref,
+                arc_length_m=None,
+                position_m=position_m,
+                look_at_m=look_at_m,
+                eye_height_m=ROLE_CAMERA_EYE_HEIGHT_M,
+                fov_x_deg=ROLE_CAMERA_FOV_X_DEG,
+                audit_only=False,
+                disclosure=_ROLE_CAMERA_DISCLOSURE[module_id],
+                bound_production_plan_sha256=plan_sha,
+                bound_camera_registry_sha256=registry_sha,
+            ),
+        )
+    return tuple(candidates)
+
+
 def build_default_reciprocal_route_module_plan(
     *,
     scene: ScenePlan,
     elevated_topology: ElevatedTopologyPlan,
     environment_module_plan: EnvironmentModulePlan,
+    production_camera_plan: ProductionCameraPlan | None = None,
 ) -> ReciprocalRouteModulePlan:
-    """Build the canonical default plan bound to the given scene + topology + v1 plan."""
+    """Build the canonical default plan bound to the given scene + topology + v1 plan.
+
+    ``production_camera_plan`` binds the six standing-eye role camera
+    candidates (Phase 4.2) to the canonical 180-camera plan + camera
+    registry.  When omitted, the candidates are constructed with
+    placeholder all-zero SHA-256 bindings; the caller is expected to
+    supply a real plan before publishing.  This keeps the plan
+    constructible for unit tests that do not exercise the §3 caller
+    chain, while still binding content identity in the published path.
+    """
 
     scene_sha = hashlib.sha256(
         canonical_scene_plan_bytes(scene),
@@ -1324,6 +1628,14 @@ def build_default_reciprocal_route_module_plan(
     env_module_sha = hashlib.sha256(
         canonical_environment_module_plan_bytes(environment_module_plan),
     ).hexdigest()
+    if production_camera_plan is not None:
+        plan_sha = hashlib.sha256(
+            canonical_production_plan_bytes(production_camera_plan),
+        ).hexdigest()
+        registry_sha = production_camera_registry_digest(production_camera_plan)
+    else:
+        plan_sha = "0" * 64
+        registry_sha = "0" * 64
     modules = tuple(
         _default_module(module_id)
         for module_id in (
@@ -1335,6 +1647,11 @@ def build_default_reciprocal_route_module_plan(
             "lower-valley-uphill",
         )
     )
+    role_camera_candidates = _default_role_camera_candidates(
+        scene=scene,
+        plan_sha=plan_sha,
+        registry_sha=registry_sha,
+    )
     plan = ReciprocalRouteModulePlan(
         scene_plan_sha256=scene_sha,
         elevated_topology_sha256=topology_sha,
@@ -1343,6 +1660,7 @@ def build_default_reciprocal_route_module_plan(
         summary=ReciprocalRouteModuleSummary(
             part_count=sum(len(module.parts) for module in modules),
         ),
+        role_camera_candidates=role_camera_candidates,
     )
     return plan.model_copy(
         update={},  # trigger re-validation

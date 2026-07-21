@@ -18,6 +18,11 @@ from pipeline.synthetic_village.environment_module import (
     build_default_environment_module_plan,
     canonical_environment_module_plan_bytes,
 )
+from pipeline.synthetic_village.production_profile import (
+    build_production_camera_plan,
+    canonical_production_plan_bytes,
+    production_camera_registry_digest,
+)
 from pipeline.synthetic_village.reciprocal_route_module import (
     BATCH8_ARCHIVE_SHA256,
     BATCH8_RELEASE_MANIFEST_SHA256,
@@ -32,6 +37,7 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     RECIPROCAL_ROUTE_SCHEMA,
     WATERMILL_TAILRACE_INSTANCE_RANGE,
     PartLayoutSpec,
+    ReciprocalRoleCameraCandidate,
     ReciprocalRouteError,
     ReciprocalRouteModule,
     ReciprocalRouteModulePart,
@@ -603,3 +609,294 @@ def test_default_part_layout_preserves_phase3_aabb(plan) -> None:
     # watermill base_z = 45; gallery base_z = 78.
     assert min_z == 45.0
     assert max_z == 78.0
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.2: Standing-eye role camera candidates
+# (HANDOFF-CODEX-010 §"Opus camera 输出清单" + HANDOFF-CODEX-011 P0-2).
+#
+# The candidate schema is the foundation for the §3 caller chain's real
+# standing-eye camera.  It is NOT a ProductionCameraPose: intrinsics and
+# c2w_opencv are caller-computed.  The candidate only declares geometry
+# + topology_ref + content-addressed binding so renders can be traced
+# back to this exact candidate.
+# --------------------------------------------------------------------------- #
+
+
+def test_plan_carries_six_role_camera_candidates(plan) -> None:
+    """Default plan must carry exactly six standing-eye candidates,
+    one per module, in module order, with unique camera IDs."""
+
+    assert len(plan.role_camera_candidates) == 6
+    expected_role_ids = (
+        "central-courtyard-downhill",
+        "bridge-deck-crossing",
+        "watermill-tailrace",
+        "covered-gallery-underpass",
+        "forest-orchard-boundary",
+        "lower-valley-uphill",
+    )
+    assert tuple(c.role_module_id for c in plan.role_camera_candidates) == expected_role_ids
+    expected_camera_ids = tuple(
+        f"camera-reciprocal-role-{i:03d}" for i in range(1, 7)
+    )
+    assert tuple(c.camera_id for c in plan.role_camera_candidates) == expected_camera_ids
+    # Eye height is Literal-locked to 1.6 m (standing-eye, not aerial).
+    for candidate in plan.role_camera_candidates:
+        assert candidate.eye_height_m == 1.6
+        assert candidate.audit_only is False
+        assert len(candidate.bound_production_plan_sha256) == 64
+        assert len(candidate.bound_camera_registry_sha256) == 64
+
+
+def test_role_camera_candidate_rejects_non_finite_position() -> None:
+    """NaN/Inf in position_m must be rejected at schema level."""
+
+    with pytest.raises(ValidationError):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(float("nan"), 30.0, 70.0),
+            look_at_m=(40.0, 5.0, 70.0),
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+        )
+
+
+def test_role_camera_candidate_rejects_degenerate_view_direction() -> None:
+    """position_m and look_at_m within 1.0 m must be rejected
+    (degenerate forward axis, no real view direction)."""
+
+    with pytest.raises(ValidationError, match="differ by at least 1.0"):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 70.0),
+            look_at_m=(40.0, 30.5, 70.0),  # 0.5 m apart
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+        )
+
+
+def test_role_camera_candidate_rejects_wrong_eye_height() -> None:
+    """eye_height_m must be Literal-locked to 1.6 (standing-eye).
+    Aerial (6.0) or 0.0 must be rejected to fail-closed any trust
+    drift away from standing-eye."""
+
+    with pytest.raises(ValidationError):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 70.0),
+            look_at_m=(40.0, 5.0, 70.0),
+            eye_height_m=6.0,  # aerial, not standing-eye
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+        )
+
+
+def test_role_camera_candidate_rejects_audit_only_true() -> None:
+    """audit_only=True must be rejected: a role camera is a real
+    candidate pose, not an audit-only aerial viewpoint."""
+
+    with pytest.raises(ValidationError):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 70.0),
+            look_at_m=(40.0, 5.0, 70.0),
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=True,  # forbidden
+            disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+        )
+
+
+def test_role_camera_candidate_rejects_short_disclosure() -> None:
+    """disclosure must be at least 10 chars to carry honest provenance."""
+
+    with pytest.raises(ValidationError):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 70.0),
+            look_at_m=(40.0, 5.0, 70.0),
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="short",  # < 10 chars
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+        )
+
+
+def test_role_camera_candidate_rejects_non_sha256_plan_binding() -> None:
+    """bound_production_plan_sha256 must be 64-hex (fail-closed
+    against forged or non-canonical plan bindings)."""
+
+    with pytest.raises(ValidationError):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 70.0),
+            look_at_m=(40.0, 5.0, 70.0),
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+            bound_production_plan_sha256="not-a-sha256",
+            bound_camera_registry_sha256="0" * 64,
+        )
+
+
+def test_plan_rejects_wrong_candidate_count(plan) -> None:
+    """A plan with 5 or 7 candidates must fail validation."""
+
+    import json as _json
+
+    payload = plan.model_dump(mode="json")
+    # Drop one candidate -> 5.
+    payload["role_camera_candidates"] = payload["role_camera_candidates"][:5]
+    with pytest.raises(ValidationError):
+        ReciprocalRouteModulePlan.model_validate_json(_json.dumps(payload))
+
+    # Duplicate one candidate -> 7 (also breaks unique camera_id, but
+    # the count check fires first).
+    payload = plan.model_dump(mode="json")
+    payload["role_camera_candidates"] = (
+        payload["role_camera_candidates"]
+        + [payload["role_camera_candidates"][0]]
+    )
+    with pytest.raises(ValidationError):
+        ReciprocalRouteModulePlan.model_validate_json(_json.dumps(payload))
+
+
+def test_plan_rejects_wrong_candidate_order(plan) -> None:
+    """Swapping two candidates' role_module_id must fail validation
+    (order must match the six module IDs in plan order)."""
+
+    import json as _json
+
+    payload = plan.model_dump(mode="json")
+    # Swap role_module_id of candidates 0 and 1.
+    (
+        payload["role_camera_candidates"][0]["role_module_id"],
+        payload["role_camera_candidates"][1]["role_module_id"],
+    ) = (
+        payload["role_camera_candidates"][1]["role_module_id"],
+        payload["role_camera_candidates"][0]["role_module_id"],
+    )
+    with pytest.raises(ValidationError, match="one-per-module"):
+        ReciprocalRouteModulePlan.model_validate_json(_json.dumps(payload))
+
+
+def test_plan_rejects_duplicate_candidate_camera_ids(plan) -> None:
+    """Two candidates with the same camera_id must fail validation,
+    even if the role_module_id order is correct."""
+
+    import json as _json
+
+    payload = plan.model_dump(mode="json")
+    # Force candidate 1 to share candidate 0's camera_id.
+    payload["role_camera_candidates"][1]["camera_id"] = (
+        payload["role_camera_candidates"][0]["camera_id"]
+    )
+    with pytest.raises(ValidationError, match="IDs must be unique"):
+        ReciprocalRouteModulePlan.model_validate_json(_json.dumps(payload))
+
+
+def test_plan_sha_changes_when_candidate_position_changes(plan) -> None:
+    """Tampering a candidate's position_m must change plan_sha256
+    (tamper detection: render identity flows from candidate geometry)."""
+
+    first_candidate = plan.role_camera_candidates[0]
+    original_position = first_candidate.position_m
+    tampered_candidate = first_candidate.model_copy(
+        update={
+            "position_m": (
+                original_position[0] + 50.0,
+                original_position[1],
+                original_position[2],
+            ),
+        },
+    )
+    tampered_plan = plan.model_copy(
+        update={
+            "role_camera_candidates": (
+                tampered_candidate,
+                *plan.role_camera_candidates[1:],
+            ),
+        },
+    )
+    assert (
+        reciprocal_route_module_plan_sha256(tampered_plan)
+        != reciprocal_route_module_plan_sha256(plan)
+    )
+
+
+def test_role_camera_candidates_default_to_placeholder_sha(plan) -> None:
+    """When build_default_reciprocal_route_module_plan is called without
+    a production_camera_plan, the candidates must carry placeholder
+    all-zero SHA-256 bindings.  This keeps the plan constructible for
+    tests that do not exercise the §3 caller chain, while making it
+    explicit that no real production plan is bound."""
+
+    for candidate in plan.role_camera_candidates:
+        assert candidate.bound_production_plan_sha256 == "0" * 64
+        assert candidate.bound_camera_registry_sha256 == "0" * 64
+
+
+def test_role_camera_candidates_bind_to_production_plan_sha(
+    scene, topology, env_module_plan,
+) -> None:
+    """When build_default_reciprocal_route_module_plan is called with a
+    real production_camera_plan, the candidates must carry that plan's
+    canonical SHA + registry digest (content-addressed binding)."""
+
+    production_camera_plan = build_production_camera_plan(
+        scene=scene,
+        elevated_topology=topology,
+    )
+    plan = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=env_module_plan,
+        production_camera_plan=production_camera_plan,
+    )
+    expected_plan_sha = hashlib.sha256(
+        canonical_production_plan_bytes(production_camera_plan),
+    ).hexdigest()
+    expected_registry_sha = production_camera_registry_digest(
+        production_camera_plan,
+    )
+    for candidate in plan.role_camera_candidates:
+        assert candidate.bound_production_plan_sha256 == expected_plan_sha
+        assert candidate.bound_camera_registry_sha256 == expected_registry_sha
+    # Sanity: the bound SHAs are NOT all-zero placeholders.
+    assert expected_plan_sha != "0" * 64
+    assert expected_registry_sha != "0" * 64
