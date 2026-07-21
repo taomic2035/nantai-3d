@@ -298,6 +298,38 @@ Expand-Archive $archive `
 texture payload。最终尺度、连接锚点、拓扑、碰撞、材质图和实例身份必须在版本化 recipe 中声明
 并经过 Blender 实测。
 
+### Batch 14 斜向路线与平移检查点参考
+
+[Batch 14 Diagonal Navigation Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch14-2026-07-21)
+补充上坡左斜、下坡右斜、后场服务巷、林果边界、前移检查点和后移检查点六个角色。它们重点
+暴露挡墙背面、屋檐/阳台底面、基础支撑、排水出口、溪床/桥台、隐藏侧巷和反向立面，帮助
+Blender 建模摆脱只做正面“景观图”的问题。
+
+```powershell
+$releaseDir = ".nantai-studio\release-downloads\batch14-diagonal-navigation"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download synthetic-village-design-inputs-batch14-2026-07-21 `
+  --pattern "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.zip" `
+  --pattern "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.SHA256SUMS.txt" `
+  --dir $releaseDir --clobber
+
+$archiveName = "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.zip"
+$archive = Join-Path $releaseDir $archiveName
+$sumFile = Join-Path $releaseDir "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 14 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch14" -Force
+```
+
+ZIP 严格只有 6 张原始 `1536×1024` PNG、6 份精确 prompt、manifest、使用说明和 payload
+checksum。六张图是独立生成的设计输入，不是同一场景的标定多视图；其中“前移/后移约 8 米”
+只是提示词中的构图意图，没有实测 pose、baseline、intrinsics 或像素对应。不得把本包直接送入
+SfM/NeRF/3DGS 或声称 360° coverage。应先建立 canonical 3D recipe 和已知相机，再由 collision/
+topology 与 fresh RGB/depth/normal/instance/semantic/camera evidence 决定受测位置是否可漫游。
+
 ## 核心工作流
 
 ### 1. 混合媒体输入
