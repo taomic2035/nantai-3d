@@ -164,21 +164,58 @@ MIN_TRAIL_SHELTER_CLEAR_WIDTH_M = 1.5
 MIN_LOWER_VALLEY_TRAIL_WIDTH_M = 1.2
 MAX_RETAINING_STEP_RISE_M = 0.18
 
-#: Default spatial layout for the simplified v1 build (Phase 4.1).
+#: Default spatial layout for the simplified v1 build (Phase 4.1, amended
+#: Phase 4.3 to lift bridge/watermill above aux-terrain and to enlarge
+#: passage extent so the probe can measure standing-eye clearance).
 #: Used only by ``_default_part_layout`` to populate ``PartLayoutSpec``;
 #: the Blender runtime script never reads these constants.  Any change
 #: here changes ``reciprocal_route_module_plan_sha256`` and therefore
 #: ``build_id`` and the downstream render identity.
+#: Phase 4.3 amendments (responding to FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md):
+#:   * bridge z 50 -> 55: bridge parts at y in [-82.5, -70] sit above
+#:     aux-terrain whose terrain_height_m peaks at ~53.27; lifting base_z
+#:     to 55 keeps parts above terrain.
+#:   * watermill z 45 -> 52: watermill parts at y in [-97.5, -85] sit
+#:     above aux-terrain whose terrain_height_m peaks at ~48.64; lifting
+#:     base_z to 52 keeps parts above terrain.
+#:   * part extent z 0.6 -> 2.5: the previous 0.6 m solid box gave only
+#:     0.3 m upward clearance (probe measured clearance_min_m ~0.3).  The
+#:     new 2.5 m extent, combined with the 5-panel passage geometry in
+#:     ``_module_geometry``, gives an upward clearance of ~2.475 m which
+#:     is >= ``MIN_ROUTE_CLEARANCE_M = 2.4``.  The part_layout.center_m.z
+#:     remains the passage floor; the passage rises from center_m.z to
+#:     center_m.z + extent_m.z.
 _DEFAULT_MODULE_BASE_POSITION: dict[ModuleId, tuple[float, float, float]] = {
     "central-courtyard-downhill": (40.0, 30.0, 70.0),
-    "bridge-deck-crossing": (-150.0, -100.0, 50.0),
-    "watermill-tailrace": (-180.0, -130.0, 45.0),
+    "bridge-deck-crossing": (-150.0, -100.0, 55.0),
+    "watermill-tailrace": (-180.0, -130.0, 52.0),
     "covered-gallery-underpass": (60.0, -25.0, 78.0),
     "forest-orchard-boundary": (120.0, 80.0, 75.0),
     "lower-valley-uphill": (-90.0, 60.0, 55.0),
 }
 _DEFAULT_PART_SPACING_Y_M = 2.5
-_DEFAULT_PART_EXTENT_M: tuple[float, float, float] = (1.6, 1.6, 0.6)
+#: Passage extent: x/y are the outer bounding box of the passage
+#: (walls included).  z is the passage height (floor to ceiling).  The
+#: runtime's ``_module_geometry`` (Phase 4.3) decomposes this extent into
+#: 4 panels: floor, ceiling, left wall, right wall (no front/back wall --
+#: the route passes through along y).  Inner width = x - 2 *
+#: _PASSAGE_WALL_THICKNESS_M (0.1 m on each side) = 1.4 m >=
+#: MIN_ROUTE_CLEAR_WIDTH_M = 1.2.  Inner height = z + 2 *
+#: _PASSAGE_RAY_SAFE_GAP_M (0.001 m gap above and below so the upward
+#: ray origin is not on the floor surface) = 2.502 m >=
+#: MIN_ROUTE_CLEARANCE_M = 2.4.  Upward ray from part center hits the
+#: ceiling underside at distance z + gap = 2.501 m >= 2.4.
+#:
+#: Phase 4.3 amendment (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md
+#: §"待处理" item: "perpendicular ray missed"): the original extent_y
+#: 1.6 m < spacing_y 2.5 m left a 0.9 m gap between adjacent parts'
+#: walls, so 3 of the probe's 5 polyline-interpolated samples fell in
+#: empty space and the perpendicular ray cast along x hit nothing.
+#: Raising extent_y to 2.6 m makes each wall span +-1.3 m around its
+#: part center; adjacent walls then overlap by 0.1 m and every sample
+#: position along the polyline is inside some wall's y range.  Inner
+#: width is unaffected because it depends on x, not y.
+_DEFAULT_PART_EXTENT_M: tuple[float, float, float] = (1.6, 2.6, 2.5)
 _DEFAULT_PART_ORIENTATION_DEG = 0.0
 
 # BuildReport v1 reserves 0/1/2 for sky, terrain, and terrain-support,

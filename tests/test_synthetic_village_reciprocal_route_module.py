@@ -579,11 +579,22 @@ def test_plan_sha_changes_when_part_layout_changes(plan, scene, topology, env_mo
 def test_default_part_layout_preserves_phase3_aabb(plan) -> None:
     """The default layout must preserve the exact AABB that Phase 3 produced.
 
-    REVIEW-CODEX-018 measured mesh AABB: min=(-180.8, -98.3, 44.7),
-    max=(120.8, 168.3, 78.3).  The 0.8/0.3 offsets come from box
-    half-extent (1.6/2, 0.6/2).  The part *centers* must therefore be:
-      min_center = (-180.0, -97.5, 45.0)
+    Phase 4.3 amendments (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md
+    §"待处理" item 3) lift bridge z 50 -> 55 and watermill z 45 -> 52
+    so the modules no longer intersect aux-terrain.  The min_z is
+    therefore 52.0 (was 45.0 in Phase 3).  All other AABB corners
+    remain identical because xy layouts are unchanged.
+
+    REVIEW-CODEX-018 measured the Phase 3 mesh AABB:
+      min=(-180.8, -98.3, 44.7), max=(120.8, 168.3, 78.3).
+    The 0.8/0.3 offsets come from box half-extent (1.6/2, 0.6/2).  The
+    part *centers* for Phase 4.3 are therefore:
+      min_center = (-180.0, -97.5, 52.0)
       max_center = (120.0, 167.5, 78.0)
+    The mesh AABB itself changes because extent_m.z grew from 0.6 to
+    2.5 (Phase 4.3 item 1: 5-panel passage geometry).  That change is
+    asserted separately in
+    ``test_module_geometry_emits_five_panel_passage``.
     """
 
     centers = [
@@ -606,8 +617,10 @@ def test_default_part_layout_preserves_phase3_aabb(plan) -> None:
     #   80 + (211-176)*2.5 = 80 + 87.5 = 167.5
     assert min_y == -97.5
     assert max_y == 167.5
-    # watermill base_z = 45; gallery base_z = 78.
-    assert min_z == 45.0
+    # Phase 4.3: watermill base_z lifted 45 -> 52 to clear aux-terrain
+    # peak ~48.64 m at the watermill's y range.  gallery base_z = 78
+    # is unchanged.
+    assert min_z == 52.0
     assert max_z == 78.0
 
 

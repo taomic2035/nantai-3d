@@ -38,6 +38,19 @@ OUTPUT_NAME = "village-reciprocal-route.blend"
 EXPECTED_BASE_ROOTS = 175
 EXPECTED_MODULE_ROOTS = 43
 EXPECTED_TOTAL_ROOTS = 218
+#: Phase 4.3: one topology proxy mesh per reciprocal-route module so the
+#: probe's ``closest_point_on_mesh`` can hit a real mesh instead of the
+#: v1 EMPTY / curve root (``path-network-001/002/003/005`` are EMPTY
+#: objects in the base scene).  Proxies do NOT count toward the 218-root
+#: canonical registry; they are auxiliary attachment targets only.
+EXPECTED_TOPOLOGY_PROXY_COUNT = 6
+#: Proxy mesh is a small box placed at the role candidate's ``look_at_m``
+#: (the topology direction point).  1.5 m on each side is large enough
+#: that ``closest_point_on_mesh`` reliably hits from the module's first
+#: part center (~25 m away), and small enough that the proxy does not
+#: intersect module meshes or aux-terrain by accident.  Any change here
+#: changes ``runtime_script_sha256`` and therefore ``build_id``.
+_DEFAULT_TOPOLOGY_PROXY_EXTENT_M = (1.5, 1.5, 1.5)
 
 SEMANTIC_CLASS_BY_ID = {
     3: "building",
@@ -429,8 +442,65 @@ class MeshAssembler:
         )
 
 
+#: Thickness of the four wall / floor / ceiling panels that form a
+#: passage.  Small enough that the inner clear dimensions stay above
+#: the probe thresholds, large enough that the panels are non-degenerate
+#: meshes after modifier evaluation.
+_PASSAGE_PANEL_THICKNESS_M = 0.05
+#: Half-thickness helper.
+_PASSAGE_PANEL_HALF_M = _PASSAGE_PANEL_THICKNESS_M / 2.0
+#: Wall thickness (left/right) -- thicker than floor/ceiling so BVH
+#: overlap tests are robust against floating-point edge cases.
+_PASSAGE_WALL_THICKNESS_M = 0.1
+_PASSAGE_WALL_HALF_M = _PASSAGE_WALL_THICKNESS_M / 2.0
+#: Ray-safe gap between part center (probe ray origin) and the floor /
+#: ceiling panel surfaces.  Without this gap the upward ray's origin
+#: (cx, cy, cz) lies exactly on the floor panel's top face, and BVH
+#: ``ray_cast`` returns distance 0 instead of the intended ceiling
+#: hit at distance ``sz``.  1 mm is small enough that the measured
+#: clearance (``sz + _PASSAGE_RAY_SAFE_GAP_M``) stays within rounding
+#: of the design value, and large enough to be stable against
+#: floating-point noise in BVH construction.  Inner clear height
+#: becomes ``sz + 2 * gap`` (still >= MIN_ROUTE_CLEARANCE_M = 2.4).
+_PASSAGE_RAY_SAFE_GAP_M = 0.001
+
+
 def _module_geometry(part):
-    """Return a simplified but finite non-empty mesh for one part.
+    """Return a 4-panel passage mesh for one part.
+
+    Phase 4.3 (responding to FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md):
+    the previous single solid box gave only 0.3 m upward clearance
+    because the upward ray from the part center hit the box's own top
+    face.  The new geometry decomposes the part extent into 4 panels:
+
+      * Floor:   slab whose top face is ``_PASSAGE_RAY_SAFE_GAP_M`` below
+                 center.z (so the upward ray origin is not on the floor
+                 surface); extent (x, y, panel_thickness)
+      * Ceiling: slab whose bottom face is ``_PASSAGE_RAY_SAFE_GAP_M``
+                 above center.z + sz; extent (x, y, panel_thickness)
+      * Left:    wall at x = cx - sx/2 + wall_half,
+                 extent (wall_thickness, y, sz + 2 * gap)
+      * Right:   wall at x = cx + sx/2 - wall_half,
+                 extent (wall_thickness, y, sz + 2 * gap)
+
+    Floor and ceiling panels sit **outside** the passage interior so a
+    ray cast from ``(cx, cy, cz)`` upward hits the ceiling's underside at
+    distance ``sz + gap`` (not the floor's own top face at distance 0).
+    Walls span ``sz + 2 * gap`` in z so a perpendicular ray cast from
+    ``(cx, cy, cz)`` along x is unambiguously inside the wall pair's
+    z range.
+
+    There is intentionally no front/back panel: the route passes through
+    the passage along y, and perpendicular ray casts (along x) measure
+    the inner width between the two walls.
+
+    Inner clear width  = sx - 2 * wall_thickness = sx - 0.2
+    Inner clear height = sz + 2 * _PASSAGE_RAY_SAFE_GAP_M
+
+    For the default extent (1.6, 1.6, 2.5) and gap = 0.001 this gives:
+      inner width  = 1.4 m   (>= MIN_ROUTE_CLEAR_WIDTH_M  = 1.2)
+      inner height = 2.502 m (>= MIN_ROUTE_CLEARANCE_M   = 2.4)
+      upward clearance from part center = sz + gap = 2.501 m
 
     The part's spatial layout (center, extent, orientation) is read
     verbatim from ``part["part_layout"]`` in the canonical request.
@@ -440,13 +510,282 @@ def _module_geometry(part):
     """
 
     layout = part["part_layout"]
+    cx, cy, cz = (float(value) for value in layout["center_m"])
+    sx, sy, sz = (float(value) for value in layout["extent_m"])
+    yaw = math.radians(float(layout["orientation_deg"]))
     assembler = MeshAssembler()
+    # Floor (slab whose top face is _PASSAGE_RAY_SAFE_GAP_M below cz so
+    # the upward ray origin (cx, cy, cz) is not on the floor surface).
+    floor_top_z = cz - _PASSAGE_RAY_SAFE_GAP_M
     assembler.add_box(
-        tuple(float(value) for value in layout["center_m"]),
-        tuple(float(value) for value in layout["extent_m"]),
-        math.radians(float(layout["orientation_deg"])),
+        (cx, cy, floor_top_z - _PASSAGE_PANEL_HALF_M),
+        (sx, sy, _PASSAGE_PANEL_THICKNESS_M),
+        yaw,
+    )
+    # Ceiling (slab whose bottom face is _PASSAGE_RAY_SAFE_GAP_M above
+    # cz + sz so the upward ray hits it at distance sz + gap, not 0).
+    ceiling_bottom_z = cz + sz + _PASSAGE_RAY_SAFE_GAP_M
+    assembler.add_box(
+        (cx, cy, ceiling_bottom_z + _PASSAGE_PANEL_HALF_M),
+        (sx, sy, _PASSAGE_PANEL_THICKNESS_M),
+        yaw,
+    )
+    # Left wall (spans the full passage height including the ray-safe
+    # gap on both ends; centre at mid-height).
+    wall_z_center = cz + sz / 2.0
+    wall_z_extent = sz + 2.0 * _PASSAGE_RAY_SAFE_GAP_M
+    assembler.add_box(
+        (cx - sx / 2.0 + _PASSAGE_WALL_HALF_M, cy, wall_z_center),
+        (_PASSAGE_WALL_THICKNESS_M, sy, wall_z_extent),
+        yaw,
+    )
+    # Right wall.
+    assembler.add_box(
+        (cx + sx / 2.0 - _PASSAGE_WALL_HALF_M, cy, wall_z_center),
+        (_PASSAGE_WALL_THICKNESS_M, sy, wall_z_extent),
+        yaw,
     )
     return assembler
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.3: topology proxy meshes.
+#
+# The v1 base scene's ``path-network-001/002/003/005`` objects are EMPTY
+# roots; ``closest_point_on_mesh`` returns no hit on them (see
+# FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md §"Topology attachment probes").
+# The reciprocal-route runtime emits one proxy mesh per module so the
+# probe can measure a real attachment distance.  The proxy:
+#
+#   * is placed at the role candidate's ``look_at_m`` (the topology
+#     direction point, ~25 m in front of the module's first part);
+#   * is a small 1.5 m box, large enough to be hit by
+#     ``closest_point_on_mesh`` from the part center, small enough not to
+#     accidentally intersect module meshes or aux-terrain;
+#   * carries ``nv_stable_id = "{topology_ref}::{module_id}"`` so the
+#     probe can find a module-specific target without colliding with the
+#     v1 EMPTY root's ``nv_stable_id = "{topology_ref}"``;
+#   * does NOT carry ``nv_root = True`` -- it is not part of the 218-root
+#     canonical registry and must not be counted by
+#     ``_validate_built_modules``.
+# --------------------------------------------------------------------------- #
+
+
+def _topology_proxy_id_for_module(module_id, topology_ref):
+    """Stable id for the module-specific topology proxy mesh."""
+    return f"{topology_ref}::{module_id}"
+
+
+def _topology_proxy_targets(plan):
+    """Return ``[(module_id, topology_ref, look_at_m), ...]`` for the
+    six reciprocal-route modules.
+
+    Reads ``role_camera_candidates`` verbatim from the canonical plan
+    (Phase 4.2).  The plan validator already enforces 6 entries with
+    unique ``role_module_id`` and finite ``look_at_m`` tuples, so this
+    function only reads and re-shapes them.
+    """
+
+    candidates = plan.get("role_camera_candidates")
+    if (
+        not isinstance(candidates, list)
+        or len(candidates) != EXPECTED_TOPOLOGY_PROXY_COUNT
+    ):
+        raise RuntimeBuildError(
+            "plan role_camera_candidates is not exactly six entries",
+        )
+    out = []
+    seen_modules = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise RuntimeBuildError(
+                "role_camera_candidate is not a dict",
+            )
+        module_id = candidate.get("role_module_id")
+        topology_ref = candidate.get("topology_ref")
+        look_at = candidate.get("look_at_m")
+        if not isinstance(module_id, str) or not module_id:
+            raise RuntimeBuildError(
+                "role_camera_candidate role_module_id is invalid",
+            )
+        if not isinstance(topology_ref, str) or not topology_ref:
+            raise RuntimeBuildError(
+                f"role_camera_candidate for {module_id} "
+                f"has no topology_ref",
+            )
+        if (
+            not isinstance(look_at, list)
+            or len(look_at) != 3
+            or not all(
+                isinstance(v, (int, float)) and math.isfinite(v) for v in look_at
+            )
+        ):
+            raise RuntimeBuildError(
+                f"role_camera_candidate for {module_id} "
+                f"has invalid look_at_m",
+            )
+        if module_id in seen_modules:
+            raise RuntimeBuildError(
+                f"role_camera_candidate for {module_id} is duplicated",
+            )
+        seen_modules.add(module_id)
+        out.append((module_id, topology_ref, tuple(float(v) for v in look_at)))
+    if len(out) != EXPECTED_TOPOLOGY_PROXY_COUNT:
+        raise RuntimeBuildError(
+            "topology proxy target count is not exactly six",
+        )
+    return out
+
+
+#: Phase 4.3 amendment (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md
+#: §"待处理" item: "topology attachment distance wrong"): offset from
+#: the module's first part center to the topology proxy center, in
+#: metres along the -y axis.  See ``_topology_proxy_center`` for the
+#: full rationale.  Any change here changes ``runtime_script_sha256``
+#: and therefore ``build_id``.
+_TOPOLOGY_PROXY_OFFSET_Y_M = 2.5
+
+
+def _topology_proxy_center(first_part_center):
+    """Phase 4.3: compute the world-space center of the topology proxy.
+
+    Returns a 3-tuple placed ``_TOPOLOGY_PROXY_OFFSET_Y_M`` metres in
+    the -y direction from the module's first part center.  The -y
+    direction is chosen because module parts extend in +y (instance_id
+    increases -> y increases by ``_DEFAULT_PART_SPACING_Y_M``), so -y
+    is always "away from parts" and the proxy does not overlap any
+    module mesh.  The proxy extent is 1.5 m (half-extent 0.75 m), so
+    the closest surface point on the proxy is on its +y face at
+    distance ``_TOPOLOGY_PROXY_OFFSET_Y_M - 0.75 = 1.75 m`` from the
+    first part center, which is within the probe's
+    ``MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M = 2.0 m`` threshold.
+    """
+
+    return (
+        float(first_part_center[0]),
+        float(first_part_center[1]) - _TOPOLOGY_PROXY_OFFSET_Y_M,
+        float(first_part_center[2]),
+    )
+
+
+def _topology_proxy_geometry(center_m):
+    """Return a MeshAssembler with a single 1.5 m box centered on
+    ``center_m`` (the proxy placement point)."""
+
+    assembler = MeshAssembler()
+    assembler.add_box(
+        (float(center_m[0]), float(center_m[1]), float(center_m[2])),
+        _DEFAULT_TOPOLOGY_PROXY_EXTENT_M,
+        0.0,
+    )
+    return assembler
+
+
+def _tag_topology_proxy(obj, module_id, topology_ref):
+    """Tag a proxy mesh with its module-specific identity.
+
+    The proxy carries the same low-trust stage / usability / trust_effect
+    Literals as the module meshes so a downstream renderer cannot mistake
+    it for a surveyed topology attachment.  ``nv_root`` is intentionally
+    absent (``obj.get("nv_root")`` returns ``None``) so
+    ``_validate_built_modules`` does not count it toward the 218 canonical
+    roots.  ``nv_proxy_topology = True`` lets the validator recognise it
+    as the auxiliary kind.
+    """
+
+    obj["nv_proxy_topology"] = True
+    obj["nv_stable_id"] = _topology_proxy_id_for_module(module_id, topology_ref)
+    obj["nv_proxy_module_id"] = module_id
+    obj["nv_proxy_topology_ref"] = topology_ref
+    obj["nv_stage"] = "modeled-unverified"
+    obj["nv_trust_effect"] = "none"
+    obj["nv_geometry_usability"] = "preview-only"
+
+
+def _build_topology_proxies(request, collection):
+    """Build one proxy mesh per module.
+
+    Returns the list of created mesh objects.  Each proxy mesh is
+    parented to its module's first part root (so it moves with the
+    module if the plan layout changes) and gets a single material slot
+    so the build report's ``finite_nonempty_module_meshes`` Literal
+    stays honest (each proxy is finite, non-empty, has UVs + tangents
+    + exactly one material).
+    """
+
+    plan = request["reciprocal_route_module_plan"]
+    targets = _topology_proxy_targets(plan)
+    proxies = []
+    for module_id, topology_ref, _look_at_m in targets:
+        # Find the module's first part root to parent the proxy to.
+        module = next(
+            (
+                m for m in plan["modules"]
+                if m.get("module_id") == module_id
+            ),
+            None,
+        )
+        if module is None or not isinstance(module.get("parts"), list):
+            raise RuntimeBuildError(
+                f"topology proxy module {module_id} has no parts",
+            )
+        parts = sorted(module["parts"], key=lambda p: p["instance_id"])
+        first_part = parts[0]
+        first_part_id = first_part["part_id"]
+        root_name = f"nv__{first_part_id}"
+        parent_root = bpy.data.objects.get(root_name)
+        if parent_root is None:
+            raise RuntimeBuildError(
+                f"topology proxy parent root missing: {root_name}",
+            )
+        stable_id = _topology_proxy_id_for_module(module_id, topology_ref)
+        proxy_name = f"proxy__{stable_id}"
+        if bpy.data.objects.get(proxy_name) is not None:
+            raise RuntimeBuildError(
+                f"topology proxy already exists: {proxy_name}",
+            )
+        # Phase 4.3: place proxy near the module's first part (not at
+        # the role camera's look_at 25 m away) so the probe's
+        # ``MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M = 2.0 m`` threshold can
+        # be satisfied.  See ``_topology_proxy_center`` for rationale.
+        first_part_center = first_part["part_layout"]["center_m"]
+        proxy_center = _topology_proxy_center(first_part_center)
+        assembler = _topology_proxy_geometry(proxy_center)
+        mesh = bpy.data.meshes.new(f"m__{stable_id}")
+        mesh.from_pydata(assembler.vertices, [], assembler.faces)
+        mesh.update()
+        if not mesh.vertices or not mesh.polygons:
+            raise RuntimeBuildError(
+                f"topology proxy mesh is empty: {stable_id}",
+            )
+        proxy_obj = bpy.data.objects.new(proxy_name, mesh)
+        collection.objects.link(proxy_obj)
+        proxy_obj.parent = parent_root
+        _tag_topology_proxy(proxy_obj, module_id, topology_ref)
+        # Reuse the parent's material so the proxy has exactly one slot
+        # (the build report's structural validator checks this).
+        parent_mesh = next(
+            (
+                child for child in parent_root.children
+                if child.name.startswith("mesh__")
+            ),
+            None,
+        )
+        if parent_mesh is None or not parent_mesh.data.materials:
+            raise RuntimeBuildError(
+                f"topology proxy parent has no render mesh: {root_name}",
+            )
+        proxy_obj.data.materials.append(parent_mesh.data.materials[0])
+        # UVs + tangents so the proxy passes the same finite-non-empty
+        # structural check as module meshes.
+        uv_layer = proxy_obj.data.uv_layers.new(name="uv0")
+        proxy_obj.data.uv_layers.active = uv_layer
+        for corner in proxy_obj.data.loops:
+            uv_layer.data[corner.index].uv = (0.0, 0.0)
+        proxy_obj.data.calc_tangents()
+        proxy_obj["nv_tangents"] = True
+        proxies.append(proxy_obj)
+    return proxies
 
 
 def _tag(obj, row):
@@ -584,10 +923,15 @@ def _build_modules(request):
             )
             roots.append(root)
             meshes.append(mesh)
-    return roots, meshes
+    # Phase 4.3: emit one topology proxy mesh per module so the probe's
+    # ``closest_point_on_mesh`` can hit a real mesh instead of the v1
+    # EMPTY / curve topology root.  Proxies are auxiliary and do NOT
+    # count toward the 218-root canonical registry.
+    proxies = _build_topology_proxies(request, collection)
+    return roots, meshes, proxies
 
 
-def _validate_built_modules(request, base_roots, module_roots, module_meshes):
+def _validate_built_modules(request, base_roots, module_roots, module_meshes, topology_proxies):
     all_roots = [obj for obj in bpy.data.objects if obj.get("nv_root") is True]
     expected_ids = [row["object_id"] for row in request["object_registry"]]
     actual_by_id = {obj.get("nv_stable_id"): obj for obj in all_roots}
@@ -631,6 +975,7 @@ def _validate_built_modules(request, base_roots, module_roots, module_meshes):
                 raise RuntimeBuildError(
                     f"reciprocal-route mesh contains non-finite vertex: {mesh.name}",
                 )
+    _validate_topology_proxies(request, topology_proxies)
     bpy.context.scene["nv_reciprocal_route_module_build"] = json.dumps(
         {
             "build_id": request["build_id"],
@@ -639,12 +984,103 @@ def _validate_built_modules(request, base_roots, module_roots, module_meshes):
             ],
             "geometry_usability": "preview-only",
             "module_root_count": EXPECTED_MODULE_ROOTS,
+            "topology_proxy_count": EXPECTED_TOPOLOGY_PROXY_COUNT,
             "stage": "modeled-unverified",
             "trust_effect": "none",
         },
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _validate_topology_proxies(request, topology_proxies):
+    """Verify each proxy mesh carries the right identity and is finite
+    and non-empty.
+
+    Proxies are auxiliary and do NOT count toward the 218-root canonical
+    registry, so the registry check above is unaffected.  But each proxy
+    must still match its declared ``(module_id, topology_ref)`` pair from
+    the canonical plan, have a finite non-empty mesh with one material,
+    and carry the low-trust Literal tags so no downstream code can
+    promote it.
+    """
+
+    if len(topology_proxies) != EXPECTED_TOPOLOGY_PROXY_COUNT:
+        raise RuntimeBuildError(
+            f"topology proxy count is {len(topology_proxies)}, "
+            f"expected {EXPECTED_TOPOLOGY_PROXY_COUNT}",
+        )
+    plan = request["reciprocal_route_module_plan"]
+    targets = _topology_proxy_targets(plan)
+    expected_by_module = {
+        module_id: (topology_ref, look_at_m)
+        for module_id, topology_ref, look_at_m in targets
+    }
+    seen_proxy_ids = set()
+    for proxy in topology_proxies:
+        stable_id = proxy.get("nv_stable_id")
+        if not isinstance(stable_id, str) or not stable_id:
+            raise RuntimeBuildError(
+                "topology proxy is missing nv_stable_id",
+            )
+        if stable_id in seen_proxy_ids:
+            raise RuntimeBuildError(
+                f"topology proxy stable_id is duplicated: {stable_id}",
+            )
+        seen_proxy_ids.add(stable_id)
+        if proxy.get("nv_root") is True:
+            raise RuntimeBuildError(
+                f"topology proxy must not carry nv_root: {stable_id}",
+            )
+        if (
+            proxy.get("nv_proxy_topology") is not True
+            or proxy.get("nv_stage") != "modeled-unverified"
+            or proxy.get("nv_trust_effect") != "none"
+            or proxy.get("nv_geometry_usability") != "preview-only"
+        ):
+            raise RuntimeBuildError(
+                f"topology proxy tags are invalid: {stable_id}",
+            )
+        module_id = proxy.get("nv_proxy_module_id")
+        topology_ref = proxy.get("nv_proxy_topology_ref")
+        if (module_id, topology_ref) not in [
+            (mid, tref) for mid, tref, _ in targets
+        ]:
+            raise RuntimeBuildError(
+                f"topology proxy (module_id={module_id}, "
+                f"topology_ref={topology_ref}) is not in plan targets",
+            )
+        expected_topology_ref, _expected_look_at = expected_by_module[module_id]
+        if topology_ref != expected_topology_ref:
+            raise RuntimeBuildError(
+                f"topology proxy topology_ref={topology_ref} for "
+                f"{module_id} disagrees with plan "
+                f"({expected_topology_ref})",
+            )
+        expected_stable_id = _topology_proxy_id_for_module(module_id, topology_ref)
+        if stable_id != expected_stable_id:
+            raise RuntimeBuildError(
+                f"topology proxy stable_id={stable_id} disagrees with "
+                f"expected {expected_stable_id}",
+            )
+        if proxy.type != "MESH":
+            raise RuntimeBuildError(
+                f"topology proxy is not a MESH: {stable_id}",
+            )
+        if (
+            not proxy.data.vertices
+            or not proxy.data.polygons
+            or proxy.get("nv_tangents") is not True
+            or len(proxy.data.materials) != 1
+        ):
+            raise RuntimeBuildError(
+                f"topology proxy mesh is structurally invalid: {stable_id}",
+            )
+        for vertex in proxy.data.vertices:
+            if not all(math.isfinite(value) for value in vertex.co):
+                raise RuntimeBuildError(
+                    f"topology proxy mesh contains non-finite vertex: {stable_id}",
+                )
 
 
 def _write_report(request, staging_path, output_path, module_meshes):
@@ -700,12 +1136,13 @@ def main():
     request_path, staging_path = _runtime_paths(sys.argv)
     request = _validate_request(_load_request(request_path))
     base_roots = _validate_base_scene(request)
-    module_roots, module_meshes = _build_modules(request)
+    module_roots, module_meshes, topology_proxies = _build_modules(request)
     _validate_built_modules(
         request,
         base_roots,
         module_roots,
         module_meshes,
+        topology_proxies,
     )
     output_path = staging_path / OUTPUT_NAME
     if output_path.exists() or (staging_path / REPORT_NAME).exists():

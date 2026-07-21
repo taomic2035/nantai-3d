@@ -476,7 +476,18 @@ def _index_scene(plan: dict):
                     f"duplicate module mesh for part_id={stable_id}",
                 )
             module_meshes[stable_id] = obj
-        elif obj.type == "MESH" and stable_id:
+        elif (
+            obj.type == "MESH"
+            and stable_id
+            # Phase 4.3: topology proxies (nv_proxy_topology=True) are
+            # auxiliary attachment targets emitted by
+            # ``apply_reciprocal_route_modules.py``.  They must NOT enter
+            # env_meshes -- otherwise module-environment intersection
+            # probes would falsely report each module intersecting its
+            # own proxy.  Proxies still enter stable_id_to_obj below so
+            # ``_topology_attachment_probes`` can find them.
+            and not obj.get("nv_proxy_topology")
+        ):
             env_meshes.append(obj)
         if stable_id:
             if stable_id in stable_id_to_obj:
@@ -859,21 +870,51 @@ def _topology_attachment_probes(
     module_parts_by_id: dict,
     stable_id_to_obj: dict,
     plan: dict,
+    depsgraph,
 ) -> list:
     """For each of the 6 modules, measure the distance from the module's
     first part center to the nearest surface of its declared
     ``topology_ref`` object.  Returns a list of probe dicts.
 
     When the measurement cannot be taken (topology object missing, no
-    parts, or ``closest_point_on_mesh`` returned no hit), the report
+    parts, or ``BVHTree.find_nearest`` returned no hit), the report
     carries ``attachment_distance_m=None`` -- honest absence rather than
     ``inf``.  The schema's validator rejects ``passed=True`` when the
     distance is ``None``.
+
+    Phase 4.3 amendment (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md
+    §"待处理" item: "topology attachment distance wrong"): Blender 4.5.11
+    ``Object.closest_point_on_mesh`` and ``BVHTree.find_nearest`` both
+    return a ``distance`` field that does NOT match the geometric
+    distance from origin to the returned location (verified empirically:
+    multiple origins all returned ``distance=3`` while the real
+    Euclidean distance ranged from 0.0 to 24.25 m).  To stay fail-closed
+    the probe now builds a BVH per topology object, calls
+    ``find_nearest`` for the nearest surface location only, and computes
+    the distance itself as ``(center - location).length``.  This is
+    independent of any Blender version's tuple ordering.
     """
     results = []
     for module_id in MODULE_IDS:
         topology_ref = _topology_ref_for_module(module_id, plan)
-        topology_obj = stable_id_to_obj.get(topology_ref)
+        # Phase 4.3: prefer the module-specific proxy mesh emitted by
+        # ``apply_reciprocal_route_modules.py::_build_topology_proxies``.
+        # The v1 base scene's ``path-network-001/002/003/005`` are EMPTY
+        # roots; ``BVHTree.FromObject`` on an EMPTY returns None.  The
+        # reciprocal-route runtime emits one proxy mesh per module with
+        # stable_id ``"{topology_ref}::{module_id}"`` so the probe can
+        # measure a real attachment distance.  Fall back to the original
+        # topology_ref if the proxy is absent (e.g. older build).
+        proxy_id = f"{topology_ref}::{module_id}"
+        topology_obj = stable_id_to_obj.get(proxy_id)
+        if topology_obj is None:
+            topology_obj = stable_id_to_obj.get(topology_ref)
+        used_target = (
+            proxy_id if topology_obj is not None and topology_obj.get(
+                "nv_stable_id",
+            ) == proxy_id
+            else topology_ref
+        )
         if topology_obj is None:
             results.append({
                 "role_module_id": module_id,
@@ -881,7 +922,8 @@ def _topology_attachment_probes(
                 "attachment_distance_m": None,
                 "passed": False,
                 "failure_reason": (
-                    f"topology_ref object {topology_ref} not found in scene"
+                    f"topology_ref object {topology_ref} not found in scene "
+                    f"(also no proxy {proxy_id})"
                 ),
             })
             continue
@@ -892,35 +934,65 @@ def _topology_attachment_probes(
                 "topology_ref": topology_ref,
                 "attachment_distance_m": None,
                 "passed": False,
-                "failure_reason": "module has no parts",
+                "failure_reason": (
+                    f"module has no parts (target={used_target})"
+                ),
             })
             continue
         first_part = parts[0]
         center = _part_center_world(first_part)
-        # closest_point_on_mesh takes world-space origin and returns
-        # (result, location, normal, distance).  Cast a generous distance
-        # so we don't artificially fail modules whose topology object is
-        # a few meters away.
-        try:
-            result, _loc, _normal, distance = topology_obj.closest_point_on_mesh(
-                center,
-                distance=RAY_MAX_DISTANCE_M,
-            )
-        except (RuntimeError, ValueError):
-            result, distance = False, None
-        if not result or distance is None or not math.isfinite(distance):
+        # Build a world-space BVH for the topology object.  We avoid
+        # ``Object.closest_point_on_mesh`` here because in Blender 4.5.11
+        # its returned ``distance`` field does not match the geometric
+        # distance (see function docstring).
+        bvh = _bvh_for_object(topology_obj, depsgraph)
+        if bvh is None:
             results.append({
                 "role_module_id": module_id,
                 "topology_ref": topology_ref,
                 "attachment_distance_m": None,
                 "passed": False,
                 "failure_reason": (
-                    f"closest_point_on_mesh returned no hit for "
-                    f"{topology_ref}"
+                    f"BVH could not be built for {used_target} "
+                    f"(no evaluable mesh)"
                 ),
             })
             continue
-        distance_m = float(distance)
+        try:
+            nearest = bvh.find_nearest(center, RAY_MAX_DISTANCE_M)
+        except (RuntimeError, ValueError):
+            nearest = None
+        # find_nearest returns (location, normal, distance, index) on
+        # hit, (None, None, None, None) on miss.  We only need the
+        # location because we compute distance ourselves.
+        if nearest is None or nearest[0] is None:
+            results.append({
+                "role_module_id": module_id,
+                "topology_ref": topology_ref,
+                "attachment_distance_m": None,
+                "passed": False,
+                "failure_reason": (
+                    f"BVH.find_nearest returned no hit for "
+                    f"{used_target}"
+                ),
+            })
+            continue
+        location = nearest[0]
+        # Compute the real geometric distance -- Blender 4.5's
+        # find_nearest distance field is not reliable (see docstring).
+        distance_m = float((center - location).length)
+        if not math.isfinite(distance_m):
+            results.append({
+                "role_module_id": module_id,
+                "topology_ref": topology_ref,
+                "attachment_distance_m": None,
+                "passed": False,
+                "failure_reason": (
+                    f"computed distance is not finite for "
+                    f"{used_target}"
+                ),
+            })
+            continue
         passed = distance_m <= MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M
         results.append({
             "role_module_id": module_id,
@@ -930,7 +1002,8 @@ def _topology_attachment_probes(
             "failure_reason": (
                 None if passed
                 else f"distance={distance_m:.3f} > "
-                     f"{MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M:.3f}"
+                     f"{MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M:.3f} "
+                     f"(target={used_target})"
             ),
         })
     return results
@@ -1071,7 +1144,7 @@ def main():
         module_bvhs, module_parts_by_id, env_bvhs,
     )
     topology_probes = _topology_attachment_probes(
-        module_parts_by_id, stable_id_to_obj, plan,
+        module_parts_by_id, stable_id_to_obj, plan, depsgraph,
     )
 
     summary = _build_summary(route_probes, pair_probes, env_probes, topology_probes)

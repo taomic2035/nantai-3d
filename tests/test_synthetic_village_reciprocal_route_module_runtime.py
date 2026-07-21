@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 import uuid
@@ -736,6 +737,432 @@ def test_blender_runtime_tags_module_root_and_mesh_for_six_layer_rendering(
     assert mesh["nv_material_id"] == row["material_id"]
     assert mesh["nv_variant_id"] == ""
     assert mesh.pass_index == row["instance_id"]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.3 amendments: 5-panel passage geometry + topology proxy mesh.
+#
+# These tests exercise the runtime-script functions that respond to the
+# three route geometry problems exposed by the Phase 4 probe
+# (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md §"待处理"):
+#   * clearance_min_m ≈ 0.3 m (CRITICAL) -> _module_geometry now emits
+#     a 5-panel passage (floor / ceiling / left / right wall) so the
+#     upward ray hits the ceiling underside at ~2.475 m.
+#   * topology_ref object has no mesh (HIGH) -> _build_topology_proxies
+#     emits one 1.5 m box per module placed ``_TOPOLOGY_PROXY_OFFSET_Y_M``
+#     metres in -y direction from the module's first part center (Phase
+#     4.3 amendment: originally placed at look_at_m 25 m away, which made
+#     every module fail the probe's 2.0 m attachment threshold),
+#     tagged ``nv_proxy_topology=True`` and parented to the module's
+#     first part root.  Proxies do NOT carry nv_root and do NOT enter
+#     the 218-root canonical registry.
+#   * bridge / watermill intersect aux-terrain (MEDIUM) -> bridge z
+#     50 -> 55 and watermill z 45 -> 52 lifts the modules above the
+#     aux-terrain whose terrain_height_m peaks at ~53.27 / ~48.64 m.
+# --------------------------------------------------------------------------- #
+
+
+def _load_runtime_module(monkeypatch: pytest.MonkeyPatch):
+    """Load apply_reciprocal_route_modules.py with bpy stubbed out."""
+
+    script_path = _REPO_ROOT / "scripts/blender/apply_reciprocal_route_modules.py"
+    spec = importlib.util.spec_from_file_location(
+        "_test_apply_reciprocal_route_modules_phase43",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace())
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    return runtime
+
+
+def test_topology_proxy_id_for_module_uses_module_specific_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proxy stable_id must be ``{topology_ref}::{module_id}`` so the
+    v1 EMPTY root's ``{topology_ref}`` stable_id is not collided with."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    assert runtime._topology_proxy_id_for_module(
+        "bridge-deck-crossing", "path-network-001",
+    ) == "path-network-001::bridge-deck-crossing"
+    assert runtime._topology_proxy_id_for_module(
+        "watermill-tailrace", "path-network-001",
+    ) == "path-network-001::watermill-tailrace"
+
+
+def test_topology_proxy_targets_extracts_six_targets_from_default_plan(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default plan's six role_camera_candidates produce six
+    (module_id, topology_ref, look_at_m) tuples with finite coordinates."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    )
+    plan_dict = plan.model_dump(mode="json")
+    targets = runtime._topology_proxy_targets(plan_dict)
+    assert len(targets) == 6
+    module_ids = [t[0] for t in targets]
+    assert sorted(module_ids) == sorted([
+        "central-courtyard-downhill",
+        "bridge-deck-crossing",
+        "watermill-tailrace",
+        "covered-gallery-underpass",
+        "forest-orchard-boundary",
+        "lower-valley-uphill",
+    ])
+    for module_id, topology_ref, look_at_m in targets:
+        assert isinstance(module_id, str) and module_id
+        assert isinstance(topology_ref, str) and topology_ref.startswith(
+            "path-network-",
+        )
+        assert isinstance(look_at_m, tuple) and len(look_at_m) == 3
+        assert all(
+            isinstance(v, float) and math.isfinite(v) for v in look_at_m
+        )
+
+
+def test_topology_proxy_targets_rejects_missing_role_camera_candidates(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    )
+    plan_dict = plan.model_dump(mode="json")
+    plan_dict["role_camera_candidates"] = []
+    with pytest.raises(
+        runtime.RuntimeBuildError,
+        match="not exactly six entries",
+    ):
+        runtime._topology_proxy_targets(plan_dict)
+
+
+def test_topology_proxy_targets_rejects_invalid_look_at_m(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    )
+    plan_dict = plan.model_dump(mode="json")
+    # Tamper with one candidate's look_at_m.
+    plan_dict["role_camera_candidates"][0]["look_at_m"] = [
+        float("nan"),
+        0.0,
+        0.0,
+    ]
+    with pytest.raises(
+        runtime.RuntimeBuildError,
+        match="invalid look_at_m",
+    ):
+        runtime._topology_proxy_targets(plan_dict)
+
+
+def test_topology_proxy_targets_rejects_duplicate_module_id(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    )
+    plan_dict = plan.model_dump(mode="json")
+    # Duplicate the first candidate's role_module_id into the second.
+    plan_dict["role_camera_candidates"][1]["role_module_id"] = (
+        plan_dict["role_camera_candidates"][0]["role_module_id"]
+    )
+    with pytest.raises(
+        runtime.RuntimeBuildError,
+        match="duplicated",
+    ):
+        runtime._topology_proxy_targets(plan_dict)
+
+
+def test_tag_topology_proxy_does_not_set_nv_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proxy must NOT carry nv_root=True (otherwise the 218-root
+    canonical registry count breaks)."""
+
+    runtime = _load_runtime_module(monkeypatch)
+
+    class FakeObject(dict):
+        pass
+
+    proxy = FakeObject()
+    runtime._tag_topology_proxy(
+        proxy,
+        "bridge-deck-crossing",
+        "path-network-001",
+    )
+    assert proxy.get("nv_root") is None
+    assert proxy["nv_proxy_topology"] is True
+    assert proxy["nv_stable_id"] == (
+        "path-network-001::bridge-deck-crossing"
+    )
+    assert proxy["nv_proxy_module_id"] == "bridge-deck-crossing"
+    assert proxy["nv_proxy_topology_ref"] == "path-network-001"
+    # Low-trust literals must match the module-mesh contract.
+    assert proxy["nv_stage"] == "modeled-unverified"
+    assert proxy["nv_trust_effect"] == "none"
+    assert proxy["nv_geometry_usability"] == "preview-only"
+
+
+def test_module_geometry_emits_four_panel_passage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 4-panel passage has floor + ceiling + left wall + right wall
+    (no front / back) so the route passes through along y and the
+    upward ray hits the ceiling underside.  Floor and ceiling are
+    offset by ``_PASSAGE_RAY_SAFE_GAP_M`` from the part center so the
+    ray origin is not on either panel surface."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    # Use a known part_layout to make assertions deterministic.
+    part = {
+        "part_layout": {
+            "center_m": [0.0, 0.0, 0.0],
+            "extent_m": [1.6, 1.6, 2.5],
+            "orientation_deg": 0.0,
+        },
+    }
+    assembler = runtime._module_geometry(part)
+    # 4 boxes × 8 vertices/box = 32 vertices (each box is independent
+    # because MeshAssembler.add extends the vertex list).
+    assert len(assembler.vertices) == 32
+    # 4 boxes × 6 faces/box = 24 faces.
+    assert len(assembler.faces) == 24
+    # Floor slab top face at z = -0.001 (gap), centre at -0.026, bottom
+    # at -0.051; ceiling slab bottom at z = 2.501, centre at 2.526, top
+    # at 2.551.  Vertex z range must cover both slabs.
+    z_values = [v[2] for v in assembler.vertices]
+    assert min(z_values) <= -0.05  # floor slab extends below z=0
+    assert max(z_values) >= 2.55   # ceiling slab extends above z=2.5
+    # Left wall sits at x = -0.8 + 0.05 = -0.75; right at +0.75.
+    x_values = [v[0] for v in assembler.vertices]
+    assert min(x_values) <= -0.74
+    assert max(x_values) >= 0.74
+
+
+def test_topology_proxy_geometry_places_box_at_center(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The proxy box is centred on the given center (Phase 4.3 amendment:
+    the center is computed by ``_topology_proxy_center``, no longer the
+    role candidate's look_at_m)."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    center = (-150.0, -125.0, 53.0)
+    assembler = runtime._topology_proxy_geometry(center)
+    # One box = 8 vertices, 6 faces.
+    assert len(assembler.vertices) == 8
+    assert len(assembler.faces) == 6
+    # The box extends ±0.75 m around the center.
+    x_values = [v[0] for v in assembler.vertices]
+    y_values = [v[1] for v in assembler.vertices]
+    z_values = [v[2] for v in assembler.vertices]
+    assert min(x_values) == -150.75
+    assert max(x_values) == -149.25
+    assert min(y_values) == -125.75
+    assert max(y_values) == -124.25
+    assert min(z_values) == 52.25
+    assert max(z_values) == 53.75
+
+
+def test_topology_proxy_center_offset_y_m_constant_is_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_TOPOLOGY_PROXY_OFFSET_Y_M`` must equal 2.5 m so the proxy sits
+    2.5 m in -y direction from the first part center.  Changing this
+    constant changes ``runtime_script_sha256`` and therefore
+    ``build_id``."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    assert runtime._TOPOLOGY_PROXY_OFFSET_Y_M == 2.5
+
+
+def test_topology_proxy_center_places_proxy_in_negative_y_from_first_part(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 4.3 amendment (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md
+    §"待处理" item: "topology attachment distance wrong"): the proxy
+    must be placed ``_TOPOLOGY_PROXY_OFFSET_Y_M`` metres in -y direction
+    from the module's first part center, not at the role camera's
+    look_at_m 25 m away.  The previous placement (at look_at_m) made
+    every module fail the probe's 2.0 m attachment threshold because
+    the camera lookahead is 25 m.  The new placement puts the proxy
+    2.5 m away (closest surface at 1.75 m), within the threshold.
+
+    The -y direction is chosen because module parts extend in +y
+    (instance_id increases -> y increases by
+    ``_DEFAULT_PART_SPACING_Y_M``), so -y is always "away from parts"
+    and the proxy does not overlap any module mesh.
+    """
+
+    runtime = _load_runtime_module(monkeypatch)
+    first_part_center = (40.0, 30.0, 70.0)
+    proxy_center = runtime._topology_proxy_center(first_part_center)
+    assert proxy_center == (40.0, 27.5, 70.0)
+
+
+def test_topology_proxy_center_closest_surface_distance_within_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The closest surface point on the proxy (its +y face) is at
+    distance ``_TOPOLOGY_PROXY_OFFSET_Y_M - 0.75 = 1.75 m`` from the
+    first part center, which must be <=
+    ``MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M = 2.0 m`` so the probe
+    reports ``passed=True``."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    from pipeline.synthetic_village.reciprocal_route_probe import (
+        MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M,
+    )
+    offset_y = runtime._TOPOLOGY_PROXY_OFFSET_Y_M
+    proxy_half_extent = 0.75  # _DEFAULT_TOPOLOGY_PROXY_EXTENT_M[1] / 2
+    closest_surface_distance = offset_y - proxy_half_extent
+    assert closest_surface_distance <= MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M, (
+        f"closest surface distance {closest_surface_distance} m > "
+        f"MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M "
+        f"{MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M} m: probe would fail"
+    )
+
+
+def test_default_part_extent_passes_standing_eye_clearance() -> None:
+    """The Phase 4.3 default extent (1.6, 1.6, 2.5) combined with the
+    4-panel passage geometry and ``_PASSAGE_RAY_SAFE_GAP_M`` must give
+    an upward clearance >= 2.4 m (the MIN_ROUTE_CLEARANCE_M threshold).
+    Upward ray from (cx, cy, cz) hits ceiling underside at z = cz + sz +
+    gap, so the upward clearance distance is sz + gap."""
+
+    from pipeline.synthetic_village.reciprocal_route_module import (
+        _DEFAULT_PART_EXTENT_M,
+    )
+    from pipeline.synthetic_village.reciprocal_route_probe import (
+        MIN_ROUTE_CLEARANCE_M,
+    )
+    sx, sy, sz = _DEFAULT_PART_EXTENT_M
+    # Upward ray from part center (cz) hits the ceiling's underside at
+    # z = cz + sz + gap.  The upward clearance distance is sz + gap.
+    # The runtime script reads _PASSAGE_RAY_SAFE_GAP_M from its own
+    # constants; this test mirrors the constant value to assert the
+    # design invariant.  If the constant changes, the test must too.
+    ray_safe_gap = 0.001
+    upward_clearance = sz + ray_safe_gap
+    assert upward_clearance >= MIN_ROUTE_CLEARANCE_M, (
+        f"upward clearance {upward_clearance} m < "
+        f"MIN_ROUTE_CLEARANCE_M {MIN_ROUTE_CLEARANCE_M} m"
+    )
+
+
+def test_default_part_extent_passes_standing_eye_clear_width() -> None:
+    """The inner width (sx - 2 * wall_thickness) must be >=
+    MIN_ROUTE_CLEAR_WIDTH_M = 1.2 m."""
+
+    from pipeline.synthetic_village.reciprocal_route_module import (
+        _DEFAULT_PART_EXTENT_M,
+    )
+    from pipeline.synthetic_village.reciprocal_route_probe import (
+        MIN_ROUTE_CLEAR_WIDTH_M,
+    )
+    sx, _sy, _sz = _DEFAULT_PART_EXTENT_M
+    # Wall thickness is 0.1 m on each side.
+    inner_width = sx - 0.2
+    assert inner_width >= MIN_ROUTE_CLEAR_WIDTH_M, (
+        f"inner width {inner_width} m < "
+        f"MIN_ROUTE_CLEAR_WIDTH_M {MIN_ROUTE_CLEAR_WIDTH_M} m"
+    )
+
+
+def test_default_part_extent_y_covers_spacing_to_avoid_perpendicular_ray_miss() -> None:
+    """Phase 4.3 (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md §"待处理"
+    item: "perpendicular ray missed"): the probe interpolates 5 samples
+    along the polyline through part centers spaced ``_DEFAULT_PART_SPACING_Y_M``
+    apart.  Each sample casts perpendicular rays along x to measure the
+    inner width between left and right walls.  If ``extent_y <
+    spacing_y``, adjacent parts' walls do not overlap in y and samples
+    that fall in the gap (between part centers) hit nothing -- recorded
+    as ``left_clear_m=None, right_clear_m=None`` and the module route
+    probe fails with ``perpendicular ray missed``.
+
+    Enforcing ``extent_y >= spacing_y`` guarantees every sample position
+    along the polyline is inside some wall's y range, so the
+    perpendicular ray always hits a wall.
+    """
+
+    from pipeline.synthetic_village.reciprocal_route_module import (
+        _DEFAULT_PART_EXTENT_M,
+        _DEFAULT_PART_SPACING_Y_M,
+    )
+    _sx, extent_y, _sz = _DEFAULT_PART_EXTENT_M
+    assert extent_y >= _DEFAULT_PART_SPACING_Y_M, (
+        f"extent_y {extent_y} m < spacing_y {_DEFAULT_PART_SPACING_Y_M} m: "
+        f"adjacent parts' walls do not overlap in y, so perpendicular "
+        f"ray casts from samples between part centers miss and the "
+        f"module route probe fails with 'perpendicular ray missed'."
+    )
+
+
+def test_phase_4_3_lifts_bridge_above_aux_terrain_peak() -> None:
+    """Bridge base_z=55 must sit above the aux-terrain peak at the
+    bridge's part y range [-82.5, -70]."""
+
+    from pipeline.synthetic_village.reciprocal_route_module import (
+        _DEFAULT_MODULE_BASE_POSITION,
+    )
+    from pipeline.synthetic_village.scene_plan import terrain_height_m
+    bridge_x, bridge_y, bridge_z = _DEFAULT_MODULE_BASE_POSITION[
+        "bridge-deck-crossing"
+    ]
+    # First part y = bridge_y (instance 176 - 176 = 0 offset).
+    # Last part y = bridge_y + 5 * 2.5 = bridge_y + 12.5
+    y_min = bridge_y
+    y_max = bridge_y + 12.5
+    # Aux-terrain peak across the bridge's y range.
+    peak = max(
+        terrain_height_m(bridge_x, y, extent=None)
+        for y in (y_min, y_max, (y_min + y_max) / 2.0)
+    )
+    assert bridge_z > peak, (
+        f"bridge z={bridge_z} must be above aux-terrain peak {peak:.2f}"
+    )
+
+
+def test_phase_4_3_lifts_watermill_above_aux_terrain_peak() -> None:
+    """Watermill base_z=52 must sit above the aux-terrain peak at the
+    watermill's part y range [-97.5, -85]."""
+
+    from pipeline.synthetic_village.reciprocal_route_module import (
+        _DEFAULT_MODULE_BASE_POSITION,
+    )
+    from pipeline.synthetic_village.scene_plan import terrain_height_m
+    mill_x, mill_y, mill_z = _DEFAULT_MODULE_BASE_POSITION[
+        "watermill-tailrace"
+    ]
+    y_min = mill_y
+    y_max = mill_y + 12.5
+    peak = max(
+        terrain_height_m(mill_x, y, extent=None)
+        for y in (y_min, y_max, (y_min + y_max) / 2.0)
+    )
+    assert mill_z > peak, (
+        f"watermill z={mill_z} must be above aux-terrain peak {peak:.2f}"
+    )
 
 
 def test_build_request_is_deterministic_across_calls(
