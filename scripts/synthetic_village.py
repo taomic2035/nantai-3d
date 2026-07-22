@@ -152,6 +152,62 @@ def _run_windows_production_render():
     return run_windows_production_render
 
 
+def _load_reciprocal_route_runtime_request():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.reciprocal_route_module_runtime import (
+        load_reciprocal_route_runtime_request,
+    )
+
+    return load_reciprocal_route_runtime_request
+
+
+def _verify_reciprocal_production_build():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.reciprocal_route_production import (
+        verify_reciprocal_production_build,
+    )
+
+    return verify_reciprocal_production_build
+
+
+def _run_reciprocal_production_batch():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.reciprocal_route_batch import (
+        run_reciprocal_production_batch,
+    )
+
+    return run_reciprocal_production_batch
+
+
+def _parse_reciprocal_batch_targets(values: list[str]):
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.reciprocal_route_batch import (
+        ReciprocalProductionBatchTarget,
+    )
+
+    targets = []
+    for value in values:
+        role_module_id, separator, target_camera_id = value.partition("=")
+        if not separator:
+            raise SystemExit(
+                "--target must be ROLE_MODULE_ID=camera-ground-route-010|039",
+            )
+        try:
+            targets.append(
+                ReciprocalProductionBatchTarget(
+                    role_module_id=role_module_id,
+                    target_camera_id=target_camera_id,
+                ),
+            )
+        except ValueError as exc:
+            raise SystemExit(f"invalid reciprocal --target: {value}") from exc
+    return tuple(targets)
+
+
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant is forbidden: {value}")
 
@@ -628,6 +684,72 @@ def _parser() -> argparse.ArgumentParser:
         default=15 * 60,
     )
     render_production_windows.add_argument("--render-root", type=Path)
+    render_reciprocal_production = commands.add_parser(
+        "render-reciprocal-production",
+        help=(
+            "Run or resume the exact six-role L0 caller against one verified "
+            "exact-218 reciprocal Blender build and persist a Studio-readable "
+            "batch journal."
+        ),
+    )
+    render_reciprocal_production.add_argument(
+        "--reciprocal-build",
+        type=Path,
+        required=True,
+        help=(
+            "Directory containing canonical reciprocal-route build request, "
+            "report, and measured .blend bytes."
+        ),
+    )
+    render_reciprocal_production.add_argument(
+        "--blender",
+        type=Path,
+        required=True,
+    )
+    render_reciprocal_production.add_argument(
+        "--target",
+        action="append",
+        required=True,
+        help=(
+            "ROLE_MODULE_ID=camera-ground-route-010|039; repeat exactly once "
+            "for each of the six canonical roles in plan order."
+        ),
+    )
+    render_reciprocal_production.add_argument(
+        "--min-valid-pixel-ratio",
+        type=float,
+        required=True,
+    )
+    render_reciprocal_production.add_argument(
+        "--post-render-policy",
+        type=Path,
+        required=True,
+    )
+    render_reciprocal_production.add_argument(
+        "--clearance-near-distance-m",
+        type=float,
+        required=True,
+    )
+    render_reciprocal_production.add_argument(
+        "--min-upper-middle-near-hits",
+        type=int,
+        required=True,
+    )
+    render_reciprocal_production.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+        help=(
+            "One private batch directory; place it below "
+            ".nantai-studio/sv-prod-win/reciprocal-production-batches/ "
+            "for Studio discovery."
+        ),
+    )
+    render_reciprocal_production.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=30 * 60,
+    )
     build_environment_modules = commands.add_parser(
         "build-environment-modules",
         help=(
@@ -1087,6 +1209,66 @@ def main(argv: list[str] | None = None) -> int:
                     "preflight_only": result.preflight_only,
                     "build_verification_level": "L2",
                     "frame_verification_level": "L0",
+                    "trust_effect": "none-quality-filter-only",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "render-reciprocal-production":
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from pipeline.synthetic_village.production_preflight import (
+            ProductionClearancePolicy,
+        )
+        from pipeline.synthetic_village.production_render import (
+            LocalProductionQualityPolicy,
+        )
+        from pipeline.synthetic_village.reciprocal_route_module_runtime import (
+            RECIPROCAL_ROUTE_REPORT_NAME,
+            RECIPROCAL_ROUTE_REQUEST_NAME,
+        )
+
+        runtime_request = _load_reciprocal_route_runtime_request()(
+            args.reciprocal_build / RECIPROCAL_ROUTE_REQUEST_NAME,
+        )
+        verified_build = _verify_reciprocal_production_build()(
+            report_path=args.reciprocal_build / RECIPROCAL_ROUTE_REPORT_NAME,
+            runtime_request=runtime_request,
+        )
+        build_plan, _, _, _ = _import_production_profile()
+        result = _run_reciprocal_production_batch()(
+            verified_build=verified_build,
+            source_plan=build_plan(),
+            targets=_parse_reciprocal_batch_targets(args.target),
+            blender_executable=args.blender,
+            output_root=args.output_root,
+            clearance_policy=ProductionClearancePolicy(
+                near_distance_m=args.clearance_near_distance_m,
+                minimum_upper_middle_near_hit_count=(
+                    args.min_upper_middle_near_hits
+                ),
+            ),
+            quality_policy=LocalProductionQualityPolicy(
+                minimum_valid_pixel_ratio=args.min_valid_pixel_ratio,
+            ),
+            post_render_policy=_load_post_render_policy(
+                args.post_render_policy,
+            ),
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(
+            json.dumps(
+                {
+                    "accepted_count": result.accepted_count,
+                    "batch_id": result.batch_id,
+                    "batch_root": str(result.batch_root),
+                    "failed_count": result.failed_count,
+                    "journal_path": str(result.journal_path),
+                    "reused_count": result.reused_count,
+                    "synthetic": True,
+                    "verification_level": "L0",
                     "trust_effect": "none-quality-filter-only",
                 },
                 ensure_ascii=False,

@@ -533,3 +533,130 @@ def test_build_environment_modules_uses_runtime_default_build_root(
             "source-consistent-multiscale-surface-v1",
         ],
     ) == 0
+
+
+def test_render_reciprocal_production_runs_resumable_six_role_batch(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    runtime_request = object()
+    verified_build = object()
+    source_plan = object()
+    policy = object()
+    run_calls = []
+    build_root = tmp_path / "reciprocal-build"
+    output_root = (
+        tmp_path
+        / ".nantai-studio/sv-prod-win/reciprocal-production-batches/batch-001"
+    )
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_load_reciprocal_route_runtime_request",
+        lambda: lambda path: (
+            runtime_request
+            if path == build_root / "reciprocal-route-build-request.json"
+            else None
+        ),
+    )
+
+    expected_runtime_request = runtime_request
+
+    def verify_build(*, report_path, runtime_request: object):
+        assert report_path == build_root / "reciprocal-route-build-report.json"
+        assert runtime_request is expected_runtime_request
+        return verified_build
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_verify_reciprocal_production_build",
+        lambda: verify_build,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_import_production_profile",
+        lambda: (lambda: source_plan, None, None, None),
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_load_post_render_policy",
+        lambda path: policy,
+    )
+
+    def run_batch(**kwargs):
+        run_calls.append(kwargs)
+        return SimpleNamespace(
+            batch_id="a" * 64,
+            batch_root=output_root,
+            journal_path=output_root / "batch-journal.json",
+            accepted_count=5,
+            failed_count=1,
+            reused_count=0,
+        )
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_reciprocal_production_batch",
+        lambda: run_batch,
+    )
+    roles = (
+        "central-courtyard-downhill",
+        "bridge-deck-crossing",
+        "watermill-tailrace",
+        "covered-gallery-underpass",
+        "forest-orchard-boundary",
+        "lower-valley-uphill",
+    )
+    arguments = [
+        "render-reciprocal-production",
+        "--reciprocal-build",
+        str(build_root),
+        "--blender",
+        str(tmp_path / "blender.exe"),
+        "--post-render-policy",
+        str(tmp_path / "policy.json"),
+        "--min-valid-pixel-ratio",
+        "0.05",
+        "--clearance-near-distance-m",
+        "2.0",
+        "--min-upper-middle-near-hits",
+        "5",
+        "--output-root",
+        str(output_root),
+        "--timeout-seconds",
+        "900",
+    ]
+    for index, role in enumerate(roles):
+        camera_id = (
+            "camera-ground-route-010"
+            if index % 2 == 0
+            else "camera-ground-route-039"
+        )
+        arguments.extend(("--target", f"{role}={camera_id}"))
+
+    assert synthetic_village_cli.main(arguments) == 0
+
+    assert len(run_calls) == 1
+    call = run_calls[0]
+    assert call["verified_build"] is verified_build
+    assert call["source_plan"] is source_plan
+    assert call["blender_executable"] == tmp_path / "blender.exe"
+    assert call["output_root"] == output_root
+    assert call["clearance_policy"].near_distance_m == 2.0
+    assert call["clearance_policy"].minimum_upper_middle_near_hit_count == 5
+    assert call["quality_policy"].minimum_valid_pixel_ratio == 0.05
+    assert call["post_render_policy"] is policy
+    assert call["timeout_seconds"] == 900
+    assert tuple(row.role_module_id for row in call["targets"]) == roles
+    assert json.loads(capsys.readouterr().out) == {
+        "accepted_count": 5,
+        "batch_id": "a" * 64,
+        "batch_root": str(output_root),
+        "failed_count": 1,
+        "journal_path": str(output_root / "batch-journal.json"),
+        "reused_count": 0,
+        "synthetic": True,
+        "trust_effect": "none-quality-filter-only",
+        "verification_level": "L0",
+    }

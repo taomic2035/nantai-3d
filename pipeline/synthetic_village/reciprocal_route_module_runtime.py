@@ -311,6 +311,43 @@ def canonical_reciprocal_route_runtime_request_bytes(
     return canary._canonical_json_bytes(request.model_dump(mode="json"))
 
 
+def load_reciprocal_route_runtime_request(
+    path: Path,
+) -> ReciprocalRouteRuntimeRequest:
+    """Load a bounded canonical request without trusting a sibling report."""
+
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+        if not raw or len(raw) > canary.MAX_BUILD_REPORT_BYTES:
+            raise ReciprocalRouteRuntimeError(
+                "reciprocal-route runtime request bytes are absent or unbounded",
+            )
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,
+        )
+        request = ReciprocalRouteRuntimeRequest.model_validate_json(raw)
+        if raw != canonical_reciprocal_route_runtime_request_bytes(request):
+            raise ReciprocalRouteRuntimeError(
+                "reciprocal-route runtime request is not canonical JSON",
+            )
+        return request
+    except ReciprocalRouteRuntimeError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValueError,
+        ValidationError,
+        canary.CanaryBuildError,
+    ) as exc:
+        raise ReciprocalRouteRuntimeError(
+            "reciprocal-route runtime request validation failed",
+        ) from exc
+
+
 class ReciprocalRouteBuildCounts(FrozenModel):
     """Count summary for the reciprocal-route build report.
 

@@ -52,6 +52,7 @@ from pipeline.synthetic_village.reciprocal_route_module_runtime import (
     build_reciprocal_route_runtime_request,
     canonical_reciprocal_route_runtime_request_bytes,
     load_reciprocal_route_build_report,
+    load_reciprocal_route_runtime_request,
     run_reciprocal_route_build,
     verify_reciprocal_route_build_report,
 )
@@ -627,6 +628,23 @@ def test_load_report_rejects_non_canonical_bytes(
 # --------------------------------------------------------------------------- #
 # Phase 3: build_reciprocal_route_runtime_request (content-addressed constructor).
 # --------------------------------------------------------------------------- #
+
+
+def test_runtime_request_loader_requires_canonical_bounded_bytes(
+    tmp_path: Path,
+) -> None:
+    request = build_reciprocal_route_runtime_request(
+        base_build=_base_build(tmp_path),
+    )
+    path = tmp_path / "reciprocal-route-build-request.json"
+    canonical = canonical_reciprocal_route_runtime_request_bytes(request)
+    path.write_bytes(canonical)
+
+    assert load_reciprocal_route_runtime_request(path) == request
+
+    path.write_bytes(canonical.rstrip(b"\n"))
+    with pytest.raises(ReciprocalRouteRuntimeError, match="runtime request"):
+        load_reciprocal_route_runtime_request(path)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
