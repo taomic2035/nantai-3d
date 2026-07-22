@@ -13,7 +13,7 @@ from pathlib import Path
 import bpy
 
 REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v6"
+    "nantai.synthetic-village.local-production-render-frame-request.v7"
 )
 REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v4"
@@ -33,6 +33,14 @@ LINEAGE_KEYS = {
     "trust_effect",
 }
 EXPECTED_TOPOLOGY_PROXY_COUNT = 6
+ROLE_INSTANCE_IDS = {
+    "central-courtyard-downhill": list(range(176, 183)),
+    "bridge-deck-crossing": list(range(183, 189)),
+    "watermill-tailrace": list(range(189, 196)),
+    "covered-gallery-underpass": list(range(196, 205)),
+    "forest-orchard-boundary": list(range(205, 212)),
+    "lower-valley-uphill": list(range(212, 219)),
+}
 
 
 class RuntimeRenderError(RuntimeError):
@@ -150,6 +158,14 @@ def _validate_reciprocal_boundary(request, *, scene, script_path):
         "object_registry_sha256"
     ]:
         raise RuntimeRenderError("object registry digest is invalid")
+    role_module_id = request.get("role_module_id")
+    expected_visible_ids = ROLE_INSTANCE_IDS.get(role_module_id)
+    if expected_visible_ids is None:
+        raise RuntimeRenderError("reciprocal role module is invalid")
+    if request.get("required_visible_instance_ids") != expected_visible_ids:
+        raise RuntimeRenderError(
+            "required visible instance IDs do not match the complete role segment",
+        )
     lineage = _parse_scene_lineage(scene)
     if lineage["build_id"] != request["build_id"]:
         raise RuntimeRenderError(
@@ -261,6 +277,8 @@ def _validate_request(request, engine):
     internal.pop("environment_module_build_report_sha256")
     internal.pop("reciprocal_route_module_plan_sha256")
     internal.pop("engine_script_sha256")
+    internal.pop("role_module_id")
+    internal.pop("required_visible_instance_ids")
     internal["build_adapter"] = "windows-textured-v2"
     internal["build_id"] = bpy.context.scene.get("nv_build_id")
     try:

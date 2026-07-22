@@ -69,7 +69,7 @@ def _render_boundary_payload(script_path: Path) -> dict[str, object]:
     registry = _registry_payload()
     return {
         "schema_version": (
-            "nantai.synthetic-village.local-production-render-frame-request.v6"
+            "nantai.synthetic-village.local-production-render-frame-request.v7"
         ),
         "renderer_script_sha256": hashlib.sha256(
             script_path.read_bytes(),
@@ -81,6 +81,8 @@ def _render_boundary_payload(script_path: Path) -> dict[str, object]:
         "reciprocal_route_module_plan_sha256": "b" * 64,
         "environment_module_build_report_sha256": "c" * 64,
         "build_adapter": "windows-reciprocal-route-v1",
+        "role_module_id": "central-courtyard-downhill",
+        "required_visible_instance_ids": list(range(176, 183)),
         "object_registry": registry,
         "object_registry_sha256": hashlib.sha256(
             canary._canonical_json_bytes(registry),  # noqa: SLF001
@@ -286,6 +288,21 @@ def test_render_wrapper_accepts_exact_218_boundary(
         scene=_scene_lineage(),
         script_path=RENDER_WRAPPER,
     )
+
+
+def test_render_wrapper_rejects_partial_role_instance_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    request = _render_boundary_payload(RENDER_WRAPPER)
+    request["required_visible_instance_ids"] = [176]
+
+    with pytest.raises(wrapper.RuntimeRenderError, match="complete role segment"):
+        wrapper._validate_reciprocal_boundary(
+            request,
+            scene=_scene_lineage(),
+            script_path=RENDER_WRAPPER,
+        )
 
 
 @pytest.mark.parametrize("count", (130, 175, 217, 219))

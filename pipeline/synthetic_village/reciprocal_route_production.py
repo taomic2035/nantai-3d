@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -59,6 +60,15 @@ from .production_render import (
     evaluate_local_production_frame_quality,
     local_production_quality_policy_sha256,
 )
+from .reciprocal_route_module import (
+    BRIDGE_CROSSING_INSTANCE_RANGE,
+    CENTRAL_DOWNHILL_INSTANCE_RANGE,
+    FOREST_BOUNDARY_INSTANCE_RANGE,
+    GALLERY_UNDERPASS_INSTANCE_RANGE,
+    LOWER_VALLEY_UPHILL_INSTANCE_RANGE,
+    WATERMILL_TAILRACE_INSTANCE_RANGE,
+    ModuleId,
+)
 from .reciprocal_route_module_runtime import (
     ReciprocalRouteRuntimeRequest,
     load_reciprocal_route_build_report,
@@ -66,7 +76,7 @@ from .reciprocal_route_module_runtime import (
 )
 
 RECIPROCAL_RENDER_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v6"
+    "nantai.synthetic-village.local-production-render-frame-request.v7"
 )
 RECIPROCAL_RENDER_REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v4"
@@ -88,6 +98,15 @@ Matrix4 = tuple[
     tuple[float, float, float, float],
     tuple[float, float, float, float],
 ]
+
+_ROLE_INSTANCE_RANGES: dict[ModuleId, range] = {
+    "central-courtyard-downhill": CENTRAL_DOWNHILL_INSTANCE_RANGE,
+    "bridge-deck-crossing": BRIDGE_CROSSING_INSTANCE_RANGE,
+    "watermill-tailrace": WATERMILL_TAILRACE_INSTANCE_RANGE,
+    "covered-gallery-underpass": GALLERY_UNDERPASS_INSTANCE_RANGE,
+    "forest-orchard-boundary": FOREST_BOUNDARY_INSTANCE_RANGE,
+    "lower-valley-uphill": LOWER_VALLEY_UPHILL_INSTANCE_RANGE,
+}
 
 
 class FrozenModel(BaseModel):
@@ -140,6 +159,41 @@ def _canonical(payload: object) -> bytes:
     return (
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
+
+
+def reciprocal_role_visible_instance_ids(
+    role_module_id: ModuleId,
+) -> tuple[int, ...]:
+    """Return the complete immutable instance segment for one role module."""
+
+    instance_range = _ROLE_INSTANCE_RANGES.get(role_module_id)
+    if instance_range is None:
+        raise ReciprocalProductionError(
+            f"unknown reciprocal role module: {role_module_id!r}",
+        )
+    return tuple(instance_range)
+
+
+def reciprocal_production_render_id(
+    *,
+    base_render_id: str,
+    role_module_id: ModuleId,
+) -> str:
+    """Bind the generic render identity to one exact role visibility target."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", base_render_id) is None:
+        raise ReciprocalProductionError("base render ID is not a SHA-256")
+    return hashlib.sha256(
+        _canonical(
+            {
+                "base_render_id": base_render_id,
+                "required_visible_instance_ids": list(
+                    reciprocal_role_visible_instance_ids(role_module_id),
+                ),
+                "role_module_id": role_module_id,
+            },
+        ),
+    ).hexdigest()
 
 
 def _opencv_c2w_to_blender(matrix: Matrix4) -> Matrix4:
@@ -538,7 +592,7 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
     """One exact-218 reciprocal-route production-camera render request."""
 
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-request.v6"
+        "nantai.synthetic-village.local-production-render-frame-request.v7"
     ] = RECIPROCAL_RENDER_REQUEST_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = (
         PRODUCTION_PROFILE_ID
@@ -575,6 +629,8 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
     post_render_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     settings: canary.RenderSettings
     camera: ProductionCameraPose
+    role_module_id: ModuleId
+    required_visible_instance_ids: tuple[int, ...]
     requested_c2w_blender: Matrix4
     object_registry: tuple[canary.ObjectRegistryEntry, ...] = Field(
         min_length=218,
@@ -640,7 +696,14 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
         )
         if self.post_render_policy_sha256 != expected_policy_sha256:
             raise ValueError("post-render policy digest is invalid")
-        expected_render_id = production_render_id(
+        expected_visible_ids = reciprocal_role_visible_instance_ids(
+            self.role_module_id,
+        )
+        if self.required_visible_instance_ids != expected_visible_ids:
+            raise ValueError(
+                "required visible instance IDs do not match the complete role segment",
+            )
+        base_render_id = production_render_id(
             self.production_plan,
             blender_executable_sha256=self.blender_executable_sha256,
             renderer_script_sha256=self.renderer_script_sha256,
@@ -655,6 +718,10 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
             environment_module_build_report_sha256=(
                 self.environment_module_build_report_sha256
             ),
+        )
+        expected_render_id = reciprocal_production_render_id(
+            base_render_id=base_render_id,
+            role_module_id=self.role_module_id,
         )
         if self.render_id != expected_render_id:
             raise ValueError("render ID does not bind the production inputs")
@@ -1146,7 +1213,7 @@ def run_reciprocal_production_camera(
     clearance_policy: ProductionClearancePolicy,
     quality_policy: LocalProductionQualityPolicy,
     post_render_policy: ProductionFrameQualityPolicyV2,
-    required_visible_instance_ids: tuple[int, ...],
+    role_module_id: ModuleId,
     process_runner: Callable[..., subprocess.CompletedProcess[str]] = (
         subprocess.run
     ),
@@ -1156,16 +1223,9 @@ def run_reciprocal_production_camera(
 
     if timeout_seconds <= 0:
         raise ReciprocalProductionError("runner timeout must be positive")
-    if (
-        not required_visible_instance_ids
-        or required_visible_instance_ids
-        != tuple(sorted(set(required_visible_instance_ids)))
-        or any(value < 1 or value > 218 for value in required_visible_instance_ids)
-    ):
-        raise ReciprocalProductionError(
-            "required visible instance IDs must be a non-empty unique sorted "
-            "subset of 1..218",
-        )
+    required_visible_instance_ids = reciprocal_role_visible_instance_ids(
+        role_module_id,
+    )
     registry_instance_ids = {
         row.instance_id for row in verified_build.object_registry
     }
@@ -1283,6 +1343,7 @@ def run_reciprocal_production_camera(
         render_request = build_reciprocal_production_frame_request(
             plan=plan,
             camera_id=camera_id,
+            role_module_id=role_module_id,
             build_id=verified_build.build_id,
             blender_executable_sha256=_sha256_file(blender_executable),
             renderer_script_sha256=_sha256_file(renderer_script),
@@ -1370,7 +1431,9 @@ def run_reciprocal_production_camera(
         )
         require_reciprocal_visible_instances(
             frame_report.statistics,
-            required_visible_instance_ids=required_visible_instance_ids,
+            required_visible_instance_ids=(
+                render_request.required_visible_instance_ids
+            ),
         )
         metadata = load_reciprocal_production_camera_metadata(
             frame_output / f"cameras/{camera_id}.json",
@@ -1503,6 +1566,7 @@ def build_reciprocal_production_frame_request(
     *,
     plan: ProductionCameraPlan,
     camera_id: str,
+    role_module_id: ModuleId,
     build_id: str,
     blender_executable_sha256: str,
     renderer_script_sha256: str,
@@ -1533,7 +1597,7 @@ def build_reciprocal_production_frame_request(
     post_render_policy_sha256 = production_frame_quality_policy_v2_sha256(
         post_render_policy,
     )
-    render_id = production_render_id(
+    base_render_id = production_render_id(
         plan,
         blender_executable_sha256=blender_executable_sha256,
         renderer_script_sha256=renderer_script_sha256,
@@ -1548,6 +1612,13 @@ def build_reciprocal_production_frame_request(
         environment_module_build_report_sha256=(
             environment_module_build_report_sha256
         ),
+    )
+    render_id = reciprocal_production_render_id(
+        base_render_id=base_render_id,
+        role_module_id=role_module_id,
+    )
+    required_visible_instance_ids = reciprocal_role_visible_instance_ids(
+        role_module_id,
     )
     return ReciprocalProductionRenderFrameRequest(
         production_plan_sha256=hashlib.sha256(
@@ -1576,6 +1647,8 @@ def build_reciprocal_production_frame_request(
         post_render_policy_sha256=post_render_policy_sha256,
         settings=canary.RenderSettings(),
         camera=camera,
+        role_module_id=role_module_id,
+        required_visible_instance_ids=required_visible_instance_ids,
         requested_c2w_blender=_opencv_c2w_to_blender(camera.c2w_opencv),
         object_registry=object_registry,
         auxiliary_registry=auxiliary_registry,
@@ -1586,7 +1659,7 @@ def build_reciprocal_production_frame_request(
 def canonical_reciprocal_production_render_request_bytes(
     request: ReciprocalProductionRenderFrameRequest,
 ) -> bytes:
-    """Serialize one v6 request as stable canonical JSON bytes."""
+    """Serialize one v7 request as stable canonical JSON bytes."""
 
     return _canonical(request.model_dump(mode="json"))
 

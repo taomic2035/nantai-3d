@@ -64,6 +64,7 @@ from pipeline.synthetic_village.reciprocal_route_production import (
     canonical_reciprocal_production_render_request_bytes,
     load_reciprocal_production_render_report,
     reciprocal_object_registry_sha256,
+    reciprocal_production_render_id,
     require_exact_reciprocal_object_registry,
     require_reciprocal_visible_instances,
     run_reciprocal_production_camera,
@@ -245,6 +246,7 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
     request = build_reciprocal_production_frame_request(
         plan=plan,
         camera_id="camera-ground-route-011",
+        role_module_id="central-courtyard-downhill",
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -263,10 +265,12 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
 
     assert request.schema_version == RECIPROCAL_RENDER_REQUEST_SCHEMA
     assert request.build_adapter == RECIPROCAL_BUILD_ADAPTER
+    assert request.role_module_id == "central-courtyard-downhill"
+    assert request.required_visible_instance_ids == tuple(range(176, 183))
     assert request.object_registry_sha256 == reciprocal_object_registry_sha256(
         request.object_registry,
     )
-    assert request.render_id == production_render_id(
+    base_render_id = production_render_id(
         plan,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -282,6 +286,39 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
         build_adapter=RECIPROCAL_BUILD_ADAPTER,
         environment_module_build_report_sha256="6" * 64,
     )
+    assert request.render_id == reciprocal_production_render_id(
+        base_render_id=base_render_id,
+        role_module_id="central-courtyard-downhill",
+    )
+    bridge_request = build_reciprocal_production_frame_request(
+        plan=plan,
+        camera_id="camera-ground-route-011",
+        role_module_id="bridge-deck-crossing",
+        build_id="1" * 64,
+        blender_executable_sha256="2" * 64,
+        renderer_script_sha256="3" * 64,
+        engine_script_sha256="a" * 64,
+        blend_sha256="4" * 64,
+        build_report_sha256="5" * 64,
+        environment_module_build_report_sha256="6" * 64,
+        reciprocal_route_module_plan_sha256="7" * 64,
+        object_registry=_registry(218),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),  # noqa: SLF001
+        preflight_id="8" * 64,
+        quality_policy_sha256="9" * 64,
+        post_render_policy=policy,
+    )
+    assert bridge_request.required_visible_instance_ids == tuple(range(183, 189))
+    assert bridge_request.render_id != request.render_id
+
+    partial_role = request.model_dump(mode="json")
+    partial_role["required_visible_instance_ids"] = [176]
+    with pytest.raises(ValueError, match="complete role segment"):
+        ReciprocalProductionRenderFrameRequest.model_validate_json(
+            json.dumps(partial_role),
+        )
+
     changed_engine = request.model_dump(mode="json")
     changed_engine["engine_script_sha256"] = "b" * 64
     with pytest.raises(ValueError, match="render ID"):
@@ -300,6 +337,7 @@ def test_frame_request_rejects_changed_transitive_report_sha() -> None:
     request = build_reciprocal_production_frame_request(
         plan=plan,
         camera_id="camera-ground-route-011",
+        role_module_id="central-courtyard-downhill",
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -489,6 +527,7 @@ def test_render_report_loader_and_artifact_verifier(
     request = build_reciprocal_production_frame_request(
         plan=plan,
         camera_id="camera-ground-route-011",
+        role_module_id="central-courtyard-downhill",
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -686,7 +725,7 @@ def test_runner_does_not_render_or_publish_rejected_preflight(
                 minimum_valid_pixel_ratio=0.05,
             ),
             post_render_policy=_post_render_policy(),
-            required_visible_instance_ids=(218,),
+            role_module_id="lower-valley-uphill",
             process_runner=fake_run,
             timeout_seconds=30,
         )
@@ -797,7 +836,7 @@ def _write_fake_successful_frame(
             depth_background_pixels=1,
             depth_max_range_error_m=0.0,
             normal_max_unit_error=0.0,
-            instance_ids=(0, 218),
+            instance_ids=(0, *request.required_visible_instance_ids),
             semantic_ids=(0, 3),
         ),
         "layer_statistics": ProductionFrameLayerStatistics(
@@ -915,7 +954,7 @@ def test_runner_publishes_verified_one_camera_bundle(tmp_path: Path) -> None:
             minimum_valid_pixel_ratio=0.05,
         ),
         post_render_policy=_post_render_policy(),
-        required_visible_instance_ids=(218,),
+        role_module_id="lower-valley-uphill",
         process_runner=fake_run,
         timeout_seconds=30,
     )
