@@ -120,7 +120,11 @@ def test_elevated_pedestrian_resolves_all_real_walkable_edges() -> None:
     assert {row.topology_ref for row in elevated} == {
         edge.edge_id for edge in topology.edges
     }
-    assert {row.loop_id for row in elevated} == {"central-loop", "upper-loop"}
+    assert {row.loop_id for row in elevated} == {
+        "central-loop",
+        "upper-loop",
+        "bridge-loop",
+    }
     assert all(row.length_m > 0 and row.half_width_m >= 0.9 for row in elevated)
 
 
@@ -512,7 +516,7 @@ def test_req6_loop_closure_is_backed_by_two_verified_route_loops() -> None:
     plan = build_production_camera_plan()
     assert {
         row.loop_id for row in plan.route_loops
-    } == {"central-loop", "upper-loop"}
+    } == {"central-loop", "upper-loop", "bridge-loop"}
     assert all(row.ground_connected for row in plan.route_loops)
     assert all(len(row.ground_attachment_node_ids) == 2 for row in plan.route_loops)
     assert all(len(row.elevated_edge_ids) >= 3 for row in plan.route_loops)
@@ -752,6 +756,7 @@ def test_cli_plan_production_surfaces_the_undelivered_requirements() -> None:
     assert {row["loop_id"] for row in summary["route_loops"]} == {
         "central-loop",
         "upper-loop",
+        "bridge-loop",
     }
     rows = summary["undelivered_requirements"]
     ids = {row["requirement_id"] for row in rows}

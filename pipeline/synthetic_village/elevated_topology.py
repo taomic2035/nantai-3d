@@ -39,7 +39,7 @@ ComponentKind = Literal[
     "terrace-ramp-junction",
     "cross-level-covered-passage",
 ]
-LoopId = Literal["central-loop", "upper-loop"]
+LoopId = Literal["central-loop", "upper-loop", "bridge-loop"]
 
 _EXPECTED_COMPONENTS = (
     ("elevated-switchback-stair-v1", "switchback-stair", 127),
@@ -161,8 +161,8 @@ class ElevatedLoop(FrozenModel):
 
 
 class ElevatedTopologySummary(FrozenModel):
-    loop_count: Literal[2]
-    ground_attachment_count: Literal[4]
+    loop_count: Literal[3]
+    ground_attachment_count: Literal[6]
     component_count: Literal[4]
 
 
@@ -180,7 +180,7 @@ class ElevatedTopologyPlan(FrozenModel):
     nodes: tuple[WalkableNode, ...] = Field(min_length=8)
     edges: tuple[WalkableEdge, ...] = Field(min_length=6)
     components: tuple[ElevatedComponent, ...] = Field(min_length=4, max_length=4)
-    loops: tuple[ElevatedLoop, ...] = Field(min_length=2, max_length=2)
+    loops: tuple[ElevatedLoop, ...] = Field(min_length=2, max_length=3)
     summary: ElevatedTopologySummary
 
     @model_validator(mode="after")
@@ -239,7 +239,7 @@ class ElevatedTopologyPlan(FrozenModel):
             edge.start_node_id for edge in self.edges
         } | {edge.end_node_id for edge in self.edges}
         expected_summary = ElevatedTopologySummary(
-            loop_count=2,
+            loop_count=len({edge.loop_id for edge in self.edges}),
             ground_attachment_count=sum(
                 node.level == "ground"
                 for node in self.nodes
@@ -349,7 +349,7 @@ def _derive_loops(
 ) -> tuple[ElevatedLoop, ...]:
     nodes_by_id = {node.node_id: node for node in nodes}
     result = []
-    for loop_id in ("central-loop", "upper-loop"):
+    for loop_id in ("central-loop", "upper-loop", "bridge-loop"):
         loop_edges = tuple(edge for edge in edges if edge.loop_id == loop_id)
         edge_ids = tuple(edge.edge_id for edge in loop_edges)
         graph: dict[str, set[str]] = defaultdict(set)
@@ -458,6 +458,36 @@ def build_elevated_topology_plan(
                     scene=active,
                     level="ground",
                     ground_route_ref="path-network-003",
+                ),
+                # GLM-P0 Step 2 (FEEDBACK-HANDOFF-CODEX-012): bridge-loop
+                # nodes on path-network-001 near bridge-lower-001.  These
+                # are connected ground/elevated nodes that form a proper
+                # walkable loop, not isolated anchor nodes.  Codex directive:
+                # "在 path-network-001 给出连通、ground-level、可步行的正式
+                # node/edge".
+                _node(
+                    node_id="bridge-ground-east",
+                    x_m=-180,
+                    y_m=-90,
+                    scene=active,
+                    level="ground",
+                    ground_route_ref="path-network-001",
+                ),
+                _node(
+                    node_id="bridge-ground-west",
+                    x_m=-205,
+                    y_m=-82,
+                    scene=active,
+                    level="ground",
+                    ground_route_ref="path-network-001",
+                ),
+                _node(
+                    node_id="bridge-upper-mid",
+                    x_m=-190,
+                    y_m=-86,
+                    scene=active,
+                    level="elevated",
+                    clearance_m=3.6,
                 ),
                 # GLM-P0 (FEEDBACK-HANDOFF-CODEX-012): the four isolated
                 # module-anchor ground nodes added in Phase 4.5.1 have been
@@ -569,6 +599,56 @@ def build_elevated_topology_plan(
                     ),
                     collision=_collision(covered=False),
                 ),
+                # GLM-P0 Step 2: bridge-loop edges on path-network-001.
+                # Three edges forming a connected loop with exactly two
+                # ground attachments (bridge-ground-east, bridge-ground-west)
+                # and one elevated node (bridge-upper-mid).  All edges are
+                # owned by cross-level-covered-passage-v1 (instance 130).
+                WalkableEdge(
+                    edge_id="edge-bridge-ascent-001",
+                    component_id="cross-level-covered-passage-v1",
+                    component_kind="cross-level-covered-passage",
+                    loop_id="bridge-loop",
+                    start_node_id="bridge-ground-east",
+                    end_node_id="bridge-upper-mid",
+                    width_m=2.4,
+                    centerline=_transition_centerline(
+                        by_id["bridge-ground-east"],
+                        ((-185, -88),),
+                        by_id["bridge-upper-mid"],
+                    ),
+                    collision=_collision(covered=False),
+                ),
+                WalkableEdge(
+                    edge_id="edge-bridge-descent-001",
+                    component_id="cross-level-covered-passage-v1",
+                    component_kind="cross-level-covered-passage",
+                    loop_id="bridge-loop",
+                    start_node_id="bridge-upper-mid",
+                    end_node_id="bridge-ground-west",
+                    width_m=2.4,
+                    centerline=_transition_centerline(
+                        by_id["bridge-upper-mid"],
+                        ((-197, -84),),
+                        by_id["bridge-ground-west"],
+                    ),
+                    collision=_collision(covered=False),
+                ),
+                WalkableEdge(
+                    edge_id="edge-bridge-path-001",
+                    component_id="cross-level-covered-passage-v1",
+                    component_kind="cross-level-covered-passage",
+                    loop_id="bridge-loop",
+                    start_node_id="bridge-ground-east",
+                    end_node_id="bridge-ground-west",
+                    width_m=2.4,
+                    centerline=_transition_centerline(
+                        by_id["bridge-ground-east"],
+                        (),
+                        by_id["bridge-ground-west"],
+                    ),
+                    collision=_collision(covered=False),
+                ),
             ),
             key=lambda edge: edge.edge_id,
         )
@@ -604,6 +684,9 @@ def build_elevated_topology_plan(
             component_kind="cross-level-covered-passage",
             instance_id=130,
             edge_ids=(
+                "edge-bridge-ascent-001",
+                "edge-bridge-descent-001",
+                "edge-bridge-path-001",
                 "edge-upper-ascent-001",
                 "edge-upper-descent-001",
                 "edge-upper-gallery-001",
@@ -629,8 +712,8 @@ def build_elevated_topology_plan(
         components=components,
         loops=loops,
         summary=ElevatedTopologySummary(
-            loop_count=2,
-            ground_attachment_count=4,
+            loop_count=3,
+            ground_attachment_count=6,
             component_count=4,
         ),
     )

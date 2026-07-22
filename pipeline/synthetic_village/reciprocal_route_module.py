@@ -195,7 +195,7 @@ MAX_RETAINING_STEP_RISE_M = 0.18
 #:     center_m.z + extent_m.z.
 _DEFAULT_MODULE_BASE_POSITION: dict[ModuleId, tuple[float, float, float]] = {
     "central-courtyard-downhill": (40.0, 30.0, 70.0),
-    "bridge-deck-crossing": (-150.0, -100.0, 55.0),
+    "bridge-deck-crossing": (-155.0, -100.0, 55.0),  # GLM-P0 Step 2: -150 -> -155
     "watermill-tailrace": (-180.0, -130.0, 52.0),
     "covered-gallery-underpass": (57.0, -25.0, 78.0),
     "forest-orchard-boundary": (120.0, 30.0, 75.0),

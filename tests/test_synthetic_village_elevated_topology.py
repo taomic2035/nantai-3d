@@ -94,15 +94,21 @@ def test_four_components_have_stable_kinds_and_reserved_instance_ids() -> None:
 def test_two_elevated_alternatives_form_two_explicit_ground_connected_loops() -> None:
     plan = build_elevated_topology_plan()
 
-    assert plan.summary.loop_count == 2
-    assert plan.summary.ground_attachment_count == 4
+    assert plan.summary.loop_count == 3
+    assert plan.summary.ground_attachment_count == 6
     assert plan.summary.component_count == 4
-    assert {row.loop_id for row in plan.loops} == {"central-loop", "upper-loop"}
+    assert {row.loop_id for row in plan.loops} == {
+        "central-loop",
+        "upper-loop",
+        "bridge-loop",
+    }
     assert all(row.connected for row in plan.loops)
     assert all(row.ground_attachment_count == 2 for row in plan.loops)
     assert all(row.edge_count >= 3 for row in plan.loops)
     loop_edges = [set(row.edge_ids) for row in plan.loops]
     assert loop_edges[0].isdisjoint(loop_edges[1])
+    assert loop_edges[0].isdisjoint(loop_edges[2])
+    assert loop_edges[1].isdisjoint(loop_edges[2])
 
 
 def test_ground_attachments_lie_on_the_declared_real_path_and_match_terrain() -> None:
@@ -115,7 +121,7 @@ def test_ground_attachments_lie_on_the_declared_real_path_and_match_terrain() ->
     }
 
     ground = [node for node in plan.nodes if node.level == "ground"]
-    assert len(ground) == 4
+    assert len(ground) == 6
     for node in ground:
         assert node.ground_route_ref in paths
         route = paths[node.ground_route_ref]

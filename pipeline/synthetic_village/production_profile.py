@@ -237,6 +237,15 @@ _EXPECTED_ROUTE_LOOP_CONTRACT = (
             "edge-upper-gallery-001",
         ),
     ),
+    (
+        "bridge-loop",
+        ("bridge-ground-east", "bridge-ground-west"),
+        (
+            "edge-bridge-ascent-001",
+            "edge-bridge-descent-001",
+            "edge-bridge-path-001",
+        ),
+    ),
 )
 
 
@@ -333,7 +342,7 @@ class ProductionCameraPlan(FrozenModel):
     cameras: tuple[ProductionCameraPose, ...]
     group_coverage: tuple[GroupCoverage, ...]
     unplaced_groups: tuple[UnplacedGroup, ...]
-    route_loops: tuple[RouteLoopEvidence, ...] = Field(min_length=2, max_length=2)
+    route_loops: tuple[RouteLoopEvidence, ...] = Field(min_length=2, max_length=3)
     #: 本轮【没做到】的需求, 逐条机器可读。空元组的含义是"全部交付", 所以它
     #: 不能被默认成空 —— 必须由 builder 显式给出。
     undelivered_requirements: tuple[UndeliveredRequirement, ...]
@@ -381,7 +390,7 @@ class ProductionCameraPlan(FrozenModel):
             for row in self.route_loops
         )
         if route_contract != _EXPECTED_ROUTE_LOOP_CONTRACT:
-            raise ValueError("route loop evidence must cover the stable two-loop topology")
+            raise ValueError("route loop evidence must cover the stable topology")
         unplaced_by_group = {
             row.group_id: row.camera_count for row in self.unplaced_groups
         }
