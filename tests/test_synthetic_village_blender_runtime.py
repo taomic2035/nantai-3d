@@ -161,6 +161,12 @@ def _probe_prelude() -> str:
     )
 
 
+def _builder_probe_prelude() -> str:
+    return (
+        f"import runpy\nns = runpy.run_path({str(BUILDER)!r}, run_name='nantai_builder_probe')\n"
+    )
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -332,6 +338,42 @@ def _textured_render_request():
         auxiliary_registry=report.auxiliary_registry,
         semantic_registry=report.semantic_registry,
     )
+
+
+def test_builder_accepts_current_canonical_elevated_topology(
+    tmp_path: Path,
+) -> None:
+    from pipeline.synthetic_village.camera_plan import build_camera_plan
+    from pipeline.synthetic_village.canary import (
+        build_canary_request,
+        canonical_build_request_bytes,
+    )
+    from pipeline.synthetic_village.scene_plan import build_scene_plan
+
+    scene = build_scene_plan()
+    request = build_canary_request(
+        repo_root=ROOT,
+        scene_plan=scene,
+        camera_plan=build_camera_plan(scene),
+        visual_pack_root=(
+            ROOT / ".nantai-studio/synthetic-village/hybrid-v3/visual-sources"
+        ),
+    )
+    request_path = tmp_path / "current-request.json"
+    request_path.write_bytes(canonical_build_request_bytes(request))
+    source = (
+        _builder_probe_prelude()
+        + "import json\n"
+        + f"raw = open({str(request_path)!r}, 'rb').read()\n"
+        + "request = json.loads(raw)\n"
+        + "ns['_validate_request'](request, raw)\n"
+        + "print('NANTAI_CURRENT_TOPOLOGY_OK', flush=True)\n"
+    )
+
+    completed = _run_renderer_probe(tmp_path, source)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "NANTAI_CURRENT_TOPOLOGY_OK" in completed.stdout
 
 
 def _production_clearance_request():

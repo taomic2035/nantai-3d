@@ -474,3 +474,62 @@ def test_build_environment_modules_requires_explicit_operator_inputs(
                 # missing --material-bundle-root and --surface-realism-profile
             ],
         )
+
+
+def test_build_environment_modules_uses_runtime_default_build_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    verified_build = SimpleNamespace(directory=tmp_path / "verified-v2")
+    result = SimpleNamespace(
+        final_directory=tmp_path / "default-modules" / ("f" * 64),
+        request=SimpleNamespace(
+            build_id="f" * 64,
+            base_build_id="a" * 64,
+            environment_module_plan_sha256="b" * 64,
+        ),
+        report=SimpleNamespace(
+            counts=EnvironmentModuleBuildCounts(module_mesh_objects=47),
+            artifact=EnvironmentModuleArtifact(
+                name="village-modules.blend",
+                kind="blender-scene",
+                sha256="e" * 64,
+                size_bytes=4096,
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_verify_windows_production_build",
+        lambda: lambda **_kwargs: verified_build,
+    )
+
+    def run_environment_module_build(
+        *,
+        base_build: object,
+        repo_root: Path,
+        timeout_seconds: int,
+    ):
+        assert base_build is verified_build
+        assert repo_root == synthetic_village_cli.ROOT
+        assert timeout_seconds == 1200
+        return result
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_environment_module_build",
+        lambda: run_environment_module_build,
+    )
+
+    assert synthetic_village_cli.main(
+        [
+            "build-environment-modules",
+            "--verified-v2-build",
+            str(tmp_path / "verified-v2"),
+            "--material-bundle-root",
+            str(tmp_path / "materials"),
+            "--surface-realism-profile",
+            "source-consistent-multiscale-surface-v1",
+        ],
+    ) == 0

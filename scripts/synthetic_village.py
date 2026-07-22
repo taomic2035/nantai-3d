@@ -1103,11 +1103,15 @@ def main(argv: list[str] | None = None) -> int:
             visual_pack_root=args.visual_pack_root,
             surface_realism_profile_id=args.surface_realism_profile,
         )
+        build_kwargs = {
+            "base_build": verified_build,
+            "repo_root": ROOT,
+            "timeout_seconds": args.timeout_seconds,
+        }
+        if args.build_root is not None:
+            build_kwargs["build_root"] = args.build_root
         result = _run_environment_module_build()(
-            base_build=verified_build,
-            repo_root=ROOT,
-            build_root=args.build_root,
-            timeout_seconds=args.timeout_seconds,
+            **build_kwargs,
         )
         print(
             json.dumps(

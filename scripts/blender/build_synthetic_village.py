@@ -64,6 +64,12 @@ ELEVATED_COMPONENT_IDENTITIES = (
     ("terrace-ramp-junction-v1", "terrace-ramp-junction", 129),
     ("cross-level-covered-passage-v1", "cross-level-covered-passage", 130),
 )
+ELEVATED_LOOP_IDS = (
+    "central-loop",
+    "upper-loop",
+    "bridge-loop",
+    "valley-loop",
+)
 TERRAIN_TEXTURE_SCALE = 3.0
 TERRAIN_TEXTURE_SLOTS = (
     "material-moss-stone-01",
@@ -600,10 +606,16 @@ def _validate_elevated_topology(topology, scene, source_hashes, semantic_registr
     edges = topology["edges"]
     components = topology["components"]
     loops = topology["loops"]
-    _expect_list(nodes, 8, "elevated_topology.nodes")
-    _expect_list(edges, 6, "elevated_topology.edges")
+    if not isinstance(nodes, list) or len(nodes) < 8:
+        raise RuntimeBuildError(
+            "elevated_topology.nodes must contain at least 8 entries",
+        )
+    if not isinstance(edges, list) or len(edges) < 6:
+        raise RuntimeBuildError(
+            "elevated_topology.edges must contain at least 6 entries",
+        )
     _expect_list(components, 4, "elevated_topology.components")
-    _expect_list(loops, 2, "elevated_topology.loops")
+    _expect_list(loops, len(ELEVATED_LOOP_IDS), "elevated_topology.loops")
     node_ids = []
     node_positions = {}
     for node in nodes:
@@ -675,7 +687,7 @@ def _validate_elevated_topology(topology, scene, source_hashes, semantic_registr
             or not _is_slug(edge["component_id"])
             or edge["component_kind"]
             not in {row[1] for row in ELEVATED_COMPONENT_IDENTITIES}
-            or edge["loop_id"] not in {"central-loop", "upper-loop"}
+            or edge["loop_id"] not in ELEVATED_LOOP_IDS
             or edge["start_node_id"] not in node_positions
             or edge["end_node_id"] not in node_positions
             or not _is_finite_number(edge["width_m"])
@@ -774,8 +786,7 @@ def _validate_elevated_topology(topology, scene, source_hashes, semantic_registr
         ):
             raise RuntimeBuildError("elevated topology component metadata is inconsistent")
 
-    expected_loop_ids = ("central-loop", "upper-loop")
-    for loop, loop_id in zip(loops, expected_loop_ids, strict=True):
+    for loop, loop_id in zip(loops, ELEVATED_LOOP_IDS, strict=True):
         _expect_keys(
             loop,
             (
@@ -791,9 +802,11 @@ def _validate_elevated_topology(topology, scene, source_hashes, semantic_registr
             loop["loop_id"] != loop_id
             or loop["connected"] is not True
             or loop["ground_attachment_count"] != 2
-            or loop["edge_count"] != 3
+            or not isinstance(loop["edge_count"], int)
+            or isinstance(loop["edge_count"], bool)
+            or loop["edge_count"] < 3
             or not isinstance(loop["edge_ids"], list)
-            or len(loop["edge_ids"]) != 3
+            or len(loop["edge_ids"]) != loop["edge_count"]
             or loop["edge_ids"]
             != [
                 edge["edge_id"]
@@ -802,11 +815,21 @@ def _validate_elevated_topology(topology, scene, source_hashes, semantic_registr
             ]
         ):
             raise RuntimeBuildError("elevated topology loop contract is invalid")
-    if topology["summary"] != {
-        "component_count": 4,
-        "ground_attachment_count": 4,
-        "loop_count": 2,
-    }:
+    used_node_ids = {
+        endpoint
+        for edge in edges
+        for endpoint in (edge["start_node_id"], edge["end_node_id"])
+    }
+    expected_summary = {
+        "component_count": len(components),
+        "ground_attachment_count": sum(
+            node["level"] == "ground"
+            for node in nodes
+            if node["node_id"] in used_node_ids
+        ),
+        "loop_count": len({edge["loop_id"] for edge in edges}),
+    }
+    if topology["summary"] != expected_summary:
         raise RuntimeBuildError("elevated topology summary is invalid")
 
 
