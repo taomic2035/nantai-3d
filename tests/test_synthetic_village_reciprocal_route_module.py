@@ -561,6 +561,109 @@ def test_batch20_roles_use_non_collinear_terrain_conforming_layouts(plan) -> Non
             assert z - terrain_height_m(x, y) >= 0.4985, part.part_id
 
 
+def test_watermill_layout_and_recipe_follow_bound_environment_anchor(
+    scene,
+    topology,
+    env_module_plan,
+) -> None:
+    """Moving the bound wheel moves only its reciprocal service composition."""
+
+    original = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=env_module_plan,
+    )
+    lower_bridge = next(
+        module
+        for module in env_module_plan.modules
+        if module.module_id == "lower-bridge-waterwheel"
+    )
+    anchor = lower_bridge.recipe.waterwheel_assembly_anchor_m
+    moved_anchor = (anchor[0] + 10.0, anchor[1] + 20.0, anchor[2] + 3.0)
+    moved_bridge = lower_bridge.model_copy(
+        update={
+            "recipe": lower_bridge.recipe.model_copy(
+                update={"waterwheel_assembly_anchor_m": moved_anchor},
+            ),
+        },
+    )
+    moved_environment = env_module_plan.model_copy(
+        update={
+            "modules": tuple(
+                moved_bridge
+                if module.module_id == "lower-bridge-waterwheel"
+                else module
+                for module in env_module_plan.modules
+            ),
+        },
+    )
+    moved = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=moved_environment,
+    )
+
+    original_by_id = {module.module_id: module for module in original.modules}
+    moved_by_id = {module.module_id: module for module in moved.modules}
+    watermill = original_by_id["watermill-tailrace"]
+    moved_watermill = moved_by_id["watermill-tailrace"]
+    assert watermill.recipe.waterwheel_assembly_anchor_m == pytest.approx(anchor)
+    assert moved_watermill.recipe.waterwheel_assembly_anchor_m == pytest.approx(
+        moved_anchor,
+    )
+    assert tuple(part.instance_id for part in watermill.parts) == tuple(range(189, 196))
+    for before, after in zip(watermill.parts, moved_watermill.parts, strict=True):
+        assert after.part_layout.center_m[:2] == pytest.approx(
+            (
+                before.part_layout.center_m[0] + 10.0,
+                before.part_layout.center_m[1] + 20.0,
+            ),
+        )
+
+    for module_id in original_by_id.keys() - {"watermill-tailrace"}:
+        assert moved_by_id[module_id].parts == original_by_id[module_id].parts
+
+
+def test_watermill_role_camera_envelope_includes_bound_wheel_anchor(plan) -> None:
+    modules = {module.module_id: module for module in plan.modules}
+    watermill = modules["watermill-tailrace"]
+    candidate = next(
+        row
+        for row in plan.role_camera_candidates
+        if row.role_module_id == "watermill-tailrace"
+    )
+    anchor_x, anchor_y, _anchor_z = watermill.recipe.waterwheel_assembly_anchor_m
+
+    min_x = anchor_x
+    max_x = anchor_x
+    min_y = anchor_y
+    max_y = anchor_y
+    for part in watermill.parts:
+        center_x, center_y, _center_z = part.part_layout.center_m
+        extent_x, extent_y, _extent_z = part.part_layout.extent_m
+        yaw = math.radians(part.part_layout.orientation_deg)
+        half_x = (
+            abs(math.cos(yaw)) * extent_x / 2.0
+            + abs(math.sin(yaw)) * extent_y / 2.0
+        )
+        half_y = (
+            abs(math.sin(yaw)) * extent_x / 2.0
+            + abs(math.cos(yaw)) * extent_y / 2.0
+        )
+        min_x = min(min_x, center_x - half_x)
+        max_x = max(max_x, center_x + half_x)
+        min_y = min(min_y, center_y - half_y)
+        max_y = max(max_y, center_y + half_y)
+
+    assert candidate.look_at_m == pytest.approx(
+        (
+            (min_x + max_x) / 2.0,
+            (min_y + max_y) / 2.0,
+            candidate.position_m[2],
+        ),
+    )
+
+
 def test_plan_carries_explicit_geometry_family_on_every_part(plan) -> None:
     """Runtime geometry classification is canonical plan data, not a name guess."""
 
@@ -806,6 +909,14 @@ def test_role_candidates_follow_built_module_floor_and_route_direction(plan) -> 
         envelope_max_x = -math.inf
         envelope_min_y = math.inf
         envelope_max_y = -math.inf
+        if candidate.role_module_id == "watermill-tailrace":
+            anchor_x, anchor_y, _anchor_z = modules[
+                candidate.role_module_id
+            ].recipe.waterwheel_assembly_anchor_m
+            envelope_min_x = anchor_x
+            envelope_max_x = anchor_x
+            envelope_min_y = anchor_y
+            envelope_max_y = anchor_y
         for part in parts:
             center_x, center_y, _center_z = part.part_layout.center_m
             extent_x, extent_y, _extent_z = part.part_layout.extent_m

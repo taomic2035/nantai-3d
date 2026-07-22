@@ -470,6 +470,58 @@ class MeshAssembler:
             ),
         )
 
+    def add_cylinder(self, center, radius, depth, *, segments=12, axis="z", yaw=0.0):
+        """Add a deterministic faceted cylinder in the part's local frame."""
+
+        cx, cy, cz = center
+        cosine, sine = math.cos(yaw), math.sin(yaw)
+
+        def to_world(local_x, local_y, local_z):
+            return (
+                cx + local_x * cosine - local_y * sine,
+                cy + local_x * sine + local_y * cosine,
+                cz + local_z,
+            )
+
+        def oriented(axial, first, second):
+            if axis == "x":
+                return axial, first, second
+            if axis == "y":
+                return first, axial, second
+            if axis == "z":
+                return first, second, axial
+            raise RuntimeBuildError(f"unsupported cylinder axis: {axis}")
+
+        half_depth = depth / 2.0
+        local_vertices = [oriented(-half_depth, 0.0, 0.0), oriented(half_depth, 0.0, 0.0)]
+        for axial in (-half_depth, half_depth):
+            for index in range(segments):
+                angle = 2.0 * math.pi * index / segments
+                local_vertices.append(
+                    oriented(axial, radius * math.cos(angle), radius * math.sin(angle)),
+                )
+
+        faces = []
+        first_ring = 2
+        second_ring = 2 + segments
+        for index in range(segments):
+            following = (index + 1) % segments
+            faces.append(
+                (
+                    first_ring + index,
+                    first_ring + following,
+                    second_ring + following,
+                    second_ring + index,
+                ),
+            )
+            faces.append((0, first_ring + following, first_ring + index))
+            faces.append((1, second_ring + index, second_ring + following))
+
+        self.add(
+            tuple(to_world(*vertex) for vertex in local_vertices),
+            tuple(faces),
+        )
+
 
 #: Thickness of the four wall / floor / ceiling panels that form a
 #: passage.  Small enough that the inner clear dimensions stay above
@@ -510,6 +562,27 @@ def _local_center(center, yaw, local_x=0.0, local_y=0.0, local_z=0.0):
 
 def _add_local_box(assembler, center, yaw, offset, size):
     assembler.add_box(_local_center(center, yaw, *offset), size, yaw)
+
+
+def _add_local_cylinder(
+    assembler,
+    center,
+    yaw,
+    offset,
+    *,
+    radius,
+    depth,
+    axis="z",
+    segments=12,
+):
+    assembler.add_cylinder(
+        _local_center(center, yaw, *offset),
+        radius,
+        depth,
+        segments=segments,
+        axis=axis,
+        yaw=yaw,
+    )
 
 
 def _add_floor(assembler, center, extent, yaw, *, drop_m=0.0):
@@ -757,6 +830,192 @@ def _vegetation_geometry(center, extent, yaw):
     return assembler
 
 
+def _watermill_building_shell_geometry(center, extent, yaw):
+    """Open timber mill frame that keeps the route and wheel visible."""
+
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    post_width = min(0.18, sx * 0.12, sy * 0.12)
+    post_x = sx * 0.4
+    post_y = sy * 0.4
+    for local_x in (-post_x, post_x):
+        for local_y in (-post_y, post_y):
+            _add_local_box(
+                assembler,
+                center,
+                yaw,
+                (local_x, local_y, sz * 0.46),
+                (post_width, post_width, sz * 0.92),
+            )
+    for local_y in (-post_y, post_y):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (0.0, local_y, sz * 0.9),
+            (sx, post_width, post_width),
+        )
+    for local_x in (-post_x, post_x):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (local_x, 0.0, sz * 0.76),
+            (post_width, sy, post_width),
+        )
+    for local_x in (-sx * 0.24, sx * 0.24):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (local_x, 0.0, sz * 1.02),
+            (post_width, sy * 1.08, post_width),
+        )
+    return assembler
+
+
+def _watermill_platform_geometry(center, extent, yaw):
+    assembler = _open_path_geometry(center, extent, yaw)
+    sx, sy, _sz = extent
+    for local_x in (-sx * 0.32, sx * 0.32):
+        for local_y in (-sy * 0.34, sy * 0.34):
+            _add_local_box(
+                assembler,
+                center,
+                yaw,
+                (local_x, local_y, -0.22),
+                (0.14, 0.14, 0.4),
+            )
+    return assembler
+
+
+def _watermill_stair_geometry(center, extent, yaw):
+    assembler = _open_path_geometry(center, extent, yaw)
+    sx, sy, sz = extent
+    rise = min(0.22, sz * 0.12)
+    tread_depth = sy * 0.17
+    for index in range(5):
+        local_y = -sy * 0.34 + index * sy * 0.17
+        top_z = 0.12 + index * rise
+        for side in (-1.0, 1.0):
+            _add_local_box(
+                assembler,
+                center,
+                yaw,
+                (side * sx * 0.255, local_y, top_z - 0.05),
+                (sx * 0.39, tread_depth, 0.1),
+            )
+    for side in (-1.0, 1.0):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (side * sx * 0.42, 0.0, 0.16),
+            (0.1, sy * 0.9, 0.22),
+        )
+    return assembler
+
+
+def _watermill_access_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, 0.0, sz * 0.24),
+        (sx * 0.72, sy * 0.48, sz * 0.48),
+    )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, 0.0, sz * 0.57),
+        (sx * 0.88, sy * 0.22, sz * 0.18),
+    )
+    _add_local_cylinder(
+        assembler,
+        center,
+        yaw,
+        (0.0, 0.0, sz * 0.57),
+        radius=min(sx, sz) * 0.22,
+        depth=sy * 0.62,
+        axis="y",
+    )
+    return assembler
+
+
+def _watermill_creek_bank_path_geometry(center, extent, yaw):
+    assembler = _open_path_geometry(center, extent, yaw)
+    sx, sy, _sz = extent
+    for local_y in (-sy * 0.3, 0.0, sy * 0.3):
+        for side in (-1.0, 1.0):
+            _add_local_box(
+                assembler,
+                center,
+                yaw,
+                (side * sx * 0.26, local_y, 0.045),
+                (sx * 0.38, 0.1, 0.07),
+            )
+    return assembler
+
+
+def _watermill_guard_geometry(center, extent, yaw):
+    assembler = _guard_geometry(center, extent, yaw)
+    sx, sy, _sz = extent
+    for side in (-1.0, 1.0):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (side * sx * 0.34, 0.0, 0.28),
+            (sx * 0.22, sy * 0.72, 0.08),
+        )
+    return assembler
+
+
+def _watermill_tailrace_geometry(center, extent, yaw):
+    """Stone tailrace portal with an intentionally open water channel."""
+
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    _add_floor(assembler, center, extent, yaw, drop_m=0.18)
+    for side in (-1.0, 1.0):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (side * sx * 0.38, 0.0, sz * 0.36),
+            (sx * 0.2, sy, sz * 0.72),
+        )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, 0.0, sz * 0.84),
+        (sx, sy * 0.22, sz * 0.18),
+    )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, -sy * 0.38, 0.08),
+        (sx * 0.62, sy * 0.16, 0.16),
+    )
+    return assembler
+
+
+_SPECIALIZED_PART_BUILDERS = {
+    "watermill-building-shell-001": _watermill_building_shell_geometry,
+    "watermill-maintenance-platform-001": _watermill_platform_geometry,
+    "watermill-service-stair-001": _watermill_stair_geometry,
+    "watermill-access-panel-001": _watermill_access_geometry,
+    "watermill-creek-bank-path-001": _watermill_creek_bank_path_geometry,
+    "watermill-platform-guard-001": _watermill_guard_geometry,
+    "watermill-tailrace-retaining-wall-001": _watermill_tailrace_geometry,
+}
+
+
 def _module_geometry(part):
     """Build one semantic-compatible mesh from canonical family + layout."""
 
@@ -780,7 +1039,8 @@ def _module_geometry(part):
         "service-prop": _service_prop_geometry,
         "vegetation-band": _vegetation_geometry,
     }
-    return builders[family](center, extent, yaw)
+    builder = _SPECIALIZED_PART_BUILDERS.get(part["part_id"], builders[family])
+    return builder(center, extent, yaw)
 
 
 # --------------------------------------------------------------------------- #

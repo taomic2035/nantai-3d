@@ -373,6 +373,46 @@ def test_lower_bridge_module_has_at_least_three_sections(plan: EnvironmentModule
         assert section.arch_soffit_z_m >= section.deck_z_m - 1e-6
 
 
+def test_lower_bridge_waterwheel_assembly_anchor_is_canonical_and_editable(
+    plan: EnvironmentModulePlan,
+) -> None:
+    """The modeled wheel center belongs to the hashed plan, not Blender code."""
+
+    bridge = next(m for m in plan.modules if m.module_id == "lower-bridge-waterwheel")
+    assert isinstance(bridge.recipe, LowerBridgeRecipe)
+    assert bridge.recipe.waterwheel_assembly_anchor_m == pytest.approx(
+        (-185.2, -115.0, 43.15),
+    )
+
+    payload = bridge.recipe.model_dump(mode="python")
+    payload["waterwheel_assembly_anchor_m"] = (-175.2, -95.0, 73.15)
+    moved = LowerBridgeRecipe.model_validate(payload)
+    assert moved.waterwheel_assembly_anchor_m == pytest.approx(
+        (-175.2, -95.0, 73.15),
+    )
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    (
+        (float("nan"), -115.0, 43.15),
+        (-185.2, float("inf"), 43.15),
+        (-185.2, -115.0),
+        (True, -115.0, 43.15),
+    ),
+)
+def test_lower_bridge_waterwheel_assembly_anchor_rejects_invalid_values(
+    plan: EnvironmentModulePlan,
+    anchor: tuple[object, ...],
+) -> None:
+    bridge = next(m for m in plan.modules if m.module_id == "lower-bridge-waterwheel")
+    payload = bridge.recipe.model_dump(mode="python")
+    payload["waterwheel_assembly_anchor_m"] = anchor
+
+    with pytest.raises(ValidationError):
+        LowerBridgeRecipe.model_validate(payload)
+
+
 # --------------------------------------------------------------------------- #
 # §TDD 5 — central courtyard loop width / clearance / collision / entry.
 # --------------------------------------------------------------------------- #

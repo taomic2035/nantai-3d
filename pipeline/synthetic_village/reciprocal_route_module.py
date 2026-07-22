@@ -64,7 +64,14 @@ import json
 import math
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_serializer,
+    model_validator,
+)
 
 from .elevated_topology import (
     ElevatedTopologyPlan,
@@ -242,6 +249,23 @@ _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION: dict[
         210: (138.0, 104.0, 36.870),
         211: (142.0, 97.0, 270.000),
     },
+}
+
+# Batch 21 keeps the accepted Batch 20 service-loop shape but binds it to the
+# existing environment waterwheel instead of a second absolute coordinate
+# truth. Moving the authored environment anchor therefore moves the entire
+# reciprocal watermill composition and changes both canonical plan identities.
+_BATCH21_WATERMILL_PART_OFFSETS_XY_ORIENTATION: dict[
+    int,
+    tuple[float, float, float],
+] = {
+    189: (-13.8, 5.0, 270.000),
+    190: (-17.8, 9.0, 270.000),
+    191: (-12.8, 9.0, 216.870),
+    192: (-11.8, 7.0, 270.000),
+    193: (-9.8, 5.0, 216.870),
+    194: (-14.8, 9.0, 270.000),
+    195: (-10.8, 3.0, 270.000),
 }
 #: Passage extent: x/y are the outer bounding box of the passage
 #: (walls included).  z is the passage height (floor to ceiling).  The
@@ -494,6 +518,11 @@ class WatermillTailraceRecipe(FrozenModel):
     ] = Field(min_length=6, max_length=6)
     bound_creek_object_id: Literal["creek-main-001"]
     bound_path_network: Literal["path-network-001"]
+    waterwheel_assembly_anchor_m: tuple[
+        _FiniteFloat,
+        _FiniteFloat,
+        _FiniteFloat,
+    ] = (-185.2, -115.0, 43.15)
     building_shell_present: Literal[True] = True
     maintenance_platform: WatermillMaintenancePlatformSpec
     service_stair: WatermillServiceStairSpec
@@ -505,6 +534,13 @@ class WatermillTailraceRecipe(FrozenModel):
         if len(set(self.bound_waterwheel_part_ids)) != len(self.bound_waterwheel_part_ids):
             raise ValueError("bound waterwheel part IDs must be unique")
         return self
+
+    @model_serializer(mode="wrap")
+    def _preserve_legacy_v1_bytes(self, handler):
+        payload = handler(self)
+        if "waterwheel_assembly_anchor_m" not in self.model_fields_set:
+            payload.pop("waterwheel_assembly_anchor_m", None)
+        return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -1193,10 +1229,69 @@ def _module_instance_range(module_id: ModuleId) -> range:
     return LOWER_VALLEY_UPHILL_INSTANCE_RANGE
 
 
-def _flat_module_floor_z(module_id: ModuleId) -> float:
+def _environment_waterwheel_anchor(
+    environment_module_plan: EnvironmentModulePlan,
+) -> tuple[float, float, float]:
+    lower_bridge = next(
+        (
+            module
+            for module in environment_module_plan.modules
+            if module.module_id == "lower-bridge-waterwheel"
+        ),
+        None,
+    )
+    if lower_bridge is None:
+        raise ReciprocalRouteError(
+            "bound environment plan has no lower-bridge-waterwheel module",
+        )
+    anchor = getattr(lower_bridge.recipe, "waterwheel_assembly_anchor_m", None)
+    if (
+        not isinstance(anchor, tuple)
+        or len(anchor) != 3
+        or not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in anchor
+        )
+    ):
+        raise ReciprocalRouteError(
+            "bound environment waterwheel assembly anchor is invalid",
+        )
+    return tuple(float(value) for value in anchor)
+
+
+def _explicit_role_layout(
+    module_id: ModuleId,
+    environment_module_plan: EnvironmentModulePlan | None,
+) -> dict[int, tuple[float, float, float]] | None:
+    if module_id == "watermill-tailrace" and environment_module_plan is not None:
+        anchor_x, anchor_y, _anchor_z = _environment_waterwheel_anchor(
+            environment_module_plan,
+        )
+        return {
+            instance_id: (
+                round(anchor_x + offset_x, 3),
+                round(anchor_y + offset_y, 3),
+                orientation_deg,
+            )
+            for instance_id, (
+                offset_x,
+                offset_y,
+                orientation_deg,
+            ) in _BATCH21_WATERMILL_PART_OFFSETS_XY_ORIENTATION.items()
+        }
+    return _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION.get(module_id)
+
+
+def _flat_module_floor_z(
+    module_id: ModuleId,
+    *,
+    environment_module_plan: EnvironmentModulePlan | None = None,
+) -> float:
     """Return a flat floor clearing the highest terrain point in the run."""
 
-    explicit_layout = _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION.get(module_id)
+    explicit_layout = _explicit_role_layout(module_id, environment_module_plan)
     if explicit_layout is not None:
         expected_instances = set(_module_instance_range(module_id))
         if set(explicit_layout) != expected_instances:
@@ -1248,6 +1343,7 @@ def _default_part_layout(
     instance_id: int,
     *,
     elevated_topology: ElevatedTopologyPlan,
+    environment_module_plan: EnvironmentModulePlan,
 ) -> PartLayoutSpec:
     """Build the canonical default layout for one part.
 
@@ -1294,8 +1390,11 @@ def _default_part_layout(
             orientation_deg=_CENTRAL_CONTOUR_ORIENTATION_DEG,
         )
 
-    base_z = _flat_module_floor_z(module_id)
-    explicit_layout = _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION.get(module_id)
+    base_z = _flat_module_floor_z(
+        module_id,
+        environment_module_plan=environment_module_plan,
+    )
+    explicit_layout = _explicit_role_layout(module_id, environment_module_plan)
     if explicit_layout is not None:
         try:
             x, y, orientation_deg = explicit_layout[instance_id]
@@ -1601,7 +1700,9 @@ def _default_bridge_deck_crossing_recipe() -> BridgeDeckCrossingRecipe:
     )
 
 
-def _default_watermill_tailrace_recipe() -> WatermillTailraceRecipe:
+def _default_watermill_tailrace_recipe(
+    environment_module_plan: EnvironmentModulePlan,
+) -> WatermillTailraceRecipe:
     return WatermillTailraceRecipe(
         bound_waterwheel_part_ids=(
             "waterwheel-wheel-001",
@@ -1613,6 +1714,9 @@ def _default_watermill_tailrace_recipe() -> WatermillTailraceRecipe:
         ),
         bound_creek_object_id="creek-main-001",
         bound_path_network="path-network-001",
+        waterwheel_assembly_anchor_m=_environment_waterwheel_anchor(
+            environment_module_plan,
+        ),
         building_shell_present=True,
         maintenance_platform=WatermillMaintenancePlatformSpec(
             clear_width_m=1.5,
@@ -1772,6 +1876,7 @@ def _default_module(
     module_id: ModuleId,
     *,
     elevated_topology: ElevatedTopologyPlan,
+    environment_module_plan: EnvironmentModulePlan,
 ) -> ReciprocalRouteModule:
     if module_id == "central-courtyard-downhill":
         recipe = _default_central_courtyard_downhill_recipe()
@@ -1860,7 +1965,7 @@ def _default_module(
             ),
         )
     elif module_id == "watermill-tailrace":
-        recipe = _default_watermill_tailrace_recipe()
+        recipe = _default_watermill_tailrace_recipe(environment_module_plan)
         part_specs = (
             (
                 "watermill-building-shell-001",
@@ -2067,6 +2172,7 @@ def _default_module(
                 module_id,
                 instance_id,
                 elevated_topology=elevated_topology,
+                environment_module_plan=environment_module_plan,
             ),
         )
         for part_id, instance_id, semantic_id, material_slot_id in part_specs
@@ -2152,6 +2258,8 @@ _ROLE_ROUTE_GEOMETRY_FAMILIES = frozenset(
 
 def _role_camera_geometry(
     parts: tuple[ReciprocalRouteModulePart, ...],
+    *,
+    composition_points: tuple[tuple[float, float, float], ...] = (),
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
     """Derive standing-eye position and target from authored geometry.
 
@@ -2191,6 +2299,22 @@ def _role_camera_geometry(
     max_x = -math.inf
     min_y = math.inf
     max_y = -math.inf
+    for point in composition_points:
+        if (
+            not isinstance(point, tuple)
+            or len(point) != 3
+            or not all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                for value in point
+            )
+        ):
+            raise ReciprocalRouteError("role camera composition point is invalid")
+        min_x = min(min_x, float(point[0]))
+        max_x = max(max_x, float(point[0]))
+        min_y = min(min_y, float(point[1]))
+        max_y = max(max_y, float(point[1]))
     for part in parts:
         center_x, center_y, _center_z = part.part_layout.center_m
         extent_x, extent_y, _extent_z = part.part_layout.extent_m
@@ -2254,13 +2378,20 @@ def _default_role_camera_candidates(
         _DEFAULT_ROLE_CAMERA_PLACEMENT,
         start=1,
     ):
+        module = module_by_id[module_id]
         parts = tuple(
             sorted(
-                module_by_id[module_id].parts,
+                module.parts,
                 key=lambda part: part.instance_id,
             ),
         )
-        position_m, look_at_m = _role_camera_geometry(parts)
+        composition_points = ()
+        if module_id == "watermill-tailrace":
+            composition_points = (module.recipe.waterwheel_assembly_anchor_m,)
+        position_m, look_at_m = _role_camera_geometry(
+            parts,
+            composition_points=composition_points,
+        )
 
         # REVIEW-CODEX-021: deterministically bind the nearest ground node
         # whose ground_route_ref matches topology_ref.  No same-ref node,
@@ -2364,7 +2495,11 @@ def build_default_reciprocal_route_module_plan(
         plan_sha = "0" * 64
         registry_sha = "0" * 64
     modules = tuple(
-        _default_module(module_id, elevated_topology=elevated_topology)
+        _default_module(
+            module_id,
+            elevated_topology=elevated_topology,
+            environment_module_plan=environment_module_plan,
+        )
         for module_id in (
             "central-courtyard-downhill",
             "bridge-deck-crossing",

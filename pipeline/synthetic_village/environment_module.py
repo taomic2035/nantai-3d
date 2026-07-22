@@ -47,7 +47,14 @@ import hashlib
 import json
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_serializer,
+    model_validator,
+)
 
 from .elevated_topology import (
     ElevatedTopologyPlan,
@@ -93,6 +100,7 @@ SEMANTIC_ID_BY_CLASS = {
 }
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+_FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 ModuleId = Literal[
     "central-courtyard",
     "lower-bridge-waterwheel",
@@ -261,6 +269,11 @@ class LowerBridgeRecipe(FrozenModel):
     arch_thickness_m: float = Field(gt=0.2, allow_inf_nan=False)
     abutment_support_count: int = Field(ge=2)
     creek_sections: tuple[CreekCrossSectionSpec, ...] = Field(min_length=3)
+    waterwheel_assembly_anchor_m: tuple[
+        _FiniteFloat,
+        _FiniteFloat,
+        _FiniteFloat,
+    ] = (-185.2, -115.0, 43.15)
     waterwheel_parts: tuple[WaterwheelPartSpec, ...] = Field(min_length=6)
     maintenance_platform_is_main_route: Literal[False] = False
     main_route_connectivity_preserved: bool
@@ -292,6 +305,22 @@ class LowerBridgeRecipe(FrozenModel):
                 "main route connectivity over bridge-lower-001 must be preserved",
             )
         return self
+
+    @model_serializer(mode="wrap")
+    def _preserve_legacy_v1_bytes(self, handler):
+        """Keep historical v1 requests canonical while binding new plans.
+
+        Pre-Batch-21 request artifacts did not serialize an assembly anchor.
+        Pydantic supplies the modeled legacy center when loading those bytes,
+        but the serializer must not invent a new key during their canonical
+        round-trip. New default plans pass the field explicitly, so it remains
+        present in their canonical bytes and changes the plan identity.
+        """
+
+        payload = handler(self)
+        if "waterwheel_assembly_anchor_m" not in self.model_fields_set:
+            payload.pop("waterwheel_assembly_anchor_m", None)
+        return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -663,6 +692,7 @@ def _default_lower_bridge_recipe() -> LowerBridgeRecipe:
         arch_thickness_m=0.45,
         abutment_support_count=2,
         creek_sections=sections,
+        waterwheel_assembly_anchor_m=(-185.2, -115.0, 43.15),
         waterwheel_parts=wheel_parts,
         maintenance_platform_is_main_route=False,
         main_route_connectivity_preserved=True,

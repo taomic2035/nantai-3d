@@ -580,7 +580,25 @@ def _central_geometry(part_id):
     return mesh
 
 
-def _bridge_geometry(part_id):
+def _waterwheel_anchor(recipe):
+    if not isinstance(recipe, dict):
+        raise RuntimeBuildError("lower-bridge recipe is invalid")
+    anchor = recipe.get("waterwheel_assembly_anchor_m")
+    if (
+        not isinstance(anchor, list)
+        or len(anchor) != 3
+        or not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in anchor
+        )
+    ):
+        raise RuntimeBuildError("waterwheel assembly anchor is invalid")
+    return tuple(float(value) for value in anchor)
+
+
+def _bridge_geometry(part_id, recipe):
     mesh = MeshAssembler()
     if part_id == "bridge-arch-001":
         mesh.add_arch_ring((-175.0, -115.0, 39.0), 5.4, 3.8, 4.0)
@@ -602,14 +620,15 @@ def _bridge_geometry(part_id):
     elif part_id == "creek-water-surface-001":
         mesh.add_box((-175.0, -115.0, 38.92), (10.5, 28.0, 0.10))
     elif part_id == "waterwheel-wheel-001":
-        mesh.add_ring((-185.2, -115.0, 43.15), 3.05, 0.28, 0.34)
+        anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)
+        mesh.add_ring((anchor_x, anchor_y, anchor_z), 3.05, 0.28, 0.34)
         for index in range(8):
             angle = index * math.pi / 4.0
             mesh.add_box(
                 (
-                    -185.2 + math.cos(angle) * 1.45,
-                    -115.0,
-                    43.15 + math.sin(angle) * 1.45,
+                    anchor_x + math.cos(angle) * 1.45,
+                    anchor_y,
+                    anchor_z + math.sin(angle) * 1.45,
                 ),
                 (
                     max(0.24, abs(math.cos(angle)) * 3.0),
@@ -618,20 +637,55 @@ def _bridge_geometry(part_id):
                 ),
             )
     elif part_id == "waterwheel-axle-001":
-        mesh.add_cylinder((-185.2, -115.0, 43.15), 0.38, 3.0, 20, axis="y")
+        anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)
+        mesh.add_cylinder((anchor_x, anchor_y, anchor_z), 0.38, 3.0, 20, axis="y")
     elif part_id == "waterwheel-bracket-001":
-        mesh.add_box((-187.4, -116.0, 41.4), (0.45, 0.45, 4.0))
-        mesh.add_box((-183.0, -116.0, 41.4), (0.45, 0.45, 4.0))
-        mesh.add_box((-185.2, -116.0, 39.5), (5.0, 0.55, 0.45))
+        anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)
+        mesh.add_box(
+            (anchor_x - 2.2, anchor_y - 1.0, anchor_z - 1.75),
+            (0.45, 0.45, 4.0),
+        )
+        mesh.add_box(
+            (anchor_x + 2.2, anchor_y - 1.0, anchor_z - 1.75),
+            (0.45, 0.45, 4.0),
+        )
+        mesh.add_box(
+            (anchor_x, anchor_y - 1.0, anchor_z - 3.65),
+            (5.0, 0.55, 0.45),
+        )
     elif part_id == "waterwheel-millrace-001":
-        mesh.add_box((-189.0, -115.0, 46.05), (7.0, 1.3, 0.18), 0.08)
-        mesh.add_box((-189.0, -115.72, 46.38), (7.0, 0.18, 0.65), 0.08)
-        mesh.add_box((-189.0, -114.28, 46.38), (7.0, 0.18, 0.65), 0.08)
+        anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)
+        mesh.add_box(
+            (anchor_x - 3.8, anchor_y, anchor_z + 2.9),
+            (7.0, 1.3, 0.18),
+            0.08,
+        )
+        mesh.add_box(
+            (anchor_x - 3.8, anchor_y - 0.72, anchor_z + 3.23),
+            (7.0, 0.18, 0.65),
+            0.08,
+        )
+        mesh.add_box(
+            (anchor_x - 3.8, anchor_y + 0.72, anchor_z + 3.23),
+            (7.0, 0.18, 0.65),
+            0.08,
+        )
     elif part_id == "waterwheel-spill-001":
-        mesh.add_box((-185.4, -115.0, 46.0), (1.0, 1.0, 0.22))
-        mesh.add_box((-185.4, -115.0, 44.8), (0.55, 0.75, 2.2))
+        anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)
+        mesh.add_box(
+            (anchor_x - 0.2, anchor_y, anchor_z + 2.85),
+            (1.0, 1.0, 0.22),
+        )
+        mesh.add_box(
+            (anchor_x - 0.2, anchor_y, anchor_z + 1.65),
+            (0.55, 0.75, 2.2),
+        )
     elif part_id == "waterwheel-tailwater-001":
-        mesh.add_box((-184.2, -115.0, 39.05), (5.0, 2.0, 0.12))
+        anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)
+        mesh.add_box(
+            (anchor_x + 1.0, anchor_y, anchor_z - 4.1),
+            (5.0, 2.0, 0.12),
+        )
     else:
         raise RuntimeBuildError(f"unknown bridge module part: {part_id}")
     return mesh
@@ -686,11 +740,11 @@ def _service_geometry(part_id):
     return mesh
 
 
-def _module_geometry(module_id, part_id):
+def _module_geometry(module_id, part_id, recipe):
     if module_id == "central-courtyard":
         return _central_geometry(part_id)
     if module_id == "lower-bridge-waterwheel":
-        return _bridge_geometry(part_id)
+        return _bridge_geometry(part_id, recipe)
     if module_id == "rear-service-courtyard":
         return _service_geometry(part_id)
     raise RuntimeBuildError(f"unknown environment module: {module_id}")
@@ -755,7 +809,11 @@ def _build_modules(request):
                     f"verified runtime material is absent: {binding['runtime_slot_id']}",
                 )
             root = _new_module_root(module, part, row, collection)
-            assembler = _module_geometry(module["module_id"], part["part_id"])
+            assembler = _module_geometry(
+                module["module_id"],
+                part["part_id"],
+                module["recipe"],
+            )
             mesh = _link_mesh(
                 root,
                 assembler,

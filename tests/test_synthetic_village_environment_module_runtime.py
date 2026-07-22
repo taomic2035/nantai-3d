@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +30,45 @@ from pipeline.synthetic_village.scene_plan import build_scene_plan
 
 def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _load_blender_runtime(monkeypatch: pytest.MonkeyPatch):
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/blender/apply_environment_modules.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_test_apply_environment_modules_batch21",
+        script,
+    )
+    assert spec is not None and spec.loader is not None
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace())
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    return runtime
+
+
+def test_waterwheel_geometry_uses_plan_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moving only the canonical anchor translates every wheel vertex."""
+
+    runtime = _load_blender_runtime(monkeypatch)
+    original = runtime._bridge_geometry(
+        "waterwheel-wheel-001",
+        {"waterwheel_assembly_anchor_m": [-185.2, -115.0, 43.15]},
+    )
+    moved = runtime._bridge_geometry(
+        "waterwheel-wheel-001",
+        {"waterwheel_assembly_anchor_m": [-175.2, -95.0, 73.15]},
+    )
+
+    assert len(original.vertices) == len(moved.vertices)
+    assert len(original.faces) == len(moved.faces)
+    for before, after in zip(original.vertices, moved.vertices, strict=True):
+        assert tuple(after[axis] - before[axis] for axis in range(3)) == pytest.approx(
+            (10.0, 20.0, 30.0),
+        )
 
 
 def _base_build(tmp_path: Path) -> SimpleNamespace:

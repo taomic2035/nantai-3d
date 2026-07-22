@@ -153,7 +153,7 @@ set. Keep the specialized dispatch table and builder names explicit.
 - [ ] **Step 1: Run source verification**
 
 ```powershell
-python -m pytest tests/test_synthetic_village_environment_module.py tests/test_synthetic_village_environment_module_runtime.py tests/test_synthetic_village_reciprocal_route_module.py tests/test_synthetic_village_reciprocal_route_module_runtime.py tests/test_synthetic_village_reciprocal_route_probe.py tests/test_synthetic_village_reciprocal_production.py -q
+python -m pytest tests/test_synthetic_village_environment_module.py tests/test_synthetic_village_environment_module_runtime.py tests/test_synthetic_village_reciprocal_route_module.py tests/test_synthetic_village_reciprocal_route_module_runtime.py tests/test_synthetic_village_reciprocal_route_probe.py tests/test_synthetic_village_reciprocal_route_production.py -q
 python -m ruff check pipeline/synthetic_village/environment_module.py pipeline/synthetic_village/reciprocal_route_module.py scripts/blender/apply_environment_modules.py scripts/blender/apply_reciprocal_route_modules.py tests/test_synthetic_village_environment_module.py tests/test_synthetic_village_environment_module_runtime.py tests/test_synthetic_village_reciprocal_route_module.py tests/test_synthetic_village_reciprocal_route_module_runtime.py
 ```
 

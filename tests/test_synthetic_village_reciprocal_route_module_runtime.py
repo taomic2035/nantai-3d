@@ -1129,6 +1129,128 @@ def test_module_geometry_families_do_not_serialize_identically(
     assert len(payloads) == len(family_semantics)
 
 
+@pytest.mark.parametrize(
+    ("part_id", "geometry_family", "semantic_id", "minimum_vertices"),
+    (
+        ("watermill-building-shell-001", "building-shell", 3, 72),
+        ("watermill-maintenance-platform-001", "open-path", 7, 56),
+        ("watermill-service-stair-001", "open-path", 7, 72),
+        ("watermill-access-panel-001", "service-prop", 13, 40),
+        ("watermill-creek-bank-path-001", "open-path", 7, 48),
+        ("watermill-platform-guard-001", "guard-rail", 13, 112),
+        (
+            "watermill-tailrace-retaining-wall-001",
+            "retaining-structure",
+            12,
+            40,
+        ),
+    ),
+)
+def test_batch21_watermill_parts_use_specialized_construction_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    part_id: str,
+    geometry_family: str,
+    semantic_id: int,
+    minimum_vertices: int,
+) -> None:
+    """Every Batch 21 part must be richer than its generic family template."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    part = _geometry_part(geometry_family, semantic_id)
+    part["part_id"] = part_id
+    specialized = runtime._module_geometry(part)
+    generic = runtime._module_geometry(
+        {
+            **part,
+            "part_id": f"generic-{geometry_family}",
+        },
+    )
+
+    assert len(specialized.vertices) >= minimum_vertices
+    assert (specialized.vertices, specialized.faces) != (
+        generic.vertices,
+        generic.faces,
+    )
+
+
+def test_batch21_watermill_access_panel_has_faceted_bearing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    part = _geometry_part("service-prop", 13)
+    part["part_id"] = "watermill-access-panel-001"
+
+    assembler = runtime._module_geometry(part)
+
+    assert any(len(face) == 3 for face in assembler.faces)
+
+
+def test_batch21_watermill_service_stair_has_five_tread_elevations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    part = _geometry_part("open-path", 7)
+    part["part_id"] = "watermill-service-stair-001"
+
+    assembler = runtime._module_geometry(part)
+    positive_tops = sorted(
+        {round(vertex[2], 3) for vertex in assembler.vertices if vertex[2] > 0.0},
+    )
+
+    assert len(positive_tops) >= 5
+
+
+@pytest.mark.parametrize(
+    "part_id",
+    (
+        "watermill-service-stair-001",
+        "watermill-creek-bank-path-001",
+    ),
+)
+def test_batch21_open_watermill_routes_keep_upward_probe_line_clear(
+    monkeypatch: pytest.MonkeyPatch,
+    part_id: str,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    part = _geometry_part("open-path", 7)
+    part["part_id"] = part_id
+
+    assembler = runtime._module_geometry(part)
+    boxes = [
+        assembler.vertices[index:index + 8]
+        for index in range(0, len(assembler.vertices), 8)
+    ]
+    blocking_boxes = []
+    for box in boxes:
+        min_x, max_x = min(v[0] for v in box), max(v[0] for v in box)
+        min_y, max_y = min(v[1] for v in box), max(v[1] for v in box)
+        max_z = max(v[2] for v in box)
+        if min_x <= 0.0 <= max_x and min_y <= 0.0 <= max_y and max_z >= 0.0:
+            blocking_boxes.append(box)
+
+    assert blocking_boxes == []
+
+
+def test_batch21_watermill_tailrace_retaining_wall_keeps_center_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    part = _geometry_part("retaining-structure", 12)
+    part["part_id"] = "watermill-tailrace-retaining-wall-001"
+
+    assembler = runtime._module_geometry(part)
+    boxes = [assembler.vertices[index:index + 8] for index in range(0, len(assembler.vertices), 8)]
+    blocking_boxes = []
+    for box in boxes:
+        min_x, max_x = min(v[0] for v in box), max(v[0] for v in box)
+        min_y, max_y = min(v[1] for v in box), max(v[1] for v in box)
+        min_z, max_z = min(v[2] for v in box), max(v[2] for v in box)
+        if min_x <= 0.0 <= max_x and min_y <= 0.0 <= max_y and min_z <= 0.8 <= max_z:
+            blocking_boxes.append(box)
+
+    assert blocking_boxes == []
+
+
 def test_building_shell_is_a_view_through_portal_not_a_back_wall(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
