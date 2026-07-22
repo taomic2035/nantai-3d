@@ -115,7 +115,7 @@ def test_ground_attachments_lie_on_the_declared_real_path_and_match_terrain() ->
     }
 
     ground = [node for node in plan.nodes if node.level == "ground"]
-    assert len(ground) == 7
+    assert len(ground) == 8
     for node in ground:
         assert node.ground_route_ref in paths
         route = paths[node.ground_route_ref]
@@ -171,13 +171,18 @@ def test_module_anchor_ground_nodes_are_isolated_and_on_declared_paths() -> None
     scene = build_scene_plan()
     plan = build_elevated_topology_plan(scene)
 
-    anchor_ids = {"bridge-ground-001", "gallery-ground-001", "watermill-ground-001"}
+    anchor_ids = {
+        "bridge-ground-001",
+        "gallery-ground-001",
+        "watermill-ground-001",
+        "valley-ground-001",
+    }
     anchor_nodes = {
         node.node_id: node
         for node in plan.nodes
         if node.node_id in anchor_ids
     }
-    assert len(anchor_nodes) == 3
+    assert len(anchor_nodes) == 4
 
     # Anchor nodes must not participate in any edge.
     used_node_ids = {
@@ -201,6 +206,7 @@ def test_module_anchor_ground_nodes_are_isolated_and_on_declared_paths() -> None
         "bridge-ground-001": "path-network-002",
         "gallery-ground-001": "path-network-003",
         "watermill-ground-001": "path-network-001",
+        "valley-ground-001": "path-network-002",
     }
     for anchor_id, route_ref in expected_routes.items():
         node = anchor_nodes[anchor_id]

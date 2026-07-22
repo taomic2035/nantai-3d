@@ -492,6 +492,14 @@ def build_elevated_topology_plan(
                     level="ground",
                     ground_route_ref="path-network-001",
                 ),
+                _node(
+                    node_id="valley-ground-001",
+                    x_m=-90,
+                    y_m=-35,
+                    scene=active,
+                    level="ground",
+                    ground_route_ref="path-network-002",
+                ),
             ),
             key=lambda node: node.node_id,
         )

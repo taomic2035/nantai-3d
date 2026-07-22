@@ -627,10 +627,11 @@ def test_default_part_layout_preserves_phase3_aabb(plan) -> None:
     assert max_x == 120.0
     # watermill base_y = -130; first watermill part (instance 189):
     #   -130 + (189-176)*2.5 = -130 + 32.5 = -97.5
-    # forest base_y = 80; last forest part (instance 211):
-    #   80 + (211-176)*2.5 = 80 + 87.5 = 167.5
+    # forest base_y = 30 (Phase 4.5.2 relocated from 80 to bring
+    # candidates within 30 m of upper-ground-west); last forest part
+    # (instance 211): 30 + (211-176)*2.5 = 30 + 87.5 = 117.5
     assert min_y == -97.5
-    assert max_y == 167.5
+    assert max_y == 117.5
     # Phase 4.3: watermill base_z lifted 45 -> 52 to clear aux-terrain
     # peak ~48.64 m at the watermill's y range.  gallery base_z = 78
     # is unchanged.
