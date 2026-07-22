@@ -190,6 +190,23 @@ def _role_plan_context(
     return source_plan, candidate, derived
 
 
+def _role_candidates():
+    scene = build_scene_plan()
+    topology = build_elevated_topology_plan(scene)
+    source_plan = build_production_camera_plan(scene, topology)
+    environment = build_default_environment_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+    )
+    reciprocal = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=environment,
+        production_camera_plan=source_plan,
+    )
+    return reciprocal.role_camera_candidates
+
+
 def test_role_render_plan_is_derived_from_bound_candidate_only() -> None:
     scene = build_scene_plan()
     topology = build_elevated_topology_plan(scene)
@@ -297,7 +314,12 @@ def test_verified_build_uses_measured_report_bytes_and_report_lineage(
             (loaded, request, output_path),
         ),
     )
-    runtime_request = object()
+    role_camera_candidates = _role_candidates()
+    runtime_request = SimpleNamespace(
+        reciprocal_route_module_plan=SimpleNamespace(
+            role_camera_candidates=role_camera_candidates,
+        ),
+    )
 
     verified = verify_reciprocal_production_build(
         report_path=report_path,
@@ -312,6 +334,7 @@ def test_verified_build_uses_measured_report_bytes_and_report_lineage(
     assert verified.environment_module_build_report_sha256 == "b" * 64
     assert verified.reciprocal_route_module_plan_sha256 == "c" * 64
     assert verified.object_registry == registry
+    assert verified.role_camera_candidates == role_camera_candidates
 
 
 def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
@@ -769,6 +792,7 @@ def test_runner_does_not_render_or_publish_rejected_preflight(
         environment_module_build_report_sha256="6" * 64,
         reciprocal_route_module_plan_sha256="7" * 64,
         object_registry=_registry(218),
+        role_camera_candidates=_role_candidates(),
     )
     calls: list[list[str]] = []
 
@@ -827,6 +851,61 @@ def test_runner_does_not_render_or_publish_rejected_preflight(
 
     assert len(calls) == 1
     assert not any(output_root.glob("[0-9a-f]*"))
+
+
+def test_runner_rejects_candidate_not_bound_to_verified_build(
+    tmp_path: Path,
+) -> None:
+    source_plan, candidate, _derived = _role_plan_context(5)
+    verified_candidates = _role_candidates()
+    blend_path = tmp_path / "village-reciprocal-route.blend"
+    blend_path.write_bytes(b"verified-blend")
+    report_path = tmp_path / "reciprocal-route-build-report.json"
+    report_path.write_bytes(b"verified-report\n")
+    executable = tmp_path / "blender.exe"
+    executable.write_bytes(b"verified-blender")
+    verified_build = VerifiedReciprocalProductionBuild(
+        build_id="1" * 64,
+        report_path=report_path,
+        report_sha256=hashlib.sha256(report_path.read_bytes()).hexdigest(),
+        blend_path=blend_path,
+        blend_sha256=hashlib.sha256(blend_path.read_bytes()).hexdigest(),
+        environment_module_build_report_sha256="6" * 64,
+        reciprocal_route_module_plan_sha256="7" * 64,
+        object_registry=_registry(218),
+        role_camera_candidates=verified_candidates,
+    )
+    tampered = candidate.model_copy(
+        update={"disclosure": f"{candidate.disclosure} tampered"},
+    )
+    calls: list[list[str]] = []
+
+    def must_not_run(args, **kwargs):
+        del kwargs
+        calls.append([str(value) for value in args])
+        raise AssertionError("Blender must not run for an unbound candidate")
+
+    with pytest.raises(
+        ReciprocalProductionError,
+        match="candidate.*verified reciprocal build",
+    ):
+        run_reciprocal_production_camera(
+            verified_build=verified_build,
+            source_plan=source_plan,
+            role_camera_candidate=tampered,
+            target_camera_id="camera-ground-route-010",
+            blender_executable=executable,
+            output_root=tmp_path / "renders",
+            clearance_policy=_clearance_policy(),
+            quality_policy=LocalProductionQualityPolicy(
+                minimum_valid_pixel_ratio=0.05,
+            ),
+            post_render_policy=_post_render_policy(),
+            process_runner=must_not_run,
+            timeout_seconds=30,
+        )
+
+    assert calls == []
 
 
 def _write_fake_successful_frame(
@@ -996,6 +1075,7 @@ def test_runner_publishes_verified_one_camera_bundle(tmp_path: Path) -> None:
         environment_module_build_report_sha256="6" * 64,
         reciprocal_route_module_plan_sha256="7" * 64,
         object_registry=_registry(218),
+        role_camera_candidates=_role_candidates(),
     )
     calls: list[list[str]] = []
 

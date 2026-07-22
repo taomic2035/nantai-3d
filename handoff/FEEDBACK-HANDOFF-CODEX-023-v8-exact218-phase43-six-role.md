@@ -104,6 +104,20 @@ This is a modeled-geometry defect, not a reason to weaken the policy or pitch
 an unbound camera. The five machine-accepted frames prove caller plumbing and
 fail-closed bindings only. They do not meet a real-scene visual bar.
 
+## Caller candidate identity hardening
+
+The verified-build handle now retains the exact six role camera candidates
+from the content-addressed reciprocal runtime request. Before deriving a
+camera plan or starting Blender, the caller requires the canonical six-role
+ordering and compares the complete candidate SHA with the candidate embedded
+in that verified build. A changed disclosure, pose, topology binding, or any
+other candidate field therefore fails closed before a subprocess or publish.
+
+TDD first reproduced the gap with a candidate that remained valid against the
+source production plan but was absent from the verified build. The focused
+caller/runtime/Blender contract suite is `104 passed`; Ruff is clean. This is
+identity hardening only and adds no geometry or quality trust.
+
 ## Next ownership
 
 GLM receives the role-aware mesh task in

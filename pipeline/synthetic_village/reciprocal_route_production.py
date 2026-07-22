@@ -132,6 +132,7 @@ class VerifiedReciprocalProductionBuild:
     environment_module_build_report_sha256: str
     reciprocal_route_module_plan_sha256: str
     object_registry: tuple[canary.ObjectRegistryEntry, ...]
+    role_camera_candidates: tuple[ReciprocalRoleCameraCandidate, ...]
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,40 @@ def reciprocal_role_camera_candidate_sha256(
     """Content identity for one complete reciprocal role camera candidate."""
 
     return hashlib.sha256(_canonical(candidate.model_dump(mode="json"))).hexdigest()
+
+
+def _require_candidate_bound_to_verified_build(
+    *,
+    verified_build: VerifiedReciprocalProductionBuild,
+    candidate: ReciprocalRoleCameraCandidate,
+) -> None:
+    """Reject a caller candidate absent from the exact verified build plan."""
+
+    candidates = verified_build.role_camera_candidates
+    expected_roles = tuple(_ROLE_INSTANCE_RANGES)
+    if (
+        len(candidates) != len(expected_roles)
+        or tuple(row.role_module_id for row in candidates) != expected_roles
+    ):
+        raise ReciprocalProductionError(
+            "verified reciprocal build does not carry the exact six role candidates",
+        )
+    verified_candidate = next(
+        (
+            row
+            for row in candidates
+            if row.role_module_id == candidate.role_module_id
+        ),
+        None,
+    )
+    if (
+        verified_candidate is None
+        or reciprocal_role_camera_candidate_sha256(verified_candidate)
+        != reciprocal_role_camera_candidate_sha256(candidate)
+    ):
+        raise ReciprocalProductionError(
+            "role camera candidate is not bound to the verified reciprocal build",
+        )
 
 
 def build_reciprocal_role_render_plan(
@@ -1340,6 +1375,10 @@ def run_reciprocal_production_camera(
 
     if timeout_seconds <= 0:
         raise ReciprocalProductionError("runner timeout must be positive")
+    _require_candidate_bound_to_verified_build(
+        verified_build=verified_build,
+        candidate=role_camera_candidate,
+    )
     plan = build_reciprocal_role_render_plan(
         source_plan=source_plan,
         role_camera_candidate=role_camera_candidate,
@@ -1834,4 +1873,7 @@ def verify_reciprocal_production_build(
             report.reciprocal_route_module_plan_sha256
         ),
         object_registry=report.object_registry,
+        role_camera_candidates=(
+            runtime_request.reciprocal_route_module_plan.role_camera_candidates
+        ),
     )
