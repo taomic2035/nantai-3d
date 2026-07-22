@@ -976,8 +976,8 @@ def pose_separation_evidence(plan: ProductionCameraPlan) -> dict[str, object]:
     支撑某一个具体数字。所以这里【只报分布, 不设阈值】, 并显式声明没有阈值 ——
     挑一个数假装它是判据, 比不做更糟, 因为下游会以为这条已经被守住了。
 
-    实测最近一对约 3.5 m (ground-route-004 与 environment-corridor-002 在
-    溪流与路网交汇处), 由消费者自行决定它是否构成退化基线。
+    实测最近一对约 0.2 m (ground-route-013 与 elevated-pedestrian-007 在
+    central-loop 上方步道与地面路径交汇处), 由消费者自行决定它是否构成退化基线。
     """
 
     cameras = plan.cameras
