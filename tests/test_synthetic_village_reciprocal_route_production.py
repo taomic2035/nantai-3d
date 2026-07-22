@@ -14,6 +14,9 @@ from pipeline.synthetic_village import canary
 from pipeline.synthetic_village.elevated_topology import (
     build_elevated_topology_plan,
 )
+from pipeline.synthetic_village.environment_module import (
+    build_default_environment_module_plan,
+)
 from pipeline.synthetic_village.production_journal import (
     ProductionArtifactRecord,
     expected_production_artifacts,
@@ -37,6 +40,10 @@ from pipeline.synthetic_village.production_quality_gates import (
 from pipeline.synthetic_village.production_render import (
     LocalProductionQualityPolicy,
 )
+from pipeline.synthetic_village.reciprocal_route_module import (
+    build_default_reciprocal_route_module_plan,
+    materialize_reciprocal_role_candidate,
+)
 from pipeline.synthetic_village.reciprocal_route_production import (
     RECIPROCAL_BUILD_ADAPTER,
     RECIPROCAL_CAMERA_METADATA_SCHEMA,
@@ -57,6 +64,7 @@ from pipeline.synthetic_village.reciprocal_route_production import (
     build_reciprocal_production_clearance_report,
     build_reciprocal_production_clearance_request,
     build_reciprocal_production_frame_request,
+    build_reciprocal_role_render_plan,
     canonical_reciprocal_production_camera_metadata_bytes,
     canonical_reciprocal_production_clearance_report_bytes,
     canonical_reciprocal_production_clearance_request_bytes,
@@ -65,6 +73,7 @@ from pipeline.synthetic_village.reciprocal_route_production import (
     load_reciprocal_production_render_report,
     reciprocal_object_registry_sha256,
     reciprocal_production_render_id,
+    reciprocal_role_camera_candidate_sha256,
     require_exact_reciprocal_object_registry,
     require_reciprocal_visible_instances,
     run_reciprocal_production_camera,
@@ -155,6 +164,74 @@ def _clearance_policy() -> ProductionClearancePolicy:
     )
 
 
+def _role_plan_context(
+    role_index: int = 0,
+    target_camera_id: str = "camera-ground-route-010",
+):
+    scene = build_scene_plan()
+    topology = build_elevated_topology_plan(scene)
+    source_plan = build_production_camera_plan(scene, topology)
+    environment = build_default_environment_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+    )
+    reciprocal = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=environment,
+        production_camera_plan=source_plan,
+    )
+    candidate = reciprocal.role_camera_candidates[role_index]
+    derived = build_reciprocal_role_render_plan(
+        source_plan=source_plan,
+        role_camera_candidate=candidate,
+        target_camera_id=target_camera_id,
+    )
+    return source_plan, candidate, derived
+
+
+def test_role_render_plan_is_derived_from_bound_candidate_only() -> None:
+    scene = build_scene_plan()
+    topology = build_elevated_topology_plan(scene)
+    source_plan = build_production_camera_plan(scene, topology)
+    environment = build_default_environment_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+    )
+    reciprocal = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=environment,
+        production_camera_plan=source_plan,
+    )
+    candidate = reciprocal.role_camera_candidates[0]
+
+    derived = build_reciprocal_role_render_plan(
+        source_plan=source_plan,
+        role_camera_candidate=candidate,
+        target_camera_id="camera-ground-route-010",
+    )
+
+    original = next(
+        row for row in source_plan.cameras
+        if row.camera_id == "camera-ground-route-010"
+    )
+    expected = materialize_reciprocal_role_candidate(
+        candidate,
+        target_group_id=original.group_id,
+        target_sequence_index=original.sequence_index,
+        target_camera_id=original.camera_id,
+    )
+    actual = next(row for row in derived.cameras if row.camera_id == original.camera_id)
+    assert actual == expected
+    assert tuple(
+        row for row in derived.cameras if row.camera_id != original.camera_id
+    ) == tuple(
+        row for row in source_plan.cameras if row.camera_id != original.camera_id
+    )
+    assert source_plan.cameras[source_plan.cameras.index(original)] == original
+
+
 def test_exact_reciprocal_registry_is_content_addressed() -> None:
     registry = _registry(218)
 
@@ -238,15 +315,14 @@ def test_verified_build_uses_measured_report_bytes_and_report_lineage(
 
 
 def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
-    scene = build_scene_plan()
-    topology = build_elevated_topology_plan(scene)
-    plan = build_production_camera_plan(scene, topology)
+    source_plan, candidate, plan = _role_plan_context()
     policy = _post_render_policy()
 
     request = build_reciprocal_production_frame_request(
         plan=plan,
-        camera_id="camera-ground-route-011",
-        role_module_id="central-courtyard-downhill",
+        source_plan=source_plan,
+        role_camera_candidate=candidate,
+        camera_id="camera-ground-route-010",
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -266,6 +342,8 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
     assert request.schema_version == RECIPROCAL_RENDER_REQUEST_SCHEMA
     assert request.build_adapter == RECIPROCAL_BUILD_ADAPTER
     assert request.role_module_id == "central-courtyard-downhill"
+    assert request.source_production_plan == source_plan
+    assert request.role_camera_candidate == candidate
     assert request.required_visible_instance_ids == tuple(range(176, 183))
     assert request.object_registry_sha256 == reciprocal_object_registry_sha256(
         request.object_registry,
@@ -289,11 +367,17 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
     assert request.render_id == reciprocal_production_render_id(
         base_render_id=base_render_id,
         role_module_id="central-courtyard-downhill",
+        role_camera_candidate_sha256=(
+            reciprocal_role_camera_candidate_sha256(candidate)
+        ),
+        source_production_plan_sha256=request.source_production_plan_sha256,
     )
+    bridge_source, bridge_candidate, bridge_plan = _role_plan_context(1)
     bridge_request = build_reciprocal_production_frame_request(
-        plan=plan,
-        camera_id="camera-ground-route-011",
-        role_module_id="bridge-deck-crossing",
+        plan=bridge_plan,
+        source_plan=bridge_source,
+        role_camera_candidate=bridge_candidate,
+        camera_id="camera-ground-route-010",
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -319,6 +403,21 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
             json.dumps(partial_role),
         )
 
+    changed_candidate = candidate.model_copy(
+        update={"disclosure": candidate.disclosure + " altered"},
+    )
+    mismatched_pose = request.model_dump(mode="json")
+    mismatched_pose["role_camera_candidate"] = changed_candidate.model_dump(
+        mode="json",
+    )
+    mismatched_pose["role_camera_candidate_sha256"] = (
+        reciprocal_role_camera_candidate_sha256(changed_candidate)
+    )
+    with pytest.raises(ValueError, match="exact candidate-derived role plan"):
+        ReciprocalProductionRenderFrameRequest.model_validate_json(
+            json.dumps(mismatched_pose),
+        )
+
     changed_engine = request.model_dump(mode="json")
     changed_engine["engine_script_sha256"] = "b" * 64
     with pytest.raises(ValueError, match="render ID"):
@@ -331,13 +430,12 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
 
 
 def test_frame_request_rejects_changed_transitive_report_sha() -> None:
-    scene = build_scene_plan()
-    topology = build_elevated_topology_plan(scene)
-    plan = build_production_camera_plan(scene, topology)
+    source_plan, candidate, plan = _role_plan_context()
     request = build_reciprocal_production_frame_request(
         plan=plan,
-        camera_id="camera-ground-route-011",
-        role_module_id="central-courtyard-downhill",
+        source_plan=source_plan,
+        role_camera_candidate=candidate,
+        camera_id="camera-ground-route-010",
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -521,13 +619,12 @@ def test_reciprocal_render_statistics_accept_instance_218() -> None:
 def test_render_report_loader_and_artifact_verifier(
     tmp_path: Path,
 ) -> None:
-    scene = build_scene_plan()
-    topology = build_elevated_topology_plan(scene)
-    plan = build_production_camera_plan(scene, topology)
+    source_plan, candidate, plan = _role_plan_context()
     request = build_reciprocal_production_frame_request(
         plan=plan,
-        camera_id="camera-ground-route-011",
-        role_module_id="central-courtyard-downhill",
+        source_plan=source_plan,
+        role_camera_candidate=candidate,
+        camera_id="camera-ground-route-010",
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
@@ -656,9 +753,7 @@ def test_render_report_loader_and_artifact_verifier(
 def test_runner_does_not_render_or_publish_rejected_preflight(
     tmp_path: Path,
 ) -> None:
-    scene = build_scene_plan()
-    topology = build_elevated_topology_plan(scene)
-    plan = build_production_camera_plan(scene, topology)
+    source_plan, candidate, _derived = _role_plan_context(5)
     blend_path = tmp_path / "village-reciprocal-route.blend"
     blend_path.write_bytes(b"verified-blend")
     report_path = tmp_path / "reciprocal-route-build-report.json"
@@ -688,7 +783,7 @@ def test_runner_does_not_render_or_publish_rejected_preflight(
             request_path.read_bytes(),
         )
         evidence = ProductionCameraClearanceEvidence(
-            camera_id="camera-ground-route-011",
+            camera_id=request.selected_camera_ids[0],
             rays=tuple(
                 ProductionClearanceRayEvidence(
                     sample_x=sample_x,
@@ -716,8 +811,9 @@ def test_runner_does_not_render_or_publish_rejected_preflight(
     with pytest.raises(ReciprocalProductionError, match="preflight rejected"):
         run_reciprocal_production_camera(
             verified_build=verified_build,
-            plan=plan,
-            camera_id="camera-ground-route-011",
+            source_plan=source_plan,
+            role_camera_candidate=candidate,
+            target_camera_id="camera-ground-route-010",
             blender_executable=executable,
             output_root=output_root,
             clearance_policy=_clearance_policy(),
@@ -725,7 +821,6 @@ def test_runner_does_not_render_or_publish_rejected_preflight(
                 minimum_valid_pixel_ratio=0.05,
             ),
             post_render_policy=_post_render_policy(),
-            role_module_id="lower-valley-uphill",
             process_runner=fake_run,
             timeout_seconds=30,
         )
@@ -885,9 +980,7 @@ def _write_fake_successful_frame(
 
 
 def test_runner_publishes_verified_one_camera_bundle(tmp_path: Path) -> None:
-    scene = build_scene_plan()
-    topology = build_elevated_topology_plan(scene)
-    plan = build_production_camera_plan(scene, topology)
+    source_plan, candidate, _derived = _role_plan_context(5)
     blend_path = tmp_path / "village-reciprocal-route.blend"
     blend_path.write_bytes(b"verified-blend")
     report_path = tmp_path / "reciprocal-route-build-report.json"
@@ -916,7 +1009,7 @@ def test_runner_publishes_verified_one_camera_bundle(tmp_path: Path) -> None:
                 request_path.read_bytes(),
             )
             evidence = ProductionCameraClearanceEvidence(
-                camera_id="camera-ground-route-011",
+                camera_id=request.selected_camera_ids[0],
                 rays=tuple(
                     ProductionClearanceRayEvidence(
                         sample_x=sample_x,
@@ -945,8 +1038,9 @@ def test_runner_publishes_verified_one_camera_bundle(tmp_path: Path) -> None:
 
     result = run_reciprocal_production_camera(
         verified_build=verified_build,
-        plan=plan,
-        camera_id="camera-ground-route-011",
+        source_plan=source_plan,
+        role_camera_candidate=candidate,
+        target_camera_id="camera-ground-route-010",
         blender_executable=executable,
         output_root=tmp_path / "renders",
         clearance_policy=_clearance_policy(),
@@ -954,7 +1048,6 @@ def test_runner_publishes_verified_one_camera_bundle(tmp_path: Path) -> None:
             minimum_valid_pixel_ratio=0.05,
         ),
         post_render_policy=_post_render_policy(),
-        role_module_id="lower-valley-uphill",
         process_runner=fake_run,
         timeout_seconds=30,
     )

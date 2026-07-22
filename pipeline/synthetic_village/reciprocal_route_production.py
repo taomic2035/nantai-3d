@@ -66,8 +66,11 @@ from .reciprocal_route_module import (
     FOREST_BOUNDARY_INSTANCE_RANGE,
     GALLERY_UNDERPASS_INSTANCE_RANGE,
     LOWER_VALLEY_UPHILL_INSTANCE_RANGE,
+    REPLACEMENT_OBSTRUCTED_CAMERA_IDS,
     WATERMILL_TAILRACE_INSTANCE_RANGE,
     ModuleId,
+    ReciprocalRoleCameraCandidate,
+    materialize_reciprocal_role_candidate,
 )
 from .reciprocal_route_module_runtime import (
     ReciprocalRouteRuntimeRequest,
@@ -76,7 +79,7 @@ from .reciprocal_route_module_runtime import (
 )
 
 RECIPROCAL_RENDER_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v7"
+    "nantai.synthetic-village.local-production-render-frame-request.v8"
 )
 RECIPROCAL_RENDER_REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v4"
@@ -178,11 +181,19 @@ def reciprocal_production_render_id(
     *,
     base_render_id: str,
     role_module_id: ModuleId,
+    role_camera_candidate_sha256: str,
+    source_production_plan_sha256: str,
 ) -> str:
     """Bind the generic render identity to one exact role visibility target."""
 
     if re.fullmatch(r"[0-9a-f]{64}", base_render_id) is None:
         raise ReciprocalProductionError("base render ID is not a SHA-256")
+    for label, value in (
+        ("role camera candidate SHA", role_camera_candidate_sha256),
+        ("source production plan SHA", source_production_plan_sha256),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ReciprocalProductionError(f"{label} is not a SHA-256")
     return hashlib.sha256(
         _canonical(
             {
@@ -190,10 +201,80 @@ def reciprocal_production_render_id(
                 "required_visible_instance_ids": list(
                     reciprocal_role_visible_instance_ids(role_module_id),
                 ),
+                "role_camera_candidate_sha256": role_camera_candidate_sha256,
                 "role_module_id": role_module_id,
+                "source_production_plan_sha256": source_production_plan_sha256,
             },
         ),
     ).hexdigest()
+
+
+def reciprocal_role_camera_candidate_sha256(
+    candidate: ReciprocalRoleCameraCandidate,
+) -> str:
+    """Content identity for one complete reciprocal role camera candidate."""
+
+    return hashlib.sha256(_canonical(candidate.model_dump(mode="json"))).hexdigest()
+
+
+def build_reciprocal_role_render_plan(
+    *,
+    source_plan: ProductionCameraPlan,
+    role_camera_candidate: ReciprocalRoleCameraCandidate,
+    target_camera_id: str,
+) -> ProductionCameraPlan:
+    """Derive one exact 180-camera role plan from a bound candidate."""
+
+    source_plan_sha256 = hashlib.sha256(
+        canonical_production_plan_bytes(source_plan),
+    ).hexdigest()
+    source_registry_sha256 = production_camera_registry_digest(source_plan)
+    if (
+        role_camera_candidate.bound_production_plan_sha256
+        != source_plan_sha256
+        or role_camera_candidate.bound_camera_registry_sha256
+        != source_registry_sha256
+    ):
+        raise ReciprocalProductionError(
+            "reciprocal role candidate is not bound to the source production plan",
+        )
+    if target_camera_id not in REPLACEMENT_OBSTRUCTED_CAMERA_IDS:
+        raise ReciprocalProductionError(
+            "reciprocal role target is not a clearance-rejected production camera",
+        )
+    original = next(
+        (
+            row
+            for row in source_plan.cameras
+            if row.camera_id == target_camera_id
+        ),
+        None,
+    )
+    if original is None:
+        raise ReciprocalProductionError(
+            f"reciprocal role target is absent from source plan: {target_camera_id}",
+        )
+    replacement = materialize_reciprocal_role_candidate(
+        role_camera_candidate,
+        target_group_id=original.group_id,
+        target_sequence_index=original.sequence_index,
+        target_camera_id=original.camera_id,
+    )
+    payload = source_plan.model_dump(mode="json")
+    payload["cameras"] = [
+        (replacement if row.camera_id == target_camera_id else row).model_dump(
+            mode="json",
+        )
+        for row in source_plan.cameras
+    ]
+    try:
+        return ProductionCameraPlan.model_validate_json(
+            json.dumps(payload, ensure_ascii=False),
+        )
+    except ValidationError as exc:
+        raise ReciprocalProductionError(
+            "materialized reciprocal role candidate cannot form a production plan",
+        ) from exc
 
 
 def _opencv_c2w_to_blender(matrix: Matrix4) -> Matrix4:
@@ -592,7 +673,7 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
     """One exact-218 reciprocal-route production-camera render request."""
 
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-request.v7"
+        "nantai.synthetic-village.local-production-render-frame-request.v8"
     ] = RECIPROCAL_RENDER_REQUEST_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = (
         PRODUCTION_PROFILE_ID
@@ -601,6 +682,9 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
     camera_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     elevated_topology_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     production_plan: ProductionCameraPlan
+    source_production_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_camera_registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_production_plan: ProductionCameraPlan
     render_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_adapter: Literal["windows-reciprocal-route-v1"] = (
         RECIPROCAL_BUILD_ADAPTER
@@ -630,6 +714,8 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
     settings: canary.RenderSettings
     camera: ProductionCameraPose
     role_module_id: ModuleId
+    role_camera_candidate_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    role_camera_candidate: ReciprocalRoleCameraCandidate
     required_visible_instance_ids: tuple[int, ...]
     requested_c2w_blender: Matrix4
     object_registry: tuple[canary.ObjectRegistryEntry, ...] = Field(
@@ -647,6 +733,35 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> ReciprocalProductionRenderFrameRequest:
+        source_plan_sha256 = hashlib.sha256(
+            canonical_production_plan_bytes(self.source_production_plan),
+        ).hexdigest()
+        if self.source_production_plan_sha256 != source_plan_sha256:
+            raise ValueError("source production plan digest is invalid")
+        source_registry_sha256 = production_camera_registry_digest(
+            self.source_production_plan,
+        )
+        if self.source_camera_registry_sha256 != source_registry_sha256:
+            raise ValueError("source camera registry digest is invalid")
+        candidate_sha256 = reciprocal_role_camera_candidate_sha256(
+            self.role_camera_candidate,
+        )
+        if self.role_camera_candidate_sha256 != candidate_sha256:
+            raise ValueError("role camera candidate digest is invalid")
+        if self.role_camera_candidate.role_module_id != self.role_module_id:
+            raise ValueError("role camera candidate does not match role module")
+        try:
+            expected_role_plan = build_reciprocal_role_render_plan(
+                source_plan=self.source_production_plan,
+                role_camera_candidate=self.role_camera_candidate,
+                target_camera_id=self.camera.camera_id,
+            )
+        except ReciprocalProductionError as exc:
+            raise ValueError(str(exc)) from exc
+        if expected_role_plan != self.production_plan:
+            raise ValueError(
+                "production plan is not the exact candidate-derived role plan",
+            )
         if self.production_plan_sha256 != hashlib.sha256(
             canonical_production_plan_bytes(self.production_plan),
         ).hexdigest():
@@ -722,6 +837,8 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
         expected_render_id = reciprocal_production_render_id(
             base_render_id=base_render_id,
             role_module_id=self.role_module_id,
+            role_camera_candidate_sha256=self.role_camera_candidate_sha256,
+            source_production_plan_sha256=self.source_production_plan_sha256,
         )
         if self.render_id != expected_render_id:
             raise ValueError("render ID does not bind the production inputs")
@@ -1206,14 +1323,14 @@ def _remove_private_staging(path: Path, *, parent: Path) -> None:
 def run_reciprocal_production_camera(
     *,
     verified_build: VerifiedReciprocalProductionBuild,
-    plan: ProductionCameraPlan,
-    camera_id: str,
+    source_plan: ProductionCameraPlan,
+    role_camera_candidate: ReciprocalRoleCameraCandidate,
+    target_camera_id: str,
     blender_executable: Path,
     output_root: Path,
     clearance_policy: ProductionClearancePolicy,
     quality_policy: LocalProductionQualityPolicy,
     post_render_policy: ProductionFrameQualityPolicyV2,
-    role_module_id: ModuleId,
     process_runner: Callable[..., subprocess.CompletedProcess[str]] = (
         subprocess.run
     ),
@@ -1223,6 +1340,13 @@ def run_reciprocal_production_camera(
 
     if timeout_seconds <= 0:
         raise ReciprocalProductionError("runner timeout must be positive")
+    plan = build_reciprocal_role_render_plan(
+        source_plan=source_plan,
+        role_camera_candidate=role_camera_candidate,
+        target_camera_id=target_camera_id,
+    )
+    camera_id = target_camera_id
+    role_module_id = role_camera_candidate.role_module_id
     required_visible_instance_ids = reciprocal_role_visible_instance_ids(
         role_module_id,
     )
@@ -1342,8 +1466,9 @@ def run_reciprocal_production_camera(
         ).resolve(strict=True)
         render_request = build_reciprocal_production_frame_request(
             plan=plan,
+            source_plan=source_plan,
+            role_camera_candidate=role_camera_candidate,
             camera_id=camera_id,
-            role_module_id=role_module_id,
             build_id=verified_build.build_id,
             blender_executable_sha256=_sha256_file(blender_executable),
             renderer_script_sha256=_sha256_file(renderer_script),
@@ -1565,8 +1690,9 @@ def run_reciprocal_production_camera(
 def build_reciprocal_production_frame_request(
     *,
     plan: ProductionCameraPlan,
+    source_plan: ProductionCameraPlan,
+    role_camera_candidate: ReciprocalRoleCameraCandidate,
     camera_id: str,
-    role_module_id: ModuleId,
     build_id: str,
     blender_executable_sha256: str,
     renderer_script_sha256: str,
@@ -1594,6 +1720,14 @@ def build_reciprocal_production_frame_request(
         )
     object_registry_sha256 = reciprocal_object_registry_sha256(object_registry)
     camera_registry_sha256 = production_camera_registry_digest(plan)
+    source_production_plan_sha256 = hashlib.sha256(
+        canonical_production_plan_bytes(source_plan),
+    ).hexdigest()
+    source_camera_registry_sha256 = production_camera_registry_digest(source_plan)
+    role_module_id = role_camera_candidate.role_module_id
+    role_camera_candidate_sha256 = reciprocal_role_camera_candidate_sha256(
+        role_camera_candidate,
+    )
     post_render_policy_sha256 = production_frame_quality_policy_v2_sha256(
         post_render_policy,
     )
@@ -1616,6 +1750,8 @@ def build_reciprocal_production_frame_request(
     render_id = reciprocal_production_render_id(
         base_render_id=base_render_id,
         role_module_id=role_module_id,
+        role_camera_candidate_sha256=role_camera_candidate_sha256,
+        source_production_plan_sha256=source_production_plan_sha256,
     )
     required_visible_instance_ids = reciprocal_role_visible_instance_ids(
         role_module_id,
@@ -1627,6 +1763,9 @@ def build_reciprocal_production_frame_request(
         camera_registry_sha256=camera_registry_sha256,
         elevated_topology_sha256=plan.elevated_topology_sha256,
         production_plan=plan,
+        source_production_plan_sha256=source_production_plan_sha256,
+        source_camera_registry_sha256=source_camera_registry_sha256,
+        source_production_plan=source_plan,
         render_id=render_id,
         build_id=build_id,
         blender_executable_sha256=blender_executable_sha256,
@@ -1648,6 +1787,8 @@ def build_reciprocal_production_frame_request(
         settings=canary.RenderSettings(),
         camera=camera,
         role_module_id=role_module_id,
+        role_camera_candidate_sha256=role_camera_candidate_sha256,
+        role_camera_candidate=role_camera_candidate,
         required_visible_instance_ids=required_visible_instance_ids,
         requested_c2w_blender=_opencv_c2w_to_blender(camera.c2w_opencv),
         object_registry=object_registry,
@@ -1659,7 +1800,7 @@ def build_reciprocal_production_frame_request(
 def canonical_reciprocal_production_render_request_bytes(
     request: ReciprocalProductionRenderFrameRequest,
 ) -> bytes:
-    """Serialize one v7 request as stable canonical JSON bytes."""
+    """Serialize one v8 request as stable canonical JSON bytes."""
 
     return _canonical(request.model_dump(mode="json"))
 

@@ -13,7 +13,7 @@ from pathlib import Path
 import bpy
 
 REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v7"
+    "nantai.synthetic-village.local-production-render-frame-request.v8"
 )
 REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v4"
@@ -140,6 +140,9 @@ def _validate_reciprocal_boundary(request, *, scene, script_path):
         "reciprocal_route_module_plan_sha256",
         "environment_module_build_report_sha256",
         "object_registry_sha256",
+        "role_camera_candidate_sha256",
+        "source_camera_registry_sha256",
+        "source_production_plan_sha256",
     ):
         if not _is_sha256(request.get(key)):
             raise RuntimeRenderError(f"request {key} is not a SHA-256")
@@ -165,6 +168,26 @@ def _validate_reciprocal_boundary(request, *, scene, script_path):
     if request.get("required_visible_instance_ids") != expected_visible_ids:
         raise RuntimeRenderError(
             "required visible instance IDs do not match the complete role segment",
+        )
+    source_plan = request.get("source_production_plan")
+    if not isinstance(source_plan, dict) or hashlib.sha256(
+        _canonical_bytes(source_plan),
+    ).hexdigest() != request["source_production_plan_sha256"]:
+        raise RuntimeRenderError("source production plan digest is invalid")
+    role_candidate = request.get("role_camera_candidate")
+    if not isinstance(role_candidate, dict) or hashlib.sha256(
+        _canonical_bytes(role_candidate),
+    ).hexdigest() != request["role_camera_candidate_sha256"]:
+        raise RuntimeRenderError("role camera candidate digest is invalid")
+    if (
+        role_candidate.get("role_module_id") != role_module_id
+        or role_candidate.get("bound_production_plan_sha256")
+        != request["source_production_plan_sha256"]
+        or role_candidate.get("bound_camera_registry_sha256")
+        != request["source_camera_registry_sha256"]
+    ):
+        raise RuntimeRenderError(
+            "role camera candidate source bindings are invalid",
         )
     lineage = _parse_scene_lineage(scene)
     if lineage["build_id"] != request["build_id"]:
@@ -279,6 +302,11 @@ def _validate_request(request, engine):
     internal.pop("engine_script_sha256")
     internal.pop("role_module_id")
     internal.pop("required_visible_instance_ids")
+    internal.pop("role_camera_candidate")
+    internal.pop("role_camera_candidate_sha256")
+    internal.pop("source_camera_registry_sha256")
+    internal.pop("source_production_plan")
+    internal.pop("source_production_plan_sha256")
     internal["build_adapter"] = "windows-textured-v2"
     internal["build_id"] = bpy.context.scene.get("nv_build_id")
     try:

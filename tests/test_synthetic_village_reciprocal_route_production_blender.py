@@ -67,9 +67,20 @@ def _boundary_payload(script_path: Path) -> dict[str, object]:
 
 def _render_boundary_payload(script_path: Path) -> dict[str, object]:
     registry = _registry_payload()
+    source_plan = {"marker": "source-production-plan", "schema_version": 1}
+    source_plan_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(source_plan),  # noqa: SLF001
+    ).hexdigest()
+    source_camera_registry_sha256 = "d" * 64
+    role_candidate = {
+        "bound_camera_registry_sha256": source_camera_registry_sha256,
+        "bound_production_plan_sha256": source_plan_sha256,
+        "marker": "role-camera-candidate",
+        "role_module_id": "central-courtyard-downhill",
+    }
     return {
         "schema_version": (
-            "nantai.synthetic-village.local-production-render-frame-request.v7"
+            "nantai.synthetic-village.local-production-render-frame-request.v8"
         ),
         "renderer_script_sha256": hashlib.sha256(
             script_path.read_bytes(),
@@ -82,7 +93,14 @@ def _render_boundary_payload(script_path: Path) -> dict[str, object]:
         "environment_module_build_report_sha256": "c" * 64,
         "build_adapter": "windows-reciprocal-route-v1",
         "role_module_id": "central-courtyard-downhill",
+        "role_camera_candidate": role_candidate,
+        "role_camera_candidate_sha256": hashlib.sha256(
+            canary._canonical_json_bytes(role_candidate),  # noqa: SLF001
+        ).hexdigest(),
         "required_visible_instance_ids": list(range(176, 183)),
+        "source_camera_registry_sha256": source_camera_registry_sha256,
+        "source_production_plan": source_plan,
+        "source_production_plan_sha256": source_plan_sha256,
         "object_registry": registry,
         "object_registry_sha256": hashlib.sha256(
             canary._canonical_json_bytes(registry),  # noqa: SLF001
@@ -298,6 +316,21 @@ def test_render_wrapper_rejects_partial_role_instance_segment(
     request["required_visible_instance_ids"] = [176]
 
     with pytest.raises(wrapper.RuntimeRenderError, match="complete role segment"):
+        wrapper._validate_reciprocal_boundary(
+            request,
+            scene=_scene_lineage(),
+            script_path=RENDER_WRAPPER,
+        )
+
+
+def test_render_wrapper_rejects_changed_role_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    request = _render_boundary_payload(RENDER_WRAPPER)
+    request["role_camera_candidate"]["marker"] = "changed"
+
+    with pytest.raises(wrapper.RuntimeRenderError, match="candidate digest"):
         wrapper._validate_reciprocal_boundary(
             request,
             scene=_scene_lineage(),
