@@ -181,6 +181,7 @@ class _FakeCompilerRunner:
         self.validator_messages = validator_messages
         self.fail_etc1s_quality = fail_etc1s_quality
         self.codecs: dict[Path, str] = {}
+        self.commands: list[tuple[str, ...]] = []
 
     def __call__(
         self,
@@ -191,6 +192,7 @@ class _FakeCompilerRunner:
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
         del environment, label
+        self.commands.append(command)
         assert timeout >= 120
         if "--t2" in command:
             assert timeout > 120
@@ -736,6 +738,110 @@ def test_verified_texture_compiles_twice_then_publishes_content_addressed(
     )
 
 
+def test_runtime_environment_is_platform_specific(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    darwin = ktx2_toolchain._runtime_environment(
+        tmp_path / "darwin-tools",
+        _fake_receipt(),
+    )
+    assert darwin["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+    assert Path(darwin["DYLD_LIBRARY_PATH"]) == (
+        tmp_path / "darwin-tools/runtime/lib"
+    ).absolute()
+    assert "SystemRoot" not in darwin
+
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("TEMP", r"C:\Users\tester\AppData\Local\Temp")
+    windows = ktx2_toolchain._runtime_environment(
+        tmp_path / "windows-tools",
+        _fake_windows_receipt(),
+    )
+    assert windows["SystemRoot"] == r"C:\Windows"
+    assert windows["TEMP"] == r"C:\Users\tester\AppData\Local\Temp"
+    assert windows["PATH"].split(";")[0] == str(
+        (tmp_path / "windows-tools/bin").absolute(),
+    )
+    assert "DYLD_LIBRARY_PATH" not in windows
+
+
+def test_verified_texture_cache_revalidates_without_reencoding(
+    tmp_path: Path,
+    compiler_reference_png: bytes,
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(compiler_reference_png)
+    cache_root = tmp_path / "cache"
+    first_runner = _FakeCompilerRunner(compiler_reference_png)
+    first = compile_verified_ktx2_texture(
+        source,
+        role="base_color",
+        tool_root=tmp_path / "tools",
+        receipt=_fake_receipt(),
+        output_root=tmp_path / "published-first",
+        cache_root=cache_root,
+        runner=first_runner,
+    )
+    assert sum("--t2" in command for command in first_runner.commands) == 2
+
+    second_runner = _FakeCompilerRunner(compiler_reference_png)
+    second = compile_verified_ktx2_texture(
+        source,
+        role="base_color",
+        tool_root=tmp_path / "tools",
+        receipt=_fake_receipt(),
+        output_root=tmp_path / "published-second",
+        cache_root=cache_root,
+        runner=second_runner,
+    )
+
+    assert second == first
+    assert sum("--t2" in command for command in second_runner.commands) == 0
+    assert sum(
+        len(command) > 1 and command[1] == "validate"
+        for command in second_runner.commands
+    ) == 1
+    assert sum(
+        len(command) > 1 and command[1] == "extract"
+        for command in second_runner.commands
+    ) == 1
+    assert (
+        tmp_path / "published-second" / second.object_path
+    ).read_bytes() == _fake_ktx2()
+
+
+def test_verified_texture_cache_rejects_tampered_object(
+    tmp_path: Path,
+    compiler_reference_png: bytes,
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(compiler_reference_png)
+    cache_root = tmp_path / "cache"
+    compile_verified_ktx2_texture(
+        source,
+        role="base_color",
+        tool_root=tmp_path / "tools",
+        receipt=_fake_receipt(),
+        output_root=tmp_path / "published-first",
+        cache_root=cache_root,
+        runner=_FakeCompilerRunner(compiler_reference_png),
+    )
+    cached_object = next(cache_root.rglob("*.ktx2"))
+    cached_object.write_bytes(cached_object.read_bytes() + b"tampered")
+
+    with pytest.raises(KtxToolchainError, match="cache object identity"):
+        compile_verified_ktx2_texture(
+            source,
+            role="base_color",
+            tool_root=tmp_path / "tools",
+            receipt=_fake_receipt(),
+            output_root=tmp_path / "published-second",
+            cache_root=cache_root,
+            runner=_FakeCompilerRunner(compiler_reference_png),
+        )
+
+
 def test_verified_texture_rejects_repeat_drift_and_validator_messages(
     tmp_path: Path,
     compiler_reference_png: bytes,
@@ -831,9 +937,10 @@ def test_h3_ktx2_pack_is_complete_content_addressed_and_idempotent(
         tool_root,
         receipt,
         output_root,
+        cache_root,
         runner,
     ):
-        del tool_root, runner
+        del tool_root, cache_root, runner
         source_payload = Path(source).read_bytes()
         transfer = "srgb" if role == "base_color" else "linear"
         payload = _fake_ktx2(transfer=2 if transfer == "srgb" else 1)

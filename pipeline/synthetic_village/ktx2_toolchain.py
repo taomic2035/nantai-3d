@@ -90,6 +90,8 @@ KTX_RECEIPT_SCHEMA = "nantai.ktx-tool-receipt.v1"
 KTX_WINDOWS_RECEIPT_SCHEMA = "nantai.ktx-windows-tool-receipt.v1"
 H3_KTX2_PACK_SCHEMA = "nantai.h3-ktx2-pack.v1"
 H3_KTX2_PACK_MANIFEST = "manifest.json"
+KTX_TEXTURE_CACHE_SCHEMA = "nantai.ktx-texture-cache-entry.v1"
+KTX_TEXTURE_CACHE_MANIFEST = "descriptor.json"
 KTX_RECEIPT_NAME = "receipt.json"
 KTX_MAX_BYTES = 512 * 1024 * 1024
 KTX_MAX_PROCESS_OUTPUT = 1024 * 1024
@@ -389,6 +391,44 @@ class KtxTextureDescriptor(FrozenModel):
         return self
 
 
+class KtxTextureCacheEntry(FrozenModel):
+    schema_version: Literal[
+        "nantai.ktx-texture-cache-entry.v1"
+    ] = KTX_TEXTURE_CACHE_SCHEMA
+    cache_key: Sha256
+    source_sha256: Sha256
+    role: TextureRole
+    package_sha256: Sha256
+    toktx_sha256: Sha256
+    ktx_sha256: Sha256
+    command_options: tuple[str, ...]
+    descriptor: KtxTextureDescriptor
+
+    @model_validator(mode="after")
+    def _identity_is_closed(self) -> KtxTextureCacheEntry:
+        descriptor = self.descriptor
+        if (
+            descriptor.source_sha256 != self.source_sha256
+            or descriptor.role != self.role
+            or descriptor.toktx_sha256 != self.toktx_sha256
+            or descriptor.command_options != self.command_options
+        ):
+            raise ValueError("KTX2 cache descriptor identity disagrees")
+        expected = hashlib.sha256(
+            _canonical_ktx_texture_cache_identity_bytes(
+                source_sha256=self.source_sha256,
+                role=self.role,
+                package_sha256=self.package_sha256,
+                toktx_sha256=self.toktx_sha256,
+                ktx_sha256=self.ktx_sha256,
+                command_options=self.command_options,
+            ),
+        ).hexdigest()
+        if self.cache_key != expected:
+            raise ValueError("KTX2 cache key disagrees with its identity")
+        return self
+
+
 class H3Ktx2MaterialRecord(FrozenModel):
     slot_id: str = Field(pattern=r"^material-[a-z0-9]+(?:-[a-z0-9]+)*$")
     base_color: KtxTextureDescriptor
@@ -476,6 +516,40 @@ def canonical_h3_ktx2_pack_bytes(
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _canonical_ktx_texture_cache_identity_bytes(
+    *,
+    source_sha256: str,
+    role: TextureRole,
+    package_sha256: str,
+    toktx_sha256: str,
+    ktx_sha256: str,
+    command_options: tuple[str, ...],
+) -> bytes:
+    return (
+        json.dumps(
+            {
+                "command_options": command_options,
+                "ktx_sha256": ktx_sha256,
+                "package_sha256": package_sha256,
+                "role": role,
+                "source_sha256": source_sha256,
+                "toktx_sha256": toktx_sha256,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def canonical_ktx_texture_cache_entry_bytes(
+    entry: KtxTextureCacheEntry,
+) -> bytes:
+    return _canonical_json_bytes(entry)
 
 
 def _sha256_file(path: Path) -> tuple[str, int]:
@@ -897,13 +971,233 @@ def _compile_texture_attempt(
     return payload, audit, quality, options, True
 
 
+def _expected_command_options(
+    role: TextureRole,
+    *,
+    force_uastc: bool,
+) -> tuple[str, ...]:
+    command = toktx_command(
+        Path("toktx"),
+        role=role,
+        source=Path("source.png"),
+        output=Path("texture.ktx2"),
+        force_uastc=force_uastc,
+    )
+    return command[1:-2]
+
+
+def _texture_cache_key(
+    *,
+    source_sha256: str,
+    role: TextureRole,
+    receipt: AnyKtxToolReceipt,
+    command_options: tuple[str, ...],
+) -> str:
+    return hashlib.sha256(
+        _canonical_ktx_texture_cache_identity_bytes(
+            source_sha256=source_sha256,
+            role=role,
+            package_sha256=receipt.package_sha256,
+            toktx_sha256=receipt.toktx.sha256,
+            ktx_sha256=receipt.ktx.sha256,
+            command_options=command_options,
+        ),
+    ).hexdigest()
+
+
+def _publish_ktx2_object(
+    output_root: Path,
+    *,
+    descriptor: KtxTextureDescriptor,
+    payload: bytes,
+) -> None:
+    destination = output_root / descriptor.object_path
+    try:
+        _prepare_real_directory(
+            destination.parent,
+            label="KTX2 object directory",
+        )
+    except H3MaterialSourceError as exc:
+        raise KtxToolchainError(
+            f"KTX2 object directory cannot be trusted: {exc}",
+        ) from exc
+    if destination.exists():
+        if _read_compilation_output(
+            destination,
+            label=f"{descriptor.role} published KTX2",
+        ) != payload:
+            raise KtxToolchainError(
+                f"{descriptor.role} content-addressed KTX2 conflicts on disk",
+            )
+        return
+    with destination.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _load_verified_texture_cache_entry(
+    entry_root: Path,
+    *,
+    source: Path,
+    source_sha256: str,
+    role: TextureRole,
+    tool_root: Path,
+    receipt: AnyKtxToolReceipt,
+    environment: dict[str, str],
+    runner: ProcessRunner,
+) -> tuple[KtxTextureDescriptor, bytes]:
+    try:
+        _require_real_directory(entry_root, label="KTX2 texture cache entry")
+        raw = _read_stable_bytes(
+            entry_root / KTX_TEXTURE_CACHE_MANIFEST,
+            maximum_bytes=1024 * 1024,
+            label="KTX2 texture cache descriptor",
+        )
+        entry = KtxTextureCacheEntry.model_validate_json(raw)
+        if raw != canonical_ktx_texture_cache_entry_bytes(entry):
+            raise KtxToolchainError(
+                "KTX2 texture cache descriptor is not canonical JSON",
+            )
+        if entry.cache_key != entry_root.name:
+            raise KtxToolchainError("KTX2 texture cache directory identity disagrees")
+        if (
+            entry.source_sha256 != source_sha256
+            or entry.role != role
+            or entry.package_sha256 != receipt.package_sha256
+            or entry.toktx_sha256 != receipt.toktx.sha256
+            or entry.ktx_sha256 != receipt.ktx.sha256
+        ):
+            raise KtxToolchainError("KTX2 texture cache evidence disagrees")
+        object_path = entry_root / f"{entry.descriptor.sha256}.ktx2"
+        expected_closure = tuple(
+            sorted(
+                (
+                    KTX_TEXTURE_CACHE_MANIFEST,
+                    object_path.name,
+                ),
+            ),
+        )
+        if _directory_closure(entry_root) != expected_closure:
+            raise KtxToolchainError("KTX2 texture cache closure disagrees")
+        payload = _read_stable_bytes(
+            object_path,
+            maximum_bytes=KTX_MAX_BYTES,
+            label="KTX2 texture cache object",
+        )
+        descriptor = entry.descriptor
+        if (
+            len(payload) != descriptor.bytes
+            or hashlib.sha256(payload).hexdigest() != descriptor.sha256
+        ):
+            raise KtxToolchainError("KTX2 texture cache object identity disagrees")
+        audit = audit_ktx2_bytes(
+            payload,
+            expected_transfer=descriptor.transfer,
+            expected_codec=descriptor.codec,
+        )
+        if audit.sha256 != descriptor.sha256 or audit.bytes != descriptor.bytes:
+            raise KtxToolchainError("KTX2 texture cache structural audit disagrees")
+        validation = runner(
+            validation_command(tool_root / receipt.ktx.relative_path, object_path),
+            environment=environment,
+            label=f"{role} cached official KTX validation",
+            timeout=KTX_PROCESS_TIMEOUT_SECONDS,
+        )
+        _require_official_validation(validation)
+        with tempfile.TemporaryDirectory(prefix=".ktx-cache-verify.") as temporary:
+            decoded = Path(temporary) / "decoded.png"
+            runner(
+                extract_command(
+                    tool_root / receipt.ktx.relative_path,
+                    source=object_path,
+                    output=decoded,
+                ),
+                environment=environment,
+                label=f"{role} cached level-zero extraction",
+                timeout=KTX_PROCESS_TIMEOUT_SECONDS,
+            )
+            quality = measure_decoded_quality(
+                _read_compilation_output(source, label=f"{role} PNG source"),
+                _read_compilation_output(
+                    decoded,
+                    label=f"{role} cached decoded PNG",
+                ),
+                role=role,
+            )
+        if quality != descriptor.quality:
+            raise KtxToolchainError("KTX2 texture cache decoded quality disagrees")
+        return descriptor, payload
+    except KtxToolchainError:
+        raise
+    except (H3MaterialSourceError, OSError, ValidationError, ValueError) as exc:
+        raise KtxToolchainError(
+            f"KTX2 texture cache entry cannot be trusted: {exc}",
+        ) from exc
+
+
+def _publish_texture_cache_entry(
+    cache_root: Path,
+    *,
+    descriptor: KtxTextureDescriptor,
+    payload: bytes,
+    receipt: AnyKtxToolReceipt,
+) -> None:
+    cache_key = _texture_cache_key(
+        source_sha256=descriptor.source_sha256,
+        role=descriptor.role,
+        receipt=receipt,
+        command_options=descriptor.command_options,
+    )
+    entry = KtxTextureCacheEntry(
+        cache_key=cache_key,
+        source_sha256=descriptor.source_sha256,
+        role=descriptor.role,
+        package_sha256=receipt.package_sha256,
+        toktx_sha256=receipt.toktx.sha256,
+        ktx_sha256=receipt.ktx.sha256,
+        command_options=descriptor.command_options,
+        descriptor=descriptor,
+    )
+    final_root = cache_root / cache_key
+    if final_root.exists():
+        raw = _read_stable_bytes(
+            final_root / KTX_TEXTURE_CACHE_MANIFEST,
+            maximum_bytes=1024 * 1024,
+            label="existing KTX2 texture cache descriptor",
+        )
+        if raw != canonical_ktx_texture_cache_entry_bytes(entry):
+            raise KtxToolchainError("existing KTX2 texture cache entry conflicts")
+        existing = _read_stable_bytes(
+            final_root / f"{descriptor.sha256}.ktx2",
+            maximum_bytes=KTX_MAX_BYTES,
+            label="existing KTX2 texture cache object",
+        )
+        if existing != payload:
+            raise KtxToolchainError("existing KTX2 texture cache object conflicts")
+        return
+    with tempfile.TemporaryDirectory(
+        prefix=".ktx-cache-entry.",
+        dir=cache_root,
+    ) as temporary:
+        staging = Path(temporary) / "entry"
+        staging.mkdir()
+        object_path = staging / f"{descriptor.sha256}.ktx2"
+        object_path.write_bytes(payload)
+        (staging / KTX_TEXTURE_CACHE_MANIFEST).write_bytes(
+            canonical_ktx_texture_cache_entry_bytes(entry),
+        )
+        os.rename(staging, final_root)
+
+
 def compile_verified_ktx2_texture(
     source: Path,
     *,
     role: TextureRole,
     tool_root: Path,
-    receipt: KtxToolReceipt,
+    receipt: AnyKtxToolReceipt,
     output_root: Path,
+    cache_root: Path | None = None,
     runner: ProcessRunner = _default_compile_runner,
 ) -> KtxTextureDescriptor:
     """Compile twice, validate, quality-check, and publish one KTX2 object."""
@@ -921,7 +1215,48 @@ def compile_verified_ktx2_texture(
         raise KtxToolchainError(
             f"KTX2 publication root cannot be trusted: {exc}",
         ) from exc
-    environment = _runtime_environment(tool_root)
+    prepared_cache_root = None
+    if cache_root is not None:
+        try:
+            prepared_cache_root = _prepare_real_directory(
+                Path(cache_root).expanduser().absolute(),
+                label="KTX2 texture cache root",
+            )
+        except H3MaterialSourceError as exc:
+            raise KtxToolchainError(
+                f"KTX2 texture cache root cannot be trusted: {exc}",
+            ) from exc
+    environment = _runtime_environment(tool_root, receipt)
+    if prepared_cache_root is not None:
+        option_sets = [_expected_command_options(role, force_uastc=False)]
+        if role == "orm":
+            option_sets.append(_expected_command_options(role, force_uastc=True))
+        for command_options in option_sets:
+            cache_key = _texture_cache_key(
+                source_sha256=source_sha256,
+                role=role,
+                receipt=receipt,
+                command_options=command_options,
+            )
+            entry_root = prepared_cache_root / cache_key
+            if not entry_root.exists():
+                continue
+            descriptor, payload = _load_verified_texture_cache_entry(
+                entry_root,
+                source=source,
+                source_sha256=source_sha256,
+                role=role,
+                tool_root=tool_root,
+                receipt=receipt,
+                environment=environment,
+                runner=runner,
+            )
+            _publish_ktx2_object(
+                output_root,
+                descriptor=descriptor,
+                payload=payload,
+            )
+            return descriptor
     with tempfile.TemporaryDirectory(
         prefix=".ktx-texture.",
         dir=output_root,
@@ -957,30 +1292,7 @@ def compile_verified_ktx2_texture(
             )
         payload, audit, quality, options, fallback = first
         object_path = f"objects/{audit.sha256}.ktx2"
-        destination = output_root / object_path
-        try:
-            _prepare_real_directory(
-                destination.parent,
-                label="KTX2 object directory",
-            )
-        except H3MaterialSourceError as exc:
-            raise KtxToolchainError(
-                f"KTX2 object directory cannot be trusted: {exc}",
-            ) from exc
-        if destination.exists():
-            if _read_compilation_output(
-                destination,
-                label=f"{role} published KTX2",
-            ) != payload:
-                raise KtxToolchainError(
-                    f"{role} content-addressed KTX2 conflicts on disk",
-                )
-        else:
-            with destination.open("xb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-    return KtxTextureDescriptor(
+    descriptor = KtxTextureDescriptor(
         role=role,
         source_sha256=source_sha256,
         object_path=object_path,
@@ -993,6 +1305,19 @@ def compile_verified_ktx2_texture(
         orm_etc1s_fallback=fallback,
         quality=quality,
     )
+    _publish_ktx2_object(
+        output_root,
+        descriptor=descriptor,
+        payload=payload,
+    )
+    if prepared_cache_root is not None:
+        _publish_texture_cache_entry(
+            prepared_cache_root,
+            descriptor=descriptor,
+            payload=payload,
+            receipt=receipt,
+        )
+    return descriptor
 
 
 def _pack_descriptors(
@@ -1109,6 +1434,15 @@ def compile_h3_ktx2_pack(
             and existing.ktx_sha256 == receipt.ktx.sha256
         ):
             return PreparedH3Ktx2Pack(root=candidate, manifest=existing)
+    try:
+        cache_root = _prepare_real_directory(
+            publication_root / ".texture-cache",
+            label="H3 KTX2 texture cache root",
+        )
+    except H3MaterialSourceError as exc:
+        raise KtxToolchainError(
+            f"H3 KTX2 texture cache root cannot be trusted: {exc}",
+        ) from exc
     with tempfile.TemporaryDirectory(
         prefix=".h3-ktx2-pack.",
         dir=publication_root,
@@ -1136,6 +1470,7 @@ def compile_h3_ktx2_pack(
                     tool_root=tool_root,
                     receipt=receipt,
                     output_root=pack_root,
+                    cache_root=cache_root,
                     runner=runner,
                 )
             records.append(
@@ -1347,13 +1682,33 @@ def _binary_evidence(
     )
 
 
-def _runtime_environment(root: Path) -> dict[str, str]:
+def _runtime_environment(
+    root: Path,
+    receipt: AnyKtxToolReceipt | None = None,
+) -> dict[str, str]:
+    if receipt is None or receipt.platform == "darwin-arm64":
+        return {
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": str(Path.home()),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "DYLD_LIBRARY_PATH": str((root / "runtime/lib").absolute()),
+        }
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    temporary = os.environ.get("TEMP") or os.environ.get("TMP")
+    if not system_root or not temporary:
+        raise KtxToolchainError(
+            "Windows KTX runtime requires measured SystemRoot and TEMP",
+        )
+    tool_bin = (root / "bin").absolute()
+    system32 = Path(system_root) / "System32"
     return {
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-        "HOME": str(Path.home()),
+        "PATH": f"{tool_bin};{system32}",
+        "SystemRoot": system_root,
+        "TEMP": temporary,
+        "TMP": temporary,
         "LANG": "C",
         "LC_ALL": "C",
-        "DYLD_LIBRARY_PATH": str((root / "runtime/lib").absolute()),
     }
 
 
@@ -1761,7 +2116,7 @@ def load_ktx_tool_receipt(
             signature_runner=windows_signature_runner,
         )
     root = path.parent
-    environment = _runtime_environment(root)
+    environment = _runtime_environment(root, receipt)
     actual_toktx = _binary_evidence(
         root,
         receipt.toktx.relative_path,
