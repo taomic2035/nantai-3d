@@ -210,6 +210,19 @@ GLM 交付后：
 （`ground-route-013` vs `elevated-pedestrian-007`）。这是 req-5 未交付项，和本次 mesh
 probe 失败不同；不能用 Phase 4.3 通过来替代后续 fresh preflight、六层实渲、post-render v2。
 
+## 9. 可选 Batch 16 junction 视觉参考（2026-07-22）
+
+Codex 已生成两张与本 root cause 对应、但保持通用的私有设计参考：
+
+| reference | SHA-256 |
+|---|---|
+| `design-construction-gallery-side-entry-clearance-01.png` | `be0a780f7b4c6d0c743cd723ed8660ea82376720618c6ca0f93b42c5352d0cb1` |
+| `design-construction-vegetation-junction-opening-01.png` | `ee75bead6aebb613cabf8affa9d37c2303e8d33d88800b51f46506400dffd525` |
+
+它们只表达“入口保持开敞、植被在路口确定性退让”的建模意图；不改变本文件的失败结论，
+也不替代 GLM-P0 的 TDD、fresh exact-218 build 或 Phase 4.3 probe。完整边界见
+`handoff/FEEDBACK-IMAGE2-020-batch16-junction-construction-boards.md`。
+
 ---
 
 Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>

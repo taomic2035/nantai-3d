@@ -16,20 +16,20 @@
 - Create: `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch16/prompts/*.txt`
 - Create: `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch16/generation-queue-batch16.json`
 
-- [ ] **Step 1:** Create the private `batch16/prompts` directory.
-- [ ] **Step 2:** Save one exact structured prompt for each of the eight approved filenames.
-- [ ] **Step 3:** Record all jobs as `pending`, with the common fail-closed declarations from the design.
-- [ ] **Step 4:** Confirm the queue has eight unique output names and eight existing prompt files.
+- [x] **Step 1:** Create the private `batch16/prompts` directory.
+- [x] **Step 2:** Save one exact structured prompt for each of the eight approved filenames.
+- [x] **Step 3:** Record all jobs as `pending`, with the common fail-closed declarations from the design.
+- [x] **Step 4:** Confirm the queue has eight unique output names and eight existing prompt files.
 
 ### Task 2: Generate the eight boards
 
 **Files:**
 - Create: `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch16/*.png`
 
-- [ ] **Step 1:** Invoke the built-in image generator once for the gallery side-entry board.
-- [ ] **Step 2:** Invoke it once for the vegetation junction-opening board.
-- [ ] **Step 3:** Invoke it once for each of the remaining six construction-detail boards.
-- [ ] **Step 4:** Copy every selected original PNG from the built-in generated-images area to its stable Batch 16 filename without overwriting another asset.
+- [x] **Step 1:** Invoke the built-in image generator once for the gallery side-entry board.
+- [x] **Step 2:** Invoke it once for the vegetation junction-opening board.
+- [x] **Step 3:** Invoke it once for each of the remaining six construction-detail boards.
+- [x] **Step 4:** Copy every selected original PNG from the built-in generated-images area to its stable Batch 16 filename without overwriting another asset.
 
 ### Task 3: Inspect and inventory
 
@@ -37,17 +37,17 @@
 - Create: `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch16/candidate-sources-batch16.json`
 - Create: `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch16/contact-sheet-batch16.png`
 
-- [ ] **Step 1:** Read each PNG and record SHA-256, bytes, width, height, and color mode.
-- [ ] **Step 2:** Build a private contact sheet only for visual QA; do not treat it as a source asset.
-- [ ] **Step 3:** Inspect the contact sheet and any ambiguous full-resolution images for composition, forbidden text/watermarks, and assembly usefulness.
-- [ ] **Step 4:** Mark only successfully generated and inspected items as `complete`; preserve failures as explicit queue state without creating empty PNGs.
+- [x] **Step 1:** Read each PNG and record SHA-256, bytes, width, height, and color mode.
+- [x] **Step 2:** Build a private contact sheet only for visual QA; do not treat it as a source asset.
+- [x] **Step 3:** Inspect the contact sheet and any ambiguous full-resolution images for composition, forbidden text/watermarks, and assembly usefulness.
+- [x] **Step 4:** Mark only successfully generated and inspected items as `complete`; preserve failures as explicit queue state without creating empty PNGs.
 
 ### Task 4: Document and publish the tracked evidence
 
 **Files:**
 - Create: `handoff/FEEDBACK-IMAGE2-020-batch16-junction-construction-boards.md`
 
-- [ ] **Step 1:** Record each final image identity, intended modeling use, and visual-review result.
-- [ ] **Step 2:** State that the pack is synthetic, uncalibrated, non-metric, non-orthographic, and forbidden as multiview training or coverage evidence.
-- [ ] **Step 3:** Verify the private manifest closes over exactly eight prompts and eight images, and confirm Git does not stage the private candidates or `web/data/`.
-- [ ] **Step 4:** Path-stage only the tracked design, plan, and handoff files; commit with the required Codex co-author trailer and push `main`.
+- [x] **Step 1:** Record each final image identity, intended modeling use, and visual-review result.
+- [x] **Step 2:** State that the pack is synthetic, uncalibrated, non-metric, non-orthographic, and forbidden as multiview training or coverage evidence.
+- [x] **Step 3:** Verify the private manifest closes over exactly eight prompts and eight images, and confirm Git does not stage the private candidates or `web/data/`.
+- [x] **Step 4:** Path-stage only the tracked design, plan, and handoff files; commit with the required Codex co-author trailer and push `main`.
