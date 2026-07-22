@@ -1129,6 +1129,35 @@ def test_module_geometry_families_do_not_serialize_identically(
     assert len(payloads) == len(family_semantics)
 
 
+def test_building_shell_is_a_view_through_portal_not_a_back_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell before later parts must not occlude the full role sequence."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    assembler = runtime._module_geometry(_geometry_part("building-shell", 3))
+    boxes = [assembler.vertices[index:index + 8] for index in range(0, len(assembler.vertices), 8)]
+    for box in boxes:
+        x_extent = max(v[0] for v in box) - min(v[0] for v in box)
+        y_extent = max(v[1] for v in box) - min(v[1] for v in box)
+        z_extent = max(v[2] for v in box) - min(v[2] for v in box)
+        assert not (x_extent > 1.5 and y_extent < 0.2 and z_extent > 2.0)
+
+
+def test_guard_rail_has_low_semantic_base_for_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thin rails retain a low prop-semantic base visible at route distance."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    assembler = runtime._module_geometry(_geometry_part("guard-rail", 13))
+
+    assert len(assembler.vertices) == 48
+    base = assembler.vertices[-8:]
+    assert max(vertex[2] for vertex in base) <= 0.12
+    assert min(vertex[2] for vertex in base) < 0.0
+
+
 @pytest.mark.parametrize(
     ("part", "message"),
     [

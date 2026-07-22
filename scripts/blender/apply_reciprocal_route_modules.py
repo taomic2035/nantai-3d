@@ -600,13 +600,8 @@ def _bridge_deck_geometry(center, extent, yaw):
 def _building_shell_geometry(center, extent, yaw):
     assembler = _covered_passage_geometry(center, extent, yaw)
     sx, sy, sz = extent
-    _add_local_box(
-        assembler,
-        center,
-        yaw,
-        (0.0, sy / 2.0 - 0.06, sz * 0.55),
-        (sx, 0.12, sz * 1.1),
-    )
+    # Keep the route axis open. A full rear wall made every later canonical
+    # part invisible when the role camera looked through the shell.
     _add_local_box(
         assembler,
         center,
@@ -704,6 +699,13 @@ def _guard_geometry(center, extent, yaw):
             (local_x, 0.0, local_z),
             (0.1, sy, 0.1),
         )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (local_x, 0.0, 0.039),
+        (0.22, sy, 0.08),
+    )
     return assembler
 
 
