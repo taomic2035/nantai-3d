@@ -39,7 +39,7 @@ ComponentKind = Literal[
     "terrace-ramp-junction",
     "cross-level-covered-passage",
 ]
-LoopId = Literal["central-loop", "upper-loop", "bridge-loop"]
+LoopId = Literal["central-loop", "upper-loop", "bridge-loop", "valley-loop"]
 
 _EXPECTED_COMPONENTS = (
     ("elevated-switchback-stair-v1", "switchback-stair", 127),
@@ -161,8 +161,8 @@ class ElevatedLoop(FrozenModel):
 
 
 class ElevatedTopologySummary(FrozenModel):
-    loop_count: Literal[3]
-    ground_attachment_count: Literal[6]
+    loop_count: Literal[4]
+    ground_attachment_count: Literal[8]
     component_count: Literal[4]
 
 
@@ -180,7 +180,7 @@ class ElevatedTopologyPlan(FrozenModel):
     nodes: tuple[WalkableNode, ...] = Field(min_length=8)
     edges: tuple[WalkableEdge, ...] = Field(min_length=6)
     components: tuple[ElevatedComponent, ...] = Field(min_length=4, max_length=4)
-    loops: tuple[ElevatedLoop, ...] = Field(min_length=2, max_length=3)
+    loops: tuple[ElevatedLoop, ...] = Field(min_length=2, max_length=4)
     summary: ElevatedTopologySummary
 
     @model_validator(mode="after")
@@ -349,7 +349,7 @@ def _derive_loops(
 ) -> tuple[ElevatedLoop, ...]:
     nodes_by_id = {node.node_id: node for node in nodes}
     result = []
-    for loop_id in ("central-loop", "upper-loop", "bridge-loop"):
+    for loop_id in ("central-loop", "upper-loop", "bridge-loop", "valley-loop"):
         loop_edges = tuple(edge for edge in edges if edge.loop_id == loop_id)
         edge_ids = tuple(edge.edge_id for edge in loop_edges)
         graph: dict[str, set[str]] = defaultdict(set)
@@ -485,6 +485,34 @@ def build_elevated_topology_plan(
                     node_id="bridge-upper-mid",
                     x_m=-190,
                     y_m=-86,
+                    scene=active,
+                    level="elevated",
+                    clearance_m=3.6,
+                ),
+                # GLM-P0 Step 3 (FEEDBACK-HANDOFF-CODEX-012): valley-loop
+                # nodes on path-network-002 near lower-valley-uphill module.
+                # Connected ground/elevated nodes forming a proper walkable
+                # loop, not isolated anchor nodes.
+                _node(
+                    node_id="valley-ground-north",
+                    x_m=-90,
+                    y_m=-35,
+                    scene=active,
+                    level="ground",
+                    ground_route_ref="path-network-002",
+                ),
+                _node(
+                    node_id="valley-ground-south",
+                    x_m=-130,
+                    y_m=-58,
+                    scene=active,
+                    level="ground",
+                    ground_route_ref="path-network-002",
+                ),
+                _node(
+                    node_id="valley-upper-mid",
+                    x_m=-110,
+                    y_m=-46,
                     scene=active,
                     level="elevated",
                     clearance_m=3.6,
@@ -649,6 +677,55 @@ def build_elevated_topology_plan(
                     ),
                     collision=_collision(covered=False),
                 ),
+                # GLM-P0 Step 3: valley-loop edges on path-network-002.
+                # Three edges forming a connected loop with exactly two
+                # ground attachments (valley-ground-north, valley-ground-south)
+                # and one elevated node (valley-upper-mid).
+                WalkableEdge(
+                    edge_id="edge-valley-ascent-001",
+                    component_id="cross-level-covered-passage-v1",
+                    component_kind="cross-level-covered-passage",
+                    loop_id="valley-loop",
+                    start_node_id="valley-ground-south",
+                    end_node_id="valley-upper-mid",
+                    width_m=2.4,
+                    centerline=_transition_centerline(
+                        by_id["valley-ground-south"],
+                        ((-120, -52),),
+                        by_id["valley-upper-mid"],
+                    ),
+                    collision=_collision(covered=False),
+                ),
+                WalkableEdge(
+                    edge_id="edge-valley-descent-001",
+                    component_id="cross-level-covered-passage-v1",
+                    component_kind="cross-level-covered-passage",
+                    loop_id="valley-loop",
+                    start_node_id="valley-upper-mid",
+                    end_node_id="valley-ground-north",
+                    width_m=2.4,
+                    centerline=_transition_centerline(
+                        by_id["valley-upper-mid"],
+                        ((-100, -40),),
+                        by_id["valley-ground-north"],
+                    ),
+                    collision=_collision(covered=False),
+                ),
+                WalkableEdge(
+                    edge_id="edge-valley-path-001",
+                    component_id="cross-level-covered-passage-v1",
+                    component_kind="cross-level-covered-passage",
+                    loop_id="valley-loop",
+                    start_node_id="valley-ground-north",
+                    end_node_id="valley-ground-south",
+                    width_m=2.4,
+                    centerline=_transition_centerline(
+                        by_id["valley-ground-north"],
+                        (),
+                        by_id["valley-ground-south"],
+                    ),
+                    collision=_collision(covered=False),
+                ),
             ),
             key=lambda edge: edge.edge_id,
         )
@@ -690,6 +767,9 @@ def build_elevated_topology_plan(
                 "edge-upper-ascent-001",
                 "edge-upper-descent-001",
                 "edge-upper-gallery-001",
+                "edge-valley-ascent-001",
+                "edge-valley-descent-001",
+                "edge-valley-path-001",
             ),
             material_slot_ids=(
                 "material-weathered-timber-01",
@@ -712,8 +792,8 @@ def build_elevated_topology_plan(
         components=components,
         loops=loops,
         summary=ElevatedTopologySummary(
-            loop_count=3,
-            ground_attachment_count=6,
+            loop_count=4,
+            ground_attachment_count=8,
             component_count=4,
         ),
     )

@@ -246,6 +246,15 @@ _EXPECTED_ROUTE_LOOP_CONTRACT = (
             "edge-bridge-path-001",
         ),
     ),
+    (
+        "valley-loop",
+        ("valley-ground-north", "valley-ground-south"),
+        (
+            "edge-valley-ascent-001",
+            "edge-valley-descent-001",
+            "edge-valley-path-001",
+        ),
+    ),
 )
 
 
@@ -342,7 +351,7 @@ class ProductionCameraPlan(FrozenModel):
     cameras: tuple[ProductionCameraPose, ...]
     group_coverage: tuple[GroupCoverage, ...]
     unplaced_groups: tuple[UnplacedGroup, ...]
-    route_loops: tuple[RouteLoopEvidence, ...] = Field(min_length=2, max_length=3)
+    route_loops: tuple[RouteLoopEvidence, ...] = Field(min_length=2, max_length=4)
     #: 本轮【没做到】的需求, 逐条机器可读。空元组的含义是"全部交付", 所以它
     #: 不能被默认成空 —— 必须由 builder 显式给出。
     undelivered_requirements: tuple[UndeliveredRequirement, ...]
