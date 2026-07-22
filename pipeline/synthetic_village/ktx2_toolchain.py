@@ -550,6 +550,7 @@ def toktx_command(
     if role not in {"base_color", "normal", "orm"}:
         raise KtxToolchainError(f"unknown KTX texture role: {role}")
     transfer = "srgb" if role == "base_color" else "linear"
+    primaries = "srgb" if role == "base_color" else "none"
     if role == "orm" and not force_uastc:
         encoding = (
             "--encode",
@@ -575,6 +576,8 @@ def toktx_command(
         "--genmipmap",
         "--assign_oetf",
         transfer,
+        "--assign_primaries",
+        primaries,
         str(output),
         str(source),
     )

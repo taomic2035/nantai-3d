@@ -639,6 +639,8 @@ def test_uastc_commands_are_role_and_colour_space_exact(
         "--genmipmap",
         "--assign_oetf",
         transfer,
+        "--assign_primaries",
+        "srgb" if role == "base_color" else "none",
         "output.ktx2",
         "source.png",
     )
@@ -662,6 +664,8 @@ def test_orm_starts_etc1s_and_can_fall_back_to_uastc() -> None:
         "--genmipmap",
         "--assign_oetf",
         "linear",
+        "--assign_primaries",
+        "none",
         "orm.ktx2",
         "orm.png",
     )
