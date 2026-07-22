@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 36 张路线/包络/跨分块过渡/方向/模块板设计输入，均有 SHA 与来源边界 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 44 张路线/包络/跨分块过渡/方向/模块板/构造与材质设计输入，均有 SHA 与来源边界 |
 | 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
 | 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
@@ -360,6 +360,37 @@ ZIP 只含 8 张入选图、8 份精确 prompt、manifest、使用说明和 payl
 sheet、生成队列、失败请求或旧批次。引用条件只传递视觉语言，不建立像素对应、共享几何、标定相机、
 米制尺度或 360° coverage。Blender 消费后仍须通过 topology/clearance、平移相机六层实渲、
 visibility 与 post-render v2，才能证明受测位置可漫游。
+
+### Batch 21 角色构造与模拟材质参考
+
+[Batch 21 Role-Construction & Simulated-Material Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch21-2026-07-23)
+提供 6 张桥梁、水车、森林的互补构造视角，以及 2 张石材/旧木材模拟 albedo 原型。构造图重点
+暴露拱腹、桥台、轮轴、引水槽、尾水、挡墙、涵洞、楼梯底部和路线支撑，供下一轮 Blender
+独立构件建模；材质图只用于合成视觉 QA，不是实拍纹理或完整 PBR 材质组。
+
+```powershell
+$releaseDir = ".nantai-studio\release-downloads\batch21-role-construction"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download synthetic-village-design-inputs-batch21-2026-07-23 `
+  --pattern "synthetic-village-role-construction-material-pack-batch21-2026-07-23.zip" `
+  --pattern "synthetic-village-role-construction-material-pack-batch21-2026-07-23.SHA256SUMS.txt" `
+  --dir $releaseDir --clobber
+
+$archiveName = "synthetic-village-role-construction-material-pack-batch21-2026-07-23.zip"
+$archive = Join-Path $releaseDir $archiveName
+$sumFile = Join-Path $releaseDir "synthetic-village-role-construction-material-pack-batch21-2026-07-23.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 21 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch21" -Force
+```
+
+ZIP 只含 8 张最终 PNG、8 份精确 prompt、manifest、使用说明和 payload checksum；不含 contact
+sheet、生成队列、失败请求或旧批次。6 张场景图是独立生成的设计参考，不是标定多视图；2 张材质图
+未经色彩标定、物理尺度或无缝平铺验证，也没有 normal/roughness/displacement 通道。所有输入保持
+`synthetic=true`、`design-only`、`preview-only` 和 `trust_effect=none`。
 
 ## 核心工作流
 
