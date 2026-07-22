@@ -6,6 +6,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const CAMERA_ID = /^camera-[a-z0-9-]+-[0-9]{3}$/;
 const VALID_STATUS = new Set(['awaiting-evidence', 'invalid-evidence', 'available']);
 const VALID_COMPARISON = new Set(['minimum', 'maximum']);
+const RECIPROCAL_BATCH_KIND = 'reciprocal-six-role-batch';
+const ENTRY_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -25,6 +27,9 @@ function invalidEvidence() {
     verification_level: null,
     trust_effect: TRUST_EFFECT,
     report_sha256: null,
+    evidence_kind: null,
+    evidence_sha256: null,
+    batch_id: null,
     stages: STAGE_IDS.map((id) => ({ id, state: 'invalid-evidence' })),
     cameras: [],
   };
@@ -62,14 +67,55 @@ function normalizeRule(rule) {
 }
 
 function normalizeCamera(camera) {
+  const entryId = camera?.entry_id ?? camera?.camera_id;
+  const roleModuleId = camera?.role_module_id ?? null;
   if (
     !camera
+    || !ENTRY_ID.test(entryId)
     || !CAMERA_ID.test(camera.camera_id)
-    || !['passed', 'rejected'].includes(camera.state)
-    || !SHA256.test(camera.runtime_report_sha256)
-    || !SHA256.test(camera.statistics_sha256)
     || !SHA256.test(camera.policy_sha256)
     || !Array.isArray(camera.rules)
+  ) {
+    throw new TypeError('invalid production quality camera evidence');
+  }
+  if (['failed', 'planned'].includes(camera.state)) {
+    if (
+      roleModuleId !== entryId
+      || camera.runtime_report_sha256 !== null
+      || camera.statistics_sha256 !== null
+      || camera.quality_report_sha256 !== null
+      || camera.rules.length !== 0
+      || (camera.state === 'failed' && (
+        typeof camera.error_code !== 'string'
+        || !camera.error_code
+        || typeof camera.error_message !== 'string'
+        || !camera.error_message
+      ))
+      || (camera.state === 'planned' && (
+        camera.error_code !== null || camera.error_message !== null
+      ))
+    ) {
+      throw new TypeError('invalid evidence-free reciprocal outcome');
+    }
+    return {
+      entry_id: entryId,
+      role_module_id: roleModuleId,
+      camera_id: camera.camera_id,
+      render_id: camera.render_id ?? null,
+      state: camera.state,
+      runtime_report_sha256: null,
+      statistics_sha256: null,
+      policy_sha256: camera.policy_sha256,
+      quality_report_sha256: null,
+      error_code: camera.error_code,
+      error_message: camera.error_message,
+      rules: [],
+    };
+  }
+  if (
+    !['passed', 'rejected'].includes(camera.state)
+    || !SHA256.test(camera.runtime_report_sha256)
+    || !SHA256.test(camera.statistics_sha256)
     || camera.rules.length < 1
   ) {
     throw new TypeError('invalid production quality camera evidence');
@@ -80,11 +126,17 @@ function normalizeCamera(camera) {
     throw new TypeError('camera state disagrees with rule evidence');
   }
   return {
+    entry_id: entryId,
+    role_module_id: roleModuleId,
     camera_id: camera.camera_id,
+    render_id: camera.render_id ?? null,
     state: camera.state,
     runtime_report_sha256: camera.runtime_report_sha256,
     statistics_sha256: camera.statistics_sha256,
     policy_sha256: camera.policy_sha256,
+    quality_report_sha256: camera.quality_report_sha256 ?? null,
+    error_code: null,
+    error_message: null,
     rules,
   };
 }
@@ -122,20 +174,39 @@ export function normalizeProductionQualityEvidence(raw) {
         verification_level: raw.verification_level,
         trust_effect: TRUST_EFFECT,
         report_sha256: null,
+        evidence_kind: raw.evidence_kind ?? null,
+        evidence_sha256: null,
+        batch_id: null,
         stages: raw.stages.map(({ id, state }) => ({ id, state })),
         cameras: [],
       };
     }
+    const isReciprocalBatch = raw.evidence_kind === RECIPROCAL_BATCH_KIND;
     if (
       !['L0', 'L2'].includes(raw.verification_level)
-      || !SHA256.test(raw.report_sha256)
+      || (
+        isReciprocalBatch
+          ? !SHA256.test(raw.evidence_sha256) || !SHA256.test(raw.batch_id)
+          : !SHA256.test(raw.report_sha256)
+      )
       || raw.cameras.length < 1
     ) {
       throw new TypeError('available production quality evidence is incomplete');
     }
     const cameras = raw.cameras.map(normalizeCamera);
-    if (new Set(cameras.map((camera) => camera.camera_id)).size !== cameras.length) {
-      throw new TypeError('production quality camera IDs are duplicated');
+    if (
+      (isReciprocalBatch && cameras.some((camera) => (
+        camera.role_module_id !== camera.entry_id
+      )))
+      || (!isReciprocalBatch && cameras.some((camera) => (
+        camera.role_module_id !== null
+        || !['passed', 'rejected'].includes(camera.state)
+      )))
+    ) {
+      throw new TypeError('quality entries disagree with their evidence kind');
+    }
+    if (new Set(cameras.map((camera) => camera.entry_id)).size !== cameras.length) {
+      throw new TypeError('production quality entry IDs are duplicated');
     }
     return {
       schema_version: 1,
@@ -145,6 +216,9 @@ export function normalizeProductionQualityEvidence(raw) {
       verification_level: raw.verification_level,
       trust_effect: TRUST_EFFECT,
       report_sha256: raw.report_sha256,
+      evidence_kind: isReciprocalBatch ? RECIPROCAL_BATCH_KIND : 'frame-quality-report',
+      evidence_sha256: isReciprocalBatch ? raw.evidence_sha256 : raw.report_sha256,
+      batch_id: isReciprocalBatch ? raw.batch_id : null,
       stages: raw.stages.map(({ id, state }) => ({ id, state })),
       cameras,
     };
@@ -175,21 +249,27 @@ function stageMarkup(stages) {
 
 function cameraMarkup(camera) {
   if (!camera) return '';
+  const label = camera.role_module_id ?? camera.camera_id;
+  const failure = camera.error_code
+    ? `<div class="evidence-card is-warning"><b>${escapeHtml(camera.error_code)}</b><p>${escapeHtml(camera.error_message)}</p></div>`
+    : '';
   return `<article class="quality-camera" data-state="${escapeHtml(camera.state)}">
-    <h4>${escapeHtml(camera.camera_id)}</h4>
+    <h4>${escapeHtml(label)}</h4>
+    ${camera.role_module_id ? `<p>${escapeHtml(camera.camera_id)}</p>` : ''}
     <p class="quality-camera-state">${escapeHtml(camera.state)}</p>
+    ${failure}
     <dl class="quality-hashes">
-      <div><dt>Runtime report SHA</dt><dd>${escapeHtml(camera.runtime_report_sha256)}</dd></div>
-      <div><dt>Statistics SHA</dt><dd>${escapeHtml(camera.statistics_sha256)}</dd></div>
+      <div><dt>Runtime report SHA</dt><dd>${escapeHtml(camera.runtime_report_sha256 ?? 'not published')}</dd></div>
+      <div><dt>Statistics SHA</dt><dd>${escapeHtml(camera.statistics_sha256 ?? 'not published')}</dd></div>
       <div><dt>Policy SHA</dt><dd>${escapeHtml(camera.policy_sha256)}</dd></div>
     </dl>
     <div class="quality-rules" role="table" aria-label="Per-rule decisions">
-      ${camera.rules.map((rule) => `<div class="quality-rule" role="row">
+      ${camera.rules.length ? camera.rules.map((rule) => `<div class="quality-rule" role="row">
         <span role="cell">${escapeHtml(rule.rule_id)}</span>
         <span role="cell">${escapeHtml(rule.measured)}</span>
         <span role="cell">${escapeHtml(rule.comparison_direction)} ${escapeHtml(rule.operator_threshold)}</span>
         <b role="cell" data-state="${rule.passes ? 'passed' : 'rejected'}">${rule.passes ? 'PASS' : 'REJECT'}</b>
-      </div>`).join('')}
+      </div>`).join('') : '<p>no canonical quality report was published</p>'}
     </div>
   </article>`;
 }
@@ -197,14 +277,15 @@ function cameraMarkup(camera) {
 export function renderProductionQualityPanel(raw, selectedCameraId = null) {
   const evidence = normalizeProductionQualityEvidence(raw);
   const selected = evidence.cameras.find(
-    (camera) => camera.camera_id === selectedCameraId,
+    (camera) => camera.entry_id === selectedCameraId,
   ) ?? evidence.cameras.find((camera) => camera.state === 'rejected')
+    ?? evidence.cameras.find((camera) => camera.state === 'failed')
     ?? evidence.cameras[0]
     ?? null;
   const options = evidence.cameras.map((camera) => (
-    `<option value="${escapeHtml(camera.camera_id)}"${
-      camera.camera_id === selected?.camera_id ? ' selected' : ''
-    }>${escapeHtml(camera.camera_id)} · ${escapeHtml(camera.state)}</option>`
+    `<option value="${escapeHtml(camera.entry_id)}"${
+      camera.entry_id === selected?.entry_id ? ' selected' : ''
+    }>${escapeHtml(camera.role_module_id ?? camera.camera_id)} · ${escapeHtml(camera.state)}</option>`
   )).join('');
   return `<section class="production-quality-panel" data-production-quality="${escapeHtml(evidence.status)}">
     <p class="eyebrow">PRODUCTION FRAME QUALITY</p>
@@ -217,7 +298,8 @@ export function renderProductionQualityPanel(raw, selectedCameraId = null) {
       <div><dt>synthetic</dt><dd>${String(evidence.synthetic)}</dd></div>
       <div><dt>verification</dt><dd>${escapeHtml(evidence.verification_level ?? 'unverified')}</dd></div>
       <div><dt>trust effect</dt><dd>${escapeHtml(evidence.trust_effect)}</dd></div>
-      <div><dt>report SHA</dt><dd>${escapeHtml(evidence.report_sha256 ?? 'awaiting verified report')}</dd></div>
+      <div><dt>evidence kind</dt><dd>${escapeHtml(evidence.evidence_kind ?? 'awaiting')}</dd></div>
+      <div><dt>evidence SHA</dt><dd>${escapeHtml(evidence.evidence_sha256 ?? 'awaiting verified evidence')}</dd></div>
     </dl>
     ${evidence.cameras.length ? `<label class="quality-camera-picker">
       Camera

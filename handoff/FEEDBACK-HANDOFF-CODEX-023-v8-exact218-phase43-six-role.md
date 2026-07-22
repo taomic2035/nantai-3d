@@ -118,6 +118,32 @@ source production plan but was absent from the verified build. The focused
 caller/runtime/Blender contract suite is `104 passed`; Ruff is clean. This is
 identity hardening only and adds no geometry or quality trust.
 
+## Durable six-role batch and Studio projection
+
+The caller now has a writer-locked, resumable six-role batch journal. Its batch
+identity binds the verified build/report/blend, exact-218 registry, reciprocal
+plan, source production plan, Blender executable, all three policies, the six
+complete candidate SHAs, and the explicit `010/039` target assignment. A rerun
+reuses only accepted entries; failed entries are retried and never acquire
+quality-report fields unless the per-camera caller actually publishes them.
+
+Studio can discover the latest journal below:
+
+```text
+.nantai-studio/sv-prod-win/reciprocal-production-batches/<batch>/
+```
+
+Accepted entries are not trusted from the batch row alone: Studio reopens the
+camera journal, quality request/report and bound files, verifies canonical
+bytes, every recorded SHA, build/plan/journal lineage and the v2 report before
+showing per-rule PASS. A failed entry with no canonical quality report remains
+visibly failed with no fabricated rules. Backend Studio contracts are
+`107 passed, 9 skipped`; all `87` Studio JavaScript tests pass.
+
+The earlier private `reciprocal-v8-six-role` evidence predates this batch
+journal and is not silently migrated. The first real batch publication will be
+the fresh rerun after the role-aware mesh fix.
+
 ## Next ownership
 
 GLM receives the role-aware mesh task in

@@ -48,6 +48,59 @@ function availableEvidence() {
   };
 }
 
+function reciprocalBatchEvidence() {
+  return {
+    schema_version: 1,
+    status: 'available',
+    message: 'geometry preflight pass is not final frame pass',
+    synthetic: true,
+    verification_level: 'L0',
+    trust_effect: 'none-quality-filter-only',
+    report_sha256: null,
+    evidence_kind: 'reciprocal-six-role-batch',
+    evidence_sha256: 'e'.repeat(64),
+    batch_id: 'f'.repeat(64),
+    stages: [
+      { id: 'preflight', state: 'passed' },
+      { id: 'rendering', state: 'completed' },
+      { id: 'post-render-quality', state: 'rejected' },
+    ],
+    cameras: [{
+      entry_id: 'central-courtyard-downhill',
+      role_module_id: 'central-courtyard-downhill',
+      camera_id: 'camera-ground-route-010',
+      render_id: null,
+      state: 'failed',
+      runtime_report_sha256: null,
+      statistics_sha256: null,
+      policy_sha256: 'd'.repeat(64),
+      quality_report_sha256: null,
+      error_code: 'post-render-quality-rejected',
+      error_message: 'post-render quality rejected camera: camera-ground-route-010',
+      rules: [],
+    }, {
+      entry_id: 'bridge-deck-crossing',
+      role_module_id: 'bridge-deck-crossing',
+      camera_id: 'camera-ground-route-039',
+      render_id: '1'.repeat(64),
+      state: 'passed',
+      runtime_report_sha256: '2'.repeat(64),
+      statistics_sha256: '3'.repeat(64),
+      policy_sha256: 'd'.repeat(64),
+      quality_report_sha256: '4'.repeat(64),
+      error_code: null,
+      error_message: null,
+      rules: [{
+        rule_id: 'upper-ground-dominance',
+        measured: 0.2,
+        operator_threshold: 0.3,
+        comparison_direction: 'maximum',
+        passes: true,
+      }],
+    }],
+  };
+}
+
 test('loader keeps honest absence as awaiting evidence', async () => {
   const { loadProductionQualityEvidence } = subject();
   const evidence = await loadProductionQualityEvidence({
@@ -138,4 +191,26 @@ test('camera selector renders one auditable camera at a time', () => {
   );
   assert.doesNotMatch(html, /<h4>camera-ground-route-034<\/h4>/);
   assert.match(html, /<h4>camera-ground-route-035<\/h4>/);
+});
+
+test('reciprocal batch keeps role identity and evidence-free failure honest', () => {
+  const { normalizeProductionQualityEvidence, renderProductionQualityPanel } = subject();
+  const evidence = normalizeProductionQualityEvidence(reciprocalBatchEvidence());
+
+  assert.equal(evidence.status, 'available');
+  assert.equal(evidence.evidence_kind, 'reciprocal-six-role-batch');
+  assert.equal(evidence.cameras[0].entry_id, 'central-courtyard-downhill');
+  assert.equal(evidence.cameras[0].state, 'failed');
+  assert.equal(evidence.cameras[0].runtime_report_sha256, null);
+  assert.deepEqual(evidence.cameras[0].rules, []);
+
+  const html = renderProductionQualityPanel(
+    evidence,
+    'central-courtyard-downhill',
+  );
+  assert.match(html, /central-courtyard-downhill/);
+  assert.match(html, /camera-ground-route-010/);
+  assert.match(html, /post-render-quality-rejected/);
+  assert.match(html, new RegExp('e'.repeat(64)));
+  assert.doesNotMatch(html, /undefined/);
 });

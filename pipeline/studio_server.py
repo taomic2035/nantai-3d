@@ -117,6 +117,14 @@ from pipeline.synthetic_village.production_render import (
     canonical_local_production_render_journal_bytes,
     compute_local_production_journal_sha256,
 )
+from pipeline.synthetic_village.reciprocal_route_batch import (
+    ReciprocalProductionBatchError,
+    load_reciprocal_production_batch_journal,
+)
+from pipeline.synthetic_village.reciprocal_route_production import (
+    ReciprocalProductionCameraJournal,
+    canonical_reciprocal_production_camera_journal_bytes,
+)
 
 SNAPSHOT_SCHEMA_VERSION = 2
 RUN_LEDGER_SCHEMA_VERSION = 1
@@ -1275,8 +1283,276 @@ def _load_runs(root: Path) -> dict[str, Any]:
     }
 
 
+def _reciprocal_production_quality_snapshot(
+    root: Path,
+) -> dict[str, Any] | None:
+    """Project one verified six-role batch, including evidence-free failures."""
+
+    boundary = (
+        root
+        / ".nantai-studio/sv-prod-win/reciprocal-production-batches"
+    )
+    if not boundary.exists():
+        return None
+    invalid = {
+        "schema_version": 1,
+        "status": "invalid-evidence",
+        "message": "geometry preflight pass is not final frame pass",
+        "synthetic": True,
+        "verification_level": None,
+        "trust_effect": "none-quality-filter-only",
+        "report_sha256": None,
+        "evidence_kind": "reciprocal-six-role-batch",
+        "evidence_sha256": None,
+        "stages": [
+            {"id": "preflight", "state": "invalid-evidence"},
+            {"id": "rendering", "state": "invalid-evidence"},
+            {"id": "post-render-quality", "state": "invalid-evidence"},
+        ],
+        "cameras": [],
+    }
+    if not _is_real_project_subtree(root, boundary):
+        return invalid
+    try:
+        candidates = [
+            child / "batch-journal.json"
+            for child in boundary.iterdir()
+            if child.is_dir()
+            and not child.is_symlink()
+            and (child / "batch-journal.json").is_file()
+            and not (child / "batch-journal.json").is_symlink()
+        ]
+        if not candidates:
+            return None
+        journal_path = max(
+            candidates,
+            key=lambda path: (path.stat().st_mtime_ns, path.parent.name),
+        )
+        journal = load_reciprocal_production_batch_journal(journal_path)
+        journal_file_sha256 = _sha256_file(journal_path)
+    except (OSError, ValueError, ReciprocalProductionBatchError):
+        return invalid
+
+    projected = []
+    try:
+        for entry in journal.entries:
+            base = {
+                "entry_id": entry.role_module_id,
+                "role_module_id": entry.role_module_id,
+                "camera_id": entry.target_camera_id,
+                "render_id": entry.render_id,
+            }
+            if entry.state == "planned":
+                projected.append({
+                    **base,
+                    "state": "planned",
+                    "runtime_report_sha256": None,
+                    "statistics_sha256": None,
+                    "policy_sha256": journal.post_render_policy_sha256,
+                    "quality_report_sha256": None,
+                    "error_code": None,
+                    "error_message": None,
+                    "rules": [],
+                })
+                continue
+            if entry.state == "failed":
+                projected.append({
+                    **base,
+                    "state": "failed",
+                    "runtime_report_sha256": None,
+                    "statistics_sha256": None,
+                    "policy_sha256": journal.post_render_policy_sha256,
+                    "quality_report_sha256": None,
+                    "error_code": entry.error_code,
+                    "error_message": entry.error_message,
+                    "rules": [],
+                })
+                continue
+
+            frame_root = (journal_path.parent / str(entry.frame_path)).resolve(
+                strict=True,
+            )
+            if (
+                not frame_root.is_dir()
+                or frame_root.is_symlink()
+                or not _is_below(journal_path.parent.resolve(strict=True), frame_root)
+            ):
+                raise ValueError("reciprocal batch frame escapes its root")
+            paths = {
+                "journal": frame_root / "evidence/journal.json",
+                "preflight_request": frame_root / "evidence/preflight-request.json",
+                "preflight_report": frame_root / "evidence/preflight-report.json",
+                "render_request": frame_root / "evidence/render-request.json",
+                "render_report": frame_root / "frame-report.json",
+                "quality_request": frame_root / "evidence/quality-request.json",
+                "quality_report": frame_root / "evidence/quality-report.json",
+            }
+            resolved = {
+                key: _resolve_real_evidence_file(
+                    root,
+                    path,
+                    approved_root=".nantai-studio",
+                )
+                for key, path in paths.items()
+            }
+            if any(path is None for path in resolved.values()):
+                raise ValueError("reciprocal batch evidence is incomplete")
+            if (
+                _sha256_file(resolved["preflight_request"])
+                != entry.preflight_request_sha256
+                or _sha256_file(resolved["preflight_report"])
+                != entry.preflight_report_sha256
+                or _sha256_file(resolved["render_request"])
+                != entry.render_request_sha256
+                or _sha256_file(resolved["render_report"])
+                != entry.render_report_sha256
+                or _sha256_file(resolved["quality_request"])
+                != entry.quality_request_sha256
+                or _sha256_file(resolved["quality_report"])
+                != entry.quality_report_sha256
+            ):
+                raise ValueError("reciprocal batch evidence digest disagrees")
+
+            camera_journal_raw = resolved["journal"].read_bytes()
+            quality_request_raw = resolved["quality_request"].read_bytes()
+            quality_report_raw = resolved["quality_report"].read_bytes()
+            if max(
+                len(camera_journal_raw),
+                len(quality_request_raw),
+                len(quality_report_raw),
+            ) > MAX_JSON_BYTES:
+                raise ValueError("reciprocal batch evidence is too large")
+            camera_journal = ReciprocalProductionCameraJournal.model_validate_json(
+                camera_journal_raw,
+            )
+            quality_request = ProductionFrameQualityRequestV2.model_validate_json(
+                quality_request_raw,
+            )
+            quality_report = ProductionFrameQualityReportV2.model_validate_json(
+                quality_report_raw,
+            )
+            if (
+                camera_journal_raw
+                != canonical_reciprocal_production_camera_journal_bytes(
+                    camera_journal,
+                )
+                or quality_request_raw
+                != canonical_production_frame_quality_request_v2_bytes(
+                    quality_request,
+                )
+                or quality_report_raw
+                != canonical_production_frame_quality_report_v2_bytes(
+                    quality_report,
+                )
+            ):
+                raise ValueError("reciprocal batch evidence is not canonical")
+            binding = quality_request.frames[0]
+            if (
+                len(quality_request.frames) != 1
+                or len(quality_report.decisions) != 1
+                or camera_journal.journal_sha256 != entry.journal_sha256
+                or camera_journal.render_id != entry.render_id
+                or camera_journal.camera_id != entry.target_camera_id
+                or camera_journal.build_id != journal.build_id
+                or camera_journal.build_report_sha256
+                != journal.build_report_sha256
+                or camera_journal.environment_module_build_report_sha256
+                != journal.environment_module_build_report_sha256
+                or camera_journal.reciprocal_route_module_plan_sha256
+                != journal.reciprocal_route_module_plan_sha256
+                or quality_request.render_id != entry.render_id
+                or quality_request.journal_sha256 != entry.journal_sha256
+                or quality_request.build_id != journal.build_id
+                or quality_request.build_report_sha256
+                != journal.build_report_sha256
+                or quality_request.policy_sha256
+                != journal.post_render_policy_sha256
+                or binding.camera_id != entry.target_camera_id
+                or binding.runtime_report_sha256
+                != entry.render_report_sha256
+                or binding.artifacts != camera_journal.artifacts
+            ):
+                raise ValueError("reciprocal batch evidence lineage disagrees")
+            verify_production_frame_quality_report_v2(
+                quality_report,
+                request=quality_request,
+            )
+            decision = quality_report.decisions[0]
+            if not decision.passes:
+                raise ValueError("accepted reciprocal batch entry is rejected")
+            projected.append({
+                **base,
+                "state": "passed",
+                "runtime_report_sha256": binding.runtime_report_sha256,
+                "statistics_sha256": decision.statistics_sha256,
+                "policy_sha256": decision.policy_sha256,
+                "quality_report_sha256": entry.quality_report_sha256,
+                "error_code": None,
+                "error_message": None,
+                "rules": [
+                    {
+                        "rule_id": rule.rule_id,
+                        "measured": rule.measured,
+                        "operator_threshold": rule.threshold,
+                        "comparison_direction": rule.comparison,
+                        "passes": rule.passes,
+                    }
+                    for rule in decision.rule_decisions
+                ],
+            })
+    except (OSError, ValidationError, ValueError):
+        return invalid
+
+    has_planned = any(row["state"] == "planned" for row in projected)
+    has_failed = any(row["state"] == "failed" for row in projected)
+    preflight_state = (
+        "rejected"
+        if any(row.get("error_code") == "preflight-rejected" for row in projected)
+        else "passed"
+    )
+    return {
+        "schema_version": 1,
+        "status": "available",
+        "message": "geometry preflight pass is not final frame pass",
+        "synthetic": True,
+        "verification_level": journal.verification_level,
+        "trust_effect": journal.trust_effect,
+        "report_sha256": None,
+        "evidence_kind": "reciprocal-six-role-batch",
+        "evidence_sha256": journal_file_sha256,
+        "batch_id": journal.batch_id,
+        "batch_journal_sha256": journal.journal_sha256,
+        "build_id": journal.build_id,
+        "reciprocal_route_module_plan_sha256": (
+            journal.reciprocal_route_module_plan_sha256
+        ),
+        "stages": [
+            {"id": "preflight", "state": preflight_state},
+            {
+                "id": "rendering",
+                "state": "in-progress" if has_planned else "completed",
+            },
+            {
+                "id": "post-render-quality",
+                "state": (
+                    "awaiting-evidence"
+                    if has_planned
+                    else "rejected"
+                    if has_failed
+                    else "passed"
+                ),
+            },
+        ],
+        "cameras": projected,
+    }
+
+
 def _production_quality_snapshot(root: Path) -> dict[str, Any]:
     """Project verified production-quality evidence without inventing it."""
+
+    reciprocal = _reciprocal_production_quality_snapshot(root.resolve())
+    if reciprocal is not None:
+        return reciprocal
 
     awaiting = {
         "schema_version": 1,

@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import io
 import json
+import subprocess
 import threading
 import warnings
 from contextlib import contextmanager
@@ -61,6 +62,12 @@ from pipeline.synthetic_village.mesh_asset_bundle_v2 import (
 from pipeline.synthetic_village.mesh_asset_bundle_v3 import (
     publish_mesh_asset_bundle_v3,
 )
+from pipeline.synthetic_village.production_preflight import (
+    PRODUCTION_CLEARANCE_SAMPLE_POINTS,
+    ProductionCameraClearanceEvidence,
+    ProductionClearancePolicy,
+    ProductionClearanceRayEvidence,
+)
 from pipeline.synthetic_village.production_profile import (
     ProductionCameraPlan,
     build_production_camera_plan,
@@ -77,6 +84,17 @@ from pipeline.synthetic_village.production_render import (
     canonical_local_production_render_journal_bytes,
     evaluate_local_production_frame_quality,
     transition_local_production_frame,
+)
+from pipeline.synthetic_village.reciprocal_route_batch import (
+    run_reciprocal_production_batch,
+)
+from pipeline.synthetic_village.reciprocal_route_production import (
+    ReciprocalProductionClearanceRequest,
+    ReciprocalProductionError,
+    ReciprocalProductionRenderFrameRequest,
+    build_reciprocal_production_clearance_report,
+    canonical_reciprocal_production_clearance_report_bytes,
+    run_reciprocal_production_camera,
 )
 from tests.test_glb_shared_texture_audit import (
     _fixture as _write_shared_texture_glb_fixture,
@@ -107,6 +125,21 @@ from tests.test_synthetic_village_production_quality_gates import (
 )
 from tests.test_synthetic_village_production_render import (
     _request as _production_render_request,
+)
+from tests.test_synthetic_village_reciprocal_route_batch import (
+    _accepted_result as _reciprocal_accepted_result,
+)
+from tests.test_synthetic_village_reciprocal_route_batch import (
+    _context as _reciprocal_batch_context,
+)
+from tests.test_synthetic_village_reciprocal_route_batch import (
+    _post_render_policy as _reciprocal_post_render_policy,
+)
+from tests.test_synthetic_village_reciprocal_route_production import (
+    _post_render_policy as _permissive_reciprocal_post_render_policy,
+)
+from tests.test_synthetic_village_reciprocal_route_production import (
+    _write_fake_successful_frame as _write_reciprocal_successful_frame,
 )
 
 
@@ -2561,6 +2594,219 @@ class TestHttpContract:
         assert snapshot["status"] == "available"
         assert snapshot["render_id"] == evidence["journal"].render_id
         assert snapshot["report_sha256"] == evidence["report_sha256"]
+
+    def test_production_quality_api_projects_reciprocal_batch_failures(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        source_plan, build, executable, targets = _reciprocal_batch_context(
+            tmp_path,
+        )
+        batch_root = (
+            tmp_path
+            / ".nantai-studio/sv-prod-win/reciprocal-production-batches/batch-001"
+        )
+
+        def reject_all(**kwargs):
+            raise ReciprocalProductionError(
+                f"post-render quality rejected camera: "
+                f"{kwargs['target_camera_id']}",
+            )
+
+        result = run_reciprocal_production_batch(
+            verified_build=build,
+            source_plan=source_plan,
+            targets=targets,
+            blender_executable=executable,
+            output_root=batch_root,
+            clearance_policy=ProductionClearancePolicy(
+                near_distance_m=2.0,
+                minimum_upper_middle_near_hit_count=5,
+            ),
+            quality_policy=LocalProductionQualityPolicy(
+                minimum_valid_pixel_ratio=0.05,
+            ),
+            post_render_policy=_reciprocal_post_render_policy(),
+            camera_runner=reject_all,
+        )
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        snapshot = json.loads(payload)
+        assert snapshot["status"] == "available"
+        assert snapshot["evidence_kind"] == "reciprocal-six-role-batch"
+        assert snapshot["batch_id"] == result.batch_id
+        assert snapshot["report_sha256"] is None
+        assert len(snapshot["evidence_sha256"]) == 64
+        assert snapshot["stages"][-1] == {
+            "id": "post-render-quality",
+            "state": "rejected",
+        }
+        assert len(snapshot["cameras"]) == 6
+        assert snapshot["cameras"][0]["entry_id"] == (
+            "central-courtyard-downhill"
+        )
+        assert snapshot["cameras"][0]["state"] == "failed"
+        assert snapshot["cameras"][0]["error_code"] == (
+            "post-render-quality-rejected"
+        )
+        assert snapshot["cameras"][0]["rules"] == []
+
+    def test_production_quality_api_rejects_batch_acceptance_without_evidence(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        source_plan, build, executable, targets = _reciprocal_batch_context(
+            tmp_path,
+        )
+        batch_root = (
+            tmp_path
+            / ".nantai-studio/sv-prod-win/reciprocal-production-batches/batch-002"
+        )
+
+        def forge_acceptance(**kwargs):
+            return _reciprocal_accepted_result(
+                batch_root,
+                kwargs["role_camera_candidate"].role_module_id,
+                kwargs["target_camera_id"],
+            )
+
+        run_reciprocal_production_batch(
+            verified_build=build,
+            source_plan=source_plan,
+            targets=targets,
+            blender_executable=executable,
+            output_root=batch_root,
+            clearance_policy=ProductionClearancePolicy(
+                near_distance_m=2.0,
+                minimum_upper_middle_near_hit_count=5,
+            ),
+            quality_policy=LocalProductionQualityPolicy(
+                minimum_valid_pixel_ratio=0.05,
+            ),
+            post_render_policy=_reciprocal_post_render_policy(),
+            camera_runner=forge_acceptance,
+        )
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        snapshot = json.loads(payload)
+        assert snapshot["status"] == "invalid-evidence"
+        assert snapshot["cameras"] == []
+
+    def test_production_quality_api_verifies_reciprocal_accepted_evidence(
+        self,
+        tmp_path,
+    ):
+        _write_v2_project(tmp_path)
+        source_plan, build, executable, targets = _reciprocal_batch_context(
+            tmp_path,
+        )
+        batch_root = (
+            tmp_path
+            / ".nantai-studio/sv-prod-win/reciprocal-production-batches/batch-003"
+        )
+
+        def fake_process(args, **kwargs):
+            del kwargs
+            call = [str(value) for value in args]
+            request_path = Path(call[call.index("--request") + 1])
+            if "--report" in call:
+                request = ReciprocalProductionClearanceRequest.model_validate_json(
+                    request_path.read_bytes(),
+                )
+                evidence = ProductionCameraClearanceEvidence(
+                    camera_id=request.selected_camera_ids[0],
+                    rays=tuple(
+                        ProductionClearanceRayEvidence(
+                            sample_x=sample_x,
+                            sample_y=sample_y,
+                            hit=False,
+                        )
+                        for sample_x, sample_y in (
+                            PRODUCTION_CLEARANCE_SAMPLE_POINTS
+                        )
+                    ),
+                )
+                Path(call[call.index("--report") + 1]).write_bytes(
+                    canonical_reciprocal_production_clearance_report_bytes(
+                        build_reciprocal_production_clearance_report(
+                            request,
+                            evidence=(evidence,),
+                        ),
+                    ),
+                )
+            else:
+                request = (
+                    ReciprocalProductionRenderFrameRequest.model_validate_json(
+                        request_path.read_bytes(),
+                    )
+                )
+                frame_root = Path(call[call.index("--staging") + 1])
+                frame_root.mkdir()
+                _write_reciprocal_successful_frame(request, frame_root)
+            return subprocess.CompletedProcess(call, 0, "ok", "")
+
+        def one_acceptance(**kwargs):
+            if (
+                kwargs["role_camera_candidate"].role_module_id
+                != "central-courtyard-downhill"
+            ):
+                raise ReciprocalProductionError(
+                    f"preflight rejected camera: {kwargs['target_camera_id']}",
+                )
+            return run_reciprocal_production_camera(
+                **kwargs,
+                process_runner=fake_process,
+            )
+
+        run_reciprocal_production_batch(
+            verified_build=build,
+            source_plan=source_plan,
+            targets=targets,
+            blender_executable=executable,
+            output_root=batch_root,
+            clearance_policy=ProductionClearancePolicy(
+                near_distance_m=2.0,
+                minimum_upper_middle_near_hit_count=5,
+            ),
+            quality_policy=LocalProductionQualityPolicy(
+                minimum_valid_pixel_ratio=0.05,
+            ),
+            post_render_policy=_permissive_reciprocal_post_render_policy(),
+            camera_runner=one_acceptance,
+        )
+
+        with _running_server(tmp_path) as server:
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/api/production-quality",
+            )
+
+        assert status == 200
+        snapshot = json.loads(payload)
+        assert snapshot["status"] == "available"
+        accepted = snapshot["cameras"][0]
+        assert accepted["entry_id"] == "central-courtyard-downhill"
+        assert accepted["state"] == "passed", accepted.get("error_message")
+        assert len(accepted["rules"]) == 8
+        assert len(accepted["runtime_report_sha256"]) == 64
+        assert snapshot["cameras"][1]["state"] == "failed"
 
     def test_production_quality_api_fails_closed_on_incomplete_sidecars(
         self,
