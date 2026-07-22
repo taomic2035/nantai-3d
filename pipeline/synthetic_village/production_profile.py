@@ -448,6 +448,84 @@ class ProductionCameraPlan(FrozenModel):
         return self
 
 
+def _isolated_camera_group_stats(
+    cameras: list[ProductionCameraPose],
+) -> list[dict[str, object]]:
+    """Per-group IQR isolation statistics — shared by validator and evidence.
+
+    Mirrors the logic of _validate_no_isolated_cameras but returns structured
+    evidence instead of raising.  Groups with fewer than 6 cameras are reported
+    as skipped — IQR is unreliable when n=5 (can degenerate to ~0).
+
+    elevated-pedestrian is sub-grouped by loop (central/upper/bridge/valley)
+    extracted from topology_ref pattern "edge-{loop}-{type}-{number}" so
+    cameras on geographically separated loops are not compared in the same
+    IQR pool.
+    """
+
+    groups: dict[str, list[ProductionCameraPose]] = {}
+    for cam in cameras:
+        if cam.group_id == "elevated-pedestrian":
+            parts = cam.topology_ref.split("-")
+            loop = (
+                parts[1]
+                if len(parts) >= 3 and parts[0] == "edge"
+                else "unknown"
+            )
+            key = f"elevated-pedestrian:{loop}"
+        else:
+            key = cam.group_id
+        groups.setdefault(key, []).append(cam)
+
+    results: list[dict[str, object]] = []
+    for group_id, group_cams in groups.items():
+        count = len(group_cams)
+        if count < 6:
+            results.append(
+                {
+                    "group_id": group_id,
+                    "camera_count": count,
+                    "skipped": True,
+                    "reason": (
+                        "n < 6: IQR unreliable (n=5 IQR can degenerate to ~0)"
+                    ),
+                    "check": "skipped",
+                }
+            )
+            continue
+        nn_distances: list[tuple[float, str]] = []
+        for index, cam in enumerate(group_cams):
+            best = min(
+                math.dist(cam.position_m, other.position_m)
+                for j, other in enumerate(group_cams)
+                if j != index
+            )
+            nn_distances.append((best, cam.camera_id))
+        distances = [value for value, _ in nn_distances]
+        q1 = _quantile(distances, 0.25)
+        q3 = _quantile(distances, 0.75)
+        iqr = q3 - q1
+        upper_fence = q3 + 1.5 * iqr
+        isolated = [(d, cid) for d, cid in nn_distances if d > upper_fence]
+        results.append(
+            {
+                "group_id": group_id,
+                "camera_count": count,
+                "skipped": False,
+                "q1_m": round(q1, 3),
+                "q3_m": round(q3, 3),
+                "iqr_m": round(iqr, 3),
+                "upper_fence_m": round(upper_fence, 3),
+                "isolated_cameras": [
+                    {"camera_id": cid, "nn_distance_m": round(d, 3)}
+                    for d, cid in isolated
+                ],
+                "check": "failed" if isolated else "passed",
+            }
+        )
+    return results
+
+
 def _validate_no_isolated_cameras(
     cameras: list[ProductionCameraPose],
 ) -> None:
@@ -472,48 +550,18 @@ def _validate_no_isolated_cameras(
     产生假阳性), 跳过 (不假装检测了)。近重复 pose 检测仍覆盖这些组。
     """
 
-    groups: dict[str, list[ProductionCameraPose]] = {}
-    for cam in cameras:
-        if cam.group_id == "elevated-pedestrian":
-            # Sub-group by loop so cameras on different loops are not
-            # compared in the same IQR pool.  bridge-loop cameras are
-            # ~100m from central-loop cameras, but not isolated within
-            # their own loop.  topology_ref pattern:
-            # "edge-{loop}-{type}-{number}" (e.g. "edge-bridge-ascent-001").
-            parts = cam.topology_ref.split("-")
-            loop = (
-                parts[1]
-                if len(parts) >= 3 and parts[0] == "edge"
-                else "unknown"
-            )
-            key = f"elevated-pedestrian:{loop}"
-        else:
-            key = cam.group_id
-        groups.setdefault(key, []).append(cam)
-    for group_id, group_cams in groups.items():
-        if len(group_cams) < 6:
-            continue
-        nn_distances: list[tuple[float, str]] = []
-        for index, cam in enumerate(group_cams):
-            best = min(
-                math.dist(cam.position_m, other.position_m)
-                for j, other in enumerate(group_cams)
-                if j != index
-            )
-            nn_distances.append((best, cam.camera_id))
-        distances = [value for value, _ in nn_distances]
-        q1 = _quantile(distances, 0.25)
-        q3 = _quantile(distances, 0.75)
-        iqr = q3 - q1
-        upper_fence = q3 + 1.5 * iqr
-        isolated = [(d, cid) for d, cid in nn_distances if d > upper_fence]
-        if isolated:
+    for row in _isolated_camera_group_stats(cameras):
+        if row["check"] == "failed":
+            isolated = row["isolated_cameras"]
+            assert isinstance(isolated, list)
             details = ", ".join(
-                f"{cid}: {d:.3f}m" for d, cid in isolated
+                f"{item['camera_id']}: {item['nn_distance_m']:.3f}m"
+                for item in isolated
             )
             raise ProductionProfileError(
-                f"isolated cameras detected in group {group_id!r} "
-                f"(threshold: Q3+1.5*IQR={upper_fence:.3f}m): {details}"
+                f"isolated cameras detected in group {row['group_id']!r} "
+                f"(threshold: Q3+1.5*IQR={row['upper_fence_m']:.3f}m): "
+                f"{details}"
             )
 
 
@@ -1134,13 +1182,16 @@ def _undelivered_requirements() -> tuple[UndeliveredRequirement, ...]:
 
 
 def pose_separation_evidence(plan: ProductionCameraPlan) -> dict[str, object]:
-    """全部相机两两中心距离的【实测分布】+ parallax 物理阈值。
+    """全部相机两两中心距离的【实测分布】+ parallax 物理阈值 + 孤立相机证据。
 
-    req 5 近重复 pose 检测已实现: _validate_no_near_duplicate_poses 用
-    parallax-based 物理推导 (min_baseline = PARALLAX_TOLERANCE_PX *
-    REFERENCE_SCENE_DEPTH_M / fx_px) 在 _validate_plan 中 fail-closed。
+    req 5 pose quality gates 已部分实现:
+    - _validate_no_near_duplicate_poses: parallax-based 物理推导
+      (min_baseline = PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px)
+      在 _validate_plan 中 fail-closed。
+    - _validate_no_isolated_cameras: 组内 IQR (Tukey upper fence) 检测,
+      elevated-pedestrian 按 loop 子分组。
 
-    这里同时发布实测分布和所用的物理阈值, 供消费者理解验证上下文。
+    这里同时发布实测分布、物理阈值和孤立相机统计, 供消费者理解验证上下文。
     """
 
     cameras = plan.cameras
@@ -1155,6 +1206,10 @@ def pose_separation_evidence(plan: ProductionCameraPlan) -> dict[str, object]:
     distances = [row[0] for row in pairs]
     fx_px = cameras[0].intrinsics.fx
     min_baseline = MIN_PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
+    isolated_evidence = _isolated_camera_group_stats(list(cameras))
+    all_isolated_passed = all(
+        row["check"] in ("passed", "skipped") for row in isolated_evidence
+    )
     return {
         "pair_count": len(pairs),
         "nearest_pair_m": round(distances[0], 3),
@@ -1164,13 +1219,18 @@ def pose_separation_evidence(plan: ProductionCameraPlan) -> dict[str, object]:
         "farthest_pair_m": round(distances[-1], 3),
         "near_duplicate_threshold_m": round(min_baseline, 3),
         "near_duplicate_check": "passed" if distances[0] >= min_baseline else "failed",
+        "isolated_camera_evidence": isolated_evidence,
+        "isolated_camera_check": "passed" if all_isolated_passed else "failed",
         "disclaimer": (
             "near-duplicate pose detection uses a parallax-based physical minimum "
             f"baseline: {MIN_PARALLAX_TOLERANCE_PX}px parallax at "
             f"{REFERENCE_SCENE_DEPTH_M}m depth = {min_baseline:.3f}m (fx={fx_px:.2f}). "
             "Pairs closer than this cannot produce >= 1px parallax and are rejected "
-            "at plan validation time. This distribution is published for context; "
-            "the gate is enforced in _validate_no_near_duplicate_poses."
+            "at plan validation time. Isolated camera detection uses per-group Tukey "
+            "upper fence (Q3+1.5*IQR) on nearest-neighbor distances, with "
+            "elevated-pedestrian sub-grouped by loop. Groups with n < 6 are skipped "
+            "(IQR unreliable). Both gates are enforced in _validate_plan; this "
+            "distribution is published for context."
         ),
     }
 

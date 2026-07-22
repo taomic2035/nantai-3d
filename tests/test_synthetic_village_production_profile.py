@@ -569,7 +569,7 @@ def test_route_loop_and_group_summaries_reject_external_mutation() -> None:
 
 
 def test_pose_separation_evidence_reports_distribution_with_parallax_threshold() -> None:
-    """req 5 近重复检测已实现: parallax 物理阈值 + 实测分布。"""
+    """req 5 近重复检测已实现: parallax 物理阈值 + 实测分布 + 孤立相机证据。"""
 
     from pipeline.synthetic_village.production_profile import pose_separation_evidence
 
@@ -581,6 +581,27 @@ def test_pose_separation_evidence_reports_distribution_with_parallax_threshold()
     assert evidence["near_duplicate_threshold_m"] > 0.0
     assert evidence["near_duplicate_check"] == "passed"
     assert "parallax" in evidence["disclaimer"]
+
+    # 孤立相机证据: 每组都有统计, 整体必须 passed (plan 验证已过)
+    isolated = evidence["isolated_camera_evidence"]
+    assert isinstance(isolated, list)
+    assert len(isolated) > 0
+    assert evidence["isolated_camera_check"] == "passed"
+    # elevated-pedestrian 必须按 loop 子分组 (至少 4 个子组)
+    elevated_subgroups = [
+        row for row in isolated if str(row["group_id"]).startswith("elevated-pedestrian:")
+    ]
+    assert len(elevated_subgroups) >= 4
+    # 每个非 skipped 组必须有 q1/q3/iqr/upper_fence
+    for row in isolated:
+        if row["check"] == "passed":
+            assert "q1_m" in row
+            assert "q3_m" in row
+            assert "iqr_m" in row
+            assert "upper_fence_m" in row
+            assert row["isolated_cameras"] == []
+        elif row["check"] == "skipped":
+            assert "reason" in row
 
     # 阈值是物理推导, 不是任意数字:
     # min_baseline = PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
