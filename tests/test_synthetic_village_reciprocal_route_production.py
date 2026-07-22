@@ -242,6 +242,33 @@ def _role_candidates():
     return reciprocal.role_camera_candidates
 
 
+def test_all_default_role_candidates_form_valid_180_camera_plans() -> None:
+    """Canonical role placement must not create an isolated ground camera.
+
+    The batch caller alternates the two clearance-rejected target IDs.  A
+    candidate that validates by itself can still violate the full production
+    plan's spacing/outlier gate after materialization, so prove all six here.
+    """
+
+    source_plan = build_production_camera_plan()
+    for index, candidate in enumerate(_role_candidates()):
+        target_camera_id = (
+            "camera-ground-route-010"
+            if index % 2 == 0
+            else "camera-ground-route-039"
+        )
+        derived = build_reciprocal_role_render_plan(
+            source_plan=source_plan,
+            role_camera_candidate=candidate,
+            target_camera_id=target_camera_id,
+        )
+        assert len(derived.cameras) == 180
+        materialized = next(
+            row for row in derived.cameras if row.camera_id == target_camera_id
+        )
+        assert materialized.position_m == pytest.approx(candidate.position_m)
+
+
 def test_role_render_plan_is_derived_from_bound_candidate_only() -> None:
     scene = build_scene_plan()
     topology = build_elevated_topology_plan(scene)

@@ -198,6 +198,51 @@ _DEFAULT_MODULE_BASE_POSITION: dict[ModuleId, tuple[float, float, float]] = {
     "lower-valley-uphill": (-90.0, -127.5, 55.0),
 }
 _DEFAULT_PART_SPACING_Y_M = 2.5
+
+#: Batch 20 design-only topology references are consumed as authored XY
+#: relationships, never as calibrated image coordinates.  These three roles
+#: were the formal v5 post-render rejects: their former layouts were arbitrary
+#: north-south runs in empty terrain.  The explicit centers below form compact
+#: dogleg/service-loop/switchback compositions near the already-declared
+#: topology nodes and built environment, while retaining a common terrain-
+#: clearing floor per module for the <=12% route-slope contract.
+#:
+#: The third value is the Blender yaw in degrees.  Local +Y is the route axis,
+#: so route-bearing parts follow their outgoing segment tangent.  Non-route
+#: parts use the nearest structural heading.  Batch 20 remains replaceable
+#: ``design-only`` input with ``trust_effect=none``; this table is canonical
+#: modeled-unverified geometry authored from that reference, not measurement.
+_BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION: dict[
+    ModuleId,
+    dict[int, tuple[float, float, float]],
+] = {
+    "bridge-deck-crossing": {
+        183: (-190.0, -105.0, 270.000),
+        184: (-186.0, -105.0, 306.870),
+        185: (-182.0, -102.0, 270.000),
+        186: (-178.0, -102.0, 225.000),
+        187: (-181.0, -105.0, 270.000),
+        188: (-175.0, -105.0, 225.000),
+    },
+    "watermill-tailrace": {
+        189: (-199.0, -110.0, 270.000),
+        190: (-203.0, -106.0, 270.000),
+        191: (-198.0, -106.0, 216.870),
+        192: (-197.0, -108.0, 270.000),
+        193: (-195.0, -110.0, 216.870),
+        194: (-200.0, -106.0, 270.000),
+        195: (-196.0, -112.0, 270.000),
+    },
+    "forest-orchard-boundary": {
+        205: (130.0, 94.0, 302.005),
+        206: (134.0, 96.5, 270.000),
+        207: (136.0, 99.0, 270.000),
+        208: (138.0, 96.5, 319.399),
+        209: (141.0, 100.0, 36.870),
+        210: (138.0, 104.0, 36.870),
+        211: (142.0, 97.0, 270.000),
+    },
+}
 #: Passage extent: x/y are the outer bounding box of the passage
 #: (walls included).  z is the passage height (floor to ceiling).  The
 #: runtime's ``_module_geometry`` (Phase 4.3) decomposes this extent into
@@ -1151,14 +1196,28 @@ def _module_instance_range(module_id: ModuleId) -> range:
 def _flat_module_floor_z(module_id: ModuleId) -> float:
     """Return a flat floor clearing the highest terrain point in the run."""
 
-    base_x, base_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
-    peak = max(
-        terrain_height_m(
-            base_x,
-            base_y + (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M,
+    explicit_layout = _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION.get(module_id)
+    if explicit_layout is not None:
+        expected_instances = set(_module_instance_range(module_id))
+        if set(explicit_layout) != expected_instances:
+            raise ReciprocalRouteError(
+                f"Batch 20 layout for {module_id} does not cover its exact "
+                "instance segment",
+            )
+        xy_centers = (
+            (explicit_layout[instance_id][0], explicit_layout[instance_id][1])
+            for instance_id in _module_instance_range(module_id)
         )
-        for instance_id in _module_instance_range(module_id)
-    )
+    else:
+        base_x, base_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
+        xy_centers = (
+            (
+                base_x,
+                base_y + (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M,
+            )
+            for instance_id in _module_instance_range(module_id)
+        )
+    peak = max(terrain_height_m(x, y) for x, y in xy_centers)
     return round(peak + _NONCENTRAL_FLOOR_CLEARANCE_M, 3)
 
 
@@ -1192,10 +1251,10 @@ def _default_part_layout(
 ) -> PartLayoutSpec:
     """Build the canonical default layout for one part.
 
-    Non-canary modules preserve the Phase 3 hardcoded layout.  The central
-    canary follows a free contour near the canonical ``central-ground-east``
-    node so it does not duplicate the already-built courtyard environment
-    module.  The runtime reads every value verbatim from this plan.
+    The central canary follows a free contour near the canonical
+    ``central-ground-east`` node.  Batch 20 bridge/watermill/forest roles use
+    explicit non-collinear XY/yaw layouts; remaining roles preserve their
+    Phase 3 run.  The runtime reads every value verbatim from this plan.
     """
 
     if module_id == "central-courtyard-downhill":
@@ -1235,8 +1294,23 @@ def _default_part_layout(
             orientation_deg=_CENTRAL_CONTOUR_ORIENTATION_DEG,
         )
 
-    base_x, base_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
     base_z = _flat_module_floor_z(module_id)
+    explicit_layout = _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION.get(module_id)
+    if explicit_layout is not None:
+        try:
+            x, y, orientation_deg = explicit_layout[instance_id]
+        except KeyError as exc:
+            raise ReciprocalRouteError(
+                f"Batch 20 layout for {module_id} is missing instance "
+                f"{instance_id}",
+            ) from exc
+        return PartLayoutSpec(
+            center_m=(x, y, base_z),
+            extent_m=_DEFAULT_PART_EXTENT_M,
+            orientation_deg=orientation_deg,
+        )
+
+    base_x, base_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
     offset_y = (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M
     return PartLayoutSpec(
         center_m=(base_x, base_y + offset_y, base_z),
@@ -2071,6 +2145,79 @@ _ROLE_CAMERA_DISCLOSURE: dict[ModuleId, str] = {
     ),
 }
 
+_ROLE_ROUTE_GEOMETRY_FAMILIES = frozenset(
+    {"open-path", "covered-passage", "bridge-deck"},
+)
+
+
+def _role_camera_geometry(
+    parts: tuple[ReciprocalRouteModulePart, ...],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Derive standing-eye position and target from authored geometry.
+
+    Position follows the initial tangent of the first two route-bearing parts,
+    rather than the arbitrary first/last part pair.  The target is the center
+    of the world-space XY envelope of every role part, including rotated
+    extents.  Its Z remains at standing-eye height: this keeps the view level
+    and avoids hiding a layout defect with a generic downward pitch.
+    """
+
+    route_parts = tuple(
+        part
+        for part in parts
+        if part.geometry_family in _ROLE_ROUTE_GEOMETRY_FAMILIES
+    )
+    if len(route_parts) < 2:
+        raise ReciprocalRouteError(
+            f"role module {parts[0].module_id} needs at least two route-bearing parts",
+        )
+    first = route_parts[0].part_layout.center_m
+    second = route_parts[1].part_layout.center_m
+    route = tuple(second[axis] - first[axis] for axis in range(3))
+    route_length = math.sqrt(sum(value * value for value in route))
+    if route_length <= 0.0:
+        raise ReciprocalRouteError(
+            f"role module {parts[0].module_id} has no non-degenerate initial "
+            "route tangent",
+        )
+    direction = tuple(value / route_length for value in route)
+    position_m = (
+        first[0] - direction[0] * ROLE_CAMERA_APPROACH_OFFSET_M,
+        first[1] - direction[1] * ROLE_CAMERA_APPROACH_OFFSET_M,
+        first[2] + ROLE_CAMERA_EYE_HEIGHT_M,
+    )
+
+    min_x = math.inf
+    max_x = -math.inf
+    min_y = math.inf
+    max_y = -math.inf
+    for part in parts:
+        center_x, center_y, _center_z = part.part_layout.center_m
+        extent_x, extent_y, _extent_z = part.part_layout.extent_m
+        yaw = math.radians(part.part_layout.orientation_deg)
+        half_x = (
+            abs(math.cos(yaw)) * extent_x / 2.0
+            + abs(math.sin(yaw)) * extent_y / 2.0
+        )
+        half_y = (
+            abs(math.sin(yaw)) * extent_x / 2.0
+            + abs(math.cos(yaw)) * extent_y / 2.0
+        )
+        min_x = min(min_x, center_x - half_x)
+        max_x = max(max_x, center_x + half_x)
+        min_y = min(min_y, center_y - half_y)
+        max_y = max(max_y, center_y + half_y)
+    look_at_m = (
+        (min_x + max_x) / 2.0,
+        (min_y + max_y) / 2.0,
+        position_m[2],
+    )
+    if math.dist(position_m, look_at_m) <= 0.0:
+        raise ReciprocalRouteError(
+            f"role module {parts[0].module_id} camera envelope target is degenerate",
+        )
+    return position_m, look_at_m
+
 
 def _default_role_camera_candidates(
     *,
@@ -2081,9 +2228,10 @@ def _default_role_camera_candidates(
 ) -> tuple[ReciprocalRoleCameraCandidate, ...]:
     """Build the canonical six standing-eye camera candidates.
 
-    Each candidate sits at standing-eye height (1.6 m) above its module's
-    first passage floor, with the look_at point 25 m along the ordered-part
-    route direction.  The candidate's ``bound_production_plan_sha256``
+    Each candidate sits at standing-eye height (1.6 m) behind the first
+    authored route segment.  Its level look target is the world-space XY
+    envelope center of every role part, including rotated extents.  The
+    candidate's ``bound_production_plan_sha256``
     + ``bound_camera_registry_sha256`` are content-addressed bindings to
     the canonical 180-camera plan, so the §3 caller chain can verify the
     render's lineage back to this exact candidate.
@@ -2112,26 +2260,7 @@ def _default_role_camera_candidates(
                 key=lambda part: part.instance_id,
             ),
         )
-        first = parts[0].part_layout.center_m
-        last = parts[-1].part_layout.center_m
-        route_length = math.dist(first, last)
-        if route_length <= 0.0:
-            raise ReciprocalRouteError(
-                f"role module {module_id} has no non-degenerate route direction",
-            )
-        direction = tuple(
-            (last[axis] - first[axis]) / route_length
-            for axis in range(3)
-        )
-        position_m = (
-            first[0] - direction[0] * ROLE_CAMERA_APPROACH_OFFSET_M,
-            first[1] - direction[1] * ROLE_CAMERA_APPROACH_OFFSET_M,
-            first[2] + ROLE_CAMERA_EYE_HEIGHT_M,
-        )
-        look_at_m = tuple(
-            position_m[axis] + direction[axis] * ROLE_CAMERA_LOOKAHEAD_M
-            for axis in range(3)
-        )
+        position_m, look_at_m = _role_camera_geometry(parts)
 
         # REVIEW-CODEX-021: deterministically bind the nearest ground node
         # whose ground_route_ref matches topology_ref.  No same-ref node,

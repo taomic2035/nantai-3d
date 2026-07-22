@@ -1450,54 +1450,33 @@ def test_default_part_extent_y_covers_spacing_to_avoid_perpendicular_ray_miss() 
     )
 
 
-def test_bridge_floor_is_derived_from_exact_terrain_peak() -> None:
-    """Bridge Z is the route-run peak plus the locked 0.5 m clearance."""
+@pytest.mark.parametrize(
+    "module_id",
+    (
+        "bridge-deck-crossing",
+        "watermill-tailrace",
+        "forest-orchard-boundary",
+    ),
+)
+def test_batch20_role_floor_is_derived_from_authored_terrain_peak(
+    module_id: str,
+) -> None:
+    """Batch 20 roles clear the terrain peak at their exact authored XYs."""
 
     from pipeline.synthetic_village.reciprocal_route_module import (
-        _DEFAULT_MODULE_BASE_POSITION,
-        _DEFAULT_PART_SPACING_Y_M,
+        _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION,
         _NONCENTRAL_FLOOR_CLEARANCE_M,
-        BRIDGE_CROSSING_INSTANCE_RANGE,
         _flat_module_floor_z,
     )
     from pipeline.synthetic_village.scene_plan import terrain_height_m
-    bridge_x, bridge_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[
-        "bridge-deck-crossing"
-    ]
+
     peak = max(
-        terrain_height_m(
-            bridge_x,
-            bridge_y + (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M,
+        terrain_height_m(x, y)
+        for x, y, _orientation in (
+            _BATCH20_ROLE_PART_LAYOUT_XY_ORIENTATION[module_id].values()
         )
-        for instance_id in BRIDGE_CROSSING_INSTANCE_RANGE
     )
-    assert _flat_module_floor_z("bridge-deck-crossing") == pytest.approx(
-        round(peak + _NONCENTRAL_FLOOR_CLEARANCE_M, 3),
-    )
-
-
-def test_watermill_floor_is_derived_from_exact_terrain_peak() -> None:
-    """Watermill uses the same deterministic terrain-clearance contract."""
-
-    from pipeline.synthetic_village.reciprocal_route_module import (
-        _DEFAULT_MODULE_BASE_POSITION,
-        _DEFAULT_PART_SPACING_Y_M,
-        _NONCENTRAL_FLOOR_CLEARANCE_M,
-        WATERMILL_TAILRACE_INSTANCE_RANGE,
-        _flat_module_floor_z,
-    )
-    from pipeline.synthetic_village.scene_plan import terrain_height_m
-    mill_x, mill_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[
-        "watermill-tailrace"
-    ]
-    peak = max(
-        terrain_height_m(
-            mill_x,
-            mill_y + (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M,
-        )
-        for instance_id in WATERMILL_TAILRACE_INSTANCE_RANGE
-    )
-    assert _flat_module_floor_z("watermill-tailrace") == pytest.approx(
+    assert _flat_module_floor_z(module_id) == pytest.approx(
         round(peak + _NONCENTRAL_FLOOR_CLEARANCE_M, 3),
     )
 

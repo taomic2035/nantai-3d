@@ -44,7 +44,6 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     RECIPROCAL_ROUTE_SCHEMA,
     REPLACEMENT_OBSTRUCTED_CAMERA_IDS,
     ROLE_CAMERA_APPROACH_OFFSET_M,
-    ROLE_CAMERA_LOOKAHEAD_M,
     ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M,
     WATERMILL_TAILRACE_INSTANCE_RANGE,
     PartLayoutSpec,
@@ -512,10 +511,54 @@ def test_plan_carries_part_layout_on_every_part(plan) -> None:
             assert isinstance(part.part_layout, PartLayoutSpec)
             assert len(part.part_layout.center_m) == 3
             assert len(part.part_layout.extent_m) == 3
-            expected_orientation = (
-                270.0 if module.module_id == "central-courtyard-downhill" else 0.0
-            )
-            assert part.part_layout.orientation_deg == expected_orientation
+            assert 0.0 <= part.part_layout.orientation_deg < 360.0
+
+
+def test_batch20_roles_use_non_collinear_terrain_conforming_layouts(plan) -> None:
+    """Rejected v5 roles must consume Batch 20 as authored spatial layouts.
+
+    A renamed straight run is not enough: route-bearing centers must turn in
+    XY, orientations must follow more than one heading, and the common flat
+    floor must still clear the analytic terrain at every authored part.
+    """
+
+    target_roles = {
+        "bridge-deck-crossing",
+        "watermill-tailrace",
+        "forest-orchard-boundary",
+    }
+    route_families = {"open-path", "covered-passage", "bridge-deck"}
+    modules = {module.module_id: module for module in plan.modules}
+
+    for module_id in target_roles:
+        parts = sorted(modules[module_id].parts, key=lambda part: part.instance_id)
+        route_parts = [
+            part for part in parts if part.geometry_family in route_families
+        ]
+        assert len(route_parts) >= 3
+        route_xy = [part.part_layout.center_m[:2] for part in route_parts]
+        turn_cross_products = []
+        for first, second, third in zip(
+            route_xy,
+            route_xy[1:],
+            route_xy[2:],
+            strict=False,
+        ):
+            ax, ay = second[0] - first[0], second[1] - first[1]
+            bx, by = third[0] - second[0], third[1] - second[1]
+            turn_cross_products.append(ax * by - ay * bx)
+        assert any(abs(value) > 1e-6 for value in turn_cross_products), module_id
+
+        headings = {
+            round(part.part_layout.orientation_deg, 3) for part in route_parts
+        }
+        assert len(headings) >= 2, module_id
+
+        floor_z = {part.part_layout.center_m[2] for part in parts}
+        assert len(floor_z) == 1, module_id
+        for part in parts:
+            x, y, z = part.part_layout.center_m
+            assert z - terrain_height_m(x, y) >= 0.4985, part.part_id
 
 
 def test_plan_carries_explicit_geometry_family_on_every_part(plan) -> None:
@@ -647,8 +690,8 @@ def test_plan_sha_changes_when_part_layout_changes(plan, scene, topology, env_mo
     )
 
 
-def test_default_part_layout_preserves_xy_and_terrain_conforming_z(plan) -> None:
-    """XY anchors stay canonical while Z follows each module's terrain peak."""
+def test_default_part_layout_stays_inside_canonical_scene_bounds(plan, scene) -> None:
+    """Authored layouts stay finite and inside the synthetic scene extent."""
 
     centers = [
         part.part_layout.center_m
@@ -659,23 +702,11 @@ def test_default_part_layout_preserves_xy_and_terrain_conforming_z(plan) -> None
     max_x = max(c[0] for c in centers)
     min_y = min(c[1] for c in centers)
     max_y = max(c[1] for c in centers)
-    min_z = min(c[2] for c in centers)
-    max_z = max(c[2] for c in centers)
-    # watermill base_x = -180; forest base_x = 120.
-    assert min_x == -180.0
-    assert max_x == 120.0
-    # watermill base_y = -130; first watermill part (instance 189):
-    #   -130 + (189-176)*2.5 = -130 + 32.5 = -97.5
-    # forest base_y = 30 (Phase 4.5.2 relocated from 80 to bring
-    # candidates within 30 m of upper-ground-west); last forest part
-    # (instance 211): 30 + (211-176)*2.5 = 30 + 87.5 = 117.5
-    assert min_y == -97.5
-    assert max_y == 117.5
-    # Watermill is the lowest route after terrain conformance; forest is the
-    # highest. Both values are content-addressed consequences of the analytic
-    # terrain function plus the locked 0.5 m clearance.
-    assert min_z == pytest.approx(49.803)
-    assert max_z == pytest.approx(91.975)
+    half_width = scene.extent.width_m / 2.0
+    half_depth = scene.extent.depth_m / 2.0
+    assert -half_width < min_x < max_x < half_width
+    assert -half_depth < min_y < max_y < half_depth
+    assert all(math.isfinite(value) for center in centers for value in center)
 
 
 def test_noncentral_flat_routes_clear_their_entire_terrain_run(plan) -> None:
@@ -754,10 +785,16 @@ def test_role_candidates_follow_built_module_floor_and_route_direction(plan) -> 
             modules[candidate.role_module_id].parts,
             key=lambda part: part.instance_id,
         )
-        first = parts[0].part_layout.center_m
-        last = parts[-1].part_layout.center_m
-        route = tuple(last[axis] - first[axis] for axis in range(3))
-        route_length = math.dist(first, last)
+        route_parts = [
+            part
+            for part in parts
+            if part.geometry_family
+            in {"open-path", "covered-passage", "bridge-deck"}
+        ]
+        first = route_parts[0].part_layout.center_m
+        second = route_parts[1].part_layout.center_m
+        route = tuple(second[axis] - first[axis] for axis in range(3))
+        route_length = math.dist(first, second)
         assert route_length > 0.0
         direction = tuple(value / route_length for value in route)
         expected_position = (
@@ -765,9 +802,30 @@ def test_role_candidates_follow_built_module_floor_and_route_direction(plan) -> 
             first[1] - direction[1] * ROLE_CAMERA_APPROACH_OFFSET_M,
             first[2] + candidate.eye_height_m,
         )
-        expected_look_at = tuple(
-            expected_position[axis] + direction[axis] * ROLE_CAMERA_LOOKAHEAD_M
-            for axis in range(3)
+        envelope_min_x = math.inf
+        envelope_max_x = -math.inf
+        envelope_min_y = math.inf
+        envelope_max_y = -math.inf
+        for part in parts:
+            center_x, center_y, _center_z = part.part_layout.center_m
+            extent_x, extent_y, _extent_z = part.part_layout.extent_m
+            yaw = math.radians(part.part_layout.orientation_deg)
+            half_x = (
+                abs(math.cos(yaw)) * extent_x / 2.0
+                + abs(math.sin(yaw)) * extent_y / 2.0
+            )
+            half_y = (
+                abs(math.sin(yaw)) * extent_x / 2.0
+                + abs(math.cos(yaw)) * extent_y / 2.0
+            )
+            envelope_min_x = min(envelope_min_x, center_x - half_x)
+            envelope_max_x = max(envelope_max_x, center_x + half_x)
+            envelope_min_y = min(envelope_min_y, center_y - half_y)
+            envelope_max_y = max(envelope_max_y, center_y + half_y)
+        expected_look_at = (
+            (envelope_min_x + envelope_max_x) / 2.0,
+            (envelope_min_y + envelope_max_y) / 2.0,
+            expected_position[2],
         )
 
         assert candidate.position_m == pytest.approx(expected_position)
