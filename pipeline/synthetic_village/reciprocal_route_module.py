@@ -172,20 +172,16 @@ MIN_TRAIL_SHELTER_CLEAR_WIDTH_M = 1.5
 MIN_LOWER_VALLEY_TRAIL_WIDTH_M = 1.2
 MAX_RETAINING_STEP_RISE_M = 0.18
 
-#: Default spatial layout for the simplified v1 build (Phase 4.1, amended
-#: Phase 4.3 to lift bridge/watermill above aux-terrain and to enlarge
-#: passage extent so the probe can measure standing-eye clearance).
+#: Default XY anchors plus legacy Z seeds for the simplified v1 build.
 #: Used only by ``_default_part_layout`` to populate ``PartLayoutSpec``;
 #: the Blender runtime script never reads these constants.  Any change
 #: here changes ``reciprocal_route_module_plan_sha256`` and therefore
 #: ``build_id`` and the downstream render identity.
-#: Phase 4.3 amendments (responding to FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md):
-#:   * bridge z 50 -> 55: bridge parts at y in [-82.5, -70] sit above
-#:     aux-terrain whose terrain_height_m peaks at ~53.27; lifting base_z
-#:     to 55 keeps parts above terrain.
-#:   * watermill z 45 -> 52: watermill parts at y in [-97.5, -85] sit
-#:     above aux-terrain whose terrain_height_m peaks at ~48.64; lifting
-#:     base_z to 52 keeps parts above terrain.
+#: Non-central Z is no longer read from the third tuple item. A flat module
+#: floor is derived from the maximum analytic terrain height across its exact
+#: part run plus ``_NONCENTRAL_FLOOR_CLEARANCE_M``. This preserves the <=12%
+#: flat-route slope contract without leaving forest/lower-valley geometry
+#: buried or bridge/watermill/gallery geometry at arbitrary elevations.
 #:   * part extent z 0.6 -> 2.5: the previous 0.6 m solid box gave only
 #:     0.3 m upward clearance (probe measured clearance_min_m ~0.3).  The
 #:     new 2.5 m extent, combined with the 5-panel passage geometry in
@@ -229,6 +225,7 @@ _CENTRAL_CONTOUR_DIRECTION = (1.0, 0.0, 0.0)
 _CENTRAL_CONTOUR_Y_M = 40.0
 _CENTRAL_CONTOUR_ORIENTATION_DEG = 270.0
 _CENTRAL_FLOOR_CLEARANCE_M = 0.5
+_NONCENTRAL_FLOOR_CLEARANCE_M = 0.5
 
 # BuildReport v1 reserves 0/1/2 for sky, terrain, and terrain-support,
 # then assigns ScenePlan semantic classes from 3 in SEMANTIC_ORDER order.
@@ -1151,6 +1148,20 @@ def _module_instance_range(module_id: ModuleId) -> range:
     return LOWER_VALLEY_UPHILL_INSTANCE_RANGE
 
 
+def _flat_module_floor_z(module_id: ModuleId) -> float:
+    """Return a flat floor clearing the highest terrain point in the run."""
+
+    base_x, base_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
+    peak = max(
+        terrain_height_m(
+            base_x,
+            base_y + (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M,
+        )
+        for instance_id in _module_instance_range(module_id)
+    )
+    return round(peak + _NONCENTRAL_FLOOR_CLEARANCE_M, 3)
+
+
 def _module_batch8_source(module_id: ModuleId) -> str:
     return {
         "central-courtyard-downhill": BATCH8_CENTRAL_COURTYARD_DOWNHILL_SHA256,
@@ -1224,7 +1235,8 @@ def _default_part_layout(
             orientation_deg=_CENTRAL_CONTOUR_ORIENTATION_DEG,
         )
 
-    base_x, base_y, base_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
+    base_x, base_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
+    base_z = _flat_module_floor_z(module_id)
     offset_y = (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M
     return PartLayoutSpec(
         center_m=(base_x, base_y + offset_y, base_z),

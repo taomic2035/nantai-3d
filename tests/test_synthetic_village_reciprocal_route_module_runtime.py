@@ -1450,50 +1450,55 @@ def test_default_part_extent_y_covers_spacing_to_avoid_perpendicular_ray_miss() 
     )
 
 
-def test_phase_4_3_lifts_bridge_above_aux_terrain_peak() -> None:
-    """Bridge base_z=55 must sit above the aux-terrain peak at the
-    bridge's part y range [-82.5, -70]."""
+def test_bridge_floor_is_derived_from_exact_terrain_peak() -> None:
+    """Bridge Z is the route-run peak plus the locked 0.5 m clearance."""
 
     from pipeline.synthetic_village.reciprocal_route_module import (
         _DEFAULT_MODULE_BASE_POSITION,
+        _DEFAULT_PART_SPACING_Y_M,
+        _NONCENTRAL_FLOOR_CLEARANCE_M,
+        BRIDGE_CROSSING_INSTANCE_RANGE,
+        _flat_module_floor_z,
     )
     from pipeline.synthetic_village.scene_plan import terrain_height_m
-    bridge_x, bridge_y, bridge_z = _DEFAULT_MODULE_BASE_POSITION[
+    bridge_x, bridge_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[
         "bridge-deck-crossing"
     ]
-    # First part y = bridge_y (instance 176 - 176 = 0 offset).
-    # Last part y = bridge_y + 5 * 2.5 = bridge_y + 12.5
-    y_min = bridge_y
-    y_max = bridge_y + 12.5
-    # Aux-terrain peak across the bridge's y range.
     peak = max(
-        terrain_height_m(bridge_x, y, extent=None)
-        for y in (y_min, y_max, (y_min + y_max) / 2.0)
+        terrain_height_m(
+            bridge_x,
+            bridge_y + (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M,
+        )
+        for instance_id in BRIDGE_CROSSING_INSTANCE_RANGE
     )
-    assert bridge_z > peak, (
-        f"bridge z={bridge_z} must be above aux-terrain peak {peak:.2f}"
+    assert _flat_module_floor_z("bridge-deck-crossing") == pytest.approx(
+        round(peak + _NONCENTRAL_FLOOR_CLEARANCE_M, 3),
     )
 
 
-def test_phase_4_3_lifts_watermill_above_aux_terrain_peak() -> None:
-    """Watermill base_z=52 must sit above the aux-terrain peak at the
-    watermill's part y range [-97.5, -85]."""
+def test_watermill_floor_is_derived_from_exact_terrain_peak() -> None:
+    """Watermill uses the same deterministic terrain-clearance contract."""
 
     from pipeline.synthetic_village.reciprocal_route_module import (
         _DEFAULT_MODULE_BASE_POSITION,
+        _DEFAULT_PART_SPACING_Y_M,
+        _NONCENTRAL_FLOOR_CLEARANCE_M,
+        WATERMILL_TAILRACE_INSTANCE_RANGE,
+        _flat_module_floor_z,
     )
     from pipeline.synthetic_village.scene_plan import terrain_height_m
-    mill_x, mill_y, mill_z = _DEFAULT_MODULE_BASE_POSITION[
+    mill_x, mill_y, _legacy_z = _DEFAULT_MODULE_BASE_POSITION[
         "watermill-tailrace"
     ]
-    y_min = mill_y
-    y_max = mill_y + 12.5
     peak = max(
-        terrain_height_m(mill_x, y, extent=None)
-        for y in (y_min, y_max, (y_min + y_max) / 2.0)
+        terrain_height_m(
+            mill_x,
+            mill_y + (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M,
+        )
+        for instance_id in WATERMILL_TAILRACE_INSTANCE_RANGE
     )
-    assert mill_z > peak, (
-        f"watermill z={mill_z} must be above aux-terrain peak {peak:.2f}"
+    assert _flat_module_floor_z("watermill-tailrace") == pytest.approx(
+        round(peak + _NONCENTRAL_FLOOR_CLEARANCE_M, 3),
     )
 
 

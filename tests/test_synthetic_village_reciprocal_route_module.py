@@ -647,26 +647,8 @@ def test_plan_sha_changes_when_part_layout_changes(plan, scene, topology, env_mo
     )
 
 
-def test_default_part_layout_preserves_phase3_aabb(plan) -> None:
-    """The default layout must preserve the exact AABB that Phase 3 produced.
-
-    Phase 4.3 amendments (FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md
-    §"待处理" item 3) lift bridge z 50 -> 55 and watermill z 45 -> 52
-    so the modules no longer intersect aux-terrain.  The min_z is
-    therefore 52.0 (was 45.0 in Phase 3).  All other AABB corners
-    remain identical because xy layouts are unchanged.
-
-    REVIEW-CODEX-018 measured the Phase 3 mesh AABB:
-      min=(-180.8, -98.3, 44.7), max=(120.8, 168.3, 78.3).
-    The 0.8/0.3 offsets come from box half-extent (1.6/2, 0.6/2).  The
-    part *centers* for Phase 4.3 are therefore:
-      min_center = (-180.0, -97.5, 52.0)
-      max_center = (120.0, 167.5, 78.0)
-    The mesh AABB itself changes because extent_m.z grew from 0.6 to
-    2.5 (Phase 4.3 item 1: 5-panel passage geometry).  That change is
-    asserted separately in
-    ``test_module_geometry_emits_five_panel_passage``.
-    """
+def test_default_part_layout_preserves_xy_and_terrain_conforming_z(plan) -> None:
+    """XY anchors stay canonical while Z follows each module's terrain peak."""
 
     centers = [
         part.part_layout.center_m
@@ -689,11 +671,36 @@ def test_default_part_layout_preserves_phase3_aabb(plan) -> None:
     # (instance 211): 30 + (211-176)*2.5 = 30 + 87.5 = 117.5
     assert min_y == -97.5
     assert max_y == 117.5
-    # Phase 4.3: watermill base_z lifted 45 -> 52 to clear aux-terrain
-    # peak ~48.64 m at the watermill's y range.  gallery base_z = 78
-    # is unchanged.
-    assert min_z == 52.0
-    assert max_z == 78.0
+    # Watermill is the lowest route after terrain conformance; forest is the
+    # highest. Both values are content-addressed consequences of the analytic
+    # terrain function plus the locked 0.5 m clearance.
+    assert min_z == pytest.approx(49.803)
+    assert max_z == pytest.approx(91.975)
+
+
+def test_noncentral_flat_routes_clear_their_entire_terrain_run(plan) -> None:
+    """A flat route may bridge a slope, but it must never be buried by it."""
+
+    for module in plan.modules[1:]:
+        z_values = {part.part_layout.center_m[2] for part in module.parts}
+        assert len(z_values) == 1, module.module_id
+        clearances = [
+            part.part_layout.center_m[2]
+            - terrain_height_m(*part.part_layout.center_m[:2])
+            for part in module.parts
+        ]
+        assert min(clearances) == pytest.approx(0.5, abs=0.0015), module.module_id
+        assert all(clearance >= 0.4985 for clearance in clearances), module.module_id
+
+
+def test_role_camera_eyes_are_above_analytic_terrain(plan) -> None:
+    """A camera below terrain can pass pixels while showing an underground wall."""
+
+    for candidate in plan.role_camera_candidates:
+        x, y, z = candidate.position_m
+        assert z - terrain_height_m(x, y) >= candidate.eye_height_m, (
+            candidate.role_module_id
+        )
 
 
 # --------------------------------------------------------------------------- #
