@@ -123,6 +123,26 @@ function incompletePlan() {
         ],
         ground_connected: true,
       },
+      {
+        loop_id: 'bridge-loop',
+        ground_attachment_node_ids: ['bridge-ground-east', 'bridge-ground-west'],
+        elevated_edge_ids: [
+          'edge-bridge-ascent-001',
+          'edge-bridge-descent-001',
+          'edge-bridge-path-001',
+        ],
+        ground_connected: true,
+      },
+      {
+        loop_id: 'valley-loop',
+        ground_attachment_node_ids: ['valley-ground-north', 'valley-ground-south'],
+        elevated_edge_ids: [
+          'edge-valley-ascent-001',
+          'edge-valley-descent-001',
+          'edge-valley-path-001',
+        ],
+        ground_connected: true,
+      },
     ],
     undelivered_requirements: [
       {
@@ -194,6 +214,10 @@ test('count, completion, group and identity contradictions fail closed', () => {
     (plan) => { plan.plan_schema = 'production-camera-plan-by-name'; },
     (plan) => { delete plan.elevated_topology_sha256; },
     (plan) => { plan.route_loops[0].ground_connected = false; },
+    (plan) => { plan.route_loops.pop(); },
+    (plan) => {
+      plan.route_loops[2].elevated_edge_ids[2] = 'edge-bridge-invented-999';
+    },
   ];
 
   for (const mutate of mutations) {

@@ -50,6 +50,30 @@ const ROUTE_LOOP_CONTRACT = Object.freeze([
       'edge-upper-gallery-001',
     ]),
   }),
+  Object.freeze({
+    loop_id: 'bridge-loop',
+    ground_attachment_node_ids: Object.freeze([
+      'bridge-ground-east',
+      'bridge-ground-west',
+    ]),
+    elevated_edge_ids: Object.freeze([
+      'edge-bridge-ascent-001',
+      'edge-bridge-descent-001',
+      'edge-bridge-path-001',
+    ]),
+  }),
+  Object.freeze({
+    loop_id: 'valley-loop',
+    ground_attachment_node_ids: Object.freeze([
+      'valley-ground-north',
+      'valley-ground-south',
+    ]),
+    elevated_edge_ids: Object.freeze([
+      'edge-valley-ascent-001',
+      'edge-valley-descent-001',
+      'edge-valley-path-001',
+    ]),
+  }),
 ]);
 
 function isRecord(value) {
