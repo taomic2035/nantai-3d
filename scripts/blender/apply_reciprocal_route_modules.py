@@ -5,12 +5,12 @@ host opens the verified 175-root ``village-modules.blend`` first, then supplies
 an absolute canonical request path and an empty private staging directory
 after ``--``.
 
-Phase 3 of HANDOFF-OPUS-009.  Geometry is intentionally simplified (one box per
-part positioned by module + instance) so that the runtime can be exercised
-end-to-end without re-introducing the failed Batch-8 ribbon / floating-band
-attempts.  Each part still gets a finite, non-empty mesh with proper UVs,
-tangents, and a single material slot, so the build report's
-``finite_nonempty_module_meshes`` Literal[True] remains honest.
+Phase 3 of HANDOFF-OPUS-009. Geometry is intentionally simplified but consumes
+the canonical per-part ``geometry_family`` declaration: open paths, covered
+passages, bridges, structures, drainage, guards, props, and vegetation no
+longer collapse to one universal tunnel. Each part still gets a finite,
+non-empty mesh with proper UVs, tangents, and one material slot, so the build
+report's ``finite_nonempty_module_meshes`` Literal[True] remains honest.
 
 The plan cannot be modified at runtime.  Every identity (build_id, plan SHA,
 material bindings, runtime script SHA, object registry) is content-addressed
@@ -65,6 +65,19 @@ SEMANTIC_CLASS_BY_ID = {
     12: "retaining-wall",
     13: "prop",
     14: "elevated-walkway",
+}
+
+GEOMETRY_FAMILY_SEMANTIC_CLASSES = {
+    "open-path": frozenset({"path"}),
+    "covered-passage": frozenset({"building"}),
+    "bridge-deck": frozenset({"bridge"}),
+    "building-shell": frozenset({"building"}),
+    "structural-frame": frozenset({"building"}),
+    "drainage-channel": frozenset({"creek"}),
+    "retaining-structure": frozenset({"retaining-wall"}),
+    "guard-rail": frozenset({"prop"}),
+    "service-prop": frozenset({"prop"}),
+    "vegetation-band": frozenset({"prop"}),
 }
 
 MATERIAL_BINDINGS = {
@@ -357,8 +370,24 @@ def _validate_request(request):
     # Phase 4.1: every part must carry a canonical part_layout so the
     # runtime does not invent its own layout (REVIEW-CODEX-018 item 1).
     for part in parts:
+        _validate_geometry_family(part)
         _validate_part_layout(part)
     return request
+
+
+def _validate_geometry_family(part):
+    family = part.get("geometry_family")
+    if family not in GEOMETRY_FAMILY_SEMANTIC_CLASSES:
+        raise RuntimeBuildError(
+            f"part {part.get('part_id')} geometry_family is invalid",
+        )
+    semantic_class = SEMANTIC_CLASS_BY_ID.get(part.get("semantic_id"))
+    if semantic_class not in GEOMETRY_FAMILY_SEMANTIC_CLASSES[family]:
+        raise RuntimeBuildError(
+            f"part {part.get('part_id')} geometry_family {family} is "
+            f"incompatible with semantic_id {part.get('semantic_id')}",
+        )
+    return family
 
 
 def _validate_part_layout(part):
@@ -463,100 +492,292 @@ _PASSAGE_WALL_HALF_M = _PASSAGE_WALL_THICKNESS_M / 2.0
 #: floating-point noise in BVH construction.  Inner clear height
 #: becomes ``sz + 2 * gap`` (still >= MIN_ROUTE_CLEARANCE_M = 2.4).
 _PASSAGE_RAY_SAFE_GAP_M = 0.001
+_PATH_EDGE_HEIGHT_M = 0.18
+_BRIDGE_PARAPET_HEIGHT_M = 0.65
+
+
+def _local_center(center, yaw, local_x=0.0, local_y=0.0, local_z=0.0):
+    """Transform one local offset into the canonical part's world frame."""
+
+    cx, cy, cz = center
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    return (
+        cx + local_x * cosine - local_y * sine,
+        cy + local_x * sine + local_y * cosine,
+        cz + local_z,
+    )
+
+
+def _add_local_box(assembler, center, yaw, offset, size):
+    assembler.add_box(_local_center(center, yaw, *offset), size, yaw)
+
+
+def _add_floor(assembler, center, extent, yaw, *, drop_m=0.0):
+    sx, sy, _sz = extent
+    floor_top_z = center[2] - _PASSAGE_RAY_SAFE_GAP_M - drop_m
+    assembler.add_box(
+        (center[0], center[1], floor_top_z - _PASSAGE_PANEL_HALF_M),
+        (sx, sy, _PASSAGE_PANEL_THICKNESS_M),
+        yaw,
+    )
+    return floor_top_z
+
+
+def _add_edge_pair(assembler, center, extent, yaw, *, height_m, width_m=0.1):
+    sx, sy, _sz = extent
+    local_x = sx / 2.0 - width_m / 2.0
+    local_z = -_PASSAGE_RAY_SAFE_GAP_M + height_m / 2.0
+    for side in (-1.0, 1.0):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (side * local_x, 0.0, local_z),
+            (width_m, sy, height_m),
+        )
+
+
+def _open_path_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    _add_floor(assembler, center, extent, yaw)
+    _add_edge_pair(
+        assembler,
+        center,
+        extent,
+        yaw,
+        height_m=_PATH_EDGE_HEIGHT_M,
+    )
+    return assembler
+
+
+def _covered_passage_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    _add_floor(assembler, center, extent, yaw)
+    ceiling_bottom_z = center[2] + sz + _PASSAGE_RAY_SAFE_GAP_M
+    assembler.add_box(
+        (center[0], center[1], ceiling_bottom_z + _PASSAGE_PANEL_HALF_M),
+        (sx, sy, _PASSAGE_PANEL_THICKNESS_M),
+        yaw,
+    )
+    wall_z = sz / 2.0
+    wall_height = sz + 2.0 * _PASSAGE_RAY_SAFE_GAP_M
+    wall_x = sx / 2.0 - _PASSAGE_WALL_HALF_M
+    for side in (-1.0, 1.0):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (side * wall_x, 0.0, wall_z),
+            (_PASSAGE_WALL_THICKNESS_M, sy, wall_height),
+        )
+    return assembler
+
+
+def _bridge_deck_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    _add_floor(assembler, center, extent, yaw, drop_m=0.04)
+    _add_edge_pair(
+        assembler,
+        center,
+        extent,
+        yaw,
+        height_m=_BRIDGE_PARAPET_HEIGHT_M,
+        width_m=0.14,
+    )
+    # A shallow transverse sill makes the deck transition visibly distinct
+    # from an open stone path while keeping the overhead volume open.
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, extent[1] * 0.35, 0.04),
+        (extent[0] * 0.82, 0.12, 0.08),
+    )
+    return assembler
+
+
+def _building_shell_geometry(center, extent, yaw):
+    assembler = _covered_passage_geometry(center, extent, yaw)
+    sx, sy, sz = extent
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, sy / 2.0 - 0.06, sz * 0.55),
+        (sx, 0.12, sz * 1.1),
+    )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, 0.0, sz + 0.16),
+        (sx * 0.55, sy * 0.7, 0.27),
+    )
+    return assembler
+
+
+def _structural_frame_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    post_width = 0.14
+    for local_x in (-sx * 0.38, sx * 0.38):
+        for local_y in (-sy * 0.38, sy * 0.38):
+            _add_local_box(
+                assembler,
+                center,
+                yaw,
+                (local_x, local_y, sz / 2.0),
+                (post_width, post_width, sz),
+            )
+    for local_y in (-sy * 0.38, sy * 0.38):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (0.0, local_y, sz),
+            (sx, 0.18, 0.18),
+        )
+    return assembler
+
+
+def _drainage_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, _sz = extent
+    _add_floor(assembler, center, extent, yaw, drop_m=0.16)
+    for side in (-1.0, 1.0):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (side * sx * 0.34, 0.0, -0.04),
+            (sx * 0.18, sy, 0.24),
+        )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, 0.0, 0.03),
+        (sx * 0.5, 0.1, 0.06),
+    )
+    return assembler
+
+
+def _retaining_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    _add_floor(assembler, center, extent, yaw, drop_m=0.08)
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (-sx * 0.34, 0.0, sz * 0.28),
+        (sx * 0.22, sy, sz * 0.56),
+    )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (sx * 0.1, -sy * 0.22, 0.12),
+        (sx * 0.66, sy * 0.28, 0.24),
+    )
+    return assembler
+
+
+def _guard_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, _sz = extent
+    local_x = -sx * 0.42
+    for local_y in (-sy * 0.38, 0.0, sy * 0.38):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (local_x, local_y, 0.55),
+            (0.09, 0.09, 1.1),
+        )
+    for local_z in (0.48, 0.96):
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (local_x, 0.0, local_z),
+            (0.1, sy, 0.1),
+        )
+    return assembler
+
+
+def _service_prop_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, 0.0, sz * 0.22),
+        (sx * 0.52, sy * 0.34, sz * 0.44),
+    )
+    _add_local_box(
+        assembler,
+        center,
+        yaw,
+        (0.0, -sy * 0.19, sz * 0.43),
+        (sx * 0.32, 0.08, sz * 0.25),
+    )
+    return assembler
+
+
+def _vegetation_geometry(center, extent, yaw):
+    assembler = MeshAssembler()
+    sx, sy, sz = extent
+    stems = (
+        (-0.28, -0.3, 0.72),
+        (0.24, -0.12, 0.54),
+        (-0.08, 0.25, 0.86),
+    )
+    for x_ratio, y_ratio, height_ratio in stems:
+        height = sz * height_ratio
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (sx * x_ratio, sy * y_ratio, height / 2.0),
+            (0.12, 0.12, height),
+        )
+        _add_local_box(
+            assembler,
+            center,
+            yaw,
+            (sx * x_ratio, sy * y_ratio, height),
+            (sx * 0.34, sy * 0.22, sz * 0.24),
+        )
+    return assembler
 
 
 def _module_geometry(part):
-    """Return a 4-panel passage mesh for one part.
+    """Build one semantic-compatible mesh from canonical family + layout."""
 
-    Phase 4.3 (responding to FEEDBACK-HANDOFF-OPUS-009-phase4-probe.md):
-    the previous single solid box gave only 0.3 m upward clearance
-    because the upward ray from the part center hit the box's own top
-    face.  The new geometry decomposes the part extent into 4 panels:
-
-      * Floor:   slab whose top face is ``_PASSAGE_RAY_SAFE_GAP_M`` below
-                 center.z (so the upward ray origin is not on the floor
-                 surface); extent (x, y, panel_thickness)
-      * Ceiling: slab whose bottom face is ``_PASSAGE_RAY_SAFE_GAP_M``
-                 above center.z + sz; extent (x, y, panel_thickness)
-      * Left:    wall at x = cx - sx/2 + wall_half,
-                 extent (wall_thickness, y, sz + 2 * gap)
-      * Right:   wall at x = cx + sx/2 - wall_half,
-                 extent (wall_thickness, y, sz + 2 * gap)
-
-    Floor and ceiling panels sit **outside** the passage interior so a
-    ray cast from ``(cx, cy, cz)`` upward hits the ceiling's underside at
-    distance ``sz + gap`` (not the floor's own top face at distance 0).
-    Walls span ``sz + 2 * gap`` in z so a perpendicular ray cast from
-    ``(cx, cy, cz)`` along x is unambiguously inside the wall pair's
-    z range.
-
-    There is intentionally no front/back panel: the route passes through
-    the passage along y, and perpendicular ray casts (along x) measure
-    the inner width between the two walls.
-
-    Inner clear width  = sx - 2 * wall_thickness = sx - 0.2
-    Inner clear height = sz + 2 * _PASSAGE_RAY_SAFE_GAP_M
-
-    For the default extent (1.6, 1.6, 2.5) and gap = 0.001 this gives:
-      inner width  = 1.4 m   (>= MIN_ROUTE_CLEAR_WIDTH_M  = 1.2)
-      inner height = 2.502 m (>= MIN_ROUTE_CLEARANCE_M   = 2.4)
-      upward clearance from part center = sz + gap = 2.501 m
-
-    The part's spatial layout (center, extent, orientation) is read
-    verbatim from ``part["part_layout"]`` in the canonical request.
-    The runtime does NOT invent its own layout (Phase 4.1).
-    ``_validate_request`` has already validated the layout, so this
-    function only reads it.
-    """
-
+    family = _validate_geometry_family(part)
+    _validate_part_layout(part)
     layout = part["part_layout"]
     cx, cy, cz = (float(value) for value in layout["center_m"])
     sx, sy, sz = (float(value) for value in layout["extent_m"])
     yaw = math.radians(float(layout["orientation_deg"]))
-    assembler = MeshAssembler()
-    # Floor (slab whose top face is _PASSAGE_RAY_SAFE_GAP_M below cz so
-    # the upward ray origin (cx, cy, cz) is not on the floor surface).
-    floor_top_z = cz - _PASSAGE_RAY_SAFE_GAP_M
-    assembler.add_box(
-        (cx, cy, floor_top_z - _PASSAGE_PANEL_HALF_M),
-        (sx, sy, _PASSAGE_PANEL_THICKNESS_M),
-        yaw,
-    )
-    # Ceiling (slab whose bottom face is _PASSAGE_RAY_SAFE_GAP_M above
-    # cz + sz so the upward ray hits it at distance sz + gap, not 0).
-    ceiling_bottom_z = cz + sz + _PASSAGE_RAY_SAFE_GAP_M
-    assembler.add_box(
-        (cx, cy, ceiling_bottom_z + _PASSAGE_PANEL_HALF_M),
-        (sx, sy, _PASSAGE_PANEL_THICKNESS_M),
-        yaw,
-    )
-    # Left wall (spans the full passage height including the ray-safe
-    # gap on both ends; centre at mid-height).
-    wall_z_center = cz + sz / 2.0
-    wall_z_extent = sz + 2.0 * _PASSAGE_RAY_SAFE_GAP_M
-    wall_center_offset = sx / 2.0 - _PASSAGE_WALL_HALF_M
-    left_wall_center = (
-        cx - wall_center_offset * math.cos(yaw),
-        cy - wall_center_offset * math.sin(yaw),
-        wall_z_center,
-    )
-    assembler.add_box(
-        left_wall_center,
-        (_PASSAGE_WALL_THICKNESS_M, sy, wall_z_extent),
-        yaw,
-    )
-    # Right wall.
-    right_wall_center = (
-        cx + wall_center_offset * math.cos(yaw),
-        cy + wall_center_offset * math.sin(yaw),
-        wall_z_center,
-    )
-    assembler.add_box(
-        right_wall_center,
-        (_PASSAGE_WALL_THICKNESS_M, sy, wall_z_extent),
-        yaw,
-    )
-    return assembler
+    center = (cx, cy, cz)
+    extent = (sx, sy, sz)
+    builders = {
+        "open-path": _open_path_geometry,
+        "covered-passage": _covered_passage_geometry,
+        "bridge-deck": _bridge_deck_geometry,
+        "building-shell": _building_shell_geometry,
+        "structural-frame": _structural_frame_geometry,
+        "drainage-channel": _drainage_geometry,
+        "retaining-structure": _retaining_geometry,
+        "guard-rail": _guard_geometry,
+        "service-prop": _service_prop_geometry,
+        "vegetation-band": _vegetation_geometry,
+    }
+    return builders[family](center, extent, yaw)
 
 
 # --------------------------------------------------------------------------- #

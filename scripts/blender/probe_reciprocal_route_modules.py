@@ -29,9 +29,10 @@ inferred from the plan, the build report, or the file name.  The probe
 does NOT promote ``modeled-unverified`` trust; all trust fields remain
 Literal-locked to ``preview-only`` / ``L0`` / ``none``.
 
-If a measurement cannot be taken (e.g., a ray missed every obstacle), it
-is recorded as ``passed=False`` with a ``failure_reason``; the report is
-still emitted, but its ``summary.overall_passed`` is ``False``.
+If a required measurement cannot be taken it is recorded as ``passed=False``
+with a ``failure_reason``. An upward miss is intentionally valid for an
+explicitly open route (unbounded overhead within the probe distance), while a
+covered route must still produce a finite roof hit.
 """
 
 from __future__ import annotations
@@ -58,6 +59,23 @@ MAX_ROUTE_SLOPE_PCT = 12.0
 MIN_ROUTE_CLEARANCE_M = 2.4
 MAX_TOPOLOGY_ATTACHMENT_DISTANCE_M = 2.0
 ROUTE_SAMPLES_PER_MODULE = 5
+ROUTE_GEOMETRY_FAMILIES = frozenset(
+    {"open-path", "covered-passage", "bridge-deck"},
+)
+KNOWN_GEOMETRY_FAMILIES = frozenset(
+    {
+        "open-path",
+        "covered-passage",
+        "bridge-deck",
+        "building-shell",
+        "structural-frame",
+        "drainage-channel",
+        "retaining-structure",
+        "guard-rail",
+        "service-prop",
+        "vegetation-band",
+    },
+)
 
 # Maximum ray-cast distance for perpendicular / upward samples (m).
 # Rays that exceed this distance without a hit are recorded as ``None``
@@ -620,6 +638,66 @@ def _polyline_points(parts: list[dict]) -> list[Vector]:
     return [_part_center_world(part) for part in parts]
 
 
+def _route_parts(parts: list[dict]) -> list[dict]:
+    """Return authored route-bearing parts; reject absent/unknown families."""
+
+    selected = []
+    for part in parts:
+        family = part.get("geometry_family")
+        if family not in KNOWN_GEOMETRY_FAMILIES:
+            raise ProbeBuildError(
+                f"part {part.get('part_id')} geometry_family is invalid",
+            )
+        if family in ROUTE_GEOMETRY_FAMILIES:
+            selected.append(part)
+    if not selected:
+        raise ProbeBuildError("module has no explicit route geometry parts")
+    if len(selected) <= ROUTE_SAMPLES_PER_MODULE:
+        return selected
+    # Deterministic evenly-spaced subset including both ends. Current default
+    # modules have <=5 route parts, but this keeps later additive plans bounded.
+    last = len(selected) - 1
+    indices = [
+        round(last * index / (ROUTE_SAMPLES_PER_MODULE - 1))
+        for index in range(ROUTE_SAMPLES_PER_MODULE)
+    ]
+    return [selected[index] for index in indices]
+
+
+def _route_part_samples(parts: list[dict]):
+    """Return direct canonical part centers with a deterministic tangent."""
+
+    points = _polyline_points(parts)
+    samples = []
+    for index, (part, position) in enumerate(zip(parts, points, strict=True)):
+        if len(points) == 1:
+            yaw = math.radians(float(part["part_layout"]["orientation_deg"]))
+            forward = Vector((-math.sin(yaw), math.cos(yaw), 0.0))
+        elif index < len(points) - 1:
+            forward = (points[index + 1] - position).normalized()
+        else:
+            forward = (position - points[index - 1]).normalized()
+        samples.append((part, position, forward))
+    return points, samples
+
+
+def _clearance_failures(family_distances: list[tuple[str, float | None]]) -> list[str]:
+    """Apply open-versus-covered upward-clearance semantics."""
+
+    if any(
+        family == "covered-passage" and distance is None
+        for family, distance in family_distances
+    ):
+        return ["covered route upward ray missed (finite roof unavailable)"]
+    finite = [distance for _family, distance in family_distances if distance is not None]
+    if finite and min(finite) < MIN_ROUTE_CLEARANCE_M:
+        return [
+            f"clearance_min_m={min(finite):.3f} < "
+            f"{MIN_ROUTE_CLEARANCE_M:.3f}",
+        ]
+    return []
+
+
 def _sample_polyline(points: list[Vector], sample_count: int):
     """Sample ``sample_count`` points evenly by arc length along the polyline.
 
@@ -681,8 +759,8 @@ def _measure_route(
     """Measure route geometry for one module.  Returns a dict of
     measurement values suitable for ``ModuleRouteProbe``."""
 
-    points = _polyline_points(parts)
-    samples_data = _sample_polyline(points, ROUTE_SAMPLES_PER_MODULE)
+    measured_parts = _route_parts(parts)
+    points, samples_data = _route_part_samples(measured_parts)
 
     # Flatten all BVHs (module + env) for perpendicular ray-casting.
     probe_bvhs = list(module_bvhs.values()) + [b for _id, b in env_bvhs]
@@ -690,9 +768,10 @@ def _measure_route(
     sample_measurements = []
     clear_widths = []
     clearances = []
+    family_distances = []
     any_ray_missed = False
 
-    for position, forward in samples_data:
+    for part, position, forward in samples_data:
         # Perpendicular directions in the XY plane.
         left_dir = Vector((-forward.y, forward.x, 0.0)).normalized()
         right_dir = Vector((forward.y, -forward.x, 0.0)).normalized()
@@ -714,6 +793,7 @@ def _measure_route(
             clear_widths.append(clear_width)
         if upward_clear is not None:
             clearances.append(upward_clear)
+        family_distances.append((part["geometry_family"], upward_clear))
 
         sample_measurements.append({
             "arc_length_m": 0.0,  # filled below
@@ -778,11 +858,7 @@ def _measure_route(
         failures.append(
             f"|slope_pct|={abs(slope_pct):.3f} > {MAX_ROUTE_SLOPE_PCT:.3f}",
         )
-    if clearance_min is not None and clearance_min < MIN_ROUTE_CLEARANCE_M:
-        failures.append(
-            f"clearance_min_m={clearance_min:.3f} < "
-            f"{MIN_ROUTE_CLEARANCE_M:.3f}",
-        )
+    failures.extend(_clearance_failures(family_distances))
 
     passed = not failures
     failure_reason = "; ".join(failures) if failures else None

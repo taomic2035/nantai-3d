@@ -795,6 +795,27 @@ def _load_runtime_module(monkeypatch: pytest.MonkeyPatch):
     return runtime
 
 
+def _load_probe_runtime_module(monkeypatch: pytest.MonkeyPatch):
+    """Load the Blender probe script while stubbing its Blender-only imports."""
+
+    script_path = _REPO_ROOT / "scripts/blender/probe_reciprocal_route_modules.py"
+    spec = importlib.util.spec_from_file_location(
+        "_test_probe_reciprocal_route_modules_phase43",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "mathutils", SimpleNamespace(Vector=object))
+    monkeypatch.setitem(
+        sys.modules,
+        "mathutils.bvhtree",
+        SimpleNamespace(BVHTree=object),
+    )
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    return runtime
+
+
 def test_junction_vegetation_clearance_targets_derive_from_bound_plan(
     base: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
@@ -1027,46 +1048,123 @@ def test_tag_topology_proxy_does_not_set_nv_root(
     assert proxy.hide_viewport is False
 
 
-def test_module_geometry_emits_four_panel_passage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The 4-panel passage has floor + ceiling + left wall + right wall
-    (no front / back) so the route passes through along y and the
-    upward ray hits the ceiling underside.  Floor and ceiling are
-    offset by ``_PASSAGE_RAY_SAFE_GAP_M`` from the part center so the
-    ray origin is not on either panel surface."""
-
-    runtime = _load_runtime_module(monkeypatch)
-    # Use a known part_layout to make assertions deterministic.
-    part = {
+def _geometry_part(
+    geometry_family: str,
+    semantic_id: int,
+    *,
+    orientation_deg: float = 0.0,
+) -> dict:
+    return {
+        "part_id": f"test-{geometry_family}",
+        "semantic_id": semantic_id,
+        "geometry_family": geometry_family,
         "part_layout": {
             "center_m": [0.0, 0.0, 0.0],
-            "extent_m": [1.6, 1.6, 2.5],
-            "orientation_deg": 0.0,
+            "extent_m": [1.6, 2.6, 2.5],
+            "orientation_deg": orientation_deg,
         },
     }
-    assembler = runtime._module_geometry(part)
-    # 4 boxes × 8 vertices/box = 32 vertices (each box is independent
-    # because MeshAssembler.add extends the vertex list).
-    assert len(assembler.vertices) == 32
-    # 4 boxes × 6 faces/box = 24 faces.
-    assert len(assembler.faces) == 24
-    # Floor slab top face at z = -0.001 (gap), centre at -0.026, bottom
-    # at -0.051; ceiling slab bottom at z = 2.501, centre at 2.526, top
-    # at 2.551.  Vertex z range must cover both slabs.
-    z_values = [v[2] for v in assembler.vertices]
-    assert min(z_values) <= -0.05  # floor slab extends below z=0
-    assert max(z_values) >= 2.55   # ceiling slab extends above z=2.5
-    # Left wall sits at x = -0.8 + 0.05 = -0.75; right at +0.75.
-    x_values = [v[0] for v in assembler.vertices]
-    assert min(x_values) <= -0.74
-    assert max(x_values) >= 0.74
 
 
-def test_module_geometry_rotates_wall_offsets_with_passage(
+def test_module_geometry_open_path_has_no_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Yaw rotates both each wall box and its local-x centre offset.
+    """Open route keeps measurable low curbs but never invents a roof."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    assembler = runtime._module_geometry(_geometry_part("open-path", 7))
+
+    assert len(assembler.vertices) == 24
+    assert len(assembler.faces) == 18
+    z_values = [v[2] for v in assembler.vertices]
+    assert min(z_values) < 0.0
+    assert max(z_values) < 0.5
+
+
+def test_module_geometry_covered_passage_retains_finite_roof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an explicitly building-semantic passage gets full sides and roof."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    assembler = runtime._module_geometry(_geometry_part("covered-passage", 3))
+
+    assert len(assembler.vertices) == 32
+    assert len(assembler.faces) == 24
+    assert max(vertex[2] for vertex in assembler.vertices) >= 2.55
+
+
+def test_module_geometry_bridge_deck_is_open_overhead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    assembler = runtime._module_geometry(_geometry_part("bridge-deck", 4))
+
+    assert max(vertex[2] for vertex in assembler.vertices) < 1.0
+
+
+def test_module_geometry_families_do_not_serialize_identically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All authored blockout families must produce a distinct mesh payload."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    family_semantics = {
+        "open-path": 7,
+        "covered-passage": 3,
+        "bridge-deck": 4,
+        "building-shell": 3,
+        "structural-frame": 3,
+        "drainage-channel": 5,
+        "retaining-structure": 12,
+        "guard-rail": 13,
+        "service-prop": 13,
+        "vegetation-band": 13,
+    }
+    payloads = set()
+    for family, semantic_id in family_semantics.items():
+        assembler = runtime._module_geometry(_geometry_part(family, semantic_id))
+        payloads.add((tuple(assembler.vertices), tuple(assembler.faces)))
+
+    assert len(payloads) == len(family_semantics)
+
+
+@pytest.mark.parametrize(
+    ("part", "message"),
+    [
+        ({"semantic_id": 7, "part_layout": {}}, "geometry_family"),
+        (
+            {
+                "geometry_family": "covered-passage",
+                "semantic_id": 7,
+                "part_layout": {},
+            },
+            "incompatible",
+        ),
+        (
+            {
+                "geometry_family": "mystery",
+                "semantic_id": 7,
+                "part_layout": {},
+            },
+            "geometry_family",
+        ),
+    ],
+)
+def test_module_geometry_rejects_invalid_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    part: dict,
+    message: str,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    with pytest.raises(runtime.RuntimeBuildError, match=message):
+        runtime._module_geometry(part)
+
+
+def test_module_geometry_rotates_open_path_curbs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Yaw rotates both each curb box and its local-x centre offset.
 
     A 270-degree passage runs along world +x, so its walls must straddle
     world y.  Rotating only the boxes leaves their centres on world x and
@@ -1074,20 +1172,91 @@ def test_module_geometry_rotates_wall_offsets_with_passage(
     """
 
     runtime = _load_runtime_module(monkeypatch)
-    assembler = runtime._module_geometry({
-        "part_layout": {
-            "center_m": [30.0, 40.0, 77.0],
-            "extent_m": [1.6, 2.6, 2.5],
-            "orientation_deg": 270.0,
-        },
-    })
-    left_wall = assembler.vertices[16:24]
-    right_wall = assembler.vertices[24:32]
-    left_center = tuple(sum(vertex[axis] for vertex in left_wall) / 8 for axis in range(3))
-    right_center = tuple(sum(vertex[axis] for vertex in right_wall) / 8 for axis in range(3))
+    part = _geometry_part("open-path", 7, orientation_deg=270.0)
+    part["part_layout"]["center_m"] = [30.0, 40.0, 77.0]
+    assembler = runtime._module_geometry(part)
+    left_curb = assembler.vertices[8:16]
+    right_curb = assembler.vertices[16:24]
+    left_center = tuple(sum(vertex[axis] for vertex in left_curb) / 8 for axis in range(3))
+    right_center = tuple(sum(vertex[axis] for vertex in right_curb) / 8 for axis in range(3))
 
     assert left_center[:2] == pytest.approx((30.0, 40.75))
     assert right_center[:2] == pytest.approx((30.0, 39.25))
+
+
+def test_probe_selects_only_explicit_route_families(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_probe_runtime_module(monkeypatch)
+    parts = [
+        {"part_id": "a", "instance_id": 1, "geometry_family": "open-path"},
+        {"part_id": "b", "instance_id": 2, "geometry_family": "guard-rail"},
+        {"part_id": "c", "instance_id": 3, "geometry_family": "covered-passage"},
+        {"part_id": "d", "instance_id": 4, "geometry_family": "bridge-deck"},
+        {"part_id": "e", "instance_id": 5, "geometry_family": "drainage-channel"},
+    ]
+
+    selected = runtime._route_parts(parts)
+
+    assert [part["part_id"] for part in selected] == ["a", "c", "d"]
+
+
+def test_probe_rejects_missing_geometry_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_probe_runtime_module(monkeypatch)
+    with pytest.raises(runtime.ProbeBuildError, match="geometry_family"):
+        runtime._route_parts([{"part_id": "legacy", "instance_id": 1}])
+
+
+def test_every_default_module_has_real_route_probe_parts(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_probe_runtime_module(monkeypatch)
+    plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    )
+
+    counts = {
+        module.module_id: len(
+            runtime._route_parts(
+                [part.model_dump(mode="json") for part in module.parts],
+            ),
+        )
+        for module in plan.modules
+    }
+
+    assert counts == {
+        "central-courtyard-downhill": 5,
+        "bridge-deck-crossing": 5,
+        "watermill-tailrace": 3,
+        "covered-gallery-underpass": 4,
+        "forest-orchard-boundary": 5,
+        "lower-valley-uphill": 4,
+    }
+
+
+def test_probe_requires_finite_clearance_for_covered_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_probe_runtime_module(monkeypatch)
+
+    assert runtime._clearance_failures(
+        [
+            ("open-path", None),
+            ("bridge-deck", None),
+            ("covered-passage", 2.5),
+        ],
+    ) == []
+    assert runtime._clearance_failures(
+        [("covered-passage", None)],
+    ) == ["covered route upward ray missed (finite roof unavailable)"]
+    assert runtime._clearance_failures(
+        [("covered-passage", 2.0)],
+    ) == ["clearance_min_m=2.000 < 2.400"]
 
 
 def test_topology_proxy_geometry_places_box_at_center(
