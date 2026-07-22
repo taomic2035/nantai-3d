@@ -2,7 +2,7 @@
 
 > 日期：2026-07-22
 > 生成：OpenAI built-in image generation，经 Codex imagegen
-> 状态：`6/6` 原始来源完成；私有候选；未注册、未进入 Release
+> 状态：`6/6` 原始来源 + `2` 个定向质量变体完成；私有候选；未注册、未进入 Release
 
 ## 结论
 
@@ -64,6 +64,21 @@ RGB mean absolute error 重算：
 同类请求，也没有把“看起来接近”写成通过。仓库已有 H3 确定性 quilting、对侧边缘
 强制连续和 PBR 派生工具链；后续应把合格来源接到该机器验证链，而不是靠提示词或
 主观目测授予 seamless。
+
+## 定向质量变体（2026-07-22 追加）
+
+逐张视觉审查发现：原灰瓦带明显局部烘焙明暗，原溪床有水下模糊/湿润观感。为降低
+Blender 二次打光风险，使用 built-in image generation 生成两个独立 v2 候选；没有
+覆盖原文件，也没有把变体选入生产合同：
+
+| variant | bytes | SHA-256 | left/right | top/bottom | status |
+|---|---:|---|---:|---:|---|
+| `material-albedo-gray-clay-roof-tile-01-flatlight-v2.png` | `3,092,888` | `c6a29d6ada000661a5f4656c5dfc32021e5d611ebcd1c01eb57c2139fe7d5286` | `0.114964` | `0.067390` | design-only；仍有瓦片曲面局部明暗 |
+| `material-albedo-shallow-creek-bed-01-dry-v2.png` | `3,678,841` | `1dddd1f0b956471daddbba4a8b7fb0b4505929ef225c61bf9dd55a429d033a4a` | `0.128768` | `0.120457` | 视觉优选；待 deterministic authoring |
+
+两张均为 `1254×1254 RGB PNG`。灰瓦 v2 的上下边误差明显下降，但左右边仍未通过；
+干溪床 v2 消除了原图的水感，却没有获得无缝证据。精确提示词、队列、SHA 和视觉
+判定均已写回 Batch 15 私有候选目录。二者继续保持 `trust_effect=none`。
 
 ## 信任边界
 
