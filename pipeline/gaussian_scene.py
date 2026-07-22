@@ -27,6 +27,10 @@ from loguru import logger
 from plyfile import PlyData, PlyElement
 
 from pipeline.recon_schema import Sim3, _canonical_float
+from pipeline.spherical_harmonics import (
+    compute_sh_rotation_blocks,
+    rotate_sh_coefficients,
+)
 
 if TYPE_CHECKING:
     from pipeline.recon_schema import FrameTransform
@@ -452,8 +456,8 @@ class GaussianScene:
         ``Sim3`` 的匿名条目，使得 :func:`reconstruct._validate_scene_history` 因找不到
         对应可审计定义而 fail-closed —— 从而无法再"凭空/按约定(空历史)"通过校验。
         """
-        self._validate_safe_rotation(sim3)
-        self._apply_sim3(sim3)
+        sh_blocks = self._prepare_sh_rotation(sim3)
+        self._apply_sim3(sim3, sh_blocks=sh_blocks)
         # Record only after the mutation commits, so a failed transform leaves
         # both geometry and history untouched (fail-closed atomicity).
         self._record_anonymous_transform(sim3)
@@ -497,23 +501,31 @@ class GaussianScene:
     def flatten_sh(self) -> "GaussianScene":
         """丢弃高阶球谐 (f_rest), 只保留 DC (视角无关基色), 原地修改并返回 self。
 
-        高阶 SH 编码视角相关外观 (高光/反射), 其正确旋转 (Wigner-D) 本版未实现, 故
-        transform()/apply_frame_transform() 对含高阶 SH 的场景施加非恒等旋转时 fail-closed
-        阻断 (见 _validate_safe_rotation)。flatten 后 sh_degree=0, 旋转对 DC 恒等 → 米制/
-        地理对齐 (sfm-local→ENU 的 Sim3 含旋转) 可安全应用于真实 3DGS 重建。诚实代价: 失去
-        视角相关高光, 保留正确的视角无关基色 —— 远好于施加错误 SH 旋转产生的错误颜色。
+        高阶 SH 编码视角相关外观 (高光/反射)。transform()/apply_frame_transform() 现已
+        实现可靠的 degree 0–3 SH 旋转 (Wigner-D, 见 pipeline/spherical_harmonics.py)，但
+        某些场景仍需 flatten：训练器只接受 DC、或需要减少 PLY 体积。flatten 后 sh_degree=0,
+        旋转对 DC 恒等。诚实代价: 失去视角相关高光, 保留正确的视角无关基色。
         """
         self.sh_rest = np.zeros((self.xyz.shape[0], 0), dtype=np.float64)
         self.sh_degree = 0
         return self
 
-    def _validate_safe_rotation(self, sim3: Sim3) -> None:
+    def _prepare_sh_rotation(
+        self, sim3: Sim3,
+    ) -> tuple[np.ndarray, ...] | None:
+        """Compute Wigner-D rotation blocks for the scene's SH degree.
+
+        Returns ``None`` when no SH rotation is needed (identity rotation or
+        degree-0 scene).  Otherwise returns blocks from
+        :func:`compute_sh_rotation_blocks`, which also validates ``R`` is a
+        proper orthonormal rotation (fail-closed on improper / NaN input).
+        """
+        if self.sh_degree == 0:
+            return None
         rotation = sim3.rotation_matrix()
-        if self.sh_degree > 0 and not np.allclose(rotation, np.eye(3), atol=1e-10):
-            raise ValueError(
-                "rotation 会改变高阶 SH 球谐基；当前版本未实现可靠 SH rotation，已阻断。"
-                "如需米制/地理对齐真实 SH 重建，先扁平化 SH（丢 f_rest 保 DC 视角无关基色）："
-                "scripts/flatten_ply_sh.py 或 GaussianScene.flatten_sh()")
+        if np.allclose(rotation, np.eye(3), atol=1e-10):
+            return None
+        return compute_sh_rotation_blocks(rotation, max_degree=self.sh_degree)
 
     @staticmethod
     def _require_float32_representable(label: str, values: np.ndarray) -> None:
@@ -528,7 +540,10 @@ class GaussianScene:
                 f"transformed {label} values must be representable as float32"
             )
 
-    def _apply_sim3(self, sim3: Sim3) -> None:
+    def _apply_sim3(
+        self, sim3: Sim3,
+        sh_blocks: tuple[np.ndarray, ...] | None = None,
+    ) -> None:
         rotation = sim3.rotation_matrix()
         with np.errstate(over="ignore", invalid="ignore"):
             xyz = sim3.scale * (self.xyz @ rotation.T) + np.array(sim3.t_xyz)
@@ -541,11 +556,19 @@ class GaussianScene:
         norms[norms < 1e-12] = 1.0
         rot = rot / norms
 
+        # Rotate SH coefficients using pre-computed Wigner-D blocks.
+        new_sh_rest = self.sh_rest
+        if sh_blocks is not None and self.sh_rest.shape[1] > 0:
+            new_sh_rest = rotate_sh_coefficients(
+                self.sh_rest, sh_blocks, self.sh_degree,
+            )
+
         for label, values in (
             ("xyz", xyz),
             ("scale", scale),
             ("normals", normals),
             ("quaternion", rot),
+            ("sh_rest", new_sh_rest),
         ):
             self._require_float32_representable(label, values)
 
@@ -555,6 +578,7 @@ class GaussianScene:
         self.scale = scale
         self.normals = normals
         self.rot = rot
+        self.sh_rest = new_sh_rest
 
     def apply_frame_transform(
         self,
@@ -570,8 +594,8 @@ class GaussianScene:
             raise ValueError(
                 f"transform source frame 不匹配: scene={self.frame_id}, "
                 f"expected={transform.source_frame}")
-        self._validate_safe_rotation(transform.sim3)
-        self._apply_sim3(transform.sim3)
+        sh_blocks = self._prepare_sh_rotation(transform.sim3)
+        self._apply_sim3(transform.sim3, sh_blocks=sh_blocks)
         self.frame_id = transform.target_frame
         if target_units is not None:
             self.units = getattr(target_units, "value", target_units)

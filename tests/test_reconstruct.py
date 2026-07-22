@@ -396,14 +396,15 @@ class TestImportEngine:
         assert "chunks" not in m["artifacts"]
         assert not (tmp_path / "web" / "chunks").exists()
 
-    def test_sh_reconstruction_needs_flatten_to_metric_align_through_rotation(
+    def test_sh_reconstruction_metric_align_through_rotation_without_flatten(
         self, photos_dir, tmp_path,
     ):
         # End-to-end real-data-workflow.md step 3: a REAL 3DGS with higher-order SH,
         # imported through a NON-identity-rotation Sim3 into an ENU-aligned world.
-        # Without flatten the loader fail-closes on SH+rotation; after flatten the same
-        # import reaches geometry_usability=metric-aligned (flatten drops f_rest only —
-        # it never touches the frame/units/provenance that earn the metric class).
+        # SH rotation (Wigner-D) is now implemented, so the import succeeds WITHOUT
+        # needing flatten_sh — the SH coefficients are rotated to preserve view-
+        # dependent colour. flatten_sh remains available as a lossy downgrade but is
+        # no longer a prerequisite for metric alignment through rotation.
         from pipeline.alignment import align_registration
         from pipeline.recon_schema import (
             CameraIntrinsics,
@@ -449,32 +450,27 @@ class TestImportEngine:
                       t_xyz=[0.0, 0.0, 0.0]),
             method=TransformMethod.EXTERNAL_SIM3, evidence=["control-point fit"])
 
-        def _import(scene):
-            ply = tmp_path / "trained.ply"
-            scene.save_ply(ply, flavor="3dgs")
-            return reconstruct(
-                photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                web_dir=tmp_path / "web", engine="import", registration=aligned,
-                splat_map=[SplatInput(session_id="s0", path=str(ply),
-                                      source_frame=trainer_frame, transform=transform)],
-                dedup_voxel=0.0)
-
-        # 未 flatten: SH + 旋转 → fail-closed 阻断
-        with pytest.raises(ValueError, match="SH"):
-            _import(sh_scene)
-        # flatten 后: 同一导入到达 metric-aligned
-        m = _import(sh_scene.flatten_sh())
+        ply = tmp_path / "trained.ply"
+        sh_scene.save_ply(ply, flavor="3dgs")
+        m = reconstruct(
+            photos_dir=photos_dir, out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web", engine="import", registration=aligned,
+            splat_map=[SplatInput(session_id="s0", path=str(ply),
+                                  source_frame=trainer_frame, transform=transform)],
+            dedup_voxel=0.0)
+        # SH + 旋转 → 直接到达 metric-aligned (Wigner-D 保留视角相关颜色)
         assert m["coordinate_contract"]["alignment_status"] == "aligned"
         assert m["provenance"]["synthetic"] is False
         assert m["provenance"]["geometry_usability"] == "metric-aligned"
 
-    def test_flatten_ply_sh_script_unblocks_metric_alignment_of_sh_reconstruction(
+    def test_flatten_ply_sh_script_produces_rotation_safe_degree0_ply(
         self, tmp_path,
     ):
-        # Real 3DGS reconstructions (nerfstudio splatfacto) carry higher-order SH.
-        # Metric/geo alignment applies a Sim3 with ROTATION, which the loader blocks
-        # for SH scenes (no reliable SH rotation → fail-closed). scripts/flatten_ply_sh.py
-        # is the documented honest preprocessing: drop f_rest_*, keep DC → rotation-safe.
+        # scripts/flatten_ply_sh.py drops f_rest_* keeping DC (view-independent
+        # base colour). SH rotation (Wigner-D) is now implemented, so flatten is
+        # no longer a prerequisite for metric alignment through rotation — but it
+        # remains a valid lossy downgrade when a consumer only accepts DC, or to
+        # reduce PLY size. The resulting degree-0 ply is trivially rotation-safe.
         import subprocess
         import sys
 
@@ -494,7 +490,7 @@ class TestImportEngine:
 
         flat = GaussianScene.load_ply(ply)
         assert flat.sh_degree == 0
-        # 旋转 (如 sfm-local→ENU 对齐) 现在不再被 SH 阻断
+        # degree-0 旋转对 SH 恒等 (无高阶系数)
         flat.transform(Sim3(quat_wxyz=[np.cos(np.pi / 4), 0, 0, np.sin(np.pi / 4)]))
         assert flat.sh_degree == 0
 

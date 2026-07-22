@@ -63,9 +63,9 @@ class TestTransform:
     def test_flatten_sh_unblocks_rotation_keeping_view_independent_color(
         self, tmp_path, degree, width,
     ):
-        """含高阶 SH 的场景旋转被 fail-closed 阻断 (未实现可靠 SH 旋转); flatten_sh
-        丢高阶保 DC (视角无关基色) → sh_degree=0 → 米制/地理对齐的旋转可安全应用。
-        这是真实 3DGS 重建 (nerfstudio splatfacto 输出 degree 3 SH) 米制对齐的诚实降级路径。"""
+        """SH rotation (Wigner-D) 现已实现: 含高阶 SH 的场景可直接旋转。
+        flatten_sh 仍可作为有损降级使用 (丢 f_rest 保 DC), 但不再是必须的前置步骤。
+        这是真实 3DGS 重建 (nerfstudio splatfacto 输出 degree 3 SH) 米制对齐的完整路径。"""
         n = 16
         rng = np.random.default_rng(3)
         xyz = rng.uniform(-1, 1, (n, 3))
@@ -75,21 +75,24 @@ class TestTransform:
         assert scene.sh_degree == degree
         half = np.pi / 4
         rot = Sim3(quat_wxyz=[np.cos(half), 0, 0, np.sin(half)])
-        # 阻断信息须自文档化: 指向 flatten 解法, 而非留用户面对死路。
-        with pytest.raises(ValueError, match="flatten"):
-            scene.transform(rot)
-
+        sh_before = scene.sh_rest.copy()
         dc_before = scene.sh_dc.copy()
+
+        # Rotation now succeeds directly — SH coefficients are rotated via Wigner-D.
+        scene.transform(rot)
+        assert scene.sh_degree == degree              # degree preserved
+        assert scene.sh_rest.shape == (n, width)      # shape preserved
+        assert np.all(np.isfinite(scene.sh_rest))
+        assert not np.array_equal(scene.sh_rest, sh_before)  # SH changed
+        assert np.array_equal(scene.sh_dc, dc_before)  # DC unchanged
+
+        # flatten_sh is still available as a lossy downgrade
         returned = scene.flatten_sh()
-        assert returned is scene                       # 原地修改并返回 self, 可链式
+        assert returned is scene
         assert scene.sh_degree == 0
         assert scene.sh_rest.shape == (n, 0)
-        assert np.array_equal(scene.sh_dc, dc_before)  # DC 视角无关基色不变
+        assert np.array_equal(scene.sh_dc, dc_before)
 
-        scene.transform(rot)                            # 不再阻断
-        assert np.array_equal(scene.sh_dc, dc_before)  # 旋转对 DC 恒等
-
-        # flatten 后存盘/重载是合法 degree-0 3dgs ply
         p = tmp_path / "flat.ply"
         scene.save_ply(p, flavor="3dgs")
         assert GaussianScene.load_ply(p).sh_degree == 0
@@ -129,14 +132,17 @@ class TestTransform:
         assert all(tid.startswith("anon-") for tid in ids)
 
     def test_failed_transform_leaves_history_untouched(self):
-        # High-order SH rotation fails closed; history must stay empty too.
+        # SH rotation (Wigner-D) now succeeds, so we exercise the float32
+        # representability gate: a huge coordinate + large scale overflows,
+        # and the transform must fail closed leaving history empty.
         from pipeline.gaussian_scene import GaussianScene
         sh_rest = np.arange(24, dtype=np.float64).reshape(1, 24)
-        s = GaussianScene([[1.0, 0, 0]], [[0.5, 0.5, 0.5]], sh_rest=sh_rest)
+        s = GaussianScene([[3.0e38, 0, 0]], [[0.5, 0.5, 0.5]], sh_rest=sh_rest)
         assert s.sh_degree > 0
-        half = np.pi / 4
-        with pytest.raises(ValueError, match="SH|球谐|rotation"):
-            s.transform(Sim3(quat_wxyz=[np.cos(half), 0, 0, np.sin(half)]))
+        half = np.pi / 8
+        with pytest.raises(ValueError, match="float32|representable"):
+            s.transform(Sim3(scale=2.0,
+                             quat_wxyz=[np.cos(half), 0, 0, np.sin(half)]))
         assert s.applied_transform_ids == []
         assert s.applied_transform_paths == []
 

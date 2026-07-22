@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """扁平化 3DGS PLY 的球谐 (SH): 丢弃高阶 f_rest_*, 只保留 DC (f_dc) 视角无关基色。
 
-为什么需要: 本仓库的坐标对齐会把 sfm-local 场景经 Sim3 (含**旋转**) 变换到米制 ENU
-世界。高阶 SH 编码视角相关外观 (高光/反射), 其正确旋转 (Wigner-D) 本版**未实现**, 故
-canonical loader/transform 对含高阶 SH 的场景施加非恒等旋转时**故意 fail-closed 阻断**
-(绝不施加错误的 SH 旋转产生错误颜色)。nerfstudio splatfacto 等训练器输出带 SH 的 3DGS,
-若要对其做**米制/地理对齐**, 先用本工具扁平化 SH。
+用途: ``pipeline/spherical_harmonics.py`` 已实现 degree 0–3 的 Wigner-D SH 旋转,
+含高阶 SH 的场景可直接经非恒等 Sim3 旋转对齐到 ENU, **无需** 先扁平化。本工具
+保留为**有损降级**选项, 适用于:
+  - 下游消费者只接受 DC (如某些 viewer/trainer)
+  - 减小 PLY 体积 (丢弃 f_rest_* 属性)
+  - 不需要视角相关高光的简化漫游
 
-诚实代价: 丢失视角相关高光, 保留正确的视角无关基色 —— 远好于错误的 SH 旋转。基本漫游
-(preview-only sfm-local, 不含旋转) 无需本步; 仅米制/地理对齐 (含旋转) 路径需要。
+诚实代价: 丢失视角相关高光, 保留正确的视角无关基色。旋转后 DC 恒等 (degree-0
+SH 是常数), 故 flatten 后的 PLY 仍可安全旋转。
 
 用法 (通常排在 normalize_ply_quats 之后、prepare_import 之前):
     python scripts/flatten_ply_sh.py trained/point_cloud.ply               # 原地写回

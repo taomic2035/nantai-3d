@@ -224,7 +224,7 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
 
 - `pipeline/registration.py`：COLMAP SIFT **默认走 CPU**（`use_gpu=False`），无 N 卡/headless 可靠；`reconstruct --colmap-gpu` 可显式开 GPU 提速。
 - `scripts/normalize_ply_quats.py`：训练器 PLY 的四元数归一化预处理（加载器 fail-closed 拒绝非单位四元数，Studio 复用同一语义校验，故不改门、提供预处理）。
-- `scripts/flatten_ply_sh.py`：米制对齐前扁平化高阶球谐（丢 `f_rest_*` 保 DC）的诚实预处理——高阶 SH 的正确旋转未实现，加载器对「SH + 旋转」fail-closed，flatten 后旋转对 DC 恒等即可安全对齐（`GaussianScene.flatten_sh()` 同语义，均有测试）。
+- `scripts/flatten_ply_sh.py`：扁平化高阶球谐（丢 `f_rest_*` 保 DC）的**可选降级**工具——`pipeline/spherical_harmonics.py` 已实现 degree 0–3 Wigner-D SH 旋转，含高阶 SH 的场景可直接经非恒等 Sim3 旋转对齐，**无需** 先 flatten。flatten 适用于仅需视角无关基色或减小 PLY 体积的场景（`GaussianScene.flatten_sh()` 同语义，均有测试）。
 - `pipeline/spatial_chunk.py` + `scripts/chunk_reconstruction.py`：大重建的空间分块（XY 网格 → per-chunk ply + LOD + `chunks.json` 流式 manifest），让上百万高斯的真实重建可只载相机附近的块。纯重打包：半开区间分箱保证无损不重复，provenance 逐块继承、manifest 如实记录源契约，绝不提升信任。
 - `scripts/prepare_import.py`：一键生成导入契约（registration.json + splat-input.json），消除手写易错步骤；生成诚实的 sfm-local frame。
 - `scripts/reconstruct_local.py`：**一键本机重建**——串起 COLMAP→Brush→normalize→prepare_import→import。**图片目录与视频文件两种输入均已本机实测端到端跑通**（视频自动抽帧，时序帧走 sequential 匹配）。
