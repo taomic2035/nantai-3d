@@ -538,6 +538,20 @@ def test_plan_carries_explicit_geometry_family_on_every_part(plan) -> None:
     }
 
 
+def test_declared_clear_height_routes_have_covered_geometry(plan) -> None:
+    """Recipes with finite route clear height must materialize a covered part."""
+
+    modules = {module.module_id: module for module in plan.modules}
+    for module_id in (
+        "central-courtyard-downhill",
+        "covered-gallery-underpass",
+    ):
+        assert any(
+            part.geometry_family == "covered-passage"
+            for part in modules[module_id].parts
+        ), module_id
+
+
 def test_part_rejects_missing_geometry_family(plan) -> None:
     """A legacy or tampered part cannot fall back to a universal primitive."""
 

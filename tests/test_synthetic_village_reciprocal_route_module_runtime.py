@@ -1233,7 +1233,7 @@ def test_every_default_module_has_real_route_probe_parts(
         "central-courtyard-downhill": 5,
         "bridge-deck-crossing": 5,
         "watermill-tailrace": 3,
-        "covered-gallery-underpass": 4,
+        "covered-gallery-underpass": 5,
         "forest-orchard-boundary": 5,
         "lower-valley-uphill": 4,
     }

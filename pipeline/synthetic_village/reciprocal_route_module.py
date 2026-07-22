@@ -1652,7 +1652,10 @@ _DEFAULT_GEOMETRY_FAMILY_BY_PART_ID: dict[str, GeometryFamily] = {
     # The lower lane is a path surface under separately declared gallery
     # structure; its own path-semantic mesh deliberately has no fake roof.
     "gallery-underpass-lower-lane-001": "open-path",
-    "gallery-post-run-001": "structural-frame",
+    # The recipe declares a finite lower-lane clear height. The building-
+    # semantic post run owns the measured covered cell; the path-semantic
+    # lower lane stays an open surface and therefore never mislabels a roof.
+    "gallery-post-run-001": "covered-passage",
     "gallery-beam-run-001": "structural-frame",
     "gallery-foundation-run-001": "retaining-structure",
     "gallery-guard-run-001": "guard-rail",
