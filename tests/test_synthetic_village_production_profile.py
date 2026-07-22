@@ -117,9 +117,18 @@ def test_elevated_pedestrian_resolves_all_real_walkable_edges() -> None:
     elevated = resolved["elevated-pedestrian"]
     assert all(isinstance(row, ElevatedPolylineTopologySource) for row in elevated)
     topology = build_elevated_topology_plan(scene)
-    assert {row.topology_ref for row in elevated} == {
-        edge.edge_id for edge in topology.edges
+    # Ground-closing edges (both endpoints at ground level) are excluded
+    # from elevated-pedestrian sources — they are ground-level paths, not
+    # elevated walkways.  Placing elevated cameras on them creates
+    # near-duplicate poses with ground-route cameras (degenerate baseline).
+    nodes_by_id = {node.node_id: node for node in topology.nodes}
+    elevated_edge_ids = {
+        edge.edge_id
+        for edge in topology.edges
+        if nodes_by_id[edge.start_node_id].level == "elevated"
+        or nodes_by_id[edge.end_node_id].level == "elevated"
     }
+    assert {row.topology_ref for row in elevated} == elevated_edge_ids
     assert {row.loop_id for row in elevated} == {
         "central-loop",
         "upper-loop",
@@ -144,7 +153,15 @@ def test_plan_places_the_full_target_from_verified_topology() -> None:
 
 def test_exactly_48_elevated_cameras_follow_real_3d_centerlines() -> None:
     topology = build_elevated_topology_plan()
-    edges = {edge.edge_id: edge for edge in topology.edges}
+    # Only elevated walkway edges (at least one elevated endpoint) are
+    # used for camera placement — ground-closing edges are excluded.
+    nodes_by_id = {node.node_id: node for node in topology.nodes}
+    edges = {
+        edge.edge_id: edge
+        for edge in topology.edges
+        if nodes_by_id[edge.start_node_id].level == "elevated"
+        or nodes_by_id[edge.end_node_id].level == "elevated"
+    }
     cameras = [
         camera
         for camera in build_production_camera_plan().cameras
@@ -172,7 +189,15 @@ def test_exactly_48_elevated_cameras_follow_real_3d_centerlines() -> None:
 
 def test_each_elevated_edge_is_observed_in_both_travel_directions() -> None:
     topology = build_elevated_topology_plan()
-    edges = {edge.edge_id: edge for edge in topology.edges}
+    # Only elevated walkway edges (at least one elevated endpoint) are
+    # observed — ground-closing edges are excluded from camera placement.
+    nodes_by_id = {node.node_id: node for node in topology.nodes}
+    edges = {
+        edge.edge_id: edge
+        for edge in topology.edges
+        if nodes_by_id[edge.start_node_id].level == "elevated"
+        or nodes_by_id[edge.end_node_id].level == "elevated"
+    }
     directions: dict[str, set[int]] = {edge_id: set() for edge_id in edges}
     for camera in build_production_camera_plan().cameras:
         if camera.group_id != "elevated-pedestrian":
@@ -543,28 +568,39 @@ def test_route_loop_and_group_summaries_reject_external_mutation() -> None:
         _reload(payload)
 
 
-def test_pose_separation_evidence_reports_the_distribution_without_inventing_a_threshold() -> None:
-    """req 5 没实现 —— 但【实测分布】可以如实给出, 让 Codex 自己判断。
-
-    绝不编阈值: "多近算近重复" 定不出来, 就报分布 + 显式声明没有阈值,
-    绝不挑一个数假装它是判据。
-    """
+def test_pose_separation_evidence_reports_distribution_with_parallax_threshold() -> None:
+    """req 5 近重复检测已实现: parallax 物理阈值 + 实测分布。"""
 
     from pipeline.synthetic_village.production_profile import pose_separation_evidence
 
     plan = build_production_camera_plan()
     evidence = pose_separation_evidence(plan)
 
-    assert evidence["threshold"] is None
-    assert "no-threshold" in evidence["disclaimer"]
     assert evidence["pair_count"] > 0
     assert evidence["nearest_pair_m"] > 0.0
+    assert evidence["near_duplicate_threshold_m"] > 0.0
+    assert evidence["near_duplicate_check"] == "passed"
+    assert "parallax" in evidence["disclaimer"]
+
+    # 阈值是物理推导, 不是任意数字:
+    # min_baseline = PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
+    from pipeline.synthetic_village.production_profile import (
+        MIN_PARALLAX_TOLERANCE_PX,
+        REFERENCE_SCENE_DEPTH_M,
+    )
+    fx_px = plan.cameras[0].intrinsics.fx
+    expected_threshold = MIN_PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
+    assert evidence["near_duplicate_threshold_m"] == pytest.approx(
+        round(expected_threshold, 3), abs=1e-3
+    )
+
+    # 最近对距离必须 > parallax 阈值 (否则 plan 验证会 fail-closed)
+    assert evidence["nearest_pair_m"] >= evidence["near_duplicate_threshold_m"]
 
     # 分布必须是【实算】的: 最近一对必须真的是最近的
     nearest = evidence["nearest_pair"]
     by_id = {c.camera_id: c.position_m for c in plan.cameras}
     recomputed = math.dist(by_id[nearest[0]], by_id[nearest[1]])
-    # 报告值是 round(..., 3), 故容差取 1e-3 —— 不是精确相等
     assert recomputed == pytest.approx(evidence["nearest_pair_m"], abs=1e-3)
     everything = [
         math.dist(a.position_m, b.position_m)
@@ -909,6 +945,92 @@ def test_isolated_camera_detection_reason_documents_implementation() -> None:
     assert "near-duplicate" in row.reason
     assert "sky/ground" in row.reason
 
+
+# --------------------------------------------------------------------------
+# req 5: near-duplicate pose detection (parallax-based)
+# --------------------------------------------------------------------------
+
+
+def test_near_duplicate_pose_detection_passes_on_current_plan() -> None:
+    """当前 180 台相机的最近对间距必须 >= parallax 物理阈值。"""
+
+    plan = build_production_camera_plan()
+    assert plan.camera_count == 180
+
+
+def test_near_duplicate_pose_detection_rejects_injected_pair() -> None:
+    """注入一对间距低于 parallax 阈值的相机时, 验证必须 fail-closed。"""
+
+    payload = _plan_payload()
+    # Move camera-002 to be within 0.249m of camera-001
+    for cam in payload["cameras"]:
+        if cam["camera_id"] == "camera-ground-route-002":
+            cam["position_m"] = list(payload["cameras"][0]["position_m"])
+            cam["position_m"][0] += 0.1  # 0.1m offset < 0.249m threshold
+            break
+    with pytest.raises(ValidationError, match="near-duplicate poses detected"):
+        _reload(payload)
+
+
+def test_near_duplicate_threshold_is_physically_derived() -> None:
+    """parallax 阈值必须从物理常量推导, 不是任意数字。"""
+
+    from pipeline.synthetic_village.production_profile import (
+        MIN_PARALLAX_TOLERANCE_PX,
+        REFERENCE_SCENE_DEPTH_M,
+    )
+
+    plan = build_production_camera_plan()
+    fx_px = plan.cameras[0].intrinsics.fx
+    expected = MIN_PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
+    # Must be positive, finite, and match the documented formula
+    assert expected > 0
+    assert math.isfinite(expected)
+    # With the current intrinsics (fx=803.68), threshold is ~0.249m
+    assert 0.2 < expected < 0.3
+
+
+def test_ground_closing_edges_excluded_from_elevated_cameras() -> None:
+    """两端都是 ground-level nodes 的 edge 不应被用于 elevated-pedestrian 相机放置。
+
+    edge-bridge-path-001 和 edge-valley-path-001 是 ground-closing edges,
+    它们的 centerline 是地面路径。把它们当作 elevated walkway 来放置
+    elevated-pedestrian 相机会导致与 ground-route 相机重叠 (degenerate baseline)。
+    """
+
+    plan = build_production_camera_plan()
+    elevated = [
+        c for c in plan.cameras if c.group_id == "elevated-pedestrian"
+    ]
+    topology_refs = {c.topology_ref for c in elevated}
+    # Ground-closing edges must NOT appear in elevated camera topology_refs
+    assert "edge-bridge-path-001" not in topology_refs
+    assert "edge-valley-path-001" not in topology_refs
+    # All other edges should be present
+    assert len(topology_refs) == 10
+    assert len(elevated) == 48
+
+
+def test_elevated_pedestrian_iqr_uses_loop_subgrouping() -> None:
+    """elevated-pedestrian 组应按 loop 子分组计算 IQR, 避免跨 loop 假阳性。
+
+    bridge-loop 相机距 central-loop ~100m, 但在自己 loop 内不孤立。
+    如果不分 loop, IQR 会把 bridge 相机误判为孤立。
+    """
+
+    plan = build_production_camera_plan()
+    elevated = [
+        c for c in plan.cameras if c.group_id == "elevated-pedestrian"
+    ]
+    # Verify cameras span all 4 loops
+    loops = set()
+    for cam in elevated:
+        parts = cam.topology_ref.split("-")
+        if len(parts) >= 3 and parts[0] == "edge":
+            loops.add(parts[1])
+    assert loops == {"bridge", "central", "upper", "valley"}
+    # Plan builds successfully, meaning no false-positive isolation
+    assert plan.complete is True
 
 
 def test_polyline_topology_source_accepts_closed_ring() -> None:

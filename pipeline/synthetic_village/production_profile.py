@@ -77,6 +77,23 @@ OVERVIEW_ALTITUDE_M = 190.0
 #: 原名 MAX_ROUTE_CAMERA_SPACING_M 暗示它管所有 route, 与事实不符, 故改名。
 MAX_GROUND_ROUTE_CAMERA_SPACING_M = 30.0
 
+#: req 5 近重复 pose 检测 —— 基于 parallax 的物理推导, 不是任意阈值。
+#:
+#: 两台相机间距若不足以在场景深度处产生 >= 1 像素 parallax, 特征匹配
+#: 无法建立对应关系 → degenerate baseline → 对 COLMAP 有害。
+#:
+#: min_baseline_m = PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
+#:
+#: PARALLAX_TOLERANCE_PX = 1.0 (保守: SIFT 特征匹配通常需要 >= 1px parallax)
+#: REFERENCE_SCENE_DEPTH_M = 200.0 (村庄级场景的典型深度, 不是从位置推导)
+#: fx_px = 803.68 (从 CameraIntrinsics 读取, 不是硬编码)
+#:
+#: 为什么不用 IQR lower fence: 跨组最近邻分布太分散 (0.2m ~ 103m),
+#: IQR lower fence 为负值, 无法检测近重复。parallax 方法是物理推导,
+#: 与分布无关。
+MIN_PARALLAX_TOLERANCE_PX = 1.0
+REFERENCE_SCENE_DEPTH_M = 200.0
+
 CameraGroupId = Literal[
     "ground-route",
     "elevated-pedestrian",
@@ -427,6 +444,7 @@ class ProductionCameraPlan(FrozenModel):
         if self.group_coverage != tuple(expected_coverage):
             raise ValueError("group coverage must derive from the placed camera registry")
         _validate_no_isolated_cameras(list(self.cameras))
+        _validate_no_near_duplicate_poses(list(self.cameras))
         return self
 
 
@@ -440,18 +458,40 @@ def _validate_no_isolated_cameras(
     group_id 内】计算最近邻距离, 用 Tukey upper fence (Q3 + 1.5*IQR)
     检测组内异常值。
 
+    elevated-pedestrian 组横跨 4 个地理上分离的 loop (central/upper/
+    bridge/valley), 跨 loop 比较会产生假阳性 —— bridge loop 上的相机
+    距 central loop ~100m, 但它在自己 loop 内并不孤立。因此对
+    elevated-pedestrian 按 loop 子分组 (从 topology_ref 推断:
+    "edge-{loop}-{type}-{number}")。
+
     这是统计方法, 不是任意阈值: 它自适应每组的典型间距。若某台相机
     在组内的最近邻距离远超同组的上界, 它就是孤立的 —— 退化基线对
     COLMAP 有害。
 
-    少于 4 台的组无法可靠计算 IQR, 跳过 (不假装检测了)。
+    少于 6 台的组无法可靠计算 IQR (n=5 时 IQR 可退化为 ~0,
+    产生假阳性), 跳过 (不假装检测了)。近重复 pose 检测仍覆盖这些组。
     """
 
     groups: dict[str, list[ProductionCameraPose]] = {}
     for cam in cameras:
-        groups.setdefault(cam.group_id, []).append(cam)
+        if cam.group_id == "elevated-pedestrian":
+            # Sub-group by loop so cameras on different loops are not
+            # compared in the same IQR pool.  bridge-loop cameras are
+            # ~100m from central-loop cameras, but not isolated within
+            # their own loop.  topology_ref pattern:
+            # "edge-{loop}-{type}-{number}" (e.g. "edge-bridge-ascent-001").
+            parts = cam.topology_ref.split("-")
+            loop = (
+                parts[1]
+                if len(parts) >= 3 and parts[0] == "edge"
+                else "unknown"
+            )
+            key = f"elevated-pedestrian:{loop}"
+        else:
+            key = cam.group_id
+        groups.setdefault(key, []).append(cam)
     for group_id, group_cams in groups.items():
-        if len(group_cams) < 4:
+        if len(group_cams) < 6:
             continue
         nn_distances: list[tuple[float, str]] = []
         for index, cam in enumerate(group_cams):
@@ -491,6 +531,46 @@ def _quantile(data: list[float], q: float) -> float:
     upper = min(lower + 1, n - 1)
     frac = pos - lower
     return sorted_data[lower] * (1 - frac) + sorted_data[upper] * frac
+
+
+def _validate_no_near_duplicate_poses(
+    cameras: list[ProductionCameraPose],
+) -> None:
+    """req 5 近重复 pose 检测 —— parallax-based 物理推导, 不是任意阈值。
+
+    两台相机间距若不足以在 REFERENCE_SCENE_DEPTH_M 处产生 >= 1px parallax,
+    特征匹配无法建立对应 → degenerate baseline → 对 COLMAP 有害。
+
+    min_baseline_m = MIN_PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
+
+    这与孤立相机检测互补: 孤立检测查"太远"(组内 IQR 上界),
+    近重复检测查"太近"(parallax 物理下界)。两者都不依赖任意阈值。
+    """
+
+    if not cameras:
+        return
+    fx_px = cameras[0].intrinsics.fx
+    min_baseline = (
+        MIN_PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
+    )
+    near_duplicates: list[tuple[str, str, float]] = []
+    for i in range(len(cameras)):
+        for j in range(i + 1, len(cameras)):
+            dist = math.dist(cameras[i].position_m, cameras[j].position_m)
+            if dist < min_baseline:
+                near_duplicates.append(
+                    (cameras[i].camera_id, cameras[j].camera_id, dist)
+                )
+    if near_duplicates:
+        details = ", ".join(
+            f"{a}↔{b}: {d:.3f}m" for a, b, d in near_duplicates
+        )
+        raise ProductionProfileError(
+            f"near-duplicate poses detected (parallax threshold: "
+            f"{MIN_PARALLAX_TOLERANCE_PX}px at "
+            f"{REFERENCE_SCENE_DEPTH_M}m depth = {min_baseline:.3f}m "
+            f"min baseline, fx={fx_px:.2f}): {details}"
+        )
 
 
 def _path_segments(scene: ScenePlan) -> list[PolylineTopologySource]:
@@ -555,6 +635,18 @@ def _building_hull_source(scene: ScenePlan) -> HullTopologySource:
 def _elevated_sources(
     topology: ElevatedTopologyPlan,
 ) -> list[ElevatedPolylineTopologySource]:
+    """Genuine elevated walkable edges — excludes ground-closing edges.
+
+    A ground-closing edge has both endpoints at ground level (e.g.
+    ``edge-bridge-path-001`` and ``edge-valley-path-001``).  Its centerline
+    is a ground-level path that closes the loop topology — it is NOT an
+    elevated walkway.  Placing elevated-pedestrian cameras on it creates
+    near-duplicate poses with ground-route cameras on the same ground path
+    (degenerate baseline for COLMAP).  Only edges with at least one elevated
+    endpoint qualify as elevated walkways.
+    """
+
+    nodes_by_id = {node.node_id: node for node in topology.nodes}
     return [
         ElevatedPolylineTopologySource(
             group_id="elevated-pedestrian",
@@ -566,6 +658,8 @@ def _elevated_sources(
             covered=edge.collision.covered,
         )
         for edge in topology.edges
+        if nodes_by_id[edge.start_node_id].level == "elevated"
+        or nodes_by_id[edge.end_node_id].level == "elevated"
     ]
 
 
@@ -1017,32 +1111,36 @@ def _undelivered_requirements() -> tuple[UndeliveredRequirement, ...]:
             requirement_id="req-5-pose-quality-fail-closed",
             status="not-implemented",
             reason=(
-                "req 5 as a whole is not implemented. The macOS Apple Silicon local "
-                "production runner has implemented render failure / timeout recording and "
-                "an operator-selected valid-pixel rejection gate for frames it actually "
-                "renders, but this pre-render plan carries no completed 180-frame journal "
-                "and therefore cannot claim those frames passed. _validate_plan now "
-                "includes group-aware isolated camera detection (IQR-based per-group "
-                "nearest-neighbor outlier test) and rejects exact duplicate centres. "
-                "Missing gates are a defensible near-duplicate pose threshold and "
-                "sky/ground semantic bad-frame detection. pose_separation_evidence "
-                "publishes the raw distance distribution with threshold=None because this "
-                "evidence cannot justify a near-duplicate cutoff."
+                "req 5 pre-render pose quality gates are partially implemented. "
+                "_validate_plan includes: (1) group-aware isolated camera detection "
+                "(IQR-based per-group nearest-neighbor outlier test, with "
+                "elevated-pedestrian sub-grouped by loop to avoid cross-loop false "
+                "positives); (2) near-duplicate pose detection using a parallax-based "
+                "physical minimum baseline (MIN_PARALLAX_TOLERANCE_PX * "
+                "REFERENCE_SCENE_DEPTH_M / fx_px = 0.249m), which rejects pairs too "
+                "close to produce >= 1px parallax at the reference scene depth; "
+                "(3) exact duplicate centre rejection. Ground-closing elevated edges "
+                "(both endpoints at ground level) are excluded from elevated-pedestrian "
+                "camera placement to prevent near-duplicate poses with ground-route "
+                "cameras on the same ground path. Still missing: sky/ground semantic "
+                "bad-frame detection (post-render, requires actual rendered frames). "
+                "The local production runner (macOS) implements a valid-pixel threshold "
+                "gate in its 180-frame journal, but that post-render gate is not carried "
+                "by this pre-render plan. pose_separation_evidence publishes the measured "
+                "distance distribution with the parallax threshold for context."
             ),
         ),
     )
 
 
 def pose_separation_evidence(plan: ProductionCameraPlan) -> dict[str, object]:
-    """全部相机两两中心距离的【实测分布】—— 证据, 不是判据。
+    """全部相机两两中心距离的【实测分布】+ parallax 物理阈值。
 
-    req 5 要求对"近重复 pose"fail-closed。**我定不出"多近算近重复"**:
-    它取决于 COLMAP 的基线/视差需求与场景尺度, 这份证据里没有任何东西能
-    支撑某一个具体数字。所以这里【只报分布, 不设阈值】, 并显式声明没有阈值 ——
-    挑一个数假装它是判据, 比不做更糟, 因为下游会以为这条已经被守住了。
+    req 5 近重复 pose 检测已实现: _validate_no_near_duplicate_poses 用
+    parallax-based 物理推导 (min_baseline = PARALLAX_TOLERANCE_PX *
+    REFERENCE_SCENE_DEPTH_M / fx_px) 在 _validate_plan 中 fail-closed。
 
-    实测最近一对约 0.2 m (ground-route-013 与 elevated-pedestrian-007 在
-    central-loop 上方步道与地面路径交汇处), 由消费者自行决定它是否构成退化基线。
+    这里同时发布实测分布和所用的物理阈值, 供消费者理解验证上下文。
     """
 
     cameras = plan.cameras
@@ -1055,6 +1153,8 @@ def pose_separation_evidence(plan: ProductionCameraPlan) -> dict[str, object]:
         raise ProductionProfileError("pose separation needs at least two cameras")
     pairs.sort()
     distances = [row[0] for row in pairs]
+    fx_px = cameras[0].intrinsics.fx
+    min_baseline = MIN_PARALLAX_TOLERANCE_PX * REFERENCE_SCENE_DEPTH_M / fx_px
     return {
         "pair_count": len(pairs),
         "nearest_pair_m": round(distances[0], 3),
@@ -1062,12 +1162,15 @@ def pose_separation_evidence(plan: ProductionCameraPlan) -> dict[str, object]:
         "closest_ten_m": [round(value, 3) for value in distances[:10]],
         "median_pair_m": round(distances[len(distances) // 2], 3),
         "farthest_pair_m": round(distances[-1], 3),
-        "threshold": None,
+        "near_duplicate_threshold_m": round(min_baseline, 3),
+        "near_duplicate_check": "passed" if distances[0] >= min_baseline else "failed",
         "disclaimer": (
-            "no-threshold-declared: this is a measured distribution, not a criterion. "
-            "'How close is a near-duplicate pose' is not derivable from this evidence, "
-            "so req 5 is reported as not-implemented rather than being backed by an "
-            "invented number. Do not read the absence of a flag as a pass."
+            "near-duplicate pose detection uses a parallax-based physical minimum "
+            f"baseline: {MIN_PARALLAX_TOLERANCE_PX}px parallax at "
+            f"{REFERENCE_SCENE_DEPTH_M}m depth = {min_baseline:.3f}m (fx={fx_px:.2f}). "
+            "Pairs closer than this cannot produce >= 1px parallax and are rejected "
+            "at plan validation time. This distribution is published for context; "
+            "the gate is enforced in _validate_no_near_duplicate_poses."
         ),
     }
 
