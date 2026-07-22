@@ -79,12 +79,21 @@ MODULE_IDS = (
     "lower-valley-uphill",
 )
 
-#: Canonical module_id → topology_ref mapping (mirrors
-#: ``_DEFAULT_ROLE_CAMERA_PLACEMENT`` in reciprocal_route_module.py).
-#: The probe asserts this mapping rather than trusting the plan's
-#: ``role_camera_candidates`` (which may be absent in Phase 4.1 plans).
-#: If ``role_camera_candidates`` IS present, the probe validates it
-#: matches this mapping (fail-closed).
+#: Module attachment topology (REVIEW-CODEX-021).
+#:
+#: This is the **module attachment topology** — the path object the
+#: module mesh attaches to in Blender.  It is used by the Phase 4.3
+#: attachment probe to measure the distance from each module's first
+#: part mesh to the declared ``topology_ref`` scene object.
+#:
+#: This is DISTINCT from the **camera placement topology** (which path
+#: network has a ground ``WalkableNode`` within 30 m of the candidate's
+#: position).  The two may differ for modules that cross path-network
+#: boundaries.  The probe does NOT assert that the camera's
+#: ``topology_ref`` equals the module's attachment ref.
+#:
+#: ``MODULE_TOPOLOGY_REFS`` stays at the original values because it
+#: measures module mesh attachment, not camera placement.
 MODULE_TOPOLOGY_REFS = {
     "central-courtyard-downhill": "path-network-003",
     "bridge-deck-crossing": "path-network-001",
@@ -92,6 +101,25 @@ MODULE_TOPOLOGY_REFS = {
     "covered-gallery-underpass": "path-network-005",
     "forest-orchard-boundary": "path-network-002",
     "lower-valley-uphill": "path-network-001",
+}
+
+#: Camera placement topology (REVIEW-CODEX-021).
+#:
+#: This is the **camera placement topology** — the path network whose
+#: ground ``WalkableNode`` is within 30 m of the candidate position.
+#: Mirrors ``_DEFAULT_ROLE_CAMERA_PLACEMENT`` in
+#: ``reciprocal_route_module.py``.  When ``role_camera_candidates`` is
+#: present in the plan, the probe validates each candidate's
+#: ``topology_ref`` matches this mapping AND that
+#: ``bound_walkable_node.ground_route_ref`` matches the candidate's
+#: ``topology_ref``.
+CAMERA_PLACEMENT_TOPOLOGY = {
+    "central-courtyard-downhill": "path-network-003",
+    "bridge-deck-crossing": "path-network-001",
+    "watermill-tailrace": "path-network-001",
+    "covered-gallery-underpass": "path-network-003",
+    "forest-orchard-boundary": "path-network-003",
+    "lower-valley-uphill": "path-network-002",
 }
 
 # Trust disclosure (must match the schema's Literal-locked disclosure).
@@ -405,20 +433,25 @@ def _module_id_for_part(part_id: str, plan: dict) -> str | None:
 
 
 def _topology_ref_for_module(module_id: str, plan: dict) -> str:
-    """Return the declared ``topology_ref`` for a module.
+    """Return the module attachment ``topology_ref`` for a module.
 
-    The probe asserts the canonical ``MODULE_TOPOLOGY_REFS`` mapping
-    rather than trusting the plan's ``role_camera_candidates`` (which
-    may be absent in Phase 4.1 plans).  If ``role_camera_candidates``
-    IS present, the probe validates it matches the canonical mapping
-    (fail-closed: a plan that disagrees with the probe's asserted
-    topology is rejected).
+    REVIEW-CODEX-021: this returns the **module attachment topology**
+    (from ``MODULE_TOPOLOGY_REFS``), NOT the camera placement topology.
+    The probe uses this to measure the distance from the module's mesh
+    to the declared path object in Blender.
+
+    When ``role_camera_candidates`` is present, the probe validates the
+    candidate's ``topology_ref`` matches ``CAMERA_PLACEMENT_TOPOLOGY``
+    (not ``MODULE_TOPOLOGY_REFS``), and that
+    ``bound_walkable_node.ground_route_ref`` matches the candidate's
+    ``topology_ref``.  The probe does NOT assert that the camera's
+    ref equals the module's attachment ref.
     """
 
-    canonical_ref = MODULE_TOPOLOGY_REFS[module_id]
+    attachment_ref = MODULE_TOPOLOGY_REFS[module_id]
     candidates = plan.get("role_camera_candidates")
     if candidates is None:
-        return canonical_ref
+        return attachment_ref
     if not isinstance(candidates, list) or len(candidates) != EXPECTED_MODULE_COUNT:
         raise ProbeBuildError(
             "plan role_camera_candidates is present but not six entries",
@@ -432,17 +465,30 @@ def _topology_ref_for_module(module_id: str, plan: dict) -> str:
             f"plan role_camera_candidates for {module_id} "
             f"is not unique (matches={len(matches)})",
         )
-    ref = matches[0].get("topology_ref")
-    if not isinstance(ref, str) or not ref:
+    camera_ref = matches[0].get("topology_ref")
+    if not isinstance(camera_ref, str) or not camera_ref:
         raise ProbeBuildError(
             f"plan role_camera_candidates for {module_id} has no topology_ref",
         )
-    if ref != canonical_ref:
+    # Validate camera placement topology (REVIEW-CODEX-021)
+    expected_camera_ref = CAMERA_PLACEMENT_TOPOLOGY[module_id]
+    if camera_ref != expected_camera_ref:
         raise ProbeBuildError(
-            f"plan role_camera_candidates topology_ref={ref} for "
-            f"{module_id} disagrees with canonical {canonical_ref}",
+            f"plan role_camera_candidates topology_ref={camera_ref} for "
+            f"{module_id} disagrees with canonical camera placement "
+            f"{expected_camera_ref}",
         )
-    return canonical_ref
+    # Validate bound_walkable_node consistency (REVIEW-CODEX-021)
+    bound_node = matches[0].get("bound_walkable_node")
+    if bound_node is not None:
+        node_route = bound_node.get("ground_route_ref")
+        if not isinstance(node_route, str) or node_route != camera_ref:
+            raise ProbeBuildError(
+                f"plan role_camera_candidates for {module_id} has "
+                f"bound_walkable_node.ground_route_ref={node_route!r} "
+                f"that does not match topology_ref={camera_ref!r}",
+            )
+    return attachment_ref
 
 
 # --------------------------------------------------------------------------- #

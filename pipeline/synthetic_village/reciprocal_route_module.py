@@ -688,7 +688,15 @@ class WalkableNodeBinding(FrozenModel):
     specific ``WalkableNode`` in ``ElevatedTopologyPlan``.  The binding
     is content-addressed: it stores the node's ``node_id`` (pattern-
     validated), ``position_m`` (3-tuple of finite scene-local metres),
-    and ``level`` (Literal-locked to ``"ground"`` or ``"elevated"``).
+    ``level`` (Literal-locked to ``"ground"`` or ``"elevated"``), and
+    ``ground_route_ref`` (the path network the node belongs to).
+
+    REVIEW-CODEX-021: ``ground_route_ref`` is now a required field so
+    the binding is self-contained — callers and probes can verify the
+    candidate's ``topology_ref`` matches the bound node's route without
+    consulting an external topology plan.  The candidate's
+    ``topology_ref`` must equal ``ground_route_ref`` (validated on the
+    parent ``ReciprocalRoleCameraCandidate``).
 
     The binding does NOT replace ``topology_ref`` (which still names the
     path network the candidate is placed along for backward compat with
@@ -711,6 +719,10 @@ class WalkableNodeBinding(FrozenModel):
     )
     node_position_m: tuple[_FiniteFloat, _FiniteFloat, _FiniteFloat]
     level: Literal["ground", "elevated"]
+    ground_route_ref: str = Field(
+        pattern=r"^path-[a-z0-9]+(?:-[a-z0-9]+)*$",
+        min_length=1,
+    )
 
     @model_validator(mode="after")
     def _node_position_is_finite(self) -> WalkableNodeBinding:
@@ -793,7 +805,20 @@ class ReciprocalRoleCameraCandidate(FrozenModel):
         # This is a geometry gate that catches a candidate claiming to
         # bind a node it is clearly not near -- it does NOT promote the
         # candidate to measured/metric/aligned.
+        #
+        # REVIEW-CODEX-021: the candidate's ``topology_ref`` must equal
+        # the bound node's ``ground_route_ref``.  Without this check, a
+        # candidate could bind to a node on a different path network
+        # (false-green: spatially near but topologically wrong).
         if self.bound_walkable_node is not None:
+            if self.topology_ref != self.bound_walkable_node.ground_route_ref:
+                raise ValueError(
+                    f"candidate topology_ref={self.topology_ref!r} does not "
+                    f"match bound_walkable_node.ground_route_ref="
+                    f"{self.bound_walkable_node.ground_route_ref!r}; "
+                    f"the candidate must bind a node on the same path "
+                    f"network it claims to be placed along",
+                )
             distance = math.dist(
                 self.position_m,
                 self.bound_walkable_node.node_position_m,
@@ -1872,11 +1897,26 @@ def _default_module(
     )
 
 
-#: Default topology binding per reciprocal role (Phase 4.2/4.4).
-#: Each entry is (role_module_id, topology_ref).  Camera geometry is not
-#: duplicated here: it is derived from the module's ordered part centers so
-#: moving a module cannot leave its role camera above, below, or behind the
-#: built passage.  Any change here changes the reciprocal plan/build identity.
+#: Camera placement topology per reciprocal role (REVIEW-CODEX-021).
+#:
+#: Each entry maps (role_module_id, camera_topology_ref) — the path
+#: network whose ground ``WalkableNode`` is within 30 m of the
+#: candidate's position.  This is the **camera placement topology**,
+#: distinct from the module's **attachment topology** (which path object
+#: the module mesh attaches to in Blender).  The two may differ for
+#: modules that cross path-network boundaries.
+#:
+#: REVIEW-CODEX-021 fixed three false-green bindings where the
+#: candidate's ``topology_ref`` named a path network with no ground
+#: node within 30 m:
+#:
+#:   covered-gallery-underpass: path-network-005 → path-network-003
+#:     (central-ground-east at 28.4 m; path-network-005 has no node)
+#:   forest-orchard-boundary:  path-network-002 → path-network-003
+#:     (upper-ground-west at 28.1 m; same-ref nearest was 202 m)
+#:   lower-valley-uphill:      path-network-001 → path-network-002
+#:     (valley-ground-north at 9.6 m; same-ref nearest was 102 m)
+#:
 #: Any change here changes ``reciprocal_route_module_plan_sha256`` and
 #: therefore ``build_id`` and the downstream render identity.
 _DEFAULT_ROLE_CAMERA_PLACEMENT: tuple[
@@ -1886,9 +1926,9 @@ _DEFAULT_ROLE_CAMERA_PLACEMENT: tuple[
     ("central-courtyard-downhill", "path-network-003"),
     ("bridge-deck-crossing", "path-network-001"),
     ("watermill-tailrace", "path-network-001"),
-    ("covered-gallery-underpass", "path-network-005"),
-    ("forest-orchard-boundary", "path-network-002"),
-    ("lower-valley-uphill", "path-network-001"),
+    ("covered-gallery-underpass", "path-network-003"),
+    ("forest-orchard-boundary", "path-network-003"),
+    ("lower-valley-uphill", "path-network-002"),
 )
 
 #: Default disclosure strings per role (Phase 4.2).  Each disclosure is
@@ -1926,6 +1966,7 @@ _ROLE_CAMERA_DISCLOSURE: dict[ModuleId, str] = {
 def _default_role_camera_candidates(
     *,
     modules: tuple[ReciprocalRouteModule, ...],
+    elevated_topology: ElevatedTopologyPlan,
     plan_sha: str,
     registry_sha: str,
 ) -> tuple[ReciprocalRoleCameraCandidate, ...]:
@@ -1937,6 +1978,11 @@ def _default_role_camera_candidates(
     + ``bound_camera_registry_sha256`` are content-addressed bindings to
     the canonical 180-camera plan, so the §3 caller chain can verify the
     render's lineage back to this exact candidate.
+
+    REVIEW-CODEX-021: each candidate's ``bound_walkable_node`` is now
+    populated deterministically from ``elevated_topology``.  The nearest
+    ground node whose ``ground_route_ref`` matches the candidate's
+    ``topology_ref`` is selected; ties, absence, and > 30 m all fail-closed.
 
     ``plan_sha`` / ``registry_sha`` may be ``"0" * 64`` placeholder when
     the plan is constructed without a production camera plan (unit tests);
@@ -1977,6 +2023,53 @@ def _default_role_camera_candidates(
             position_m[axis] + direction[axis] * ROLE_CAMERA_LOOKAHEAD_M
             for axis in range(3)
         )
+
+        # REVIEW-CODEX-021: deterministically bind the nearest ground node
+        # whose ground_route_ref matches topology_ref.  No same-ref node,
+        # distance > 30 m, or distance ambiguity all fail-closed.
+        matching_nodes = [
+            node
+            for node in elevated_topology.nodes
+            if node.level == "ground"
+            and node.ground_route_ref == topology_ref
+        ]
+        if not matching_nodes:
+            raise ReciprocalRouteError(
+                f"role module {module_id} topology_ref={topology_ref!r} "
+                f"has no ground node with matching ground_route_ref in "
+                f"the elevated topology plan",
+            )
+        scored = sorted(
+            (
+                (math.dist(position_m, node.position_m), node)
+                for node in matching_nodes
+            ),
+            key=lambda pair: pair[0],
+        )
+        nearest_distance, nearest_node = scored[0]
+        if nearest_distance > ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M:
+            raise ReciprocalRouteError(
+                f"role module {module_id} nearest same-ref ground node "
+                f"{nearest_node.node_id} is {nearest_distance:.3f} m away, "
+                f"exceeds ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M "
+                f"{ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M:.3f} m",
+            )
+        if len(scored) > 1:
+            second_distance = scored[1][0]
+            if abs(nearest_distance - second_distance) < 1e-6:
+                raise ReciprocalRouteError(
+                    f"role module {module_id} has ambiguous nearest "
+                    f"ground nodes: {scored[0][1].node_id} at "
+                    f"{nearest_distance:.3f} m vs {scored[1][1].node_id} "
+                    f"at {second_distance:.3f} m",
+                )
+        bound_walkable_node = WalkableNodeBinding(
+            node_id=nearest_node.node_id,
+            node_position_m=nearest_node.position_m,
+            level="ground",
+            ground_route_ref=nearest_node.ground_route_ref,
+        )
+
         candidates.append(
             ReciprocalRoleCameraCandidate(
                 role_module_id=module_id,
@@ -1991,6 +2084,7 @@ def _default_role_camera_candidates(
                 disclosure=_ROLE_CAMERA_DISCLOSURE[module_id],
                 bound_production_plan_sha256=plan_sha,
                 bound_camera_registry_sha256=registry_sha,
+                bound_walkable_node=bound_walkable_node,
             ),
         )
     return tuple(candidates)
@@ -2044,6 +2138,7 @@ def build_default_reciprocal_route_module_plan(
     )
     role_camera_candidates = _default_role_camera_candidates(
         modules=modules,
+        elevated_topology=elevated_topology,
         plan_sha=plan_sha,
         registry_sha=registry_sha,
     )

@@ -1013,6 +1013,7 @@ def test_walkable_node_binding_accepts_valid_node() -> None:
         node_id="central-ground-east",
         node_position_m=(30.0, 27.0, 71.0),
         level="ground",
+        ground_route_ref="path-network-003",
     )
     assert binding.node_id == "central-ground-east"
     assert binding.node_position_m == (30.0, 27.0, 71.0)
@@ -1028,6 +1029,7 @@ def test_walkable_node_binding_rejects_invalid_node_id_pattern() -> None:
             node_id="Central_Ground_East",  # uppercase + underscore
             node_position_m=(30.0, 27.0, 71.0),
             level="ground",
+            ground_route_ref="path-network-003",
         )
 
 
@@ -1040,17 +1042,21 @@ def test_walkable_node_binding_rejects_unknown_level() -> None:
             node_id="central-ground-east",
             node_position_m=(30.0, 27.0, 71.0),
             level="aerial",  # not in Literal
+            ground_route_ref="path-network-003",
         )
 
 
-def test_candidate_defaults_to_no_walkable_node_binding(plan) -> None:
-    """Default candidates must have ``bound_walkable_node=None`` so the
-    Phase 4.4 upgrade is additive and does not change Phase 4.2's plan
-    SHA.  Caller chain populates the binding only when a canonical
-    WalkableNode is matched to the candidate's placement."""
+def test_candidate_defaults_to_populated_walkable_node_binding(plan) -> None:
+    """REVIEW-CODEX-021: default candidates must have ``bound_walkable_node``
+    populated (not None) — the nearest ground node whose
+    ``ground_route_ref`` matches the candidate's ``topology_ref`` is
+    deterministically selected at plan construction time.  This replaces
+    the Phase 4.2 behaviour where ``bound_walkable_node`` was None by
+    default and the caller was expected to fill it later."""
 
     for candidate in plan.role_camera_candidates:
-        assert candidate.bound_walkable_node is None
+        assert candidate.bound_walkable_node is not None
+        assert candidate.bound_walkable_node.ground_route_ref == candidate.topology_ref
 
 
 def test_candidate_accepts_walkable_node_binding_within_distance() -> None:
@@ -1077,6 +1083,7 @@ def test_candidate_accepts_walkable_node_binding_within_distance() -> None:
             node_id="central-ground-east",
             node_position_m=(30.0, 27.0, 71.0),
             level="ground",
+            ground_route_ref="path-network-003",
         ),
     )
     assert candidate.bound_walkable_node is not None
@@ -1109,6 +1116,7 @@ def test_candidate_rejects_walkable_node_beyond_max_distance() -> None:
                 node_id="central-ground-east",
                 node_position_m=(300.0, 300.0, 71.0),
                 level="ground",
+                ground_route_ref="path-network-003",
             ),
         )
 
@@ -1125,6 +1133,7 @@ def test_plan_sha_changes_when_walkable_node_binding_changes(plan) -> None:
                 node_id="central-ground-east",
                 node_position_m=(30.0, 27.0, first_candidate.position_m[2]),
                 level="ground",
+                ground_route_ref="path-network-003",
             ),
         },
     )
@@ -1148,6 +1157,173 @@ def test_walkable_node_max_distance_constant_is_locked() -> None:
     prevents silent drift in the geometry gate."""
 
     assert ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M == 30.0
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW-CODEX-021: six-role topology binding false-green fix
+# --------------------------------------------------------------------------- #
+
+
+def test_all_six_role_candidates_bind_same_ref_ground_node_within_30m(plan, topology) -> None:
+    """REVIEW-CODEX-021 §1: each candidate's ``topology_ref`` must equal
+    its ``bound_walkable_node.ground_route_ref``, and the 3D distance
+    must be ≤ 30 m.  This is the core fix — three roles previously bound
+    to path networks with no ground node within 30 m."""
+
+    import math as _math
+
+    ground_nodes = {n.node_id: n for n in topology.nodes if n.level == "ground"}
+    for candidate in plan.role_camera_candidates:
+        binding = candidate.bound_walkable_node
+        assert binding is not None, candidate.role_module_id
+        assert binding.ground_route_ref == candidate.topology_ref, (
+            f"{candidate.role_module_id}: topology_ref={candidate.topology_ref!r} "
+            f"!= ground_route_ref={binding.ground_route_ref!r}"
+        )
+        assert binding.node_id in ground_nodes, (
+            f"{candidate.role_module_id}: bound node {binding.node_id} not in topology"
+        )
+        node = ground_nodes[binding.node_id]
+        assert node.ground_route_ref == candidate.topology_ref
+        distance = _math.dist(candidate.position_m, binding.node_position_m)
+        assert distance <= ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M, (
+            f"{candidate.role_module_id}: distance {distance:.3f} m > "
+            f"{ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M} m"
+        )
+        assert binding.node_position_m == node.position_m
+
+
+def test_candidate_rejects_topology_ref_mismatch_with_bound_node() -> None:
+    """REVIEW-CODEX-021: candidate's ``topology_ref`` must equal
+    ``bound_walkable_node.ground_route_ref`` — a candidate claiming to
+    be on path-network-003 but binding a node on path-network-001 is
+    a false-green binding."""
+
+    with pytest.raises(ValidationError, match="does not match"):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 71.0),
+            look_at_m=(40.0, 5.0, 70.0),
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="modeled-unverified standing-eye test candidate",
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+            bound_walkable_node=WalkableNodeBinding(
+                node_id="bridge-ground-east",
+                node_position_m=(-180.0, -90.0, 47.3),
+                level="ground",
+                ground_route_ref="path-network-001",
+            ),
+        )
+
+
+def test_tamper_bound_node_id_rejected(plan) -> None:
+    """REVIEW-CODEX-021: changing ``bound_walkable_node.node_id`` to a
+    non-existent node must change the plan SHA (content-addressed)."""
+
+    first = plan.role_camera_candidates[0]
+    tampered = first.model_copy(
+        update={
+            "bound_walkable_node": first.bound_walkable_node.model_copy(
+                update={"node_id": "fake-node-id"},
+            ),
+        },
+    )
+    tampered_plan = plan.model_copy(
+        update={"role_camera_candidates": (tampered, *plan.role_camera_candidates[1:])},
+    )
+    assert (
+        reciprocal_route_module_plan_sha256(tampered_plan)
+        != reciprocal_route_module_plan_sha256(plan)
+    )
+
+
+def test_tamper_bound_node_position_rejected(plan) -> None:
+    """REVIEW-CODEX-021: changing ``bound_walkable_node.node_position_m``
+    must change the plan SHA."""
+
+    first = plan.role_camera_candidates[0]
+    tampered = first.model_copy(
+        update={
+            "bound_walkable_node": first.bound_walkable_node.model_copy(
+                update={"node_position_m": (31.0, 28.0, 75.0)},
+            ),
+        },
+    )
+    tampered_plan = plan.model_copy(
+        update={"role_camera_candidates": (tampered, *plan.role_camera_candidates[1:])},
+    )
+    assert (
+        reciprocal_route_module_plan_sha256(tampered_plan)
+        != reciprocal_route_module_plan_sha256(plan)
+    )
+
+
+def test_tamper_bound_node_route_rejected(plan) -> None:
+    """REVIEW-CODEX-021: changing ``bound_walkable_node.ground_route_ref``
+    to a value that mismatches the candidate's ``topology_ref`` must
+    fail validation (false-green binding prevention)."""
+
+    first = plan.role_camera_candidates[0]
+    tampered_data = first.model_dump(mode="python")
+    tampered_data["bound_walkable_node"]["ground_route_ref"] = "path-network-001"
+    with pytest.raises(ValidationError, match="does not match"):
+        ReciprocalRoleCameraCandidate.model_validate(tampered_data)
+
+
+def test_tamper_bound_node_level_rejected(plan) -> None:
+    """REVIEW-CODEX-021: changing ``bound_walkable_node.level`` to
+    ``"elevated"`` must change the plan SHA (content-addressed)."""
+
+    first = plan.role_camera_candidates[0]
+    tampered = first.model_copy(
+        update={
+            "bound_walkable_node": first.bound_walkable_node.model_copy(
+                update={"level": "elevated"},
+            ),
+        },
+    )
+    tampered_plan = plan.model_copy(
+        update={"role_camera_candidates": (tampered, *plan.role_camera_candidates[1:])},
+    )
+    assert (
+        reciprocal_route_module_plan_sha256(tampered_plan)
+        != reciprocal_route_module_plan_sha256(plan)
+    )
+
+
+def test_production_and_reciprocal_plan_canonical_bytes_deterministic(
+    scene, topology, env_module_plan,
+) -> None:
+    """REVIEW-CODEX-021: building the plan twice must produce identical
+    canonical bytes (deterministic construction)."""
+
+    prod_plan = build_production_camera_plan()
+    first = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=env_module_plan,
+        production_camera_plan=prod_plan,
+    )
+    second = build_default_reciprocal_route_module_plan(
+        scene=scene,
+        elevated_topology=topology,
+        environment_module_plan=env_module_plan,
+        production_camera_plan=prod_plan,
+    )
+    assert (
+        canonical_reciprocal_route_module_plan_bytes(first)
+        == canonical_reciprocal_route_module_plan_bytes(second)
+    )
+    assert (
+        reciprocal_route_module_plan_sha256(first)
+        == reciprocal_route_module_plan_sha256(second)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1390,6 +1566,7 @@ def test_build_replacement_candidate_produces_valid_candidate(
         node_id=ground_node.node_id,
         node_position_m=ground_node.position_m,
         level="ground",
+        ground_route_ref="path-network-003",
     )
     look_at = (
         ground_node.position_m[0],
@@ -1443,6 +1620,7 @@ def test_build_replacement_candidate_accepts_both_obstructed_ids(
         node_id=ground_node.node_id,
         node_position_m=ground_node.position_m,
         level="ground",
+        ground_route_ref="path-network-003",
     )
     look_at = (
         ground_node.position_m[0],
@@ -1481,6 +1659,7 @@ def test_build_replacement_candidate_rejects_unknown_obstructed_camera_id(
         node_id=ground_node.node_id,
         node_position_m=ground_node.position_m,
         level="ground",
+        ground_route_ref="path-network-001",
     )
     look_at = (
         ground_node.position_m[0],
@@ -1515,6 +1694,7 @@ def test_build_replacement_candidate_rejects_insufficient_clearance(
         node_id=ground_node.node_id,
         node_position_m=ground_node.position_m,
         level="ground",
+        ground_route_ref="path-network-001",
     )
     look_at = (
         ground_node.position_m[0],
@@ -1549,6 +1729,7 @@ def test_build_replacement_candidate_rejects_elevated_walkable_node(
         node_id=elevated_node.node_id,
         node_position_m=elevated_node.position_m,
         level="elevated",
+        ground_route_ref="path-network-001",
     )
     look_at = (
         elevated_node.position_m[0],
@@ -1591,6 +1772,7 @@ def test_build_replacement_candidate_can_be_materialized_to_target_pose(
         node_id=ground_node.node_id,
         node_position_m=ground_node.position_m,
         level="ground",
+        ground_route_ref="path-network-003",
     )
     look_at = (
         ground_node.position_m[0],
@@ -1671,6 +1853,7 @@ def test_build_replacement_candidate_rejects_non_finite_clearance(
         node_id=ground_node.node_id,
         node_position_m=ground_node.position_m,
         level="ground",
+        ground_route_ref="path-network-001",
     )
     look_at = (
         ground_node.position_m[0],
@@ -1750,6 +1933,7 @@ def test_walkable_node_binding_rejects_non_finite_position(
             node_id="test-node",
             node_position_m=(bad_value, 0.0, 0.0),
             level="ground",
+            ground_route_ref="path-network-001",
         )
 
 
