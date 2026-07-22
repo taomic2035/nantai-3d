@@ -330,6 +330,37 @@ checksum。六张图是独立生成的设计输入，不是同一场景的标定
 SfM/NeRF/3DGS 或声称 360° coverage。应先建立 canonical 3D recipe 和已知相机，再由 collision/
 topology 与 fresh RGB/depth/normal/instance/semantic/camera evidence 决定受测位置是否可漫游。
 
+### Batch 20 角色拓扑与相机包络参考
+
+[Batch 20 Role-Topology Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch20-2026-07-23)
+提供 8 张最终筛选的 image2 原始 PNG：桥梁折线接近与院落侧回望、水车环形检修路线与上层平台
+回望、森林折返节点与林内返村视角，以及桥—水车、森林—果园两个共享空间包络。它们针对正式
+实渲中桥、水车、森林角色的构图缺口，强调非共线路线、近中远景密度和结构背面。
+
+```powershell
+$releaseDir = ".nantai-studio\release-downloads\batch20-role-topology"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download synthetic-village-design-inputs-batch20-2026-07-23 `
+  --pattern "synthetic-village-role-topology-design-pack-batch20-2026-07-23.zip" `
+  --pattern "synthetic-village-role-topology-design-pack-batch20-2026-07-23.SHA256SUMS.txt" `
+  --dir $releaseDir --clobber
+
+$archiveName = "synthetic-village-role-topology-design-pack-batch20-2026-07-23.zip"
+$archive = Join-Path $releaseDir $archiveName
+$sumFile = Join-Path $releaseDir "synthetic-village-role-topology-design-pack-batch20-2026-07-23.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 20 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch20" -Force
+```
+
+ZIP 只含 8 张入选图、8 份精确 prompt、manifest、使用说明和 payload checksum；不含 contact
+sheet、生成队列、失败请求或旧批次。引用条件只传递视觉语言，不建立像素对应、共享几何、标定相机、
+米制尺度或 360° coverage。Blender 消费后仍须通过 topology/clearance、平移相机六层实渲、
+visibility 与 post-render v2，才能证明受测位置可漫游。
+
 ## 核心工作流
 
 ### 1. 混合媒体输入
