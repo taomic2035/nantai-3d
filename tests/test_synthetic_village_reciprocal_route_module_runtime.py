@@ -875,12 +875,11 @@ def test_topology_proxy_id_for_module_uses_module_specific_format(
     ) == "path-network-001::watermill-tailrace"
 
 
-def test_topology_proxy_targets_extracts_six_targets_from_default_plan(
+def test_topology_proxy_targets_use_module_attachment_topology(
     base: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default plan's six role_camera_candidates produce six
-    (module_id, topology_ref, look_at_m) tuples with finite coordinates."""
+    """Proxy refs follow module attachment, not camera placement topology."""
 
     runtime = _load_runtime_module(monkeypatch)
     plan = build_default_reciprocal_route_module_plan(
@@ -891,15 +890,17 @@ def test_topology_proxy_targets_extracts_six_targets_from_default_plan(
     plan_dict = plan.model_dump(mode="json")
     targets = runtime._topology_proxy_targets(plan_dict)
     assert len(targets) == 6
-    module_ids = [t[0] for t in targets]
-    assert sorted(module_ids) == sorted([
-        "central-courtyard-downhill",
-        "bridge-deck-crossing",
-        "watermill-tailrace",
-        "covered-gallery-underpass",
-        "forest-orchard-boundary",
-        "lower-valley-uphill",
-    ])
+    assert {
+        module_id: topology_ref
+        for module_id, topology_ref, _look_at_m in targets
+    } == {
+        "central-courtyard-downhill": "path-network-003",
+        "bridge-deck-crossing": "path-network-001",
+        "watermill-tailrace": "path-network-001",
+        "covered-gallery-underpass": "path-network-005",
+        "forest-orchard-boundary": "path-network-002",
+        "lower-valley-uphill": "path-network-001",
+    }
     for module_id, topology_ref, look_at_m in targets:
         assert isinstance(module_id, str) and module_id
         assert isinstance(topology_ref, str) and topology_ref.startswith(

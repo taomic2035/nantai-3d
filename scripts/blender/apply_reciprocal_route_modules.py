@@ -904,14 +904,49 @@ def _topology_proxy_id_for_module(module_id, topology_ref):
     return f"{topology_ref}::{module_id}"
 
 
+_MODULE_ATTACHMENT_RECIPE_PATHS = {
+    "central-courtyard-downhill": ("downhill_gate", "connects_to_topology"),
+    "bridge-deck-crossing": ("upstream_attachment", "connects_to_topology"),
+    "watermill-tailrace": ("bound_path_network",),
+    "covered-gallery-underpass": ("lower_branch", "connects_to_topology"),
+    "forest-orchard-boundary": ("bound_path_network",),
+    "lower-valley-uphill": ("bound_path_network",),
+}
+
+
+def _module_attachment_topology_ref(module):
+    """Read the module attachment topology from its canonical recipe."""
+
+    if not isinstance(module, dict):
+        raise RuntimeBuildError("topology proxy module is not a dict")
+    module_id = module.get("module_id")
+    path = _MODULE_ATTACHMENT_RECIPE_PATHS.get(module_id)
+    if path is None:
+        raise RuntimeBuildError(
+            f"topology proxy module_id is unsupported: {module_id}",
+        )
+    value = module.get("recipe")
+    for key in path:
+        if not isinstance(value, dict):
+            raise RuntimeBuildError(
+                f"module attachment topology is absent for {module_id}",
+            )
+        value = value.get(key)
+    if not isinstance(value, str) or not value:
+        raise RuntimeBuildError(
+            f"module attachment topology is invalid for {module_id}",
+        )
+    return value
+
+
 def _topology_proxy_targets(plan):
-    """Return ``[(module_id, topology_ref, look_at_m), ...]`` for the
+    """Return ``[(module_id, attachment_ref, look_at_m), ...]`` for the
     six reciprocal-route modules.
 
-    Reads ``role_camera_candidates`` verbatim from the canonical plan
-    (Phase 4.2).  The plan validator already enforces 6 entries with
-    unique ``role_module_id`` and finite ``look_at_m`` tuples, so this
-    function only reads and re-shapes them.
+    Camera placement topology and module attachment topology may differ
+    for cross-path modules.  Candidate coordinates still come from the
+    canonical role-camera rows, while each proxy ref is read from the
+    matching module recipe that the Phase 4.3 attachment probe measures.
     """
 
     candidates = plan.get("role_camera_candidates")
@@ -922,6 +957,17 @@ def _topology_proxy_targets(plan):
         raise RuntimeBuildError(
             "plan role_camera_candidates is not exactly six entries",
         )
+    modules = plan.get("modules")
+    if not isinstance(modules, list) or len(modules) != EXPECTED_TOPOLOGY_PROXY_COUNT:
+        raise RuntimeBuildError("plan modules is not exactly six entries")
+    module_by_id = {}
+    for module in modules:
+        if not isinstance(module, dict):
+            raise RuntimeBuildError("topology proxy module is not a dict")
+        module_id = module.get("module_id")
+        if not isinstance(module_id, str) or not module_id or module_id in module_by_id:
+            raise RuntimeBuildError("topology proxy module_id is invalid or duplicated")
+        module_by_id[module_id] = module
     out = []
     seen_modules = set()
     for candidate in candidates:
@@ -930,17 +976,17 @@ def _topology_proxy_targets(plan):
                 "role_camera_candidate is not a dict",
             )
         module_id = candidate.get("role_module_id")
-        topology_ref = candidate.get("topology_ref")
         look_at = candidate.get("look_at_m")
         if not isinstance(module_id, str) or not module_id:
             raise RuntimeBuildError(
                 "role_camera_candidate role_module_id is invalid",
             )
-        if not isinstance(topology_ref, str) or not topology_ref:
+        module = module_by_id.get(module_id)
+        if module is None:
             raise RuntimeBuildError(
-                f"role_camera_candidate for {module_id} "
-                f"has no topology_ref",
+                f"role_camera_candidate module is absent from plan: {module_id}",
             )
+        topology_ref = _module_attachment_topology_ref(module)
         if (
             not isinstance(look_at, list)
             or len(look_at) != 3
