@@ -238,6 +238,12 @@ SEMANTIC_ID_BY_CLASS = {
 }
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+#: Finite float for tuple element types — Pydantic strict mode already
+#: rejects ``bool`` for ``float`` fields, but ``allow_inf_nan=False``
+#: adds schema-level defense so ``inf``/``nan`` are rejected before the
+#: model_validator's ``math.isfinite`` check runs (GLM-P2 defense in depth
+#: per FEEDBACK-HANDOFF-CODEX-012 §"GLM-P2").
+_FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 ModuleId = Literal[
     "central-courtyard-downhill",
     "bridge-deck-crossing",
@@ -598,8 +604,8 @@ class PartLayoutSpec(FrozenModel):
     for the simplified box geometry, not measured survey coordinates.
     """
 
-    center_m: tuple[float, float, float]
-    extent_m: tuple[float, float, float]
+    center_m: tuple[_FiniteFloat, _FiniteFloat, _FiniteFloat]
+    extent_m: tuple[_FiniteFloat, _FiniteFloat, _FiniteFloat]
     orientation_deg: float = Field(ge=0.0, lt=360.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
@@ -703,7 +709,7 @@ class WalkableNodeBinding(FrozenModel):
         min_length=1,
         max_length=64,
     )
-    node_position_m: tuple[float, float, float]
+    node_position_m: tuple[_FiniteFloat, _FiniteFloat, _FiniteFloat]
     level: Literal["ground", "elevated"]
 
     @model_validator(mode="after")
@@ -748,8 +754,8 @@ class ReciprocalRoleCameraCandidate(FrozenModel):
     camera_id: RoleCameraId
     topology_ref: str = Field(min_length=1)
     arc_length_m: float | None = Field(default=None, allow_inf_nan=False)
-    position_m: tuple[float, float, float]
-    look_at_m: tuple[float, float, float]
+    position_m: tuple[_FiniteFloat, _FiniteFloat, _FiniteFloat]
+    look_at_m: tuple[_FiniteFloat, _FiniteFloat, _FiniteFloat]
     eye_height_m: Literal[ROLE_CAMERA_EYE_HEIGHT_M] = ROLE_CAMERA_EYE_HEIGHT_M
     fov_x_deg: float = Field(
         gt=0.0,
@@ -987,13 +993,17 @@ def build_ground_route_replacement_candidate(
     # ``inf < 2.4`` is False), so a caller passing NaN or Inf would
     # construct a replacement candidate without verified clearance --
     # a fail-open hole.  Reject explicitly before the comparison.
-    if not isinstance(probe_clearance_min_m, (int, float)) or not math.isfinite(
-        probe_clearance_min_m,
-    ):
+    # GLM-P2 (FEEDBACK-HANDOFF-CODEX-012): ``bool`` is a subclass of
+    # ``int`` in Python, so ``isinstance(True, (int, float))`` is True
+    # and ``math.isfinite(True)`` is True.  An explicit ``bool`` check
+    # is required to reject ``True``/``False`` as a clearance value.
+    if isinstance(probe_clearance_min_m, bool) or not isinstance(
+        probe_clearance_min_m, (int, float),
+    ) or not math.isfinite(probe_clearance_min_m):
         raise ReciprocalRouteError(
             f"probe_clearance_min_m={probe_clearance_min_m!r} must be a "
-            f"finite real number; NaN/Inf silently bypass the clearance "
-            f"gate and are rejected"
+            f"finite real number; NaN/Inf/bool silently bypass the "
+            f"clearance gate and are rejected"
         )
     if probe_clearance_min_m < MIN_ROUTE_CLEARANCE_M:
         raise ReciprocalRouteError(

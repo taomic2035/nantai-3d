@@ -1029,17 +1029,6 @@ def test_walkable_node_binding_rejects_invalid_node_id_pattern() -> None:
         )
 
 
-def test_walkable_node_binding_rejects_non_finite_position() -> None:
-    """NaN/Inf in node_position_m must be rejected at schema level."""
-
-    with pytest.raises(ValidationError):
-        WalkableNodeBinding(
-            node_id="central-ground-east",
-            node_position_m=(float("nan"), 27.0, 71.0),
-            level="ground",
-        )
-
-
 def test_walkable_node_binding_rejects_unknown_level() -> None:
     """level must be Literal-locked to ``"ground"`` or ``"elevated"``;
     other values (e.g. ``"aerial"``) must be rejected."""
@@ -1656,6 +1645,8 @@ def test_reciprocal_route_module_order_matches_plan_module_order(plan) -> None:
         (float("nan"), "nan"),
         (float("inf"), "inf"),
         (float("-inf"), "-inf"),
+        (True, "bool-true"),
+        (False, "bool-false"),
     ],
 )
 def test_build_replacement_candidate_rejects_non_finite_clearance(
@@ -1665,7 +1656,11 @@ def test_build_replacement_candidate_rejects_non_finite_clearance(
     Inf silently bypass the ``< MIN_ROUTE_CLEARANCE_M`` comparison
     (``nan < 2.4`` is False, ``inf < 2.4`` is False), so a caller
     passing NaN or Inf would construct a replacement candidate without
-    verified clearance -- a fail-open hole.  This TDD locks the fix."""
+    verified clearance -- a fail-open hole.  ``bool`` is a subclass of
+    ``int`` in Python, so ``isinstance(True, (int, float))`` is True and
+    ``math.isfinite(True)`` is True; an explicit ``bool`` check is
+    required (GLM-P2 per FEEDBACK-HANDOFF-CODEX-012).  This TDD locks
+    the fix."""
 
     ground_node = next(
         node for node in topology.nodes if node.level == "ground"
@@ -1692,3 +1687,89 @@ def test_build_replacement_candidate_rejects_non_finite_clearance(
             probe_clearance_min_m=bad_clearance,
             disclosure="modeled-unverified replacement; fresh preflight required",
         )
+
+
+# --------------------------------------------------------------------------- #
+# GLM-P2 (FEEDBACK-HANDOFF-CODEX-012 §"GLM-P2"): schema-level
+# ``allow_inf_nan=False`` defense in depth for tuple[float, float, float]
+# fields.  These tests confirm the field-level rejection fires before the
+# model_validator's ``math.isfinite`` check, providing two independent layers.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "bad_value,label",
+    [
+        (float("nan"), "nan"),
+        (float("inf"), "inf"),
+        (float("-inf"), "-inf"),
+    ],
+)
+def test_role_camera_candidate_rejects_non_finite_look_at(
+    bad_value: float, label: str,
+) -> None:
+    """``look_at_m`` with NaN/Inf must be rejected at schema level
+    (GLM-P2: ``allow_inf_nan=False`` on the tuple element type)."""
+
+    with pytest.raises(ValidationError):
+        ReciprocalRoleCameraCandidate(
+            role_module_id="central-courtyard-downhill",
+            camera_id="camera-reciprocal-role-001",
+            topology_ref="path-network-003",
+            arc_length_m=None,
+            position_m=(40.0, 30.0, 70.0),
+            look_at_m=(bad_value, 5.0, 70.0),
+            eye_height_m=1.6,
+            fov_x_deg=65.0,
+            audit_only=False,
+            disclosure="modeled-unverified standing-eye at the courtyard downhill gate",
+            bound_production_plan_sha256="0" * 64,
+            bound_camera_registry_sha256="0" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_value,label",
+    [
+        (float("nan"), "nan"),
+        (float("inf"), "inf"),
+        (float("-inf"), "-inf"),
+    ],
+)
+def test_walkable_node_binding_rejects_non_finite_position(
+    bad_value: float, label: str,
+) -> None:
+    """``WalkableNodeBinding.node_position_m`` with NaN/Inf must be
+    rejected at schema level (GLM-P2: ``allow_inf_nan=False`` on the
+    tuple element type)."""
+
+    with pytest.raises(ValidationError):
+        WalkableNodeBinding(
+            node_id="test-node",
+            node_position_m=(bad_value, 0.0, 0.0),
+            level="ground",
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_value,label",
+    [
+        (float("nan"), "nan"),
+        (float("inf"), "inf"),
+        (float("-inf"), "-inf"),
+    ],
+)
+def test_part_layout_rejects_non_finite_extent(
+    bad_value: float, label: str,
+) -> None:
+    """``PartLayoutSpec.extent_m`` with NaN/Inf must be rejected at
+    schema level (GLM-P2: ``allow_inf_nan=False`` on the tuple element
+    type).  The model_validator's positivity check is a second layer."""
+
+    with pytest.raises(ValidationError):
+        PartLayoutSpec(
+            center_m=(0.0, 0.0, 0.0),
+            extent_m=(bad_value, 1.6, 0.6),
+            orientation_deg=0.0,
+        )
+
