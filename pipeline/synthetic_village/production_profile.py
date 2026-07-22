@@ -426,7 +426,71 @@ class ProductionCameraPlan(FrozenModel):
                 )
         if self.group_coverage != tuple(expected_coverage):
             raise ValueError("group coverage must derive from the placed camera registry")
+        _validate_no_isolated_cameras(list(self.cameras))
         return self
+
+
+def _validate_no_isolated_cameras(
+    cameras: list[ProductionCameraPose],
+) -> None:
+    """req 5 孤立相机检测 —— 组内 IQR 异常值测试。
+
+    不同分组天然间距不同 (ground-route ~20m, perimeter-inward ~65m,
+    audit-overview ~103m)。全局阈值会误杀所有大间距组。这里在【每个
+    group_id 内】计算最近邻距离, 用 Tukey upper fence (Q3 + 1.5*IQR)
+    检测组内异常值。
+
+    这是统计方法, 不是任意阈值: 它自适应每组的典型间距。若某台相机
+    在组内的最近邻距离远超同组的上界, 它就是孤立的 —— 退化基线对
+    COLMAP 有害。
+
+    少于 4 台的组无法可靠计算 IQR, 跳过 (不假装检测了)。
+    """
+
+    groups: dict[str, list[ProductionCameraPose]] = {}
+    for cam in cameras:
+        groups.setdefault(cam.group_id, []).append(cam)
+    for group_id, group_cams in groups.items():
+        if len(group_cams) < 4:
+            continue
+        nn_distances: list[tuple[float, str]] = []
+        for index, cam in enumerate(group_cams):
+            best = min(
+                math.dist(cam.position_m, other.position_m)
+                for j, other in enumerate(group_cams)
+                if j != index
+            )
+            nn_distances.append((best, cam.camera_id))
+        distances = [value for value, _ in nn_distances]
+        q1 = _quantile(distances, 0.25)
+        q3 = _quantile(distances, 0.75)
+        iqr = q3 - q1
+        upper_fence = q3 + 1.5 * iqr
+        isolated = [(d, cid) for d, cid in nn_distances if d > upper_fence]
+        if isolated:
+            details = ", ".join(
+                f"{cid}: {d:.3f}m" for d, cid in isolated
+            )
+            raise ProductionProfileError(
+                f"isolated cameras detected in group {group_id!r} "
+                f"(threshold: Q3+1.5*IQR={upper_fence:.3f}m): {details}"
+            )
+
+
+def _quantile(data: list[float], q: float) -> float:
+    """Linear interpolation quantile (matches statistics.quantiles inclusive)."""
+
+    if not data:
+        raise ValueError("empty data")
+    sorted_data = sorted(data)
+    n = len(sorted_data)
+    if n == 1:
+        return sorted_data[0]
+    pos = q * (n - 1)
+    lower = int(pos)
+    upper = min(lower + 1, n - 1)
+    frac = pos - lower
+    return sorted_data[lower] * (1 - frac) + sorted_data[upper] * frac
 
 
 def _path_segments(scene: ScenePlan) -> list[PolylineTopologySource]:
@@ -957,12 +1021,13 @@ def _undelivered_requirements() -> tuple[UndeliveredRequirement, ...]:
                 "production runner has implemented render failure / timeout recording and "
                 "an operator-selected valid-pixel rejection gate for frames it actually "
                 "renders, but this pre-render plan carries no completed 180-frame journal "
-                "and therefore cannot claim those frames passed. Missing gates are a "
-                "defensible near-duplicate pose threshold, isolated camera detection, and "
-                "sky/ground semantic bad-frame detection. _validate_plan rejects exact "
-                "duplicate centres only. pose_separation_evidence publishes the raw "
-                "distance distribution with threshold=None because this evidence cannot "
-                "justify a near-duplicate cutoff."
+                "and therefore cannot claim those frames passed. _validate_plan now "
+                "includes group-aware isolated camera detection (IQR-based per-group "
+                "nearest-neighbor outlier test) and rejects exact duplicate centres. "
+                "Missing gates are a defensible near-duplicate pose threshold and "
+                "sky/ground semantic bad-frame detection. pose_separation_evidence "
+                "publishes the raw distance distribution with threshold=None because this "
+                "evidence cannot justify a near-duplicate cutoff."
             ),
         ),
     )

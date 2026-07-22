@@ -848,6 +848,69 @@ def test_polyline_topology_source_rejects_adjacent_duplicate_points() -> None:
         )
 
 
+# --------------------------------------------------------------------------
+# req 5: 孤立相机检测 (组内 IQR 异常值测试)
+# --------------------------------------------------------------------------
+#
+# req 5 要求对"孤立相机"fail-closed。孤立相机 = 在同组内最近邻距离远超
+# 该组典型间距的相机, 对 COLMAP 是退化基线。
+#
+# 全局 IQR 会误杀所有大间距组 (perimeter-inward ~65m, audit-overview ~103m)。
+# 正确做法是组内 IQR: 每个分组内自适应自己的典型间距。
+
+
+def test_isolated_camera_detection_passes_on_current_plan() -> None:
+    """当前 180 台相机不应有孤立 —— 组内 IQR 检测应通过。"""
+
+    plan = build_production_camera_plan()
+    # If this passes, no isolated cameras were detected
+    assert plan.camera_count == 180
+
+
+def test_isolated_camera_detection_rejects_injected_outlier() -> None:
+    """注入一台远离同组的相机时, 验证必须 fail-closed。"""
+
+    payload = _plan_payload()
+    # Move one ground-route camera far away from all other ground-route cameras
+    for cam in payload["cameras"]:
+        if cam["camera_id"] == "camera-ground-route-001":
+            cam["position_m"] = [99999.0, 99999.0, 1.6]
+            break
+    with pytest.raises(ValidationError, match="isolated cameras detected"):
+        _reload(payload)
+
+
+def test_isolated_camera_detection_is_group_aware() -> None:
+    """perimeter-inward 的天然间距 (~65m) 不应被误判为孤立。
+
+    全局 IQR 会把所有 32 台 perimeter-inward 标记为孤立 (false positive)。
+    组内 IQR 正确识别它们是同组内的正常间距。
+    """
+
+    plan = build_production_camera_plan()
+    perimeter = [c for c in plan.cameras if c.group_id == "perimeter-inward"]
+    assert len(perimeter) == 32
+    # If plan validation passes, group-aware detection works correctly
+    assert plan.complete is True
+
+
+def test_isolated_camera_detection_reason_documents_implementation() -> None:
+    """req-5 reason 应反映孤立相机检测已实现, 但近重复和 sky/ground 仍未实现。"""
+
+    plan = build_production_camera_plan()
+    row = next(
+        r
+        for r in plan.undelivered_requirements
+        if r.requirement_id == "req-5-pose-quality-fail-closed"
+    )
+    assert row.status == "not-implemented"
+    assert "isolated camera detection" in row.reason
+    assert "IQR" in row.reason
+    assert "near-duplicate" in row.reason
+    assert "sky/ground" in row.reason
+
+
+
 def test_polyline_topology_source_accepts_closed_ring() -> None:
     """闭合 ring (首尾相同) 是合法拓扑, perimeter-inward 真实使用;
     不能被相邻重复点检查误拒。"""
