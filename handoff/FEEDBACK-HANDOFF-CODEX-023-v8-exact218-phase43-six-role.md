@@ -141,8 +141,30 @@ visibly failed with no fabricated rules. Backend Studio contracts are
 `107 passed, 9 skipped`; all `87` Studio JavaScript tests pass.
 
 The earlier private `reciprocal-v8-six-role` evidence predates this batch
-journal and is not silently migrated. The first real batch publication will be
-the fresh rerun after the role-aware mesh fix.
+journal and was not silently migrated. Commit `e2fc0f1` adds the explicit
+`render-reciprocal-production` CLI and a canonical runtime-request loader. Its
+caller/runtime/batch regression suite is `91 passed`; Ruff and direct CLI help
+are clean.
+
+A fresh pre-mesh-fix baseline was then rendered through that CLI into:
+
+```text
+.nantai-studio/sv-prod-win/reciprocal-production-batches/v8-pre-mesh-fix/
+```
+
+| field | value |
+|---|---|
+| batch ID | `554443087078c2003b7342ec563b0391fabd85e8fedb084599b773cf8ed2d949` |
+| journal self SHA | `e94c83658c450edd908f578abf9e81ca591593911a627211618e7e748476515a` |
+| journal file / Studio evidence SHA | `984fcf0a01446bb0750680592e165bcb3c4f7c2312b6b529daf149bae0b68e18` |
+| result | `5 accepted / 1 failed` |
+| failed role | `lower-valley-uphill` / `post-render-quality-rejected` |
+
+Independent journal loading and the Studio projection agree on all six role
+states. Studio reports rendering completed and post-render quality rejected;
+it does not fabricate a quality report for the failed role. This baseline is
+machine-readable evidence of the known defect, not a waiver. The post-fix run
+must use a fresh plan/build/batch identity.
 
 ## Next ownership
 
