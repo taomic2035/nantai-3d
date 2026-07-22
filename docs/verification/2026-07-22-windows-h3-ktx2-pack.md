@@ -108,6 +108,12 @@ fallback 仍严格绑定以下 H2 私有 payload：
 `b5f49...`。在恢复 exact H2 payload 或经单独 review 批准新的 fallback identity 前，
 不得改 pin、不得组合 v2/v3 bundle，也不得把 H3 设为默认 profile。
 
+远端恢复排查进一步确认：Actions API 返回的最新 100 个 artifact 均为 634-byte
+`plysha-*`；Release 内 203,272,000-byte visual pack 与 109,580,561-byte canary
+pack 的完整 ZIP 中央目录分别为 139 / 167 entries，两个 exact H2 ID 与 bundle
+路径均为 0 命中。该检查仅取得每个 ZIP 最后 1 MiB，并按 EOCD 声明的完整中央
+目录逐项解析；没有用文件名猜测内部内容，也没有保留无用全包。
+
 恢复后下一门依次为：compose MaterialBundle v2 → compose MeshAssetBundle v3 →
 Blender H2/H3 同视角接触表 → Viewer H3 加载与 H2 一字段回滚 → 私有 release。
 公开 GitHub Release 仍需单独明确授权。

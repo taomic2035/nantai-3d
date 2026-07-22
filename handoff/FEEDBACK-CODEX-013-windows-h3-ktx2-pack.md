@@ -36,6 +36,25 @@
 
 若拿不到 exact payload，停在这里并上报；不要自行批准新 fallback identity。
 
+## 远端恢复排查（2026-07-22）
+
+- GitHub Actions API 返回的最新 100 个 artifact 全部是 634-byte
+  `plysha-ubuntu-latest` / `plysha-windows-latest`，没有 H2 bundle 归档。
+- 对 Release 中 203,272,000-byte
+  `synthetic-mountain-village-visual-pack-hybrid-v3-2026-07-17.zip` 读取 ZIP
+  尾部中央目录：18,513 bytes / 139 entries；顶层仅
+  `default-resources`、`source-evidence`、`visual-sources`，两个 exact H2 ID
+  及 bundle 路径均为 0 命中。
+- 对 109,580,561-byte
+  `synthetic-mountain-village-canary-2026-07-16.zip` 同样检查：17,586 bytes /
+  167 entries；顶层仅 `README.md`、`RELEASE-METADATA.json`、`canary-build`、
+  `renders`、`visual-sources`，同样 0 命中。
+- 排查只下载 ZIP 最后 1 MiB 并完整解析中央目录；确认不命中后未保留全包或
+  临时 range 文件。
+
+因此 GitHub Actions / Release 不是 exact H2 恢复源；仍须从原 Mac 私有存储按
+字节恢复，或另行 review 新 fallback identity。
+
 ## Codex 恢复后顺序
 
 1. compose/publish MaterialBundle v2；
