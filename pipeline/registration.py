@@ -472,8 +472,31 @@ def parse_colmap_images_txt(text: str) -> dict[str, tuple[np.ndarray, np.ndarray
     }
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_COLMAP_CANDIDATES = (
+    "third/colmap/bin/colmap.exe",
+    "third/colmap/colmap.exe",
+    "third/colmap/bin/colmap",
+    "third/colmap/colmap",
+)
+
+
+def _find_colmap_binary() -> str | None:
+    """Resolve the COLMAP executable: probe third/ first, fall back to PATH.
+
+    Mirrors scripts/doctor.py _find_binary so registration.py is self-sufficient
+    without requiring the caller to prepend third/colmap/bin to PATH.
+    """
+    for rel in _COLMAP_CANDIDATES:
+        candidate = _REPO_ROOT / rel
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("colmap")
+
+
 def colmap_available() -> bool:
-    return shutil.which("colmap") is not None
+    return _find_colmap_binary() is not None
 
 
 @functools.lru_cache(maxsize=1)
@@ -485,8 +508,11 @@ def _colmap_sift_group() -> str:
     的 nocuda 版已是 Feature*）。探测已安装 build 的帮助文本，两种命名都适配，
     避免 'unrecognised option' 直接失败。
     """
+    binary = _find_colmap_binary()
+    if binary is None:
+        return "Feature"
     try:
-        out = subprocess.run(["colmap", "feature_extractor", "-h"],
+        out = subprocess.run([binary, "feature_extractor", "-h"],
                              capture_output=True, text=True, timeout=30)
         text = (out.stdout or "") + (out.stderr or "")
         if "SiftExtraction.use_gpu" in text and "FeatureExtraction.use_gpu" not in text:
@@ -526,10 +552,16 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
     sparse = workspace / "sparse"
     sparse.mkdir(exist_ok=True)
 
+    colmap_bin = _find_colmap_binary()
+    if colmap_bin is None:
+        raise RuntimeError(
+            "colmap not found: checked third/colmap/bin/ and PATH. "
+            "Install COLMAP or use --engine mock.")
+
     def run(args: list[str]):
         logger.info(f"colmap {' '.join(args[:2])} ...")
         try:
-            proc = subprocess.run(["colmap", *args], capture_output=True,
+            proc = subprocess.run([colmap_bin, *args], capture_output=True,
                                   text=True, timeout=stage_timeout_s)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
