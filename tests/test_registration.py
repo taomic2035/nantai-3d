@@ -1,6 +1,7 @@
 """统一坐标系配准: 会话划分 / mock 确定性 / 坐标一致性 / COLMAP 解析"""
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -369,3 +370,79 @@ class TestGpsEnu:
         # 纬度 60° 时东西向缩短为 cos(60°)=0.5
         expected = np.radians(0.001) * 6378137.0 * 0.5
         assert abs(enu[0] - expected) < 0.5
+
+
+class TestFindColmapBinary:
+    """_find_colmap_binary resolves COLMAP without requiring PATH manipulation.
+
+    FEEDBACK-HANDOFF-OPUS-011 §1 identified that registration.py relied on
+    shutil.which("colmap") only, missing the bundled third/colmap/bin/ install.
+    The fix (commit d6743c8) mirrors scripts/doctor.py _find_binary. These
+    tests are hermetic — they do not depend on a real COLMAP install.
+    """
+
+    def test_finds_bundled_exe_in_third_colmap_bin(self, tmp_path, monkeypatch):
+        import pipeline.registration as reg
+
+        fake_root = tmp_path
+        colmap_dir = fake_root / "third" / "colmap" / "bin"
+        colmap_dir.mkdir(parents=True)
+        exe = colmap_dir / "colmap.exe"
+        exe.write_bytes(b"fake")
+        monkeypatch.setattr(reg, "_REPO_ROOT", fake_root)
+        monkeypatch.setattr(reg.shutil, "which", lambda _: None)
+
+        result = reg._find_colmap_binary()
+        assert result is not None
+        assert Path(result).name == "colmap.exe"
+
+    def test_finds_bundled_binary_without_bin_subdir(self, tmp_path, monkeypatch):
+        import pipeline.registration as reg
+
+        fake_root = tmp_path
+        colmap_dir = fake_root / "third" / "colmap"
+        colmap_dir.mkdir(parents=True)
+        exe = colmap_dir / "colmap.exe"
+        exe.write_bytes(b"fake")
+        monkeypatch.setattr(reg, "_REPO_ROOT", fake_root)
+        monkeypatch.setattr(reg.shutil, "which", lambda _: None)
+
+        result = reg._find_colmap_binary()
+        assert result is not None
+        assert Path(result).name == "colmap.exe"
+
+    def test_falls_back_to_path_when_third_absent(self, tmp_path, monkeypatch):
+        import pipeline.registration as reg
+
+        monkeypatch.setattr(reg, "_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda _: "/usr/bin/colmap"
+        )
+
+        result = reg._find_colmap_binary()
+        assert result == "/usr/bin/colmap"
+
+    def test_returns_none_when_not_found_anywhere(self, tmp_path, monkeypatch):
+        import pipeline.registration as reg
+
+        monkeypatch.setattr(reg, "_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(reg.shutil, "which", lambda _: None)
+
+        assert reg._find_colmap_binary() is None
+        assert reg.colmap_available() is False
+
+    def test_colmap_register_raises_clear_error_when_binary_missing(
+        self, tmp_path, monkeypatch,
+    ):
+        import pipeline.registration as reg
+
+        photos = tmp_path / "photos"
+        photos.mkdir()
+        (photos / "IMG_0001.jpg").write_bytes(b"fake")
+        workspace = tmp_path / "colmap"
+
+        monkeypatch.setattr(reg, "_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(reg.shutil, "which", lambda _: None)
+
+        with pytest.raises(RuntimeError, match="colmap not found"):
+            reg.colmap_register(photos, workspace)
