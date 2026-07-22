@@ -115,7 +115,7 @@ def test_ground_attachments_lie_on_the_declared_real_path_and_match_terrain() ->
     }
 
     ground = [node for node in plan.nodes if node.level == "ground"]
-    assert len(ground) == 8
+    assert len(ground) == 4
     for node in ground:
         assert node.ground_route_ref in paths
         route = paths[node.ground_route_ref]
@@ -163,68 +163,23 @@ def test_elevated_nodes_and_edges_have_absolute_clearance_and_buildable_envelope
     verify_elevated_topology_plan(plan, scene)
 
 
-def test_module_anchor_ground_nodes_are_isolated_and_on_declared_paths() -> None:
-    """Phase 4.5: three isolated anchor ground nodes for reciprocal-route
-    role camera binding.  These nodes are on declared paths (verify accepts
-    them) but do not participate in any loop/edge (ground_attachment_count
-    stays 4)."""
+def test_all_ground_nodes_participate_in_edges() -> None:
+    """GLM-P0 (FEEDBACK-HANDOFF-CODEX-012): all ground nodes must
+    participate in at least one edge.  Isolated anchor nodes are rejected
+    by Codex's directive: "不要登记孤立节点来过距离门"."""
     scene = build_scene_plan()
     plan = build_elevated_topology_plan(scene)
 
-    anchor_ids = {
-        "bridge-ground-001",
-        "gallery-ground-001",
-        "watermill-ground-001",
-        "valley-ground-001",
-    }
-    anchor_nodes = {
-        node.node_id: node
-        for node in plan.nodes
-        if node.node_id in anchor_ids
-    }
-    assert len(anchor_nodes) == 4
-
-    # Anchor nodes must not participate in any edge.
     used_node_ids = {
         edge.start_node_id for edge in plan.edges
     } | {edge.end_node_id for edge in plan.edges}
-    for anchor_id in anchor_ids:
-        assert anchor_id not in used_node_ids, (
-            f"{anchor_id} participates in an edge but should be isolated"
+    ground_nodes = [n for n in plan.nodes if n.level == "ground"]
+    for node in ground_nodes:
+        assert node.node_id in used_node_ids, (
+            f"ground node {node.node_id} is isolated (not in any edge); "
+            f"Codex rejects isolated nodes"
         )
-
-    # ground_attachment_count must stay 4 (loop attachments only).
-    assert plan.summary.ground_attachment_count == 4
-
-    # Each anchor must be on its declared path and match terrain.
-    paths = {
-        item.object_id: item
-        for item in scene.objects
-        if item.semantic_class == "path"
-    }
-    expected_routes = {
-        "bridge-ground-001": "path-network-002",
-        "gallery-ground-001": "path-network-003",
-        "watermill-ground-001": "path-network-001",
-        "valley-ground-001": "path-network-002",
-    }
-    for anchor_id, route_ref in expected_routes.items():
-        node = anchor_nodes[anchor_id]
-        assert node.ground_route_ref == route_ref
-        route = paths[route_ref]
-        points = [(p.x_m, p.y_m) for p in route.polyline.points]
-        distance = min(
-            _point_segment_distance(
-                (node.position_m[0], node.position_m[1]), start, end
-            )
-            for start, end in zip(points, points[1:], strict=False)
-        )
-        assert distance <= route.polyline.width_m / 2 + 1e-6
-        assert node.position_m[2] == pytest.approx(
-            terrain_height_m(node.position_m[0], node.position_m[1], scene.extent),
-            abs=1e-9,
-        )
-
+    assert plan.summary.ground_attachment_count == len(ground_nodes)
     verify_elevated_topology_plan(plan, scene)
 
 

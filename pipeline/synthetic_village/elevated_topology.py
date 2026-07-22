@@ -232,12 +232,9 @@ class ElevatedTopologyPlan(FrozenModel):
         expected_loops = _derive_loops(self.nodes, self.edges)
         if self.loops != expected_loops:
             raise ValueError("elevated loop summaries do not derive from graph evidence")
-        # Only ground nodes that participate in loop edges count as loop
-        # ground attachments.  Isolated anchor nodes (module-adjacent
-        # ground reference points for reciprocal-route role cameras) are
-        # valid canonical topology reference points on declared paths but
-        # do not participate in any loop and must not inflate the loop
-        # attachment count.
+        # Ground attachments are ground-level nodes that participate in at
+        # least one edge.  All nodes must participate in the topology graph;
+        # isolated nodes are rejected by Codex's directive (GLM-P0).
         used_node_ids = {
             edge.start_node_id for edge in self.edges
         } | {edge.end_node_id for edge in self.edges}
@@ -462,44 +459,14 @@ def build_elevated_topology_plan(
                     level="ground",
                     ground_route_ref="path-network-003",
                 ),
-                # Phase 4.5: isolated module-anchor ground nodes for
-                # reciprocal-route role camera binding.  These are
-                # canonical topology reference points on declared paths
-                # but do not participate in any loop/edge.  Each sits on
-                # an existing path-network polyline vertex so verify
-                # accepts it without scene-plan changes.
-                _node(
-                    node_id="bridge-ground-001",
-                    x_m=-165,
-                    y_m=-78,
-                    scene=active,
-                    level="ground",
-                    ground_route_ref="path-network-002",
-                ),
-                _node(
-                    node_id="gallery-ground-001",
-                    x_m=58,
-                    y_m=43,
-                    scene=active,
-                    level="ground",
-                    ground_route_ref="path-network-003",
-                ),
-                _node(
-                    node_id="watermill-ground-001",
-                    x_m=-180.736,
-                    y_m=-106.808,
-                    scene=active,
-                    level="ground",
-                    ground_route_ref="path-network-001",
-                ),
-                _node(
-                    node_id="valley-ground-001",
-                    x_m=-90,
-                    y_m=-35,
-                    scene=active,
-                    level="ground",
-                    ground_route_ref="path-network-002",
-                ),
+                # GLM-P0 (FEEDBACK-HANDOFF-CODEX-012): the four isolated
+                # module-anchor ground nodes added in Phase 4.5.1 have been
+                # removed.  Codex rejected isolated nodes that do not
+                # participate in any edge: "不要登记孤立节点来过距离门".
+                # Each remaining module's walkable-node connectivity will be
+                # restored via either module translation (covered-gallery)
+                # or connected ground node/edge additions (bridge, watermill,
+                # lower-valley) in subsequent steps.
             ),
             key=lambda node: node.node_id,
         )

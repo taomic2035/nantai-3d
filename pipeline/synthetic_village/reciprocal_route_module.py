@@ -197,7 +197,7 @@ _DEFAULT_MODULE_BASE_POSITION: dict[ModuleId, tuple[float, float, float]] = {
     "central-courtyard-downhill": (40.0, 30.0, 70.0),
     "bridge-deck-crossing": (-150.0, -100.0, 55.0),
     "watermill-tailrace": (-180.0, -130.0, 52.0),
-    "covered-gallery-underpass": (60.0, -25.0, 78.0),
+    "covered-gallery-underpass": (57.0, -25.0, 78.0),
     "forest-orchard-boundary": (120.0, 30.0, 75.0),
     "lower-valley-uphill": (-90.0, -127.5, 55.0),
 }
