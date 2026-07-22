@@ -697,6 +697,41 @@ class ReciprocalRenderStatistics(FrozenModel):
         return self
 
 
+def require_reciprocal_visible_instances(
+    statistics: ReciprocalRenderStatistics,
+    *,
+    required_visible_instance_ids: tuple[int, ...],
+) -> None:
+    """Require every caller-declared role instance in the measured mask.
+
+    The generic post-render policy can accept a geometrically valid frame in
+    which the intended reciprocal module is completely outside the view.  A
+    role-camera caller must therefore bind its expected canonical instances
+    explicitly and fail closed when any are absent from measured statistics.
+    """
+
+    if (
+        not required_visible_instance_ids
+        or required_visible_instance_ids
+        != tuple(sorted(set(required_visible_instance_ids)))
+        or any(value < 1 or value > 218 for value in required_visible_instance_ids)
+    ):
+        raise ReciprocalProductionError(
+            "required visible instance IDs must be a non-empty unique sorted "
+            "subset of 1..218",
+        )
+    missing = tuple(
+        value
+        for value in required_visible_instance_ids
+        if value not in statistics.instance_ids
+    )
+    if missing:
+        raise ReciprocalProductionError(
+            "required reciprocal role instances are not visible: "
+            + ", ".join(str(value) for value in missing),
+        )
+
+
 class ReciprocalProductionRenderFrameReport(
     LocalProductionRenderFrameReport,
 ):
@@ -1109,6 +1144,7 @@ def run_reciprocal_production_camera(
     clearance_policy: ProductionClearancePolicy,
     quality_policy: LocalProductionQualityPolicy,
     post_render_policy: ProductionFrameQualityPolicyV2,
+    required_visible_instance_ids: tuple[int, ...],
     process_runner: Callable[..., subprocess.CompletedProcess[str]] = (
         subprocess.run
     ),
@@ -1118,6 +1154,23 @@ def run_reciprocal_production_camera(
 
     if timeout_seconds <= 0:
         raise ReciprocalProductionError("runner timeout must be positive")
+    if (
+        not required_visible_instance_ids
+        or required_visible_instance_ids
+        != tuple(sorted(set(required_visible_instance_ids)))
+        or any(value < 1 or value > 218 for value in required_visible_instance_ids)
+    ):
+        raise ReciprocalProductionError(
+            "required visible instance IDs must be a non-empty unique sorted "
+            "subset of 1..218",
+        )
+    registry_instance_ids = {
+        row.instance_id for row in verified_build.object_registry
+    }
+    if not set(required_visible_instance_ids).issubset(registry_instance_ids):
+        raise ReciprocalProductionError(
+            "required visible instance IDs are absent from the verified registry",
+        )
     blender_executable = Path(blender_executable).resolve(strict=True)
     output_root = Path(output_root).absolute()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1307,6 +1360,10 @@ def run_reciprocal_production_camera(
             frame_report,
             request=render_request,
             frame_root=frame_output,
+        )
+        require_reciprocal_visible_instances(
+            frame_report.statistics,
+            required_visible_instance_ids=required_visible_instance_ids,
         )
         metadata = load_reciprocal_production_camera_metadata(
             frame_output / f"cameras/{camera_id}.json",

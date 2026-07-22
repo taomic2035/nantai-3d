@@ -65,6 +65,7 @@ from pipeline.synthetic_village.reciprocal_route_production import (
     load_reciprocal_production_render_report,
     reciprocal_object_registry_sha256,
     require_exact_reciprocal_object_registry,
+    require_reciprocal_visible_instances,
     run_reciprocal_production_camera,
     verify_reciprocal_production_build,
     verify_reciprocal_production_clearance_report,
@@ -100,6 +101,50 @@ def _post_render_policy() -> ProductionFrameQualityPolicyV2:
         upper_region_end_row_exclusive=288,
         ground_semantic_ids=(1,),
     )
+
+
+def test_required_role_instances_must_all_be_visible() -> None:
+    statistics = ReciprocalRenderStatistics(
+        depth_min_m=0.0,
+        depth_max_m=10.0,
+        depth_background_pixels=1,
+        depth_max_range_error_m=0.0,
+        normal_max_unit_error=0.0,
+        instance_ids=(0, 176, 177, 178),
+        semantic_ids=(0, 7),
+    )
+
+    require_reciprocal_visible_instances(
+        statistics,
+        required_visible_instance_ids=(176, 177, 178),
+    )
+    with pytest.raises(ReciprocalProductionError, match="not visible"):
+        require_reciprocal_visible_instances(
+            statistics,
+            required_visible_instance_ids=(176, 179),
+        )
+
+
+@pytest.mark.parametrize(
+    "required",
+    ((), (176, 176), (0,), (219,), (177, 176)),
+)
+def test_required_role_instance_contract_is_exact(required: tuple[int, ...]) -> None:
+    statistics = ReciprocalRenderStatistics(
+        depth_min_m=0.0,
+        depth_max_m=10.0,
+        depth_background_pixels=1,
+        depth_max_range_error_m=0.0,
+        normal_max_unit_error=0.0,
+        instance_ids=(0, 176, 177),
+        semantic_ids=(0, 7),
+    )
+
+    with pytest.raises(ReciprocalProductionError, match="required visible"):
+        require_reciprocal_visible_instances(
+            statistics,
+            required_visible_instance_ids=required,
+        )
 
 
 def _clearance_policy() -> ProductionClearancePolicy:
@@ -631,6 +676,7 @@ def test_runner_does_not_render_or_publish_rejected_preflight(
                 minimum_valid_pixel_ratio=0.05,
             ),
             post_render_policy=_post_render_policy(),
+            required_visible_instance_ids=(218,),
             process_runner=fake_run,
             timeout_seconds=30,
         )
@@ -859,6 +905,7 @@ def test_runner_publishes_verified_one_camera_bundle(tmp_path: Path) -> None:
             minimum_valid_pixel_ratio=0.05,
         ),
         post_render_policy=_post_render_policy(),
+        required_visible_instance_ids=(218,),
         process_runner=fake_run,
         timeout_seconds=30,
     )
