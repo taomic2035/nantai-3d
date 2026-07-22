@@ -690,7 +690,12 @@ def extract_command(
     )
 
 
-def _decode_quality_png(payload: bytes, *, label: str) -> np.ndarray:
+def _decode_quality_png(
+    payload: bytes,
+    *,
+    label: str,
+    allow_palette: bool = False,
+) -> np.ndarray:
     if len(payload) < 1 or len(payload) > 128 * 1024 * 1024:
         raise KtxToolchainError(f"{label} PNG byte length is invalid")
     try:
@@ -700,7 +705,12 @@ def _decode_quality_png(payload: bytes, *, label: str) -> np.ndarray:
                 raise KtxToolchainError(
                     f"{label} must be an exact 4096 by 4096 PNG",
                 )
-            if image.mode not in {"RGB", "RGBA"}:
+            palette_is_safe = (
+                allow_palette
+                and image.mode == "P"
+                and "transparency" not in image.info
+            )
+            if image.mode not in {"RGB", "RGBA"} and not palette_is_safe:
                 raise KtxToolchainError(f"{label} must decode as RGB or RGBA")
             return np.asarray(image.convert("RGB"), dtype=np.uint8)
     except KtxToolchainError:
@@ -765,7 +775,11 @@ def measure_decoded_quality(
     if role not in {"base_color", "normal", "orm"}:
         raise KtxToolchainError(f"unknown decoded texture role: {role}")
     reference = _decode_quality_png(reference_payload, label="reference")
-    decoded = _decode_quality_png(decoded_payload, label="decoded KTX level")
+    decoded = _decode_quality_png(
+        decoded_payload,
+        label="decoded KTX level",
+        allow_palette=True,
+    )
     if role == "base_color":
         score = _tiled_base_colour_ssim(reference, decoded)
         if score < KTX_BASE_COLOUR_MIN_SSIM:
@@ -1538,6 +1552,7 @@ def _level_ranges(
     payload: bytes,
     *,
     level_count: int,
+    supercompression: int,
 ) -> tuple[tuple[int, int], ...]:
     ranges = []
     for index in range(level_count):
@@ -1548,7 +1563,11 @@ def _level_ranges(
         )
         if (
             length < 1
-            or uncompressed < 1
+            or (
+                uncompressed != 0
+                if supercompression == KTX_SS_BASIS_LZ
+                else uncompressed < 1
+            )
             or offset < 80 + level_count * 24
             or offset > len(payload)
             or length > len(payload) - offset
@@ -1634,7 +1653,11 @@ def audit_ktx2_bytes(
         raise KtxToolchainError("KTX2 DFD codec is invalid")
     if supercompression != codec_evidence[1]:
         raise KtxToolchainError("KTX2 codec and supercompression disagree")
-    _level_ranges(payload, level_count=level_count)
+    _level_ranges(
+        payload,
+        level_count=level_count,
+        supercompression=supercompression,
+    )
     return KtxBinaryAudit(
         sha256=hashlib.sha256(payload).hexdigest(),
         bytes=len(payload),

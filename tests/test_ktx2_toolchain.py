@@ -59,7 +59,14 @@ def _fake_ktx2(
     cursor = payload_offset
     for level in range(level_count):
         payload = bytes([level % 251]) * 16
-        levels.append(struct.pack("<QQQ", cursor, len(payload), len(payload)))
+        levels.append(
+            struct.pack(
+                "<QQQ",
+                cursor,
+                len(payload),
+                0 if colour_model == 163 else len(payload),
+            ),
+        )
         level_payloads.append(payload)
         cursor += len(payload)
     dfd = bytearray(dfd_length)
@@ -1060,6 +1067,27 @@ def test_decoded_quality_gates_are_role_exact() -> None:
     assert orm_quality.passed is True
 
 
+def test_decoded_orm_quality_accepts_official_palette_png(
+    compiler_reference_png: bytes,
+) -> None:
+    with Image.open(io.BytesIO(compiler_reference_png)) as image:
+        palette = image.convert(
+            "P",
+            palette=Image.Palette.ADAPTIVE,
+            colors=256,
+        )
+        output = io.BytesIO()
+        palette.save(output, format="PNG")
+
+    quality = measure_decoded_quality(
+        compiler_reference_png,
+        output.getvalue(),
+        role="orm",
+    )
+
+    assert quality.orm_max_channel_error == 0.0
+
+
 @pytest.mark.parametrize(
     "role",
     ["base_color", "normal", "orm"],
@@ -1098,6 +1126,18 @@ def test_independent_ktx2_audit_reads_header_dfd_and_full_mip_chain() -> None:
     assert audit.transfer == "srgb"
     assert audit.codec == "uastc"
     assert audit.media_type == "image/ktx2"
+
+
+def test_independent_ktx2_audit_accepts_normative_basislz_zero_lengths() -> None:
+    audit = audit_ktx2_bytes(
+        _fake_ktx2(transfer=1, colour_model=163),
+        expected_transfer="linear",
+        expected_codec="etc1s",
+    )
+
+    assert audit.codec == "etc1s"
+    assert audit.level_dimensions == KTX_LEVEL_DIMENSIONS
+    assert audit.transfer == "linear"
 
 
 @pytest.mark.parametrize(
