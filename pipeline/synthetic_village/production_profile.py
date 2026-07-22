@@ -1260,18 +1260,20 @@ def _undelivered_requirements() -> tuple[UndeliveredRequirement, ...]:
             status="not-implemented",
             reason=(
                 "req 3 asks that every instantiated building / bridge / courtyard / "
-                "environment component have both front and reverse facade coverage. No "
-                "front/back determination is implemented anywhere: object_registry carries "
-                "no per-component orientation, so no facade can be named 'front', and "
-                "adding orientation to the build was not attempted. This is a missing "
-                "input, not a limit of the evidence -- do not read it as 'impossible'. "
-                "What is delivered, on the canary's 24 frames only, is "
-                "observed_normal_angular_spread_deg: a per-component continuous quantity "
-                "recomputed from the journal-anchored normal layer that measures whether "
-                "distinct surfaces were observed. It does not identify which surface is "
-                "the front, so it does not satisfy req 3, and no threshold is declared on "
-                "it. This 180-camera profile renders no frames at all, so even that "
-                "evidence does not exist here."
+                "environment component have both front and reverse facade coverage. The "
+                "facade_orientation_deg field now exists on ObjectRegistryEntry (optional, "
+                "backward-compatible, ge=-180 lt=180, reject NaN/Inf), but it is not yet "
+                "populated from SceneObject.transform.yaw_deg during registry construction "
+                "-- so every entry still carries None and no facade can be named 'front'. "
+                "The downstream coverage_audit still reports orientation_coverage='unknown' "
+                "for the same reason. This is a missing wiring step, not a limit of the "
+                "evidence -- do not read it as 'impossible'. What is delivered, on the "
+                "canary's 24 frames only, is observed_normal_angular_spread_deg: a "
+                "per-component continuous quantity recomputed from the journal-anchored "
+                "normal layer that measures whether distinct surfaces were observed. It "
+                "does not identify which surface is the front, so it does not satisfy "
+                "req 3, and no threshold is declared on it. This 180-camera profile renders "
+                "no frames at all, so even that evidence does not exist here."
             ),
         ),
         UndeliveredRequirement(

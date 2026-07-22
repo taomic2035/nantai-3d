@@ -335,6 +335,22 @@ class ObjectRegistryEntry(FrozenModel):
         default=None,
         pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
     )
+    #: req 3 per-component facade orientation in degrees.  ``None`` = unknown
+    #: (backward-compatible: existing registries without this field still
+    #: validate).  When populated from SceneObject.transform.yaw_deg, it names
+    #: which direction is "front" so front/back facade coverage can be
+    #: determined.  Carries no trust — it is a declared input, not measured.
+    facade_orientation_deg: float | None = Field(
+        default=None,
+        ge=-180.0,
+        lt=180.0,
+        allow_inf_nan=False,
+        #: req 3 canonical compatibility (REVIEW-CODEX-020): when ``None``
+        #: the field is absent from ``model_dump`` so that historical
+        #: 130/175/218 request/report bytes and digests remain reproducible.
+        #: A non-None value enters canonical bytes and downstream SHA.
+        exclude_if=lambda value: value is None,
+    )
 
 
 class AuxiliaryRegistryEntry(FrozenModel):

@@ -788,6 +788,90 @@ def test_artifact_request_registry_has_only_portable_exact_names() -> None:
     assert all("/" not in entry.name and "\\" not in entry.name for entry in ARTIFACT_REQUESTS)
 
 
+def test_object_registry_entry_facade_orientation_is_optional_and_validated() -> None:
+    """req 3: facade_orientation_deg is optional, validated, and canonical-compatible.
+
+    Guards REVIEW-CODEX-020 §3 regression gates 2–4:
+      * gate 2: None → canonical dump omits the key (historical bytes intact)
+      * gate 3: different non-None values produce different digests
+      * gate 4: out-of-range / NaN / Inf fail-closed
+    """
+
+    import hashlib
+
+    from pipeline.synthetic_village.canary import ObjectRegistryEntry
+
+    # Default: None (backward-compatible with existing registries)
+    entry_none = ObjectRegistryEntry(
+        object_id="stone-wall-01",
+        instance_id=1,
+        semantic_id=5,
+        material_id=3,
+    )
+    assert entry_none.facade_orientation_deg is None
+
+    # Gate 2: None → key absent from canonical model_dump (json mode)
+    dump_none = entry_none.model_dump(mode="json")
+    assert "facade_orientation_deg" not in dump_none, dump_none
+
+    # Accepts valid yaw
+    entry_val = ObjectRegistryEntry(
+        object_id="stone-wall-01",
+        instance_id=1,
+        semantic_id=5,
+        material_id=3,
+        facade_orientation_deg=-15.0,
+    )
+    assert entry_val.facade_orientation_deg == -15.0
+
+    # Non-None value appears in canonical dump
+    dump_val = entry_val.model_dump(mode="json")
+    assert dump_val["facade_orientation_deg"] == -15.0
+
+    # Gate 3: different non-None values produce different registry digests
+    entry_0 = ObjectRegistryEntry(
+        object_id="stone-wall-01", instance_id=1, semantic_id=5, material_id=3,
+        facade_orientation_deg=0.0,
+    )
+    entry_90 = ObjectRegistryEntry(
+        object_id="stone-wall-01", instance_id=1, semantic_id=5, material_id=3,
+        facade_orientation_deg=90.0,
+    )
+    digest_none = hashlib.sha256(
+        json.dumps(entry_none.model_dump(mode="json"), sort_keys=True).encode(),
+    ).hexdigest()
+    digest_0 = hashlib.sha256(
+        json.dumps(entry_0.model_dump(mode="json"), sort_keys=True).encode(),
+    ).hexdigest()
+    digest_90 = hashlib.sha256(
+        json.dumps(entry_90.model_dump(mode="json"), sort_keys=True).encode(),
+    ).hexdigest()
+    assert digest_none != digest_0, "None vs 0.0 must differ"
+    assert digest_0 != digest_90, "0.0 vs 90.0 must differ"
+
+    # Gate 4: rejects out-of-range, NaN, Inf (fail-closed)
+    with pytest.raises(ValidationError):
+        ObjectRegistryEntry(
+            object_id="x", instance_id=1, semantic_id=3, material_id=1,
+            facade_orientation_deg=180.0,
+        )
+    with pytest.raises(ValidationError):
+        ObjectRegistryEntry(
+            object_id="x", instance_id=1, semantic_id=3, material_id=1,
+            facade_orientation_deg=float("nan"),
+        )
+    with pytest.raises(ValidationError):
+        ObjectRegistryEntry(
+            object_id="x", instance_id=1, semantic_id=3, material_id=1,
+            facade_orientation_deg=float("inf"),
+        )
+    with pytest.raises(ValidationError):
+        ObjectRegistryEntry(
+            object_id="x", instance_id=1, semantic_id=3, material_id=1,
+            facade_orientation_deg=-180.1,
+        )
+
+
 def test_build_counts_reject_unregistered_auxiliary_meshes() -> None:
     with pytest.raises(ValidationError):
         BuildCounts(

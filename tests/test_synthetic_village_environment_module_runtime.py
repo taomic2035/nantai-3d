@@ -376,3 +376,63 @@ def test_report_rejects_tampered_base_blend_sha(tmp_path: Path) -> None:
             request=request,
             output_path=output,
         )
+
+
+def test_environment_module_runtime_request_roundtrip_canonical_bytes(
+    tmp_path: Path,
+) -> None:
+    """REVIEW-CODEX-020 §3 gate 1+5: canonical bytes survive model_validate_json round-trip.
+
+    The ``facade_orientation_deg`` field added to ``ObjectRegistryEntry`` uses
+    ``exclude_if=lambda value: value is None`` so that ``None`` (the default
+    for all current entries) is absent from ``model_dump(mode="json")``.
+    Historical 175-entry request bytes and digests must remain reproducible.
+    """
+
+    base = _base_build(tmp_path)
+    request = build_environment_module_runtime_request(
+        base_build=base,
+        repo_root=Path(__file__).resolve().parents[1],
+    )
+
+    # Every entry has facade_orientation_deg=None (not yet populated)
+    assert all(row.facade_orientation_deg is None for row in request.object_registry)
+
+    original_bytes = canonical_environment_module_runtime_request_bytes(request)
+    reloaded = type(request).model_validate_json(original_bytes)
+    recomputed_bytes = canonical_environment_module_runtime_request_bytes(reloaded)
+
+    assert recomputed_bytes == original_bytes, (
+        "canonical bytes changed after round-trip — historical provenance break"
+    )
+    assert reloaded.build_id == request.build_id
+    assert reloaded.base_object_registry_sha256 == request.base_object_registry_sha256
+
+
+_EXISTING_ARTIFACT = (
+    Path(__file__).resolve().parents[1]
+    / ".nantai-studio/synthetic-village/hybrid-v4/work/environment-modules/"
+    "61f70a6c1abfc861e76564220a147027d5f99c86f907295ba7598a8bc68ffca5/"
+    "module-build-request.json"
+)
+
+
+@pytest.mark.skipif(
+    not _EXISTING_ARTIFACT.exists(),
+    reason="private artifact not available in this environment",
+)
+def test_existing_module_build_request_artifact_remains_canonical() -> None:
+    """REVIEW-CODEX-020 §3 gate 1: on-disk artifact bytes == recomputed canonical bytes."""
+
+    from pipeline.synthetic_village.environment_module_runtime import (
+        EnvironmentModuleRuntimeRequest,
+        canonical_environment_module_runtime_request_bytes,
+    )
+
+    raw = _EXISTING_ARTIFACT.read_bytes()
+    request = EnvironmentModuleRuntimeRequest.model_validate_json(raw)
+    recomputed = canonical_environment_module_runtime_request_bytes(request)
+    assert recomputed == raw, (
+        "on-disk module-build-request.json no longer matches canonical bytes — "
+        "facade_orientation_deg field broke historical provenance"
+    )

@@ -20,9 +20,10 @@
   simplified-pbr-not-render-parity, 审计改变不了这两件事。
 
 【本模块【不】声称能算的东西 —— 见 orientation_coverage】
-`object_registry` 里【没有】组件朝向, 因此『哪个立面是正面』无从谈起,
+`ObjectRegistryEntry.facade_orientation_deg` 字段已存在但尚未从
+`SceneObject.transform.yaw_deg` 填充, 因此『哪个立面是正面』无从谈起,
 『每个组件至少有正面和反向覆盖』(req 3 的字面要求) 一律 fail-closed 标 `unknown`。
-**这是缺一个输入 (registry 里没有朝向), 不是这份证据的能力上限** —— 两者必须分清。
+**这是缺一个 wiring 步骤 (字段未填充), 不是这份证据的能力上限** —— 两者必须分清。
 
 报告确实会给出两样【相关但不等价】的连续量, 各自带着显式语义标签, 目的就是让
 消费者【不可能】把它们误读成正反面覆盖:
@@ -94,11 +95,13 @@ NULL_INSTANCE_ID = 0
 #: 并非无话可说 —— 被 journal 锚定 sha256 的 normal 层能实测"看没看到不同的面",
 #: 那条连续量就是 observed_normal_angular_spread_deg, 已经交付。
 ORIENTATION_UNKNOWN_REASON = (
-    "object_registry carries no component orientation, so no facade can be named "
-    "'front' or 'back'; this is a missing input, not a limit of this evidence. The "
-    "journal-anchored normal layer does measure whether distinct surfaces were "
-    "observed, and that continuous quantity is published as "
-    "observed_normal_angular_spread_deg -- it does not identify which surface is the front"
+    "ObjectRegistryEntry.facade_orientation_deg exists but is not yet populated "
+    "from SceneObject.transform.yaw_deg during registry construction, so every entry "
+    "still carries None and no facade can be named 'front' or 'back'; this is a "
+    "missing wiring step, not a limit of this evidence. The journal-anchored normal "
+    "layer does measure whether distinct surfaces were observed, and that continuous "
+    "quantity is published as observed_normal_angular_spread_deg -- it does not "
+    "identify which surface is the front"
 )
 
 #: 方位角字段的语义标签。存在的唯一目的就是让消费者【不可能】把它误读成正反面覆盖。

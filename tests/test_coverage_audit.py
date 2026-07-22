@@ -1048,7 +1048,8 @@ def test_normal_spread_never_claims_to_know_which_face_is_the_front() -> None:
 
 
 def test_orientation_unknown_reason_blames_the_missing_input_not_the_evidence() -> None:
-    """归因必须正确: registry 无朝向 -> "正面/背面"无定义 (这句对);
+    """归因必须正确: facade_orientation_deg 字段已存在但未从 yaw_deg 填充 ->
+    "正面/背面"仍无定义 (字段在但值是 None);
     但"这份证据上无定义"是【错的】—— 法线层能回答"看没看到不同的面"。
 
     "把没做说成做不到"是本项目最忌讳的措辞之一, 所以这条归因由测试钉死。
@@ -1057,11 +1058,14 @@ def test_orientation_unknown_reason_blames_the_missing_input_not_the_evidence() 
     from pipeline.synthetic_village.coverage_audit import ORIENTATION_UNKNOWN_REASON
 
     reason = ORIENTATION_UNKNOWN_REASON
-    assert "object_registry carries no component orientation" in reason
+    # 字段已存在但未填充
+    assert "facade_orientation_deg exists but is not yet populated" in reason
+    # 旧措辞不再适用 (字段已经存在了)
+    assert "carries no component orientation" not in reason
     # 不许再声称"这份证据上无定义"
     assert "undefined on this evidence" not in reason
-    # 必须指明真正的原因是【缺输入】, 并指向那条确实交付了的连续量
-    assert "missing input" in reason
+    # 必须指明真正的原因是【缺 wiring 步骤】, 并指向那条确实交付了的连续量
+    assert "missing wiring step" in reason
     assert "observed_normal_angular_spread_deg" in reason
 
 
