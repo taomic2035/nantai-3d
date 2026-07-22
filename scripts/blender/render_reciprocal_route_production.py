@@ -28,9 +28,11 @@ LINEAGE_KEYS = {
     "reciprocal_route_module_plan_sha256",
     "geometry_usability",
     "module_root_count",
+    "topology_proxy_count",
     "stage",
     "trust_effect",
 }
+EXPECTED_TOPOLOGY_PROXY_COUNT = 6
 
 
 class RuntimeRenderError(RuntimeError):
@@ -77,6 +79,7 @@ def _parse_scene_lineage(scene):
     if (
         lineage["geometry_usability"] != "preview-only"
         or lineage["module_root_count"] != 43
+        or lineage["topology_proxy_count"] != 6
         or lineage["stage"] != "modeled-unverified"
         or lineage["trust_effect"] != "none"
     ):
@@ -84,6 +87,33 @@ def _parse_scene_lineage(scene):
             "reciprocal-route scene lineage trust contract is invalid",
         )
     return lineage
+
+
+def _prepare_topology_proxies_for_production(objects):
+    proxies = [
+        obj
+        for obj in objects
+        if obj.type == "MESH" and obj.get("nv_proxy_topology", False)
+    ]
+    proxy_ids = [obj.get("nv_stable_id") for obj in proxies]
+    if (
+        len(proxies) != EXPECTED_TOPOLOGY_PROXY_COUNT
+        or len(set(proxy_ids)) != EXPECTED_TOPOLOGY_PROXY_COUNT
+        or any(not isinstance(proxy_id, str) or not proxy_id for proxy_id in proxy_ids)
+        or any(
+            obj.get("nv_root") is True
+            or obj.get("nv_stage") != "modeled-unverified"
+            or obj.get("nv_trust_effect") != "none"
+            or obj.get("nv_geometry_usability") != "preview-only"
+            or not obj.hide_render
+            for obj in proxies
+        )
+    ):
+        raise RuntimeRenderError(
+            "topology proxy mesh identity or visibility is invalid",
+        )
+    for obj in proxies:
+        obj.hide_viewport = True
 
 
 def _validate_reciprocal_boundary(request, *, scene, script_path):
@@ -210,6 +240,7 @@ def _validate_request(request, engine):
         scene=bpy.context.scene,
         script_path=Path(__file__),
     )
+    _prepare_topology_proxies_for_production(bpy.data.objects)
     internal = copy.deepcopy(request)
     internal.pop("environment_module_build_report_sha256")
     internal.pop("reciprocal_route_module_plan_sha256")

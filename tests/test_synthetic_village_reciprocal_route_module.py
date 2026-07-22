@@ -9,6 +9,7 @@ promote modeled-unverified trust.
 from __future__ import annotations
 
 import hashlib
+import math
 
 import pytest
 from pydantic import ValidationError
@@ -39,6 +40,8 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     RECIPROCAL_ROUTE_RECIPE_VERSION,
     RECIPROCAL_ROUTE_SCHEMA,
     REPLACEMENT_OBSTRUCTED_CAMERA_IDS,
+    ROLE_CAMERA_APPROACH_OFFSET_M,
+    ROLE_CAMERA_LOOKAHEAD_M,
     ROLE_CAMERA_WALKABLE_NODE_MAX_DISTANCE_M,
     WATERMILL_TAILRACE_INSTANCE_RANGE,
     PartLayoutSpec,
@@ -55,7 +58,7 @@ from pipeline.synthetic_village.reciprocal_route_module import (
     reciprocal_route_module_plan_sha256,
     verify_reciprocal_route_module_plan,
 )
-from pipeline.synthetic_village.scene_plan import build_scene_plan
+from pipeline.synthetic_village.scene_plan import build_scene_plan, terrain_height_m
 
 
 @pytest.fixture(scope="module")
@@ -505,7 +508,10 @@ def test_plan_carries_part_layout_on_every_part(plan) -> None:
             assert isinstance(part.part_layout, PartLayoutSpec)
             assert len(part.part_layout.center_m) == 3
             assert len(part.part_layout.extent_m) == 3
-            assert part.part_layout.orientation_deg == 0.0
+            expected_orientation = (
+                270.0 if module.module_id == "central-courtyard-downhill" else 0.0
+            )
+            assert part.part_layout.orientation_deg == expected_orientation
 
 
 def test_part_layout_rejects_negative_extent() -> None:
@@ -668,6 +674,73 @@ def test_plan_carries_six_role_camera_candidates(plan) -> None:
         assert candidate.audit_only is False
         assert len(candidate.bound_production_plan_sha256) == 64
         assert len(candidate.bound_camera_registry_sha256) == 64
+
+
+def test_role_candidates_follow_built_module_floor_and_route_direction(plan) -> None:
+    """Candidate geometry must be derived from the same module parts it audits.
+
+    This prevents module-layout changes from leaving cameras above, below, or
+    behind the modeled passage while still satisfying schema-only checks.
+    """
+
+    modules = {module.module_id: module for module in plan.modules}
+    for candidate in plan.role_camera_candidates:
+        parts = sorted(
+            modules[candidate.role_module_id].parts,
+            key=lambda part: part.instance_id,
+        )
+        first = parts[0].part_layout.center_m
+        last = parts[-1].part_layout.center_m
+        route = tuple(last[axis] - first[axis] for axis in range(3))
+        route_length = math.dist(first, last)
+        assert route_length > 0.0
+        direction = tuple(value / route_length for value in route)
+        expected_position = (
+            first[0] - direction[0] * ROLE_CAMERA_APPROACH_OFFSET_M,
+            first[1] - direction[1] * ROLE_CAMERA_APPROACH_OFFSET_M,
+            first[2] + candidate.eye_height_m,
+        )
+        expected_look_at = tuple(
+            expected_position[axis] + direction[axis] * ROLE_CAMERA_LOOKAHEAD_M
+            for axis in range(3)
+        )
+
+        assert candidate.position_m == pytest.approx(expected_position)
+        assert candidate.look_at_m == pytest.approx(expected_look_at)
+
+
+def test_central_route_uses_free_contour_above_terrain(plan, topology) -> None:
+    """The canary route must not duplicate the existing courtyard module.
+
+    It starts on the free y=40 contour near ``central-ground-east`` and each
+    flat floor starts 0.5 m above the analytic terrain (about 0.1 m above
+    the Blender terrain mesh) and remains above the descending contour.
+    This remains a
+    modeled-unverified placement; the Blender probe owns collision evidence.
+    """
+
+    module = next(
+        row for row in plan.modules if row.module_id == "central-courtyard-downhill"
+    )
+    parts = sorted(module.parts, key=lambda part: part.instance_id)
+    assert parts[0].part_layout.center_m[:2] == (30.0, 40.0)
+    assert all(part.part_layout.orientation_deg == 270.0 for part in parts)
+    assert all(part.part_layout.center_m[1] == 40.0 for part in parts)
+    expected_floor_z = round(terrain_height_m(30.0, 40.0) + 0.5, 3)
+    assert all(part.part_layout.center_m[2] == expected_floor_z for part in parts)
+    for part in parts:
+        x, y, z = part.part_layout.center_m
+        assert z >= round(terrain_height_m(x, y) + 0.5, 3)
+
+    node = next(
+        row for row in topology.nodes if row.node_id == "central-ground-east"
+    )
+    candidate = next(
+        row
+        for row in plan.role_camera_candidates
+        if row.role_module_id == "central-courtyard-downhill"
+    )
+    assert math.dist(candidate.position_m, node.position_m) < 30.0
 
 
 def test_role_camera_candidate_rejects_non_finite_position() -> None:

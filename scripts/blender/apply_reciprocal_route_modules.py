@@ -534,14 +534,25 @@ def _module_geometry(part):
     # gap on both ends; centre at mid-height).
     wall_z_center = cz + sz / 2.0
     wall_z_extent = sz + 2.0 * _PASSAGE_RAY_SAFE_GAP_M
+    wall_center_offset = sx / 2.0 - _PASSAGE_WALL_HALF_M
+    left_wall_center = (
+        cx - wall_center_offset * math.cos(yaw),
+        cy - wall_center_offset * math.sin(yaw),
+        wall_z_center,
+    )
     assembler.add_box(
-        (cx - sx / 2.0 + _PASSAGE_WALL_HALF_M, cy, wall_z_center),
+        left_wall_center,
         (_PASSAGE_WALL_THICKNESS_M, sy, wall_z_extent),
         yaw,
     )
     # Right wall.
+    right_wall_center = (
+        cx + wall_center_offset * math.cos(yaw),
+        cy + wall_center_offset * math.sin(yaw),
+        wall_z_center,
+    )
     assembler.add_box(
-        (cx + sx / 2.0 - _PASSAGE_WALL_HALF_M, cy, wall_z_center),
+        right_wall_center,
         (_PASSAGE_WALL_THICKNESS_M, sy, wall_z_extent),
         yaw,
     )
@@ -700,6 +711,11 @@ def _tag_topology_proxy(obj, module_id, topology_ref):
     obj["nv_stage"] = "modeled-unverified"
     obj["nv_trust_effect"] = "none"
     obj["nv_geometry_usability"] = "preview-only"
+    # Probe-only attachment geometry must never leak into production RGB,
+    # masks, or camera-clearance rays.  It remains in bpy.data so the
+    # dedicated Phase 4 mesh probe can inspect it explicitly.
+    obj.hide_render = True
+    obj.hide_viewport = False
 
 
 def _build_topology_proxies(request, collection):

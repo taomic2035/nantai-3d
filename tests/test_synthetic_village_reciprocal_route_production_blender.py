@@ -93,6 +93,7 @@ def _scene_lineage() -> dict[str, object]:
                 "reciprocal_route_module_plan_sha256": "b" * 64,
                 "geometry_usability": "preview-only",
                 "module_root_count": 43,
+                "topology_proxy_count": 6,
                 "stage": "modeled-unverified",
                 "trust_effect": "none",
             },
@@ -100,6 +101,57 @@ def _scene_lineage() -> dict[str, object]:
             sort_keys=True,
         ),
     }
+
+
+class _FakeTopologyProxy(dict):
+    type = "MESH"
+    hide_render = True
+    hide_viewport = False
+
+
+def _topology_proxies() -> list[_FakeTopologyProxy]:
+    return [
+        _FakeTopologyProxy(
+            nv_proxy_topology=True,
+            nv_stable_id=f"path-network-001::role-{index}",
+            nv_stage="modeled-unverified",
+            nv_trust_effect="none",
+            nv_geometry_usability="preview-only",
+        )
+        for index in range(6)
+    ]
+
+
+@pytest.mark.parametrize("wrapper_path", (PREFLIGHT_WRAPPER, RENDER_WRAPPER))
+def test_wrapper_hides_six_verified_topology_proxies_from_production(
+    wrapper_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(wrapper_path, monkeypatch)
+    proxies = _topology_proxies()
+
+    wrapper._prepare_topology_proxies_for_production(proxies)
+
+    assert all(proxy.hide_render for proxy in proxies)
+    assert all(proxy.hide_viewport for proxy in proxies)
+
+
+@pytest.mark.parametrize("wrapper_path", (PREFLIGHT_WRAPPER, RENDER_WRAPPER))
+def test_wrapper_rejects_visible_topology_proxy(
+    wrapper_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(wrapper_path, monkeypatch)
+    proxies = _topology_proxies()
+    proxies[0].hide_render = False
+
+    error_type = (
+        wrapper.RuntimePreflightError
+        if wrapper_path == PREFLIGHT_WRAPPER
+        else wrapper.RuntimeRenderError
+    )
+    with pytest.raises(error_type, match="topology proxy"):
+        wrapper._prepare_topology_proxies_for_production(proxies)
 
 
 def test_preflight_wrapper_accepts_exact_218_boundary(
@@ -148,6 +200,27 @@ def test_preflight_wrapper_rejects_scene_build_mismatch(
     )
 
     with pytest.raises(wrapper.RuntimePreflightError, match="scene build ID"):
+        wrapper._validate_reciprocal_boundary(
+            _boundary_payload(PREFLIGHT_WRAPPER),
+            scene=scene,
+            script_path=PREFLIGHT_WRAPPER,
+        )
+
+
+def test_preflight_wrapper_rejects_wrong_topology_proxy_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(PREFLIGHT_WRAPPER, monkeypatch)
+    scene = _scene_lineage()
+    lineage = json.loads(scene["nv_reciprocal_route_module_build"])
+    lineage["topology_proxy_count"] = 5
+    scene["nv_reciprocal_route_module_build"] = json.dumps(
+        lineage,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    with pytest.raises(wrapper.RuntimePreflightError, match="trust contract"):
         wrapper._validate_reciprocal_boundary(
             _boundary_payload(PREFLIGHT_WRAPPER),
             scene=scene,
@@ -214,6 +287,27 @@ def test_render_wrapper_rejects_scene_plan_mismatch(
         wrapper._validate_reciprocal_boundary(
             request,
             scene=_scene_lineage(),
+            script_path=RENDER_WRAPPER,
+        )
+
+
+def test_render_wrapper_rejects_wrong_topology_proxy_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    scene = _scene_lineage()
+    lineage = json.loads(scene["nv_reciprocal_route_module_build"])
+    lineage["topology_proxy_count"] = 7
+    scene["nv_reciprocal_route_module_build"] = json.dumps(
+        lineage,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    with pytest.raises(wrapper.RuntimeRenderError, match="trust contract"):
+        wrapper._validate_reciprocal_boundary(
+            _render_boundary_payload(RENDER_WRAPPER),
+            scene=scene,
             script_path=RENDER_WRAPPER,
         )
 

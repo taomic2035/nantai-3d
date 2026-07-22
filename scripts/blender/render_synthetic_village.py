@@ -855,9 +855,13 @@ def _validate_registry_mesh_coverage(object_registry, auxiliary_registry):
     registry = {row["object_id"]: row for row in object_registry}
     covered_stable_ids = set()
     auxiliary_meshes = []
+    topology_proxy_meshes = []
     bpy.context.view_layer.update()
     for obj in bpy.data.objects:
         if obj.type != "MESH":
+            continue
+        if obj.get("nv_proxy_topology", False):
+            topology_proxy_meshes.append(obj)
             continue
         if obj.get("nv_auxiliary", False):
             auxiliary_meshes.append(obj)
@@ -895,6 +899,27 @@ def _validate_registry_mesh_coverage(object_registry, auxiliary_registry):
         raise RuntimeRenderError(
             "loaded scene lacks canonical mesh coverage for IDs: " + ", ".join(missing[:8]),
         )
+
+    if topology_proxy_meshes:
+        proxy_ids = [obj.get("nv_stable_id") for obj in topology_proxy_meshes]
+        if (
+            len(topology_proxy_meshes) != 6
+            or len(set(proxy_ids)) != 6
+            or any(not isinstance(proxy_id, str) or not proxy_id for proxy_id in proxy_ids)
+            or any(
+                obj.get("nv_root") is True
+                or obj.get("nv_stage") != "modeled-unverified"
+                or obj.get("nv_trust_effect") != "none"
+                or obj.get("nv_geometry_usability") != "preview-only"
+                or not obj.hide_render
+                or not obj.hide_viewport
+                or obj.pass_index != 0
+                for obj in topology_proxy_meshes
+            )
+        ):
+            raise RuntimeRenderError(
+                "topology proxy mesh identity or visibility is invalid",
+            )
 
     mesh_rows = [row for row in auxiliary_registry if row["kind"] == "mesh"]
     if {obj.name for obj in auxiliary_meshes} != {row["blender_name"] for row in mesh_rows}:

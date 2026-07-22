@@ -82,7 +82,12 @@ from .production_profile import (
     canonical_production_plan_bytes,
     production_camera_registry_digest,
 )
-from .scene_plan import SEMANTIC_ORDER, ScenePlan, canonical_scene_plan_bytes, terrain_height_m
+from .scene_plan import (
+    SEMANTIC_ORDER,
+    ScenePlan,
+    canonical_scene_plan_bytes,
+    terrain_height_m,
+)
 
 RECIPROCAL_ROUTE_SCHEMA = "nantai.synthetic-village.reciprocal-route-module.v1"
 RECIPROCAL_ROUTE_RECIPE_VERSION = "v1"
@@ -220,6 +225,10 @@ _DEFAULT_PART_SPACING_Y_M = 2.5
 #: width is unaffected because it depends on x, not y.
 _DEFAULT_PART_EXTENT_M: tuple[float, float, float] = (1.6, 2.6, 2.5)
 _DEFAULT_PART_ORIENTATION_DEG = 0.0
+_CENTRAL_CONTOUR_DIRECTION = (1.0, 0.0, 0.0)
+_CENTRAL_CONTOUR_Y_M = 40.0
+_CENTRAL_CONTOUR_ORIENTATION_DEG = 270.0
+_CENTRAL_FLOOR_CLEARANCE_M = 0.5
 
 # BuildReport v1 reserves 0/1/2 for sky, terrain, and terrain-support,
 # then assigns ScenePlan semantic classes from 3 in SEMANTIC_ORDER order.
@@ -652,6 +661,7 @@ ROLE_CAMERA_FOV_X_DEG = 65.0
 #: production_profile.ROUTE_LOOKAHEAD_M so the candidate's look_at_m is
 #: consistent with how the 180-camera plan places ground-route cameras.
 ROLE_CAMERA_LOOKAHEAD_M = 25.0
+ROLE_CAMERA_APPROACH_OFFSET_M = 5.0
 
 #: Phase 4.4 (P0-2 item 1): maximum 3D distance from a candidate's
 #: ``position_m`` to its ``bound_walkable_node_position_m`` when the
@@ -1094,15 +1104,53 @@ def _module_batch9_source(module_id: ModuleId) -> str:
 def _default_part_layout(
     module_id: ModuleId,
     instance_id: int,
+    *,
+    elevated_topology: ElevatedTopologyPlan,
 ) -> PartLayoutSpec:
     """Build the canonical default layout for one part.
 
-    Preserves the exact spatial layout that Phase 3 hardcoded inside
-    ``apply_reciprocal_route_modules.MODULE_BASE_POSITION`` so the AABB
-    reported by REVIEW-CODEX-018 stays identical.  The runtime script
-    now reads these values verbatim from the plan instead of inventing
-    them.
+    Non-canary modules preserve the Phase 3 hardcoded layout.  The central
+    canary follows a free contour near the canonical ``central-ground-east``
+    node so it does not duplicate the already-built courtyard environment
+    module.  The runtime reads every value verbatim from this plan.
     """
+
+    if module_id == "central-courtyard-downhill":
+        node = next(
+            (
+                row
+                for row in elevated_topology.nodes
+                if row.node_id == "central-ground-east"
+            ),
+            None,
+        )
+        if (
+            node is None
+            or node.level != "ground"
+            or node.ground_route_ref != "path-network-003"
+        ):
+            raise ReciprocalRouteError(
+                "central courtyard route requires canonical central-ground-east "
+                "on path-network-003",
+            )
+        part_index = instance_id - CENTRAL_DOWNHILL_INSTANCE_RANGE.start
+        distance_m = part_index * _DEFAULT_PART_SPACING_Y_M
+        x = node.position_m[0] + _CENTRAL_CONTOUR_DIRECTION[0] * distance_m
+        y = _CENTRAL_CONTOUR_Y_M
+        floor_z = (
+            terrain_height_m(node.position_m[0], y)
+            + _CENTRAL_FLOOR_CLEARANCE_M
+        )
+        center_m = (
+            round(x, 3),
+            round(y, 3),
+            round(floor_z, 3),
+        )
+        return PartLayoutSpec(
+            center_m=center_m,
+            extent_m=_DEFAULT_PART_EXTENT_M,
+            orientation_deg=_CENTRAL_CONTOUR_ORIENTATION_DEG,
+        )
 
     base_x, base_y, base_z = _DEFAULT_MODULE_BASE_POSITION[module_id]
     offset_y = (instance_id - 176) * _DEFAULT_PART_SPACING_Y_M
@@ -1503,7 +1551,11 @@ def _default_lower_valley_uphill_recipe() -> LowerValleyUphillRecipe:
     )
 
 
-def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
+def _default_module(
+    module_id: ModuleId,
+    *,
+    elevated_topology: ElevatedTopologyPlan,
+) -> ReciprocalRouteModule:
     if module_id == "central-courtyard-downhill":
         recipe = _default_central_courtyard_downhill_recipe()
         part_specs = (
@@ -1793,7 +1845,11 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
             instance_id=instance_id,
             semantic_id=semantic_id,
             material_slot_id=material_slot_id,
-            part_layout=_default_part_layout(module_id, instance_id),
+            part_layout=_default_part_layout(
+                module_id,
+                instance_id,
+                elevated_topology=elevated_topology,
+            ),
         )
         for part_id, instance_id, semantic_id, material_slot_id in part_specs
     )
@@ -1806,66 +1862,23 @@ def _default_module(module_id: ModuleId) -> ReciprocalRouteModule:
     )
 
 
-#: Default standing-eye placement per reciprocal role (Phase 4.2).
-#: Each entry is (role_module_id, topology_ref, position_xy, look_at_xy).
-#: ``position`` sits at standing-eye height above terrain; ``look_at`` is
-#: the lookahead point along the role's bound path network so the
-#: candidate lines up with how production_profile._place_route_group
-#: places ground-route cameras.  Coordinates are scene-local meters.
+#: Default topology binding per reciprocal role (Phase 4.2/4.4).
+#: Each entry is (role_module_id, topology_ref).  Camera geometry is not
+#: duplicated here: it is derived from the module's ordered part centers so
+#: moving a module cannot leave its role camera above, below, or behind the
+#: built passage.  Any change here changes the reciprocal plan/build identity.
 #: Any change here changes ``reciprocal_route_module_plan_sha256`` and
 #: therefore ``build_id`` and the downstream render identity.
 _DEFAULT_ROLE_CAMERA_PLACEMENT: tuple[
-    tuple[ModuleId, str, tuple[float, float], tuple[float, float]],
+    tuple[ModuleId, str],
     ...,
 ] = (
-    # central courtyard: standing-eye at courtyard edge looking down the
-    # downhill gate toward path-network-003.
-    (
-        "central-courtyard-downhill",
-        "path-network-003",
-        (40.0, 30.0),
-        (40.0, 5.0),
-    ),
-    # bridge deck: standing-eye mid-deck looking upstream along
-    # path-network-001.
-    (
-        "bridge-deck-crossing",
-        "path-network-001",
-        (-150.0, -100.0),
-        (-150.0, -125.0),
-    ),
-    # watermill tailrace: standing-eye at the tailrace service stair
-    # looking along path-network-001 toward the creek.
-    (
-        "watermill-tailrace",
-        "path-network-001",
-        (-180.0, -130.0),
-        (-180.0, -105.0),
-    ),
-    # covered gallery underpass: standing-eye at the lower lane entry
-    # looking along path-network-005 toward the gallery interior.
-    (
-        "covered-gallery-underpass",
-        "path-network-005",
-        (60.0, -25.0),
-        (60.0, 0.0),
-    ),
-    # forest orchard boundary: standing-eye at the orchard edge looking
-    # along path-network-002 into the forest band.
-    (
-        "forest-orchard-boundary",
-        "path-network-002",
-        (120.0, 80.0),
-        (120.0, 55.0),
-    ),
-    # lower valley uphill: standing-eye at the lower retaining step
-    # looking along path-network-001 back toward the village.
-    (
-        "lower-valley-uphill",
-        "path-network-001",
-        (-90.0, 60.0),
-        (-90.0, 85.0),
-    ),
+    ("central-courtyard-downhill", "path-network-003"),
+    ("bridge-deck-crossing", "path-network-001"),
+    ("watermill-tailrace", "path-network-001"),
+    ("covered-gallery-underpass", "path-network-005"),
+    ("forest-orchard-boundary", "path-network-002"),
+    ("lower-valley-uphill", "path-network-001"),
 )
 
 #: Default disclosure strings per role (Phase 4.2).  Each disclosure is
@@ -1902,15 +1915,15 @@ _ROLE_CAMERA_DISCLOSURE: dict[ModuleId, str] = {
 
 def _default_role_camera_candidates(
     *,
-    scene: ScenePlan,
+    modules: tuple[ReciprocalRouteModule, ...],
     plan_sha: str,
     registry_sha: str,
 ) -> tuple[ReciprocalRoleCameraCandidate, ...]:
     """Build the canonical six standing-eye camera candidates.
 
-    Each candidate sits at standing-eye height (1.6 m) above terrain at
-    the role's bound placement, with the look_at point ahead along the
-    role's topology ref.  The candidate's ``bound_production_plan_sha256``
+    Each candidate sits at standing-eye height (1.6 m) above its module's
+    first passage floor, with the look_at point 25 m along the ordered-part
+    route direction.  The candidate's ``bound_production_plan_sha256``
     + ``bound_camera_registry_sha256`` are content-addressed bindings to
     the canonical 180-camera plan, so the §3 caller chain can verify the
     render's lineage back to this exact candidate.
@@ -1922,22 +1935,37 @@ def _default_role_camera_candidates(
     caller chain.
     """
 
+    module_by_id = {module.module_id: module for module in modules}
     candidates: list[ReciprocalRoleCameraCandidate] = []
-    for index, (module_id, topology_ref, position_xy, look_at_xy) in enumerate(
+    for index, (module_id, topology_ref) in enumerate(
         _DEFAULT_ROLE_CAMERA_PLACEMENT,
         start=1,
     ):
-        terrain_z = terrain_height_m(position_xy[0], position_xy[1], scene.extent)
-        look_z = terrain_height_m(look_at_xy[0], look_at_xy[1], scene.extent)
-        position_m = (
-            position_xy[0],
-            position_xy[1],
-            terrain_z + ROLE_CAMERA_EYE_HEIGHT_M,
+        parts = tuple(
+            sorted(
+                module_by_id[module_id].parts,
+                key=lambda part: part.instance_id,
+            ),
         )
-        look_at_m = (
-            look_at_xy[0],
-            look_at_xy[1],
-            look_z + ROLE_CAMERA_EYE_HEIGHT_M,
+        first = parts[0].part_layout.center_m
+        last = parts[-1].part_layout.center_m
+        route_length = math.dist(first, last)
+        if route_length <= 0.0:
+            raise ReciprocalRouteError(
+                f"role module {module_id} has no non-degenerate route direction",
+            )
+        direction = tuple(
+            (last[axis] - first[axis]) / route_length
+            for axis in range(3)
+        )
+        position_m = (
+            first[0] - direction[0] * ROLE_CAMERA_APPROACH_OFFSET_M,
+            first[1] - direction[1] * ROLE_CAMERA_APPROACH_OFFSET_M,
+            first[2] + ROLE_CAMERA_EYE_HEIGHT_M,
+        )
+        look_at_m = tuple(
+            position_m[axis] + direction[axis] * ROLE_CAMERA_LOOKAHEAD_M
+            for axis in range(3)
         )
         candidates.append(
             ReciprocalRoleCameraCandidate(
@@ -1994,7 +2022,7 @@ def build_default_reciprocal_route_module_plan(
         plan_sha = "0" * 64
         registry_sha = "0" * 64
     modules = tuple(
-        _default_module(module_id)
+        _default_module(module_id, elevated_topology=elevated_topology)
         for module_id in (
             "central-courtyard-downhill",
             "bridge-deck-crossing",
@@ -2005,7 +2033,7 @@ def build_default_reciprocal_route_module_plan(
         )
     )
     role_camera_candidates = _default_role_camera_candidates(
-        scene=scene,
+        modules=modules,
         plan_sha=plan_sha,
         registry_sha=registry_sha,
     )

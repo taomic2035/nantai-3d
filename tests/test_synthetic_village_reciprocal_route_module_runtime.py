@@ -921,6 +921,8 @@ def test_tag_topology_proxy_does_not_set_nv_root(
     assert proxy["nv_stage"] == "modeled-unverified"
     assert proxy["nv_trust_effect"] == "none"
     assert proxy["nv_geometry_usability"] == "preview-only"
+    assert proxy.hide_render is True
+    assert proxy.hide_viewport is False
 
 
 def test_module_geometry_emits_four_panel_passage(
@@ -957,6 +959,33 @@ def test_module_geometry_emits_four_panel_passage(
     x_values = [v[0] for v in assembler.vertices]
     assert min(x_values) <= -0.74
     assert max(x_values) >= 0.74
+
+
+def test_module_geometry_rotates_wall_offsets_with_passage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Yaw rotates both each wall box and its local-x centre offset.
+
+    A 270-degree passage runs along world +x, so its walls must straddle
+    world y.  Rotating only the boxes leaves their centres on world x and
+    makes the clearance probe hit the floor/terrain instead of the walls.
+    """
+
+    runtime = _load_runtime_module(monkeypatch)
+    assembler = runtime._module_geometry({
+        "part_layout": {
+            "center_m": [30.0, 40.0, 77.0],
+            "extent_m": [1.6, 2.6, 2.5],
+            "orientation_deg": 270.0,
+        },
+    })
+    left_wall = assembler.vertices[16:24]
+    right_wall = assembler.vertices[24:32]
+    left_center = tuple(sum(vertex[axis] for vertex in left_wall) / 8 for axis in range(3))
+    right_center = tuple(sum(vertex[axis] for vertex in right_wall) / 8 for axis in range(3))
+
+    assert left_center[:2] == pytest.approx((30.0, 40.75))
+    assert right_center[:2] == pytest.approx((30.0, 39.25))
 
 
 def test_topology_proxy_geometry_places_box_at_center(
