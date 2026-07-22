@@ -1,0 +1,97 @@
+# FEEDBACK-IMAGE2-019 — Batch 15 合成材质 albedo 源
+
+> 日期：2026-07-22
+> 生成：OpenAI built-in image generation，经 Codex imagegen
+> 状态：`6/6` 原始来源完成；私有候选；未注册、未进入 Release
+
+## 结论
+
+Batch 6–14 已有 82 张整景、方向、边界、垂直包络、斜向路线和模块板素材。
+Batch 15 不再堆相似整景，改为补 Blender 近景和 360° 转向时反复出现的独立、
+可替换表面来源：石墙、灰瓦、旧木、白灰墙、湿石路、浅溪床各一张。
+
+六张原始来源均已生成并保存在私有候选区：
+
+```text
+.nantai-studio/synthetic-village/hybrid-v4-candidates/batch15/
+```
+
+| slot | size | bytes | SHA-256 |
+|---|---:|---:|---|
+| `material-albedo-fieldstone-masonry-01` | `1254×1254` | `3,510,962` | `4bc32e67581aa7950ebc7034904b0e3c9aaeaf52c97b3a6294ffc0c31aa34da8` |
+| `material-albedo-gray-clay-roof-tile-01` | `1254×1254` | `3,327,781` | `beb277389cdcceccb1b1084ba0c1e9e396954ae8cf02b4f44a609f7c04b82c05` |
+| `material-albedo-weathered-dark-timber-01` | `1254×1254` | `2,306,675` | `ccbaa3ea18151be25ed4b06d7b2fbdd34e0ec5dcfb1cfde2ac6d05884d99ec55` |
+| `material-albedo-aged-lime-plaster-01` | `1254×1254` | `3,327,306` | `d50f9139607b0d505f76c67d16e342cb4250938400f3d8898743da3a44a7f926` |
+| `material-albedo-wet-stone-paving-01` | `1254×1254` | `3,024,258` | `0177bf8b8495f3fd18a34f37ee913bcbc8a5bee8503b59e0de7bb8dc782b547e` |
+| `material-albedo-shallow-creek-bed-01` | `1254×1254` | `3,389,813` | `3eab5333c251bc165ed36d32855e6f06b338d70e30c2593fa04b1f2fc5f6dcad` |
+
+所有原图均为 RGB PNG；六份精确提示词、队列和候选 manifest 与原图同目录。
+原始设计来源总数由 84 增至 88；另有一张未通过的旧木 seamfix 变体，保留在
+私有候选区供审计，不计入 88 张原始来源。
+
+## 视觉适用性
+
+- 旧木：正交窄板、暗棕但仍保留木纹，没有门窗、五金和边框；
+- 灰泥：满幅低对比暖白灰泥，细微抹痕，没有建筑特征；
+- 湿石路：正交俯视不规则铺石，尺度均匀，没有路缘、排水口或积水焦点；
+- 浅溪床：正交俯视的卵石与细砾，分布均匀，没有河岸、鱼、植物或天空反射；
+- 已有石墙和灰瓦仍满足“单一表面来源”构图要求。
+
+这些特征让素材可在不同墙面、屋面、地面与水体节点复用，不绑定某一栋建筑或
+单一镜头。但“可复用”不等于共享真实几何，也不提供任何 360° 相机覆盖证据。
+
+## 接缝审计
+
+提示词要求 seamless 不能成为机器证据。统一使用 19px 对侧条带、逐像素归一化
+RGB mean absolute error 重算：
+
+| slot | left/right MAE | top/bottom MAE | verdict |
+|---|---:|---:|---|
+| fieldstone | `0.108546` | `0.140949` | not seamless |
+| gray roof tile | `0.095134` | `0.144136` | not seamless |
+| dark timber | `0.048064` | `0.028864` | not seamless |
+| lime plaster | `0.049134` | `0.051645` | not seamless |
+| wet stone paving | `0.051281` | `0.041395` | not seamless |
+| shallow creek bed | `0.095465` | `0.097305` | not seamless |
+
+旧木 reference-edit canary 保留中心外观并略微降低误差：
+
+| variant | SHA-256 | left/right | top/bottom | verdict |
+|---|---|---:|---:|---|
+| `material-albedo-weathered-dark-timber-01-seamfix-v1` | `667687aadb85f18600ddc41144a334d92077a58639bdfe3268c937b3ecd745b5` | `0.045088` | `0.027532` | rejected; still not verified seamless |
+
+这证明单次 imagegen reference edit 不能保证对侧像素连续，因此没有继续浪费五次
+同类请求，也没有把“看起来接近”写成通过。仓库已有 H3 确定性 quilting、对侧边缘
+强制连续和 PBR 派生工具链；后续应把合格来源接到该机器验证链，而不是靠提示词或
+主观目测授予 seamless。
+
+## 信任边界
+
+六张来源全部保持：
+
+```text
+synthetic=true
+metric_texel_scale=unknown
+seamless_edges=not-verified
+color_space=unknown-unprofiled-png
+pbr_map_consistency=not-generated
+texture_use=albedo-source-only-not-registered
+real_photo_textures=false
+trust_effect=none
+```
+
+它们不能直接进入 material registry。没有对应的 measured roughness、normal、height
+或 displacement，也不是南台村真实墙体、屋瓦或溪床照片。
+
+## 后续消费顺序
+
+1. 为 Batch 15 建立内容寻址 source-pack receipt，并显式记录 private-project-use；
+2. 复用或扩展 H3 `sha-quilt-seam-pbr-v1`，生成确定性 4096 authored master；
+3. 要求对侧像素严格一致、source SSIM 和 mean RGB drift 全部通过；
+4. 生成并标注 heuristic normal/ORM，绝不称为物理测量；
+5. 通过 KTX2 编译、解码质量与完整 mip 门；
+6. 在 fresh Blender build 中跑近、中、远和斜视角 RGB/normal 审计；
+7. 只有上述证据齐全后才进入一个干净 Release，不发布原图、失败 seamfix 或其它中间态。
+
+本批推进的是 360° 漫游所需的“多表面可替换纹理来源”，不是由图片生成真实几何
+本身。真实模型仍需要真实照片/视频、SfM 位姿、外部 GPU 重建及后处理证据。
