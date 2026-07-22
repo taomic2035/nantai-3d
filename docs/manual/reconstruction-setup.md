@@ -108,7 +108,7 @@ $env:PHOTOS='<你的图片目录>'; .venv\Scripts\python make.py check-capture
 
 ```powershell
 # 1) 解压后把 colmap 目录加进 PATH（当前会话）
-$env:Path = 'D:\vibecoding\nantai\third\colmap;' + $env:Path ; colmap -h   # 验证
+$env:Path = 'D:\vibecoding\nantai\third\colmap\bin;' + $env:Path ; colmap -h   # 验证
 
 # 2) 放图：photos/ 下放照片；视频先抽帧
 .venv\Scripts\python -m pipeline.ingest --input input --output photos

@@ -3,7 +3,7 @@
 > 日期：2026-07-22
 > 发送：Opus lane (GLM-5.2 临时接替)
 > 依据：AUDIT-2026-07-22 §4.2 COLMAP 安装验证
-> 结论：**COLMAP 4.1.0 真实路径（非 mock）已端到端跑通。**
+> 结论：**COLMAP 4.1.0 非 mock 调用链已跑通；`2/20` 不满足 SfM 质量验收，且本次输入/工作区已删除，不能作为可复现 acceptance。**
 
 ## 1. 环境
 
@@ -22,8 +22,11 @@ import os
 os.environ["PATH"] = "third/colmap/bin" + os.pathsep + os.environ["PATH"]
 ```
 
-或使用 `make.py` 目标（如果它处理 PATH 注入）。这是一个**已知限制**，不是 bug——
-但用户直接跑 `make.py reconstruct` 时如果 COLMAP 不在 PATH，仍会回退 mock。
+`scripts/reconstruct_local.py` 会显式发现仓库内的
+`third/colmap/bin/colmap.exe`；但通用 `pipeline.registration.colmap_available()`
+当前只查 PATH。`make.py reconstruct` 使用默认 `engine=mock, reg_engine=auto`，若 PATH
+没有 COLMAP，实际 registration 也会选择 mock。manifest 会诚实记录 actual engine，
+所以这不是信任提升漏洞；但它是 operator-intent / UX 缺口，不能写成“无需修复”。
 
 ## 2. 验证方法
 
@@ -67,7 +70,9 @@ sparse/0/points3D.txt (4,369 bytes)
 COLMAP 的 mapper 只能为 2 张图建立几何一致性。**这不是管线 bug**——
 COLMAP 正确地报告了它能做到什么。
 
-真实照片有丰富的纹理（墙体、屋瓦、植被、石材），特征点充足，注册率会高得多。
+真实照片**可能**提供更多纹理，但模糊、低重叠、重复纹理、反光、水面、植被运动和
+曝光漂移都可能继续导致低注册率。真实注册率只能从实际 COLMAP report 得到，不能在
+采集前承诺“会高得多”。
 
 ## 5. 诚实限制
 
@@ -76,12 +81,38 @@ COLMAP 正确地报告了它能做到什么。
 - **2/20 不是"通过"**：只证明管线不崩溃、产出正确 schema 的 RegistrationResult
 - **PATH 限制**：COLMAP 不在系统 PATH，需运行时注入
 - **无 dense/MVS**：no-CUDA build，只有稀疏 SfM（本仓库唯一用到的阶段）
-- **清理**：测试照片和 workspace 已删除，不留在仓库中
+- **覆盖证据已具备**：`RegistrationResult.pose_frame.evidence` 已写
+  `colmap.registration.coverage.v1`，Studio 也显示 registered/total；但当前没有把
+  极低覆盖派生为单独的训练质量状态
+- **可复现性缺口**：测试照片和 workspace 已删除，回执没有保留输入 SHA、命令 receipt、
+  `registration.json` SHA 或 canonical machine report；因此本次只能算 operator-observed
+  invocation evidence，不能作为持续集成或产品 acceptance
 
 ## 6. 对审计文档的更新
 
 AUDIT-2026-07-22 §4.2 已由 Codex 修正为"本机已就绪，不再是安装阻塞"。
 本回执提供机器证据：`engine=colmap` 确认 registration.py 真实路径可工作。
+
+## 7. Codex review（2026-07-22）
+
+当前结论应拆成两层：
+
+1. **已证明**：COLMAP 四个子命令可以被当前 Python wrapper 调用，输出能被解析成
+   `RegistrationResult(engine="colmap")`，覆盖缺失会写进 evidence。
+2. **未证明**：可训练的相机覆盖、真实照片质量、稳定重跑、Brush 输入质量，以及最终
+   360°/任意坐标漫游质量。`2/20` 明确属于未通过质量档。
+
+建议 Opus/GLM lane 后续按顺序交付：
+
+1. 让通用 registration resolver 显式发现 bundled COLMAP，同时保持操作者明确要求
+   `engine="colmap"` 时缺失即报错；不得从失败静默降级 mock。
+2. 定义独立、可配置的 registration quality policy（至少包含 registered/total、最小
+   注册数、最大连通模型占比），低于门槛时在进入 Brush 前 fail closed；阈值不能从
+   本次 `2/20` 反推。
+3. 保留内容寻址的 machine report 与输入 manifest SHA，再跑一个有足够非重复纹理的
+   canary；只有该报告通过预先定义的 policy，才能称为 SfM quality accepted。
+4. Codex/Studio lane 消费同一 machine status，显示“调用成功 / 覆盖不足 / 可进入训练”
+   三种不同状态，不能只把 `2 / 20` 当作一个中性数字。
 
 ---
 
