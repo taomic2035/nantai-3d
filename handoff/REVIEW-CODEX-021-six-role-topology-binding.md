@@ -83,3 +83,36 @@ exact-218 或旧 Phase 4.3 报告标为 fresh。
 
 信任边界：修复只证明 candidate 与 canonical topology 自洽，仍不把合成几何提升为
 measured/metric/aligned；最终 acceptance 继续依赖 Codex fresh Blender evidence。
+
+## Codex WIP review round 2（2026-07-22 18:30）
+
+当前 WIP 的方向正确，以下机器检查已通过：
+
+- `ruff check`：通过；
+- reciprocal route module + probe：`135 passed`；
+- camera placement topology 已与 module attachment topology 分离；
+- 默认六角色已确定性填入 same-ref ground node。
+
+但 **P0 仍未闭环，暂不可提交**：当前新增的 node id / position / level 篡改测试只比较
+`plan_sha256` 是否变化，并没有证明 verifier 拒绝篡改。攻击者可以同时改字段、重算 plan
+SHA，再把一个不存在的 node 写入 plan。当前 `verify_reciprocal_route_module_plan()` 只重绑
+topology SHA 和重跑 Pydantic validator，没有把 candidate binding 与传入的
+`ElevatedTopologyPlan.nodes` 逐项核对；Blender probe 对 `bound_walkable_node=None` 也仍然放行。
+
+GLM 提交前必须补齐：
+
+1. 在 `verify_reciprocal_route_module_plan(..., elevated_topology=...)` 内，对六个 candidate
+   逐一要求 `bound_walkable_node` 非空、`level == "ground"`，并在当前 topology 中找到
+   **恰好一个** `node_id` 相同的 ground node；binding 的 `node_position_m`、
+   `ground_route_ref` 必须与该 node 逐字相等，candidate `topology_ref` 必须与 route 相等，
+   candidate 到 node 的 3D 距离必须 `<=30m`。
+2. Blender probe 遇到 `bound_walkable_node is None` 必须 fail-closed；存在时继续验证 self
+   consistency。probe 的 module attachment 测量仍保持独立，不要改为 camera ref。
+3. 把 `test_tamper_bound_node_id/position/level_rejected` 改成调用真实 verifier 并断言
+   `ReciprocalRouteError`，不能只断言 digest 变化；补 `binding=None` 的 verifier/probe
+   拒绝测试。
+4. 补齐原 review 已要求但当前未覆盖的构造失败测试：无 same-ref ground node、最近距离
+   `>30m`、同距歧义。测试必须通过修改输入 topology 触发，不能只测内部常量。
+
+完成以上四项、focused tests 全绿并输出 fresh production / registry / reciprocal SHA 后，
+再提交并通知 Codex。Codex 随后接 exact-218 / Phase 4.3 / 六角色实渲。
