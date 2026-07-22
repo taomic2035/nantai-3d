@@ -248,6 +248,7 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
+        engine_script_sha256="a" * 64,
         blend_sha256="4" * 64,
         build_report_sha256="5" * 64,
         environment_module_build_report_sha256="6" * 64,
@@ -269,6 +270,7 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
         plan,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
+        engine_script_sha256="a" * 64,
         blend_sha256="4" * 64,
         build_report_sha256="5" * 64,
         camera_registry_sha256=request.camera_registry_sha256,
@@ -280,6 +282,12 @@ def test_frame_request_binds_exact_218_registry_and_transitive_report() -> None:
         build_adapter=RECIPROCAL_BUILD_ADAPTER,
         environment_module_build_report_sha256="6" * 64,
     )
+    changed_engine = request.model_dump(mode="json")
+    changed_engine["engine_script_sha256"] = "b" * 64
+    with pytest.raises(ValueError, match="render ID"):
+        ReciprocalProductionRenderFrameRequest.model_validate_json(
+            json.dumps(changed_engine),
+        )
     assert canonical_reciprocal_production_render_request_bytes(request).endswith(
         b"\n",
     )
@@ -295,6 +303,7 @@ def test_frame_request_rejects_changed_transitive_report_sha() -> None:
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
+        engine_script_sha256="a" * 64,
         blend_sha256="4" * 64,
         build_report_sha256="5" * 64,
         environment_module_build_report_sha256="6" * 64,
@@ -483,6 +492,7 @@ def test_render_report_loader_and_artifact_verifier(
         build_id="1" * 64,
         blender_executable_sha256="2" * 64,
         renderer_script_sha256="3" * 64,
+        engine_script_sha256="a" * 64,
         blend_sha256="4" * 64,
         build_report_sha256="5" * 64,
         environment_module_build_report_sha256="6" * 64,

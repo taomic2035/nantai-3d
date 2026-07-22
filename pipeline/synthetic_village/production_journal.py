@@ -188,6 +188,7 @@ def production_render_id(
     *,
     blender_executable_sha256: str,
     renderer_script_sha256: str,
+    engine_script_sha256: str | None = None,
     blend_sha256: str,
     build_report_sha256: str,
     camera_registry_sha256: str,
@@ -238,6 +239,8 @@ def production_render_id(
             environment_module_build_report_sha256,
             "environment_module_build_report_sha256",
         )
+    if engine_script_sha256 is not None:
+        _require_64_hex_sha(engine_script_sha256, "engine_script_sha256")
     payload = {
         "schema_version": PRODUCTION_JOURNAL_SCHEMA,
         "profile_id": plan.profile_id,
@@ -249,6 +252,8 @@ def production_render_id(
         "scene_plan_sha256": plan.scene_plan_sha256,
         "camera_ids": [camera.camera_id for camera in plan.cameras],
     }
+    if engine_script_sha256 is not None:
+        payload["engine_script_sha256"] = engine_script_sha256
     if preflight_id is not None:
         _require_64_hex_sha(preflight_id, "preflight_id")
         payload["preflight_id"] = preflight_id

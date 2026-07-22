@@ -13,7 +13,7 @@ from pathlib import Path
 import bpy
 
 REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v5"
+    "nantai.synthetic-village.local-production-render-frame-request.v6"
 )
 REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v4"
@@ -127,6 +127,7 @@ def _validate_reciprocal_boundary(request, *, scene, script_path):
         )
     for key in (
         "renderer_script_sha256",
+        "engine_script_sha256",
         "build_id",
         "reciprocal_route_module_plan_sha256",
         "environment_module_build_report_sha256",
@@ -162,8 +163,23 @@ def _validate_reciprocal_boundary(request, *, scene, script_path):
         )
 
 
-def _load_engine():
-    path = Path(__file__).with_name("render_synthetic_village.py")
+def _load_engine(expected_sha256, *, engine_path=None):
+    path = (
+        Path(engine_path)
+        if engine_path is not None
+        else Path(__file__).with_name("render_synthetic_village.py")
+    )
+    try:
+        source = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeRenderError("engine script cannot be read") from exc
+    if (
+        not _is_sha256(expected_sha256)
+        or hashlib.sha256(source).hexdigest() != expected_sha256
+    ):
+        raise RuntimeRenderError(
+            "engine script digest does not match imported script",
+        )
     spec = importlib.util.spec_from_file_location(
         "nantai_frozen_production_renderer_v4",
         path,
@@ -171,7 +187,7 @@ def _load_engine():
     if spec is None or spec.loader is None:
         raise RuntimeRenderError("frozen render engine cannot be loaded")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    exec(compile(source, str(path), "exec"), module.__dict__)  # noqa: S102
     return module
 
 
@@ -244,6 +260,7 @@ def _validate_request(request, engine):
     internal = copy.deepcopy(request)
     internal.pop("environment_module_build_report_sha256")
     internal.pop("reciprocal_route_module_plan_sha256")
+    internal.pop("engine_script_sha256")
     internal["build_adapter"] = "windows-textured-v2"
     internal["build_id"] = bpy.context.scene.get("nv_build_id")
     try:
@@ -254,7 +271,28 @@ def _validate_request(request, engine):
 
 
 def main():
-    engine = _prepare_engine(_load_engine())
+    try:
+        marker = sys.argv.index("--")
+        values = sys.argv[marker + 1 :]
+        if (
+            len(values) != 4
+            or values[0] != "--request"
+            or values[2] != "--staging"
+        ):
+            raise RuntimeRenderError(
+                "expected exactly --request <file> --staging <directory>",
+            )
+        request_hint = json.loads(Path(values[1]).read_text(encoding="utf-8"))
+        if not isinstance(request_hint, dict):
+            raise RuntimeRenderError(
+                "engine identity cannot be read before import",
+            )
+        engine_sha256 = request_hint.get("engine_script_sha256")
+    except (ValueError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeRenderError(
+            "engine identity cannot be read before import",
+        ) from exc
+    engine = _prepare_engine(_load_engine(engine_sha256))
     try:
         request_path, staging_path = engine._runtime_argv(sys.argv)
         request = engine._load_request(request_path)

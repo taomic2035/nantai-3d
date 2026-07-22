@@ -69,10 +69,13 @@ def _render_boundary_payload(script_path: Path) -> dict[str, object]:
     registry = _registry_payload()
     return {
         "schema_version": (
-            "nantai.synthetic-village.local-production-render-frame-request.v5"
+            "nantai.synthetic-village.local-production-render-frame-request.v6"
         ),
         "renderer_script_sha256": hashlib.sha256(
             script_path.read_bytes(),
+        ).hexdigest(),
+        "engine_script_sha256": hashlib.sha256(
+            (ROOT / "scripts/blender/render_synthetic_village.py").read_bytes(),
         ).hexdigest(),
         "build_id": "a" * 64,
         "reciprocal_route_module_plan_sha256": "b" * 64,
@@ -83,6 +86,35 @@ def _render_boundary_payload(script_path: Path) -> dict[str, object]:
             canary._canonical_json_bytes(registry),  # noqa: SLF001
         ).hexdigest(),
     }
+
+
+def test_render_wrapper_rejects_engine_digest_before_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    engine = tmp_path / "render_synthetic_village.py"
+    engine.write_bytes(b"tampered engine")
+    request = _render_boundary_payload(RENDER_WRAPPER)
+
+    with pytest.raises(wrapper.RuntimeRenderError, match="engine script digest"):
+        wrapper._load_engine(
+            request["engine_script_sha256"],
+            engine_path=engine,
+        )
+
+
+def test_render_wrapper_imports_engine_with_matching_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = _load_wrapper(RENDER_WRAPPER, monkeypatch)
+    engine = ROOT / "scripts/blender/render_synthetic_village.py"
+    monkeypatch.setitem(sys.modules, "OpenImageIO", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "mathutils", SimpleNamespace(Matrix=object))
+
+    loaded = wrapper._load_engine(hashlib.sha256(engine.read_bytes()).hexdigest())
+
+    assert Path(loaded.__file__).resolve() == engine.resolve()
 
 
 def _scene_lineage() -> dict[str, object]:

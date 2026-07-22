@@ -66,7 +66,7 @@ from .reciprocal_route_module_runtime import (
 )
 
 RECIPROCAL_RENDER_REQUEST_SCHEMA = (
-    "nantai.synthetic-village.local-production-render-frame-request.v5"
+    "nantai.synthetic-village.local-production-render-frame-request.v6"
 )
 RECIPROCAL_RENDER_REPORT_SCHEMA = (
     "nantai.synthetic-village.local-production-render-frame-report.v4"
@@ -538,7 +538,7 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
     """One exact-218 reciprocal-route production-camera render request."""
 
     schema_version: Literal[
-        "nantai.synthetic-village.local-production-render-frame-request.v5"
+        "nantai.synthetic-village.local-production-render-frame-request.v6"
     ] = RECIPROCAL_RENDER_REQUEST_SCHEMA
     profile_id: Literal["synthetic-village-coverage-180-v1"] = (
         PRODUCTION_PROFILE_ID
@@ -559,6 +559,7 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
     )
     blender_executable_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     renderer_script_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    engine_script_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     blend_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     environment_module_build_report_sha256: str = Field(
@@ -643,6 +644,7 @@ class ReciprocalProductionRenderFrameRequest(FrozenModel):
             self.production_plan,
             blender_executable_sha256=self.blender_executable_sha256,
             renderer_script_sha256=self.renderer_script_sha256,
+            engine_script_sha256=self.engine_script_sha256,
             blend_sha256=self.blend_sha256,
             build_report_sha256=self.build_report_sha256,
             camera_registry_sha256=self.camera_registry_sha256,
@@ -1275,12 +1277,16 @@ def run_reciprocal_production_camera(
         renderer_script = (
             repo_root / "scripts/blender/render_reciprocal_route_production.py"
         ).resolve(strict=True)
+        engine_script = (
+            repo_root / "scripts/blender/render_synthetic_village.py"
+        ).resolve(strict=True)
         render_request = build_reciprocal_production_frame_request(
             plan=plan,
             camera_id=camera_id,
             build_id=verified_build.build_id,
             blender_executable_sha256=_sha256_file(blender_executable),
             renderer_script_sha256=_sha256_file(renderer_script),
+            engine_script_sha256=_sha256_file(engine_script),
             blend_sha256=verified_build.blend_sha256,
             build_report_sha256=verified_build.report_sha256,
             environment_module_build_report_sha256=(
@@ -1317,6 +1323,7 @@ def run_reciprocal_production_camera(
             canary._snapshot_regular_file(verified_build.blend_path),  # noqa: SLF001
             canary._snapshot_regular_file(verified_build.report_path),  # noqa: SLF001
             canary._snapshot_regular_file(renderer_script),  # noqa: SLF001
+            canary._snapshot_regular_file(engine_script),  # noqa: SLF001
             canary._snapshot_regular_file(render_request_path),  # noqa: SLF001
         )
         render_started = time.monotonic()
@@ -1499,6 +1506,7 @@ def build_reciprocal_production_frame_request(
     build_id: str,
     blender_executable_sha256: str,
     renderer_script_sha256: str,
+    engine_script_sha256: str,
     blend_sha256: str,
     build_report_sha256: str,
     environment_module_build_report_sha256: str,
@@ -1529,6 +1537,7 @@ def build_reciprocal_production_frame_request(
         plan,
         blender_executable_sha256=blender_executable_sha256,
         renderer_script_sha256=renderer_script_sha256,
+        engine_script_sha256=engine_script_sha256,
         blend_sha256=blend_sha256,
         build_report_sha256=build_report_sha256,
         camera_registry_sha256=camera_registry_sha256,
@@ -1551,6 +1560,7 @@ def build_reciprocal_production_frame_request(
         build_id=build_id,
         blender_executable_sha256=blender_executable_sha256,
         renderer_script_sha256=renderer_script_sha256,
+        engine_script_sha256=engine_script_sha256,
         blend_sha256=blend_sha256,
         build_report_sha256=build_report_sha256,
         environment_module_build_report_sha256=(
@@ -1576,7 +1586,7 @@ def build_reciprocal_production_frame_request(
 def canonical_reciprocal_production_render_request_bytes(
     request: ReciprocalProductionRenderFrameRequest,
 ) -> bytes:
-    """Serialize one v5 request as stable canonical JSON bytes."""
+    """Serialize one v6 request as stable canonical JSON bytes."""
 
     return _canonical(request.model_dump(mode="json"))
 
