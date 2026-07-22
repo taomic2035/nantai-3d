@@ -115,7 +115,7 @@ def test_ground_attachments_lie_on_the_declared_real_path_and_match_terrain() ->
     }
 
     ground = [node for node in plan.nodes if node.level == "ground"]
-    assert len(ground) == 4
+    assert len(ground) == 7
     for node in ground:
         assert node.ground_route_ref in paths
         route = paths[node.ground_route_ref]
@@ -159,6 +159,65 @@ def test_elevated_nodes_and_edges_have_absolute_clearance_and_buildable_envelope
                 abs(value * 1000 - round(value * 1000)) <= 1e-7
                 for value in point.position_m
             )
+
+    verify_elevated_topology_plan(plan, scene)
+
+
+def test_module_anchor_ground_nodes_are_isolated_and_on_declared_paths() -> None:
+    """Phase 4.5: three isolated anchor ground nodes for reciprocal-route
+    role camera binding.  These nodes are on declared paths (verify accepts
+    them) but do not participate in any loop/edge (ground_attachment_count
+    stays 4)."""
+    scene = build_scene_plan()
+    plan = build_elevated_topology_plan(scene)
+
+    anchor_ids = {"bridge-ground-001", "gallery-ground-001", "watermill-ground-001"}
+    anchor_nodes = {
+        node.node_id: node
+        for node in plan.nodes
+        if node.node_id in anchor_ids
+    }
+    assert len(anchor_nodes) == 3
+
+    # Anchor nodes must not participate in any edge.
+    used_node_ids = {
+        edge.start_node_id for edge in plan.edges
+    } | {edge.end_node_id for edge in plan.edges}
+    for anchor_id in anchor_ids:
+        assert anchor_id not in used_node_ids, (
+            f"{anchor_id} participates in an edge but should be isolated"
+        )
+
+    # ground_attachment_count must stay 4 (loop attachments only).
+    assert plan.summary.ground_attachment_count == 4
+
+    # Each anchor must be on its declared path and match terrain.
+    paths = {
+        item.object_id: item
+        for item in scene.objects
+        if item.semantic_class == "path"
+    }
+    expected_routes = {
+        "bridge-ground-001": "path-network-002",
+        "gallery-ground-001": "path-network-003",
+        "watermill-ground-001": "path-network-001",
+    }
+    for anchor_id, route_ref in expected_routes.items():
+        node = anchor_nodes[anchor_id]
+        assert node.ground_route_ref == route_ref
+        route = paths[route_ref]
+        points = [(p.x_m, p.y_m) for p in route.polyline.points]
+        distance = min(
+            _point_segment_distance(
+                (node.position_m[0], node.position_m[1]), start, end
+            )
+            for start, end in zip(points, points[1:], strict=False)
+        )
+        assert distance <= route.polyline.width_m / 2 + 1e-6
+        assert node.position_m[2] == pytest.approx(
+            terrain_height_m(node.position_m[0], node.position_m[1], scene.extent),
+            abs=1e-9,
+        )
 
     verify_elevated_topology_plan(plan, scene)
 
