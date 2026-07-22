@@ -25,6 +25,8 @@ from pipeline.synthetic_village.production_profile import (
     production_camera_registry_digest,
 )
 from pipeline.synthetic_village.reciprocal_route_module import (
+    _CENTRAL_CONTOUR_Y_M,
+    _CENTRAL_FLOOR_CLEARANCE_M,
     BATCH8_ARCHIVE_SHA256,
     BATCH8_RELEASE_MANIFEST_SHA256,
     BATCH9_ARCHIVE_SHA256,
@@ -1772,4 +1774,159 @@ def test_part_layout_rejects_non_finite_extent(
             extent_m=(bad_value, 1.6, 0.6),
             orientation_deg=0.0,
         )
+
+
+# --------------------------------------------------------------------------- #
+# GLM-P1 (FEEDBACK-HANDOFF-CODEX-012 §"GLM-P1"): terrain dual-truth audit.
+#
+# The Blender terrain mesh samples the same analytic ``terrain_height_m``
+# formula on a 4 m grid and linearly interpolates across triangulated
+# faces.  At off-grid points the smooth sine curve and the faceted mesh
+# diverge.  These tests quantify the discrepancy and fail-closed if the
+# module floor clearance is insufficient to absorb it.
+# --------------------------------------------------------------------------- #
+
+#: Grid spacing used by the Blender terrain mesh builder
+#: (scripts/blender/build_synthetic_village.py SURFACE_TERRAIN_SPACING_M).
+#: Hardcoded here to avoid importing the Blender script (which has
+#: Blender-only dependencies).  If the spacing changes in the build
+#: script, this constant must be updated and the tests re-run.
+_TERRAIN_MESH_GRID_SPACING_M = 4.0
+
+
+def _grid_index(value: float, spacing: float, origin: float) -> int:
+    """Return the lower grid index for a world coordinate."""
+    return int((value - origin) / spacing)
+
+
+def _barycentric_mesh_height(
+    x: float,
+    y: float,
+    extent,
+    spacing: float = _TERRAIN_MESH_GRID_SPACING_M,
+) -> float:
+    """Simulate the Blender terrain mesh's barycentric interpolation.
+
+    The mesh triangulates each grid cell quad into two triangles along
+    the bottom-left to top-right diagonal.  This function computes the
+    exact barycentric interpolation for whichever triangle the point
+    falls in, matching the Blender mesh's rendered height.
+    """
+    origin_x = -extent.width_m / 2
+    origin_y = -extent.depth_m / 2
+
+    col = _grid_index(x, spacing, origin_x)
+    row = _grid_index(y, spacing, origin_y)
+
+    x0 = origin_x + col * spacing
+    y0 = origin_y + row * spacing
+    x1 = x0 + spacing
+    y1 = y0 + spacing
+
+    z_bl = terrain_height_m(x0, y0, extent)
+    z_br = terrain_height_m(x1, y0, extent)
+    z_tl = terrain_height_m(x0, y1, extent)
+    z_tr = terrain_height_m(x1, y1, extent)
+
+    fx = (x - x0) / spacing
+    fy = (y - y0) / spacing
+
+    # Diagonal from BL (x0,y0) to TR (x1,y1): fx >= fy -> Triangle 1
+    if fx >= fy:
+        # Triangle BL, BR, TR: lambda1 = 1-fx, lambda2 = fx-fy, lambda3 = fy
+        return z_bl * (1 - fx) + z_br * (fx - fy) + z_tr * fy
+    # Triangle BL, TR, TL: lambda1 = 1-fy, lambda2 = fx, lambda3 = fy-fx
+    return z_bl * (1 - fy) + z_tr * fx + z_tl * (fy - fx)
+
+
+def test_terrain_mesh_interpolation_error_bounded_by_central_clearance(
+    scene,
+) -> None:
+    """The maximum terrain mesh interpolation error at the central
+    courtyard contour (y=40) must be less than
+    ``_CENTRAL_FLOOR_CLEARANCE_M`` (0.5 m).
+
+    The central courtyard module places its floor at
+    ``terrain_height_m(x, 40) + _CENTRAL_FLOOR_CLEARANCE_M``.  If the
+    Blender mesh's interpolated height exceeds the analytic height by
+    more than the clearance, the module floor would be embedded in the
+    rendered terrain -- a fail-closed violation.
+
+    This test simulates the mesh interpolation and fails if the clearance
+    is insufficient at any point along the y=40 contour where module
+    parts are placed (x from 25 to 50, covering the 7-part central
+    courtyard module + camera approach offset).
+    """
+    extent = scene.extent
+    y = _CENTRAL_CONTOUR_Y_M
+
+    max_error = 0.0
+    max_error_x = 0.0
+
+    # Sample every 0.1 m along the central contour where parts are placed.
+    # Module parts span x from 30 to 45 (7 parts at 2.5 m spacing);
+    # candidate camera is at x ~ 25 (approach offset 5 m before first part).
+    x = 25.0
+    while x <= 50.0:
+        analytic = terrain_height_m(x, y, extent)
+        mesh = _barycentric_mesh_height(x, y, extent)
+        error = mesh - analytic  # positive: mesh is higher -> floor embedded
+        if error > max_error:
+            max_error = error
+            max_error_x = x
+        x += 0.1
+
+    assert max_error < _CENTRAL_FLOOR_CLEARANCE_M, (
+        f"terrain mesh interpolation error {max_error:.4f} m at "
+        f"({max_error_x:.1f}, {y}) exceeds central floor clearance "
+        f"{_CENTRAL_FLOOR_CLEARANCE_M} m; module floor would be embedded "
+        f"in rendered terrain"
+    )
+
+
+def test_terrain_mesh_max_interpolation_error_across_scene(scene) -> None:
+    """Measure the maximum terrain mesh interpolation error across the
+    entire scene to document the scale of the dual-truth discrepancy.
+
+    This test does NOT fail on a threshold -- it reports the maximum
+    error and the location where it occurs, establishing the empirical
+    bound for the dual-truth audit.  The central clearance test above
+    uses this bound to fail-closed at the module location.
+    """
+    extent = scene.extent
+    spacing = _TERRAIN_MESH_GRID_SPACING_M
+
+    max_error = 0.0
+    max_error_loc = (0.0, 0.0)
+
+    # Sample at 0.5 m resolution across the scene interior (skip the
+    # exact boundary where terrain is 0 or 120).
+    x = -extent.width_m / 2 + spacing
+    while x < extent.width_m / 2 - spacing:
+        y = -extent.depth_m / 2 + spacing
+        while y < extent.depth_m / 2 - spacing:
+            # Only check off-grid points (grid points have zero error)
+            fx = (x - (-extent.width_m / 2)) % spacing
+            fy = (y - (-extent.depth_m / 2)) % spacing
+            if fx < 0.01 or fy < 0.01:
+                y += 0.5
+                continue
+            analytic = terrain_height_m(x, y, extent)
+            mesh = _barycentric_mesh_height(x, y, extent)
+            error = abs(mesh - analytic)
+            if error > max_error:
+                max_error = error
+                max_error_loc = (x, y)
+            y += 0.5
+        x += 0.5
+
+    # Report the bound.  This is an empirical observation, not a gate.
+    # The gate is in test_terrain_mesh_interpolation_error_bounded_by_central_clearance.
+    assert max_error > 0.0, "no interpolation error found (sampling bug)"
+    # The error must be sub-meter for the 4 m grid on this terrain.
+    assert max_error < 1.0, (
+        f"terrain mesh max interpolation error {max_error:.4f} m at "
+        f"{max_error_loc} exceeds 1.0 m; grid spacing may be too coarse "
+        f"or terrain formula may have changed"
+    )
 

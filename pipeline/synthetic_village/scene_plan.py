@@ -203,7 +203,37 @@ def _is_mm(value: float) -> bool:
 
 
 def terrain_height_m(x_m: float, y_m: float, extent: SceneExtent | None = None) -> float:
-    """Return the tracked analytic terrain height, quantized to one millimeter."""
+    """Return the tracked analytic terrain height, quantized to one millimeter.
+
+    **Dual-truth warning (GLM-P1, FEEDBACK-HANDOFF-CODEX-012):**
+
+    This is the *analytic planning* terrain — the continuous, exact formula
+    used by scene plans, elevated topology, camera anchors, and module
+    layout.  It is **not** the same as the *rendered* terrain that cameras
+    actually see.
+
+    The Blender terrain mesh (``scripts/blender/build_synthetic_village.py``
+    ``_create_terrain``) uses the **same formula** but samples it on a
+    discrete grid (``SURFACE_TERRAIN_SPACING_M = 4.0`` m) and linearly
+    interpolates across triangulated faces.  At any off-grid point the
+    smooth sine curve and the linearly-interpolated mesh diverge.
+
+    **Authoritative source for rendered geometry**: the Blender terrain
+    mesh, as measured by the Phase 4.3 probe
+    (``scripts/blender/probe_reciprocal_route_modules.py``).  The analytic
+    function is authoritative for *planning* (layout, topology, camera
+    anchors) but must not be treated as the rendered surface height.
+
+    **Fail-closed contract**: when the probe-measured mesh z at a module
+    position exceeds the module floor z, the probe must fail (module
+    embedded in terrain).  Module floor clearances (e.g.
+    ``_CENTRAL_FLOOR_CLEARANCE_M``) must exceed the maximum interpolation
+    error at the module's location; the adversarial test
+    ``test_terrain_mesh_interpolation_error_bounded_by_central_clearance``
+    locks this invariant.
+
+    Unknown mesh z (no probe data) → treat as unknown, fail-closed.
+    """
 
     active = extent or build_default_recipe().scene
     if not math.isfinite(x_m) or not math.isfinite(y_m):
