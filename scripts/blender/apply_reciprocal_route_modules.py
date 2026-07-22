@@ -560,6 +560,323 @@ def _module_geometry(part):
 
 
 # --------------------------------------------------------------------------- #
+# Phase 4.3 junction vegetation opening.
+#
+# The fresh exact-218 probe localized its only module/environment collision to
+# ``gallery-branch-attachment-side-001`` versus the ``roadside-vegetation``
+# child of ``path-network-003``.  The terrain ribbon and the other four path
+# children do not intersect.  At this additive runtime layer both objects are
+# present and the side attachment carries the canonical layout, so the opening
+# can be derived from the bound plan instead of duplicating world coordinates.
+#
+# Each rule maps a module recipe branch to the part whose XY footprint is the
+# vegetation-free junction envelope.  Adding another supported junction is an
+# explicit contract change and therefore changes the runtime script SHA/build
+# identity.  The runtime removes whole disconnected vegetation components;
+# it never clips the path ribbon or silently tolerates a module intersection.
+# --------------------------------------------------------------------------- #
+
+_JUNCTION_VEGETATION_RULES = (
+    (
+        "covered-gallery-underpass",
+        "side_branch",
+        "gallery-branch-attachment-side-001",
+    ),
+)
+_ROADSIDE_VEGETATION_PART_ID = "roadside-vegetation"
+
+
+def _layout_aabb_xy(layout):
+    """Return the world-space XY AABB of one canonical part layout."""
+
+    if not isinstance(layout, dict):
+        raise RuntimeBuildError("junction vegetation part layout is invalid")
+    center = layout.get("center_m")
+    extent = layout.get("extent_m")
+    yaw_deg = layout.get("orientation_deg")
+    if (
+        not isinstance(center, list)
+        or len(center) != 3
+        or not isinstance(extent, list)
+        or len(extent) != 3
+        or not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in (*center, *extent)
+        )
+        or any(float(value) <= 0.0 for value in extent)
+        or not isinstance(yaw_deg, (int, float))
+        or isinstance(yaw_deg, bool)
+        or not math.isfinite(yaw_deg)
+    ):
+        raise RuntimeBuildError("junction vegetation part layout is invalid")
+    cx, cy = float(center[0]), float(center[1])
+    hx, hy = float(extent[0]) / 2.0, float(extent[1]) / 2.0
+    yaw = math.radians(float(yaw_deg))
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    corners = []
+    for local_x, local_y in ((-hx, -hy), (-hx, hy), (hx, -hy), (hx, hy)):
+        corners.append(
+            (
+                cx + local_x * cosine - local_y * sine,
+                cy + local_x * sine + local_y * cosine,
+            ),
+        )
+    xs = [row[0] for row in corners]
+    ys = [row[1] for row in corners]
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def _junction_vegetation_clearance_targets(plan):
+    """Derive every vegetation opening from the bound module plan."""
+
+    modules = plan.get("modules") if isinstance(plan, dict) else None
+    if not isinstance(modules, list):
+        raise RuntimeBuildError("junction vegetation module plan is invalid")
+    targets = []
+    for module_id, branch_key, part_id in _JUNCTION_VEGETATION_RULES:
+        matches = [
+            module
+            for module in modules
+            if isinstance(module, dict) and module.get("module_id") == module_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeBuildError(
+                f"junction vegetation module is absent or duplicated: {module_id}",
+            )
+        module = matches[0]
+        recipe = module.get("recipe")
+        branch = recipe.get(branch_key) if isinstance(recipe, dict) else None
+        topology_ref = (
+            branch.get("connects_to_topology")
+            if isinstance(branch, dict)
+            else None
+        )
+        if (
+            not isinstance(topology_ref, str)
+            or not topology_ref.startswith("path-network-")
+        ):
+            raise RuntimeBuildError(
+                f"junction vegetation topology binding is invalid: {module_id}",
+            )
+        parts = module.get("parts")
+        part_matches = [
+            part
+            for part in parts
+            if isinstance(part, dict) and part.get("part_id") == part_id
+        ] if isinstance(parts, list) else []
+        if len(part_matches) != 1:
+            raise RuntimeBuildError(
+                f"junction vegetation part is absent or duplicated: {part_id}",
+            )
+        targets.append(
+            {
+                "module_id": module_id,
+                "part_id": part_id,
+                "topology_ref": topology_ref,
+                "aabb_xy_m": _layout_aabb_xy(part_matches[0].get("part_layout")),
+            },
+        )
+    return tuple(targets)
+
+
+def _vegetation_components_overlapping_xy(vertices, faces, aabb_xy_m):
+    """Return disconnected vertex components overlapping an XY envelope.
+
+    ``roadside-vegetation`` is authored as independent ellipsoids in one mesh.
+    Selecting whole connected components preserves every plant outside the
+    junction instead of slicing triangles at an arbitrary plane.
+    """
+
+    if (
+        not isinstance(aabb_xy_m, (tuple, list))
+        or len(aabb_xy_m) != 4
+        or not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in aabb_xy_m
+        )
+    ):
+        raise RuntimeBuildError("junction vegetation clearance AABB is invalid")
+    envelope_min_x, envelope_max_x, envelope_min_y, envelope_max_y = (
+        float(value) for value in aabb_xy_m
+    )
+    if envelope_min_x >= envelope_max_x or envelope_min_y >= envelope_max_y:
+        raise RuntimeBuildError("junction vegetation clearance AABB is invalid")
+    rows = [tuple(float(value) for value in vertex) for vertex in vertices]
+    if not rows or any(
+        len(row) != 3 or not all(math.isfinite(value) for value in row)
+        for row in rows
+    ):
+        raise RuntimeBuildError("roadside vegetation vertices are invalid")
+    adjacency = [set() for _ in rows]
+    referenced = set()
+    for face in faces:
+        indices = tuple(face)
+        if (
+            len(indices) < 3
+            or any(
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or not 0 <= index < len(rows)
+                for index in indices
+            )
+        ):
+            raise RuntimeBuildError("roadside vegetation faces are invalid")
+        referenced.update(indices)
+        for index, current in enumerate(indices):
+            following = indices[(index + 1) % len(indices)]
+            adjacency[current].add(following)
+            adjacency[following].add(current)
+    if referenced != set(range(len(rows))):
+        raise RuntimeBuildError("roadside vegetation contains loose vertices")
+    components = []
+    remaining = set(range(len(rows)))
+    while remaining:
+        seed = min(remaining)
+        component = {seed}
+        stack = [seed]
+        remaining.remove(seed)
+        while stack:
+            current = stack.pop()
+            for neighbour in adjacency[current]:
+                if neighbour in remaining:
+                    remaining.remove(neighbour)
+                    component.add(neighbour)
+                    stack.append(neighbour)
+        components.append(tuple(sorted(component)))
+    selected = []
+    for component in components:
+        xs = [rows[index][0] for index in component]
+        ys = [rows[index][1] for index in component]
+        if (
+            max(xs) > envelope_min_x
+            and min(xs) < envelope_max_x
+            and max(ys) > envelope_min_y
+            and min(ys) < envelope_max_y
+        ):
+            selected.append(component)
+    return tuple(selected)
+
+
+def _apply_junction_vegetation_clearances(request, base_roots):
+    """Remove exactly one colliding roadside plant per declared junction."""
+
+    targets = _junction_vegetation_clearance_targets(
+        request["reciprocal_route_module_plan"],
+    )
+    evidence = []
+    for target in targets:
+        roots = [
+            root
+            for root in base_roots
+            if root.get("nv_stable_id") == target["topology_ref"]
+        ]
+        if len(roots) != 1:
+            raise RuntimeBuildError(
+                "junction vegetation path root is absent or duplicated: "
+                + target["topology_ref"],
+            )
+        root = roots[0]
+        children = [
+            child
+            for child in root.children
+            if child.type == "MESH"
+            and child.get("nv_part_id") == _ROADSIDE_VEGETATION_PART_ID
+        ]
+        if len(children) != 1:
+            raise RuntimeBuildError(
+                "junction roadside vegetation child is absent or duplicated: "
+                + target["topology_ref"],
+            )
+        child = children[0]
+        mesh = child.data
+        world_vertices = [
+            tuple(float(value) for value in (child.matrix_world @ vertex.co))
+            for vertex in mesh.vertices
+        ]
+        faces = [tuple(int(index) for index in polygon.vertices) for polygon in mesh.polygons]
+        selected = _vegetation_components_overlapping_xy(
+            world_vertices,
+            faces,
+            target["aabb_xy_m"],
+        )
+        if len(selected) != 1:
+            raise RuntimeBuildError(
+                "junction vegetation clearance must remove exactly one "
+                f"component for {target['part_id']}; observed {len(selected)}",
+            )
+        original_vertex_count = len(mesh.vertices)
+        original_polygon_count = len(mesh.polygons)
+        removed_vertices = selected[0]
+        import bmesh
+
+        editable = bmesh.new()
+        try:
+            editable.from_mesh(mesh)
+            editable.verts.ensure_lookup_table()
+            bmesh.ops.delete(
+                editable,
+                geom=[editable.verts[index] for index in removed_vertices],
+                context="VERTS",
+            )
+            editable.to_mesh(mesh)
+        finally:
+            editable.free()
+        mesh.update(calc_edges=True)
+        if not mesh.vertices or not mesh.polygons:
+            raise RuntimeBuildError(
+                "junction vegetation clearance emptied roadside vegetation",
+            )
+        if mesh.uv_layers.active is not None:
+            mesh.calc_tangents()
+        remaining_world_vertices = [
+            tuple(float(value) for value in (child.matrix_world @ vertex.co))
+            for vertex in mesh.vertices
+        ]
+        remaining_faces = [
+            tuple(int(index) for index in polygon.vertices)
+            for polygon in mesh.polygons
+        ]
+        if _vegetation_components_overlapping_xy(
+            remaining_world_vertices,
+            remaining_faces,
+            target["aabb_xy_m"],
+        ):
+            raise RuntimeBuildError(
+                f"junction vegetation clearance is incomplete: {target['part_id']}",
+            )
+        removed_polygon_count = original_polygon_count - len(mesh.polygons)
+        if removed_polygon_count <= 0:
+            raise RuntimeBuildError(
+                f"junction vegetation clearance removed no polygons: {target['part_id']}",
+            )
+        child["nv_junction_vegetation_clearance_applied"] = True
+        child["nv_junction_vegetation_part_id"] = target["part_id"]
+        child["nv_junction_vegetation_removed_components"] = 1
+        root["nv_junction_vegetation_clearance_applied"] = True
+        evidence.append(
+            {
+                "module_id": target["module_id"],
+                "part_id": target["part_id"],
+                "topology_ref": target["topology_ref"],
+                "aabb_xy_m": [float(value) for value in target["aabb_xy_m"]],
+                "removed_component_count": 1,
+                "removed_vertex_count": original_vertex_count - len(mesh.vertices),
+                "removed_polygon_count": removed_polygon_count,
+            },
+        )
+    bpy.context.scene["nv_junction_vegetation_clearance_evidence"] = json.dumps(
+        evidence,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return tuple(evidence)
+
+
+# --------------------------------------------------------------------------- #
 # Phase 4.3: topology proxy meshes.
 #
 # The v1 base scene's ``path-network-001/002/003/005`` objects are EMPTY
@@ -1152,6 +1469,10 @@ def main():
     request_path, staging_path = _runtime_paths(sys.argv)
     request = _validate_request(_load_request(request_path))
     base_roots = _validate_base_scene(request)
+    junction_clearance_evidence = _apply_junction_vegetation_clearances(
+        request,
+        base_roots,
+    )
     module_roots, module_meshes, topology_proxies = _build_modules(request)
     _validate_built_modules(
         request,
@@ -1173,6 +1494,9 @@ def main():
             {
                 "build_id": request["build_id"],
                 "canonical_roots": EXPECTED_TOTAL_ROOTS,
+                "junction_vegetation_clearances": len(
+                    junction_clearance_evidence,
+                ),
                 "module_roots": EXPECTED_MODULE_ROOTS,
                 "stage": "modeled-unverified",
                 "trust_effect": "none",

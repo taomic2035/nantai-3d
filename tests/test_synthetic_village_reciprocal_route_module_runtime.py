@@ -777,6 +777,89 @@ def _load_runtime_module(monkeypatch: pytest.MonkeyPatch):
     return runtime
 
 
+def test_junction_vegetation_clearance_targets_derive_from_bound_plan(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opening must come from the bound side-attachment layout.
+
+    No Blender-side coordinate whitelist may invent a second geometry truth.
+    """
+
+    runtime = _load_runtime_module(monkeypatch)
+    plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    )
+
+    targets = runtime._junction_vegetation_clearance_targets(
+        plan.model_dump(mode="json"),
+    )
+
+    assert targets == (
+        {
+            "module_id": "covered-gallery-underpass",
+            "part_id": "gallery-branch-attachment-side-001",
+            "topology_ref": "path-network-003",
+            "aabb_xy_m": pytest.approx((56.2, 57.8, 43.7, 46.3)),
+        },
+    )
+
+
+def test_junction_vegetation_component_filter_selects_only_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disconnected roadside plants outside the opening must survive."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    vertices = (
+        (-0.4, -0.3, 0.0),
+        (0.4, -0.3, 0.0),
+        (0.0, 0.4, 0.0),
+        (4.7, -0.3, 0.0),
+        (5.3, -0.3, 0.0),
+        (5.0, 0.4, 0.0),
+        (9.6, -0.3, 0.0),
+        (10.4, -0.3, 0.0),
+        (10.0, 0.4, 0.0),
+    )
+    faces = ((0, 1, 2), (3, 4, 5), (6, 7, 8))
+
+    selected = runtime._vegetation_components_overlapping_xy(
+        vertices,
+        faces,
+        (4.5, 5.5, -0.5, 0.5),
+    )
+
+    assert selected == ((3, 4, 5),)
+
+
+def test_junction_vegetation_clearance_rejects_missing_bound_module(
+    base: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed plan cannot silently skip the promised junction opening."""
+
+    runtime = _load_runtime_module(monkeypatch)
+    plan = build_default_reciprocal_route_module_plan(
+        scene=base.scene_plan,
+        elevated_topology=base.elevated_topology,
+        environment_module_plan=base.env_module_plan,
+    ).model_dump(mode="json")
+    plan["modules"] = [
+        module
+        for module in plan["modules"]
+        if module["module_id"] != "covered-gallery-underpass"
+    ]
+
+    with pytest.raises(
+        runtime.RuntimeBuildError,
+        match="junction vegetation module is absent",
+    ):
+        runtime._junction_vegetation_clearance_targets(plan)
+
+
 def test_topology_proxy_id_for_module_uses_module_specific_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
