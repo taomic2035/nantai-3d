@@ -538,6 +538,57 @@ def test_req5_reason_distinguishes_delivered_frame_gate_from_missing_pose_gates(
     assert "no renderer exists" not in row.reason
 
 
+def test_post_render_quality_expectation_links_to_six_layer_schema() -> None:
+    """req 5 前渲染侧声明后渲染六层坏帧门的 schema 和预期帧语义。
+
+    这不是质量门, 不携带 trust —— 只声明期望, 防止后渲染门误杀预期模式
+    (如 audit-overview 俯瞰帧是 ground-dominant, 不是坏帧)。
+    """
+
+    plan = build_production_camera_plan()
+    expect = plan.post_render_quality_expectation
+
+    # schema 名与 Codex 的 production_quality_gates.py 一致
+    assert expect.quality_report_schema == (
+        "nantai.synthetic-village.production-frame-quality-report.v2"
+    )
+    # 8 条规则全部列出
+    assert len(expect.relevant_rule_ids) == 8
+    assert "sky-dominance" in expect.relevant_rule_ids
+    assert "upper-ground-dominance" in expect.relevant_rule_ids
+    assert "valid-depth-pixel-ratio" in expect.relevant_rule_ids
+    # 5 个相机组都有预期
+    assert len(expect.group_expectations) == 5
+    by_group = {row.group_id: row for row in expect.group_expectations}
+    assert set(by_group) == {
+        "ground-route",
+        "elevated-pedestrian",
+        "perimeter-inward",
+        "environment-corridor",
+        "audit-overview",
+    }
+    # audit-overview 预期 ground-dominant (190m 俯瞰, 不是坏帧)
+    assert by_group["audit-overview"].expected_dominant_semantic == "ground"
+    # perimeter-inward 预期 architecture-dominant (面向建筑群)
+    assert by_group["perimeter-inward"].expected_dominant_semantic == "architecture"
+    # 人眼视角组预期 mixed
+    for gid in ("ground-route", "elevated-pedestrian", "environment-corridor"):
+        assert by_group[gid].expected_dominant_semantic == "mixed"
+    # disclaimer 明确声明不携带 trust
+    assert "NO trust" in expect.disclosure or "no trust" in expect.disclosure.lower()
+
+
+def test_post_render_quality_expectation_rejects_external_mutation() -> None:
+    """post_render_quality_expectation 是 frozen —— 篡改必须 fail-closed。"""
+
+    payload = _plan_payload()
+    payload["post_render_quality_expectation"]["quality_report_schema"] = (
+        "fabricated-schema-v999"
+    )
+    with pytest.raises(ValidationError, match="quality_report_schema"):
+        _reload(payload)
+
+
 def test_req6_loop_closure_is_backed_by_two_verified_route_loops() -> None:
     plan = build_production_camera_plan()
     assert {

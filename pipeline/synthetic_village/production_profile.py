@@ -342,6 +342,67 @@ class UndeliveredRequirement(FrozenModel):
     reason: str = Field(min_length=20)
 
 
+#: req 5 post-render 六层坏帧门 —— 前渲染侧的期望声明。
+#:
+#: 这【不是】质量门, 不携带任何 trust。它只声明:
+#: 1. 后渲染六层质量门使用哪个 schema (让消费者知道去找谁)
+#: 2. 哪些质量规则与本 plan 相关
+#: 3. 每个相机组的预期帧语义特征 (防止后渲染门误杀预期模式)
+#:
+#: 后渲染质量门 schema 定义在 production_quality_gates.py (Codex lane):
+#: - ProductionFrameLayerStatistics: 6 个解码缓冲区的原始像素计数
+#: - ProductionFrameQualityPolicyV2: 操作员策略 + 8 条规则阈值
+#: - ProductionFrameQualityReportV2: 逐相机决策 + rejected_camera_ids
+POST_RENDER_QUALITY_REPORT_SCHEMA = (
+    "nantai.synthetic-village.production-frame-quality-report.v2"
+)
+
+#: 后渲染六层坏帧门的 8 条规则 ID (与 production_quality_gates.py QualityRuleId 同源)。
+#: 列在这里是为了让消费者在【不读 Codex 代码】的情况下知道哪些规则相关。
+POST_RENDER_QUALITY_RULE_IDS: tuple[str, ...] = (
+    "valid-depth-pixel-ratio",
+    "valid-normal-pixel-ratio",
+    "valid-semantic-pixel-ratio",
+    "sky-dominance",
+    "upper-ground-dominance",
+    "depth-near-concentration",
+    "near-instance-dominance",
+    "upper-instance-dominance",
+)
+
+
+class GroupFrameExpectation(FrozenModel):
+    """Per-group expected frame semantic — NOT a quality gate, carries no trust.
+
+    Declares what dominant semantic a camera group's frames are expected to
+    exhibit.  This prevents the post-render gate from auto-rejecting expected
+    patterns (e.g. audit-overview frames are ground-dominant because they
+    look down from 190 m — that is the intended viewpoint, not a bad frame).
+    """
+
+    group_id: CameraGroupId
+    expected_dominant_semantic: Literal["sky", "ground", "mixed", "architecture"]
+    disclosure: str = Field(min_length=10)
+
+
+class PostRenderQualityExpectation(FrozenModel):
+    """Pre-render bridge to the post-render six-layer quality gate.
+
+    This field links the pre-render camera plan to the post-render quality
+    gate schema by name.  It carries NO trust — it only declares expectations
+    so the post-render gate can distinguish expected patterns from bad frames.
+    The actual quality gate (thresholds, evaluation, decisions) lives in
+    production_quality_gates.py and is NOT carried by this pre-render plan.
+    """
+
+    quality_report_schema: Literal[
+        "nantai.synthetic-village.production-frame-quality-report.v2"
+    ] = POST_RENDER_QUALITY_REPORT_SCHEMA
+    relevant_rule_ids: tuple[str, ...]
+    group_expectations: tuple[GroupFrameExpectation, ...]
+    disclosure: str = Field(min_length=20)
+
+
 class ProductionCameraPlan(FrozenModel):
     schema_version: Literal[1] = 1
     plan_schema: Literal["nantai.synthetic-village.production-camera-plan.v1"] = (
@@ -372,6 +433,9 @@ class ProductionCameraPlan(FrozenModel):
     #: 本轮【没做到】的需求, 逐条机器可读。空元组的含义是"全部交付", 所以它
     #: 不能被默认成空 —— 必须由 builder 显式给出。
     undelivered_requirements: tuple[UndeliveredRequirement, ...]
+    #: req 5 后渲染六层坏帧门的前渲染侧期望声明。携带【零】trust —— 只声明
+    #: 期望, 不做质量判断。实际质量门在 production_quality_gates.py。
+    post_render_quality_expectation: PostRenderQualityExpectation
 
     @model_validator(mode="after")
     def _validate_plan(self) -> ProductionCameraPlan:
@@ -1127,6 +1191,61 @@ def _place_audit_overview(
     return poses
 
 
+#: req 5 后渲染六层坏帧门的 5 组预期帧语义特征。
+#:
+#: audit-overview 从 190m 俯瞰 → 预期 ground-dominant (这是设计意图, 不是坏帧)。
+#: ground-route / elevated-pedestrian / environment-corridor → 预期 mixed
+#: (人眼视角, 天空/地面/建筑混合是正常的人眼帧)。
+#: perimeter-inward → 预期 architecture-dominant (面向建筑群外扩环拍)。
+_GROUP_FRAME_EXPECTATIONS: tuple[GroupFrameExpectation, ...] = (
+    GroupFrameExpectation(
+        group_id="ground-route",
+        expected_dominant_semantic="mixed",
+        disclosure="pedestrian-eye-height-mixed-urban-canyon-frames",
+    ),
+    GroupFrameExpectation(
+        group_id="elevated-pedestrian",
+        expected_dominant_semantic="mixed",
+        disclosure="elevated-walkway-mixed-architecture-sky-frames",
+    ),
+    GroupFrameExpectation(
+        group_id="perimeter-inward",
+        expected_dominant_semantic="architecture",
+        disclosure="inward-facing-architecture-dominant-frames",
+    ),
+    GroupFrameExpectation(
+        group_id="environment-corridor",
+        expected_dominant_semantic="mixed",
+        disclosure="creek-corridor-mixed-vegetation-water-sky-frames",
+    ),
+    GroupFrameExpectation(
+        group_id="audit-overview",
+        expected_dominant_semantic="ground",
+        disclosure="aerial-overview-ground-dominant-by-design-not-a-bad-frame",
+    ),
+)
+
+
+def _post_render_quality_expectation() -> PostRenderQualityExpectation:
+    """Build the pre-render bridge to the post-render six-layer quality gate."""
+
+    return PostRenderQualityExpectation(
+        quality_report_schema=POST_RENDER_QUALITY_REPORT_SCHEMA,
+        relevant_rule_ids=POST_RENDER_QUALITY_RULE_IDS,
+        group_expectations=_GROUP_FRAME_EXPECTATIONS,
+        disclosure=(
+            "Pre-render declaration only — carries NO trust. Links this plan to "
+            "the post-render six-layer quality gate schema "
+            f"({POST_RENDER_QUALITY_REPORT_SCHEMA}). The actual quality gate "
+            "(thresholds, evaluation, per-camera decisions, rejected_camera_ids) "
+            "lives in production_quality_gates.py and is NOT carried by this "
+            "pre-render plan. Group expectations prevent the post-render gate "
+            "from auto-rejecting intended patterns (e.g. audit-overview frames "
+            "are ground-dominant by design, not bad frames)."
+        ),
+    )
+
+
 #: 本轮【没做到】的需求 —— 逐条说出来, 而不是让读者以为它们落地了。
 UNDELIVERED_REQUIREMENT_IDS: tuple[str, ...] = (
     "req-3-front-back-facade-coverage",
@@ -1171,11 +1290,20 @@ def _undelivered_requirements() -> tuple[UndeliveredRequirement, ...]:
                 "(both endpoints at ground level) are excluded from elevated-pedestrian "
                 "camera placement to prevent near-duplicate poses with ground-route "
                 "cameras on the same ground path. Still missing: sky/ground semantic "
-                "bad-frame detection (post-render, requires actual rendered frames). "
-                "The local production runner (macOS) implements a valid-pixel threshold "
-                "gate in its 180-frame journal, but that post-render gate is not carried "
-                "by this pre-render plan. pose_separation_evidence publishes the measured "
-                "distance distribution with the parallax threshold for context."
+                "bad-frame detection runtime measurement (computing pixel counts from "
+                "actual rendered 6-layer frames). The post-render schema already exists "
+                "in production_quality_gates.py (ProductionFrameLayerStatistics with "
+                "sky_pixel_count and upper_ground_pixel_count, 8 quality rules including "
+                "sky-dominance and upper-ground-dominance, ProductionFrameQualityReportV2 "
+                "with rejected_camera_ids). This plan now carries a "
+                "post_render_quality_expectation field linking to that schema by name and "
+                "declaring per-group expected frame semantics to prevent false rejections "
+                "— but the expectation carries NO trust; only the runtime measurement "
+                "produces real evidence. The local production runner (macOS) implements a "
+                "valid-pixel threshold gate in its 180-frame journal, but that post-render "
+                "gate is not carried by this pre-render plan. pose_separation_evidence "
+                "publishes the measured distance distribution with the parallax threshold "
+                "for context."
             ),
         ),
     )
@@ -1354,6 +1482,7 @@ def build_production_camera_plan(
         unplaced_groups=tuple(unplaced),
         route_loops=_route_loop_evidence(scene, topology),
         undelivered_requirements=_undelivered_requirements(),
+        post_render_quality_expectation=_post_render_quality_expectation(),
     )
 
 
