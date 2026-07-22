@@ -1152,10 +1152,13 @@ def test_guard_rail_has_low_semantic_base_for_visibility(
     runtime = _load_runtime_module(monkeypatch)
     assembler = runtime._module_geometry(_geometry_part("guard-rail", 13))
 
-    assert len(assembler.vertices) == 48
-    base = assembler.vertices[-8:]
-    assert max(vertex[2] for vertex in base) <= 0.12
-    assert min(vertex[2] for vertex in base) < 0.0
+    assert len(assembler.vertices) == 96
+    x_values = [vertex[0] for vertex in assembler.vertices]
+    assert min(x_values) < -0.6
+    assert max(x_values) > 0.6
+    for base in (assembler.vertices[40:48], assembler.vertices[-8:]):
+        assert max(vertex[2] for vertex in base) <= 0.12
+        assert min(vertex[2] for vertex in base) < 0.0
 
 
 @pytest.mark.parametrize(

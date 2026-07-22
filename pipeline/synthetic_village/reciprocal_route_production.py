@@ -1355,6 +1355,30 @@ def _remove_private_staging(path: Path, *, parent: Path) -> None:
     shutil.rmtree(path)
 
 
+def _post_render_rejection_message(quality_report, camera_id: str) -> str:
+    """Summarize measured failed rules for durable batch diagnostics."""
+
+    decision = next(
+        (
+            row
+            for row in quality_report.decisions
+            if row.camera_id == camera_id
+        ),
+        None,
+    )
+    if decision is None:
+        return f"post-render quality rejected camera: {camera_id}"
+    failed = [row for row in decision.rule_decisions if not row.passes]
+    if not failed:
+        return f"post-render quality rejected camera: {camera_id}"
+    details = "; ".join(
+        f"{row.rule_id} measured={row.measured:.6f} "
+        f"{row.comparison} threshold={row.threshold:.6f}"
+        for row in failed
+    )
+    return f"post-render quality rejected camera: {camera_id}; {details}"
+
+
 def run_reciprocal_production_camera(
     *,
     verified_build: VerifiedReciprocalProductionBuild,
@@ -1660,7 +1684,7 @@ def run_reciprocal_production_camera(
         )
         if quality_report.rejected_camera_ids:
             raise ReciprocalProductionError(
-                f"post-render quality rejected camera: {camera_id}",
+                _post_render_rejection_message(quality_report, camera_id),
             )
         evidence_root = frame_output / "evidence"
         evidence_root.mkdir()

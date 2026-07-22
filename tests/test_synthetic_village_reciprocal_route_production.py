@@ -61,6 +61,7 @@ from pipeline.synthetic_village.reciprocal_route_production import (
     ReciprocalProductionRenderFrameRequest,
     ReciprocalRenderStatistics,
     VerifiedReciprocalProductionBuild,
+    _post_render_rejection_message,
     build_reciprocal_production_clearance_report,
     build_reciprocal_production_clearance_request,
     build_reciprocal_production_frame_request,
@@ -110,6 +111,40 @@ def _post_render_policy() -> ProductionFrameQualityPolicyV2:
         near_depth_m=2.0,
         upper_region_end_row_exclusive=288,
         ground_semantic_ids=(1,),
+    )
+
+
+def test_post_render_rejection_message_carries_machine_rule_evidence() -> None:
+    report = SimpleNamespace(
+        decisions=(
+            SimpleNamespace(
+                camera_id="camera-ground-route-039",
+                rule_decisions=(
+                    SimpleNamespace(
+                        rule_id="sky-dominance",
+                        measured=0.61,
+                        comparison="maximum",
+                        threshold=0.55,
+                        passes=False,
+                    ),
+                    SimpleNamespace(
+                        rule_id="valid-depth-pixel-ratio",
+                        measured=0.92,
+                        comparison="minimum",
+                        threshold=0.30,
+                        passes=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert _post_render_rejection_message(
+        report,
+        "camera-ground-route-039",
+    ) == (
+        "post-render quality rejected camera: camera-ground-route-039; "
+        "sky-dominance measured=0.610000 maximum threshold=0.550000"
     )
 
 

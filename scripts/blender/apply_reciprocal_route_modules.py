@@ -682,30 +682,31 @@ def _retaining_geometry(center, extent, yaw):
 def _guard_geometry(center, extent, yaw):
     assembler = MeshAssembler()
     sx, sy, _sz = extent
-    local_x = -sx * 0.42
-    for local_y in (-sy * 0.38, 0.0, sy * 0.38):
+    for side in (-1.0, 1.0):
+        local_x = side * sx * 0.42
+        for local_y in (-sy * 0.38, 0.0, sy * 0.38):
+            _add_local_box(
+                assembler,
+                center,
+                yaw,
+                (local_x, local_y, 0.55),
+                (0.09, 0.09, 1.1),
+            )
+        for local_z in (0.48, 0.96):
+            _add_local_box(
+                assembler,
+                center,
+                yaw,
+                (local_x, 0.0, local_z),
+                (0.1, sy, 0.1),
+            )
         _add_local_box(
             assembler,
             center,
             yaw,
-            (local_x, local_y, 0.55),
-            (0.09, 0.09, 1.1),
+            (local_x, 0.0, 0.039),
+            (0.22, sy, 0.08),
         )
-    for local_z in (0.48, 0.96):
-        _add_local_box(
-            assembler,
-            center,
-            yaw,
-            (local_x, 0.0, local_z),
-            (0.1, sy, 0.1),
-        )
-    _add_local_box(
-        assembler,
-        center,
-        yaw,
-        (local_x, 0.0, 0.039),
-        (0.22, sy, 0.08),
-    )
     return assembler
 
 
