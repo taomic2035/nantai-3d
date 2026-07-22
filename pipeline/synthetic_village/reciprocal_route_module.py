@@ -253,6 +253,31 @@ ModuleId = Literal[
     "lower-valley-uphill",
 ]
 PartId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
+GeometryFamily = Literal[
+    "open-path",
+    "covered-passage",
+    "bridge-deck",
+    "building-shell",
+    "structural-frame",
+    "drainage-channel",
+    "retaining-structure",
+    "guard-rail",
+    "service-prop",
+    "vegetation-band",
+]
+
+_GEOMETRY_FAMILY_SEMANTIC_CLASSES: dict[GeometryFamily, frozenset[str]] = {
+    "open-path": frozenset({"path"}),
+    "covered-passage": frozenset({"building"}),
+    "bridge-deck": frozenset({"bridge"}),
+    "building-shell": frozenset({"building"}),
+    "structural-frame": frozenset({"building"}),
+    "drainage-channel": frozenset({"creek"}),
+    "retaining-structure": frozenset({"retaining-wall"}),
+    "guard-rail": frozenset({"prop"}),
+    "service-prop": frozenset({"prop"}),
+    "vegetation-band": frozenset({"prop"}),
+}
 
 
 class ReciprocalRouteError(ValueError):
@@ -1086,6 +1111,7 @@ class ReciprocalRouteModulePart(FrozenModel):
     instance_id: int
     semantic_id: int = Field(ge=0, le=14)
     material_slot_id: PartId
+    geometry_family: GeometryFamily
     part_layout: PartLayoutSpec
 
     @model_validator(mode="after")
@@ -1096,6 +1122,17 @@ class ReciprocalRouteModulePart(FrozenModel):
                 f"part {self.part_id} instance {self.instance_id} is outside "
                 f"module {self.module_id} segment "
                 f"[{expected_range.start}, {expected_range.stop - 1}]",
+            )
+        allowed_semantic_ids = {
+            SEMANTIC_ID_BY_CLASS[semantic_class]
+            for semantic_class in _GEOMETRY_FAMILY_SEMANTIC_CLASSES[
+                self.geometry_family
+            ]
+        }
+        if self.semantic_id not in allowed_semantic_ids:
+            raise ValueError(
+                f"geometry family {self.geometry_family} is incompatible with "
+                f"semantic_id {self.semantic_id}",
             )
         return self
 
@@ -1586,6 +1623,62 @@ def _default_lower_valley_uphill_recipe() -> LowerValleyUphillRecipe:
     )
 
 
+_DEFAULT_GEOMETRY_FAMILY_BY_PART_ID: dict[str, GeometryFamily] = {
+    # Central courtyard: one authored covered passage, four open route
+    # surfaces, then semantic-compatible gallery structure and guard.
+    "courtyard-downhill-gate-001": "open-path",
+    "courtyard-covered-side-passage-001": "covered-passage",
+    "courtyard-cross-slope-alley-001": "open-path",
+    "courtyard-route-attachment-upper-001": "open-path",
+    "courtyard-route-attachment-lower-001": "open-path",
+    "courtyard-gallery-post-run-001": "structural-frame",
+    "courtyard-gallery-guard-001": "guard-rail",
+    # Bridge route: attachments and ramps stay open overhead.  The bridge
+    # transition uses bridge semantics, not a path-labelled fake roof.
+    "bridge-route-attachment-upstream-001": "open-path",
+    "bridge-route-attachment-downstream-001": "open-path",
+    "bridge-access-ramp-001": "open-path",
+    "bridge-side-maintenance-path-001": "open-path",
+    "bridge-drainage-scuppers-001": "drainage-channel",
+    "bridge-deck-edge-transition-001": "bridge-deck",
+    # Watermill service route and independent structures.
+    "watermill-building-shell-001": "building-shell",
+    "watermill-maintenance-platform-001": "open-path",
+    "watermill-service-stair-001": "open-path",
+    "watermill-access-panel-001": "service-prop",
+    "watermill-creek-bank-path-001": "open-path",
+    "watermill-platform-guard-001": "guard-rail",
+    "watermill-tailrace-retaining-wall-001": "retaining-structure",
+    # The lower lane is a path surface under separately declared gallery
+    # structure; its own path-semantic mesh deliberately has no fake roof.
+    "gallery-underpass-lower-lane-001": "open-path",
+    "gallery-post-run-001": "structural-frame",
+    "gallery-beam-run-001": "structural-frame",
+    "gallery-foundation-run-001": "retaining-structure",
+    "gallery-guard-run-001": "guard-rail",
+    "gallery-side-door-001": "building-shell",
+    "gallery-branch-attachment-upper-001": "open-path",
+    "gallery-branch-attachment-lower-001": "open-path",
+    "gallery-branch-attachment-side-001": "open-path",
+    # Forest/orchard boundary.
+    "forest-boundary-path-fork-001": "open-path",
+    "forest-orchard-transition-001": "open-path",
+    "forest-retaining-drain-001": "retaining-structure",
+    "forest-trail-shelter-001": "covered-passage",
+    "forest-route-attachment-inbound-001": "open-path",
+    "forest-route-attachment-outbound-001": "open-path",
+    "forest-edge-vegetation-band-001": "vegetation-band",
+    # Lower valley return route.
+    "lower-valley-entry-path-001": "open-path",
+    "lower-valley-field-edge-path-001": "open-path",
+    "lower-valley-creek-maintenance-trail-001": "open-path",
+    "lower-valley-drainage-outlet-001": "drainage-channel",
+    "lower-valley-building-back-entry-001": "building-shell",
+    "lower-valley-route-reconnection-001": "open-path",
+    "lower-valley-retaining-step-001": "retaining-structure",
+}
+
+
 def _default_module(
     module_id: ModuleId,
     *,
@@ -1880,6 +1973,7 @@ def _default_module(
             instance_id=instance_id,
             semantic_id=semantic_id,
             material_slot_id=material_slot_id,
+            geometry_family=_DEFAULT_GEOMETRY_FAMILY_BY_PART_ID[part_id],
             part_layout=_default_part_layout(
                 module_id,
                 instance_id,

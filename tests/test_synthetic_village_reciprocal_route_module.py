@@ -9,6 +9,7 @@ promote modeled-unverified trust.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 
 import pytest
@@ -320,6 +321,7 @@ def test_plan_rejects_part_outside_module_segment(plan) -> None:
             instance_id=999,  # outside all segments
             semantic_id=first_part.semantic_id,
             material_slot_id=first_part.material_slot_id,
+            geometry_family=first_part.geometry_family,
             part_layout=first_part.part_layout,
         )
 
@@ -514,6 +516,45 @@ def test_plan_carries_part_layout_on_every_part(plan) -> None:
                 270.0 if module.module_id == "central-courtyard-downhill" else 0.0
             )
             assert part.part_layout.orientation_deg == expected_orientation
+
+
+def test_plan_carries_explicit_geometry_family_on_every_part(plan) -> None:
+    """Runtime geometry classification is canonical plan data, not a name guess."""
+
+    parts = [part for module in plan.modules for part in module.parts]
+    assert len(parts) == 43
+    assert all(part.geometry_family for part in parts)
+    assert {part.geometry_family for part in parts} == {
+        "open-path",
+        "covered-passage",
+        "bridge-deck",
+        "building-shell",
+        "structural-frame",
+        "drainage-channel",
+        "retaining-structure",
+        "guard-rail",
+        "service-prop",
+        "vegetation-band",
+    }
+
+
+def test_part_rejects_missing_geometry_family(plan) -> None:
+    """A legacy or tampered part cannot fall back to a universal primitive."""
+
+    payload = plan.modules[0].parts[0].model_dump(mode="json")
+    payload.pop("geometry_family")
+    with pytest.raises(ValidationError, match="geometry_family"):
+        ReciprocalRouteModulePart.model_validate(payload)
+
+
+def test_part_rejects_semantically_incompatible_geometry_family(plan) -> None:
+    """A path root cannot silently label a roofed building mesh as walkable path."""
+
+    payload = plan.modules[0].parts[0].model_dump(mode="json")
+    assert payload["semantic_id"] != 3
+    payload["geometry_family"] = "covered-passage"
+    with pytest.raises(ValidationError, match="geometry family.*semantic"):
+        ReciprocalRouteModulePart.model_validate_json(json.dumps(payload))
 
 
 def test_part_layout_rejects_negative_extent() -> None:
