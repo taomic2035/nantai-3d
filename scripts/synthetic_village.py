@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -180,6 +181,42 @@ def _run_reciprocal_production_batch():
     )
 
     return run_reciprocal_production_batch
+
+
+def _build_waterwheel_local_orbit_plan():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.local_orbit_audit import (
+        build_waterwheel_local_orbit_plan,
+    )
+
+    return build_waterwheel_local_orbit_plan
+
+
+def _canonical_local_orbit_plan_bytes():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.local_orbit_audit import (
+        canonical_local_orbit_plan_bytes,
+    )
+
+    return canonical_local_orbit_plan_bytes
+
+
+def _load_local_orbit_plan():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.local_orbit_audit import load_local_orbit_plan
+
+    return load_local_orbit_plan
+
+
+def _run_local_orbit_audit():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village.local_orbit_runner import run_local_orbit_audit
+
+    return run_local_orbit_audit
 
 
 def _parse_reciprocal_batch_targets(values: list[str]):
@@ -750,6 +787,74 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=30 * 60,
     )
+    build_local_orbit_plan = commands.add_parser(
+        "build-local-orbit-plan",
+        help=(
+            "Build the canonical eight-direction waterwheel audit plan bound "
+            "to one verified exact-218 reciprocal scene."
+        ),
+    )
+    build_local_orbit_plan.add_argument(
+        "--reciprocal-build",
+        type=Path,
+        required=True,
+    )
+    build_local_orbit_plan.add_argument(
+        "--anchor-m",
+        type=float,
+        nargs=3,
+        required=True,
+        metavar=("X", "Y", "Z"),
+    )
+    build_local_orbit_plan.add_argument(
+        "--output-plan",
+        type=Path,
+        required=True,
+    )
+    audit_local_orbit = commands.add_parser(
+        "audit-local-orbit",
+        help=(
+            "Run fresh preflight, six-layer render, visibility and post-render "
+            "v2 gates for all eight bound local-orbit views."
+        ),
+    )
+    audit_local_orbit.add_argument(
+        "--reciprocal-build",
+        type=Path,
+        required=True,
+    )
+    audit_local_orbit.add_argument(
+        "--local-orbit-plan",
+        type=Path,
+        required=True,
+    )
+    audit_local_orbit.add_argument("--blender", type=Path, required=True)
+    audit_local_orbit.add_argument(
+        "--min-valid-pixel-ratio",
+        type=float,
+        required=True,
+    )
+    audit_local_orbit.add_argument(
+        "--post-render-policy",
+        type=Path,
+        required=True,
+    )
+    audit_local_orbit.add_argument(
+        "--clearance-near-distance-m",
+        type=float,
+        required=True,
+    )
+    audit_local_orbit.add_argument(
+        "--min-upper-middle-near-hits",
+        type=int,
+        required=True,
+    )
+    audit_local_orbit.add_argument("--output-root", type=Path, required=True)
+    audit_local_orbit.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=30 * 60,
+    )
     build_environment_modules = commands.add_parser(
         "build-environment-modules",
         help=(
@@ -1270,6 +1375,115 @@ def main(argv: list[str] | None = None) -> int:
                     "synthetic": True,
                     "verification_level": "L0",
                     "trust_effect": "none-quality-filter-only",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command in {"build-local-orbit-plan", "audit-local-orbit"}:
+        from pipeline.synthetic_village.reciprocal_route_module_runtime import (
+            RECIPROCAL_ROUTE_REPORT_NAME,
+            RECIPROCAL_ROUTE_REQUEST_NAME,
+        )
+
+        runtime_request = _load_reciprocal_route_runtime_request()(
+            args.reciprocal_build / RECIPROCAL_ROUTE_REQUEST_NAME,
+        )
+        verified_build = _verify_reciprocal_production_build()(
+            report_path=args.reciprocal_build / RECIPROCAL_ROUTE_REPORT_NAME,
+            runtime_request=runtime_request,
+        )
+        build_plan, _, _, _ = _import_production_profile()
+        source_plan = build_plan()
+        if args.command == "build-local-orbit-plan":
+            plan = _build_waterwheel_local_orbit_plan()(
+                source_plan=source_plan,
+                environment_module_plan_sha256=(
+                    runtime_request.base_environment_module_plan_sha256
+                ),
+                exact_build_id=verified_build.build_id,
+                exact_blend_sha256=verified_build.blend_sha256,
+                anchor_m=tuple(args.anchor_m),
+            )
+            plan_bytes = _canonical_local_orbit_plan_bytes()(plan)
+            output_plan = args.output_plan.absolute()
+            output_plan.parent.resolve(strict=True)
+            with output_plan.open("xb") as stream:
+                stream.write(plan_bytes)
+            print(
+                json.dumps(
+                    {
+                        "exact_build_id": plan.exact_build_id,
+                        "exact_blend_sha256": plan.exact_blend_sha256,
+                        "local_orbit_plan_sha256": hashlib.sha256(
+                            plan_bytes,
+                        ).hexdigest(),
+                        "output_plan": str(output_plan),
+                        "synthetic": True,
+                        "verification_level": "L0",
+                        "geometry_usability": "preview-only",
+                        "training_use": "forbidden-as-multiview",
+                        "trust_effect": "none-quality-filter-only",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            return 0
+        from pipeline.synthetic_village.production_preflight import (
+            ProductionClearancePolicy,
+        )
+        from pipeline.synthetic_village.production_render import (
+            LocalProductionQualityPolicy,
+        )
+
+        result = _run_local_orbit_audit()(
+            verified_build=verified_build,
+            source_plan=source_plan,
+            local_orbit_plan=_load_local_orbit_plan()(
+                args.local_orbit_plan,
+            ),
+            verified_environment_module_plan_sha256=(
+                runtime_request.base_environment_module_plan_sha256
+            ),
+            blender_executable=args.blender,
+            output_root=args.output_root,
+            clearance_policy=ProductionClearancePolicy(
+                near_distance_m=args.clearance_near_distance_m,
+                minimum_upper_middle_near_hit_count=(
+                    args.min_upper_middle_near_hits
+                ),
+            ),
+            quality_policy=LocalProductionQualityPolicy(
+                minimum_valid_pixel_ratio=args.min_valid_pixel_ratio,
+            ),
+            post_render_policy=_load_post_render_policy(
+                args.post_render_policy,
+            ),
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(
+            json.dumps(
+                {
+                    "accepted_frame_count": result.report.accepted_frame_count,
+                    "assembly_visible_frame_count": (
+                        result.report.assembly_visible_frame_count
+                    ),
+                    "audit_root": str(result.audit_root),
+                    "local_orbit_plan_sha256": (
+                        result.report.local_orbit_plan_sha256
+                    ),
+                    "report_path": str(result.report_path),
+                    "report_sha256": result.report.report_sha256,
+                    "synthetic": True,
+                    "verification_level": "L0",
+                    "geometry_usability": "preview-only",
+                    "training_use": "forbidden-as-multiview",
+                    "trust_effect": "none-quality-filter-only",
+                    "wheel_visible_frame_count": (
+                        result.report.wheel_visible_frame_count
+                    ),
                 },
                 ensure_ascii=False,
                 sort_keys=True,

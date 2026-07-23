@@ -9,9 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .production_profile import (
     FiniteVector3,
@@ -29,6 +31,11 @@ _MATERIALIZED_CAMERA_IDS = tuple(
     f"camera-audit-overview-{index:03d}" for index in range(1, 9)
 )
 _SUPPORT_AZIMUTHS = (22.5, 112.5, 202.5, 292.5)
+_MAX_LOCAL_ORBIT_PLAN_BYTES = 512 * 1024
+
+
+class LocalOrbitPlanError(RuntimeError):
+    """Raised when an orbit plan cannot be loaded as stable canonical bytes."""
 
 
 class FrozenModel(BaseModel):
@@ -109,6 +116,82 @@ def canonical_local_orbit_plan_bytes(plan: LocalOrbitAuditPlan) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise LocalOrbitPlanError(
+                f"local orbit plan contains duplicate JSON key: {key}",
+            )
+        result[key] = value
+    return result
+
+
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def _stat_signature(result: os.stat_result) -> tuple[int, int, int, int]:
+    return result.st_dev, result.st_ino, result.st_size, result.st_mtime_ns
+
+
+def load_local_orbit_plan(path: Path) -> LocalOrbitAuditPlan:
+    """Load only bounded, stable, canonical local-orbit plan bytes."""
+
+    path = Path(path).absolute()
+    try:
+        parent = path.parent
+        if (
+            _is_linklike(path)
+            or _is_linklike(parent)
+            or parent.resolve(strict=True) != parent
+        ):
+            raise LocalOrbitPlanError(
+                "local orbit plan path has a redirected leaf or parent",
+            )
+        before = path.stat()
+        if before.st_size <= 0 or before.st_size > _MAX_LOCAL_ORBIT_PLAN_BYTES:
+            raise LocalOrbitPlanError("local orbit plan size is invalid")
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if _stat_signature(before) != _stat_signature(opened):
+                raise LocalOrbitPlanError(
+                    "local orbit plan changed before bounded read",
+                )
+            raw = stream.read(_MAX_LOCAL_ORBIT_PLAN_BYTES + 1)
+            after_open = os.fstat(stream.fileno())
+        after = path.stat()
+        if (
+            len(raw) != before.st_size
+            or len(raw) > _MAX_LOCAL_ORBIT_PLAN_BYTES
+            or _stat_signature(opened) != _stat_signature(after_open)
+            or _stat_signature(before) != _stat_signature(after)
+        ):
+            raise LocalOrbitPlanError(
+                "local orbit plan changed during bounded read",
+            )
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        plan = LocalOrbitAuditPlan.model_validate_json(raw)
+        if raw != canonical_local_orbit_plan_bytes(plan):
+            raise LocalOrbitPlanError("local orbit plan must be canonical JSON")
+        return plan
+    except LocalOrbitPlanError:
+        raise
+    except (
+        OSError,
+        RuntimeError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+    ) as exc:
+        raise LocalOrbitPlanError(
+            f"local orbit plan cannot be trusted: {exc}",
+        ) from exc
 
 
 def local_orbit_plan_sha256(plan: LocalOrbitAuditPlan) -> str:

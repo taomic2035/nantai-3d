@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -15,8 +16,10 @@ from pipeline.synthetic_village.environment_module import (
 )
 from pipeline.synthetic_village.local_orbit_audit import (
     LocalOrbitAuditPlan,
+    LocalOrbitPlanError,
     build_waterwheel_local_orbit_plan,
     canonical_local_orbit_plan_bytes,
+    load_local_orbit_plan,
     local_orbit_plan_sha256,
     materialize_local_orbit_render_plan,
 )
@@ -161,3 +164,17 @@ def test_builder_binds_exact_source_plan_digest() -> None:
     assert plan.source_production_plan_sha256 == hashlib.sha256(
         canonical_production_plan_bytes(source),
     ).hexdigest()
+
+
+def test_loader_requires_exact_canonical_plan_bytes(tmp_path: Path) -> None:
+    plan = _plan()
+    path = tmp_path / "local-orbit-plan.json"
+    path.write_bytes(canonical_local_orbit_plan_bytes(plan))
+
+    assert load_local_orbit_plan(path) == plan
+    path.write_text(
+        json.dumps(plan.model_dump(mode="json")),
+        encoding="utf-8",
+    )
+    with pytest.raises(LocalOrbitPlanError, match="canonical"):
+        load_local_orbit_plan(path)

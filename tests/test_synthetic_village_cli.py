@@ -318,7 +318,12 @@ def test_build_environment_modules_prints_bounded_truth_summary(
     verify_calls = []
     run_calls = []
     verified_build = SimpleNamespace(directory=tmp_path / "verified-v2")
-    counts = EnvironmentModuleBuildCounts(module_mesh_objects=47)
+    counts = EnvironmentModuleBuildCounts(
+        module_mesh_objects=47,
+        textured_module_meshes=47,
+        valid_uv_module_meshes=47,
+        valid_surface_color_module_meshes=47,
+    )
     artifact = EnvironmentModuleArtifact(
         name="village-modules.blend",
         kind="blender-scene",
@@ -430,10 +435,13 @@ def test_build_environment_modules_prints_bounded_truth_summary(
         "artifact_size_bytes": 4096,
         "counts": {
             "base_canonical_roots": 130,
-            "module_canonical_roots": 45,
-            "canonical_roots": 175,
-            "module_mesh_objects": 47,
-        },
+                "module_canonical_roots": 45,
+                "canonical_roots": 175,
+                "module_mesh_objects": 47,
+                "textured_module_meshes": 47,
+                "valid_uv_module_meshes": 47,
+                "valid_surface_color_module_meshes": 47,
+            },
         "verification_level": "L0",
         "geometry_usability": "preview-only",
         "stage": "modeled-unverified",
@@ -489,7 +497,12 @@ def test_build_environment_modules_uses_runtime_default_build_root(
             environment_module_plan_sha256="b" * 64,
         ),
         report=SimpleNamespace(
-            counts=EnvironmentModuleBuildCounts(module_mesh_objects=47),
+                counts=EnvironmentModuleBuildCounts(
+                    module_mesh_objects=47,
+                    textured_module_meshes=47,
+                    valid_uv_module_meshes=47,
+                    valid_surface_color_module_meshes=47,
+                ),
             artifact=EnvironmentModuleArtifact(
                 name="village-modules.blend",
                 kind="blender-scene",
@@ -660,3 +673,186 @@ def test_render_reciprocal_production_runs_resumable_six_role_batch(
         "trust_effect": "none-quality-filter-only",
         "verification_level": "L0",
     }
+
+
+def test_build_local_orbit_plan_binds_verified_exact_build(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    build_root = tmp_path / "reciprocal-build"
+    output_plan = tmp_path / "local-orbit-plan.json"
+    runtime_request = SimpleNamespace(
+        base_environment_module_plan_sha256="e" * 64,
+    )
+    verified_build = SimpleNamespace(
+        build_id="b" * 64,
+        blend_sha256="c" * 64,
+    )
+    source_plan = object()
+    plan = SimpleNamespace(
+        exact_build_id="b" * 64,
+        exact_blend_sha256="c" * 64,
+    )
+    calls = []
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_load_reciprocal_route_runtime_request",
+        lambda: lambda path: runtime_request,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_verify_reciprocal_production_build",
+        lambda: lambda **kwargs: verified_build,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_import_production_profile",
+        lambda: (lambda: source_plan, None, None, None),
+    )
+
+    def build_plan(**kwargs):
+        calls.append(kwargs)
+        return plan
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_build_waterwheel_local_orbit_plan",
+        lambda: build_plan,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_canonical_local_orbit_plan_bytes",
+        lambda: lambda value: b'{"canonical":"plan"}\n' if value is plan else b"",
+    )
+
+    assert synthetic_village_cli.main(
+        [
+            "build-local-orbit-plan",
+            "--reciprocal-build",
+            str(build_root),
+            "--anchor-m",
+            "-185.2",
+            "-115.0",
+            "43.15",
+            "--output-plan",
+            str(output_plan),
+        ],
+    ) == 0
+
+    assert output_plan.read_bytes() == b'{"canonical":"plan"}\n'
+    assert calls == [
+        {
+            "source_plan": source_plan,
+            "environment_module_plan_sha256": "e" * 64,
+            "exact_build_id": "b" * 64,
+            "exact_blend_sha256": "c" * 64,
+            "anchor_m": (-185.2, -115.0, 43.15),
+        },
+    ]
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["output_plan"] == str(output_plan.absolute())
+    assert summary["training_use"] == "forbidden-as-multiview"
+    assert summary["trust_effect"] == "none-quality-filter-only"
+
+
+def test_audit_local_orbit_uses_verified_runtime_bindings(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    runtime_request = SimpleNamespace(
+        base_environment_module_plan_sha256="e" * 64,
+    )
+    verified_build = object()
+    source_plan = object()
+    local_plan = object()
+    post_render_policy = object()
+    audit_root = tmp_path / "audit" / ("a" * 64)
+    result = SimpleNamespace(
+        report=SimpleNamespace(
+            accepted_frame_count=8,
+            assembly_visible_frame_count=8,
+            local_orbit_plan_sha256="d" * 64,
+            report_sha256="a" * 64,
+            wheel_visible_frame_count=6,
+        ),
+        audit_root=audit_root,
+        report_path=audit_root / "local-orbit-audit-report.json",
+    )
+    calls = []
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_load_reciprocal_route_runtime_request",
+        lambda: lambda path: runtime_request,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_verify_reciprocal_production_build",
+        lambda: lambda **kwargs: verified_build,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_import_production_profile",
+        lambda: (lambda: source_plan, None, None, None),
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_load_local_orbit_plan",
+        lambda: lambda path: local_plan,
+    )
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_load_post_render_policy",
+        lambda path: post_render_policy,
+    )
+
+    def run_audit(**kwargs):
+        calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_local_orbit_audit",
+        lambda: run_audit,
+    )
+    output_root = tmp_path / "orbit-output"
+    assert synthetic_village_cli.main(
+        [
+            "audit-local-orbit",
+            "--reciprocal-build",
+            str(tmp_path / "reciprocal-build"),
+            "--local-orbit-plan",
+            str(tmp_path / "local-orbit-plan.json"),
+            "--blender",
+            str(tmp_path / "blender.exe"),
+            "--min-valid-pixel-ratio",
+            "0.05",
+            "--post-render-policy",
+            str(tmp_path / "policy.json"),
+            "--clearance-near-distance-m",
+            "2.0",
+            "--min-upper-middle-near-hits",
+            "5",
+            "--output-root",
+            str(output_root),
+            "--timeout-seconds",
+            "900",
+        ],
+    ) == 0
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["verified_build"] is verified_build
+    assert call["source_plan"] is source_plan
+    assert call["local_orbit_plan"] is local_plan
+    assert call["verified_environment_module_plan_sha256"] == "e" * 64
+    assert call["blender_executable"] == tmp_path / "blender.exe"
+    assert call["output_root"] == output_root
+    assert call["post_render_policy"] is post_render_policy
+    assert call["timeout_seconds"] == 900
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["accepted_frame_count"] == 8
+    assert summary["assembly_visible_frame_count"] == 8
+    assert summary["wheel_visible_frame_count"] == 6
+    assert summary["training_use"] == "forbidden-as-multiview"
