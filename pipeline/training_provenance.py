@@ -550,6 +550,9 @@ def build_training_result(
     input_bytes_by_path: dict[str, bytes],
     gpu_environment: GpuEnvironment,
     exit_code: int,
+    actual_ply_path: str = "export/point_cloud.ply",
+    actual_config_path: str = "config.yml",
+    actual_log_path: str = "train.log",
     error_message: str | None = None,
     gaussian_count: int | None = None,
     sh_degree: int | None = None,
@@ -567,6 +570,11 @@ def build_training_result(
 
     An ``error_message`` is required for non-completed states; if omitted a
     default is derived from the exit code.
+
+    ``actual_*_path`` arguments record the source paths of the bound artefacts
+    so downstream consumers (e.g. ``prepare_import``) can re-read the same
+    bytes for closure verification.  They default to relative names but the
+    emitter should pass the real on-disk paths.
     """
     if actual_ply_bytes and exit_code == 0:
         state: Literal["completed", "failed", "interrupted"] = "completed"
@@ -588,7 +596,7 @@ def build_training_result(
             TrainingOutputBinding(
                 artifact_kind="trained_ply",
                 artifact_sha256=ply_sha,
-                artifact_path="export/point_cloud.ply",
+                artifact_path=actual_ply_path,
                 artifact_size_bytes=len(actual_ply_bytes),
                 gaussian_count=gaussian_count,
                 sh_degree=sh_degree,
@@ -598,7 +606,7 @@ def build_training_result(
         TrainingOutputBinding(
             artifact_kind="training_config_yml",
             artifact_sha256=config_sha,
-            artifact_path="config.yml",
+            artifact_path=actual_config_path,
             artifact_size_bytes=len(actual_config_bytes),
         )
     )
@@ -606,7 +614,7 @@ def build_training_result(
         TrainingOutputBinding(
             artifact_kind="training_log",
             artifact_sha256=log_sha,
-            artifact_path="train.log",
+            artifact_path=actual_log_path,
             artifact_size_bytes=len(actual_log_bytes),
         )
     )

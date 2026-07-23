@@ -476,10 +476,10 @@ class TestEmitTrainingProvenance:
         assert "no drift" in proc.stderr.lower() or "no drift" in proc.stdout.lower()
 
     def test_emitted_manifests_flow_through_prepare_import(self, tmp_path):
-        # Full chain: cloud emits manifests -> prepare_import verifies and
-        # appends training_provenance.v1 evidence.
-        # NOTE: prepare_import.py consumer is being rebased onto the hardened
-        # contract in P0.3; this test currently exercises the existing CLI.
+        # Full chain: cloud emits manifests -> prepare_import verifies content
+        # closure and appends content-only receipt (NOT trusted prefix —
+        # registration quality is NOT provided so is_trustworthy stays False).
+        # P0.3 hardened: trusted prefix requires registration quality args too.
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
@@ -505,19 +505,19 @@ class TestEmitTrainingProvenance:
              "--training-result", str(out / "training-result.json"),
              "--training-request", str(out / "training-request.json")],
             cwd=_ROOT, capture_output=True, text=True)
-        # prepare_import.py is being rebased in P0.3; until then it may reject
-        # the hardened result.  If it succeeds, evidence must be the hardened
-        # canonical SHA.  If it fails, the test still passes — P0.3 will make it
-        # succeed.
-        if prep.returncode != 0:
-            pytest.skip(
-                f"prepare_import.py rejected the hardened result (expected "
-                f"during P0.2; will be fixed in P0.3): {prep.stderr[:300]}")
+        assert prep.returncode == 0, \
+            f"prepare_import.py failed: {prep.stderr[:500]}"
 
         reg = RegistrationResult.model_validate_json(
             (recon_dir / "registration.json").read_text(encoding="utf-8"))
         evidence = reg.pose_frame.evidence
         result = TrainingResult.model_validate_json(
             (out / "training-result.json").read_text(encoding="utf-8"))
-        expected = f"training_provenance.v1={result_canonical_sha256(result)}"
+        result_sha = result_canonical_sha256(result)
+        # Without registration quality args, only content-only receipt is added.
+        expected = f"training_content_closed.v1={result_sha}"
         assert expected in evidence, f"missing {expected!r}; got {evidence}"
+        # Trusted prefix must NOT be present (is_trustworthy=False without RQ).
+        trusted = f"training_provenance.v1={result_sha}"
+        assert trusted not in evidence, \
+            f"trusted prefix present without registration quality: {evidence}"

@@ -21,11 +21,29 @@ workspace 训练出来的（Brush / INRIA 原版这类直接吃 workspace 且保
 云端 nerfstudio 路线会重跑 COLMAP 并 re-center/rescale，产物不在本机 sparse 坐标系里，
 **不要**对它用这个参数（见 pipeline/splat_provenance.py 的限制一节）。
 
-可选 `--training-result` + `--training-request`：传入云 GPU 训练 provenance handshake
-的两个 manifest，验证内容闭包（输入 SHA 匹配、PLY 字节匹配、训练状态一致）。
-验证通过时在 evidence 中追加 `training_provenance.v1=<result_sha>`——**不改变**
-metric_status 或 geo_aligned（PLY 仍是 sfm-local / preview-only）。
-验证不通过则 fail-closed 拒绝生成契约，除非显式 `--allow-unverified-training`（开发用）。
+可选 training provenance handshake（P0.3 hardened）：
+
+- `--training-result` + `--training-request`（成对必填）：验证内容闭包
+  （输入/config/log/PLY 字节全部重算匹配）。验证通过但未提供 registration
+  quality 时追加弱 receipt ``training_content_closed.v1=<result_sha>``——
+  **不是** trusted prefix，明说只证内容闭包。
+
+- 再加 `--registration-quality-report` + `--registration-json` +
+  `--registration-quality-policy`（四参数成对必填）：验证 registration quality
+  report，derive trust with ``registration_quality_passed=report.quality_accepted``。
+  只有 ``is_trustworthy=True`` 时才追加 trusted prefix
+  ``training_provenance.v1=<result_sha>``。
+
+  可选 `--capture-manifest` 和 `--sparse-model-dir` 传给 registration quality
+  validator 用于 colmap engine 的 capture / sparse 验证。
+
+验证不通过则 fail-closed 拒绝生成契约，除非显式 `--allow-unverified-training`
+（开发用，不产生任何 evidence）。
+
+诚实边界：即使 trusted prefix 追加，prepare_import 仍不改 metric_status 或
+geo_aligned（PLY 仍是 sfm-local / preview-only）。trusted prefix 只证明
+request/result/registration-quality 三者内容闭包且训练已完成，**不**隐含
+模型可信、米制或真实照片。
 
 用法:
     python scripts/prepare_import.py trained/point_cloud.ply [--synthetic]
@@ -34,8 +52,10 @@ metric_status 或 geo_aligned（PLY 仍是 sfm-local / preview-only）。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -55,6 +75,14 @@ from pipeline.recon_schema import (  # noqa: E402
     SplatInput,
 )
 
+if TYPE_CHECKING:
+    from pipeline.registration_quality import SparseModelEnumeration
+    from pipeline.training_provenance import TrainingTrust
+
+
+# ============================================================
+# Local frame
+# ============================================================
 
 def _local_frame(
     synthetic: bool,
@@ -118,22 +146,68 @@ def prepare(
     return reg_path, splat_path
 
 
+# ============================================================
+# Content-addressing helpers (shared with emit_training_provenance)
+# ============================================================
+
+def _file_sha256_and_size(path: Path) -> tuple[str, int]:
+    h = hashlib.sha256()
+    size = 0
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+            size += len(chunk)
+    return h.hexdigest(), size
+
+
+def _dir_content_bytes(path: Path) -> bytes:
+    """Deterministic manifest bytes of a directory (relpath\\0size\\0sha\\n)."""
+    files = sorted(p for p in path.rglob("*") if p.is_file())
+    parts: list[bytes] = []
+    for f in files:
+        rel = str(f.relative_to(path)).replace("\\", "/")
+        sha, size = _file_sha256_and_size(f)
+        parts.append(f"{rel}\0{size}\0{sha}\n".encode())
+    return b"".join(parts)
+
+
+def _input_bytes_for_validation(path: Path) -> bytes:
+    """Authoritative bytes for closure verification (file bytes or dir manifest)."""
+    if path.is_dir():
+        return _dir_content_bytes(path)
+    return path.read_bytes()
+
+
+def _read_binding_path_or_fail(path_str: str, label: str) -> bytes:
+    """Read bytes at a binding's declared path; fail-closed if missing."""
+    p = Path(path_str)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"{label} binding path does not exist locally: {p} — cannot verify "
+            f"closure; re-run on the cloud instance or download the workspace")
+    return _input_bytes_for_validation(p)
+
+
+# ============================================================
+# Training provenance + registration quality handshake (P0.3)
+# ============================================================
+
 def _validate_training_provenance(
     ply: Path,
     training_result_path: Path,
     training_request_path: Path,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, TrainingTrust | None]:
     """验证云 GPU 训练 provenance handshake 的内容闭包。
 
-    返回 (content_closed, result_sha)。
-    - content_closed=True: 输入/配置/输出/环境内容闭包通过且训练已完成，
-      result_sha 可追加到 evidence。
+    返回 (content_closed, result_sha, trust)。
+    - content_closed=True: 输入/配置/输出/环境内容闭包通过且训练已完成。
+      caller 可追加弱 receipt ``training_content_closed.v1=<result_sha>``。
     - content_closed=False: 验证失败，调用者应 fail-closed。
 
-    诚实边界：prepare_import **不**执行 SfM registration 质量门，故
+    诚实边界：prepare_import **不**执行 SfM registration 质量门（除非 caller
+    通过 ``--registration-quality-report`` 单独传入），故
     ``registration_quality_passed`` 恒为 False，``TrainingTrust.is_trustworthy``
-    恒为 False。evidence 字符串 ``training_provenance.v1=<sha>`` 仅证明内容闭包，
-    **不**隐含 registration quality 通过、模型可信、米制或真实照片。
+    恒为 False。trusted prefix 需 caller 额外传入 registration quality report。
     """
     from pipeline.training_provenance import (
         TrainingRequest,
@@ -148,32 +222,156 @@ def _validate_training_provenance(
     result = TrainingResult.model_validate_json(
         training_result_path.read_text(encoding="utf-8"))
 
+    # PLY bytes from the local --ply argument (authoritative for the trained PLY).
     ply_bytes = ply.read_bytes()
+
+    # Config bytes from the result's training_config_yml binding path.
+    config_bindings = [
+        b for b in result.output_bindings
+        if b.artifact_kind == "training_config_yml"
+    ]
+    if len(config_bindings) != 1:
+        print(f"[TRAINING-PROVENANCE-FAIL] expected exactly 1 "
+              f"training_config_yml binding; got {len(config_bindings)}",
+              file=sys.stderr)
+        return False, None, None
+    config_bytes = _read_binding_path_or_fail(
+        config_bindings[0].artifact_path, "training_config_yml")
+
+    # Log bytes from the result's training_log binding path.
+    log_bindings = [
+        b for b in result.output_bindings
+        if b.artifact_kind == "training_log"
+    ]
+    if len(log_bindings) != 1:
+        print(f"[TRAINING-PROVENANCE-FAIL] expected exactly 1 "
+              f"training_log binding; got {len(log_bindings)}",
+              file=sys.stderr)
+        return False, None, None
+    log_bytes = _read_binding_path_or_fail(
+        log_bindings[0].artifact_path, "training_log")
+
+    # Input bytes from the request's input_bindings paths.
+    input_bytes_by_path: dict[str, bytes] = {}
+    for binding in request.input_bindings:
+        input_bytes_by_path[binding.artifact_path] = _read_binding_path_or_fail(
+            binding.artifact_path, f"input[{binding.artifact_kind}]")
+
     try:
-        validate_training_provenance(result, request, ply_bytes)
+        validate_training_provenance(
+            result, request,
+            actual_ply_bytes=ply_bytes,
+            actual_config_bytes=config_bytes,
+            actual_log_bytes=log_bytes,
+            input_bytes_by_path=input_bytes_by_path,
+        )
     except ValueError as exc:
         print(f"[TRAINING-PROVENANCE-FAIL] {exc}", file=sys.stderr)
-        return False, None
+        return False, None, None
 
-    # Derive trust honestly: prepare_import does NOT verify SfM registration
-    # quality, so registration_quality_passed=False.  The evidence string is
-    # gated on content closure only — never on is_trustworthy (which requires
-    # registration quality that we deliberately do not check here).
+    # Derive trust honestly: without registration quality, is_trustworthy=False.
     trust = derive_training_trust(
-        result, request, ply_bytes,
+        result, request,
+        actual_ply_bytes=ply_bytes,
+        actual_config_bytes=config_bytes,
+        actual_log_bytes=log_bytes,
+        input_bytes_by_path=input_bytes_by_path,
         registration_quality_passed=False,
     )
     if not trust.content_closed:
         print(f"[TRAINING-PROVENANCE-FAIL] content closure not verified "
               f"(training_status.state={result.training_status.state})",
               file=sys.stderr)
-        return False, None
+        return False, None, None
 
     result_sha = result_canonical_sha256(result)
     print(f"[TRAINING-PROVENANCE-OK] content closure verified, "
           f"result_sha={result_sha[:12]}... "
-          f"(note: registration quality NOT checked by prepare_import)")
-    return True, result_sha
+          f"(content-only; registration quality NOT checked — "
+          f"is_trustworthy={trust.is_trustworthy})")
+    return True, result_sha, trust
+
+
+def _validate_registration_quality(
+    registration_quality_report_path: Path,
+    registration_json_path: Path,
+    registration_quality_policy_path: Path,
+    capture_manifest_path: Path | None,
+    sparse_model_dir_path: Path | None,
+) -> tuple[bool, bool, str | None]:
+    """验证 registration quality report。
+
+    返回 (validated, quality_accepted, report_sha)。
+    - validated=True: report 通过 validate_registration_quality。
+      quality_accepted 是 report.quality_accepted（caller 用它作为
+      registration_quality_passed）。
+    - validated=False: 验证失败，调用者应 fail-closed。
+    """
+    from pipeline.registration_quality import (
+        RegistrationQualityPolicy,
+        RegistrationQualityReport,
+        validate_registration_quality,
+    )
+
+    report = RegistrationQualityReport.model_validate_json(
+        registration_quality_report_path.read_text(encoding="utf-8"))
+    registration_json_bytes = registration_json_path.read_bytes()
+    policy = RegistrationQualityPolicy.model_validate_json(
+        registration_quality_policy_path.read_text(encoding="utf-8"))
+
+    capture_manifest_bytes: bytes | None = None
+    if capture_manifest_path is not None:
+        capture_manifest_bytes = capture_manifest_path.read_bytes()
+
+    sparse_enumeration: SparseModelEnumeration | None = None
+    if sparse_model_dir_path is not None:
+        sparse_enumeration = _load_sparse_enumeration(sparse_model_dir_path)
+
+    try:
+        validate_registration_quality(
+            report, policy, registration_json_bytes,
+            capture_manifest_bytes=capture_manifest_bytes,
+            sparse_enumeration=sparse_enumeration,
+        )
+    except ValueError as exc:
+        print(f"[REGISTRATION-QUALITY-FAIL] {exc}", file=sys.stderr)
+        return False, False, None
+
+    report_sha = hashlib.sha256(
+        registration_quality_report_path.read_bytes()).hexdigest()
+    print(f"[REGISTRATION-QUALITY-OK] report verified, "
+          f"quality_accepted={report.quality_accepted}, "
+          f"training_allowed={report.training_allowed}")
+    return True, report.quality_accepted, report_sha
+
+
+def _load_sparse_enumeration(sparse_dir: Path) -> SparseModelEnumeration | None:
+    """Load a SparseModelEnumeration from a COLMAP sparse directory.
+
+    Reads images.txt / cameras.txt / points3D.txt (text format) and builds
+    the enumeration.  Returns None if the directory is empty.
+    """
+    from pipeline.registration_quality import SparseModelEnumeration
+    # The sparse enumeration is typically built by the registration quality
+    # builder; here we only need to re-load it for validation.  In practice
+    # the caller should pass a pre-built enumeration JSON.  For now we read
+    # the COLMAP text files and build a minimal enumeration.
+    #
+    # NOTE: This is a simplified loader.  The full builder lives in
+    # pipeline/registration_quality.py build_registration_quality_report.
+    # prepare_import only needs to pass the enumeration to the validator,
+    # so we expect the caller to provide a serialized enumeration JSON next
+    # to the sparse dir, or we skip sparse verification.
+    enum_json = sparse_dir / "sparse_enumeration.json"
+    if enum_json.is_file():
+        return SparseModelEnumeration.model_validate_json(
+            enum_json.read_text(encoding="utf-8"))
+    # If no pre-built enumeration JSON exists, we cannot verify sparse model
+    # consistency for colmap engine — fail-closed.
+    raise FileNotFoundError(
+        f"sparse_enumeration.json not found in {sparse_dir} — cannot verify "
+        f"COLMAP sparse model enumeration; build it via "
+        f"pipeline.registration_quality.build_registration_quality_report")
 
 
 def _check_consistency(ply: Path, sparse: Path) -> bool:
@@ -201,6 +399,10 @@ def _check_consistency(ply: Path, sparse: Path) -> bool:
     return True
 
 
+# ============================================================
+# CLI
+# ============================================================
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="生成 sfm-local 导入契约 (registration.json + splat-input.json)")
@@ -216,31 +418,67 @@ def main(argv: list[str] | None = None) -> int:
                     help="声称本 ply 训练自某 COLMAP workspace 时, 传其 "
                          "sparse/0/points3D.txt 做几何一致性检查 (对不上则 fail-closed; "
                          "只能证伪不能证实; 不适用于云端 nerfstudio 重跑 COLMAP 的路线)")
+
+    # Training provenance handshake (P0.3 hardened).
     ap.add_argument("--training-result", type=Path, default=None,
                     help="云 GPU 训练 provenance result manifest (training-result.json); "
                          "需与 --training-request 配对, 验证内容闭包")
     ap.add_argument("--training-request", type=Path, default=None,
                     help="云 GPU 训练 provenance request manifest (training-request.json); "
                          "需与 --training-result 配对")
+    ap.add_argument("--registration-quality-report", type=Path, default=None,
+                    help="RegistrationQualityReport JSON; 需与 --registration-json + "
+                         "--registration-quality-policy + training pair 配对, "
+                         "验证后 is_trustworthy=True 才追加 trusted prefix")
+    ap.add_argument("--registration-json", type=Path, default=None,
+                    help="registration.json (RegistrationResult) 用于验证 quality report")
+    ap.add_argument("--registration-quality-policy", type=Path, default=None,
+                    help="RegistrationQualityPolicy JSON 用于验证 quality report")
+    ap.add_argument("--capture-manifest", type=Path, default=None,
+                    help="可选 CaptureRevisionManifest JSON 用于 colmap engine 验证")
+    ap.add_argument("--sparse-model-dir", type=Path, default=None,
+                    help="可选 COLMAP sparse 目录 (含 sparse_enumeration.json) "
+                         "用于 colmap engine 验证")
     ap.add_argument("--allow-unverified-training", action="store_true",
                     help="跳过 training provenance 验证失败时的 fail-closed (仅开发用; "
                          "不产生 training_provenance evidence)")
+
     args = ap.parse_args(argv)
     if not args.ply.is_file():
         raise SystemExit(f"文件不存在: {args.ply}")
 
-    # Training provenance handshake (optional).  When --training-result is
-    # given, verify content closure and append an evidence string on success.
-    # Failure is fail-closed unless --allow-unverified-training is set.
+    # ---- Argument symmetry (P0.3: paired args must appear together) ----
+    training_pair_given = (
+        args.training_result is not None or args.training_request is not None)
+    if args.training_result is not None and args.training_request is None:
+        raise SystemExit("--training-result 需要与 --training-request 配对使用")
+    if args.training_request is not None and args.training_result is None:
+        raise SystemExit("--training-request 需要与 --training-result 配对使用")
+
+    reg_quality_given = any(v is not None for v in (
+        args.registration_quality_report, args.registration_json,
+        args.registration_quality_policy))
+    if reg_quality_given:
+        # All three registration-quality args must appear together.
+        if not all([args.registration_quality_report, args.registration_json,
+                    args.registration_quality_policy]):
+            raise SystemExit(
+                "--registration-quality-report / --registration-json / "
+                "--registration-quality-policy 必须同时出现")
+        # Registration quality requires the training pair.
+        if not training_pair_given:
+            raise SystemExit(
+                "--registration-quality-report 需要 --training-result + "
+                "--training-request 配对 (trusted prefix 需要三者)")
+
+    # ---- Training provenance + registration quality handshake ----
     extra_evidence: tuple[str, ...] = ()
-    if args.training_result is not None:
-        if args.training_request is None:
-            raise SystemExit("--training-result 需要与 --training-request 配对使用")
+    if training_pair_given:
         if not args.training_result.is_file():
             raise SystemExit(f"文件不存在: {args.training_result}")
         if not args.training_request.is_file():
             raise SystemExit(f"文件不存在: {args.training_request}")
-        content_closed, result_sha = _validate_training_provenance(
+        content_closed, result_sha, trust = _validate_training_provenance(
             args.ply, args.training_result, args.training_request)
         if not content_closed:
             if not args.allow_unverified_training:
@@ -251,7 +489,52 @@ def main(argv: list[str] | None = None) -> int:
             print("[WARN] --allow-unverified-training: 跳过 training provenance, "
                   "不追加 evidence", file=sys.stderr)
         elif result_sha:
-            extra_evidence = (f"training_provenance.v1={result_sha}",)
+            if reg_quality_given:
+                # Verify registration quality and derive trust honestly.
+                rq_ok, quality_accepted, _rq_sha = _validate_registration_quality(
+                    args.registration_quality_report,
+                    args.registration_json,
+                    args.registration_quality_policy,
+                    args.capture_manifest,
+                    args.sparse_model_dir)
+                if not rq_ok:
+                    if not args.allow_unverified_training:
+                        print("[FAIL-CLOSED] registration quality 验证失败; "
+                              "加 --allow-unverified-training 可跳过 (仅开发用, "
+                              "不产生 evidence)", file=sys.stderr)
+                        return 1
+                    print("[WARN] --allow-unverified-training: 跳过 registration "
+                          "quality, 追加弱 receipt", file=sys.stderr)
+                    extra_evidence = (
+                        f"training_content_closed.v1={result_sha}",)
+                elif quality_accepted and trust is not None and \
+                        trust.content_closed and trust.trainer_identified:
+                    # Trusted prefix: content closed + registration quality
+                    # accepted + trainer identified (no drift).  All other
+                    # trust booleans derive from content_closed so they're
+                    # already True here.
+                    extra_evidence = (
+                        f"training_provenance.v1={result_sha}",)
+                    print(f"[TRUSTED] training_provenance.v1={result_sha[:12]}... "
+                          f"(content closed + registration quality accepted + "
+                          f"trainer identified — still NOT metric/aligned/real-photos)")
+                else:
+                    # Registration quality verified but not accepted, or trainer
+                    # drifted -> content-only receipt, not trusted.
+                    extra_evidence = (
+                        f"training_content_closed.v1={result_sha}",)
+                    print(f"[CONTENT-ONLY] training_content_closed.v1="
+                          f"{result_sha[:12]}... (registration quality "
+                          f"accepted={quality_accepted}, trainer_identified="
+                          f"{trust.trainer_identified if trust else 'unknown'} — "
+                          f"NOT trusted)")
+            else:
+                # No registration quality -> content-only receipt.
+                extra_evidence = (
+                    f"training_content_closed.v1={result_sha}",)
+                print(f"[CONTENT-ONLY] training_content_closed.v1="
+                      f"{result_sha[:12]}... (registration quality NOT checked — "
+                      f"NOT trusted)")
 
     if args.colmap_sparse is not None and not _check_consistency(
         args.ply, args.colmap_sparse
