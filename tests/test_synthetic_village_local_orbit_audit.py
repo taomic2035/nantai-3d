@@ -77,6 +77,7 @@ def test_builds_exact_eight_direction_content_addressed_orbit() -> None:
         )
         assert row.position_m[2] >= terrain_z + 1.8 - 1e-3
     assert plan.cameras[2].position_m[2] == pytest.approx(47.598)
+    assert plan.cameras[6].position_m[2] == pytest.approx(36.519)
     assert canonical_local_orbit_plan_bytes(plan).endswith(b"\n")
     assert local_orbit_plan_sha256(plan) == hashlib.sha256(
         canonical_local_orbit_plan_bytes(plan),

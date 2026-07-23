@@ -127,9 +127,9 @@ def _orbit_position(
     angle = math.radians(azimuth_deg)
     x_m = anchor[0] + radius_m * math.cos(angle)
     y_m = anchor[1] + radius_m * math.sin(angle)
-    z_m = max(
-        anchor[2] + 1.6,
-        terrain_height_m(x_m, y_m, scene.extent) + _MIN_TERRAIN_CLEARANCE_M,
+    z_m = (
+        terrain_height_m(x_m, y_m, scene.extent)
+        + _MIN_TERRAIN_CLEARANCE_M
     )
     return _q3((x_m, y_m, z_m))
 
