@@ -339,8 +339,8 @@ class TestThreeTierEvidence:
         assert trusted not in evidence, \
             f"trusted prefix without registration quality: {evidence}"
 
-    def test_trusted_prefix_with_accepted_registration_quality(self, tmp_path):
-        """Training pair + accepted registration quality + no drift → trusted."""
+    def test_mock_registration_never_yields_trusted_prefix(self, tmp_path):
+        """Accepted mock coverage is not permission to trust a training run."""
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = _emit_manifests(tmp_path, images, ply, config, log)
         reg_json, policy_json, report_json = _write_registration_quality_artifacts(
@@ -360,11 +360,12 @@ class TestThreeTierEvidence:
             (out / "training-result.json").read_text(encoding="utf-8"))
         result_sha = result_canonical_sha256(result)
 
-        expected = f"training_provenance.v1={result_sha}"
-        assert expected in evidence, f"missing {expected!r}; got {evidence}"
         content_only = f"training_content_closed.v1={result_sha}"
-        assert content_only not in evidence, \
-            f"content-only present when trusted: {evidence}"
+        assert content_only in evidence, \
+            f"mock registration must stay content-only: {evidence}"
+        trusted = f"training_provenance.v1={result_sha}"
+        assert trusted not in evidence, \
+            f"mock registration must never yield trusted evidence: {evidence}"
 
     def test_content_only_when_registration_quality_rejected(self, tmp_path):
         """Registration quality NOT accepted → content-only receipt."""

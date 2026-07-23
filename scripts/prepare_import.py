@@ -298,10 +298,10 @@ def _validate_registration_quality(
     registration_quality_policy_path: Path,
     capture_manifest_path: Path | None,
     sparse_model_dir_path: Path | None,
-) -> tuple[bool, bool, str | None]:
+) -> tuple[bool, bool, bool, str | None]:
     """验证 registration quality report。
 
-    返回 (validated, quality_accepted, report_sha)。
+    返回 (validated, quality_accepted, training_allowed, report_sha)。
     - validated=True: report 通过 validate_registration_quality。
       quality_accepted 是 report.quality_accepted（caller 用它作为
       registration_quality_passed）。
@@ -335,14 +335,19 @@ def _validate_registration_quality(
         )
     except ValueError as exc:
         print(f"[REGISTRATION-QUALITY-FAIL] {exc}", file=sys.stderr)
-        return False, False, None
+        return False, False, False, None
 
     report_sha = hashlib.sha256(
         registration_quality_report_path.read_bytes()).hexdigest()
     print(f"[REGISTRATION-QUALITY-OK] report verified, "
           f"quality_accepted={report.quality_accepted}, "
           f"training_allowed={report.training_allowed}")
-    return True, report.quality_accepted, report_sha
+    return (
+        True,
+        report.quality_accepted,
+        report.training_allowed,
+        report_sha,
+    )
 
 
 def _load_sparse_enumeration(sparse_dir: Path) -> SparseModelEnumeration | None:
@@ -491,7 +496,12 @@ def main(argv: list[str] | None = None) -> int:
         elif result_sha:
             if reg_quality_given:
                 # Verify registration quality and derive trust honestly.
-                rq_ok, quality_accepted, _rq_sha = _validate_registration_quality(
+                (
+                    rq_ok,
+                    quality_accepted,
+                    training_allowed,
+                    _rq_sha,
+                ) = _validate_registration_quality(
                     args.registration_quality_report,
                     args.registration_json,
                     args.registration_quality_policy,
@@ -507,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
                           "quality, 追加弱 receipt", file=sys.stderr)
                     extra_evidence = (
                         f"training_content_closed.v1={result_sha}",)
-                elif quality_accepted and trust is not None and \
+                elif training_allowed and trust is not None and \
                         trust.content_closed and trust.trainer_identified:
                     # Trusted prefix: content closed + registration quality
                     # accepted + trainer identified (no drift).  All other
@@ -516,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
                     extra_evidence = (
                         f"training_provenance.v1={result_sha}",)
                     print(f"[TRUSTED] training_provenance.v1={result_sha[:12]}... "
-                          f"(content closed + registration quality accepted + "
+                          f"(content closed + registration training allowed + "
                           f"trainer identified — still NOT metric/aligned/real-photos)")
                 else:
                     # Registration quality verified but not accepted, or trainer
@@ -525,7 +535,9 @@ def main(argv: list[str] | None = None) -> int:
                         f"training_content_closed.v1={result_sha}",)
                     print(f"[CONTENT-ONLY] training_content_closed.v1="
                           f"{result_sha[:12]}... (registration quality "
-                          f"accepted={quality_accepted}, trainer_identified="
+                          f"accepted={quality_accepted}, "
+                          f"training_allowed={training_allowed}, "
+                          f"trainer_identified="
                           f"{trust.trainer_identified if trust else 'unknown'} — "
                           f"NOT trusted)")
             else:
