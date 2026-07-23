@@ -33,10 +33,14 @@ Batch22 已完成四个路径限定代码切片：
 4. `7bf57c7`：绑定 source plan / environment plan / exact build / blend SHA 的
    八方向 local-orbit 计划，且不修改 canonical 180 plan。
 
+Codex 已在 `2026-07-23` 追加完成：
+
+- Batch22 `12/12` imagegen 输入、原尺寸 QA、逐图 prompt/SHA 绑定和干净 Release；
+- Release 证据见 `FEEDBACK-IMAGE2-026-batch22-watermill-local360.md`。
+
 待 Codex 完成：
 
 - exact-build local-orbit runner 与 canonical machine report；
-- 12 张 image2 独立设计参考及干净 Release；
 - fresh 175 → exact-218 → Phase 4.3 → 六角色 → 八方向六层/post-render v2；
 - Batch22 最终 handoff 与 README。
 
