@@ -144,6 +144,27 @@ ns-export gaussian-splat \
 - 输出是标准 INRIA-3DGS PLY，本仓库直接认（`f_dc_*`/`f_rest_*`/`opacity`/`scale_*`/`rot_*`）。
 - ⚠️ nerfstudio 历史上 `ns-export` 有颜色/opacity 小 quirk，且四元数可能未归一化 → §6 的 Step 0 归一化**必做**。
 
+### 5a-2. Provenance manifests（训练前后自动产出）✅
+
+`cloud/train_3dgs_nerfstudio.sh` 在训练前后自动产出两个 content-addressed manifest，本机 `prepare_import.py` 会重算每个 SHA 并 fail-closed 拒绝任何字节漂移：
+
+- **`training-request.json`**（训练前）：绑定输入照片/视频 SHA + operator-intent `config.yml` SHA + 训练意图（trainer / max_res / total_steps / seed）。
+- **`training-result.json`**（训练后）：从实际 PLY / config / training.log 字节派生所有 SHA + GPU 环境（nvidia-smi）+ trainer 版本 + 退出码 + 真实训练 UTC 起止时间。
+
+**关键设计**（REVIEW-CODEX-023 修复后）：
+- request 和 result 绑定**同一份** operator-intent `config.yml` → `actual_config_sha256 == requested_config_sha256` → 零 drift。nerfstudio 内部生成的 `config.yml` 是诊断 artefact，不作为 provenance 合同 config。
+- `--max-num-iterations` 和 `--machine.seed` 通过真实 ns-train CLI 参数传入（不只写在 intent 文件里）。
+- `ns-process-data` 预处理失败时也会 emit failed result（不静默退出）。
+- 把这两个 manifest 和 PLY 一起下回本机 `trained/`，§6 Step 1 会消费它们。
+
+**三层 evidence**（`prepare_import` 根据证据强度选择追加哪层）：
+
+| Evidence | 条件 | 含义 |
+|---|---|---|
+| `training_provenance.v1=<result_sha>` | registration quality `training_allowed=True`（non-mock engine + capture manifest + 无拒绝原因）+ content closed + trainer identified | **trusted prefix**——仍不证明真实照片或米制 |
+| `training_content_closed.v1=<result_sha>` | content closed 但 registration quality 未通过或缺 capture manifest | **content-only receipt**——只证明输入/输出字节闭合 |
+| 无 evidence | 无 training-request/result 或验证失败 | 不追加任何 trust evidence |
+
 ### 5b. 本机 Brush（✅ 已实测在 Intel UHD 770 上跑通）
 
 **实测结果（2026-07-15，本机 Intel UHD 770，30 图合成场景）**：Brush 在集显上**成功训练并导出标准 3DGS `.ply`**，**未 OOM、未崩**：
@@ -172,6 +193,19 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
 # Step 1（一键生成导入契约 registration.json + splat-input.json，并打印导入命令）
 .venv\Scripts\python scripts\prepare_import.py trained\point_cloud.ply
 #   —— 生成的是诚实的 sfm-local（arbitrary/unaligned）契约；要 metric 见下方与 real-data-workflow.md
+#
+# 有云训练 provenance manifests 时，追加以下参数让 prepare_import 绑定 trust evidence：
+#   --training-request trained\training-request.json `
+#   --training-result   trained\training-result.json
+# 有 COLMAP registration quality report 时再追加（engine=colmap 才能获 trusted prefix）：
+#   --registration-quality-report rq\quality-report.json `
+#   --registration-json         rq\registration.json `
+#   --registration-quality-policy rq\policy.json `
+#   --capture-manifest           rq\capture_manifest.json `
+#   --sparse-model-dir           rq\sparse\
+# 三层 evidence：trusted prefix 需 non-mock engine + training_allowed=True；
+#   只 content closed 得 content-only receipt；都没有则不追加 evidence。
+#   详见 §5a-2 和 handoff/REVIEW-CODEX-022-glm-registration-training-trust-contracts.md
 
 # Step 2：导入（prepare_import 打印的命令；--dedup-voxel 0 必须：非米制 frame 拒绝 0.10 默认）
 .venv\Scripts\python -m pipeline.reconstruct --engine import `
@@ -204,7 +238,7 @@ third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 
   - **退出码**：`0` = 读通了；`2` = manifest 自相矛盾；`1` = 文件不存在 / 不是合法 JSON。
 - 结果 `geometry_usability` = **`preview-only`**（sfm-local 非米制/未对齐）——这是**诚实**的：没有控制点就不冒充米制。`inspect-recon` 会把它翻成「不能测量：尺度是任意的，只能看」，并告诉你怎么升级。
 - 想要 **`metric-aligned`**（真实尺度/地理对齐）：提供控制点/GPS，走 `pipeline.alignment`（见 [real-data-workflow.md](../real-data-workflow.md)），流程我已打通并验证。
-  - ⚠️ **高阶 SH 限制（米制对齐才会遇到）**：米制/地理对齐会把场景经含**旋转**的 Sim3 变到 ENU 世界；而高阶球谐（`f_rest_*`，nerfstudio splatfacto 等训练器都会输出）的**正确旋转本仓库未实现**，加载器对「含高阶 SH + 旋转」**故意 fail-closed 阻断**（绝不施加错误 SH 旋转产生错误颜色）。**诚实解法**：对齐前先扁平化 SH——`python scripts/flatten_ply_sh.py trained/point_cloud.ply`（丢高阶 `f_rest_*`、保 DC 视角无关基色）。代价：失去视角相关高光，保留正确基色。**仅米制对齐需要**；基本 `preview-only` 漫游（不含旋转）无需此步。
+  - **高阶 SH 与米制对齐（degree 0–3 已实现）**：米制/地理对齐会把场景经含**旋转**的 Sim3 变到 ENU 世界。`pipeline/spherical_harmonics.py` 已实现 INRIA 3DGS 约定下的 Wigner-D SH 系数旋转（degree 0–3，数值采样法 + Gauss-Legendre 积分网格），含高阶 SH 的场景可直接经非恒等 Sim3 旋转对齐，**无需** 先 `flatten_sh()`。`flatten_sh()` 保留为有损降级工具（丢高阶保 DC），适用于仅需视角无关基色或减小 PLY 体积的场景。已知精度限制：INRIA `SH_C3` 常数在 float64 中有 ~2e-8 损失，正交性容差放宽至 1e-6。详见 `handoff/HANDOFF-OPUS-010-degree3-sh-rotation.md`。
 
 ---
 
