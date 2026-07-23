@@ -391,6 +391,9 @@ class EnvironmentModuleBuildCounts(FrozenModel):
     module_canonical_roots: Literal[45] = 45
     canonical_roots: Literal[175] = 175
     module_mesh_objects: int = Field(ge=45)
+    textured_module_meshes: int = Field(ge=1)
+    valid_uv_module_meshes: int = Field(ge=1)
+    valid_surface_color_module_meshes: int = Field(ge=1)
 
 
 class EnvironmentModuleBuildValidation(FrozenModel):
@@ -399,6 +402,8 @@ class EnvironmentModuleBuildValidation(FrozenModel):
     finite_nonempty_module_meshes: Literal[True]
     material_bindings_match: Literal[True]
     design_sources_are_provenance_only: Literal[True]
+    uv_contracts_match: Literal[True]
+    surface_color_contracts_match: Literal[True]
 
 
 class EnvironmentModuleArtifact(FrozenModel):
@@ -441,6 +446,14 @@ class EnvironmentModuleBuildReport(FrozenModel):
             range(1, 176),
         ):
             raise ValueError("module build report registry is not exact 1..175")
+        counts = self.counts
+        if (
+            counts.module_mesh_objects,
+            counts.textured_module_meshes,
+            counts.valid_uv_module_meshes,
+            counts.valid_surface_color_module_meshes,
+        ) != (45, 45, 45, 45):
+            raise ValueError("module build report material counts are not exact 45")
         return self
 
 

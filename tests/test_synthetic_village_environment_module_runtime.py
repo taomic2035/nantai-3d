@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,6 +47,81 @@ def _load_blender_runtime(monkeypatch: pytest.MonkeyPatch):
     runtime = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runtime)
     return runtime
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "world-xy",
+        "dominant-axis-box",
+        "roof-slope",
+        "object-long-axis",
+        "leaf-card",
+    ],
+)
+def test_environment_material_contract_accepts_bound_uv_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+) -> None:
+    runtime = _load_blender_runtime(monkeypatch)
+    material = {
+        "uv_policy": policy,
+        "nv_nominal_tile_m": 0.8,
+        "nv_surface_color_input": "nv_surface_color",
+    }
+
+    assert runtime._material_contract(material) == (
+        policy,
+        0.8,
+        "nv_surface_color",
+    )
+
+
+@pytest.mark.parametrize(
+    "material",
+    [
+        {},
+        {
+            "uv_policy": "unknown",
+            "nv_nominal_tile_m": 1.0,
+            "nv_surface_color_input": "nv_surface_color",
+        },
+        {
+            "uv_policy": "world-xy",
+            "nv_nominal_tile_m": 0.0,
+            "nv_surface_color_input": "nv_surface_color",
+        },
+        {
+            "uv_policy": "world-xy",
+            "nv_nominal_tile_m": math.nan,
+            "nv_surface_color_input": "nv_surface_color",
+        },
+        {
+            "uv_policy": "world-xy",
+            "nv_nominal_tile_m": 1.0,
+            "nv_surface_color_input": "wrong",
+        },
+    ],
+)
+def test_environment_material_contract_rejects_unbound_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    material: dict[str, object],
+) -> None:
+    runtime = _load_blender_runtime(monkeypatch)
+
+    with pytest.raises(runtime.RuntimeBuildError, match="material contract"):
+        runtime._material_contract(material)
+
+
+def test_environment_runtime_no_longer_uses_modulo_uv_proxy() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/blender/apply_environment_modules.py"
+    ).read_text(encoding="utf-8")
+
+    assert "% 1.0" not in source
+    assert 'name="nv_uv0"' in source
+    assert 'name="nv_surface_color"' in source
 
 
 def test_waterwheel_geometry_uses_plan_anchor(
@@ -249,6 +325,9 @@ def _report_payload(request, output_path: Path) -> dict[str, object]:
             "module_canonical_roots": 45,
             "canonical_roots": 175,
             "module_mesh_objects": 45,
+            "textured_module_meshes": 45,
+            "valid_uv_module_meshes": 45,
+            "valid_surface_color_module_meshes": 45,
         },
         "validation": {
             "base_registry_matches": True,
@@ -256,6 +335,8 @@ def _report_payload(request, output_path: Path) -> dict[str, object]:
             "finite_nonempty_module_meshes": True,
             "material_bindings_match": True,
             "design_sources_are_provenance_only": True,
+            "uv_contracts_match": True,
+            "surface_color_contracts_match": True,
         },
         "artifact": {
             "name": "village-modules.blend",
@@ -264,6 +345,34 @@ def _report_payload(request, output_path: Path) -> dict[str, object]:
             "size_bytes": output_path.stat().st_size,
         },
     }
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("counts", "textured_module_meshes"),
+        ("counts", "valid_uv_module_meshes"),
+        ("counts", "valid_surface_color_module_meshes"),
+        ("validation", "uv_contracts_match"),
+        ("validation", "surface_color_contracts_match"),
+    ],
+)
+def test_report_requires_material_contract_evidence(
+    tmp_path: Path,
+    section: str,
+    field: str,
+) -> None:
+    request = build_environment_module_runtime_request(
+        base_build=_base_build(tmp_path),
+        repo_root=Path(__file__).resolve().parents[1],
+    )
+    output = tmp_path / "village-modules.blend"
+    output.write_bytes(b"module-build")
+    payload = _report_payload(request, output)
+    del payload[section][field]
+
+    with pytest.raises(ValidationError):
+        EnvironmentModuleBuildReport.model_validate(payload)
 
 
 def test_report_verifier_recomputes_output_bytes(tmp_path: Path) -> None:

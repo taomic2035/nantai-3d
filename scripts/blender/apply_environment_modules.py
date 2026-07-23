@@ -25,6 +25,15 @@ OUTPUT_NAME = "village-modules.blend"
 EXPECTED_BASE_ROOTS = 130
 EXPECTED_MODULE_ROOTS = 45
 EXPECTED_TOTAL_ROOTS = 175
+UV_POLICIES = frozenset(
+    {
+        "world-xy",
+        "dominant-axis-box",
+        "roof-slope",
+        "object-long-axis",
+        "leaf-card",
+    },
+)
 
 SEMANTIC_CLASS_BY_ID = {
     3: "building",
@@ -490,21 +499,158 @@ def _new_module_root(module, part, registry, collection):
     return root
 
 
-def _assign_uvs_and_tangents(obj):
+def _material_contract(material):
+    policy = material.get("uv_policy")
+    tile_m = material.get("nv_nominal_tile_m")
+    color_input = material.get("nv_surface_color_input")
+    if (
+        policy not in UV_POLICIES
+        or isinstance(tile_m, bool)
+        or not isinstance(tile_m, (int, float))
+        or not math.isfinite(tile_m)
+        or tile_m <= 0
+        or color_input != "nv_surface_color"
+    ):
+        raise RuntimeBuildError("module material contract is invalid")
+    return policy, float(tile_m), color_input
+
+
+def _dominant_projection_axes(normal):
+    dominant = max(range(3), key=lambda index: abs(normal[index]))
+    return tuple(index for index in range(3) if index != dominant)
+
+
+def _polygon_uv_area(values):
+    if len(values) < 3:
+        return 0.0
+    first = values[0]
+    return max(
+        (
+            abs(
+                (values[index][0] - first[0])
+                * (values[index + 1][1] - first[1])
+                - (values[index][1] - first[1])
+                * (values[index + 1][0] - first[0]),
+            )
+            for index in range(1, len(values) - 1)
+        ),
+        default=0.0,
+    )
+
+
+def _project_polygon_uvs(obj, polygon, policy, tile_m):
     mesh = obj.data
-    layer = mesh.uv_layers.new(name="UVMap")
-    for loop in mesh.loops:
-        vertex = mesh.vertices[loop.vertex_index].co
-        layer.data[loop.index].uv = (
-            (float(vertex.x) * 0.16) % 1.0,
-            (float(vertex.y + vertex.z) * 0.16) % 1.0,
+    local = [mesh.vertices[index].co.copy() for index in polygon.vertices]
+    world = [obj.matrix_world @ coordinate for coordinate in local]
+    normal_matrix = obj.matrix_world.to_3x3().inverted_safe().transposed()
+    world_normal = (normal_matrix @ polygon.normal).normalized()
+
+    def project_axes(coordinates, axes):
+        return [
+            (float(coordinate[axes[0]]) / tile_m, float(coordinate[axes[1]]) / tile_m)
+            for coordinate in coordinates
+        ]
+
+    if policy == "world-xy":
+        values = project_axes(world, (0, 1))
+    elif policy == "dominant-axis-box":
+        values = project_axes(world, _dominant_projection_axes(world_normal))
+    elif policy == "roof-slope":
+        ridge = (-float(world_normal[1]), float(world_normal[0]), 0.0)
+        ridge_length = math.sqrt(sum(value * value for value in ridge))
+        if ridge_length <= 1e-8:
+            ridge = (1.0, 0.0, 0.0)
+        else:
+            ridge = tuple(value / ridge_length for value in ridge)
+        fall = (
+            float(world_normal[1]) * ridge[2] - float(world_normal[2]) * ridge[1],
+            float(world_normal[2]) * ridge[0] - float(world_normal[0]) * ridge[2],
+            float(world_normal[0]) * ridge[1] - float(world_normal[1]) * ridge[0],
         )
+        fall_length = math.sqrt(sum(value * value for value in fall))
+        if fall_length <= 1e-8:
+            values = project_axes(world, _dominant_projection_axes(world_normal))
+        else:
+            fall = tuple(value / fall_length for value in fall)
+            values = [
+                (
+                    sum(float(coordinate[index]) * ridge[index] for index in range(3))
+                    / tile_m,
+                    sum(float(coordinate[index]) * fall[index] for index in range(3))
+                    / tile_m,
+                )
+                for coordinate in world
+            ]
+    elif policy == "object-long-axis":
+        spans = [
+            max(vertex.co[index] for vertex in mesh.vertices)
+            - min(vertex.co[index] for vertex in mesh.vertices)
+            for index in range(3)
+        ]
+        long_axis = max(range(3), key=lambda index: spans[index])
+        remaining = [index for index in range(3) if index != long_axis]
+        second_axis = max(remaining, key=lambda index: spans[index])
+        values = project_axes(local, (long_axis, second_axis))
+    elif policy == "leaf-card":
+        values = project_axes(local, _dominant_projection_axes(polygon.normal))
+    else:
+        raise RuntimeBuildError(f"unsupported module UV policy: {policy}")
+
+    if _polygon_uv_area(values) <= 1e-12:
+        values = project_axes(world, _dominant_projection_axes(world_normal))
+    if _polygon_uv_area(values) <= 1e-12:
+        raise RuntimeBuildError(f"module UV projection is degenerate: {obj.name}")
+    return values
+
+
+def _assign_projected_uvs(obj, policy, tile_m):
+    mesh = obj.data
+    layer = mesh.uv_layers.get("nv_uv0") or mesh.uv_layers.new(name="nv_uv0")
+    for polygon in mesh.polygons:
+        values = _project_polygon_uvs(obj, polygon, policy, tile_m)
+        for loop_index, uv in zip(polygon.loop_indices, values, strict=True):
+            layer.data[loop_index].uv = uv
+
+
+def _ensure_white_surface_color(obj, layer_name):
+    if layer_name != "nv_surface_color":
+        raise RuntimeBuildError("module surface color layer name is invalid")
+    mesh = obj.data
+    layer = mesh.color_attributes.get(layer_name)
+    if layer is None:
+        layer = mesh.color_attributes.new(
+            name="nv_surface_color",
+            type="FLOAT_COLOR",
+            domain="CORNER",
+        )
+    if (
+        layer.data_type != "FLOAT_COLOR"
+        or layer.domain != "CORNER"
+        or len(layer.data) != len(mesh.loops)
+    ):
+        raise RuntimeBuildError(
+            f"module surface color contract is invalid: {obj.name}",
+        )
+    mesh.color_attributes.active_color = layer
+    index = tuple(mesh.color_attributes).index(layer)
+    mesh.color_attributes.active_color_index = index
+    mesh.color_attributes.render_color_index = index
+    for value in layer.data:
+        value.color = (1.0, 1.0, 1.0, 1.0)
+    obj["nv_surface_color_mode"] = "white"
+
+
+def _assign_material_contract(obj, material):
+    policy, tile_m, color_input = _material_contract(material)
+    _assign_projected_uvs(obj, policy, tile_m)
+    _ensure_white_surface_color(obj, color_input)
     try:
-        mesh.calc_tangents(uvmap="UVMap")
+        obj.data.calc_tangents(uvmap="nv_uv0")
     except Exception as exc:
         raise RuntimeBuildError(f"module tangent generation failed: {obj.name}") from exc
-    obj["nv_uv_layer"] = "UVMap"
+    obj["nv_uv_layer"] = "nv_uv0"
     obj["nv_tangents"] = True
+    obj["nv_material_contract"] = "textured-pbr-v1"
 
 
 def _link_mesh(root, assembler, material, registry, collection):
@@ -520,7 +666,7 @@ def _link_mesh(root, assembler, material, registry, collection):
     obj["nv_part_id"] = "module-geometry"
     obj["nv_root_id"] = root["nv_stable_id"]
     _tag(obj, registry)
-    _assign_uvs_and_tangents(obj)
+    _assign_material_contract(obj, material)
     root["nv_components"] = '["module-geometry"]'
     return obj
 
@@ -848,6 +994,7 @@ def _validate_built_modules(request, base_roots, module_roots, module_meshes):
             or not mesh.data.vertices
             or not mesh.data.polygons
             or mesh.get("nv_tangents") is not True
+            or mesh.get("nv_material_contract") != "textured-pbr-v1"
             or len(mesh.data.materials) != 1
         ):
             raise RuntimeBuildError(
@@ -874,7 +1021,50 @@ def _validate_built_modules(request, base_roots, module_roots, module_meshes):
     )
 
 
+def _module_material_contract_counts(module_meshes):
+    textured = 0
+    valid_uv = 0
+    valid_surface_color = 0
+    for obj in module_meshes:
+        if len(obj.data.materials) != 1:
+            continue
+        _material_contract(obj.data.materials[0])
+        textured += 1
+        uv_layer = obj.data.uv_layers.get("nv_uv0")
+        if uv_layer is not None and all(
+            _polygon_uv_area(
+                [uv_layer.data[index].uv for index in polygon.loop_indices],
+            )
+            > 1e-12
+            for polygon in obj.data.polygons
+        ):
+            valid_uv += 1
+        color_layer = obj.data.color_attributes.get("nv_surface_color")
+        if (
+            color_layer is not None
+            and color_layer.data_type == "FLOAT_COLOR"
+            and color_layer.domain == "CORNER"
+            and len(color_layer.data) == len(obj.data.loops)
+            and all(
+                tuple(float(channel) for channel in value.color)
+                == (1.0, 1.0, 1.0, 1.0)
+                for value in color_layer.data
+            )
+        ):
+            valid_surface_color += 1
+    return textured, valid_uv, valid_surface_color
+
+
 def _write_report(request, staging_path, output_path, module_meshes):
+    textured, valid_uv, valid_surface_color = _module_material_contract_counts(
+        module_meshes,
+    )
+    if (textured, valid_uv, valid_surface_color) != (
+        EXPECTED_MODULE_ROOTS,
+        EXPECTED_MODULE_ROOTS,
+        EXPECTED_MODULE_ROOTS,
+    ):
+        raise RuntimeBuildError("saved module material contracts are incomplete")
     artifact = {
         "kind": "blender-scene",
         "name": OUTPUT_NAME,
@@ -903,6 +1093,9 @@ def _write_report(request, staging_path, output_path, module_meshes):
             "module_canonical_roots": EXPECTED_MODULE_ROOTS,
             "canonical_roots": EXPECTED_TOTAL_ROOTS,
             "module_mesh_objects": len(module_meshes),
+            "textured_module_meshes": textured,
+            "valid_uv_module_meshes": valid_uv,
+            "valid_surface_color_module_meshes": valid_surface_color,
         },
         "validation": {
             "base_registry_matches": True,
@@ -910,6 +1103,8 @@ def _write_report(request, staging_path, output_path, module_meshes):
             "finite_nonempty_module_meshes": True,
             "material_bindings_match": True,
             "design_sources_are_provenance_only": True,
+            "uv_contracts_match": True,
+            "surface_color_contracts_match": True,
         },
         "artifact": artifact,
     }
