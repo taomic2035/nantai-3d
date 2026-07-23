@@ -2,7 +2,7 @@
 
 > Date: 2026-07-23
 > Owner: GLM lane (HANDOFF-GLM-002 Task 3, design + TDD plan only)
-> Status: Plan — awaiting Codex review before implementation
+> Status: Implemented — Phases 1–10 shipped; Follow-ups A/B done, C pending (Codex lane)
 > Spec: `docs/superpowers/specs/2026-07-23-cloud-training-provenance-design.md`
 
 ## Scope
@@ -262,11 +262,19 @@ Implement `pipeline/training_provenance.py` to make all Phase 1–8 tests pass:
 
 ## Follow-up (status updated 2026-07-23)
 
-- **Follow-up A:** ✅ Done (P1). `cloud/train_3dgs_nerfstudio.sh` now emits
-  `training-request.json` before training and `training-result.json` after
+- **Follow-up A:** ✅ Done (P1 + REVIEW-CODEX-023 fixes). `cloud/train_3dgs_nerfstudio.sh`
+  now emits `training-request.json` before training and `training-result.json` after
   training (captures trainer version via `ns-train --version`, GPU via
   `nvidia-smi`, config via `config.yml` SHA, log via `tee` + SHA). Failed
   training runs (exit_code != 0) also emit result manifests for diagnosis.
+  REVIEW-CODEX-023 fixes (commit `e587a23`): (1) zero config drift — request and
+  result bind the **same** operator-intent `config.yml` (nerfstudio's internal
+  `config.yml` is a diagnostic artefact, not the provenance contract); (2)
+  `--max-num-iterations` and `--machine.seed` passed via real ns-train CLI argv
+  (not just written to the intent file); (3) `ns-process-data` preprocessing
+  failure also emits a failed result (no silent exit). Proven by
+  `TestP1CanaryStubArgv` (argv consistency) and `TestP1CanaryNonMock`
+  (COLMAP → training_allowed=true → trusted prefix).
 - **Follow-up B:** ✅ Done (P0.3). `scripts/prepare_import.py` accepts
   `--training-result` + `--training-request` and applies a three-tier evidence
   system: `training_provenance.v1=<result_sha>` (trusted prefix, needs RQ +
@@ -278,5 +286,7 @@ Implement `pipeline/training_provenance.py` to make all Phase 1–8 tests pass:
 - **P1 caller work:** ✅ Done. `scripts/emit_registration_quality.py` emits
   quality reports from COLMAP sparse dirs. `tests/test_p1_canary_e2e.py` proves
   the full cloud → prepare_import caller closure with adversarial tamper tests.
-  This canary only proves the **mechanism** works — it does NOT prove real
+  `tests/test_emit_registration_quality.py` (11 tests, commit `20ede74`) closes
+  the zero-coverage gap on `emit_registration_quality.py` (mock/COLMAP/error
+  paths). This canary only proves the **mechanism** works — it does NOT prove real
   cloud training, real photos, or metric geometry.
