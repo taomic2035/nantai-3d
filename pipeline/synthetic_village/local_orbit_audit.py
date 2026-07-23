@@ -338,7 +338,7 @@ def materialize_local_orbit_render_plan(
                 arc_length_m=None,
                 position=orbit_camera.position_m,
                 look_at=orbit_camera.look_at_m,
-                eye_height_m=1.6,
+                eye_height_m=_MIN_TERRAIN_CLEARANCE_M,
                 fov_x_deg=orbit_camera.fov_x_deg,
                 disclosure="audit-only-modeled-scene-waterwheel-local-orbit",
             ),

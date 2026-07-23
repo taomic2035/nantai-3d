@@ -161,6 +161,7 @@ def test_materialized_plan_replaces_only_audit_group_and_preserves_source() -> N
     )
     for camera, row in zip(audit[:8], orbit.cameras, strict=True):
         assert camera.position_m == pytest.approx(row.position_m, abs=1e-3)
+        assert camera.eye_height_m == pytest.approx(1.8)
         rotation = np.asarray(camera.c2w_opencv, dtype=float)[:3, :3]
         assert np.max(np.abs(rotation.T @ rotation - np.eye(3))) < 1e-12
     expectation = {
