@@ -287,16 +287,26 @@ training_trust = TrainingTrust(
 
 The handshake does NOT replace `SplatInput` or `prepare_import`. Instead:
 
-1. Operator runs `cloud/train_3dgs_nerfstudio.sh` (modified in Follow-up, not
-   this design) which emits `training-request.json` + `training-result.json`.
-2. Operator runs `prepare_import.py --training-result training-result.json`.
-3. `prepare_import` calls `validate_training_provenance()` and, if
-   `is_trustworthy=True`, adds `training_provenance.v1=<result_sha>` to the
-   `CoordinateFrame.evidence` tuple — **without** changing the frame's
-   `metric_status` or `geo_aligned` (the PLY is still `sfm-local` / `preview-only`
-   until alignment evidence is applied).
-4. If `is_trustworthy=False`, `prepare_import` refuses to proceed (fail-closed)
-   unless `--allow-unverified-training` is explicitly passed (for development).
+1. Operator runs `cloud/train_3dgs_nerfstudio.sh` (now modified to emit
+   provenance manifests) which emits `training-request.json` +
+   `training-result.json`.
+2. Operator runs `prepare_import.py --training-result training-result.json
+   --training-request training-request.json`.
+3. `prepare_import` calls `validate_training_provenance()` for content closure
+   and applies a **three-tier evidence** system (P0.3):
+   - **Trusted prefix** (`training_provenance.v1=<result_sha>`): content closed
+     AND registration quality accepted AND trainer identified. Requires
+     `--registration-quality-report` + `--registration-json` +
+     `--registration-quality-policy` all present.
+   - **Content-only receipt** (`training_content_closed.v1=<result_sha>`):
+     content closed but no registration quality, or registration quality
+     rejected, or trainer drifted. Proves the PLY/config/log are mutually
+     consistent but NOT that the SfM coverage is adequate.
+   - **No evidence**: verification failed; fail-closed unless
+     `--allow-unverified-training` is passed (development only).
+4. In all cases, the evidence does NOT change the frame's `metric_status` or
+   `geo_aligned` (the PLY is still `sfm-local` / `preview-only` until alignment
+   evidence is applied).
 
 ### nerfstudio vs Brush handling
 
@@ -343,10 +353,15 @@ A synthetic canary cannot be used as real-cloud-training acceptance.
 
 ## What this design does NOT do
 
-- Does not modify `cloud/train_3dgs_nerfstudio.sh`. The script will be modified
-  in the implementation phase (Follow-up) to emit the manifests.
+- ~~Does not modify `cloud/train_3dgs_nerfstudio.sh`.~~ **Updated (P1):** the
+  cloud script now emits `training-request.json` + `training-result.json` via
+  `scripts/emit_training_provenance.py`. See `cloud/train_3dgs_nerfstudio.sh`.
 - Does not modify `pipeline/recon_schema.py` (`SplatInput`, `CoordinateFrame`).
-- Does not modify `pipeline/reconstruct.py` or `scripts/prepare_import.py`.
+- ~~Does not modify `pipeline/reconstruct.py` or `scripts/prepare_import.py`.~~
+  **Updated (P0.3/P1):** `scripts/prepare_import.py` now consumes training
+  provenance + registration quality and applies the three-tier evidence system.
+  `scripts/emit_registration_quality.py` (P1) emits quality reports from COLMAP
+  sparse dirs. `pipeline/reconstruct.py` is unchanged.
 - Does not define what "good enough" training looks like — only that the
   training run is content-closed and bound to verified inputs.
 - Does not prove the PLY is visually correct or that the geometry is metric.

@@ -284,17 +284,28 @@ def _cmd_result(args: argparse.Namespace) -> int:
     request = TrainingRequest.model_validate_json(
         Path(args.request).read_text(encoding="utf-8"))
 
-    ply = Path(args.ply)
-    if not ply.is_file():
-        raise SystemExit(f"PLY not found: {ply}")
-    ply_bytes = ply.read_bytes()
+    # PLY bytes: required for completed runs, empty for failed/interrupted.
+    ply_path_str = args.ply
+    if ply_path_str is not None:
+        ply = Path(ply_path_str)
+        if not ply.is_file():
+            raise SystemExit(f"PLY not found: {ply}")
+        ply_bytes = ply.read_bytes()
+    else:
+        if args.exit_code == 0:
+            raise SystemExit(
+                "--ply is required when --exit-code is 0 "
+                "(a completed run must produce a PLY)")
+        ply_bytes = b""
+        ply = None
 
     # Parse PLY header for gaussian_count + sh_degree.
-    try:
-        gaussian_count, sh_degree = _parse_ply_header(ply)
-    except ValueError as exc:
-        print(f"[WARN] could not parse PLY header: {exc}", file=sys.stderr)
-        gaussian_count, sh_degree = None, None
+    gaussian_count, sh_degree = None, None
+    if ply is not None:
+        try:
+            gaussian_count, sh_degree = _parse_ply_header(ply)
+        except ValueError as exc:
+            print(f"[WARN] could not parse PLY header: {exc}", file=sys.stderr)
 
     # Config bytes.
     config_path = Path(args.config_yml)
@@ -397,7 +408,8 @@ def _cmd_result(args: argparse.Namespace) -> int:
         input_bytes_by_path=input_bytes_by_path,
         gpu_environment=env,
         exit_code=exit_code,
-        actual_ply_path=str(ply).replace("\\", "/"),
+        actual_ply_path=(str(ply).replace("\\", "/") if ply is not None
+                         else "no-ply-failed-run"),
         actual_config_path=str(config_path).replace("\\", "/"),
         actual_log_path=str(log_path).replace("\\", "/"),
         error_message=error_message,
@@ -446,7 +458,9 @@ def main(argv: list[str] | None = None) -> int:
 
     rs = sub.add_parser("result", help="emit training-result.json (post-training)")
     rs.add_argument("--request", required=True, help="path to training-request.json")
-    rs.add_argument("--ply", required=True, help="trained point_cloud.ply")
+    rs.add_argument("--ply", default=None,
+                    help="trained point_cloud.ply; may be omitted when "
+                         "--exit-code != 0 (failed/interrupted run with no PLY)")
     rs.add_argument("--config-yml", required=True, help="nerfstudio config.yml")
     rs.add_argument("--log", required=True, help="training log file")
     rs.add_argument("--trainer", required=True,

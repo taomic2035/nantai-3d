@@ -260,18 +260,23 @@ Implement `pipeline/training_provenance.py` to make all Phase 1–8 tests pass:
    ```
    Commit message tail: `Co-Authored-By: GLM-5.2 <noreply@z.ai.com>`
 
-## Follow-up (not in this plan)
+## Follow-up (status updated 2026-07-23)
 
-After Codex reviews this module:
-
-- **Follow-up A:** Modify `cloud/train_3dgs_nerfstudio.sh` to emit
+- **Follow-up A:** ✅ Done (P1). `cloud/train_3dgs_nerfstudio.sh` now emits
   `training-request.json` before training and `training-result.json` after
-  training (capture trainer version via `ns-train --version`, GPU via
-  `nvidia-smi`, config via `config.yml` SHA, log via `tee` + SHA).
-- **Follow-up B:** Modify `scripts/prepare_import.py` to accept
-  `--training-result` and call `validate_training_provenance()`. If
-  `is_trustworthy=True`, add `training_provenance.v1=<result_sha>` to
-  `CoordinateFrame.evidence`. If False, fail-closed unless
-  `--allow-unverified-training` is passed.
+  training (captures trainer version via `ns-train --version`, GPU via
+  `nvidia-smi`, config via `config.yml` SHA, log via `tee` + SHA). Failed
+  training runs (exit_code != 0) also emit result manifests for diagnosis.
+- **Follow-up B:** ✅ Done (P0.3). `scripts/prepare_import.py` accepts
+  `--training-result` + `--training-request` and applies a three-tier evidence
+  system: `training_provenance.v1=<result_sha>` (trusted prefix, needs RQ +
+  content closed + trainer identified), `training_content_closed.v1=<result_sha>`
+  (content-only receipt), or no evidence (fail-closed unless
+  `--allow-unverified-training`).
 - **Follow-up C:** Studio/Viewer displays training provenance status. This is
-  Codex's lane.
+  Codex's lane. Not yet started.
+- **P1 caller work:** ✅ Done. `scripts/emit_registration_quality.py` emits
+  quality reports from COLMAP sparse dirs. `tests/test_p1_canary_e2e.py` proves
+  the full cloud → prepare_import caller closure with adversarial tamper tests.
+  This canary only proves the **mechanism** works — it does NOT prove real
+  cloud training, real photos, or metric geometry.
