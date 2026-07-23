@@ -210,6 +210,36 @@ def test_report_rejects_duplicate_render_id() -> None:
         _report(duplicate_render_id=True)
 
 
+def test_report_names_frame_where_waterwheel_assembly_is_absent() -> None:
+    plan = _plan()
+    frames = tuple(_frame(plan, index) for index in range(8))
+    frames = (
+        frames[0].model_copy(
+            update={
+                "instance_pixel_counts": (
+                    LocalOrbitInstancePixelCount(
+                        instance_id=0,
+                        pixel_count=1024 * 576,
+                    ),
+                ),
+            },
+        ),
+        *frames[1:],
+    )
+
+    with pytest.raises(
+        ReciprocalProductionError,
+        match="assembly.*audit-waterwheel-az000",
+    ):
+        build_local_orbit_audit_report(
+            plan=plan,
+            build_report_sha256="d" * 64,
+            environment_module_build_report_sha256="e" * 64,
+            reciprocal_route_module_plan_sha256="a" * 64,
+            frames=frames,
+        )
+
+
 def test_report_rejects_missing_azimuth() -> None:
     report = _report()
     payload = report.model_dump(mode="json")

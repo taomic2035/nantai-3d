@@ -641,6 +641,15 @@ def build_local_orbit_audit_report(
 ) -> LocalOrbitAuditReport:
     """Build and self-address one accepted eight-frame audit report."""
 
+    missing_assembly = tuple(
+        row.orbit_camera_id for row in frames if not row.assembly_visible
+    )
+    if missing_assembly:
+        raise ReciprocalProductionError(
+            "waterwheel assembly is absent from local orbit frames: "
+            + ", ".join(missing_assembly),
+        )
+
     payload = {
         "schema_version": "nantai.synthetic-village.local-orbit-audit-report.v1",
         "local_orbit_plan_sha256": local_orbit_plan_sha256(plan),
