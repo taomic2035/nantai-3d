@@ -20,6 +20,7 @@ CAMERA_SCHEMA = "nantai.synthetic-village.local-production-camera-metadata.v4"
 LOCAL_ORBIT_BUILD_ADAPTER = "windows-reciprocal-route-local-orbit-v1"
 EXPECTED_INSTANCE_IDS = list(range(1, 219))
 WATERWHEEL_ASSEMBLY_INSTANCE_IDS = list(range(155, 161))
+LOCAL_ORBIT_ROTATION_ENTRY_ERROR_LIMIT = 0.0000004
 PRIMARY_AZIMUTHS = list(range(0, 360, 45))
 PRIMARY_ORBIT_IDS = [f"audit-waterwheel-az{azimuth:03d}" for azimuth in PRIMARY_AZIMUTHS]
 PRIMARY_CAMERA_IDS = [f"camera-audit-overview-{index:03d}" for index in range(1, 9)]
@@ -231,11 +232,32 @@ def _load_engine(expected_sha256, *, engine_path=None):
     return module
 
 
+def _local_orbit_matrix_within_float32_tolerance(actual, expected):
+    translation_errors = []
+    for row in range(4):
+        for column in range(4):
+            requested = float(expected[row][column])
+            delta = abs(float(actual[row][column]) - requested)
+            if row < 3 and column < 3:
+                allowed = LOCAL_ORBIT_ROTATION_ENTRY_ERROR_LIMIT
+            elif row < 3 and column == 3:
+                allowed = max(5e-8, abs(requested) * 1.2e-7)
+                translation_errors.append(delta)
+            else:
+                allowed = 5e-8
+            if delta > allowed + 1e-12:
+                return False
+    return max(translation_errors) <= 0.00004 + 1e-12
+
+
 def _prepare_engine(engine):
     engine.LOCAL_PRODUCTION_REQUEST_SCHEMA = LOCAL_ORBIT_RENDER_REQUEST_SCHEMA
     engine.LOCAL_PRODUCTION_REPORT_SCHEMA = REPORT_SCHEMA
     engine.LOCAL_PRODUCTION_CAMERA_SCHEMA = CAMERA_SCHEMA
     engine.__file__ = __file__
+    engine._matrix_within_float32_tolerance = (
+        _local_orbit_matrix_within_float32_tolerance
+    )
 
     def validate_registry(object_registry):
         engine._expect_list(object_registry, 218, "object_registry")

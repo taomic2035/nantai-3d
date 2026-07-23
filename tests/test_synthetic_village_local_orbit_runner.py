@@ -731,6 +731,8 @@ def test_blender_adapter_validates_local_orbit_boundary_before_engine() -> None:
     assert 'request["orbit_camera_id"]' in source
     assert "EXPECTED_INSTANCE_IDS = list(range(1, 219))" in source
     assert "WATERWHEEL_ASSEMBLY_INSTANCE_IDS = list(range(155, 161))" in source
+    assert "LOCAL_ORBIT_ROTATION_ENTRY_ERROR_LIMIT = 0.0000004" in source
+    assert "engine._matrix_within_float32_tolerance = (" in source
 
 
 def test_blender_adapter_removes_only_bound_local_fields_for_frozen_engine() -> None:
