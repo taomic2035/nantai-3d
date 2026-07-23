@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -704,9 +706,16 @@ def _remove_local_orbit_staging(
         try:
             _remove_private_staging(path, parent=parent)
             return
-        except OSError:
+        except OSError as original:
+            if os.name == "nt":
+                extended = Path("\\\\?\\" + str(Path(path).absolute()))
+                try:
+                    shutil.rmtree(extended)
+                    return
+                except OSError:
+                    pass
             if attempt == 4:
-                raise
+                raise original
             sleep(0.05 * (2**attempt))
 
 

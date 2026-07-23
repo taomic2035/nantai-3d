@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -678,23 +679,31 @@ def test_runner_removes_outer_staging_when_any_render_fails(tmp_path: Path) -> N
     assert tuple(output_root.iterdir()) == ()
 
 
-def test_staging_cleanup_retries_transient_windows_directory_race(
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-path cleanup")
+def test_staging_cleanup_uses_windows_extended_path_after_long_path_failure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     staging = tmp_path / ".staging-transient"
     staging.mkdir()
     attempts = []
+    extended = []
 
-    def transient_remove(path: Path, *, parent: Path) -> None:
+    def long_path_failure(path: Path, *, parent: Path) -> None:
         attempts.append((path, parent))
-        if len(attempts) < 3:
-            raise OSError(145, "directory not empty")
-        path.rmdir()
+        raise OSError(145, "directory not empty")
+
+    def extended_remove(path: Path) -> None:
+        extended.append(str(path))
+        staging.rmdir()
 
     monkeypatch.setattr(
         "pipeline.synthetic_village.local_orbit_runner._remove_private_staging",
-        transient_remove,
+        long_path_failure,
+    )
+    monkeypatch.setattr(
+        "pipeline.synthetic_village.local_orbit_runner.shutil.rmtree",
+        extended_remove,
     )
 
     _remove_local_orbit_staging(
@@ -703,7 +712,8 @@ def test_staging_cleanup_retries_transient_windows_directory_race(
         sleep=lambda _: None,
     )
 
-    assert len(attempts) == 3
+    assert len(attempts) == 1
+    assert extended == ["\\\\?\\" + str(staging.absolute())]
     assert not staging.exists()
 
 
