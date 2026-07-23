@@ -2,15 +2,17 @@
 
 Drives the actual ``scripts/prepare_import.py`` CLI to verify that
 ``--training-result`` / ``--training-request`` content-closure verification
-either appends the ``training_provenance.v1=<sha>`` evidence string (on success)
-or fails closed (on mismatch).  The evidence string must NOT change
-``metric_status`` or ``geo_aligned`` — the PLY stays ``sfm-local`` / ``preview-only``.
+either appends the ``training_content_closed.v1=<sha>`` evidence string (on
+success, P0.3 hardened) or fails closed (on mismatch).  The evidence string
+must NOT change ``metric_status`` or ``geo_aligned`` — the PLY stays
+``sfm-local`` / ``preview-only``.
 """
 from __future__ import annotations
 
 import hashlib
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -26,18 +28,12 @@ from pipeline.training_provenance import (
     GpuEnvironment,
     TrainingConfig,
     TrainingInputBinding,
-    TrainingOutputBinding,
     TrainingRequest,
-    TrainingResult,
-    TrainingStatus,
-    request_canonical_sha256,
+    build_training_result,
     result_canonical_sha256,
 )
 
 _ROOT = Path(__file__).resolve().parent.parent
-_CAPTURE_SHA = "a" * 64
-_CONFIG_SHA = "b" * 64
-_LOG_SHA = "c" * 64
 
 
 def _build_ply(tmp_path: Path) -> Path:
@@ -50,23 +46,51 @@ def _build_ply(tmp_path: Path) -> Path:
     return ply
 
 
-def _build_manifests(ply: Path, tmp_path: Path) -> tuple[Path, Path, str]:
+def _build_manifests(
+    ply: Path, tmp_path: Path, *, exit_code: int = 0,
+    actual_ply_bytes: bytes | None = None,
+    error_message: str | None = None,
+) -> tuple[Path, Path, str]:
     """Build a matched training-request.json + training-result.json for ``ply``.
+
+    Creates real config.yml, training.log, and capture_manifest.json at the
+    paths referenced by the bindings, so prepare_import.py can re-read bytes
+    and verify content closure.
 
     Returns (request_path, result_path, result_sha).
     """
-    ply_bytes = ply.read_bytes()
-    ply_sha = hashlib.sha256(ply_bytes).hexdigest()
+    # Create real input/output files at absolute paths.
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir(exist_ok=True)
+    capture_manifest = photos_dir / "capture_manifest.json"
+    capture_manifest.write_text('{"version": 1}', encoding="utf-8")
+
+    config = tmp_path / "config.yml"
+    config.write_text("trainer: splatfacto\nmax_res: 800\nsteps: 10000\n",
+                      encoding="utf-8")
+
+    log = tmp_path / "training.log"
+    log.write_text("step 0 loss 0.5\nstep 9999 loss 0.01\nDONE\n",
+                   encoding="utf-8")
+
+    capture_bytes = capture_manifest.read_bytes()
+    config_bytes = config.read_bytes()
+    log_bytes = log.read_bytes()
+    if actual_ply_bytes is None:
+        actual_ply_bytes = ply.read_bytes()
+
+    capture_sha = hashlib.sha256(capture_bytes).hexdigest()
+    config_sha = hashlib.sha256(config_bytes).hexdigest()
 
     request = TrainingRequest(
         request_id="req-canary-001",
-        created_at_utc_iso="2026-07-23T00:00:00Z",
+        created_at_utc=datetime(2026, 7, 23, 0, 0, 0, tzinfo=UTC),
         input_bindings=(
             TrainingInputBinding(
                 artifact_kind="capture_manifest",
-                artifact_sha256=_CAPTURE_SHA,
-                artifact_path="photos/capture_manifest.json",
-                artifact_size_bytes=128,
+                artifact_sha256=capture_sha,
+                artifact_path=str(capture_manifest),
+                artifact_size_bytes=len(capture_bytes),
             ),
         ),
         training_config=TrainingConfig(
@@ -77,36 +101,33 @@ def _build_manifests(ply: Path, tmp_path: Path) -> tuple[Path, Path, str]:
             random_seed=42,
         ),
         expected_output_format="inria-3dgs-ply",
+        requested_config_sha256=config_sha,
     )
 
-    result = TrainingResult(
-        request_canonical_sha256=request_canonical_sha256(request),
+    result = build_training_result(
+        request=request,
         result_id="res-canary-001",
-        started_at_utc_iso="2026-07-23T01:00:00Z",
-        finished_at_utc_iso="2026-07-23T02:30:00Z",
-        actual_input_shas=(_CAPTURE_SHA,),
+        started_at_utc=datetime(2026, 7, 23, 1, 0, 0, tzinfo=UTC),
+        finished_at_utc=datetime(2026, 7, 23, 2, 30, 0, tzinfo=UTC),
         actual_trainer_name="nerfstudio-splatfacto",
         actual_trainer_version="0.1.0",
-        actual_config_sha256=_CONFIG_SHA,
+        actual_config_bytes=config_bytes,
+        actual_ply_bytes=actual_ply_bytes,
+        actual_log_bytes=log_bytes,
+        input_bytes_by_path={str(capture_manifest): capture_bytes},
         gpu_environment=GpuEnvironment(
             gpu_name="Tesla T4",
             gpu_memory_mb=15109,
             cuda_version="11.8",
             driver_version="525.60.13",
         ),
-        output_bindings=(
-            TrainingOutputBinding(
-                artifact_kind="trained_ply",
-                artifact_sha256=ply_sha,
-                artifact_path="export/point_cloud.ply",
-                artifact_size_bytes=len(ply_bytes),
-                gaussian_count=80,
-                sh_degree=3,
-            ),
-        ),
-        primary_ply_sha256=ply_sha,
-        training_status=TrainingStatus(state="completed", exit_code=0),
-        training_log_sha256=_LOG_SHA,
+        exit_code=exit_code,
+        error_message=error_message,
+        actual_ply_path=str(ply),
+        actual_config_path=str(config),
+        actual_log_path=str(log),
+        gaussian_count=80,
+        sh_degree=3,
     )
 
     req_path = tmp_path / "training-request.json"
@@ -141,7 +162,8 @@ class TestTrainingProvenanceIntegration:
         assert proc.returncode == 0, proc.stderr
 
         evidence = _evidence(out_dir / "registration.json")
-        expected = f"training_provenance.v1={result_sha}"
+        # P0.3: without registration quality, only content-only receipt.
+        expected = f"training_content_closed.v1={result_sha}"
         assert expected in evidence, f"missing evidence {expected!r}; got {evidence}"
 
         # Honest boundary: evidence must NOT smuggle a metric / aligned upgrade.
@@ -180,7 +202,7 @@ class TestTrainingProvenanceIntegration:
         assert "allow-unverified-training" in proc.stderr
 
         evidence = _evidence(out_dir / "registration.json")
-        assert not any(s.startswith("training_provenance.v1=") for s in evidence), (
+        assert not any(s.startswith("training_") for s in evidence), (
             f"--allow-unverified-training must NOT append evidence; got {evidence}"
         )
         assert "external-3dgs-import" in evidence
@@ -195,25 +217,12 @@ class TestTrainingProvenanceIntegration:
         assert "training-request" in (proc.stderr + proc.stdout)
 
     def test_failed_training_run_fails_closed(self, tmp_path):
-        # A failed training run cannot produce a valid PLY; the handshake must
-        # reject it even though the manifest is internally consistent.
+        # A failed training run (exit_code=1, empty PLY) cannot match the
+        # non-empty PLY file on disk; the handshake must reject it.
         ply = _build_ply(tmp_path)
-        req_path, res_path, _ = _build_manifests(ply, tmp_path)
-
-        # Rewrite result as a FAILED run whose primary_ply_sha256 is the empty
-        # sentinel — but the actual PLY bytes are non-empty, so content closure
-        # breaks (PLY bytes mismatch).
-        import json
-
-        result_doc = json.loads(res_path.read_text(encoding="utf-8"))
-        empty_sha = hashlib.sha256(b"").hexdigest()
-        result_doc["primary_ply_sha256"] = empty_sha
-        result_doc["output_bindings"] = []
-        result_doc["training_status"] = {
-            "state": "failed", "exit_code": 1, "error_message": "OOM",
-        }
-        res_path.write_text(
-            json.dumps(result_doc, indent=2), encoding="utf-8")
+        req_path, res_path, _ = _build_manifests(
+            ply, tmp_path, exit_code=1, actual_ply_bytes=b"",
+            error_message="OOM")
 
         proc = _run(ply, tmp_path / "recon",
                     "--training-result", str(res_path),
@@ -223,7 +232,7 @@ class TestTrainingProvenanceIntegration:
 
     def test_synthetic_combined_with_training_evidence(self, tmp_path):
         # --synthetic + --training-result must both apply: SYNTHETIC provenance
-        # AND the training_provenance evidence tag (only-degrade rule preserved).
+        # AND the content-only receipt (only-degrade rule preserved).
         ply = _build_ply(tmp_path)
         req_path, res_path, result_sha = _build_manifests(ply, tmp_path)
         out_dir = tmp_path / "recon"
@@ -240,6 +249,8 @@ class TestTrainingProvenanceIntegration:
             (out_dir / "splat-input.json").read_text(encoding="utf-8"))
         assert reg.pose_frame.frame_id == "synthetic-local"
         assert "synthetic-source-declared" in reg.pose_frame.evidence
-        assert f"training_provenance.v1={result_sha}" in reg.pose_frame.evidence
+        # P0.3: content-only receipt (not trusted prefix without RQ).
+        expected = f"training_content_closed.v1={result_sha}"
+        assert expected in reg.pose_frame.evidence
         # source_frame must remain byte-identical to registration frame.
         assert splat.source_frame == reg.pose_frame
