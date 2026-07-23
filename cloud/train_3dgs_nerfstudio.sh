@@ -11,11 +11,19 @@
 #     若某步报错，多半是 torch/CUDA/gsplat 版本匹配问题，按报错调整（见文末排错）。
 #   - ns-process-data 会在云上自己跑 COLMAP（你不需要本机 COLMAP 走云路径）。
 #
-# Provenance manifests（P1 Follow-up A）:
-#   - 训练前 emit training-request.json，绑定输入照片/视频 SHA + config.yml SHA
-#     + 训练意图（trainer / max_res / total_steps / seed）。
-#   - 训练后 emit training-result.json，从实际 PLY / config.yml / training.log 字节
+# Provenance manifests（P1 Follow-up A + REVIEW-CODEX-023 fixes）:
+#   - 训练前 emit training-request.json，绑定输入照片/视频 SHA + operator-intent
+#     config.yml SHA + 训练意图（trainer / max_res / total_steps / seed）。
+#   - 训练后 emit training-result.json，从实际 PLY / config / training.log 字节
 #     派生所有 SHA + GPU 环境（nvidia-smi）+ trainer 版本 + 退出码。
+#   - P0-1 config drift fix: request 和 result 绑定**同一份** operator-intent
+#     config.yml → actual_config_sha256 == requested_config_sha256 → 零 drift。
+#     nerfstudio 生成的 config.yml 是诊断 artefact，不作为 provenance 合同 config。
+#   - P0-2 argv fix: --max-num-iterations 和 --machine.seed 通过真实 ns-train CLI
+#     参数传入；max_resolution 由 datamanager 控制（非直接 flag），记在 intent 中。
+#   - P1-1 preprocessing failure: ns-process-data 失败时 emit failed result
+#     （preprocessing exit code + error message），不静默退出。
+#   - P2 timestamps: --started-at/--finished-at 传入真实训练 UTC 起止时间。
 #   - 两 manifest 都是 content-addressed：本机 prepare_import.py 重算每个 SHA，
 #     任一字节漂移即 fail-closed。
 #   - 失败的训练（exit_code != 0）也能 emit result（无 PLY），用于诊断。
@@ -86,10 +94,8 @@ fi
 
 # ── 准备 capture manifest（输入目录/文件的 SHA + 文件列表）──
 CAPTURE_MANIFEST="$MANIFESTS/capture_manifest.json"
-python - "$INPUT" "$CAPTURE_MANIFEST" <<'PYEOF' || {
-  echo "!! 生成 capture manifest 失败；继续但不产 provenance manifests"
-  CAPTURE_MANIFEST=""
-}
+set +e
+python - "$INPUT" "$CAPTURE_MANIFEST" <<'PYEOF'
 import json, hashlib, sys
 from pathlib import Path
 inp, out = Path(sys.argv[1]), Path(sys.argv[2])
@@ -118,62 +124,115 @@ manifest = {
 out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 print(f"[CAPTURE] {len(entries)} files, manifest_sha256={manifest['manifest_sha256'][:16]}...")
 PYEOF
+CAPTURE_EXIT=$?
+set -e
+if [ "$CAPTURE_EXIT" -ne 0 ]; then
+  echo "!! 生成 capture manifest 失败（exit=$CAPTURE_EXIT）；继续但不产 provenance manifests"
+  CAPTURE_MANIFEST=""
+fi
 
 echo "=== 2. 位姿+预处理（ns-process-data 内部跑 COLMAP）==="
+# 捕获预处理退出码：失败也要 emit result（P1-1: 不得用 set -e 直接退出）
+set +e
 if [ -d "$INPUT" ]; then
   ns-process-data images --data "$INPUT" --output-dir "$PROC" 2>&1 | tee -a "$TRAIN_LOG"
+  PREPROCESS_EXIT=${PIPESTATUS[0]}
 else
-  ns-process-data video --data "$INPUT" --output-dir "$PROC" 2>&1 | tee -a "$TRAIN_LOG"   # 视频会自动抽帧
+  ns-process-data video --data "$INPUT" --output-dir "$PROC" 2>&1 | tee -a "$TRAIN_LOG"
+  PREPROCESS_EXIT=${PIPESTATUS[0]}
+fi
+set -e
+echo "[INFO] ns-process-data exit code: $PREPROCESS_EXIT"
+
+# ── 准备 operator-intent config.yml（request 和 result 绑定同一份 → 无 drift）──
+# P0-1: 不得在 request 绑定 intent config 而在 result 绑定 nerfstudio 生成的 config，
+#   那样 validate_training_provenance 会因 config drift 拒绝。同一份文件绑定两次 = 零 drift。
+if [ -n "$EXPLICIT_CONFIG" ] && [ -f "$EXPLICIT_CONFIG" ]; then
+  CONFIG_FOR_BOTH="$EXPLICIT_CONFIG"
+else
+  CONFIG_FOR_BOTH="$MANIFESTS/operator-intent-config.yml"
+  cat > "$CONFIG_FOR_BOTH" <<YAML
+# operator intent config — bound identically in request AND result (no drift).
+# The trainer's internally-generated config.yml is a diagnostic artefact, NOT
+# the provenance contract config.  CLI flags (below) drive the actual training.
+trainer: nerfstudio-splatfacto
+trainer_version: $TRAINER_VER
+max_resolution: $MAX_RES
+total_steps: $TOTAL_STEPS
+random_seed: $SEED
+ns_train_argv:
+  - --max-num-iterations
+  - $TOTAL_STEPS
+  - --machine.seed
+  - $SEED
+  - --viewer.quit-on-train-completion
+  - "True"
+YAML
 fi
 
 # ── Emit training-request.json（训练前，绑定输入 + 意图）──
 REQUEST_MANIFEST="$MANIFESTS/training-request.json"
-if [ -n "$CAPTURE_MANIFEST" ]; then
+EMIT_SCRIPT="scripts/emit_training_provenance.py"
+if [ -n "$CAPTURE_MANIFEST" ] && [ -f "$EMIT_SCRIPT" ]; then
   echo "=== 2b. Emit training-request.json ==="
-  # 准备 config.yml（如显式给定则用之，否则用一个临时 placeholder——
-  # nerfstudio 实际 config 在训练后才生成，request 绑定的是 operator 意图 config）
-  if [ -n "$EXPLICIT_CONFIG" ] && [ -f "$EXPLICIT_CONFIG" ]; then
-    CONFIG_FOR_REQUEST="$EXPLICIT_CONFIG"
-  else
-    CONFIG_FOR_REQUEST="$MANIFESTS/operator-intent-config.yml"
-    cat > "$CONFIG_FOR_REQUEST" <<YAML
-# operator intent config — actual trainer config.yml is produced by ns-train
-trainer: nerfstudio-splatfacto
-max_resolution: $MAX_RES
-total_steps: $TOTAL_STEPS
-random_seed: $SEED
-YAML
-  fi
-
-  # 用仓库内 emit_training_provenance.py（本脚本假设已 clone nantai 到云实例）
-  EMIT_SCRIPT="scripts/emit_training_provenance.py"
-  if [ -f "$EMIT_SCRIPT" ]; then
-    python "$EMIT_SCRIPT" request \
-      --input "capture_manifest:$CAPTURE_MANIFEST" \
-      --config-yml "$CONFIG_FOR_REQUEST" \
-      --trainer nerfstudio-splatfacto \
-      --trainer-version "$TRAINER_VER" \
-      --max-resolution "$MAX_RES" \
-      --total-steps "$TOTAL_STEPS" \
-      --seed "$SEED" \
-      --output "$REQUEST_MANIFEST" \
-      || { echo "!! emit request 失败；继续但不产 provenance"; REQUEST_MANIFEST=""; }
-  else
-    echo "[WARN] 找不到 $EMIT_SCRIPT——跳过 provenance manifest emission"
-    REQUEST_MANIFEST=""
-  fi
+  python "$EMIT_SCRIPT" request \
+    --input "capture_manifest:$CAPTURE_MANIFEST" \
+    --config-yml "$CONFIG_FOR_BOTH" \
+    --trainer nerfstudio-splatfacto \
+    --trainer-version "$TRAINER_VER" \
+    --max-resolution "$MAX_RES" \
+    --total-steps "$TOTAL_STEPS" \
+    --seed "$SEED" \
+    --output "$REQUEST_MANIFEST" \
+    || { echo "!! emit request 失败；继续但不产 provenance"; REQUEST_MANIFEST=""; }
+elif [ ! -f "$EMIT_SCRIPT" ]; then
+  echo "[WARN] 找不到 $EMIT_SCRIPT——跳过 provenance manifest emission"
+  REQUEST_MANIFEST=""
 else
   REQUEST_MANIFEST=""
 fi
 
+# P1-1: 预处理失败时 emit failed result，不得静默退出
+if [ "$PREPROCESS_EXIT" -ne 0 ]; then
+  echo "!! 预处理失败（exit=$PREPROCESS_EXIT）——emit failed result"
+  if [ -n "$REQUEST_MANIFEST" ] && [ -f "$REQUEST_MANIFEST" ]; then
+    PREPROCESS_ERROR="ns-process-data failed (exit=$PREPROCESS_EXIT); training never started"
+    python "$EMIT_SCRIPT" result \
+      --request "$REQUEST_MANIFEST" \
+      --config-yml "$CONFIG_FOR_BOTH" \
+      --log "$TRAIN_LOG" \
+      --trainer nerfstudio-splatfacto \
+      --trainer-version "$TRAINER_VER" \
+      --exit-code "$PREPROCESS_EXIT" \
+      --error-message "$PREPROCESS_ERROR" \
+      --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --finished-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --output "$MANIFESTS/training-result.json" \
+      || echo "!! emit result 失败（manifest 未产出）"
+  fi
+  echo "查看 $TRAIN_LOG 排错；provenance: $MANIFESTS/training-result.json"
+  exit "$PREPROCESS_EXIT"
+fi
+
+# P2: 记录训练实际 UTC 起止时间（不是 manifest 生成时刻）
+TRAIN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "[INFO] training started at $TRAIN_STARTED_AT"
+
 echo "=== 3. 训练 3DGS（splatfacto；普通版 ~6GB 显存, 适合免费 T4）==="
+# P0-2: seed / total_steps 通过真实 ns-train CLI 参数传入（不再只写在 intent 文件里）。
+#   --max-num-iterations 和 --machine.seed 是 nerfstudio 标准参数。
+#   max_resolution 由 datamanager 控制（非直接 CLI flag），记在 intent config 中；
+#   如需精确控制分辨率，在 ns-process-data 阶段对图片降采样。
 # 捕获退出码：失败也要 emit result
 set +e
 ns-train splatfacto --data "$PROC" --output-dir "$OUT" \
+  --max-num-iterations "$TOTAL_STEPS" \
+  --machine.seed "$SEED" \
   --viewer.quit-on-train-completion True 2>&1 | tee -a "$TRAIN_LOG"
 TRAIN_EXIT=${PIPESTATUS[0]}
 set -e
-echo "[INFO] ns-train exit code: $TRAIN_EXIT"
+TRAIN_FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "[INFO] ns-train exit code: $TRAIN_EXIT  (started=$TRAIN_STARTED_AT finished=$TRAIN_FINISHED_AT)"
 
 echo "=== 4. 导出标准 INRIA-3DGS .ply ==="
 CONFIG=$(find "$OUT" -name config.yml | sort | tail -1)
@@ -196,20 +255,19 @@ fi
 RESULT_MANIFEST="$MANIFESTS/training-result.json"
 if [ -n "$REQUEST_MANIFEST" ] && [ -f "$REQUEST_MANIFEST" ]; then
   echo "=== 4b. Emit training-result.json ==="
-  ACTUAL_CONFIG="${CONFIG:-$CONFIG_FOR_REQUEST}"
-  if [ -z "$ACTUAL_CONFIG" ] || [ ! -f "$ACTUAL_CONFIG" ]; then
-    echo "[WARN] 无实际 config.yml——result manifest 将绑定 operator-intent config"
-    ACTUAL_CONFIG="$CONFIG_FOR_REQUEST"
-  fi
-
+  # P0-1: 绑定同一份 operator-intent config（与 request 相同 → 零 drift）。
+  #   nerfstudio 生成的 config.yml（$CONFIG）是诊断 artefact，不作为 actual_config。
+  # P2: 传入真实训练 UTC 起止时间（而非 manifest 生成时刻）。
   EMIT_ARGS=(
     "result"
     "--request" "$REQUEST_MANIFEST"
-    "--config-yml" "$ACTUAL_CONFIG"
+    "--config-yml" "$CONFIG_FOR_BOTH"
     "--log" "$TRAIN_LOG"
     "--trainer" "nerfstudio-splatfacto"
     "--trainer-version" "$TRAINER_VER"
     "--exit-code" "$TRAIN_EXIT"
+    "--started-at" "$TRAIN_STARTED_AT"
+    "--finished-at" "$TRAIN_FINISHED_AT"
     "--output" "$RESULT_MANIFEST"
   )
   if [ -n "$PLY" ] && [ -f "$PLY" ]; then

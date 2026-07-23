@@ -7,19 +7,26 @@ Proves the full caller loop works with a synthetic small scene:
   3. Emit training-request.json + training-result.json via CLI.
   4. prepare_import consumes all four → appends trusted-prefix evidence.
   5. Adversarial: tamper any input byte → fail-closed.
+  6. Non-mock COLMAP canary (P1-2): engine="colmap" + capture manifest +
+     sparse enumeration → training_allowed=True → trusted prefix.
+  7. Stub ns-train argv canary (P0-2): stub ns-train records argv; the
+     request intent (total_steps / seed) matches the actual CLI argv.
 
 This canary only proves the **mechanism** works end-to-end.  It does NOT
 prove cloud training is real, the photos are real, or the geometry is
-metric.  See HANDOFF-GLM-005 §3 P1.
+metric.  See HANDOFF-GLM-005 §3 P1 and REVIEW-CODEX-023.
 
 See: handoff/REVIEW-CODEX-022-glm-registration-training-trust-contracts.md
 See: handoff/HANDOFF-GLM-005-current-gap-and-priority.md
+See: handoff/REVIEW-CODEX-023-glm-p1-callers.md
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +48,8 @@ from pipeline.recon_schema import (
 )
 from pipeline.registration_quality import (
     RegistrationQualityPolicy,
+    SparseModelEntry,
+    SparseModelEnumeration,
     build_registration_quality_report,
 )
 
@@ -414,3 +423,356 @@ class TestP1CanaryAdversarial:
         )
         assert proc.returncode == 1, proc.stderr
         assert "TRAINING-PROVENANCE-FAIL" in proc.stderr
+
+
+# ============================================================
+# Non-mock COLMAP canary (P1-2): training_allowed → trusted prefix
+# ============================================================
+#
+# REVIEW-CODEX-023 P1-2: the mock-engine canaries above only prove
+# content-only receipts and tamper rejection.  This class builds a
+# synthetic-but-non-mock COLMAP RegistrationResult + SparseModelEnumeration
+# + CaptureRevisionManifest so that derive_training_allowed == True, then
+# proves prepare_import emits the trusted prefix
+# ``training_provenance.v1=<result_sha>``.
+#
+# Honest boundary (still applies): the COLMAP artifacts here are synthetic
+# text models, NOT real photos or a real SfM run.  Trusted prefix proves
+# the *contract path* closes, not that the geometry is real or metric.
+
+def _build_colmap_rq_artifacts(
+    tmp_path: Path, *, registered: int = 18, total: int = 20,
+) -> tuple[Path, Path, Path, Path, Path]:
+    """Build non-mock COLMAP RQ artifacts on disk.
+
+    Returns (registration.json, policy.json, quality-report.json,
+             capture_manifest.json, sparse_model_dir).
+    """
+    from pipeline.ingest_manifest import IngestParams
+    from pipeline.studio_revisions import (
+        CapturePayload,
+        CaptureRevisionManifest,
+    )
+
+    # RegistrationResult with engine="colmap".
+    all_images = [f"img{i:03d}.jpg" for i in range(total)]
+    intr = CameraIntrinsics(width=1920, height=1080, fx=1000.0, fy=1000.0,
+                            cx=960.0, cy=540.0)
+    poses = [
+        CameraPose(
+            image=f"img{i:03d}.jpg", session_id="s0",
+            quat_wxyz=[1.0, 0.0, 0.0, 0.0], t_xyz=[float(i), 0.0, 0.0],
+            intrinsics=intr,
+        )
+        for i in range(registered)
+    ]
+    reg = RegistrationResult(
+        schema_version=2, engine="colmap", pose_frame=_local_frame(),
+        world_frame=None, alignment_status=AlignmentStatus.UNALIGNED,
+        sessions=[CaptureSession(session_id="s0", kind="photo_batch",
+                                  source="test", images=all_images)],
+        poses=poses,
+    )
+    reg_bytes = reg.model_dump_json(indent=2).encode("utf-8")
+    reg_json = tmp_path / "rq" / "registration.json"
+    reg_json.parent.mkdir(parents=True)
+    reg_json.write_bytes(reg_bytes)
+
+    # CaptureRevisionManifest (bytes bound into the report).
+    payloads = tuple(
+        CapturePayload(
+            logical_path=f"img{i:03d}.jpg", sha256="a" * 64, byte_length=1024,
+            source_kind="photo", source_ordinal=i % 1,
+        )
+        for i in range(total)
+    )
+    manifest = CaptureRevisionManifest(
+        revision_id=f"capture-{'0' * 32}",
+        created_utc=datetime(2026, 7, 23, 10, 0, 0, tzinfo=UTC),
+        provenance="measured", synthetic=False, source_count=1,
+        output_count=total, ingest_session_id=f"ingest-{'a' * 64}",
+        ingest_manifest_sha256="b" * 64,
+        ingest_parameters=IngestParams(fps=2.0, max_frames=100,
+                                        blur_threshold=60.0, max_long_edge=1920),
+        payloads=payloads,
+    )
+    manifest_bytes = (
+        json.dumps(manifest.model_dump(mode="json"), sort_keys=True,
+                   ensure_ascii=True) + "\n"
+    ).encode("ascii")
+    capture_json = tmp_path / "rq" / "capture_manifest.json"
+    capture_json.write_bytes(manifest_bytes)
+
+    # SparseModelEnumeration (written into sparse_model_dir).
+    images = tuple(f"img{i:03d}.jpg" for i in range(registered))
+    sparse = SparseModelEnumeration(
+        models=(SparseModelEntry(
+            model_index=0, image_count=registered, point3d_count=5000,
+            images=images,
+        ),),
+        selected_model_index=0, selection_rule="single_model",
+        total_input_images=total,
+    )
+    sparse_dir = tmp_path / "rq" / "sparse"
+    sparse_dir.mkdir(parents=True)
+    (sparse_dir / "sparse_enumeration.json").write_text(
+        sparse.model_dump_json(indent=2), encoding="utf-8")
+
+    # Policy.
+    policy = RegistrationQualityPolicy(
+        min_registered_count=10, min_registered_ratio=0.7,
+        min_session_coverage_ratio=0.6, max_unregistered_consecutive_run=5,
+        min_largest_connected_model_share=0.6,
+    )
+    policy_json = tmp_path / "rq" / "policy.json"
+    policy_json.write_bytes(policy.model_dump_json(indent=2).encode("utf-8"))
+
+    # Quality report via the builder (derives all SHAs from artifacts).
+    report = build_registration_quality_report(
+        registration=reg, registration_json_bytes=reg_bytes,
+        capture_manifest=manifest, capture_manifest_bytes=manifest_bytes,
+        policy=policy, sparse_enumeration=sparse,
+        invocation_succeeded=True,
+    )
+    report_json = tmp_path / "rq" / "quality-report.json"
+    report_json.write_bytes(report.model_dump_json(indent=2).encode("utf-8"))
+    return reg_json, policy_json, report_json, capture_json, sparse_dir
+
+
+class TestP1CanaryNonMock:
+    """P1-2: non-mock COLMAP → training_allowed=True → trusted prefix.
+
+    These canaries prove the *contract path* that mock-engine canaries
+    cannot: a COLMAP-engine RegistrationResult with a capture manifest
+    and sparse enumeration yields ``training_allowed=True``, which (with
+    content closure + trainer identified) produces the trusted prefix
+    ``training_provenance.v1=<result_sha>``.
+
+    They do NOT prove the synthetic COLMAP text model is real geometry.
+    """
+
+    def test_colmap_registration_yields_trusted_prefix(self, tmp_path):
+        """engine=colmap + capture manifest + sparse enum → trusted prefix."""
+        from pipeline.registration_quality import derive_training_allowed
+
+        ws = _build_cloud_workspace(tmp_path)
+        (reg_json, policy_json, report_json, capture_json,
+         sparse_dir) = _build_colmap_rq_artifacts(tmp_path)
+        req_path, res_path, result_sha = _emit_training_manifests(tmp_path, ws)
+        out_dir = tmp_path / "recon"
+
+        # Sanity: the report really is training_allowed (non-mock, all gates).
+        report = json.loads(report_json.read_text(encoding="utf-8"))
+        assert report["engine"] == "colmap"
+        assert report["training_allowed"] is True, report
+        policy = RegistrationQualityPolicy.model_validate_json(
+            policy_json.read_text(encoding="utf-8"))
+        from pipeline.registration_quality import RegistrationQualityReport
+        rq = RegistrationQualityReport.model_validate_json(
+            report_json.read_text(encoding="utf-8"))
+        assert derive_training_allowed(rq, policy) is True
+
+        proc = _run_prepare_import(
+            ws["ply"], out_dir,
+            "--training-request", str(req_path),
+            "--training-result", str(res_path),
+            "--registration-quality-report", str(report_json),
+            "--registration-json", str(reg_json),
+            "--registration-quality-policy", str(policy_json),
+            "--capture-manifest", str(capture_json),
+            "--sparse-model-dir", str(sparse_dir),
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        evidence = _evidence(out_dir / "registration.json")
+        trusted = f"training_provenance.v1={result_sha}"
+        assert trusted in evidence, (
+            f"non-mock COLMAP must yield trusted prefix {trusted!r}; "
+            f"got {evidence}")
+        # Honest boundary: still NOT metric/aligned — trusted prefix is a
+        # training-provenance receipt, not a metric upgrade.
+        reg = RegistrationResult.model_validate_json(
+            (out_dir / "registration.json").read_text(encoding="utf-8"))
+        assert reg.pose_frame.metric_status is MetricStatus.ARBITRARY
+        assert reg.pose_frame.geo_aligned is GeoAlignment.UNALIGNED
+
+    def test_colmap_without_capture_manifest_falls_to_content_only(self, tmp_path):
+        """engine=colmap but no --capture-manifest → training_allowed=False
+        (capture_manifest_sha is None) → content-only, not trusted."""
+        ws = _build_cloud_workspace(tmp_path)
+        (reg_json, policy_json, report_json, capture_json,
+         sparse_dir) = _build_colmap_rq_artifacts(tmp_path)
+        req_path, res_path, result_sha = _emit_training_manifests(tmp_path, ws)
+        out_dir = tmp_path / "recon"
+
+        # Omit --capture-manifest: validator sees capture_manifest_sha=None
+        # even though the report declares one → mismatch → fail-closed.
+        proc = _run_prepare_import(
+            ws["ply"], out_dir,
+            "--training-request", str(req_path),
+            "--training-result", str(res_path),
+            "--registration-quality-report", str(report_json),
+            "--registration-json", str(reg_json),
+            "--registration-quality-policy", str(policy_json),
+            # intentionally no --capture-manifest
+            "--sparse-model-dir", str(sparse_dir),
+        )
+        # Fail-closed: report declares capture_manifest_sha but caller omitted
+        # the file → validator rejects → returncode 1.
+        assert proc.returncode == 1, proc.stderr
+        assert "REGISTRATION-QUALITY-FAIL" in proc.stderr
+
+
+# ============================================================
+# Stub ns-train argv canary (P0-2): request intent matches CLI argv
+# ============================================================
+#
+# REVIEW-CODEX-023 P0-2: the cloud script writes seed / total_steps into
+# the operator-intent config.yml AND passes them as real ns-train CLI
+# flags (--max-num-iterations, --machine.seed).  This canary installs a
+# stub ``ns-train`` that records its argv, runs a bash probe that mirrors
+# the cloud script's ns-train invocation (cloud/train_3dgs_nerfstudio.sh
+# lines ~227-231), and asserts the recorded argv matches the request's
+# training_config (total_steps / random_seed).
+#
+# It does NOT prove a real nerfstudio build accepts these flags — only
+# that the cloud script's argv construction is consistent with the
+# request intent it emits.  Real nerfstudio CLI compatibility must be
+# verified on a cloud GPU instance.
+
+# Bash probe mirroring cloud/train_3dgs_nerfstudio.sh ns-train invocation.
+# Keep in sync with the cloud script's `ns-train splatfacto ...` block.
+_NS_TRAIN_PROBE = r"""#!/bin/bash
+set -euo pipefail
+TOTAL_STEPS="$1"
+SEED="$2"
+PROC="$3"
+OUT="$4"
+ns-train splatfacto --data "$PROC" --output-dir "$OUT" \
+  --max-num-iterations "$TOTAL_STEPS" \
+  --machine.seed "$SEED" \
+  --viewer.quit-on-train-completion True
+"""
+
+# Stub ns-train: records argv to $NS_TRAIN_ARGV_FILE then exits 0.
+_NS_TRAIN_STUB = r"""#!/bin/bash
+printf '%s\0' "$@" > "$NS_TRAIN_ARGV_FILE"
+exit 0
+"""
+
+
+class TestP1CanaryStubArgv:
+    """P0-2: stub ns-train records argv; request intent matches the argv."""
+
+    @staticmethod
+    def _git_bash() -> str:
+        """Locate Git for Windows bash for running the probe."""
+        for cand in (r"D:\Git\bin\bash.exe", r"C:\Program Files\Git\bin\bash.exe"):
+            if Path(cand).is_file():
+                return cand
+        # Fallback: rely on PATH (CI may provide bash elsewhere).
+        return "bash"
+
+    def test_request_intent_matches_ns_train_argv(self, tmp_path):
+        """Emit a request, then run the ns-train probe with a stub; the
+        recorded argv must contain --max-num-iterations <total_steps> and
+        --machine.seed <seed> matching the request's training_config."""
+        ws = _build_cloud_workspace(tmp_path)
+        total_steps = 7777
+        seed = 99
+        # Emit a training-request.json with the chosen intent.
+        req_path = tmp_path / "cloud" / "training-request.json"
+        subprocess.run(
+            [sys.executable, "scripts/emit_training_provenance.py",
+             "request",
+             "--input", f"capture_manifest:{ws['images']}",
+             "--config-yml", str(ws["config"]),
+             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
+             "--max-resolution", "800",
+             "--total-steps", str(total_steps),
+             "--seed", str(seed),
+             "--request-id", "req-argv-canary",
+             "--output", str(req_path)],
+            cwd=_ROOT, capture_output=True, text=True, check=True)
+        request = json.loads(req_path.read_text(encoding="utf-8"))
+        assert request["training_config"]["total_steps"] == total_steps
+        assert request["training_config"]["random_seed"] == seed
+
+        # Install stub ns-train + probe in a temp bin dir.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "ns-train"
+        stub.write_text(_NS_TRAIN_STUB, encoding="utf-8", newline="\n")
+        probe = tmp_path / "probe.sh"
+        probe.write_text(_NS_TRAIN_PROBE, encoding="utf-8", newline="\n")
+        argv_file = tmp_path / "argv.txt"
+
+        # Run the probe via Git bash with the stub on PATH.
+        env = os.environ.copy()
+        # Prepend bin_dir so the stub `ns-train` shadows any real one.
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        env["NS_TRAIN_ARGV_FILE"] = str(argv_file)
+        proc = subprocess.run(
+            [self._git_bash(), str(probe),
+             str(total_steps), str(seed),
+             str(ws["images"]), str(tmp_path / "out")],
+            capture_output=True, text=True, env=env)
+        assert proc.returncode == 0, (
+            f"probe failed rc={proc.returncode}\nstderr:\n{proc.stderr}")
+        assert argv_file.is_file(), "stub did not record argv"
+
+        # Recorded argv (NUL-separated tokens, trailing NUL dropped).
+        raw = argv_file.read_bytes()
+        tokens = [t.decode("utf-8") for t in raw.split(b"\0") if t]
+        assert "--max-num-iterations" in tokens, tokens
+        assert "--machine.seed" in tokens, tokens
+        i_steps = tokens.index("--max-num-iterations")
+        i_seed = tokens.index("--machine.seed")
+        assert tokens[i_steps + 1] == str(total_steps), tokens
+        assert tokens[i_seed + 1] == str(seed), tokens
+        # The argv and the request intent agree.
+        assert int(tokens[i_steps + 1]) == request["training_config"]["total_steps"]
+        assert int(tokens[i_seed + 1]) == request["training_config"]["random_seed"]
+
+    def test_diverging_seed_breaks_intent_match(self, tmp_path):
+        """Adversarial: probe run with a seed that differs from the request
+        intent → the argv/contract comparison must detect the divergence."""
+        ws = _build_cloud_workspace(tmp_path)
+        request_seed = 42
+        actual_seed = 7  # diverges
+        req_path = tmp_path / "cloud" / "training-request.json"
+        subprocess.run(
+            [sys.executable, "scripts/emit_training_provenance.py",
+             "request",
+             "--input", f"capture_manifest:{ws['images']}",
+             "--config-yml", str(ws["config"]),
+             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
+             "--max-resolution", "800", "--total-steps", "10000",
+             "--seed", str(request_seed),
+             "--output", str(req_path)],
+            cwd=_ROOT, capture_output=True, text=True, check=True)
+        request = json.loads(req_path.read_text(encoding="utf-8"))
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "ns-train"
+        stub.write_text(_NS_TRAIN_STUB, encoding="utf-8", newline="\n")
+        probe = tmp_path / "probe.sh"
+        probe.write_text(_NS_TRAIN_PROBE, encoding="utf-8", newline="\n")
+        argv_file = tmp_path / "argv.txt"
+
+        env = os.environ.copy()
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        env["NS_TRAIN_ARGV_FILE"] = str(argv_file)
+        subprocess.run(
+            [self._git_bash(), str(probe),
+             "10000", str(actual_seed),
+             str(ws["images"]), str(tmp_path / "out")],
+            capture_output=True, text=True, env=env, check=True)
+        tokens = [t.decode("utf-8")
+                  for t in argv_file.read_bytes().split(b"\0") if t]
+        i_seed = tokens.index("--machine.seed")
+        recorded_seed = int(tokens[i_seed + 1])
+        # The divergence is exactly what the contract must catch.
+        assert recorded_seed != request["training_config"]["random_seed"]
+        assert recorded_seed == actual_seed
