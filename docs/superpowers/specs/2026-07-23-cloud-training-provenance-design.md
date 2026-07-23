@@ -252,10 +252,16 @@ same as `registration.json`.
 5. **Status consistency:** if `training_status.state != "completed"`, then
    `primary_ply_sha256` must be empty or absent, and `error_message` must be
    non-empty. A failed run cannot claim a valid PLY.
-6. **Config consistency:** if `result.actual_config_sha256` differs from the
-   request's config SHA, the result must note the deviation (the validator does
-   not reject — config drift is expected when the trainer overrides flags — but
-   the deviation must be visible, not hidden).
+6. **Config consistency:** `result.actual_config_sha256` must equal
+   `sha256(actual_config_bytes)` (tamper detection on the config itself), and
+   must equal `request.requested_config_sha256` unless
+   `TrainingDriftPolicy.allow_config_drift=True` (defaults `False` — drift is
+   **rejected**, not merely noted). The cloud script avoids drift by binding
+   the **same** operator-intent `config.yml` to both request and result
+   (REVIEW-CODEX-023 P0 fix); nerfstudio's internally generated `config.yml`
+   is a diagnostic artefact, not the provenance contract config. An explicit
+   `allow_config_drift=True` opt-in exists for cases where the trainer
+   legitimately overrides flags, but it is never the default.
 
 ### Trust derivation
 
