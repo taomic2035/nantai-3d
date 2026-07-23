@@ -1,6 +1,12 @@
 #!/bin/bash
-# 云端 GPU 环境配置脚本 (AutoDL)
-# 在 AutoDL 实例上执行此脚本, 搭建 L1/L0 GPU 任务环境
+# ⚠️ 旧素材生成愿景脚本 (L1 资产生成 / L0 构件分割 / L2 神经布局)
+#   本脚本装 Hunyuan3D / SAM2 / GroundingDINO / GaussianCity,
+#   不装 nerfstudio——它不是「照片 → 3DGS」训练链路。
+#
+#   真实云 GPU 3DGS 训练请用: cloud/train_3dgs_nerfstudio.sh
+#   端到端手册: docs/manual/reconstruction-setup.md §5a
+#
+# 在 AutoDL 实例上执行此脚本, 搭建 L1/L0 素材生成环境
 #
 # 使用方法:
 #   1. 在 AutoDL 租用 RTX 3060 12GB 或更高实例

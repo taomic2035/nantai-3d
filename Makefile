@@ -68,14 +68,16 @@ verify:
 	$(PY) verification/verify_3dtiles_conversion.py
 	$(PY) verification/verify_glm_layout.py
 
-# 云端 GPU 任务环境 (在 AutoDL 实例上执行)
+# 云端 GPU 训练环境 (在 AutoDL / Colab 实例上执行)
 env:
-	@echo "在云端 GPU 实例上执行以下命令:"
+	@echo "在云端 GPU 实例上搭建 3DGS 训练环境:"
 	@echo "  conda create -n nantai python=3.11 -y"
 	@echo "  conda activate nantai"
 	@echo "  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118"
-	@echo "  pip install hy3dgen segment-anything-2 groundingdino-py"
-	@echo "  # 详见 cloud/setup_autodl.sh"
+	@echo "  pip install nerfstudio   # 含 gsplat/splatfacto 后端"
+	@echo "  # 一键装+跑: bash cloud/train_3dgs_nerfstudio.sh <图片目录|视频>"
+	@echo "  # 端到端手册: docs/manual/reconstruction-setup.md §5a"
+	@echo "  # 注意: cloud/setup_autodl.sh 是旧素材生成愿景, 不装 nerfstudio"
 
 clean:
 	rm -rf corpus/ layouts/ scenes/ recon/
