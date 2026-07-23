@@ -84,3 +84,19 @@ ruff check tests/test_p1_canary_e2e.py                   # All checks passed
    `UNALIGNED`，未偷偷升级 metric）。
 4. 是否需要再加一个「真实 ns-process-data 失败 → failed result」的 canary
    （当前 P1-1 只在 cloud script 层修复，无对应单元 canary）。
+
+   **Update (2026-07-23)**：已在本 commit `e587a23` 中实现为
+   `tests/test_p1_canary_e2e.py::TestP1CanaryPreprocessFailure`（3 个测试，
+   全绿）。该 canary 镜像 cloud script 行 195-215 的 P1-1 路径，emit 一个
+   `--exit-code 1 --error-message "..."`（无 `--ply`）的 failed
+   `training-result.json`，并断言：
+
+   - `training_status.state == "failed"`、`exit_code == 1`、`error_message`
+     匹配、`output_bindings` 中无 `trained_ply`、`primary_ply_*` 反映空 PLY；
+   - `prepare_import` 拒绝该 failed result（`TRAINING-PROVENANCE-FAIL`）；
+   - `--allow-unverified-training` 不会偷偷升级 failed run 为 content-only
+     receipt（`content_closed=False` → 无 evidence）。
+
+   诚实边界：canary 只证明 emit CLI 接受的 argv 与 cloud script 构造的一致，
+   且 failed-state result 被正确拒绝。**不**证明真实云 GPU 上 ns-process-data
+   失败时的行为。
