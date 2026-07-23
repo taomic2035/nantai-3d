@@ -1382,6 +1382,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command in {"build-local-orbit-plan", "audit-local-orbit"}:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
         from pipeline.synthetic_village.reciprocal_route_module_runtime import (
             RECIPROCAL_ROUTE_REPORT_NAME,
             RECIPROCAL_ROUTE_REQUEST_NAME,

@@ -50,7 +50,7 @@ class LocalOrbitCamera(FrozenModel):
         pattern=r"^camera-audit-overview-00[1-8]$",
     )
     azimuth_deg: int = Field(ge=0, lt=360, multiple_of=45)
-    radius_m: Literal[12.0] = 12.0
+    radius_m: Literal[20.0] = 20.0
     position_m: FiniteVector3
     look_at_m: FiniteVector3
     fov_x_deg: Literal[65.0] = 65.0
@@ -218,8 +218,8 @@ def build_waterwheel_local_orbit_plan(
             azimuth_deg=azimuth,
             position_m=_q3(
                 (
-                    anchor_x + 12.0 * math.cos(math.radians(azimuth)),
-                    anchor_y + 12.0 * math.sin(math.radians(azimuth)),
+                    anchor_x + 20.0 * math.cos(math.radians(azimuth)),
+                    anchor_y + 20.0 * math.sin(math.radians(azimuth)),
                     anchor_z + 1.6,
                 ),
             ),

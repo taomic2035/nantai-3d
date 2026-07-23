@@ -66,7 +66,7 @@ def test_builds_exact_eight_direction_content_addressed_orbit() -> None:
         "audit-waterwheel-az315",
     )
     assert tuple(row.azimuth_deg for row in plan.cameras) == tuple(range(0, 360, 45))
-    assert all(row.radius_m == 12.0 for row in plan.cameras)
+    assert all(row.radius_m == 20.0 for row in plan.cameras)
     assert all(row.position_m[2] == pytest.approx(44.75) for row in plan.cameras)
     assert canonical_local_orbit_plan_bytes(plan).endswith(b"\n")
     assert local_orbit_plan_sha256(plan) == hashlib.sha256(
