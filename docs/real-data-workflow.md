@@ -48,6 +48,32 @@
 
 裸 COLMAP 停在 arbitrary sfm-local，**不会**被静默标为米制 ENU。
 
+### 步骤 1b · 产出 registration quality report（可选，但为 trusted prefix 所必需）
+
+若后续要走云 GPU 训练并想拿到 `training_provenance.v1` trusted prefix（见步骤 2b），
+COLMAP 配准后必须额外产出一份从 sparse 字节派生的 quality report：
+
+```bash
+.venv/bin/python scripts/emit_registration_quality.py \
+  --registration-json recon/registration.json \
+  --sparse-dir recon/colmap_ws/sparse \
+  --capture-manifest ingest/manifest.json \
+  --policy policy.json \
+  --output rq/quality-report.json
+```
+
+- `--sparse-dir` 指向 COLMAP `sparse/` 目录（含 `<index>/images.txt` + `points3D.txt`），
+  脚本会枚举多组件模型并选最大连通块。
+- `--capture-manifest` 指向 ingest 阶段的 `CaptureRevisionManifest`（可选但
+  trusted prefix 必需——它把照片源 provenance 绑到 quality report）。
+- `--policy` 是一份 `RegistrationQualityPolicy` JSON（5 个阈值：min_registered_count、
+  min_registered_ratio、min_session_coverage_ratio、max_unregistered_consecutive_run、
+  min_largest_connected_model_share）。
+
+报告里的 `training_allowed=True` 只证明配准满足 operator 覆盖策略 + non-mock engine +
+有 capture manifest——**不证明**照片真实、几何对 3DGS 充分或尺度米制。详见
+[reconstruction-setup.md §5a-2](manual/reconstruction-setup.md)。
+
 ## 步骤 2 · 控制点 → SfM→ENU Sim3 对齐
 
 准备 `control_points.json`（≥3 计数，且源点需张成 3D → 实际 **≥4 非共面**点）。每个控制点：
@@ -103,6 +129,32 @@
 `rms_residual ≤ --max-rms`。拟合残差/退化裕度/门禁结果记入 `sim3.alignment.v1=<json>` 证据串，
 挂在 `world_frame` 与 `pose_to_world` 上，可机器复核。输出的 `registration_aligned.json` 以 LF 写出。
 
+## 步骤 2b · 云 GPU 训练 provenance manifest（可选但推荐）
+
+若用云 GPU（nerfstudio `ns-train splatfacto`）训练 3DGS，`cloud/train_3dgs_nerfstudio.sh`
+会在训练前后自动产出两个 content-addressed manifest，本机 `prepare_import.py` 会重算每个
+SHA 并 fail-closed 拒绝任何字节漂移：
+
+- **`training-request.json`**（训练前）：绑定输入照片/视频 SHA + operator-intent `config.yml` SHA
+  + 训练意图（trainer / max_res / total_steps / seed）。
+- **`training-result.json`**（训练后）：从实际 PLY / config / training.log 字节派生所有 SHA
+  + GPU 环境（nvidia-smi）+ trainer 版本 + 退出码 + 真实训练 UTC 起止时间。
+
+**关键设计**（REVIEW-CODEX-023 修复后）：
+- request 和 result 绑定**同一份** operator-intent `config.yml` → `actual_config_sha256 == requested_config_sha256` → 零 drift。nerfstudio 内部生成的 `config.yml` 是诊断 artefact，不作为 provenance 合同 config。
+- `--max-num-iterations` 和 `--machine.seed` 通过真实 ns-train CLI 参数传入（不只写在 intent 文件里）。
+- `ns-process-data` 预处理失败时也会 emit failed result（不静默退出）。
+
+把这两个 manifest 和 PLY 一起下回本机 `trained/`，步骤 3 会消费它们绑定 trust evidence。
+
+**三层 evidence**（`prepare_import` 根据证据强度选择追加哪层，均不提升几何信任到 metric）：
+
+| Evidence | 条件 | 含义 |
+|---|---|---|
+| `training_provenance.v1=<result_sha>` | 步骤 1b 的 registration quality `training_allowed=True`（non-mock engine + capture manifest + 无拒绝原因）+ content closed + trainer identified | **trusted prefix**——仍不证明真实照片或米制 |
+| `training_content_closed.v1=<result_sha>` | content closed 但 registration quality 未通过或缺 capture manifest | **content-only receipt**——只证明输入/输出字节闭合 |
+| 无 evidence | 无 training-request/result 或验证失败 | 不追加任何 trust evidence |
+
 ## 步骤 3 · 导入真实 3DGS → measured 世界
 
 为每个训练产物写一个 `SplatInput`。若训练 frame 与对齐后的 target（`world-enu`）不同，必须带显式 `transform`：
@@ -130,6 +182,28 @@
   --registration recon/registration_aligned.json \
   --splat trained/drone-splat-input.json
 ```
+
+### 步骤 3b · 用 `prepare_import.py` 一键生成契约 + 绑定 trust evidence
+
+上面手写 `SplatInput` 是底层路径。更推荐用 `scripts/prepare_import.py` 一键生成
+`registration.json` + `splat-input.json`，并在有 provenance manifest 时绑定三层 evidence：
+
+```bash
+.venv/bin/python scripts/prepare_import.py trained/point_cloud.ply
+#   有云训练 provenance manifest 时追加：
+#   --training-request trained/training-request.json \
+#   --training-result   trained/training-result.json
+#   有步骤 1b 的 registration quality report 时再追加（engine=colmap 才能获 trusted prefix）：
+#   --registration-quality-report rq/quality-report.json \
+#   --registration-json         rq/registration.json \
+#   --registration-quality-policy rq/policy.json \
+#   --capture-manifest           rq/capture_manifest.json \
+#   --sparse-model-dir           rq/sparse/
+```
+
+`prepare_import` 会重算每个 manifest 的 SHA 并 fail-closed 拒绝任何字节漂移；
+trust evidence 的三层选择见步骤 2b。**绑定 evidence 不提升几何信任到 metric**——
+米制仍由步骤 2 的控制点/GPS 对齐挣得。
 
 > ⚠️ **高阶 SH + 旋转对齐**：真实对齐的 `sim3` 一般含**非恒等旋转**（上例的 `quat_wxyz:[1,0,0,0]` 只是占位），而真实 3DGS（nerfstudio splatfacto 等）带高阶球谐 `f_rest_*`。`pipeline/spherical_harmonics.py` 已实现 degree 0–3 Wigner-D SH 旋转，含高阶 SH 的场景可直接经非恒等 Sim3 旋转对齐，**无需** 先 flatten。如需降级（减小体积或仅需视角无关基色）：`python scripts/flatten_ply_sh.py trained/drone.ply`（丢 `f_rest_*`、保 DC）。
 
@@ -170,3 +244,6 @@ manifest 里记着每个 artifact 的 `sha256`（PLY 摘要）、sidecar `recon_
 
 - 没有真实 COLMAP + GPU 训练产物时，全链只能跑 mock/synthetic（明确标注 `preview-proxy`），不冒充 measured。
 - ENU→米制升级只发生在控制点/GPS + 残差达标时；任何降级/退化都 fail-closed，不静默提升。
+- **provenance manifest（步骤 2b/3b）只绑定训练 provenance 信任，不提升几何信任到 metric**：
+  `training_provenance.v1` trusted prefix 仍不证明照片真实、几何对 3DGS 充分或尺度米制；
+  `training_content_closed.v1` content-only receipt 只证明输入/输出字节闭合。米制仍由步骤 2 挣得。
