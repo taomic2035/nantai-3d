@@ -68,7 +68,15 @@ COLMAP 配准后必须额外产出一份从 sparse 字节派生的 quality repor
   trusted prefix 必需——它把照片源 provenance 绑到 quality report）。
 - `--policy` 是一份 `RegistrationQualityPolicy` JSON（5 个阈值：min_registered_count、
   min_registered_ratio、min_session_coverage_ratio、max_unregistered_consecutive_run、
-  min_largest_connected_model_share）。
+  min_largest_connected_model_share）。用 Python one-liner 生成：
+
+  ```bash
+  .venv/bin/python -c "from pipeline.registration_quality import \
+    RegistrationQualityPolicy as P; print(P(min_registered_count=10, \
+    min_registered_ratio=0.7, min_session_coverage_ratio=0.6, \
+    max_unregistered_consecutive_run=5, \
+    min_largest_connected_model_share=0.6).model_dump_json(indent=2))" > policy.json
+  ```
 
 报告里的 `training_allowed=True` 只证明配准满足 operator 覆盖策略 + non-mock engine +
 有 capture manifest——**不证明**照片真实、几何对 3DGS 充分或尺度米制。详见
