@@ -776,3 +776,162 @@ class TestP1CanaryStubArgv:
         # The divergence is exactly what the contract must catch.
         assert recorded_seed != request["training_config"]["random_seed"]
         assert recorded_seed == actual_seed
+
+
+# ============================================================
+# Preprocessing-failure canary (P1-1): ns-process-data fails → failed result
+# ============================================================
+#
+# REVIEW-CODEX-023 P1-1 / GLM-006 §6 review point #4: the cloud script's
+# ns-process-data failure path (cloud/train_3dgs_nerfstudio.sh lines 195-215)
+# emits a failed training-result.json with --exit-code and --error-message
+# (no --ply) when preprocessing fails, so the operator gets a provenance
+# receipt for the failure instead of a silent exit.  This canary exercises
+# the Python CLI argv that the cloud script constructs and proves
+# prepare_import correctly rejects the failed result.
+#
+# Divergence from the cloud script: the canary passes --gpu-name etc.
+# explicitly because the dev machine has no nvidia-smi; the cloud script
+# omits them (auto-detect works on cloud GPU instances).  This canary
+# tests the Python CLI's handling of the argv, not the bash script's
+# argv construction.
+#
+# It does NOT prove a real ns-process-data failure on a cloud GPU —
+# only that the failed-state result is well-formed and rejected.
+
+def _emit_failed_training_result(
+    tmp_path: Path, ws: dict[str, Path], *,
+    exit_code: int = 1,
+    error_message: str = "ns-process-data failed (exit=1); training never started",
+) -> tuple[Path, Path, str]:
+    """Emit training-request.json + a failed training-result.json via CLI.
+
+    Mirrors the cloud script's P1-1 preprocessing-failure path
+    (cloud/train_3dgs_nerfstudio.sh lines 195-215): ns-process-data fails,
+    cloud script emits a failed result with --exit-code and --error-message,
+    no --ply.
+    """
+    out = tmp_path / "cloud"
+    subprocess.run(
+        [sys.executable, "scripts/emit_training_provenance.py",
+         "request",
+         "--input", f"capture_manifest:{ws['images']}",
+         "--config-yml", str(ws["config"]),
+         "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
+         "--max-resolution", "800", "--total-steps", "10000", "--seed", "42",
+         "--request-id", "req-canary-fail",
+         "--output", str(out / "training-request.json")],
+        cwd=_ROOT, capture_output=True, text=True, check=True)
+    # Emit failed result (no --ply, --exit-code != 0, --error-message).
+    # GPU flags are explicit because the dev machine has no nvidia-smi;
+    # the cloud script omits them (auto-detect works on cloud GPU instances).
+    subprocess.run(
+        [sys.executable, "scripts/emit_training_provenance.py",
+         "result",
+         "--request", str(out / "training-request.json"),
+         "--config-yml", str(ws["config"]),
+         "--log", str(ws["log"]),
+         "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
+         "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
+         "--cuda-version", "11.8", "--driver-version", "525.60.13",
+         "--exit-code", str(exit_code),
+         "--error-message", error_message,
+         "--started-at", "2026-07-23T01:00:00Z",
+         "--finished-at", "2026-07-23T01:05:00Z",
+         "--result-id", "res-canary-fail",
+         "--output", str(out / "training-result.json")],
+        cwd=_ROOT, capture_output=True, text=True, check=True)
+
+    from pipeline.training_provenance import (
+        TrainingResult,
+        result_canonical_sha256,
+    )
+    result = TrainingResult.model_validate_json(
+        (out / "training-result.json").read_text(encoding="utf-8"))
+    return (out / "training-request.json",
+            out / "training-result.json",
+            result_canonical_sha256(result))
+
+
+class TestP1CanaryPreprocessFailure:
+    """P1-1: ns-process-data failure → failed result → fail-closed.
+
+    Mirrors the cloud script's preprocessing-failure path
+    (cloud/train_3dgs_nerfstudio.sh lines 195-215): when ns-process-data
+    fails, the cloud script emits a failed training-result.json with
+    --exit-code and --error-message (no --ply), then exits.
+
+    These canaries prove:
+    1. The emit CLI correctly produces a failed result with the expected
+       state (failed, exit_code, error_message, no trained_ply binding).
+    2. prepare_import rejects the failed result (fail-closed) — a failed
+       run cannot yield content closure or any trust evidence.
+    3. Even with --allow-unverified-training, no evidence is appended
+       (content_closed=False → no receipt).
+
+    They do NOT prove a real ns-process-data failure on a cloud GPU —
+    only that the Python CLI argv the cloud script constructs is valid
+    and produces the expected failed-state result.
+    """
+
+    def test_preprocess_failure_emits_failed_result(self, tmp_path):
+        """Emit a failed result via CLI; verify state/exit_code/error_message."""
+        ws = _build_cloud_workspace(tmp_path)
+        req_path, res_path, _ = _emit_failed_training_result(tmp_path, ws)
+
+        from pipeline.training_provenance import TrainingResult
+        result = TrainingResult.model_validate_json(
+            res_path.read_text(encoding="utf-8"))
+        assert result.training_status.state == "failed"
+        assert result.training_status.exit_code == 1
+        assert result.training_status.error_message == (
+            "ns-process-data failed (exit=1); training never started")
+        # No trained_ply binding for failed state.
+        kinds = [b.artifact_kind for b in result.output_bindings]
+        assert "trained_ply" not in kinds
+        # primary_ply fields reflect empty PLY.
+        import hashlib
+        assert result.primary_ply_sha256 == hashlib.sha256(b"").hexdigest()
+        assert result.primary_ply_size_bytes == 0
+
+    def test_preprocess_failure_result_rejected_by_prepare_import(
+        self, tmp_path):
+        """prepare_import rejects a failed result (fail-closed).
+
+        A failed training run (exit_code=1, no PLY in result) cannot match
+        the non-empty PLY file on disk; the handshake must reject it.
+        """
+        ws = _build_cloud_workspace(tmp_path)
+        req_path, res_path, _ = _emit_failed_training_result(tmp_path, ws)
+        out_dir = tmp_path / "recon"
+
+        proc = _run_prepare_import(
+            ws["ply"], out_dir,
+            "--training-request", str(req_path),
+            "--training-result", str(res_path),
+        )
+        assert proc.returncode == 1, proc.stderr
+        assert "TRAINING-PROVENANCE-FAIL" in proc.stderr
+
+    def test_preprocess_failure_no_evidence_with_bypass(self, tmp_path):
+        """With --allow-unverified-training, no evidence is appended for a
+        failed result (content_closed=False → no receipt).
+
+        This proves the bypass flag does not silently upgrade a failed run
+        to a content-only receipt — it skips provenance entirely.
+        """
+        ws = _build_cloud_workspace(tmp_path)
+        req_path, res_path, _ = _emit_failed_training_result(tmp_path, ws)
+        out_dir = tmp_path / "recon"
+
+        proc = _run_prepare_import(
+            ws["ply"], out_dir,
+            "--training-request", str(req_path),
+            "--training-result", str(res_path),
+            "--allow-unverified-training",
+        )
+        assert proc.returncode == 0, proc.stderr
+        evidence = _evidence(out_dir / "registration.json")
+        assert not any(s.startswith("training_") for s in evidence), (
+            f"failed result must not append evidence; got {evidence}")
+        assert "external-3dgs-import" in evidence
