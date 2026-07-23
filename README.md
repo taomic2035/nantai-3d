@@ -433,6 +433,43 @@ final report SHA 为
 平面水体与桥体遮挡；完整证据见
 [Batch22 exact-218/local-360 回执](handoff/FEEDBACK-HANDOFF-CODEX-027-batch22-exact218-local360.md)。
 
+### Batch 23 环境包络、结构支撑与表面过渡参考
+
+[Batch 23 Environment Envelope & Support Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch23-2026-07-23)
+提供 16 张可替换的独立设计输入：8 张山谷/森林/果园/村庄边缘环境包络、4 张桥梁/水车/溪岸/
+挡墙结构参考，以及 4 张水陆/石墙排水/木石承托/道路材质过渡研究。它们用于下一轮 Blender
+地形包络、支撑构造和材质遮罩建模，不进入 Git 素材 payload；干净 Release 是正式分发入口。
+
+```powershell
+$releaseDir = ".nantai-studio\release-inputs\batch23"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+
+gh release download synthetic-village-design-inputs-batch23-2026-07-23 `
+  --repo taomic2035/nantai-3d `
+  --dir $releaseDir
+
+$archive = Join-Path $releaseDir "synthetic-village-environment-envelope-support-pack-batch23-2026-07-23.zip"
+$sumFile = Join-Path $releaseDir "synthetic-village-environment-envelope-support-pack-batch23-2026-07-23.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 23 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch23" -Force
+```
+
+ZIP SHA-256 为 `549dc14d59feeab29771fce8addbf599adebe6d1f6e5ba301de63397b7cf3e1b`，
+严格只含 16 张最终 PNG、16 份精确 prompt、manifest、使用说明与 payload checksum；没有
+rejected、联系表或生成中间态。全部图像均为
+`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
+metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
+coverage_use=forbidden / trust_effect=none`。
+
+因此这批图能指导环境封闭、支撑落地和材质过渡，却不能证明 360° 重建、任意坐标漫游、真实模型
+或真实纹理。消费后必须重建 exact Blender 场景、登记内容 SHA，并重新通过 camera clearance、
+Phase 4.3、六层 visibility 与 post-render v2；完整清单与 QA 见
+[Batch23 image2 回执](handoff/FEEDBACK-IMAGE2-027-batch23-environment-envelope-support.md)。
+
 ## 核心工作流
 
 ### 1. 混合媒体输入
