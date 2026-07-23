@@ -2,7 +2,7 @@
 
 > Date: 2026-07-23
 > Owner: GLM lane (HANDOFF-GLM-002 Task 2, design + TDD plan only)
-> Status: Plan — awaiting Codex review before implementation
+> Status: Implemented — Codex reviewed (REVIEW-CODEX-022); P0 findings fixed; P0.3 + P1 callers done
 > Spec: `docs/superpowers/specs/2026-07-23-registration-sfm-quality-policy-design.md`
 
 ## Scope

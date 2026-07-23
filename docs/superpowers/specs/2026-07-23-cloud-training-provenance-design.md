@@ -2,7 +2,7 @@
 
 > Date: 2026-07-23
 > Owner: GLM lane (HANDOFF-GLM-002 Task 3, design-only)
-> Status: Design — awaiting Codex review before any runtime implementation
+> Status: Implemented — Codex reviewed (REVIEW-CODEX-022); P0 findings fixed; Follow-up A/B done, C pending (Codex lane)
 > Depends on: Task 2 `RegistrationQualityReport`
   ([spec](../plans/2026-07-23-registration-sfm-quality-policy.md))
 
