@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -22,6 +23,12 @@ from .production_profile import (
     _pose,
     canonical_production_plan_bytes,
 )
+from .scene_plan import (
+    ScenePlan,
+    build_scene_plan,
+    canonical_scene_plan_bytes,
+    terrain_height_m,
+)
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 _PRIMARY_AZIMUTHS = tuple(range(0, 360, 45))
@@ -32,6 +39,7 @@ _MATERIALIZED_CAMERA_IDS = tuple(
     f"camera-audit-overview-{index:03d}" for index in range(1, 9)
 )
 _SUPPORT_AZIMUTHS = (22.5, 112.5, 202.5, 292.5)
+_MIN_TERRAIN_CLEARANCE_M = 1.8
 _MAX_LOCAL_ORBIT_PLAN_BYTES = 512 * 1024
 
 
@@ -87,14 +95,13 @@ class LocalOrbitAuditPlan(FrozenModel):
             raise ValueError("local orbit materialized camera IDs are not exact")
         anchor_x, anchor_y, anchor_z = self.anchor_m
         expected_look = _q3((anchor_x, anchor_y, anchor_z + 0.4))
+        scene = _canonical_scene()
         for row in self.cameras:
-            angle = math.radians(row.azimuth_deg)
-            expected_position = _q3(
-                (
-                    anchor_x + row.radius_m * math.cos(angle),
-                    anchor_y + row.radius_m * math.sin(angle),
-                    anchor_z + 1.6,
-                ),
+            expected_position = _orbit_position(
+                anchor=self.anchor_m,
+                azimuth_deg=row.azimuth_deg,
+                radius_m=row.radius_m,
+                scene=scene,
             )
             if row.position_m != expected_position or row.look_at_m != expected_look:
                 raise ValueError("local orbit pose must be derived from anchor")
@@ -103,6 +110,28 @@ class LocalOrbitAuditPlan(FrozenModel):
 
 def _q3(values: tuple[float, float, float]) -> tuple[float, float, float]:
     return tuple(round(float(value), 3) for value in values)
+
+
+@lru_cache(maxsize=1)
+def _canonical_scene() -> ScenePlan:
+    return build_scene_plan()
+
+
+def _orbit_position(
+    *,
+    anchor: tuple[float, float, float],
+    azimuth_deg: float,
+    radius_m: float,
+    scene: ScenePlan,
+) -> tuple[float, float, float]:
+    angle = math.radians(azimuth_deg)
+    x_m = anchor[0] + radius_m * math.cos(angle)
+    y_m = anchor[1] + radius_m * math.sin(angle)
+    z_m = max(
+        anchor[2] + 1.6,
+        terrain_height_m(x_m, y_m, scene.extent) + _MIN_TERRAIN_CLEARANCE_M,
+    )
+    return _q3((x_m, y_m, z_m))
 
 
 def _exact_rotation_pose(**kwargs):
@@ -235,17 +264,23 @@ def build_waterwheel_local_orbit_plan(
     anchor = _q3(anchor_m)
     anchor_x, anchor_y, anchor_z = anchor
     look_at = _q3((anchor_x, anchor_y, anchor_z + 0.4))
+    scene = _canonical_scene()
+    if hashlib.sha256(canonical_scene_plan_bytes(scene)).hexdigest() != (
+        source_plan.scene_plan_sha256
+    ):
+        raise LocalOrbitPlanError(
+            "local orbit source plan is not bound to the canonical terrain",
+        )
     cameras = tuple(
         LocalOrbitCamera(
             orbit_camera_id=orbit_camera_id,
             materialized_camera_id=materialized_camera_id,
             azimuth_deg=azimuth,
-            position_m=_q3(
-                (
-                    anchor_x + 20.0 * math.cos(math.radians(azimuth)),
-                    anchor_y + 20.0 * math.sin(math.radians(azimuth)),
-                    anchor_z + 1.6,
-                ),
+            position_m=_orbit_position(
+                anchor=anchor,
+                azimuth_deg=azimuth,
+                radius_m=20.0,
+                scene=scene,
             ),
             look_at_m=look_at,
         )

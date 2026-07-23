@@ -28,7 +28,7 @@ from pipeline.synthetic_village.production_profile import (
     build_production_camera_plan,
     canonical_production_plan_bytes,
 )
-from pipeline.synthetic_village.scene_plan import build_scene_plan
+from pipeline.synthetic_village.scene_plan import build_scene_plan, terrain_height_m
 
 
 def _inputs():
@@ -68,7 +68,15 @@ def test_builds_exact_eight_direction_content_addressed_orbit() -> None:
     )
     assert tuple(row.azimuth_deg for row in plan.cameras) == tuple(range(0, 360, 45))
     assert all(row.radius_m == 20.0 for row in plan.cameras)
-    assert all(row.position_m[2] == pytest.approx(44.75) for row in plan.cameras)
+    scene = build_scene_plan()
+    for row in plan.cameras:
+        terrain_z = terrain_height_m(
+            row.position_m[0],
+            row.position_m[1],
+            scene.extent,
+        )
+        assert row.position_m[2] >= terrain_z + 1.8 - 1e-3
+    assert plan.cameras[2].position_m[2] == pytest.approx(47.598)
     assert canonical_local_orbit_plan_bytes(plan).endswith(b"\n")
     assert local_orbit_plan_sha256(plan) == hashlib.sha256(
         canonical_local_orbit_plan_bytes(plan),
