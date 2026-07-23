@@ -67,7 +67,16 @@ def test_builds_exact_eight_direction_content_addressed_orbit() -> None:
         "audit-waterwheel-az315",
     )
     assert tuple(row.azimuth_deg for row in plan.cameras) == tuple(range(0, 360, 45))
-    assert all(row.radius_m == 20.0 for row in plan.cameras)
+    assert tuple(row.radius_m for row in plan.cameras) == (
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        20.0,
+        24.0,
+    )
     scene = build_scene_plan()
     for row in plan.cameras:
         terrain_z = terrain_height_m(

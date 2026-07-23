@@ -32,6 +32,7 @@ from .scene_plan import (
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 _PRIMARY_AZIMUTHS = tuple(range(0, 360, 45))
+_PRIMARY_RADII_M = (20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 24.0)
 _PRIMARY_CAMERA_IDS = tuple(
     f"audit-waterwheel-az{azimuth:03d}" for azimuth in _PRIMARY_AZIMUTHS
 )
@@ -59,7 +60,7 @@ class LocalOrbitCamera(FrozenModel):
         pattern=r"^camera-audit-overview-00[1-8]$",
     )
     azimuth_deg: int = Field(ge=0, lt=360, multiple_of=45)
-    radius_m: Literal[20.0] = 20.0
+    radius_m: Literal[20.0, 24.0] = 20.0
     position_m: FiniteVector3
     look_at_m: FiniteVector3
     fov_x_deg: Literal[65.0] = 65.0
@@ -86,6 +87,8 @@ class LocalOrbitAuditPlan(FrozenModel):
     def _validate_orbit(self) -> LocalOrbitAuditPlan:
         if tuple(row.azimuth_deg for row in self.cameras) != _PRIMARY_AZIMUTHS:
             raise ValueError("local orbit cameras must use the exact ordered azimuth tuple")
+        if tuple(row.radius_m for row in self.cameras) != _PRIMARY_RADII_M:
+            raise ValueError("local orbit cameras must use the exact radius envelope")
         if tuple(row.orbit_camera_id for row in self.cameras) != _PRIMARY_CAMERA_IDS:
             raise ValueError("local orbit camera IDs must match the ordered azimuth tuple")
         if (
@@ -276,16 +279,18 @@ def build_waterwheel_local_orbit_plan(
             orbit_camera_id=orbit_camera_id,
             materialized_camera_id=materialized_camera_id,
             azimuth_deg=azimuth,
+            radius_m=radius_m,
             position_m=_orbit_position(
                 anchor=anchor,
                 azimuth_deg=azimuth,
-                radius_m=20.0,
+                radius_m=radius_m,
                 scene=scene,
             ),
             look_at_m=look_at,
         )
-        for azimuth, orbit_camera_id, materialized_camera_id in zip(
+        for azimuth, radius_m, orbit_camera_id, materialized_camera_id in zip(
             _PRIMARY_AZIMUTHS,
+            _PRIMARY_RADII_M,
             _PRIMARY_CAMERA_IDS,
             _MATERIALIZED_CAMERA_IDS,
             strict=True,
