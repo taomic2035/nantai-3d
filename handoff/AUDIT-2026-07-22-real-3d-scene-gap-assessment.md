@@ -6,6 +6,10 @@
 > 方法：基于代码、文件、SHA 实测证据，不做推断；Codex 于同日按当前 Windows 工作树复核运行时与 registry
 > 结论：**代码编排链已就绪，真实数据为零。7 维度中 5 个为 0% 真实，2 个为部分就绪。**
 
+> 2026-07-23 复核更新：Batch22 exact-218、Phase 4.3 和水车局部 8 方向
+> Blender 实渲 caller 已闭环；这提高了**合成场景验证就绪度**，但没有引入真实
+> 照片、真实 mesh 或真实纹理，因此不改变“真实度 0%”的结论。
+
 ## 1. 一句话结论
 
 仓库是一台精密的"烤箱"（管线+契约+Viewer），但没有"食材"（真实照片/视频），也没有完成生产级 3DGS 训练。Windows 本机已有 CPU COLMAP、受限 Brush 和 Blender；真正缺的是**真实采集输入、适合生产训练的 CUDA/云 GPU，以及由它们产生的真实训练产物**。所有 fail-closed 门都在正确地阻止合成代理冒充实测重建。
@@ -23,6 +27,28 @@
 | 照片真实感 | **0%** | 10% | COLMAP 已就绪，但无真实数据、生产训练和真实训练产物 |
 
 注：百分比表示"就绪度"而非"完成度"。0% 真实 = 无任何真实数据/几何；代码就绪度 = 管线机制是否可用。
+
+### 2.1 2026-07-23 fresh 合成场景证据
+
+- environment 175-root build：`build_id=c572ca037b39d5ae5694c1ea81afcfc0b9742e20d63d7ef0aff0123cc0444e99`，
+  report SHA `c6c63028559307b767418b235631441debcfa2643848eacea95f751314666006`；
+- reciprocal exact-218：`build_id=ebb936346ea2f31a4d551f6fa9bf64d5e48bcac46593fa0ff195b34d699f6cdd`，
+  `.blend` SHA `b13b435310f5505a98e6f181a506a5663acabbdca102498cda47242df552cf3c`，
+  report SHA `3421d3f199e954773588b39548be271cb6db16ff7e83b4d2c0dc5e0dd05c03bc`；
+- Phase 4.3：路线 `6/6`、模块对 `15/15`、环境相交 `6/6`、拓扑连接 `6/6`；
+- 水车局部环绕：plan SHA
+  `b01a71b5b85df854cc07d2f757a4c694eb96c5b320d8c5b6d31ba1ddf4ad0b64`，
+  final report SHA
+  `4ce4bc97ffce2af6f7748cecead9b3f10f2670383ff008878f4722d278e52d05`；
+  `8/8` 帧通过机器门，构件与水轮均为 `7/8` 可见，
+  `audit-waterwheel-az000` 记录为桥体造成的结构性遮挡。
+
+上述报告仍显式声明 `synthetic=true`、`verification_level=L0`、
+`geometry_usability=preview-only`、`training_use=forbidden-as-multiview` 和
+`trust_effect=none-quality-filter-only`。机器通过只能证明调用、绑定、六层产物与
+质量门按合同执行，不能证明照片真实感。目视复核仍看到块体/切面几何、
+重复拉伸的石材与苔藓纹理、悬空平台与支撑缺失、灰色空世界、平面化的溪水/河床，
+以及部分方位的近物遮挡。
 
 ## 3. 逐维度事实证据
 
@@ -62,7 +88,7 @@
 **当前状态**：几何和纹理均为合成
 
 - 看到的是"彩色盒子村庄"（硬编码颜色的程序化高斯聚簇），不是照片级场景
-- Blender 实渲预览包含 PBR 材质，但仍是稀疏块体村庄；最新 exact-218 build 为 `e60ef139bf76b36330ec690a3b2a296a2e3ba95b6dcf43bc71f6db77f7ba4964`，对应 `.blend` SHA 为 `a7fd3a33a9e9bb40ad1ef6fe737ed2fe0c3b3148063aa6409bd12f07231cd1dc`
+- Blender 实渲预览包含 PBR 材质，但仍是稀疏块体村庄；最新 exact-218 build 为 `ebb936346ea2f31a4d551f6fa9bf64d5e48bcac46593fa0ff195b34d699f6cdd`，对应 `.blend` SHA 为 `b13b435310f5505a98e6f181a506a5663acabbdca102498cda47242df552cf3c`
 - 它声明 `geometry_usability=preview-only`、`fidelity=simplified-pbr-not-render-parity`
 
 ### 3.4 360° 视角 — 40% 就绪

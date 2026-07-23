@@ -15,7 +15,7 @@
 
 | 轨道 | 当前事实 | 尚缺 |
 |---|---|---|
-| exact-218 合成场景 | Batch21 Phase 4.3 四组全绿、六角色 `6/6 accepted` | Batch22 材质修复后的 fresh build、八方向实渲与视觉验收 |
+| exact-218 合成场景 | Batch22 fresh exact-218、Phase 4.3、8 方向六层实渲机器门已闭环 | 目视仍有悬空结构、平面水体、重复纹理、空世界与遮挡 |
 | 无限坐标漫游框架 | Viewer、分块、LOD、负坐标、ETag、按需生成可用 | 当前按需内容仍是合成代理，不是真实重建 |
 | 真实照片/视频重建 | 摄取、COLMAP 接口、对齐、SH、分块、Viewer 外围机制可用 | 真实数据、accepted SfM、云 GPU 训练产物、真实导入和修复均不存在 |
 
@@ -38,11 +38,15 @@ Codex 已在 `2026-07-23` 追加完成：
 - Batch22 `12/12` imagegen 输入、原尺寸 QA、逐图 prompt/SHA 绑定和干净 Release；
 - Release 证据见 `FEEDBACK-IMAGE2-026-batch22-watermill-local360.md`。
 
-待 Codex 完成：
+Codex 已于 `2026-07-23` 完成：
 
-- exact-build local-orbit runner 与 canonical machine report；
-- fresh 175 → exact-218 → Phase 4.3 → 六角色 → 八方向六层/post-render v2；
-- Batch22 最终 handoff 与 README。
+- fresh 175-root → exact-218 → Phase 4.3；
+- exact-build local-orbit runner、地形跟随净空和 canonical machine report；
+- 8 方向六层/post-render v2：`8/8` 帧通过，构件/水轮均 `7/8`；
+- final report SHA
+  `4ce4bc97ffce2af6f7748cecead9b3f10f2670383ff008878f4722d278e52d05`。
+
+这个闭环是 `synthetic / L0 / preview-only`，不是真实 3D 验收。
 
 这些路径由 Codex 所有：
 
@@ -96,6 +100,31 @@ P0 sign-off 后，GLM 应继续：
 3. 写端到端负向测试：篡改任意一个输入字节、config、log、PLY 或 quality report
    都必须阻止 trusted import；
 4. 交付一个**合成小 canary**只能证明 caller 闭环，不得称真实场景完成。
+
+### P1 caller 当前 review 结论（针对 `5fe4882`）
+
+89 个聚焦测试通过，但真实 cloud runner 仍有下列必修项，详见
+`REVIEW-CODEX-023-glm-p1-callers.md`：
+
+1. request 绑定的 `operator-intent-config.yml` 与 nerfstudio 训练后产生的实际
+   `config.yml` 必然不同，默认 drift policy 会拒绝真实 receipt；
+2. `SEED/MAX_RES/TOTAL_STEPS` 只写进意图文件，尚未传给实际
+   `ns-train` 命令；
+3. `ns-process-data` 仍受 `set -euo pipefail` 控制，预处理失败会在生成
+   failed result 之前直接退出；
+4. 新 canary 仍是 `engine=mock`、无 capture manifest 的 content-only 路径，
+   尚未证明 non-mock `training_allowed=true` caller。
+
+GLM 下一轮应按上述顺序修复，并提供 bash 语法检查、命令行快照、
+非 mock 合成 COLMAP canary 和字节篡改反例。不得用现有 mock canary 宣称真实 caller 完成。
+
+### P2 — 合成几何的高价值修复（可与外部真实数据并行）
+
+1. 对桥下/水车模块做支撑拓扑和地形贴合的机器审计，拒绝悬空 slab；
+2. 把 creek-bed cut、水面和步行可达区分开，避免相机进入溪床体积；
+3. 给 exact-218 补 world/sky 与支撑关系，但不得用背景掩盖坏几何；
+4. 每个修复都用 fresh build + Phase 4.3 + local-orbit 机器报告交付，
+   不触碰 Codex 的 local-orbit caller 路径。
 
 ## 4. GLM 每轮回执格式
 

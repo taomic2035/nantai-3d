@@ -425,6 +425,14 @@ ZIP SHA-256 为 `1f842f8ce5eb52bafb5bb6d8a581816e1c7571187537e45ace6af669365fb07
 参考，未验证无缝平铺且不含 normal/roughness/metallic/displacement 通道。消费后仍须重建 exact
 Blender 场景，并通过平移相机六层实渲、visibility 与 post-render v2 才能形成漫游验收证据。
 
+Batch22 的 fresh exact-218 和 8 方向 local-orbit caller 已于 2026-07-23 完成机器复核：
+`8/8` 帧通过六层/post-render 门，水轮与整体构件均在 `7/8` 帧可见；
+final report SHA 为
+`4ce4bc97ffce2af6f7748cecead9b3f10f2670383ff008878f4722d278e52d05`。但它仍是
+`synthetic / L0 / preview-only / forbidden-as-multiview`，目视仍有悬空结构、简化材质、
+平面水体与桥体遮挡；完整证据见
+[Batch22 exact-218/local-360 回执](handoff/FEEDBACK-HANDOFF-CODEX-027-batch22-exact218-local360.md)。
+
 ## 核心工作流
 
 ### 1. 混合媒体输入
