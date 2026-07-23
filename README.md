@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 44 张路线/包络/跨分块过渡/方向/模块板/构造与材质设计输入，均有 SHA 与来源边界 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 102 张路线/包络/跨分块过渡/方向/模块板/构造与材质设计输入（Batch 8–14 各 6 张 + Batch 20–21 各 8 张 + Batch 22 12 张 + Batch 23–24 各 16 张），均有 SHA 与来源边界 |
 | 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
 | 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
