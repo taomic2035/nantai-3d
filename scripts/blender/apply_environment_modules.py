@@ -338,13 +338,23 @@ class MeshAssembler:
     def __init__(self):
         self.vertices = []
         self.faces = []
+        self.component_counts = {}
+        self.component_vertex_ranges = []
 
-    def add(self, vertices, faces):
+    def mark_component(self, label, start_vertex):
+        self.component_counts[label] = self.component_counts.get(label, 0) + 1
+        self.component_vertex_ranges.append(
+            (label, start_vertex, len(self.vertices)),
+        )
+
+    def add(self, vertices, faces, component=None):
         offset = len(self.vertices)
         self.vertices.extend(tuple(float(value) for value in row) for row in vertices)
         self.faces.extend(tuple(offset + index for index in face) for face in faces)
+        if component is not None:
+            self.mark_component(component, offset)
 
-    def add_box(self, center, size, yaw=0.0):
+    def add_box(self, center, size, yaw=0.0, component=None):
         cx, cy, cz = center
         sx, sy, sz = size
         hx, hy, hz = sx / 2.0, sy / 2.0, sz / 2.0
@@ -370,9 +380,18 @@ class MeshAssembler:
                 (0, 2, 6, 4),
                 (1, 5, 7, 3),
             ),
+            component=component,
         )
 
-    def add_cylinder(self, center, radius, height, segments=16, axis="z"):
+    def add_cylinder(
+        self,
+        center,
+        radius,
+        height,
+        segments=16,
+        axis="z",
+        component=None,
+    ):
         cx, cy, cz = center
         vertices = []
         for end in (-height / 2.0, height / 2.0):
@@ -408,7 +427,123 @@ class MeshAssembler:
             faces.append((index, following, segments + following, segments + index))
             faces.append((bottom_center, following, index))
             faces.append((top_center, segments + index, segments + following))
-        self.add(vertices, faces)
+        self.add(vertices, faces, component=component)
+
+    def add_annulus_xz(
+        self,
+        center,
+        inner_radius,
+        outer_radius,
+        depth,
+        segments=32,
+        component=None,
+    ):
+        cx, cy, cz = center
+        vertices = []
+        for y_offset in (-depth / 2.0, depth / 2.0):
+            for index in range(segments):
+                angle = math.tau * index / segments
+                cosine, sine = math.cos(angle), math.sin(angle)
+                vertices.extend(
+                    (
+                        (
+                            cx + outer_radius * cosine,
+                            cy + y_offset,
+                            cz + outer_radius * sine,
+                        ),
+                        (
+                            cx + inner_radius * cosine,
+                            cy + y_offset,
+                            cz + inner_radius * sine,
+                        ),
+                    ),
+                )
+        side_stride = segments * 2
+        faces = []
+        for index in range(segments):
+            following = (index + 1) % segments
+            front_outer = index * 2
+            front_inner = front_outer + 1
+            next_front_outer = following * 2
+            next_front_inner = next_front_outer + 1
+            back_outer = side_stride + front_outer
+            back_inner = back_outer + 1
+            next_back_outer = side_stride + next_front_outer
+            next_back_inner = next_back_outer + 1
+            faces.extend(
+                (
+                    (
+                        front_outer,
+                        next_front_outer,
+                        next_front_inner,
+                        front_inner,
+                    ),
+                    (
+                        back_outer,
+                        back_inner,
+                        next_back_inner,
+                        next_back_outer,
+                    ),
+                    (
+                        front_outer,
+                        back_outer,
+                        next_back_outer,
+                        next_front_outer,
+                    ),
+                    (
+                        front_inner,
+                        next_front_inner,
+                        next_back_inner,
+                        back_inner,
+                    ),
+                ),
+            )
+        self.add(vertices, faces, component=component)
+
+    def add_oriented_prism_xz(
+        self,
+        center,
+        radial,
+        tangential,
+        depth,
+        angle,
+        component=None,
+    ):
+        cx, cy, cz = center
+        half_radial = radial / 2.0
+        half_tangential = tangential / 2.0
+        cosine, sine = math.cos(angle), math.sin(angle)
+        vertices = []
+        for y_offset in (-depth / 2.0, depth / 2.0):
+            for radial_offset, tangential_offset in (
+                (-half_radial, -half_tangential),
+                (half_radial, -half_tangential),
+                (half_radial, half_tangential),
+                (-half_radial, half_tangential),
+            ):
+                vertices.append(
+                    (
+                        cx
+                        + radial_offset * cosine
+                        - tangential_offset * sine,
+                        cy + y_offset,
+                        cz
+                        + radial_offset * sine
+                        + tangential_offset * cosine,
+                    ),
+                )
+        self.add(
+            vertices,
+            (
+                (0, 3, 2, 1),
+                (4, 5, 6, 7),
+                (0, 1, 5, 4),
+                (1, 2, 6, 5),
+                (2, 3, 7, 6),
+                (3, 0, 4, 7),
+            ),
+            component=component,
+        )
 
     def add_quad(self, corners):
         self.add(corners, ((0, 1, 2, 3),))
@@ -767,20 +902,48 @@ def _bridge_geometry(part_id, recipe):
         mesh.add_box((-175.0, -115.0, 38.92), (10.5, 28.0, 0.10))
     elif part_id == "waterwheel-wheel-001":
         anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)
-        mesh.add_ring((anchor_x, anchor_y, anchor_z), 3.05, 0.28, 0.34)
-        for index in range(8):
-            angle = index * math.pi / 4.0
-            mesh.add_box(
-                (
-                    anchor_x + math.cos(angle) * 1.45,
+        anchor = (anchor_x, anchor_y, anchor_z)
+        mesh.add_annulus_xz(
+            anchor,
+            2.55,
+            3.15,
+            0.36,
+            segments=32,
+            component="annular_rim",
+        )
+        mesh.add_cylinder(
+            anchor,
+            0.42,
+            0.52,
+            24,
+            axis="y",
+            component="hub",
+        )
+        for index in range(12):
+            angle = index * math.tau / 12.0
+            mesh.add_oriented_prism_xz(
+                center=(
+                    anchor_x + 1.48 * math.cos(angle),
                     anchor_y,
-                    anchor_z + math.sin(angle) * 1.45,
+                    anchor_z + 1.48 * math.sin(angle),
                 ),
-                (
-                    max(0.24, abs(math.cos(angle)) * 3.0),
-                    0.22,
-                    max(0.24, abs(math.sin(angle)) * 3.0),
+                radial=2.20,
+                tangential=0.18,
+                depth=0.24,
+                angle=angle,
+                component="spoke",
+            )
+            mesh.add_oriented_prism_xz(
+                center=(
+                    anchor_x + 3.22 * math.cos(angle),
+                    anchor_y,
+                    anchor_z + 3.22 * math.sin(angle),
                 ),
+                radial=0.48,
+                tangential=0.82,
+                depth=1.12,
+                angle=angle,
+                component="paddle",
             )
     elif part_id == "waterwheel-axle-001":
         anchor_x, anchor_y, anchor_z = _waterwheel_anchor(recipe)

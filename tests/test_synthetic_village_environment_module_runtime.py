@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import math
 import sys
 from pathlib import Path
@@ -145,6 +146,46 @@ def test_waterwheel_geometry_uses_plan_anchor(
         assert tuple(after[axis] - before[axis] for axis in range(3)) == pytest.approx(
             (10.0, 20.0, 30.0),
         )
+
+
+def test_waterwheel_is_open_twelve_spoke_twelve_paddle_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _load_blender_runtime(monkeypatch)
+    anchor = (-185.2, -115.0, 43.15)
+    wheel = runtime._bridge_geometry(
+        "waterwheel-wheel-001",
+        {"waterwheel_assembly_anchor_m": list(anchor)},
+    )
+
+    assert wheel.component_counts == {
+        "annular_rim": 1,
+        "hub": 1,
+        "spoke": 12,
+        "paddle": 12,
+    }
+    assert all(all(math.isfinite(value) for value in vertex) for vertex in wheel.vertices)
+    assert all(len(set(face)) >= 3 for face in wheel.faces)
+
+    rim_ranges = [
+        (start, end)
+        for label, start, end in wheel.component_vertex_ranges
+        if label == "annular_rim"
+    ]
+    assert len(rim_ranges) == 1
+    start, end = rim_ranges[0]
+    rim_radii = [
+        math.hypot(vertex[0] - anchor[0], vertex[2] - anchor[2])
+        for vertex in wheel.vertices[start:end]
+    ]
+    assert min(rim_radii) >= 2.50
+    assert max(rim_radii) <= 3.20
+    assert min(rim_radii) == pytest.approx(2.55)
+    assert max(rim_radii) == pytest.approx(3.15)
+
+    source = inspect.getsource(runtime._bridge_geometry)
+    assert "range(8)" not in source
+    assert "mesh.add_ring" not in source
 
 
 def _base_build(tmp_path: Path) -> SimpleNamespace:
