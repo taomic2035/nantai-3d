@@ -21,6 +21,12 @@ workspace 训练出来的（Brush / INRIA 原版这类直接吃 workspace 且保
 云端 nerfstudio 路线会重跑 COLMAP 并 re-center/rescale，产物不在本机 sparse 坐标系里，
 **不要**对它用这个参数（见 pipeline/splat_provenance.py 的限制一节）。
 
+可选 `--training-result` + `--training-request`：传入云 GPU 训练 provenance handshake
+的两个 manifest，验证内容闭包（输入 SHA 匹配、PLY 字节匹配、训练状态一致）。
+验证通过时在 evidence 中追加 `training_provenance.v1=<result_sha>`——**不改变**
+metric_status 或 geo_aligned（PLY 仍是 sfm-local / preview-only）。
+验证不通过则 fail-closed 拒绝生成契约，除非显式 `--allow-unverified-training`（开发用）。
+
 用法:
     python scripts/prepare_import.py trained/point_cloud.ply [--synthetic]
     # 生成 recon/registration.json + recon/splat-input.json, 并打印导入命令
@@ -50,12 +56,20 @@ from pipeline.recon_schema import (  # noqa: E402
 )
 
 
-def _local_frame(synthetic: bool) -> CoordinateFrame:
+def _local_frame(
+    synthetic: bool,
+    extra_evidence: tuple[str, ...] = (),
+) -> CoordinateFrame:
     """外部训练产物的默认坐标契约：任意尺度、无地理对齐（诚实，不假装米制）。
 
     synthetic=True 只改申报的来源 provenance（SYNTHETIC + 证据标签），刻意不改
     units/metric_status —— 申报合成是降级声明，不得顺带夹带任何米制提升。
+
+    extra_evidence 追加到 evidence 元组——用于 training_provenance.v1=<sha>
+    等前缀证据字符串。**只追加证据，不改 metric_status / geo_aligned**。
     """
+    base_evidence = (["external-3dgs-import", "synthetic-source-declared"]
+                     if synthetic else ["external-3dgs-import"])
     return CoordinateFrame(
         frame_id="synthetic-local" if synthetic else "sfm-local",
         handedness=Handedness.RIGHT,
@@ -64,8 +78,7 @@ def _local_frame(synthetic: bool) -> CoordinateFrame:
         metric_status=MetricStatus.ARBITRARY,
         geo_aligned=GeoAlignment.UNALIGNED,
         provenance=FrameProvenance.SYNTHETIC if synthetic else FrameProvenance.SFM,
-        evidence=["external-3dgs-import", "synthetic-source-declared"]
-        if synthetic else ["external-3dgs-import"],
+        evidence=tuple(base_evidence) + extra_evidence,
     )
 
 
@@ -74,9 +87,14 @@ def _write_lf(path: Path, text: str) -> None:
     path.write_text(text + "\n", encoding="utf-8", newline="\n")
 
 
-def prepare(ply: Path, out_dir: Path, session_id: str,
-            synthetic: bool = False) -> tuple[Path, Path]:
-    frame = _local_frame(synthetic)
+def prepare(
+    ply: Path,
+    out_dir: Path,
+    session_id: str,
+    synthetic: bool = False,
+    extra_evidence: tuple[str, ...] = (),
+) -> tuple[Path, Path]:
+    frame = _local_frame(synthetic, extra_evidence=extra_evidence)
     reg = RegistrationResult(
         schema_version=2,
         engine="external",  # honest: not colmap/mock — an external-declared import
@@ -98,6 +116,64 @@ def prepare(ply: Path, out_dir: Path, session_id: str,
     _write_lf(reg_path, reg.model_dump_json(indent=2))
     _write_lf(splat_path, splat.model_dump_json(indent=2))
     return reg_path, splat_path
+
+
+def _validate_training_provenance(
+    ply: Path,
+    training_result_path: Path,
+    training_request_path: Path,
+) -> tuple[bool, str | None]:
+    """验证云 GPU 训练 provenance handshake 的内容闭包。
+
+    返回 (content_closed, result_sha)。
+    - content_closed=True: 输入/配置/输出/环境内容闭包通过且训练已完成，
+      result_sha 可追加到 evidence。
+    - content_closed=False: 验证失败，调用者应 fail-closed。
+
+    诚实边界：prepare_import **不**执行 SfM registration 质量门，故
+    ``registration_quality_passed`` 恒为 False，``TrainingTrust.is_trustworthy``
+    恒为 False。evidence 字符串 ``training_provenance.v1=<sha>`` 仅证明内容闭包，
+    **不**隐含 registration quality 通过、模型可信、米制或真实照片。
+    """
+    from pipeline.training_provenance import (
+        TrainingRequest,
+        TrainingResult,
+        derive_training_trust,
+        result_canonical_sha256,
+        validate_training_provenance,
+    )
+
+    request = TrainingRequest.model_validate_json(
+        training_request_path.read_text(encoding="utf-8"))
+    result = TrainingResult.model_validate_json(
+        training_result_path.read_text(encoding="utf-8"))
+
+    ply_bytes = ply.read_bytes()
+    try:
+        validate_training_provenance(result, request, ply_bytes)
+    except ValueError as exc:
+        print(f"[TRAINING-PROVENANCE-FAIL] {exc}", file=sys.stderr)
+        return False, None
+
+    # Derive trust honestly: prepare_import does NOT verify SfM registration
+    # quality, so registration_quality_passed=False.  The evidence string is
+    # gated on content closure only — never on is_trustworthy (which requires
+    # registration quality that we deliberately do not check here).
+    trust = derive_training_trust(
+        result, request, ply_bytes,
+        registration_quality_passed=False,
+    )
+    if not trust.content_closed:
+        print(f"[TRAINING-PROVENANCE-FAIL] content closure not verified "
+              f"(training_status.state={result.training_status.state})",
+              file=sys.stderr)
+        return False, None
+
+    result_sha = result_canonical_sha256(result)
+    print(f"[TRAINING-PROVENANCE-OK] content closure verified, "
+          f"result_sha={result_sha[:12]}... "
+          f"(note: registration quality NOT checked by prepare_import)")
+    return True, result_sha
 
 
 def _check_consistency(ply: Path, sparse: Path) -> bool:
@@ -140,15 +216,50 @@ def main(argv: list[str] | None = None) -> int:
                     help="声称本 ply 训练自某 COLMAP workspace 时, 传其 "
                          "sparse/0/points3D.txt 做几何一致性检查 (对不上则 fail-closed; "
                          "只能证伪不能证实; 不适用于云端 nerfstudio 重跑 COLMAP 的路线)")
+    ap.add_argument("--training-result", type=Path, default=None,
+                    help="云 GPU 训练 provenance result manifest (training-result.json); "
+                         "需与 --training-request 配对, 验证内容闭包")
+    ap.add_argument("--training-request", type=Path, default=None,
+                    help="云 GPU 训练 provenance request manifest (training-request.json); "
+                         "需与 --training-result 配对")
+    ap.add_argument("--allow-unverified-training", action="store_true",
+                    help="跳过 training provenance 验证失败时的 fail-closed (仅开发用; "
+                         "不产生 training_provenance evidence)")
     args = ap.parse_args(argv)
     if not args.ply.is_file():
         raise SystemExit(f"文件不存在: {args.ply}")
+
+    # Training provenance handshake (optional).  When --training-result is
+    # given, verify content closure and append an evidence string on success.
+    # Failure is fail-closed unless --allow-unverified-training is set.
+    extra_evidence: tuple[str, ...] = ()
+    if args.training_result is not None:
+        if args.training_request is None:
+            raise SystemExit("--training-result 需要与 --training-request 配对使用")
+        if not args.training_result.is_file():
+            raise SystemExit(f"文件不存在: {args.training_result}")
+        if not args.training_request.is_file():
+            raise SystemExit(f"文件不存在: {args.training_request}")
+        content_closed, result_sha = _validate_training_provenance(
+            args.ply, args.training_result, args.training_request)
+        if not content_closed:
+            if not args.allow_unverified_training:
+                print("[FAIL-CLOSED] training provenance 验证失败; "
+                      "加 --allow-unverified-training 可跳过 (仅开发用, 不产生 evidence)",
+                      file=sys.stderr)
+                return 1
+            print("[WARN] --allow-unverified-training: 跳过 training provenance, "
+                  "不追加 evidence", file=sys.stderr)
+        elif result_sha:
+            extra_evidence = (f"training_provenance.v1={result_sha}",)
+
     if args.colmap_sparse is not None and not _check_consistency(
         args.ply, args.colmap_sparse
     ):
         return 1
     reg_path, splat_path = prepare(args.ply, args.out_dir, args.session_id,
-                                   synthetic=args.synthetic)
+                                   synthetic=args.synthetic,
+                                   extra_evidence=extra_evidence)
     print(f"[OK] 已生成:\n  {reg_path}\n  {splat_path}\n")
     print("下一步导入 (非米制 frame 必须 --dedup-voxel 0):")
     print(f"  python -m pipeline.reconstruct --engine import "
