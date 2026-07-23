@@ -29,6 +29,7 @@ from pipeline.synthetic_village.local_orbit_runner import (
     LocalOrbitFrameEvidence,
     LocalOrbitInstancePixelCount,
     LocalOrbitRenderFrameRequest,
+    _remove_local_orbit_staging,
     build_local_orbit_audit_report,
     build_local_orbit_render_frame_request,
     canonical_local_orbit_audit_report_bytes,
@@ -675,6 +676,35 @@ def test_runner_removes_outer_staging_when_any_render_fails(tmp_path: Path) -> N
 
     assert output_root.is_dir()
     assert tuple(output_root.iterdir()) == ()
+
+
+def test_staging_cleanup_retries_transient_windows_directory_race(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    staging = tmp_path / ".staging-transient"
+    staging.mkdir()
+    attempts = []
+
+    def transient_remove(path: Path, *, parent: Path) -> None:
+        attempts.append((path, parent))
+        if len(attempts) < 3:
+            raise OSError(145, "directory not empty")
+        path.rmdir()
+
+    monkeypatch.setattr(
+        "pipeline.synthetic_village.local_orbit_runner._remove_private_staging",
+        transient_remove,
+    )
+
+    _remove_local_orbit_staging(
+        staging,
+        parent=tmp_path,
+        sleep=lambda _: None,
+    )
+
+    assert len(attempts) == 3
+    assert not staging.exists()
 
 
 def test_blender_adapter_validates_local_orbit_boundary_before_engine() -> None:

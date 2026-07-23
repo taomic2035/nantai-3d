@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from typing import Annotated, Literal
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .production_profile import (
@@ -102,6 +103,29 @@ class LocalOrbitAuditPlan(FrozenModel):
 
 def _q3(values: tuple[float, float, float]) -> tuple[float, float, float]:
     return tuple(round(float(value), 3) for value in values)
+
+
+def _exact_rotation_pose(**kwargs):
+    """Keep local audit rotations orthonormal before Blender float32 storage."""
+
+    pose = _pose(**kwargs)
+    position = np.asarray(pose.position_m, dtype=float)
+    target = np.asarray(pose.look_at_m, dtype=float)
+    forward = target - position
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, np.asarray((0.0, 0.0, 1.0)))
+    right /= np.linalg.norm(right)
+    down = np.cross(forward, right)
+    matrix = np.eye(4, dtype=float)
+    matrix[:3, 0] = right
+    matrix[:3, 1] = down
+    matrix[:3, 2] = forward
+    matrix[:3, 3] = position
+    exact = tuple(
+        tuple(float(matrix[row, column]) for column in range(4))
+        for row in range(4)
+    )
+    return pose.model_copy(update={"c2w_opencv": exact})
 
 
 def canonical_local_orbit_plan_bytes(plan: LocalOrbitAuditPlan) -> bytes:
@@ -266,7 +290,7 @@ def materialize_local_orbit_render_plan(
         strict=True,
     ):
         replacements.append(
-            _pose(
+            _exact_rotation_pose(
                 camera_id=source_camera.camera_id,
                 group_id="audit-overview",
                 sequence_index=source_camera.sequence_index,
@@ -289,7 +313,7 @@ def materialize_local_orbit_render_plan(
     ):
         angle = math.radians(azimuth)
         replacements.append(
-            _pose(
+            _exact_rotation_pose(
                 camera_id=source_camera.camera_id,
                 group_id="audit-overview",
                 sequence_index=source_camera.sequence_index,

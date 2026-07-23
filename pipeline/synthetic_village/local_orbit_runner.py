@@ -692,6 +692,24 @@ class LocalOrbitAuditResult:
     report_path: Path
 
 
+def _remove_local_orbit_staging(
+    path: Path,
+    *,
+    parent: Path,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Retry only transient Windows directory races on proven staging paths."""
+
+    for attempt in range(5):
+        try:
+            _remove_private_staging(path, parent=parent)
+            return
+        except OSError:
+            if attempt == 4:
+                raise
+            sleep(0.05 * (2**attempt))
+
+
 def _run_exact_build_frame(
     *,
     verified_build: VerifiedReciprocalProductionBuild,
@@ -1020,7 +1038,7 @@ def _run_exact_build_frame(
         )
     finally:
         if staging.exists():
-            _remove_private_staging(staging, parent=output_root)
+            _remove_local_orbit_staging(staging, parent=output_root)
 
 
 def _artifact_by_kind(
@@ -1164,4 +1182,4 @@ def run_local_orbit_audit(
         )
     finally:
         if outer_staging.exists():
-            _remove_private_staging(outer_staging, parent=output_root)
+            _remove_local_orbit_staging(outer_staging, parent=output_root)
