@@ -2,7 +2,7 @@
 
 > Date: 2026-07-23
 > Owner: GLM lane (HANDOFF-GLM-002 Task 3, P0.3 + P1)
-> Status: P0.3 hardening + P1 caller work committed; awaiting Codex review
+> Status: Implemented — Codex reviewed (REVIEW-CODEX-023); 4 findings fixed (commit `e587a23`); 2 canaries added
 > Baseline: `HANDOFF-GLM-005-current-gap-and-priority.md` §3 P0.3 + P1
 > Spec: `REVIEW-CODEX-022-glm-registration-training-trust-contracts.md`
 

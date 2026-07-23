@@ -2,8 +2,8 @@
 
 > Date: 2026-07-23
 > Owner: GLM lane (HANDOFF-GLM-002 Task 3)
-> Status: Design complete — awaiting Codex review
-> Priority: P1 (design-only; no runtime code modified)
+> Status: Implemented — Codex reviewed (REVIEW-CODEX-022); P0 findings fixed; Follow-up A/B done, C pending (Codex lane)
+> Priority: P1 (design-only at publication; implementation tracked in FEEDBACK-HANDOFF-GLM-006)
 
 ## 交付物
 
