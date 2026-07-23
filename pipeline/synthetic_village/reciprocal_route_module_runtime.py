@@ -361,6 +361,9 @@ class ReciprocalRouteBuildCounts(FrozenModel):
     module_canonical_roots: Literal[43] = 43
     canonical_roots: Literal[218] = 218
     module_mesh_objects: int = Field(ge=43)
+    textured_module_meshes: int = Field(ge=1)
+    valid_uv_module_meshes: int = Field(ge=1)
+    valid_surface_color_module_meshes: int = Field(ge=1)
 
 
 class ReciprocalRouteBuildValidation(FrozenModel):
@@ -375,6 +378,8 @@ class ReciprocalRouteBuildValidation(FrozenModel):
     finite_nonempty_module_meshes: Literal[True]
     material_bindings_match: Literal[True]
     design_sources_are_provenance_only: Literal[True]
+    uv_contracts_match: Literal[True]
+    surface_color_contracts_match: Literal[True]
 
 
 class ReciprocalRouteArtifact(FrozenModel):
@@ -438,6 +443,16 @@ class ReciprocalRouteBuildReport(FrozenModel):
         ):
             raise ValueError(
                 "reciprocal-route build report registry is not exact 1..218",
+            )
+        counts = self.counts
+        if (
+            counts.module_mesh_objects,
+            counts.textured_module_meshes,
+            counts.valid_uv_module_meshes,
+            counts.valid_surface_color_module_meshes,
+        ) != (43, 43, 43, 43):
+            raise ValueError(
+                "reciprocal-route build report material counts are not exact 43",
             )
         return self
 

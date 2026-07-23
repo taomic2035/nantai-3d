@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 import subprocess
@@ -267,6 +268,9 @@ def _build_report_payload(
             "module_canonical_roots": 43,
             "canonical_roots": 218,
             "module_mesh_objects": 43,
+            "textured_module_meshes": 43,
+            "valid_uv_module_meshes": 43,
+            "valid_surface_color_module_meshes": 43,
         },
         "validation": {
             "base_registry_matches": True,
@@ -274,6 +278,8 @@ def _build_report_payload(
             "finite_nonempty_module_meshes": True,
             "material_bindings_match": True,
             "design_sources_are_provenance_only": True,
+            "uv_contracts_match": True,
+            "surface_color_contracts_match": True,
         },
         "artifact": {
             "name": RECIPROCAL_ROUTE_ARTIFACT_NAME,
@@ -793,6 +799,130 @@ def _load_runtime_module(monkeypatch: pytest.MonkeyPatch):
     runtime = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runtime)
     return runtime
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "world-xy",
+        "dominant-axis-box",
+        "roof-slope",
+        "object-long-axis",
+        "leaf-card",
+    ],
+)
+def test_reciprocal_material_contract_accepts_bound_uv_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+    material = {
+        "uv_policy": policy,
+        "nv_nominal_tile_m": 0.8,
+        "nv_surface_color_input": "nv_surface_color",
+    }
+
+    assert runtime._material_contract(material) == (
+        policy,
+        0.8,
+        "nv_surface_color",
+    )
+
+
+@pytest.mark.parametrize(
+    "material",
+    [
+        {},
+        {
+            "uv_policy": "unknown",
+            "nv_nominal_tile_m": 1.0,
+            "nv_surface_color_input": "nv_surface_color",
+        },
+        {
+            "uv_policy": "world-xy",
+            "nv_nominal_tile_m": 0.0,
+            "nv_surface_color_input": "nv_surface_color",
+        },
+        {
+            "uv_policy": "world-xy",
+            "nv_nominal_tile_m": math.nan,
+            "nv_surface_color_input": "nv_surface_color",
+        },
+        {
+            "uv_policy": "world-xy",
+            "nv_nominal_tile_m": 1.0,
+            "nv_surface_color_input": "wrong",
+        },
+    ],
+)
+def test_reciprocal_material_contract_rejects_unbound_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    material: dict[str, object],
+) -> None:
+    runtime = _load_runtime_module(monkeypatch)
+
+    with pytest.raises(runtime.RuntimeBuildError, match="material contract"):
+        runtime._material_contract(material)
+
+
+def test_reciprocal_runtime_forbids_all_zero_uv_fallback() -> None:
+    source = (
+        _REPO_ROOT / "scripts/blender/apply_reciprocal_route_modules.py"
+    ).read_text(encoding="utf-8")
+
+    assert "mesh.uv_layers[0].data[corner.index].uv = (0.0, 0.0)" not in source
+    assert 'name="nv_uv0"' in source
+    assert 'name="nv_surface_color"' in source
+
+
+def test_environment_and_reciprocal_material_algorithms_are_source_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reciprocal = _load_runtime_module(monkeypatch)
+    script_path = _REPO_ROOT / "scripts/blender/apply_environment_modules.py"
+    spec = importlib.util.spec_from_file_location(
+        "_test_apply_environment_modules_material_parity",
+        script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace())
+    environment = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(environment)
+
+    for function_name in (
+        "_material_contract",
+        "_dominant_projection_axes",
+        "_polygon_uv_area",
+        "_project_polygon_uvs",
+        "_assign_projected_uvs",
+        "_ensure_white_surface_color",
+    ):
+        assert inspect.getsource(getattr(reciprocal, function_name)) == inspect.getsource(
+            getattr(environment, function_name),
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("counts", "textured_module_meshes"),
+        ("counts", "valid_uv_module_meshes"),
+        ("counts", "valid_surface_color_module_meshes"),
+        ("validation", "uv_contracts_match"),
+        ("validation", "surface_color_contracts_match"),
+    ],
+)
+def test_reciprocal_report_requires_material_contract_evidence(
+    runtime_request: ReciprocalRouteRuntimeRequest,
+    output_path: Path,
+    section: str,
+    field: str,
+) -> None:
+    payload = _build_report_payload(runtime_request, output_path=output_path)
+    del payload[section][field]
+
+    with pytest.raises(ValidationError):
+        ReciprocalRouteBuildReport.model_validate(payload)
 
 
 def _load_probe_runtime_module(monkeypatch: pytest.MonkeyPatch):
@@ -1739,6 +1869,9 @@ def _fake_blender_success(request_path: Path, staging: Path) -> None:
             "module_canonical_roots": 43,
             "canonical_roots": 218,
             "module_mesh_objects": 43,
+            "textured_module_meshes": 43,
+            "valid_uv_module_meshes": 43,
+            "valid_surface_color_module_meshes": 43,
         },
         "validation": {
             "base_registry_matches": True,
@@ -1746,6 +1879,8 @@ def _fake_blender_success(request_path: Path, staging: Path) -> None:
             "finite_nonempty_module_meshes": True,
             "material_bindings_match": True,
             "design_sources_are_provenance_only": True,
+            "uv_contracts_match": True,
+            "surface_color_contracts_match": True,
         },
         "artifact": {
             "name": RECIPROCAL_ROUTE_ARTIFACT_NAME,
