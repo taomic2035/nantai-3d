@@ -470,6 +470,43 @@ coverage_use=forbidden / trust_effect=none`。
 Phase 4.3、六层 visibility 与 post-render v2；完整清单与 QA 见
 [Batch23 image2 回执](handoff/FEEDBACK-IMAGE2-027-batch23-environment-envelope-support.md)。
 
+### Batch 24 外圈回望与构造剖面闭合参考
+
+[Batch 24 Reciprocal Perimeter & Section Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch24-2026-07-23)
+提供 16 张与 Batch23 环境扇区逐项绑定的设计输入：8 张从外圈向村庄回望的平移视点，以及
+8 张强调基础、挡墙、道路挖填、排水、水位和支撑传力路径的斜向构造研究。绑定只表示视觉上下文，
+不是相机标定、反向位姿或几何对应。
+
+```powershell
+$releaseDir = ".nantai-studio\release-inputs\batch24"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+
+gh release download synthetic-village-design-inputs-batch24-2026-07-23 `
+  --repo taomic2035/nantai-3d `
+  --dir $releaseDir
+
+$archive = Join-Path $releaseDir "synthetic-village-reciprocal-perimeter-section-pack-batch24-2026-07-23.zip"
+$sumFile = Join-Path $releaseDir "synthetic-village-reciprocal-perimeter-section-pack-batch24-2026-07-23.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 24 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch24" -Force
+```
+
+ZIP SHA-256 为 `1318656f2019889470bcf47d2765f6cfee335194e735995c104405936edc1723`，
+严格只含 16 张最终 PNG、16 份精确 prompt、manifest、使用说明与 payload checksum；没有
+私有 source bindings、QA 明细、rejected、旧批次源图或生成中间态。全部图像仍为
+`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
+metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
+coverage_use=forbidden / trust_effect=none`。
+
+这批图能更直接地指导反向表面、双向外圈路线和地形/基础闭合，但不能证明 360° 重建、任意坐标
+漫游、真实模型或真实纹理。消费后必须重建 exact Blender 场景和 chunk registry，再跑 reciprocal/
+seam、camera clearance、visibility、六层与 post-render v2；完整绑定、QA 和消费顺序见
+[Batch24 image2 回执](handoff/FEEDBACK-IMAGE2-028-batch24-reciprocal-perimeter-section.md)。
+
 ## 核心工作流
 
 ### 1. 混合媒体输入
