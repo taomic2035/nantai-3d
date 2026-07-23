@@ -1,4 +1,4 @@
-"""Tests for scripts/canary_gt_to_colmap.py coordinate-conversion math.
+"""Tests for scripts/canary_gt_to_colmap.py.
 
 The script converts synthetic-village canary renders (GT camera poses +
 depth EXR) into a COLMAP text dataset for direct 3DGS training (bypassing
@@ -7,15 +7,20 @@ cross-camera depth consistency) all depend on these pure-numpy functions
 being correct. A bug here would silently corrupt every camera pose or
 point cloud in the output.
 
-These tests cover the math layer only — ``main()`` requires actual render
-files (cameras/*.json, depth/*.exr, rgb/*.png) and is exercised by the
-synthetic-village canary pipeline, not here.
+Part 1 covers the math layer (rotmat↔quat, backproject↔project).
+Part 2 covers ``main()`` integration: the three self-checks fire on bad
+input, and a valid render set produces a well-formed COLMAP dataset.
+``load_depth`` is monkeypatched to avoid constructing real EXR files —
+the EXR I/O is a thin wrapper; the logic under test is the validation
+and file-generation flow.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -25,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.canary_gt_to_colmap import (  # noqa: E402
     backproject,
+    main,
     project,
     quat_to_rotmat,
     rotmat_to_quat,
@@ -238,3 +244,206 @@ class TestExpectedCoordinateConvention:
         # Center-pixel point (nearest to [3,0,0]) is at X ≈ 3
         center_dist = np.linalg.norm(pts_w - np.array([3.0, 0, 0]), axis=1)
         assert center_dist.min() < 0.5
+
+
+# ────────────────────────────────────────────────────────────────────
+# Part 2: main() integration — three self-checks + COLMAP file generation.
+# ────────────────────────────────────────────────────────────────────
+
+_INTR_A = {"fx": 100, "fy": 100, "cx": 50, "cy": 50,
+           "width_px": 100, "height_px": 100}
+_INTR_B = {"fx": 200, "fy": 200, "cx": 50, "cy": 50,
+           "width_px": 100, "height_px": 100}
+_EXPECTED_COORD = "opencv-c2w-right-down-forward-meters"
+
+
+def _make_camera_json(cam_id: str, c2w: np.ndarray, intr: dict,
+                      coord: str | None = None) -> str:
+    return json.dumps({
+        "camera_id": cam_id,
+        "intrinsics": intr,
+        "measured_c2w_opencv": c2w.tolist(),
+        "coordinate_system": coord or _EXPECTED_COORD,
+    }, ensure_ascii=False)
+
+
+def _write_png(path: Path, w: int = 100, h: int = 100) -> None:
+    img = np.full((h, w, 3), 128, dtype=np.uint8)
+    cv2.imwrite(str(path), img)
+
+
+def _make_renders(
+    tmp_path: Path,
+    *,
+    n_cams: int = 2,
+    coord_override: str | None = None,
+    c2w_override: np.ndarray | None = None,
+    depth_values: list[float] | None = None,
+) -> tuple[Path, dict[str, np.ndarray]]:
+    """Build a minimal canary render directory.
+
+    Returns ``(renders_dir, depth_maps)`` where ``depth_maps`` maps
+    ``cam_id → numpy array`` for monkeypatching ``load_depth``.
+    """
+    renders = tmp_path / "renders"
+    (renders / "cameras").mkdir(parents=True)
+    (renders / "rgb").mkdir(parents=True)
+    (renders / "depth").mkdir(parents=True)
+
+    identity = np.eye(4)
+    intr_sets = [_INTR_A, _INTR_B]
+    depths = depth_values or [10.0] * n_cams
+    depth_maps: dict[str, np.ndarray] = {}
+
+    for i in range(n_cams):
+        cid = f"cam_{i:03d}"
+        c2w = c2w_override if c2w_override is not None else identity
+        intr = intr_sets[i % len(intr_sets)]
+        coord = coord_override or _EXPECTED_COORD
+
+        (renders / "cameras" / f"{cid}.json").write_text(
+            _make_camera_json(cid, c2w, intr, coord), encoding="utf-8")
+        _write_png(renders / "rgb" / f"{cid}.png",
+                   intr["width_px"], intr["height_px"])
+        depth_maps[cid] = np.full(
+            (intr["height_px"], intr["width_px"]), depths[i])
+
+    return renders, depth_maps
+
+
+def _patch_load_depth(monkeypatch, depth_maps: dict[str, np.ndarray]) -> None:
+    """Monkeypatch ``load_depth`` to return constructed numpy arrays."""
+    import scripts.canary_gt_to_colmap as mod
+    monkeypatch.setattr(
+        mod, "load_depth",
+        lambda p: depth_maps[Path(p).stem])
+
+
+class TestMainSelfChecks:
+    """The three self-checks must fire before any COLMAP file is written."""
+
+    def test_no_camera_jsons_exits(self, tmp_path):
+        renders = tmp_path / "renders"
+        (renders / "cameras").mkdir(parents=True)
+        with pytest.raises(SystemExit, match="无相机 JSON"):
+            main([str(renders), str(tmp_path / "out")])
+
+    def test_wrong_coordinate_system_exits(self, tmp_path, monkeypatch):
+        renders, dm = _make_renders(
+            tmp_path, coord_override="blender-c2w-left-up-forward")
+        _patch_load_depth(monkeypatch, dm)
+        with pytest.raises(SystemExit, match="坐标系非预期"):
+            main([str(renders), str(tmp_path / "out")])
+
+    def test_reflection_matrix_exits(self, tmp_path, monkeypatch):
+        # diag(1, -1, 1) is orthogonal (R@R^T=I) but det=-1 → reflection
+        bad_c2w = np.diag([1.0, -1.0, 1.0, 1.0])
+        renders, dm = _make_renders(tmp_path, c2w_override=bad_c2w)
+        _patch_load_depth(monkeypatch, dm)
+        with pytest.raises(SystemExit, match="R 非刚性"):
+            main([str(renders), str(tmp_path / "out")])
+
+    def test_non_orthogonal_matrix_exits(self, tmp_path, monkeypatch):
+        # Shear: R@R^T != I, det ≈ 1 → fails rigid check
+        bad_rot = np.array([[1.0, 0.1, 0.0],
+                            [0.0, 1.0, 0.0],
+                            [0.0, 0.0, 1.0]])
+        bad_c2w = np.eye(4)
+        bad_c2w[:3, :3] = bad_rot
+        renders, dm = _make_renders(tmp_path, c2w_override=bad_c2w)
+        _patch_load_depth(monkeypatch, dm)
+        with pytest.raises(SystemExit, match="R 非刚性"):
+            main([str(renders), str(tmp_path / "out")])
+
+    def test_cross_camera_depth_mismatch_exits(self, tmp_path, monkeypatch):
+        # Two cameras at same position, depths 10 vs 20 → rel error = 1.0
+        renders, dm = _make_renders(tmp_path, depth_values=[10.0, 20.0])
+        _patch_load_depth(monkeypatch, dm)
+        with pytest.raises(SystemExit, match="跨相机深度不一致"):
+            main([str(renders), str(tmp_path / "out"), "--stride", "5"])
+
+
+class TestMainSuccess:
+    """A valid render set produces a well-formed COLMAP text dataset."""
+
+    def test_generates_colmap_files(self, tmp_path, monkeypatch):
+        renders, dm = _make_renders(tmp_path)
+        _patch_load_depth(monkeypatch, dm)
+        out = tmp_path / "out"
+        rc = main([str(renders), str(out), "--stride", "5"])
+        assert rc == 0
+
+        assert (out / "sparse" / "0" / "cameras.txt").is_file()
+        assert (out / "sparse" / "0" / "images.txt").is_file()
+        assert (out / "sparse" / "0" / "points3D.txt").is_file()
+        assert (out / "images" / "cam_000.png").is_file()
+        assert (out / "images" / "cam_001.png").is_file()
+
+    def test_two_distinct_intrinsics_yield_two_cameras(
+            self, tmp_path, monkeypatch):
+        renders, dm = _make_renders(tmp_path)
+        _patch_load_depth(monkeypatch, dm)
+        out = tmp_path / "out"
+        main([str(renders), str(out), "--stride", "5"])
+
+        cam_text = (out / "sparse" / "0" / "cameras.txt").read_text(
+            encoding="utf-8")
+        assert cam_text.count("PINHOLE") == 2
+
+    def test_identical_intrinsics_dedup_to_one_camera(
+            self, tmp_path, monkeypatch):
+        renders, dm = _make_renders(tmp_path)
+        _patch_load_depth(monkeypatch, dm)
+        # Rewrite cam_001 with same intrinsics as cam_000
+        cam0 = json.loads(
+            (renders / "cameras" / "cam_000.json").read_text(encoding="utf-8"))
+        cam1 = json.loads(
+            (renders / "cameras" / "cam_001.json").read_text(encoding="utf-8"))
+        cam1["intrinsics"] = cam0["intrinsics"]
+        (renders / "cameras" / "cam_001.json").write_text(
+            json.dumps(cam1, ensure_ascii=False), encoding="utf-8")
+
+        out = tmp_path / "out"
+        main([str(renders), str(out), "--stride", "5"])
+
+        cam_text = (out / "sparse" / "0" / "cameras.txt").read_text(
+            encoding="utf-8")
+        assert cam_text.count("PINHOLE") == 1
+
+    def test_images_txt_has_quaternion_and_translation(
+            self, tmp_path, monkeypatch):
+        renders, dm = _make_renders(tmp_path)
+        _patch_load_depth(monkeypatch, dm)
+        out = tmp_path / "out"
+        main([str(renders), str(out), "--stride", "5"])
+
+        img_text = (out / "sparse" / "0" / "images.txt").read_text(
+            encoding="utf-8")
+        lines = [line for line in img_text.strip().split("\n")
+                 if line and not line.startswith("#")]
+        assert len(lines) == 2  # 2 cameras → 2 data lines
+        # Each line: IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME (10 fields)
+        parts = lines[0].split()
+        assert len(parts) == 10
+        # Identity c2w → q = [1, 0, 0, 0], t = [0, 0, 0]
+        assert float(parts[1]) == pytest.approx(1.0)  # QW
+        assert parts[-1] == "cam_000.png"  # NAME
+
+    def test_points3d_has_backprojected_points(self, tmp_path, monkeypatch):
+        renders, dm = _make_renders(tmp_path)
+        _patch_load_depth(monkeypatch, dm)
+        out = tmp_path / "out"
+        main([str(renders), str(out), "--stride", "5"])
+
+        pts_text = (out / "sparse" / "0" / "points3D.txt").read_text(
+            encoding="utf-8")
+        lines = [line for line in pts_text.strip().split("\n")
+                 if line and not line.startswith("#")]
+        # stride=5 on 100×100 → 20×20 = 400 pts/cam × 2 cams = 800
+        assert len(lines) == 800
+        # Each line: POINT3D_ID X Y Z R G B ERROR
+        parts = lines[0].split()
+        assert len(parts) == 8
+        # Identity c2w + depth 10 → all points at Euclidean distance ≈ 10
+        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+        assert abs(np.sqrt(x ** 2 + y ** 2 + z ** 2) - 10.0) < 0.5
