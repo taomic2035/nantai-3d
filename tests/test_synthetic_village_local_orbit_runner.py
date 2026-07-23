@@ -210,7 +210,7 @@ def test_report_rejects_duplicate_render_id() -> None:
         _report(duplicate_render_id=True)
 
 
-def test_report_names_frame_where_waterwheel_assembly_is_absent() -> None:
+def test_report_records_one_natural_waterwheel_occlusion() -> None:
     plan = _plan()
     frames = tuple(_frame(plan, index) for index in range(8))
     frames = (
@@ -227,16 +227,41 @@ def test_report_names_frame_where_waterwheel_assembly_is_absent() -> None:
         *frames[1:],
     )
 
-    with pytest.raises(
-        ReciprocalProductionError,
-        match="assembly.*audit-waterwheel-az000",
-    ):
+    report = build_local_orbit_audit_report(
+        plan=plan,
+        build_report_sha256="d" * 64,
+        environment_module_build_report_sha256="e" * 64,
+        reciprocal_route_module_plan_sha256="a" * 64,
+        frames=frames,
+    )
+
+    assert report.assembly_visible_frame_count == 7
+    assert report.occluded_assembly_camera_ids == ("audit-waterwheel-az000",)
+
+
+def test_report_rejects_two_waterwheel_assembly_occlusions() -> None:
+    plan = _plan()
+    frames = list(_frame(plan, index) for index in range(8))
+    background_only = (
+        LocalOrbitInstancePixelCount(
+            instance_id=0,
+            pixel_count=1024 * 576,
+        ),
+    )
+    frames[0] = frames[0].model_copy(
+        update={"instance_pixel_counts": background_only},
+    )
+    frames[1] = frames[1].model_copy(
+        update={"instance_pixel_counts": background_only},
+    )
+
+    with pytest.raises(ReciprocalProductionError, match="more than one.*az000.*az045"):
         build_local_orbit_audit_report(
             plan=plan,
             build_report_sha256="d" * 64,
             environment_module_build_report_sha256="e" * 64,
             reciprocal_route_module_plan_sha256="a" * 64,
-            frames=frames,
+            frames=tuple(frames),
         )
 
 

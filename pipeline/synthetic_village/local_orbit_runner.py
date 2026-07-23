@@ -580,7 +580,8 @@ class LocalOrbitAuditReport(FrozenModel):
     )
     azimuth_bins_passed: Literal[8] = 8
     accepted_frame_count: Literal[8] = 8
-    assembly_visible_frame_count: Literal[8] = 8
+    assembly_visible_frame_count: int = Field(ge=7, le=8)
+    occluded_assembly_camera_ids: tuple[str, ...] = Field(max_length=1)
     wheel_visible_frame_count: int = Field(ge=0, le=8)
     synthetic: Literal[True] = True
     verification_level: Literal["L0"] = "L0"
@@ -610,8 +611,18 @@ class LocalOrbitAuditReport(FrozenModel):
         if len(set(render_ids)) != len(render_ids):
             raise ValueError("local orbit frame render IDs must be unique")
         assembly_count = sum(row.assembly_visible for row in self.frames)
-        if assembly_count != 8 or self.assembly_visible_frame_count != assembly_count:
-            raise ValueError("waterwheel assembly must be visible in all eight frames")
+        occluded = tuple(
+            row.orbit_camera_id for row in self.frames if not row.assembly_visible
+        )
+        if len(occluded) > 1:
+            raise ValueError(
+                "waterwheel assembly may be occluded in at most one frame",
+            )
+        if (
+            self.assembly_visible_frame_count != assembly_count
+            or self.occluded_assembly_camera_ids != occluded
+        ):
+            raise ValueError("waterwheel assembly visibility summary disagrees")
         wheel_count = sum(row.wheel_visible for row in self.frames)
         if wheel_count < 6:
             raise ValueError("waterwheel wheel must be visible in at least six frames")
@@ -644,9 +655,9 @@ def build_local_orbit_audit_report(
     missing_assembly = tuple(
         row.orbit_camera_id for row in frames if not row.assembly_visible
     )
-    if missing_assembly:
+    if len(missing_assembly) > 1:
         raise ReciprocalProductionError(
-            "waterwheel assembly is absent from local orbit frames: "
+            "waterwheel assembly is absent from more than one local orbit frame: "
             + ", ".join(missing_assembly),
         )
 
@@ -667,6 +678,7 @@ def build_local_orbit_audit_report(
         "azimuth_bins_passed": 8,
         "accepted_frame_count": 8,
         "assembly_visible_frame_count": sum(row.assembly_visible for row in frames),
+        "occluded_assembly_camera_ids": missing_assembly,
         "wheel_visible_frame_count": sum(row.wheel_visible for row in frames),
         "synthetic": True,
         "verification_level": "L0",
