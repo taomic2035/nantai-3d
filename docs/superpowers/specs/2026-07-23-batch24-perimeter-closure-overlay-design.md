@@ -66,9 +66,11 @@ section source SHA are part of canonical plan bytes.
 
 ## 4. Source and base bindings
 
-The plan binds the public Batch24 manifest and every accepted PNG by lowercase
-SHA-256. It uses the image bytes only as recorded design provenance; Blender
-does not infer dimensions, camera positions or geometry from pixels.
+The plan binds the private Batch24 candidate manifest and every accepted PNG by
+lowercase SHA-256. Those accepted payloads also exist in the clean public
+Release, but the build consumes the explicit private manifest path. It uses the
+image bytes only as recorded design provenance; Blender does not infer
+dimensions, camera positions or geometry from pixels.
 
 The runtime request additionally binds:
 
@@ -77,9 +79,9 @@ The runtime request additionally binds:
 - exact-218 build-report SHA-256;
 - exact-218 object-registry SHA-256;
 - Batch24 closure-plan SHA-256;
-- Batch24 public manifest SHA-256;
+- Batch24 private candidate manifest SHA-256;
 - Blender runtime script SHA-256;
-- material registry/binding SHA-256 values.
+- the verified exact-218 Blender material-binding-table SHA-256.
 
 Unknown, missing, uppercase, malformed or mismatched hashes fail closed.
 

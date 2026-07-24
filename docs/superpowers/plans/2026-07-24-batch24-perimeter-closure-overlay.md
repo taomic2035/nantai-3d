@@ -194,7 +194,7 @@ request = build_perimeter_closure_runtime_request(
     plan=closure_plan,
     batch24_manifest_path=batch24_manifest_path,
     blender_executable=blender_executable,
-    material_registry=material_registry,
+    repo_root=repo_root,
 )
 ```
 
@@ -234,7 +234,7 @@ def build_perimeter_closure_runtime_request(
     plan: PerimeterClosurePlan,
     batch24_manifest_path: Path,
     blender_executable: Path,
-    material_registry: AssetRegistry,
+    repo_root: Path = ROOT,
 ) -> PerimeterClosureRuntimeRequest: ...
 ```
 
@@ -246,8 +246,11 @@ reciprocal-route-build-report.json
 village-reciprocal-route.blend
 ```
 
-and bind their bytes plus Blender/script/material identities. The 48 appended
-registry rows must be derived from plan parts only.
+and bind their bytes plus Blender/script identities. The exact 14-row Blender
+material-binding table is inherited from and re-hashed against the verified
+exact-218 report; the unrelated PLY `AssetRegistry` is not treated as Blender
+material evidence. The 48 appended registry rows must be derived from plan
+parts only.
 
 - [ ] **Step 4: Write report verifier tests before implementation**
 
@@ -277,6 +280,9 @@ Create:
 def run_perimeter_closure_build(
     request: PerimeterClosureRuntimeRequest,
     *,
+    base_build_directory: Path,
+    blender_executable: Path,
+    repo_root: Path = ROOT,
     build_root: Path = DEFAULT_PERIMETER_CLOSURE_BUILD_ROOT,
     timeout_seconds: int = DEFAULT_PERIMETER_CLOSURE_BUILD_TIMEOUT_SECONDS,
 ) -> PerimeterClosureBuildResult: ...
