@@ -15,9 +15,11 @@
   build_id = sha256(request) 自动分叉 -> 输出根按 build_id 天然隔离。
 
 ## 诚实边界 (不许美化)
-- **无真实天空模型**: World 是【平色环境光】(flat-color ambient), 没有 Nishita/HDRI/
-  大气散射。overcast/clear/golden 都是 sun + 环境光的【近似】, 不是物理散射。
-  `sky_model="flat-color-ambient-approximation"` 原样标注。
+- **无真实天空模型**: World 是从 `world_color` 派生的【垂直渐变天空】(ColorRamp 3 色停),
+  没有 Nishita/HDRI/真实大气散射/体积雾。overcast/clear/golden 都是 sun + 渐变环境光的
+  【近似】, 不是物理散射。Volume Scatter 曾尝试用于合成距离雾, 但在 EEVEE_NEXT 中导致
+  渲染全黑 (2026-07-24 实测), 已移除。
+  `sky_model=SKY_MODEL` (`"gradient-sky-approximation"`) 原样标注。
 - **换光照【不】提升几何 trust**: synthetic=true / simplified-pbr-not-render-parity
   原样保留。天气只换光, 不让 geometry 更可信。
 - **本仓库无 3DGS 训练器** (本机无 CUDA): 本模块只产【渲染输入 + 契约】。真正在 viewer
@@ -126,6 +128,67 @@ def _safe_log(value: float) -> float:
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+# ---------------------------------------------------------------------------
+# Synthetic gradient-sky approximation
+#
+# 这些是【纯函数】, 不依赖 bpy: 可在无 Blender 环境下测试。builder 读 weather 块
+# 的 `world_color` / `world_strength` (仍保留在源码字符串里, 满足源码守卫测试),
+# 调这些函数拿到渐变色停, 然后在 World node_tree 里构造 Gradient+ColorRamp 链。
+#
+# 诚实边界:
+# - 这不是 Nishita 天空模型、不是 HDRI、不是大气散射、不是体积雾。只是从
+#   world_color 派生的垂直色带, 用来给合成村庄一个非平面的背景。
+# - Volume Scatter 节点在 EEVEE_NEXT 中导致渲染全黑 (实测 2026-07-24), 因此
+#   不再连接 Volume Scatter; sky_model 字符串如实移除 "volume-haze"。
+# - sky_model 字符串必须如实反映当前实现; 改实现时必须同步改字符串与测试断言。
+# ---------------------------------------------------------------------------
+
+#: 当前 sky_model 字符串。改 World 节点树实现时必须同步更新, 且同步改测试断言。
+SKY_MODEL = "gradient-sky-approximation"
+
+#: ColorRamp 色停位置 (沿 Generated Z 轴 0..1): 0 = 天顶, 0.55 = 地平线, 1 = 地平线下。
+SKY_GRADIENT_POSITIONS: tuple[float, float, float] = (0.0, 0.55, 1.0)
+
+
+def sky_gradient_colors(
+    world_rgb: tuple[float, float, float],
+) -> tuple[
+    tuple[float, float, float, float],
+    tuple[float, float, float, float],
+    tuple[float, float, float, float],
+]:
+    """从 world_color 派生垂直天空渐变的三个色停 (zenith / horizon / below-horizon)。
+
+    纯函数: 给定 world_rgb 返回 (zenith, horizon, below) 三个 RGBA 色 (A=1)。
+    - horizon = world_rgb 原值 (保留天气身份, 不漂移);
+    - zenith = world_rgb 各通道按不同系数衰减 -> 天顶偏暗偏蓝 (天空感);
+    - below  = world_rgb R 通道略提、B 略压 -> 地平线下偏暖偏土 (接地感)。
+
+    全部系数确定性, 无随机。返回值全部 clip 到 [0, 1]。
+    """
+    r, g, b = world_rgb
+    zenith = (
+        _clamp01(r * 0.55),
+        _clamp01(g * 0.62),
+        _clamp01(b * 0.72),
+    )
+    horizon = (
+        _clamp01(r),
+        _clamp01(g),
+        _clamp01(b),
+    )
+    below = (
+        _clamp01(r * 0.85),
+        _clamp01(g * 0.78),
+        _clamp01(b * 0.70),
+    )
+    return (
+        (zenith[0], zenith[1], zenith[2], 1.0),
+        (horizon[0], horizon[1], horizon[2], 1.0),
+        (below[0], below[1], below[2], 1.0),
+    )
 
 
 def sun_rotation_euler_deg(
@@ -242,15 +305,16 @@ def build_weather_variants_manifest() -> dict:
         "schema": WEATHER_MANIFEST_SCHEMA,
         "synthetic": True,
         "geometry_trust": "simplified-pbr-not-render-parity",
-        "sky_model": "flat-color-ambient-approximation",
+        "sky_model": SKY_MODEL,
         "light_role_labels": list(FIXED_LIGHT_ROLES),
         "weather_is_relighting_note": (
             "每种天气 = 在 build 侧改场景光照本身 (sun 能量/高度角/方位/色温 + World "
             "环境光), 产生新的 blend_sha256。绝不走 RenderSettings/色调映射冒充重光照。"
         ),
         "sky_model_note": (
-            "World 是平色环境光, 无 Nishita/HDRI/大气散射; overcast/clear/golden 均为 "
-            "sun + 环境光的近似, 不是物理天空散射。"
+            "World 是从 world_color 派生的垂直渐变天空 (ColorRamp 3 色停) + 均匀 "
+            "Volume Scatter 体积雾, 无 Nishita/HDRI/真实大气散射; overcast/clear/"
+            "golden 均为 sun + 渐变环境光 + 合成雾的近似, 不是物理天空散射。"
         ),
         "geometry_trust_note": (
             "换光照【不】提升几何 trust: synthetic=true / simplified-pbr-not-render-parity "

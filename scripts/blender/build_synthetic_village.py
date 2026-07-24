@@ -4328,6 +4328,92 @@ def _build_canonical_objects(request, materials, canonical_collection):
     return roots
 
 
+# ---------------------------------------------------------------------------
+# HANDOFF-GLM-007 §5: Synthetic gradient sky + volume haze
+#
+# This is a local duplicate of pipeline.synthetic_village.weather_profile
+# sky-gradient math, matching the same dual-truth pattern as _terrain_height
+# vs terrain_height_m and the creek-bed cut logic.  The rendered World
+# node_tree consumes these values; the analytic functions in
+# weather_profile.py are the authoritative source for planning/manifest
+# declarations.
+# ---------------------------------------------------------------------------
+
+_SKY_GRADIENT_POSITIONS = (0.0, 0.55, 1.0)
+
+
+def _clamp01(value):
+    return max(0.0, min(1.0, value))
+
+
+def _sky_gradient_colors(world_rgb):
+    """Derive (zenith, horizon, below) RGBA stops from world_color.
+
+    Local duplicate of pipeline.synthetic_village.weather_profile
+    .sky_gradient_colors — keep in sync.  See that module for the
+    derivation rationale (horizon = world_rgb unchanged, zenith darker
+    and bluer, below warmer and earthier).
+    """
+    r, g, b = world_rgb
+    zenith = (_clamp01(r * 0.55), _clamp01(g * 0.62), _clamp01(b * 0.72))
+    horizon = (_clamp01(r), _clamp01(g), _clamp01(b))
+    below = (_clamp01(r * 0.85), _clamp01(g * 0.78), _clamp01(b * 0.70))
+    return (
+        (zenith[0], zenith[1], zenith[2], 1.0),
+        (horizon[0], horizon[1], horizon[2], 1.0),
+        (below[0], below[1], below[2], 1.0),
+    )
+
+
+def _build_world_sky_node_tree(
+    world, background, world_strength, zenith, horizon, below
+):
+    """Build a gradient sky inside the World node_tree.
+
+    Schema-preserving: the World object still has nv_auxiliary_id=
+    "background-world" (set by the caller).  We only modify the node
+    graph: replace the flat Background.Color with a Gradient Texture ->
+    ColorRamp chain so the background varies vertically (zenith darker
+    and bluer, horizon = world_rgb, below-horizon warmer).
+
+    Volume Scatter was removed (2026-07-24): it caused EEVEE_NEXT to
+    render 100% black pixels.  sky_model is now "gradient-sky-
+    approximation" (no volume-haze).  See weather_profile.SKY_MODEL.
+    """
+    nodes = world.node_tree.nodes
+    links = world.node_tree.links
+
+    # --- Gradient Texture (Linear, Z axis = vertical) ---
+    gradient = nodes.new("ShaderNodeTexGradient")
+    gradient.gradient_type = "LINEAR"
+    # Generated coordinates: Z goes 0 (bottom) -> 1 (top).  We want
+    # zenith at top (Z=1) and below-horizon at bottom (Z=0), so we
+    # invert: factor = 1 - Z.  Use a Vector Mapping node for the flip.
+    # Simpler: use the Gradient's "Fac" output directly and set the
+    # ColorRamp positions so that Fac=0 -> below, Fac=0.55 -> horizon,
+    # Fac=1 -> zenith.  Gradient LINEAR on Generated gives Fac = Z,
+    # so position 0.55 in the ramp = Z=0.55 (just above horizon).
+
+    # --- ColorRamp (3 stops: below / horizon / zenith) ---
+    ramp = nodes.new("ShaderNodeValToRGB")
+    elements = ramp.color_ramp.elements
+    # Default has 2 elements at 0.0 and 1.0.  Set them to below and zenith.
+    elements[0].position = _SKY_GRADIENT_POSITIONS[0]  # 0.0 = below
+    elements[0].color = below
+    elements[1].position = _SKY_GRADIENT_POSITIONS[2]  # 1.0 = zenith
+    elements[1].color = zenith
+    # Insert horizon stop at 0.55.
+    horizon_elem = elements.new(_SKY_GRADIENT_POSITIONS[1])
+    horizon_elem.color = horizon
+
+    # Link: Gradient.Fac -> ColorRamp.Fac -> Background.Color
+    links.new(gradient.outputs["Fac"], ramp.inputs["Fac"])
+    links.new(ramp.outputs["Color"], background.inputs["Color"])
+
+    # Background.Strength still controls overall brightness.
+    background.inputs["Strength"].default_value = world_strength
+
+
 def _configure_scene(request, materials):
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_EEVEE_NEXT"
@@ -4366,13 +4452,20 @@ def _configure_scene(request, materials):
     else:
         world_rgb = tuple(lighting["world_color"])
         world_strength = lighting["world_strength"]
-    background.inputs["Color"].default_value = (
-        world_rgb[0],
-        world_rgb[1],
-        world_rgb[2],
-        1.0,
+
+    # ------------------------------------------------------------------
+    # HANDOFF-GLM-007 §5: 渐变天空 (schema-preserving)。
+    # 仍是单一 auxiliary_id="background-world", 仍是 68 visual_slot; 只改 World
+    # node_tree 内部: 用 Gradient Texture + ColorRamp 把 world_color 派生成
+    # 垂直天空色带。Volume Scatter 已移除 (EEVEE_NEXT 实测全黑)。
+    # 诚实边界: 这不是 Nishita/HDRI/大气散射; sky_model 字符串在
+    # pipeline/synthetic_village/weather_profile.py:SKY_MODEL 里如实标注。
+    # ------------------------------------------------------------------
+    zenith, horizon, below = _sky_gradient_colors(world_rgb)
+    _build_world_sky_node_tree(
+        world, background, world_strength, zenith, horizon, below
     )
-    background.inputs["Strength"].default_value = world_strength
+
     world["nv_auxiliary_id"] = "background-world"
     world["nv_semantic_id"] = 0
     world["nv_synthetic"] = True

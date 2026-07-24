@@ -150,8 +150,8 @@ def test_manifest_records_provenance_and_honest_limits() -> None:
     # 诚实边界必须出现在【操作者实际读的那份输出】里。
     honesty = json.dumps(manifest, ensure_ascii=False)
     assert "3DGS" in honesty or "retrain" in honesty.lower()
-    # World 是平色环境光, 不是真实天空散射 —— 不许把近似写成真散射。
-    assert manifest["sky_model"] == "flat-color-ambient-approximation"
+    # World 是从 world_color 派生的渐变天空, 不是真实天空散射 —— 不许把近似写成真散射。
+    assert manifest["sky_model"] == "gradient-sky-approximation"
 
 
 def test_manifest_variant_digests_match_registry_digests() -> None:
@@ -239,3 +239,70 @@ def test_cli_weather_variants_emits_manifest_and_request_block(tmp_path: Path) -
     assert block["lighting_digest"] == wp.weather_lighting_digest(
         wp.WEATHER_PROFILES["clear-noon"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Synthetic gradient-sky approximation (HANDOFF-GLM-007 §5)
+#
+# sky_gradient_colors 是纯函数, builder 读 lighting["world_color"] 调它拿到 ColorRamp
+# 色停。这里锁住派生系数和 clip 行为, 不让后续改动悄悄漂移。
+# ---------------------------------------------------------------------------
+
+
+def test_sky_model_string_matches_current_implementation() -> None:
+    """sky_model 必须如实反映当前 World 节点树实现。改实现时必须同步改字符串与测试。"""
+    assert wp.SKY_MODEL == "gradient-sky-approximation"
+    manifest = wp.build_weather_variants_manifest()
+    assert manifest["sky_model"] == wp.SKY_MODEL
+
+
+def test_sky_gradient_colors_horizon_preserves_world_rgb() -> None:
+    """horizon 色停必须等于原 world_rgb —— 保留天气身份, 不漂移。"""
+    world_rgb = (0.43, 0.55, 0.62)
+    zenith, horizon, below = wp.sky_gradient_colors(world_rgb)
+    assert horizon[:3] == world_rgb
+    assert horizon[3] == 1.0
+
+
+def test_sky_gradient_colors_zenith_is_darker_than_horizon() -> None:
+    """zenith 各通道必须 <= horizon 对应通道 —— 天顶比地平线暗 (天空感)。"""
+    world_rgb = (0.43, 0.55, 0.62)
+    zenith, horizon, _ = wp.sky_gradient_colors(world_rgb)
+    for axis in range(3):
+        assert zenith[axis] <= horizon[axis]
+
+
+def test_sky_gradient_colors_below_horizon_is_warm_shifted() -> None:
+    """below 色停 B 通道衰减系数 (0.70) 小于 R (0.85) -> 相对 horizon 偏暖。"""
+    world_rgb = (0.43, 0.55, 0.62)
+    _, horizon, below = wp.sky_gradient_colors(world_rgb)
+    # R/B 比值相对 horizon 上升 = 偏暖 (R 衰减少, B 衰减多)。
+    assert (below[0] / below[2]) > (horizon[0] / horizon[2])
+    # 且 below 各通道都不超过 horizon 对应通道 (整体仍比 horizon 暗)。
+    for axis in range(3):
+        assert below[axis] <= horizon[axis]
+
+
+def test_sky_gradient_colors_clips_to_unit_range() -> None:
+    """超亮或负值输入必须被 clip 到 [0, 1], 不允许溢出。"""
+    zenith, horizon, below = wp.sky_gradient_colors((2.0, -1.0, 0.5))
+    for stop in (zenith, horizon, below):
+        for channel in stop[:3]:
+            assert 0.0 <= channel <= 1.0
+
+
+def test_sky_gradient_colors_is_deterministic() -> None:
+    """同输入必须同输出 (无随机源)。"""
+    world_rgb = (0.43, 0.55, 0.62)
+    a = wp.sky_gradient_colors(world_rgb)
+    b = wp.sky_gradient_colors(world_rgb)
+    assert a == b
+
+
+def test_sky_gradient_positions_are_three_stops_in_ascending_order() -> None:
+    """ColorRamp 色停位置必须升序且恰为 3 个 (zenith / horizon / below)。"""
+    positions = wp.SKY_GRADIENT_POSITIONS
+    assert len(positions) == 3
+    assert positions[0] < positions[1] < positions[2]
+    assert positions[0] == 0.0
+    assert positions[-1] == 1.0
