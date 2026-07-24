@@ -539,12 +539,46 @@ class MeshAssembler:
         )
 
 
+def _side_line_from_part(part):
+    inner = tuple(float(value) for value in part["inner_anchor_m"])
+    outer = tuple(float(value) for value in part["outer_anchor_m"])
+    center = tuple(float(value) for value in part["center_m"])
+    midpoint = (
+        (inner[0] + outer[0]) / 2.0,
+        (inner[1] + outer[1]) / 2.0,
+    )
+    offset = (center[0] - midpoint[0], center[1] - midpoint[1])
+    if math.hypot(*offset) < 3.0:
+        raise RuntimeBuildError(
+            f"{part['semantic_role']} side offset is below standing-eye clearance"
+        )
+    return (
+        (inner[0] + offset[0], inner[1] + offset[1], inner[2]),
+        (outer[0] + offset[0], outer[1] + offset[1], outer[2]),
+    )
+
+
 def _build_terrain_contact(part, _collection):
     assembler = MeshAssembler()
     inner = tuple(part["inner_anchor_m"])
     outer = tuple(part["outer_anchor_m"])
-    assembler.add_ribbon(inner, outer, width=20.0, thickness=3.0)
-    return GeometryResult(assembler, {"bounds": assembler.bounds()})
+    thickness = 3.0
+    buried_inner = (inner[0], inner[1], inner[2] - thickness / 2.0)
+    buried_outer = (outer[0], outer[1], outer[2] - thickness / 2.0)
+    assembler.add_ribbon(
+        buried_inner,
+        buried_outer,
+        width=20.0,
+        thickness=thickness,
+    )
+    return GeometryResult(
+        assembler,
+        {
+            "bounds": assembler.bounds(),
+            "surface_inner_m": inner,
+            "surface_outer_m": outer,
+        },
+    )
 
 
 def _build_bidirectional_corridor(part, _collection):
@@ -566,21 +600,52 @@ def _build_support_retaining(part, _collection):
     assembler = MeshAssembler()
     inner = tuple(part["inner_anchor_m"])
     outer = tuple(part["outer_anchor_m"])
-    assembler.add_ribbon(inner, outer, width=2.4, thickness=5.0)
-    return GeometryResult(assembler, {"bounds": assembler.bounds()})
+    side_inner, side_outer = _side_line_from_part(part)
+    thickness = 4.0
+    buried_inner = (
+        side_inner[0],
+        side_inner[1],
+        inner[2] - thickness / 2.0,
+    )
+    buried_outer = (
+        side_outer[0],
+        side_outer[1],
+        outer[2] - thickness / 2.0,
+    )
+    assembler.add_ribbon(
+        buried_inner,
+        buried_outer,
+        width=1.2,
+        thickness=thickness,
+    )
+    return GeometryResult(
+        assembler,
+        {
+            "bounds": assembler.bounds(),
+            "side_inner_m": side_inner,
+            "side_outer_m": side_outer,
+        },
+    )
 
 
 def _build_drainage_water(part, _collection):
     assembler = MeshAssembler()
     inner = tuple(part["inner_anchor_m"])
     outer = tuple(part["outer_anchor_m"])
-    assembler.add_ribbon(inner, outer, width=2.0, thickness=0.18)
+    side_inner, side_outer = _side_line_from_part(part)
+    water_inner = (side_inner[0], side_inner[1], inner[2] - 0.18)
+    water_outer = (side_outer[0], side_outer[1], outer[2] - 0.18)
+    assembler.add_ribbon(inner, water_inner, width=1.4, thickness=0.12)
+    assembler.add_ribbon(water_inner, water_outer, width=1.4, thickness=0.12)
+    assembler.add_ribbon(water_outer, outer, width=1.4, thickness=0.12)
     return GeometryResult(
         assembler,
         {
             "bounds": assembler.bounds(),
             "inner_endpoint_m": inner,
             "outer_endpoint_m": outer,
+            "side_inner_m": side_inner,
+            "side_outer_m": side_outer,
         },
     )
 
@@ -604,31 +669,49 @@ def _build_boundary_seam(part, _collection):
 
 def _build_vegetation_enclosure(part, _collection):
     assembler = MeshAssembler()
-    cx, cy, cz = part["center_m"]
-    width, depth, height = part["extent_m"]
-    for index, (sx, sy, scale) in enumerate(
+    inner = tuple(float(value) for value in part["inner_anchor_m"])
+    outer = tuple(float(value) for value in part["outer_anchor_m"])
+    _width, _depth, height = part["extent_m"]
+    dx = outer[0] - inner[0]
+    dy = outer[1] - inner[1]
+    route_length_xy = math.hypot(dx, dy)
+    if route_length_xy <= 0.0:
+        raise RuntimeBuildError("vegetation route anchors must differ")
+    ux, uy = dx / route_length_xy, dy / route_length_xy
+    px, py = -uy, ux
+    trunk_centers = []
+    for index, (route_fraction, side_offset_m, scale) in enumerate(
         (
-            (-0.34, -0.28, 0.72),
-            (0.31, -0.22, 0.88),
-            (-0.26, 0.30, 1.0),
-            (0.32, 0.27, 0.78),
+            (0.68, -6.0, 0.72),
+            (0.72, 6.0, 0.88),
+            (0.84, -7.0, 1.0),
+            (0.90, 7.0, 0.78),
         )
     ):
-        x = cx + sx * width
-        y = cy + sy * depth
+        x = inner[0] + dx * route_fraction + px * side_offset_m
+        y = inner[1] + dy * route_fraction + py * side_offset_m
+        z = inner[2] + (outer[2] - inner[2]) * route_fraction
+        trunk_centers.append((x, y, z))
         trunk_height = max(2.0, height * scale * 0.45)
         assembler.add_cylinder(
-            (x, y, cz + trunk_height / 2.0),
+            (x, y, z + trunk_height / 2.0),
             radius=0.22 + 0.03 * index,
             depth=trunk_height,
         )
         crown = max(2.5, height * scale * 0.38)
         assembler.add_box(
-            (x, y, cz + trunk_height + crown / 2.0),
+            (x, y, z + trunk_height + crown / 2.0),
             (3.0 + index * 0.3, 2.5 + index * 0.2, crown),
             yaw=math.radians(part["orientation_deg"] + index * 17.0),
         )
-    return GeometryResult(assembler, {"bounds": assembler.bounds()})
+    return GeometryResult(
+        assembler,
+        {
+            "bounds": assembler.bounds(),
+            "trunk_centers_m": trunk_centers,
+            "minimum_route_clearance_m": 6.0,
+        },
+    )
 
 
 GEOMETRY_BUILDERS = {
@@ -643,6 +726,10 @@ GEOMETRY_BUILDERS = {
 
 def _endpoint_gap_m(a, b):
     return math.dist(tuple(float(value) for value in a), tuple(float(value) for value in b))
+
+
+def _endpoint_gap_xy_m(a, b):
+    return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
 
 
 def _contact_gap_m(supported_bounds, terrain_bounds):

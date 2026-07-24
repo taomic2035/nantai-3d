@@ -36,6 +36,10 @@ def runtime() -> ModuleType:
 
 
 def _part(role: str) -> dict:
+    center = {
+        "support-retaining": [18.307, 13.627, 4.0],
+        "drainage-water": [21.693, 6.373, 4.0],
+    }.get(role, [20.0, 10.0, 4.0])
     return {
         "instance_id": 219,
         "module_id": "closure-upstream",
@@ -50,7 +54,7 @@ def _part(role: str) -> dict:
             "vegetation-enclosure": "vegetation-cluster",
         }[role],
         "material_slot_id": "material-stone-block-01",
-        "center_m": [20.0, 10.0, 4.0],
+        "center_m": center,
         "extent_m": [30.0, 12.0, 4.0],
         "orientation_deg": 25.0,
         "inner_anchor_m": [5.0, 3.0, 2.0],
@@ -132,6 +136,53 @@ def test_each_geometry_family_is_finite_nonempty_and_measured(
     assert result.evidence
 
 
+def test_route_surface_and_side_structures_leave_standing_eye_open(
+    runtime: ModuleType,
+) -> None:
+    terrain_part = _part("terrain-contact")
+    terrain = runtime._build_terrain_contact(terrain_part, None)
+    assert terrain.evidence["surface_inner_m"] == tuple(
+        terrain_part["inner_anchor_m"]
+    )
+    assert terrain.evidence["surface_outer_m"] == tuple(
+        terrain_part["outer_anchor_m"]
+    )
+
+    for role, builder_name in (
+        ("support-retaining", "_build_support_retaining"),
+        ("drainage-water", "_build_drainage_water"),
+    ):
+        part = _part(role)
+        result = getattr(runtime, builder_name)(part, None)
+        assert runtime._endpoint_gap_xy_m(
+            result.evidence["side_inner_m"],
+            part["inner_anchor_m"],
+        ) >= 3.0
+        assert runtime._endpoint_gap_xy_m(
+            result.evidence["side_outer_m"],
+            part["outer_anchor_m"],
+        ) >= 3.0
+
+
+def test_vegetation_trunks_leave_bidirectional_route_clear(
+    runtime: ModuleType,
+) -> None:
+    part = _part("vegetation-enclosure")
+    result = runtime._build_vegetation_enclosure(part, None)
+    inner = part["inner_anchor_m"]
+    outer = part["outer_anchor_m"]
+    dx = outer[0] - inner[0]
+    dy = outer[1] - inner[1]
+    length = (dx * dx + dy * dy) ** 0.5
+
+    assert len(result.evidence["trunk_centers_m"]) == 4
+    for x_m, y_m, _z_m in result.evidence["trunk_centers_m"]:
+        perpendicular_distance_m = abs(
+            dy * x_m - dx * y_m + outer[0] * inner[1] - outer[1] * inner[0]
+        ) / length
+        assert perpendicular_distance_m >= 5.0
+
+
 def test_contact_and_endpoint_gap_helpers_measure_not_assert(
     runtime: ModuleType,
 ) -> None:
@@ -207,4 +258,3 @@ def test_neighbor_seam_validator_rejects_geometry_gap(
     results[1]["previous_seam_actual_m"] = (1.3, 0.0, 0.0)
     with pytest.raises(runtime.RuntimeBuildError, match="neighbor seam"):
         runtime._validate_neighbor_seams(results, max_gap_m=0.2)
-
