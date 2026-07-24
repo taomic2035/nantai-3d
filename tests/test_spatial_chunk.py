@@ -349,6 +349,7 @@ class TestChunkPayloadSHA:
             _scene(n=300), tmp_path, chunk_size_m=80.0)
         report = verify_chunks_integrity(tmp_path)
         assert report["valid"] is True
+        assert report["per_chunk_sha_verified"] is True
         assert report["verified_payloads"] > 0
         assert report["mismatches"] == []
 
@@ -400,3 +401,147 @@ class TestChunkPayloadSHA:
         assert "mismatches" in report
         assert isinstance(report["total_chunks"], int)
         assert isinstance(report["verified_payloads"], int)
+
+    def test_legacy_manifest_is_readable_but_integrity_is_unknown(
+        self,
+        tmp_path,
+    ):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0
+        )
+        manifest.pop("integrity")
+        for chunk in manifest["chunks"]:
+            chunk.pop("sha256")
+            chunk.pop("size_bytes")
+            chunk.pop("payloads")
+        (tmp_path / "chunks.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        report = verify_chunks_integrity(tmp_path)
+
+        assert report["valid"] is True
+        assert report["per_chunk_sha_verified"] is None
+        assert report["verified_payloads"] == 0
+
+    def test_new_manifest_missing_payload_row_fails_closed(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0
+        )
+        manifest["chunks"][0]["payloads"].pop("1")
+        (tmp_path / "chunks.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        report = verify_chunks_integrity(tmp_path)
+
+        assert report["valid"] is False
+        assert report["per_chunk_sha_verified"] is False
+        assert any(
+            "integrity" in row["reason"] or "payload" in row["reason"]
+            for row in report["mismatches"]
+        )
+
+    def test_payload_path_must_match_lod_and_stay_inside_root(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0
+        )
+        manifest["chunks"][0]["payloads"]["0"]["file"] = "../outside.ply"
+        (tmp_path / "chunks.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        report = verify_chunks_integrity(tmp_path)
+
+        assert report["valid"] is False
+        assert any(
+            "path" in row["reason"] or "lod" in row["reason"]
+            for row in report["mismatches"]
+        )
+
+    def test_duplicate_lod_payload_paths_fail_closed(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0
+        )
+        chunk = manifest["chunks"][0]
+        chunk["lod"]["1"] = chunk["lod"]["0"]
+        chunk["payloads"]["1"] = dict(chunk["payloads"]["0"])
+        (tmp_path / "chunks.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        report = verify_chunks_integrity(tmp_path)
+
+        assert report["valid"] is False
+        assert any(
+            "duplicate payload path" in row["reason"]
+            for row in report["mismatches"]
+        )
+
+    def test_redirected_payload_path_fails_closed(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0
+        )
+        chunk = manifest["chunks"][0]
+        original = tmp_path / chunk["payloads"]["0"]["file"]
+        alias = tmp_path / "redirected-lod0.ply"
+        try:
+            alias.symlink_to(original)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+        chunk["lod"]["0"] = alias.name
+        chunk["payloads"]["0"]["file"] = alias.name
+        (tmp_path / "chunks.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        report = verify_chunks_integrity(tmp_path)
+
+        assert report["valid"] is False
+        assert any(
+            "redirected" in row["reason"]
+            for row in report["mismatches"]
+        )
+
+    def test_manifest_bytes_are_canonical_across_output_roots(self, tmp_path):
+        scene = _scene(n=300, seed=19)
+        partition_scene_to_chunks(scene, tmp_path / "a", chunk_size_m=80.0)
+        partition_scene_to_chunks(scene, tmp_path / "b", chunk_size_m=80.0)
+
+        first = (tmp_path / "a/chunks.json").read_bytes()
+        second = (tmp_path / "b/chunks.json").read_bytes()
+
+        assert first == second
+        assert first.endswith(b"\n")
+        assert b"\r\n" not in first
+        assert first == (
+            json.dumps(
+                json.loads(first),
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    def test_source_provenance_cannot_override_coordinate_contract(
+        self,
+        tmp_path,
+    ):
+        with pytest.raises(ValueError, match="source provenance"):
+            partition_scene_to_chunks(
+                _scene(n=300),
+                tmp_path,
+                chunk_size_m=80.0,
+                source_provenance={"frame_id": "forged-frame"},
+            )

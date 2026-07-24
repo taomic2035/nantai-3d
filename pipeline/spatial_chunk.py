@@ -16,7 +16,8 @@ import hashlib
 import json
 import math
 import numbers
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 from loguru import logger
@@ -27,6 +28,7 @@ DEFAULT_CHUNK_SIZE_M = 50.0
 # 与 render_chunk_to_ply.DEFAULT_LOD_FRACTIONS 同语义: 0=远景, 1=中景, 2/缺省=全量。
 DEFAULT_LOD_FRACTIONS: dict[int, float] = {0: 0.08, 1: 0.30}
 MANIFEST_NAME = "chunks.json"
+INTEGRITY_SCHEMA = "nantai.spatial-chunks.payload-integrity.v1"
 # core_bounds 逐轴取分位盒时每侧砍掉的比例。真实 3DGS 的漂浮物是【极少数极远点】
 # (实测: 一个 Brush 实训重建 Z 向 90% 分位 52.6m, 真实 bounds 720m), 故砍掉每轴
 # 各 0.5% 尾部即可剔除它们, 而对主体几何几乎无影响。
@@ -71,9 +73,43 @@ def _require_positive_size(chunk_size_m: float) -> float:
 
 
 def _file_sha256_and_size(path: Path) -> tuple[str, int]:
-    """Read file bytes once, return (sha256_hex, size_bytes)."""
-    data = path.read_bytes()
-    return hashlib.sha256(data).hexdigest(), len(data)
+    """Stream file bytes once, return (sha256_hex, size_bytes)."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _atomic_save_ply(scene: GaussianScene, path: Path) -> None:
+    """Write a PLY beside its destination, then atomically replace it."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f".{path.name}.tmp")
+    if staging.exists():
+        raise FileExistsError(f"chunk staging path already exists: {staging}")
+    try:
+        scene.save_ply(staging, flavor="3dgs")
+        os.replace(staging, path)
+    finally:
+        if staging.exists():
+            staging.unlink()
+
+
+def _canonical_manifest_bytes(manifest: dict) -> bytes:
+    return (
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def partition_scene_to_chunks(
@@ -105,6 +141,17 @@ def partition_scene_to_chunks(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     fractions = dict(DEFAULT_LOD_FRACTIONS if lod_fractions is None else lod_fractions)
+    protected_source_keys = {
+        "frame_id",
+        "units",
+        "applied_transform_ids",
+    }
+    if source_provenance and (
+        protected_source_keys & set(source_provenance)
+    ):
+        raise ValueError(
+            "source provenance cannot override coordinate contract fields"
+        )
 
     keys = np.floor(scene.xyz[:, :2] / chunk_size_m).astype(np.int64)
     # 排序 → 分块顺序确定 (manifest 可复现)
@@ -122,12 +169,12 @@ def partition_scene_to_chunks(
         if len(sub) == 0:      # 分箱与 crop 边界一致时不该发生; 防御性跳过空块
             continue
         name = f"chunk_{cx}_{cy}.ply"
-        sub.save_ply(out_dir / name, flavor="3dgs")
+        _atomic_save_ply(sub, out_dir / name)
 
         lod_files = {2: name}   # lod2 == 全量, 与合成村庄 manifest 同约定
         for level, frac in sorted(fractions.items()):
             lod_name = f"chunk_{cx}_{cy}_lod{level}.ply"
-            sub.to_quality(frac).save_ply(out_dir / lod_name, flavor="3dgs")
+            _atomic_save_ply(sub.to_quality(frac), out_dir / lod_name)
             lod_files[level] = lod_name
 
         # --- P3: 绑定逐 chunk SHA-256 + size_bytes ---
@@ -168,6 +215,11 @@ def partition_scene_to_chunks(
         "schema_version": 1,
         "kind": "spatial-chunks",
         "chunk_size_m": chunk_size_m,
+        "integrity": {
+            "schema_version": INTEGRITY_SCHEMA,
+            "algorithm": "sha256",
+            "per_chunk_sha_required": True,
+        },
         "chunks": chunks,
         # 各 LOD 的实际比例 (含 lod2=1.0 全量): 只给文件名的话, 消费者不知道 lod0 是 8%
         # 还是别的密度, 无法按相机距离正确选级。声明出来, 语义不用猜。
@@ -201,8 +253,18 @@ def partition_scene_to_chunks(
     }
     # newline="\n": 与 trust root (registration/recon_manifest/world manifest) 惯例统一,
     # 让 manifest 跨平台字节可复现 (Windows write_text 默认把 \n 转 \r\n)。
-    (out_dir / MANIFEST_NAME).write_text(
-        json.dumps(manifest, indent=2), encoding="utf-8", newline="\n")
+    manifest_path = out_dir / MANIFEST_NAME
+    staging_manifest = out_dir / f".{MANIFEST_NAME}.tmp"
+    if staging_manifest.exists():
+        raise FileExistsError(
+            f"chunk manifest staging path already exists: {staging_manifest}"
+        )
+    try:
+        staging_manifest.write_bytes(_canonical_manifest_bytes(manifest))
+        os.replace(staging_manifest, manifest_path)
+    finally:
+        if staging_manifest.exists():
+            staging_manifest.unlink()
     logger.info(
         f"空间分块: {total_points} 高斯 → {len(chunks)} 块 "
         f"({chunk_size_m:g}m 网格) → {out_dir/MANIFEST_NAME}")
@@ -227,96 +289,242 @@ def verify_chunks_integrity(out_dir: str | Path) -> dict:
             actual / reason。
           - ``manifest_path``: 校验的 manifest 路径。
     """
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir).resolve(strict=True)
     manifest_path = out_dir / MANIFEST_NAME
     if not manifest_path.exists():
         raise FileNotFoundError(f"chunks.json not found: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = manifest_path.read_bytes()
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON key: {key}")
+            value[key] = item
+        return value
+
+    manifest = json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=lambda value: (_ for _ in ()).throw(
+            ValueError(f"non-finite JSON value: {value}")
+        ),
+    )
 
     chunks = manifest.get("chunks", [])
+    integrity = manifest.get("integrity")
+    has_declared_payloads = any(
+        isinstance(chunk, dict)
+        and any(
+            key in chunk
+            for key in ("sha256", "size_bytes", "payloads")
+        )
+        for chunk in chunks
+    )
+    if integrity is None and not has_declared_payloads:
+        return {
+            "valid": True,
+            "per_chunk_sha_verified": None,
+            "total_chunks": len(chunks),
+            "verified_payloads": 0,
+            "total_payloads": 0,
+            "mismatches": [],
+            "manifest_path": str(manifest_path),
+        }
+
     total_payloads = 0
     verified = 0
     mismatches: list[dict] = []
+    expected_integrity = {
+        "schema_version": INTEGRITY_SCHEMA,
+        "algorithm": "sha256",
+        "per_chunk_sha_required": True,
+    }
+    if integrity != expected_integrity:
+        mismatches.append({
+            "chunk_id": "*",
+            "reason": "integrity contract is missing or invalid",
+        })
+    if raw != _canonical_manifest_bytes(manifest):
+        mismatches.append({
+            "chunk_id": "*",
+            "reason": "integrity manifest is not canonical JSON",
+        })
+    if (
+        not isinstance(chunks, list)
+        or not chunks
+        or manifest.get("total_chunks") != len(chunks)
+    ):
+        mismatches.append({
+            "chunk_id": "*",
+            "reason": "integrity manifest chunk set is invalid",
+        })
+        chunks = chunks if isinstance(chunks, list) else []
+
+    def valid_portable_file(value) -> bool:
+        if not isinstance(value, str) or not value:
+            return False
+        path = PurePosixPath(value)
+        return (
+            not path.is_absolute()
+            and len(path.parts) == 1
+            and path.parts[0] not in {".", ".."}
+            and "\\" not in value
+        )
+
+    def verify_payload(
+        *,
+        chunk_id,
+        level,
+        payload,
+    ) -> None:
+        nonlocal total_payloads, verified
+        total_payloads += 1
+        if not isinstance(payload, dict) or set(payload) != {
+            "file",
+            "sha256",
+            "size_bytes",
+        }:
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "level": level,
+                "reason": "payload integrity row is incomplete",
+            })
+            return
+        file_name = payload["file"]
+        if not valid_portable_file(file_name):
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "level": level,
+                "file": file_name,
+                "reason": "payload path is not a safe relative file",
+            })
+            return
+        if (
+            not isinstance(payload["sha256"], str)
+            or len(payload["sha256"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in payload["sha256"]
+            )
+            or not isinstance(payload["size_bytes"], int)
+            or isinstance(payload["size_bytes"], bool)
+            or payload["size_bytes"] <= 0
+        ):
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "level": level,
+                "file": file_name,
+                "reason": "payload digest or size declaration is invalid",
+            })
+            return
+        candidate = out_dir / file_name
+        if candidate.is_symlink():
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "level": level,
+                "file": file_name,
+                "reason": "payload path is redirected",
+            })
+            return
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(out_dir)
+        except (OSError, ValueError):
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "level": level,
+                "file": file_name,
+                "reason": "payload file not found or path escaped root",
+            })
+            return
+        actual_sha, actual_size = _file_sha256_and_size(resolved)
+        if actual_sha != payload["sha256"]:
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "level": level,
+                "file": file_name,
+                "declared_sha256": payload["sha256"],
+                "actual_sha256": actual_sha,
+                "reason": "sha256 mismatch",
+            })
+        elif actual_size != payload["size_bytes"]:
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "level": level,
+                "file": file_name,
+                "declared_size_bytes": payload["size_bytes"],
+                "actual_size_bytes": actual_size,
+                "reason": "size_bytes mismatch",
+            })
+        else:
+            verified += 1
 
     for chunk in chunks:
+        if not isinstance(chunk, dict):
+            mismatches.append({
+                "chunk_id": "?",
+                "reason": "chunk integrity row is not an object",
+            })
+            continue
         chunk_id = chunk.get("id", "?")
         payloads = chunk.get("payloads", {})
-
-        # 校验顶层 sha256 / size_bytes (如果存在)
-        if "sha256" in chunk and "ply_file" in chunk:
-            total_payloads += 1
-            ply_path = out_dir / chunk["ply_file"]
-            if not ply_path.exists():
-                mismatches.append({
-                    "chunk_id": chunk_id,
-                    "file": chunk["ply_file"],
-                    "reason": "file not found",
-                })
-                continue
-            actual_sha, actual_size = _file_sha256_and_size(ply_path)
-            if actual_sha != chunk["sha256"]:
-                mismatches.append({
-                    "chunk_id": chunk_id,
-                    "file": chunk["ply_file"],
-                    "declared_sha256": chunk["sha256"],
-                    "actual_sha256": actual_sha,
-                    "reason": "sha256 mismatch",
-                })
-            elif actual_size != chunk.get("size_bytes"):
-                mismatches.append({
-                    "chunk_id": chunk_id,
-                    "file": chunk["ply_file"],
-                    "declared_size_bytes": chunk.get("size_bytes"),
-                    "actual_size_bytes": actual_size,
-                    "reason": "size_bytes mismatch",
-                })
-            else:
-                verified += 1
-
-        # 校验每个 LOD payload
-        for level, payload in payloads.items():
-            total_payloads += 1
-            fname = payload.get("file")
-            if fname is None:
-                mismatches.append({
-                    "chunk_id": chunk_id,
-                    "level": level,
-                    "reason": "payload missing 'file' field",
-                })
-                continue
-            ply_path = out_dir / fname
-            if not ply_path.exists():
-                mismatches.append({
-                    "chunk_id": chunk_id,
-                    "level": level,
-                    "file": fname,
-                    "reason": "file not found",
-                })
-                continue
-            actual_sha, actual_size = _file_sha256_and_size(ply_path)
-            if actual_sha != payload.get("sha256"):
-                mismatches.append({
-                    "chunk_id": chunk_id,
-                    "level": level,
-                    "file": fname,
-                    "declared_sha256": payload.get("sha256"),
-                    "actual_sha256": actual_sha,
-                    "reason": "sha256 mismatch",
-                })
-            elif actual_size != payload.get("size_bytes"):
-                mismatches.append({
-                    "chunk_id": chunk_id,
-                    "level": level,
-                    "file": fname,
-                    "declared_size_bytes": payload.get("size_bytes"),
-                    "actual_size_bytes": actual_size,
-                    "reason": "size_bytes mismatch",
-                })
-            else:
-                verified += 1
+        lod = chunk.get("lod", {})
+        if (
+            not isinstance(payloads, dict)
+            or not isinstance(lod, dict)
+            or set(payloads) != set(lod)
+            or "2" not in payloads
+        ):
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "reason": "payload integrity rows do not exactly cover lod",
+            })
+            continue
+        payload_paths = [
+            payload.get("file")
+            for payload in payloads.values()
+            if isinstance(payload, dict)
+        ]
+        if len(payload_paths) != len(set(payload_paths)):
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "reason": "duplicate payload path in lod integrity rows",
+            })
+            continue
+        if any(
+            not isinstance(payloads[level], dict)
+            or payloads[level].get("file") != file_name
+            for level, file_name in lod.items()
+        ):
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "reason": "payload path disagrees with lod filename",
+            })
+            continue
+        full = payloads["2"]
+        if (
+            full.get("file") != chunk.get("ply_file")
+            or full.get("sha256") != chunk.get("sha256")
+            or full.get("size_bytes") != chunk.get("size_bytes")
+        ):
+            mismatches.append({
+                "chunk_id": chunk_id,
+                "reason": "full payload integrity disagrees with chunk row",
+            })
+            continue
+        for level, payload in sorted(payloads.items()):
+            verify_payload(
+                chunk_id=chunk_id,
+                level=level,
+                payload=payload,
+            )
 
     return {
         "valid": len(mismatches) == 0,
+        "per_chunk_sha_verified": (
+            True if len(mismatches) == 0 else False
+        ),
         "total_chunks": len(chunks),
         "verified_payloads": verified,
         "total_payloads": total_payloads,
