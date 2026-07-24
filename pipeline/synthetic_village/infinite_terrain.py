@@ -246,3 +246,50 @@ def apply_creek_bed_cut(
     if depth <= 0.0:
         return base_height_m
     return base_height_m - depth
+
+
+def is_in_creek_channel(
+    x: float,
+    y: float,
+    creek_polyline_xy: tuple[tuple[float, float], ...],
+    creek_half_width_m: float,
+) -> bool:
+    """Return True if (x, y) is within the creek water-surface channel.
+
+    This is a 2D footprint check: the point's horizontal distance to the
+    nearest creek segment is less than ``creek_half_width_m``.  Use this to
+    reject camera placements or walkable nodes that would sit on the water
+    surface.
+    """
+
+    distance = point_to_polyline_distance_m(x, y, creek_polyline_xy)
+    return distance < creek_half_width_m
+
+
+def is_in_creek_bed_volume(
+    x: float,
+    y: float,
+    z: float,
+    creek_polyline_xy: tuple[tuple[float, float], ...],
+    creek_half_width_m: float,
+    bank_margin_m: float,
+    base_terrain_z: float,
+) -> bool:
+    """Return True if (x, y, z) is inside the creek-bed cut volume.
+
+    The creek-bed volume is the region between the cut floor
+    (``base_terrain_z - cut_depth``) and the bank top (``base_terrain_z``)
+    where the cut depth is positive.  A point at the bank surface
+    (``z == base_terrain_z``) is NOT inside the volume; a point below the
+    bank surface but above the cut floor IS inside.
+    """
+
+    distance = point_to_polyline_distance_m(x, y, creek_polyline_xy)
+    bank_edge = creek_half_width_m + bank_margin_m
+    if distance >= bank_edge:
+        return False
+    cut_depth = creek_bed_depth_m(distance, creek_half_width_m, bank_margin_m)
+    if cut_depth <= 0.0:
+        return False
+    cut_floor_z = base_terrain_z - cut_depth
+    return z >= cut_floor_z and z < base_terrain_z

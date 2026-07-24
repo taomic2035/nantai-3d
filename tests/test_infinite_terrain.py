@@ -13,6 +13,8 @@ from pipeline.synthetic_village.infinite_terrain import (
     TERRAIN_MATERIAL_SLOTS,
     apply_creek_bed_cut,
     creek_bed_depth_m,
+    is_in_creek_bed_volume,
+    is_in_creek_channel,
     point_to_polyline_distance_m,
     terrain_height_m,
     terrain_macro_tint,
@@ -208,3 +210,82 @@ def test_apply_creek_bed_cut_is_deterministic() -> None:
     c1 = apply_creek_bed_cut(base, 0.0, 0.0, creek_points, 4.0, 2.0)
     c2 = apply_creek_bed_cut(base, 0.0, 0.0, creek_points, 4.0, 2.0)
     assert c1 == c2
+
+
+# ============================================================
+# Creek channel and creek-bed volume checks
+# ============================================================
+
+
+def test_is_in_creek_channel_true_at_center() -> None:
+    """Point on creek centreline is in the channel."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    assert is_in_creek_channel(0.0, 0.0, creek, creek_half_width_m=4.0)
+
+
+def test_is_in_creek_channel_true_within_half_width() -> None:
+    """Point 3m from centre (within 4m half-width) is in the channel."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    assert is_in_creek_channel(0.0, 3.0, creek, creek_half_width_m=4.0)
+
+
+def test_is_in_creek_channel_false_at_half_width() -> None:
+    """Point exactly at half-width is NOT in the channel (strict <)."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    assert not is_in_creek_channel(0.0, 4.0, creek, creek_half_width_m=4.0)
+
+
+def test_is_in_creek_channel_false_outside() -> None:
+    """Point 10m from centre is not in the channel."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    assert not is_in_creek_channel(0.0, 10.0, creek, creek_half_width_m=4.0)
+
+
+def test_is_in_creek_bed_volume_true_below_bank() -> None:
+    """Point between cut floor and bank top is in the volume."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    base_z = 10.0
+    # At centre: cut_depth = _CREEK_BED_MAX_DEPTH_M = 1.2
+    # cut_floor = 10.0 - 1.2 = 8.8
+    # Point at z=9.0 is between 8.8 and 10.0
+    assert is_in_creek_bed_volume(
+        0.0, 0.0, 9.0, creek, 4.0, 2.0, base_z
+    )
+
+
+def test_is_in_creek_bed_volume_true_at_floor() -> None:
+    """Point exactly at cut floor is in the volume (inclusive)."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    base_z = 10.0
+    floor_z = base_z - _CREEK_BED_MAX_DEPTH_M
+    assert is_in_creek_bed_volume(
+        0.0, 0.0, floor_z, creek, 4.0, 2.0, base_z
+    )
+
+
+def test_is_in_creek_bed_volume_false_at_bank_top() -> None:
+    """Point at bank surface is NOT in the volume (exclusive upper)."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    base_z = 10.0
+    assert not is_in_creek_bed_volume(
+        0.0, 0.0, base_z, creek, 4.0, 2.0, base_z
+    )
+
+
+def test_is_in_creek_bed_volume_false_below_floor() -> None:
+    """Point below the cut floor is NOT in the volume."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    base_z = 10.0
+    floor_z = base_z - _CREEK_BED_MAX_DEPTH_M
+    assert not is_in_creek_bed_volume(
+        0.0, 0.0, floor_z - 0.1, creek, 4.0, 2.0, base_z
+    )
+
+
+def test_is_in_creek_bed_volume_false_outside_bank() -> None:
+    """Point outside bank margin is not in the volume regardless of z."""
+    creek = ((-100.0, 0.0), (100.0, 0.0))
+    base_z = 10.0
+    assert not is_in_creek_bed_volume(
+        0.0, 20.0, 9.0, creek, 4.0, 2.0, base_z
+    )

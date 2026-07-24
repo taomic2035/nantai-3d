@@ -190,6 +190,25 @@ def test_all_ground_nodes_participate_in_edges() -> None:
     verify_elevated_topology_plan(plan, scene)
 
 
+def test_no_walkable_node_is_inside_creek_channel() -> None:
+    """Creek-bed cut walkable separation: no node may sit on the water surface."""
+    scene = build_scene_plan()
+    plan = build_elevated_topology_plan(scene)
+    creek = next(item for item in scene.objects if item.semantic_class == "creek")
+    creek_xy = tuple((p.x_m, p.y_m) for p in creek.polyline.points)
+    creek_half_width = creek.polyline.width_m / 2
+    for node in plan.nodes:
+        node_xy = (node.position_m[0], node.position_m[1])
+        creek_dist = min(
+            _point_segment_distance(node_xy, start, end)
+            for start, end in zip(creek_xy, creek_xy[1:], strict=False)
+        )
+        assert creek_dist >= creek_half_width, (
+            f"node {node.node_id} is inside the creek channel "
+            f"(dist={creek_dist:.3f} < half_width={creek_half_width:.3f})"
+        )
+
+
 def test_verifier_rejects_scene_digest_building_and_water_collisions() -> None:
     scene = build_scene_plan()
     clean = build_elevated_topology_plan(scene)

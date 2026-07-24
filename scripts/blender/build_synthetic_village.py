@@ -2310,6 +2310,99 @@ def _terrain_height(x_m, y_m, extent):
     return round(extent["relief_m"] * t + interior, 3)
 
 
+# ---------------------------------------------------------------------------
+# Creek-bed cut: lower terrain along creek polylines to form a channel.
+#
+# This is a local duplicate of pipeline.synthetic_village.infinite_terrain
+# creek-bed cut logic, matching the same dual-truth pattern as _terrain_height
+# vs terrain_height_m.  The rendered terrain mesh samples the cut on a
+# discrete grid; the analytic function in infinite_terrain.py is the
+# authoritative source for planning.
+# ---------------------------------------------------------------------------
+
+_CREEK_BED_MAX_DEPTH_M = 1.2
+_CREEK_BANK_MARGIN_M = 2.0
+
+
+def _point_to_polyline_distance_m(x, y, points_xy):
+    """Return minimum Euclidean distance from (x, y) to a polyline."""
+    best = float("inf")
+    for i in range(len(points_xy) - 1):
+        x0, y0 = points_xy[i]
+        x1, y1 = points_xy[i + 1]
+        dx = x1 - x0
+        dy = y1 - y0
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-18:
+            d = math.hypot(x - x0, y - y0)
+        else:
+            t = ((x - x0) * dx + (y - y0) * dy) / seg_len_sq
+            t = max(0.0, min(1.0, t))
+            proj_x = x0 + t * dx
+            proj_y = y0 + t * dy
+            d = math.hypot(x - proj_x, y - proj_y)
+        if d < best:
+            best = d
+    return best
+
+
+def _creek_bed_depth_m(distance_m, creek_half_width_m, bank_margin_m):
+    """Return how many metres to lower terrain at a given distance from creek centre."""
+    bank_edge = creek_half_width_m + bank_margin_m
+    if distance_m >= bank_edge:
+        return 0.0
+    if distance_m < creek_half_width_m:
+        return _CREEK_BED_MAX_DEPTH_M
+    t = (bank_edge - distance_m) / bank_margin_m
+    return _CREEK_BED_MAX_DEPTH_M * t
+
+
+def _extract_creek_polylines(request):
+    """Extract creek polyline data from scene plan for terrain cut."""
+    polylines = []
+    for item in request.get("scene_plan", {}).get("objects", []):
+        if item["semantic_class"] != "creek":
+            continue
+        topology = item.get("polyline")
+        if topology is None:
+            continue
+        points_xy = tuple(
+            (p["x_m"], p["y_m"]) for p in topology["points"]
+        )
+        polylines.append(
+            {
+                "points_xy": points_xy,
+                "half_width_m": topology["width_m"] / 2,
+                "bank_margin_m": _CREEK_BANK_MARGIN_M,
+            }
+        )
+    return tuple(polylines)
+
+
+def _creek_bed_cut_depth(x_m, y_m, creek_polylines):
+    """Return total creek-bed cut depth at (x_m, y_m) across all creek polylines."""
+    if not creek_polylines:
+        return 0.0
+    max_depth = 0.0
+    for polyline in creek_polylines:
+        distance = _point_to_polyline_distance_m(x_m, y_m, polyline["points_xy"])
+        depth = _creek_bed_depth_m(
+            distance, polyline["half_width_m"], polyline["bank_margin_m"]
+        )
+        if depth > max_depth:
+            max_depth = depth
+    return max_depth
+
+
+def _terrain_height_cut(x_m, y_m, extent, creek_polylines):
+    """Return terrain height with creek-bed cut applied, quantized to 1 mm."""
+    base_z = _terrain_height(x_m, y_m, extent)
+    cut_depth = _creek_bed_cut_depth(x_m, y_m, creek_polylines)
+    if cut_depth <= 0.0:
+        return base_z
+    return round(base_z - cut_depth, 3)
+
+
 def _assign_textured_terrain_materials(terrain_obj, materials):
     moss = materials["material-moss-stone-01"]
     if moss.get("nv_implementation") != "derived-pbr-material-v1":
@@ -2362,12 +2455,15 @@ def _create_terrain(request, materials, auxiliary_collection):
         columns = int(width / spacing) + 1
         rows = int(depth / spacing) + 1
         triangle_count = (columns - 1) * (rows - 1) * 2
+    creek_polylines = _extract_creek_polylines(request)
     terrain = MeshAssembler()
     for row in range(rows):
         y_m = -depth / 2 + row * spacing
         for column in range(columns):
             x_m = -width / 2 + column * spacing
-            terrain.vertices.append((x_m, y_m, _terrain_height(x_m, y_m, extent)))
+            terrain.vertices.append(
+                (x_m, y_m, _terrain_height_cut(x_m, y_m, extent, creek_polylines))
+            )
     for row in range(rows - 1):
         for column in range(columns - 1):
             lower = row * columns + column
@@ -2396,6 +2492,9 @@ def _create_terrain(request, materials, auxiliary_collection):
     terrain_obj["nv_surface_grid_columns"] = columns
     terrain_obj["nv_surface_grid_rows"] = rows
     terrain_obj["nv_surface_triangle_count"] = triangle_count
+    terrain_obj["nv_creek_bed_cut_applied"] = len(creek_polylines) > 0
+    terrain_obj["nv_creek_bed_cut_max_depth_m"] = _CREEK_BED_MAX_DEPTH_M
+    terrain_obj["nv_creek_bed_cut_count"] = len(creek_polylines)
     terrain_obj.name = "nv__aux-terrain"
     terrain_obj["nv_auxiliary"] = True
     for polygon in terrain_obj.data.polygons:
@@ -2415,8 +2514,8 @@ def _create_terrain(request, materials, auxiliary_collection):
     bottom = -8.0
     for index, (x_m, y_m) in enumerate(perimeter):
         following = perimeter[(index + 1) % len(perimeter)]
-        z_m = _terrain_height(x_m, y_m, extent)
-        z_next = _terrain_height(following[0], following[1], extent)
+        z_m = _terrain_height_cut(x_m, y_m, extent, creek_polylines)
+        z_next = _terrain_height_cut(following[0], following[1], extent, creek_polylines)
         skirt.add(
             (
                 (x_m, y_m, z_m),
@@ -3635,11 +3734,18 @@ def _build_linear_feature(
             extent,
         )
     else:
-        ribbon = _ribbon(
-            topology["points"],
-            topology["width_m"],
-            0.13 if semantic == "creek" else 0.10,
-        )
+        if semantic == "creek":
+            creek_points = [
+                {**p, "z_m": round(p["z_m"] - _CREEK_BED_MAX_DEPTH_M, 3)}
+                for p in topology["points"]
+            ]
+            ribbon = _ribbon(creek_points, topology["width_m"], 0.13)
+        else:
+            ribbon = _ribbon(
+                topology["points"],
+                topology["width_m"],
+                0.10,
+            )
     _link_mesh(
         root,
         "terrain-conform-ribbon",
@@ -3669,17 +3775,18 @@ def _build_linear_feature(
             detail_obj["nv_surface_detail_class"] = detail_class
             detail_obj["nv_surface_detail_count"] = surface_detail_counts[detail_class]
     if semantic == "creek":
+        creek_polylines = _extract_creek_polylines(request)
         rocks = MeshAssembler()
         for segment_index, point in enumerate(topology["points"][::2]):
             for side in (-1, 1):
+                rock_x = point["x_m"] + side * (topology["width_m"] / 2 + 0.7)
+                rock_y = point["y_m"]
                 rocks.add_ellipsoid(
                     (
-                        point["x_m"] + side * (topology["width_m"] / 2 + 0.7),
-                        point["y_m"],
-                        _terrain_height(
-                            point["x_m"] + side * (topology["width_m"] / 2 + 0.7),
-                            point["y_m"],
-                            extent,
+                        rock_x,
+                        rock_y,
+                        _terrain_height_cut(
+                            rock_x, rock_y, extent, creek_polylines
                         )
                         + 0.24,
                     ),

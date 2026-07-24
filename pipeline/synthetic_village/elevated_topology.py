@@ -885,9 +885,20 @@ def verify_elevated_topology_plan(
     creek_xy = tuple(
         (point.x_m, point.y_m) for point in creek.polyline.points
     )
+    creek_half_width = creek.polyline.width_m / 2
     pond = next(item for item in active.objects if item.semantic_class == "pond")
     pond_xy = _ring_xy(pond.polygon)
     by_node = {node.node_id: node for node in plan.nodes}
+    for node in plan.nodes:
+        node_xy = (node.position_m[0], node.position_m[1])
+        creek_dist = min(
+            _point_segment_distance(node_xy, start, end)
+            for start, end in zip(creek_xy, creek_xy[1:], strict=False)
+        )
+        if creek_dist < creek_half_width:
+            raise ElevatedTopologyError(
+                f"node {node.node_id} is inside the creek channel"
+            )
     for edge in plan.edges:
         if edge.centerline[0].position_m != by_node[edge.start_node_id].position_m:
             raise ElevatedTopologyError(f"edge {edge.edge_id} start node is inconsistent")
@@ -910,7 +921,7 @@ def verify_elevated_topology_plan(
         )
         creek_clearance = _polyline_distance(points, creek_xy)
         if creek_clearance < (
-            creek.polyline.width_m / 2 + drainage_threshold
+            creek_half_width + drainage_threshold
         ):
             raise ElevatedTopologyError(
                 f"edge {edge.edge_id} violates creek water drainage clearance"
