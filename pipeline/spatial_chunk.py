@@ -12,6 +12,7 @@ manifest 如实记录源坐标契约。想要 metric-aligned, 得在源场景那
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import numbers
@@ -69,6 +70,12 @@ def _require_positive_size(chunk_size_m: float) -> float:
     return value
 
 
+def _file_sha256_and_size(path: Path) -> tuple[str, int]:
+    """Read file bytes once, return (sha256_hex, size_bytes)."""
+    data = path.read_bytes()
+    return hashlib.sha256(data).hexdigest(), len(data)
+
+
 def partition_scene_to_chunks(
     scene: GaussianScene,
     out_dir: str | Path,
@@ -123,6 +130,20 @@ def partition_scene_to_chunks(
             sub.to_quality(frac).save_ply(out_dir / lod_name, flavor="3dgs")
             lod_files[level] = lod_name
 
+        # --- P3: 绑定逐 chunk SHA-256 + size_bytes ---
+        # 消费者 (viewer / 跨 worker 缓存 / 下游工具) 拿到 chunk_*.ply 后
+        # 须能验证字节完整性, 而非只能验证源 recon_manifest.json 的 sha。
+        full_sha, full_size = _file_sha256_and_size(out_dir / name)
+        payloads: dict[str, dict] = {}
+        for level, fname in sorted(lod_files.items()):
+            ply_path = out_dir / fname
+            sha, size = _file_sha256_and_size(ply_path)
+            payloads[str(level)] = {
+                "file": fname,
+                "sha256": sha,
+                "size_bytes": size,
+            }
+
         aabb_min = [float(sub.xyz[:, i].min()) for i in range(3)]
         aabb_max = [float(sub.xyz[:, i].max()) for i in range(3)]
         for i in range(3):
@@ -134,7 +155,10 @@ def partition_scene_to_chunks(
             "x": cx,
             "y": cy,
             "ply_file": name,
+            "sha256": full_sha,
+            "size_bytes": full_size,
             "lod": {str(k): v for k, v in sorted(lod_files.items())},
+            "payloads": payloads,
             "point_count": len(sub),
             "aabb": {"min": aabb_min, "max": aabb_max},
         })
@@ -183,3 +207,119 @@ def partition_scene_to_chunks(
         f"空间分块: {total_points} 高斯 → {len(chunks)} 块 "
         f"({chunk_size_m:g}m 网格) → {out_dir/MANIFEST_NAME}")
     return manifest
+
+
+def verify_chunks_integrity(out_dir: str | Path) -> dict:
+    """重读 chunks.json 声明的 SHA-256 + size_bytes, 逐文件重算并比对。
+
+    只校验字节完整性 (declared sha vs actual sha), **绝不提升信任等级**:
+    一个 preview-only 的 chunk 文件 sha 匹配, 它仍然只是 preview-only。
+
+    Args:
+        out_dir: 包含 chunks.json 和 chunk_*.ply 的目录。
+
+    Returns:
+        dict:
+          - ``valid``: True 当所有声明 SHA 与实际字节匹配。
+          - ``total_chunks``: manifest 中的 chunk 数。
+          - ``verified_payloads``: 通过校验的 payload 数 (含各级 LOD)。
+          - ``mismatches``: 不匹配项列表, 每项含 chunk_id / file / declared /
+            actual / reason。
+          - ``manifest_path``: 校验的 manifest 路径。
+    """
+    out_dir = Path(out_dir)
+    manifest_path = out_dir / MANIFEST_NAME
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"chunks.json not found: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    chunks = manifest.get("chunks", [])
+    total_payloads = 0
+    verified = 0
+    mismatches: list[dict] = []
+
+    for chunk in chunks:
+        chunk_id = chunk.get("id", "?")
+        payloads = chunk.get("payloads", {})
+
+        # 校验顶层 sha256 / size_bytes (如果存在)
+        if "sha256" in chunk and "ply_file" in chunk:
+            total_payloads += 1
+            ply_path = out_dir / chunk["ply_file"]
+            if not ply_path.exists():
+                mismatches.append({
+                    "chunk_id": chunk_id,
+                    "file": chunk["ply_file"],
+                    "reason": "file not found",
+                })
+                continue
+            actual_sha, actual_size = _file_sha256_and_size(ply_path)
+            if actual_sha != chunk["sha256"]:
+                mismatches.append({
+                    "chunk_id": chunk_id,
+                    "file": chunk["ply_file"],
+                    "declared_sha256": chunk["sha256"],
+                    "actual_sha256": actual_sha,
+                    "reason": "sha256 mismatch",
+                })
+            elif actual_size != chunk.get("size_bytes"):
+                mismatches.append({
+                    "chunk_id": chunk_id,
+                    "file": chunk["ply_file"],
+                    "declared_size_bytes": chunk.get("size_bytes"),
+                    "actual_size_bytes": actual_size,
+                    "reason": "size_bytes mismatch",
+                })
+            else:
+                verified += 1
+
+        # 校验每个 LOD payload
+        for level, payload in payloads.items():
+            total_payloads += 1
+            fname = payload.get("file")
+            if fname is None:
+                mismatches.append({
+                    "chunk_id": chunk_id,
+                    "level": level,
+                    "reason": "payload missing 'file' field",
+                })
+                continue
+            ply_path = out_dir / fname
+            if not ply_path.exists():
+                mismatches.append({
+                    "chunk_id": chunk_id,
+                    "level": level,
+                    "file": fname,
+                    "reason": "file not found",
+                })
+                continue
+            actual_sha, actual_size = _file_sha256_and_size(ply_path)
+            if actual_sha != payload.get("sha256"):
+                mismatches.append({
+                    "chunk_id": chunk_id,
+                    "level": level,
+                    "file": fname,
+                    "declared_sha256": payload.get("sha256"),
+                    "actual_sha256": actual_sha,
+                    "reason": "sha256 mismatch",
+                })
+            elif actual_size != payload.get("size_bytes"):
+                mismatches.append({
+                    "chunk_id": chunk_id,
+                    "level": level,
+                    "file": fname,
+                    "declared_size_bytes": payload.get("size_bytes"),
+                    "actual_size_bytes": actual_size,
+                    "reason": "size_bytes mismatch",
+                })
+            else:
+                verified += 1
+
+    return {
+        "valid": len(mismatches) == 0,
+        "total_chunks": len(chunks),
+        "verified_payloads": verified,
+        "total_payloads": total_payloads,
+        "mismatches": mismatches,
+        "manifest_path": str(manifest_path),
+    }

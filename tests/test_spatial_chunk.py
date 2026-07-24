@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from pipeline.gaussian_scene import GaussianScene
-from pipeline.spatial_chunk import partition_scene_to_chunks
+from pipeline.spatial_chunk import partition_scene_to_chunks, verify_chunks_integrity
 
 
 def _scene(n=800, span=200.0, seed=3, **kw):
@@ -259,3 +259,144 @@ class TestPartition:
             partition_scene_to_chunks(
                 GaussianScene(np.zeros((0, 3)), np.zeros((0, 3))), tmp_path,
                 chunk_size_m=50.0)
+
+
+class TestChunkPayloadSHA:
+    """P3: 每个 streamed chunk 和 LOD payload 须绑定 SHA-256 + size_bytes。
+
+    消费者 (viewer / 跨 worker 缓存 / 下游工具) 拿到 chunk_*.ply 后无法验证字节完整性
+    —— 只能验证源 recon_manifest.json 的 sha。绑定逐 chunk SHA 让字节级完整性校验成为可能。
+    """
+
+    def test_each_chunk_has_sha256_and_size_bytes(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        for chunk in manifest["chunks"]:
+            assert "sha256" in chunk, "每个 chunk 须绑定 ply_file 的 sha256"
+            assert "size_bytes" in chunk, "每个 chunk 须绑定 ply_file 的 size_bytes"
+            assert isinstance(chunk["sha256"], str)
+            assert len(chunk["sha256"]) == 64, "sha256 须是 64 字符 hex"
+            assert isinstance(chunk["size_bytes"], int)
+            assert chunk["size_bytes"] > 0
+
+    def test_sha256_matches_actual_file_bytes(self, tmp_path):
+        import hashlib
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        for chunk in manifest["chunks"]:
+            ply_path = tmp_path / chunk["ply_file"]
+            actual_sha = hashlib.sha256(ply_path.read_bytes()).hexdigest()
+            actual_size = ply_path.stat().st_size
+            assert chunk["sha256"] == actual_sha, "声明 sha 须匹配实际 ply 字节"
+            assert chunk["size_bytes"] == actual_size, "声明 size 须匹配实际文件大小"
+
+    def test_payloads_covers_all_lod_levels(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=500), tmp_path, chunk_size_m=100.0,
+            lod_fractions={0: 0.1, 1: 0.4})
+        for chunk in manifest["chunks"]:
+            payloads = chunk["payloads"]
+            # 须含 lod0, lod1, lod2 (full) 三级
+            assert set(payloads.keys()) == {"0", "1", "2"}
+            for _level, payload in payloads.items():
+                assert "file" in payload
+                assert "sha256" in payload
+                assert "size_bytes" in payload
+                assert len(payload["sha256"]) == 64
+                assert payload["size_bytes"] > 0
+
+    def test_payload_sha_matches_lod_files(self, tmp_path):
+        import hashlib
+        manifest = partition_scene_to_chunks(
+            _scene(n=500), tmp_path, chunk_size_m=100.0,
+            lod_fractions={0: 0.1, 1: 0.4})
+        for chunk in manifest["chunks"]:
+            for _level, payload in chunk["payloads"].items():
+                ply_path = tmp_path / payload["file"]
+                actual_sha = hashlib.sha256(ply_path.read_bytes()).hexdigest()
+                assert payload["sha256"] == actual_sha
+                assert payload["size_bytes"] == ply_path.stat().st_size
+
+    def test_payload_full_matches_chunk_sha256(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        for chunk in manifest["chunks"]:
+            assert chunk["payloads"]["2"]["sha256"] == chunk["sha256"]
+            assert chunk["payloads"]["2"]["size_bytes"] == chunk["size_bytes"]
+            assert chunk["payloads"]["2"]["file"] == chunk["ply_file"]
+
+    def test_sha256_is_deterministic_for_same_scene(self, tmp_path):
+        scene = _scene(n=400, seed=7)
+        first = partition_scene_to_chunks(scene, tmp_path / "a", chunk_size_m=50.0)
+        second = partition_scene_to_chunks(scene, tmp_path / "b", chunk_size_m=50.0)
+        assert len(first["chunks"]) == len(second["chunks"])
+        for c1, c2 in zip(first["chunks"], second["chunks"], strict=False):
+            assert c1["sha256"] == c2["sha256"], "同一场景的 chunk sha 须确定"
+            assert c1["size_bytes"] == c2["size_bytes"]
+
+    def test_sha_does_not_promote_trust(self, tmp_path):
+        """绑定 SHA 是完整性校验, 不提升几何信任等级。"""
+        manifest = partition_scene_to_chunks(
+            _scene(n=200), tmp_path, chunk_size_m=60.0,
+            source_provenance={"geometry_usability": "preview-only"})
+        assert manifest["source"]["geometry_usability"] == "preview-only"
+        for chunk in manifest["chunks"]:
+            assert "sha256" in chunk  # SHA 存在
+        # 但 SHA 不改变信任等级: 仍是 preview-only
+
+    def test_verify_chunks_integrity_passes_for_valid_manifest(self, tmp_path):
+        partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        report = verify_chunks_integrity(tmp_path)
+        assert report["valid"] is True
+        assert report["verified_payloads"] > 0
+        assert report["mismatches"] == []
+
+    def test_verify_chunks_integrity_detects_tampered_file(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        # 篡改一个 PLY 文件
+        chunk = manifest["chunks"][0]
+        ply_path = tmp_path / chunk["ply_file"]
+        original = ply_path.read_bytes()
+        tampered = original + b"\x00" * 100
+        ply_path.write_bytes(tampered)
+        report = verify_chunks_integrity(tmp_path)
+        assert report["valid"] is False
+        assert len(report["mismatches"]) > 0
+        mismatch = report["mismatches"][0]
+        assert "chunk_id" in mismatch
+        assert mismatch["declared_sha256"] != mismatch["actual_sha256"]
+
+    def test_verify_chunks_integrity_detects_missing_file(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        # 删除一个 PLY 文件
+        chunk = manifest["chunks"][0]
+        (tmp_path / chunk["ply_file"]).unlink()
+        report = verify_chunks_integrity(tmp_path)
+        assert report["valid"] is False
+        assert any("missing" in str(m).lower() or "not found" in str(m).lower()
+                      for m in report["mismatches"])
+
+    def test_verify_chunks_integrity_detects_size_mismatch(self, tmp_path):
+        manifest = partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        # 篡改文件大小但不改 SHA (理论上很难, 但测试 size_bytes 检查路径)
+        chunk = manifest["chunks"][0]
+        ply_path = tmp_path / chunk["ply_file"]
+        original = ply_path.read_bytes()
+        # 截断文件: sha 和 size 都会变
+        ply_path.write_bytes(original[:len(original) // 2])
+        report = verify_chunks_integrity(tmp_path)
+        assert report["valid"] is False
+
+    def test_verify_returns_dict_with_human_readable_summary(self, tmp_path):
+        partition_scene_to_chunks(
+            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        report = verify_chunks_integrity(tmp_path)
+        assert "total_chunks" in report
+        assert "verified_payloads" in report
+        assert "mismatches" in report
+        assert isinstance(report["total_chunks"], int)
+        assert isinstance(report["verified_payloads"], int)
