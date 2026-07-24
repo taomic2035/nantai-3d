@@ -14,11 +14,13 @@
 
 带参数的 target 经环境变量传参（对应 Makefile 的 `make <target> VAR=...`）：
     PHOTOS=<照片目录>        check-capture（默认 photos）
-    MANIFEST=<manifest 路径>  inspect-recon（默认 web/data/recon/recon_manifest.json）
+    MANIFEST=<manifest 路径>  inspect-recon / verify-recon-artifacts
+                            （默认 web/data/recon/recon_manifest.json）
     DELIV=<交付目录>         validate-handoff（默认 HANDOFF-002）
 
 与 Makefile 保持等价的 target 名称；Makefile 仍保留给有 make 的 POSIX 环境。
-例外：doctor / check-capture / inspect-recon 目前只有本脚本有，Makefile 尚未补。
+例外：doctor / check-capture / inspect-recon / verify-recon-artifacts 目前只有本脚本有，
+Makefile 尚未补。
 """
 from __future__ import annotations
 
@@ -92,6 +94,13 @@ def inspect_recon() -> None:
     run([PY, "scripts/inspect_recon.py", manifest])
 
 
+def verify_recon_artifacts() -> None:
+    # 退出码 2 = 发现任何 mismatch / 路径安全 / chunks 异常 / 矛盾 (可当 CI 门用);
+    # 与 inspect_recon 一致。MANIFEST 默认指向同一份官方合成 manifest。
+    manifest = os.environ.get("MANIFEST", "web/data/recon/recon_manifest.json")
+    run([PY, "scripts/verify_recon_artifacts.py", manifest])
+
+
 def world() -> None:
     run([PY, "-m", "pipeline.generate_world", "--size", "5", "--seed", "42"])
 
@@ -135,6 +144,7 @@ TARGETS = {
     "setup": setup, "test": test, "lint": lint, "doctor": doctor,
     "ingest": ingest, "check-capture": check_capture,
     "reconstruct": reconstruct, "inspect-recon": inspect_recon,
+    "verify-recon-artifacts": verify_recon_artifacts,
     "world": world, "assets": assets,
     "validate-handoff": validate_handoff, "serve": serve, "verify": verify,
     "clean": clean,
