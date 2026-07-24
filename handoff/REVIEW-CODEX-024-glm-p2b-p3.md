@@ -1,8 +1,8 @@
 # REVIEW-CODEX-024 — GLM P2b/P3 contract review
 
-Date: 2026-07-24  
-Reviewer: Codex  
-Reviewed commits: `f564e4f`, `535d33e`  
+Date: 2026-07-24
+Reviewer: Codex
+Reviewed commits: `f564e4f`, `535d33e`
 Disposition: corrections required before remote push
 
 ## Outcome

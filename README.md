@@ -507,6 +507,16 @@ coverage_use=forbidden / trust_effect=none`。
 seam、camera clearance、visibility、六层与 post-render v2；完整绑定、QA 和消费顺序见
 [Batch24 image2 回执](handoff/FEEDBACK-IMAGE2-028-batch24-reciprocal-perimeter-section.md)。
 
+Batch24 已被消费为 additive exact-266 Blender 候选并完成 fresh 16 机位正式审计：
+`15/16` clearance、`15/15` 已渲染帧通过六层字节/相机身份/local/post-render-v2，
+但完整六目标可见性为 **`0/15`**，相邻双接缝可见性仅 **`3/15`**。因此当前画面可查看、
+路线可读，却不能声称外圈闭合或 360° 完整覆盖。真实 Blender UV repeat-density 探针还测得
+terrain `232.37×`、creek `40.48×`、long-wall `4.79×` 的内部变化，和画面中的重复/拉伸
+缺陷一致。exact-266 继续严格标注为
+`synthetic / L0 / preview-only / modeled-unverified / real_photo_textures=false`；
+完整 SHA、机位矩阵与目视结论见
+[Batch24 exact-266 正式审计](handoff/FEEDBACK-HANDOFF-CODEX-028-batch24-exact266-perimeter-closure.md)。
+
 ### Batch 25 环境真实感与可通行边界参考
 
 [Batch 25 Environment Realism Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch25-2026-07-24)
