@@ -1,7 +1,7 @@
 # HANDOFF-GLM-007 — Real-scene gap and independent high-value queue
 
 Date: 2026-07-24  
-Last coordinated update: 2026-07-24, after commit `338a345`
+Last coordinated update: 2026-07-24, after commits `66552b3` and `4468675`
 Owner: GLM lane  
 Coordinator/reviewer: Codex
 
@@ -54,9 +54,18 @@ evidence.
 - **Completed and pushed:** P0 creek/contact closure, commit `c1ca38b`.
 - **Completed and pushed:** P1 reconstruction artifact integrity, commit
   `9b8c0d7`; Codex reran the focused suite (`26 passed, 3 skipped`) and Ruff.
-- **In progress:** P2 base-scene world/sky/material audit. The current uncommitted
-  `weather_profile.py` and weather tests are only the first RED/contract slice;
-  pure-function tests alone do not complete P2.
+- **Completed and pushed:** P2a gradient-sky approximation and render-quality
+  metrics, commit `66552b3`. This improved the synthetic base canary only; it did
+  not rebuild or accept exact-266 and it added no real-scene evidence.
+- **In progress:** P2b material/UV distortion audit. The current uncommitted
+  `material_uv_audit.py`, Blender probe and tests are a draft only. Do not stop
+  after its pure-function tests pass; finish the real Blender measurement,
+  correction and byte-bound before/after render evidence below.
+- **Codex in progress:** the exact-266 sixteen-camera formal caller is now bound
+  through audit-plan, all-camera clearance and per-frame request contracts in
+  commits `cb3d7e7` and `4468675`. The Blender execution adapter, real sixteen
+  camera run and post-render-v2 evidence are not complete yet. GLM must not edit
+  those owned paths and must not wait for this work before continuing P2b/P3/P4.
 - **After each pushed item, start the next unblocked item in sections 6 and 7
   without waiting for Codex's exact-266 work.** Codex review may interrupt with
   corrections, but a pending review is not a reason to report that no work
@@ -134,7 +143,7 @@ Known remaining limitation: legacy `chunks.json` has no per-payload SHA/size,
 so the verifier can prove path and structural closure but cannot prove chunk
 PLY bytes. Section 6 is the queued closure for that limitation.
 
-## 5. Active P2 — base-scene world, haze and material audit
+## 5. Active P2 — P2a complete, P2b material audit in progress
 
 Current owned paths:
 
@@ -145,9 +154,12 @@ scripts/blender/build_synthetic_village.py
 tests/test_synthetic_village_blender_script.py
 ```
 
-Finish it as two path-limited commits:
+P2a was delivered in commit `66552b3`; completion evidence is in
+`handoff/FEEDBACK-HANDOFF-GLM-007-p2a-gradient-sky-closure.md`.
 
-1. **P2a world/sky/haze**
+Finish P2b as its own path-limited commit:
+
+1. **P2a world/sky/haze — complete (`66552b3`)**
    - keep the current pure deterministic gradient/haze contract;
    - make the base Blender builder actually consume that contract;
    - retain `synthetic=true`, `L0`, `preview-only` and a name that says
@@ -160,7 +172,7 @@ Finish it as two path-limited commits:
    - report request/build/blend/RGB SHA-256 values and measured luminance
      percentiles, clipped-black ratio, clipped-white ratio and background pixel
      ratio. A prettier screenshot without these bindings is not completion.
-2. **P2b material distortion audit**
+2. **P2b material distortion audit — active**
    - measure texel/UV scale variation on terrain, creek banks and long walls;
    - report each audited object/material and the measured min/max or percentile
      ratio;
@@ -168,6 +180,29 @@ Finish it as two path-limited commits:
      overlay paths;
    - rerender the same bound cameras and report before/after RGB plus the
      distortion measurements. Do not claim real-photo texture parity.
+
+   Before committing the current draft, close these review findings:
+
+   - the Blender probe currently measures UV-coordinate area per square metre,
+     not texels per metre; either bind the exact texture pixel dimensions and
+     compute a real texel-density unit, or rename the field and all conclusions
+     to `uv_area_per_m2` / repeat-density so the report does not overclaim;
+   - iterate evaluated loop triangles or triangulate every polygon for
+     measurement. Silently ignoring quads/ngons is not acceptable because the
+     base scene contains non-triangle meshes;
+   - reject non-finite numeric inputs, duplicate material IDs, missing/duplicate
+     object identities, zero-area audited categories and empty required
+     terrain/creek/long-wall categories;
+   - bind the probe report to the source `.blend` SHA, build-report SHA, probe
+     script SHA, exact object/material identities and Blender executable SHA;
+   - prove the mapping correction with the same build input, cameras, poses,
+     resolution and color management before/after. Record both RGB SHAs and
+     measured ratios; a visual screenshot or pure-function report alone is not
+     completion.
+
+   When P2b is pushed, start P3 in the same work cycle. A pending Codex review is
+   not a stop condition unless the review identifies a correctness or ownership
+   conflict.
 
 This work may touch the base Blender builder only after the creek/contact P0 is
 committed. It must not edit the exact-266 overlay paths.
