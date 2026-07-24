@@ -1,7 +1,8 @@
 # HANDOFF-GLM-007 — Real-scene gap and independent high-value queue
 
 Date: 2026-07-24  
-Last coordinated update: 2026-07-24, after commits `66552b3` and `4468675`
+Last coordinated update: 2026-07-24, after Codex review of `f564e4f` and
+`535d33e`
 Owner: GLM lane  
 Coordinator/reviewer: Codex
 
@@ -57,15 +58,32 @@ evidence.
 - **Completed and pushed:** P2a gradient-sky approximation and render-quality
   metrics, commit `66552b3`. This improved the synthetic base canary only; it did
   not rebuild or accept exact-266 and it added no real-scene evidence.
-- **In progress:** P2b material/UV distortion audit. The current uncommitted
-  `material_uv_audit.py`, Blender probe and tests are a draft only. Do not stop
-  after its pure-function tests pass; finish the real Blender measurement,
-  correction and byte-bound before/after render evidence below.
-- **Codex in progress:** the exact-266 sixteen-camera formal caller is now bound
-  through audit-plan, all-camera clearance and per-frame request contracts in
-  commits `cb3d7e7` and `4468675`. The Blender execution adapter, real sixteen
-  camera run and post-render-v2 evidence are not complete yet. GLM must not edit
-  those owned paths and must not wait for this work before continuing P2b/P3/P4.
+- **P2b review rejected as incomplete:** GLM commit `f564e4f` only delivered
+  declared repeat-distance arithmetic and a draft probe. It did not satisfy the
+  already-written requirements at lines 184–199: it mislabeled UV area as
+  texels, skipped quads/ngons, omitted runtime/build bindings and did not run a
+  real Blender probe or same-camera before/after render. Codex's follow-up now
+  closes the unit naming, non-finite/duplicate/category gates, evaluated
+  loop-triangle measurement and source/runtime SHA binding, and has run it
+  against the exact-266 `.blend`. **P2b remains open** until GLM makes a
+  base-builder-only mapping correction and produces bound before/after RGB and
+  repeat-density evidence.
+- **P3 review required corrections:** GLM commit `535d33e` added payload hashes
+  but treated a missing integrity block as valid and did not reject missing
+  rows, duplicate paths, `lod` disagreement, path escape or non-canonical
+  manifests. Codex's follow-up adds those fail-closed contracts plus explicit
+  `per_chunk_sha_verified=True/None/False`. After that follow-up is committed
+  and pushed, P3 is accepted; GLM must not duplicate the fix.
+- **Codex exact-266 formal audit executed:** commit `8cfd0d6` binds the real
+  Blender adapter and exact-266 frame verifier. Fresh evidence is 15/16
+  clearance passes, 15/15 rendered-frame local and post-render-v2 passes,
+  **0/15 complete six-target visibility** and **3/15 two-seam visibility**.
+  Camera 003 remains preflight-rejected. This is modeled-scene failure evidence,
+  not real-scene acceptance. GLM must not edit the exact-266 caller paths.
+- **GLM immediate continuation:** finish the P2b base-builder mapping correction
+  with the same bound cameras before/after, then start P4's real COLMAP
+  executable rehearsal. Do not wait for another Codex prompt after either
+  checkpoint.
 - **After each pushed item, start the next unblocked item in sections 6 and 7
   without waiting for Codex's exact-266 work.** Codex review may interrupt with
   corrections, but a pending review is not a reason to report that no work
