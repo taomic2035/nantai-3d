@@ -1,11 +1,11 @@
 # FEEDBACK IMAGE2 029 — Batch25 environment realism inputs
 
 Date: 2026-07-24
-Status: packaged, design-only
+Status: published, design-only
 
 ## Delivery
 
-- Intended release:
+- Release:
   <https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch25-2026-07-24>
 - Tag: `synthetic-village-design-inputs-batch25-2026-07-24`
 - Archive:
