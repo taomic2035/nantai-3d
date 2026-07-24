@@ -22,6 +22,7 @@ from pipeline.synthetic_village.perimeter_closure_module import (
     perimeter_closure_plan_sha256,
     verify_perimeter_closure_plan,
 )
+from pipeline.synthetic_village.scene_plan import terrain_height_m
 
 BATCH24_ASSETS = (
     (
@@ -238,6 +239,19 @@ print(perimeter_closure_plan_sha256(plan))
             terrain_height_at=lambda x, y: round(0.015 * x - 0.01 * y, 3),
         )
     )
+
+
+def test_default_plan_fits_canonical_scene_extent(
+    batch24_manifest: dict[str, Any],
+) -> None:
+    plan = build_default_perimeter_closure_plan(
+        batch24_manifest=batch24_manifest,
+        batch24_manifest_sha256="a" * 64,
+        production_plan_sha256="b" * 64,
+        topology_plan_sha256="c" * 64,
+        terrain_height_at=terrain_height_m,
+    )
+    assert len(plan.modules) == 8
 
 
 def test_default_plan_binds_all_sixteen_sources_exactly_once(

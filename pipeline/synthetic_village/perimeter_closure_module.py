@@ -570,7 +570,10 @@ def _build_part(
             outer_xy[0] - midpoint_xy[0],
             outer_xy[1] - midpoint_xy[1],
         ),
-        "vegetation-enclosure": (ux * (length_m / 2.0 + 12.0), uy * (length_m / 2.0 + 12.0)),
+        "vegetation-enclosure": (
+            ux * (length_m / 2.0 - 8.0),
+            uy * (length_m / 2.0 - 8.0),
+        ),
     }[role]
     center_xy = (
         midpoint_xy[0] + role_offset[0],
