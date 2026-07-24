@@ -920,8 +920,13 @@ def verify_elevated_topology_plan(
             edge.width_m / 2 + edge.collision.drainage_clearance_m
         )
         creek_clearance = _polyline_distance(points, creek_xy)
-        if creek_clearance < (
-            creek_half_width + drainage_threshold
+        # Intentional bridge crossings (bridge-loop) span the creek in plan
+        # view but are elevated above the water surface; they must not be
+        # rejected merely for crossing the creek centreline (HANDOFF-GLM-007
+        # §3.4).  Non-bridge edges still require full drainage clearance.
+        if (
+            edge.loop_id != "bridge-loop"
+            and creek_clearance < (creek_half_width + drainage_threshold)
         ):
             raise ElevatedTopologyError(
                 f"edge {edge.edge_id} violates creek water drainage clearance"

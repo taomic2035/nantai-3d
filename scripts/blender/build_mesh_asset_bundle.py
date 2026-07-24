@@ -512,6 +512,7 @@ def _build_detailed_building(recipe, root, registry, materials, collection):
         materials,
         collection,
         shared.BUILDING_GEOMETRY_V2,
+        None,
     )
     for child in root.children:
         part_id = child.get("nv_part_id")

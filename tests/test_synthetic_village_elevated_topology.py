@@ -234,10 +234,13 @@ def test_verifier_rejects_scene_digest_building_and_water_collisions() -> None:
 
     creek = next(item for item in scene.objects if item.semantic_class == "creek")
     payload = _plan_payload()
+    # Use a non-bridge-loop edge: bridge-loop edges are intentional creek
+    # crossings and are exempt from drainage clearance (HANDOFF-GLM-007 §3.4).
     passage = next(
         edge
         for edge in payload["edges"]
         if edge["component_kind"] == "cross-level-covered-passage"
+        and edge["loop_id"] != "bridge-loop"
         and len(edge["centerline"]) >= 3
     )
     creek_point = creek.polyline.points[len(creek.polyline.points) // 2]
@@ -248,6 +251,39 @@ def test_verifier_rejects_scene_digest_building_and_water_collisions() -> None:
     wet = ElevatedTopologyPlan.model_validate_json(json.dumps(payload))
     with pytest.raises(ElevatedTopologyError, match="water|drainage|creek"):
         verify_elevated_topology_plan(wet, scene)
+
+
+def test_bridge_loop_edge_crossing_creek_is_not_rejected() -> None:
+    """Intentional bridge crossings (bridge-loop) must not be rejected
+    merely for crossing the creek in plan view (HANDOFF-GLM-007 §3.4).
+
+    Bridge-loop edges are elevated above the water surface; the 2D plan-view
+    intersection with the creek centreline is by design, not a drainage
+    violation.
+    """
+    scene = build_scene_plan()
+    creek = next(item for item in scene.objects if item.semantic_class == "creek")
+    payload = _plan_payload()
+    bridge_edge = next(
+        edge
+        for edge in payload["edges"]
+        if edge["loop_id"] == "bridge-loop"
+        and len(edge["centerline"]) >= 3
+    )
+    creek_point = creek.polyline.points[len(creek.polyline.points) // 2]
+    bridge_edge["centerline"][1]["position_m"][:2] = [
+        creek_point.x_m,
+        creek_point.y_m,
+    ]
+    bridge_edge["centerline"][1]["position_m"][2] = round(
+        (
+            bridge_edge["centerline"][0]["position_m"][2]
+            + bridge_edge["centerline"][-1]["position_m"][2]
+        ) / 2,
+        3,
+    )
+    wet = ElevatedTopologyPlan.model_validate_json(json.dumps(payload))
+    verify_elevated_topology_plan(wet, scene)
 
 
 def test_canonical_bytes_are_deterministic_path_free_and_strictly_reloadable() -> None:

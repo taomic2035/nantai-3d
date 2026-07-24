@@ -171,6 +171,8 @@ def point_to_polyline_distance_m(
 ) -> float:
     """Return the minimum Euclidean distance from (x, y) to a polyline."""
 
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError("query coordinates must be finite")
     if len(points) < 2:
         raise ValueError("polyline must have at least 2 points")
     best = float("inf")
@@ -207,6 +209,12 @@ def creek_bed_depth_m(
     cut is zero.
     """
 
+    if not math.isfinite(distance_m):
+        raise ValueError("distance must be finite")
+    if creek_half_width_m <= 0.0:
+        raise ValueError("creek_half_width_m must be positive")
+    if bank_margin_m <= 0.0:
+        raise ValueError("bank_margin_m must be positive")
     bank_edge = creek_half_width_m + bank_margin_m
     if distance_m >= bank_edge:
         return 0.0

@@ -2326,6 +2326,10 @@ _CREEK_BANK_MARGIN_M = 2.0
 
 def _point_to_polyline_distance_m(x, y, points_xy):
     """Return minimum Euclidean distance from (x, y) to a polyline."""
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError("query coordinates must be finite")
+    if len(points_xy) < 2:
+        raise ValueError("polyline must have at least 2 points")
     best = float("inf")
     for i in range(len(points_xy) - 1):
         x0, y0 = points_xy[i]
@@ -2348,6 +2352,12 @@ def _point_to_polyline_distance_m(x, y, points_xy):
 
 def _creek_bed_depth_m(distance_m, creek_half_width_m, bank_margin_m):
     """Return how many metres to lower terrain at a given distance from creek centre."""
+    if not math.isfinite(distance_m):
+        raise ValueError("distance must be finite")
+    if creek_half_width_m <= 0.0:
+        raise ValueError("creek_half_width_m must be positive")
+    if bank_margin_m <= 0.0:
+        raise ValueError("bank_margin_m must be positive")
     bank_edge = creek_half_width_m + bank_margin_m
     if distance_m >= bank_edge:
         return 0.0
@@ -2401,6 +2411,57 @@ def _terrain_height_cut(x_m, y_m, extent, creek_polylines):
     if cut_depth <= 0.0:
         return base_z
     return round(base_z - cut_depth, 3)
+
+
+def _building_skirt_box(base_z, width, depth, transform, extent):
+    """Return ``(center, size)`` for the foundation skirt, or ``None``.
+
+    The skirt extends the building platform down to the lowest terrain
+    corner so the platform does not float on slopes.  Returns ``None`` when
+    the terrain is at or above the platform (no skirt needed) or when
+    ``transform``/``extent`` are absent (mesh-asset template path).
+    """
+    if transform is None or extent is None:
+        return None
+    yaw_rad = math.radians(transform["yaw_deg"])
+    cos_yaw = math.cos(yaw_rad)
+    sin_yaw = math.sin(yaw_rad)
+    half_w = width / 2 + 0.35
+    half_d = depth / 2 + 0.35
+    corner_terrain_z = []
+    for local_x, local_y in (
+        (-half_w, -half_d), (half_w, -half_d), (half_w, half_d), (-half_w, half_d),
+    ):
+        world_x = transform["x_m"] + local_x * cos_yaw - local_y * sin_yaw
+        world_y = transform["y_m"] + local_x * sin_yaw + local_y * cos_yaw
+        corner_terrain_z.append(_terrain_height(world_x, world_y, extent))
+    min_terrain_z = min(corner_terrain_z)
+    if min_terrain_z >= base_z - 1e-6:
+        return None
+    skirt_height = base_z - min_terrain_z
+    center_z = (base_z + min_terrain_z) / 2
+    return ((0.0, 0.0, center_z), (width + 0.7, depth + 0.7, skirt_height))
+
+
+def _bridge_foundation_box(
+    pier_bottom_z, x_value, depth, cos_yaw, sin_yaw, transform, extent, creek_polylines,
+):
+    """Return ``(center, size)`` for a bridge pier foundation, or ``None``.
+
+    The foundation extends the pier down to the creek-cut terrain so the
+    bridge does not float above the creek bed.  Returns ``None`` when the
+    terrain is at or above the pier bottom.
+    """
+    if transform is None or extent is None:
+        return None
+    world_x = transform["x_m"] + x_value * cos_yaw
+    world_y = transform["y_m"] + x_value * sin_yaw
+    terrain_z = _terrain_height_cut(world_x, world_y, extent, creek_polylines)
+    if terrain_z >= pier_bottom_z - 1e-6:
+        return None
+    foundation_height = pier_bottom_z - terrain_z
+    center_z = (pier_bottom_z + terrain_z) / 2
+    return ((x_value, 0.0, center_z), (0.9, depth, foundation_height))
 
 
 def _assign_textured_terrain_materials(terrain_obj, materials):
@@ -3149,6 +3210,7 @@ def _build_building(
     materials,
     collection,
     building_geometry_profile,
+    extent,
 ):
     dimensions = item["dimensions"]
     width = dimensions["width_m"]
@@ -3167,6 +3229,14 @@ def _build_building(
 
     base = MeshAssembler()
     base.add_box((0.0, 0.0, base_z + 0.28), (width + 0.7, depth + 0.7, 0.56))
+
+    # Foundation skirt: extend platform down to terrain at building corners
+    # to prevent floating platforms on sloped terrain.  Only applies to
+    # scene instances (which carry a world ``transform``); mesh-asset
+    # template builds construct on a flat origin platform and skip this.
+    skirt = _building_skirt_box(base_z, width, depth, item.get("transform"), extent)
+    if skirt is not None:
+        base.add_box(skirt[0], skirt[1])
     if is_v2:
         before = len(base.faces)
         base.add_box(
@@ -3422,7 +3492,7 @@ def _build_building(
         )
 
 
-def _build_bridge(item, root, registry, materials, collection):
+def _build_bridge(item, root, registry, materials, collection, extent, request):
     dimensions = item["dimensions"]
     width, depth, height = (
         dimensions["width_m"],
@@ -3430,6 +3500,10 @@ def _build_bridge(item, root, registry, materials, collection):
         dimensions["height_m"],
     )
     center_z = item["transform"]["z_m"]
+    yaw_rad = math.radians(item["transform"]["yaw_deg"])
+    cos_yaw = math.cos(yaw_rad)
+    sin_yaw = math.sin(yaw_rad)
+    creek_polylines = _extract_creek_polylines(request)
     stone = MeshAssembler()
     stone.add_box((0.0, 0.0, center_z), (width, depth, height * 0.45))
     for y_value in (-depth / 2 + 0.18, depth / 2 - 0.18):
@@ -3437,8 +3511,15 @@ def _build_bridge(item, root, registry, materials, collection):
             (0.0, y_value, center_z + height * 0.48),
             (width, 0.32, height * 0.55),
         )
+    pier_bottom_z = center_z - height * 0.82
     for x_value in (-width / 2 + 1.0, 0.0, width / 2 - 1.0):
         stone.add_box((x_value, 0.0, center_z - height * 0.42), (0.7, depth, height * 0.8))
+        foundation = _bridge_foundation_box(
+            pier_bottom_z, x_value, depth, cos_yaw, sin_yaw,
+            item["transform"], extent, creek_polylines,
+        )
+        if foundation is not None:
+            stone.add_box(foundation[0], foundation[1])
     _link_mesh(
         root,
         "stone-deck-parapets-piers",
@@ -4202,9 +4283,18 @@ def _build_canonical_objects(request, materials, canonical_collection):
                 materials,
                 canonical_collection,
                 request.get("building_geometry_profile_id", BUILDING_GEOMETRY_V1),
+                request["scene_plan"]["extent"],
             )
         elif semantic == "bridge":
-            _build_bridge(item, root, registry, materials, canonical_collection)
+            _build_bridge(
+                item,
+                root,
+                registry,
+                materials,
+                canonical_collection,
+                request["scene_plan"]["extent"],
+                request,
+            )
         elif semantic in {"creek", "path", "retaining-wall"}:
             _build_linear_feature(
                 item,
