@@ -10,20 +10,45 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from pipeline.synthetic_village import canary
 from pipeline.synthetic_village import perimeter_closure_module as closure_module
 from pipeline.synthetic_village.perimeter_closure_audit import (
     PERIMETER_CLOSURE_AUDIT_CAMERA_ORDER,
     PerimeterClosureAuditPlan,
     build_perimeter_closure_audit_plan,
+    build_perimeter_closure_clearance_report,
+    build_perimeter_closure_clearance_request,
+    build_perimeter_closure_render_frame_request,
     canonical_perimeter_closure_audit_plan_bytes,
+    canonical_perimeter_closure_clearance_report_bytes,
+    canonical_perimeter_closure_clearance_request_bytes,
+    canonical_perimeter_closure_render_request_bytes,
     perimeter_closure_audit_plan_sha256,
+    perimeter_closure_object_registry_sha256,
+    perimeter_closure_renderer_capability_sha256,
     verify_perimeter_closure_audit_plan,
+    verify_perimeter_closure_clearance_report,
 )
 from pipeline.synthetic_village.perimeter_closure_module import (
     PERIMETER_CLOSURE_MODULE_ORDER,
     PerimeterClosurePlan,
     build_default_perimeter_closure_plan,
     perimeter_closure_plan_sha256,
+)
+from pipeline.synthetic_village.production_preflight import (
+    PRODUCTION_CLEARANCE_SAMPLE_POINTS,
+    ProductionCameraClearanceEvidence,
+    ProductionClearancePolicy,
+    ProductionClearanceRayEvidence,
+    production_clearance_policy_sha256,
+)
+from pipeline.synthetic_village.production_quality_gates import (
+    candidate_synthetic_village_frame_quality_policy_v2,
+    production_frame_quality_policy_v2_sha256,
+)
+from pipeline.synthetic_village.production_render import (
+    LocalProductionQualityPolicy,
+    local_production_quality_policy_sha256,
 )
 
 
@@ -75,13 +100,76 @@ def _audit_terrain(x_m: float, y_m: float) -> float:
 
 
 def _build(closure_plan: PerimeterClosurePlan) -> PerimeterClosureAuditPlan:
+    registry = _registry()
     return build_perimeter_closure_audit_plan(
         perimeter_closure_plan=closure_plan,
         exact_build_id="d" * 64,
         exact_build_report_sha256="e" * 64,
         exact_blend_sha256="f" * 64,
-        object_registry_sha256="1" * 64,
+        object_registry_sha256=perimeter_closure_object_registry_sha256(
+            registry
+        ),
         terrain_height_at=_audit_terrain,
+    )
+
+
+def _registry() -> tuple[canary.ObjectRegistryEntry, ...]:
+    return tuple(
+        canary.ObjectRegistryEntry(
+            object_id=f"audit-object-{instance_id:03d}",
+            instance_id=instance_id,
+            semantic_id=3,
+            material_id=1,
+            variant_id=None,
+        )
+        for instance_id in range(1, 267)
+    )
+
+
+def _clearance_policy() -> ProductionClearancePolicy:
+    return ProductionClearancePolicy(
+        near_distance_m=2.0,
+        minimum_upper_middle_near_hit_count=5,
+    )
+
+
+def _local_quality_policy() -> LocalProductionQualityPolicy:
+    return LocalProductionQualityPolicy(minimum_valid_pixel_ratio=0.25)
+
+
+def _post_render_policy():
+    return candidate_synthetic_village_frame_quality_policy_v2(
+        minimum_valid_depth_pixel_ratio=0.0,
+        minimum_valid_normal_pixel_ratio=0.0,
+        minimum_valid_semantic_pixel_ratio=0.0,
+        maximum_sky_pixel_ratio=1.0,
+        maximum_upper_ground_pixel_ratio=1.0,
+        maximum_near_depth_pixel_ratio=1.0,
+        maximum_near_instance_dominance_ratio=1.0,
+        maximum_upper_instance_dominance_ratio=1.0,
+        near_depth_m=2.0,
+        upper_region_end_row_exclusive=288,
+        ground_semantic_ids=(1,),
+    )
+
+
+def _clearance_evidence(
+    plan: PerimeterClosureAuditPlan,
+) -> tuple[ProductionCameraClearanceEvidence, ...]:
+    rays = tuple(
+        ProductionClearanceRayEvidence(
+            sample_x=sample_x,
+            sample_y=sample_y,
+            hit=False,
+        )
+        for sample_x, sample_y in PRODUCTION_CLEARANCE_SAMPLE_POINTS
+    )
+    return tuple(
+        ProductionCameraClearanceEvidence(
+            camera_id=camera.camera_id,
+            rays=rays,
+        )
+        for camera in plan.cameras
     )
 
 
@@ -279,3 +367,218 @@ def test_module_order_remains_the_canonical_eight() -> None:
         "closure-west",
         "closure-northwest",
     )
+
+
+def test_clearance_request_binds_all_sixteen_exact266_cameras(
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    registry = _registry()
+    policy = _clearance_policy()
+
+    request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        object_registry=registry,
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=policy,
+    )
+
+    assert request.audit_plan_sha256 == perimeter_closure_audit_plan_sha256(
+        plan
+    )
+    assert request.selected_camera_ids == tuple(
+        camera.camera_id for camera in plan.cameras
+    )
+    assert tuple(row.instance_id for row in request.object_registry) == tuple(
+        range(1, 267)
+    )
+    assert request.object_registry_sha256 == (
+        perimeter_closure_object_registry_sha256(registry)
+    )
+    assert request.policy_sha256 == production_clearance_policy_sha256(policy)
+    assert canonical_perimeter_closure_clearance_request_bytes(request).endswith(
+        b"\n"
+    )
+    assert len(request.preflight_id) == 64
+
+
+def test_clearance_request_rejects_registry_drift(
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+
+    with pytest.raises(ValueError, match="registry"):
+        build_perimeter_closure_clearance_request(
+            plan=plan,
+            blender_executable_sha256="2" * 64,
+            audit_script_sha256="3" * 64,
+            object_registry=_registry()[:-1],
+            auxiliary_registry=canary.AUXILIARY_REGISTRY,
+            semantic_registry=canary._semantic_registry(),
+            policy=_clearance_policy(),
+        )
+
+
+def test_clearance_report_round_trip_binds_raw_measurements(
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    report = build_perimeter_closure_clearance_report(
+        request=request,
+        evidence=_clearance_evidence(plan),
+    )
+
+    assert len(report.evidence) == len(report.decisions) == 16
+    assert all(decision.passes for decision in report.decisions)
+    verify_perimeter_closure_clearance_report(report, request=request)
+    assert canonical_perimeter_closure_clearance_report_bytes(
+        report
+    ).endswith(b"\n")
+
+
+def test_clearance_report_rejects_decision_from_another_camera(
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    report = build_perimeter_closure_clearance_report(
+        request=request,
+        evidence=_clearance_evidence(plan),
+    )
+    decisions = list(report.decisions)
+    decisions[0] = decisions[0].model_copy(
+        update={"camera_id": decisions[1].camera_id}
+    )
+    mutated = report.model_copy(update={"decisions": tuple(decisions)})
+
+    with pytest.raises(ValueError, match="decision|camera"):
+        verify_perimeter_closure_clearance_report(mutated, request=request)
+
+
+def test_render_request_binds_clearance_six_layers_and_quality_policies(
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    registry = _registry()
+    clearance_request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        object_registry=registry,
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    clearance_report = build_perimeter_closure_clearance_report(
+        request=clearance_request,
+        evidence=_clearance_evidence(plan),
+    )
+    local_policy = _local_quality_policy()
+    post_policy = _post_render_policy()
+    camera = plan.cameras[0]
+
+    request = build_perimeter_closure_render_frame_request(
+        plan=plan,
+        audit_camera_id=camera.audit_camera_id,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        engine_script_sha256="4" * 64,
+        object_registry=registry,
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        clearance_report=clearance_report,
+        local_quality_policy=local_policy,
+        post_render_policy=post_policy,
+    )
+
+    assert request.camera == camera
+    assert request.clearance_decision.camera_id == camera.camera_id
+    assert request.clearance_decision.passes
+    assert request.required_target_instance_ids == (
+        camera.required_target_instance_ids
+    )
+    assert request.required_seam_instance_ids == (
+        camera.required_seam_instance_ids
+    )
+    assert request.renderer_capability_sha256 == (
+        perimeter_closure_renderer_capability_sha256()
+    )
+    assert request.local_quality_policy_sha256 == (
+        local_production_quality_policy_sha256(local_policy)
+    )
+    assert request.post_render_policy_sha256 == (
+        production_frame_quality_policy_v2_sha256(post_policy)
+    )
+    assert canonical_perimeter_closure_render_request_bytes(request).endswith(
+        b"\n"
+    )
+
+
+def test_render_request_rejects_failed_or_wrong_camera_clearance(
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    registry = _registry()
+    clearance_request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        object_registry=registry,
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    evidence = list(_clearance_evidence(plan))
+    near_rays = list(evidence[0].rays)
+    for index in range(5):
+        ray = near_rays[10 + index]
+        near_rays[10 + index] = ray.model_copy(
+            update={
+                "hit": True,
+                "distance_m": 0.5,
+                "object_name": "blocking-wall",
+                "stable_id": "blocking-wall",
+                "part_id": "mesh",
+                "semantic_id": 3,
+            }
+        )
+    evidence[0] = evidence[0].model_copy(update={"rays": tuple(near_rays)})
+    clearance_report = build_perimeter_closure_clearance_report(
+        request=clearance_request,
+        evidence=tuple(evidence),
+    )
+
+    with pytest.raises(ValueError, match="clearance"):
+        build_perimeter_closure_render_frame_request(
+            plan=plan,
+            audit_camera_id=plan.cameras[0].audit_camera_id,
+            blender_executable_sha256="2" * 64,
+            audit_script_sha256="3" * 64,
+            engine_script_sha256="4" * 64,
+            object_registry=registry,
+            auxiliary_registry=canary.AUXILIARY_REGISTRY,
+            semantic_registry=canary._semantic_registry(),
+            clearance_report=clearance_report,
+            local_quality_policy=_local_quality_policy(),
+            post_render_policy=_post_render_policy(),
+        )
