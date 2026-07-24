@@ -292,6 +292,73 @@ def test_request_binds_exact218_inputs_and_exact266_registry(prepared) -> None:
     assert request.blender_executable_sha256 == _sha256_file(prepared[2])
 
 
+def test_request_adds_explicit_bark_and_canopy_material_bindings(prepared) -> None:
+    request = _request(prepared)
+    by_alias = {row.material_alias: row for row in request.material_bindings}
+
+    assert len(request.material_bindings) == 16
+    assert by_alias["material-perimeter-bark-01"].model_dump() == {
+        "material_alias": "material-perimeter-bark-01",
+        "runtime_slot_id": "material-broadleaf-bark-01",
+        "material_family": "weathered-timber",
+        "material_id": 10,
+    }
+    assert by_alias["material-perimeter-canopy-01"].model_dump() == {
+        "material_alias": "material-perimeter-canopy-01",
+        "runtime_slot_id": "material-broadleaf-canopy-01",
+        "material_family": "orchard-leaf",
+        "material_id": 4,
+    }
+    assert by_alias["material-courtyard-timber-01"].runtime_slot_id == (
+        "material-weathered-timber-01"
+    )
+
+
+def test_request_rejects_partial_or_drifted_auxiliary_material_bindings(
+    prepared,
+) -> None:
+    request = _request(prepared)
+
+    def rebuild(payload):
+        payload["material_bindings_sha256"] = hashlib.sha256(
+            canary._canonical_json_bytes(payload["material_bindings"])
+        ).hexdigest()
+        payload.pop("build_id", None)
+        payload["build_id"] = hashlib.sha256(
+            canary._canonical_json_bytes(payload)
+        ).hexdigest()
+        return payload
+
+    partial = request.model_dump(mode="json")
+    partial["material_bindings"] = [
+        row
+        for row in partial["material_bindings"]
+        if row["material_alias"] != "material-perimeter-canopy-01"
+    ]
+    with pytest.raises(
+        ValidationError,
+        match="material bindings must be legacy-14 or exact closure-16",
+    ):
+        type(request).model_validate_json(
+            canary._canonical_json_bytes(rebuild(partial))
+        )
+
+    drifted = request.model_dump(mode="json")
+    canopy = next(
+        row
+        for row in drifted["material_bindings"]
+        if row["material_alias"] == "material-perimeter-canopy-01"
+    )
+    canopy["runtime_slot_id"] = "material-weathered-timber-01"
+    with pytest.raises(
+        ValidationError,
+        match="auxiliary material bindings are not exact",
+    ):
+        type(request).model_validate_json(
+            canary._canonical_json_bytes(rebuild(drifted))
+        )
+
+
 def test_request_bytes_and_build_id_are_deterministic(prepared) -> None:
     left = _request(prepared)
     right = _request(prepared)

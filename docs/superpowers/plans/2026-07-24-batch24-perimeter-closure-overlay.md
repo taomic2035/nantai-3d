@@ -246,11 +246,14 @@ reciprocal-route-build-report.json
 village-reciprocal-route.blend
 ```
 
-and bind their bytes plus Blender/script identities. The exact 14-row Blender
-material-binding table is inherited from and re-hashed against the verified
-exact-218 report; the unrelated PLY `AssetRegistry` is not treated as Blender
-material evidence. The 48 appended registry rows must be derived from plan
-parts only.
+and bind their bytes plus Blender/script identities. Preserve the exact
+fourteen inherited Blender material-binding rows, then append the literal
+`material-perimeter-bark-01 -> material-broadleaf-bark-01` and
+`material-perimeter-canopy-01 -> material-broadleaf-canopy-01` bindings. Hash
+the resulting sixteen-row table canonically; reject fifteen rows or any drift
+in either auxiliary row. The unrelated PLY `AssetRegistry` is not treated as
+Blender material evidence. The 48 appended registry rows must be derived from
+plan parts only.
 
 - [ ] **Step 4: Write report verifier tests before implementation**
 
@@ -371,6 +374,13 @@ Each returns a canonical root plus explicit mesh children. Roots are tagged
 from the registry; children never carry `nv_root=True`. Corridors must include
 both anchor endpoints, supports must reach terrain, drains must remain open,
 and enclosure geometry must leave the camera sky/corridor open.
+
+For each vegetation enclosure, emit four trunks with bark face material,
+twenty overlapping low-poly ellipsoid canopy lobes and eight understory
+ellipsoids with canopy face material in one mesh child. Measure every vertex's
+XY distance to the route centerline and require at least `4.0m`; also require
+the lowest crown surface to overlap its trunk top by at least `0.25m`. Box
+foliage and unbound green tint overrides are forbidden.
 
 - [ ] **Step 5: Add measured geometry validators**
 

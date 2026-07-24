@@ -183,6 +183,94 @@ def test_vegetation_trunks_leave_bidirectional_route_clear(
         assert perpendicular_distance_m >= 5.0
 
 
+def test_mesh_assembler_ellipsoid_is_closed_and_deterministic(
+    runtime: ModuleType,
+) -> None:
+    left = runtime.MeshAssembler()
+    right = runtime.MeshAssembler()
+    kwargs = {
+        "center": (2.0, -3.0, 5.0),
+        "radii": (1.5, 1.0, 2.0),
+        "segments": 10,
+        "rings": 5,
+        "yaw": math.radians(17.0),
+        "material_index": 1,
+    }
+    left.add_ellipsoid(**kwargs)
+    right.add_ellipsoid(**kwargs)
+
+    assert left.vertices == right.vertices
+    assert left.faces == right.faces
+    assert left.face_material_indices == right.face_material_indices
+    assert len(left.vertices) > 8
+    assert len(left.faces) > 6
+    assert set(left.face_material_indices) == {1}
+    assert all(
+        0 <= vertex_index < len(left.vertices)
+        for face in left.faces
+        for vertex_index in face
+    )
+    edge_counts: dict[tuple[int, int], int] = {}
+    for face in left.faces:
+        for index, start in enumerate(face):
+            end = face[(index + 1) % len(face)]
+            edge = tuple(sorted((start, end)))
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+    assert edge_counts
+    assert set(edge_counts.values()) == {2}
+
+
+def test_vegetation_uses_layered_non_box_foliage(
+    runtime: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_box(*_args, **_kwargs):
+        raise AssertionError("vegetation foliage must not use box primitives")
+
+    monkeypatch.setattr(runtime.MeshAssembler, "add_box", reject_box)
+    result = runtime._build_vegetation_enclosure(
+        _part("vegetation-enclosure"),
+        None,
+    )
+
+    assert result.evidence["crown_primitive"] == "low-poly-ellipsoid-lobes"
+    assert result.evidence["crown_lobe_count"] == 20
+    assert result.evidence["understory_cluster_count"] == 8
+    assert result.evidence["minimum_crown_trunk_overlap_m"] >= 0.25
+    assert result.evidence["material_slots"] == (
+        "material-perimeter-bark-01",
+        "material-perimeter-canopy-01",
+    )
+    assert set(result.assembler.face_material_indices) == {0, 1}
+
+
+def test_all_vegetation_geometry_leaves_route_volume_open(
+    runtime: ModuleType,
+) -> None:
+    part = _part("vegetation-enclosure")
+    result = runtime._build_vegetation_enclosure(part, None)
+    inner = part["inner_anchor_m"]
+    outer = part["outer_anchor_m"]
+    dx = outer[0] - inner[0]
+    dy = outer[1] - inner[1]
+    length = math.hypot(dx, dy)
+    clearances = [
+        abs(
+            dy * x_m
+            - dx * y_m
+            + outer[0] * inner[1]
+            - outer[1] * inner[0]
+        )
+        / length
+        for x_m, y_m, _z_m in result.assembler.vertices
+    ]
+
+    assert min(clearances) >= 4.0
+    assert result.evidence["minimum_geometry_route_clearance_m"] == (
+        pytest.approx(min(clearances), abs=1e-6)
+    )
+
+
 def test_contact_and_endpoint_gap_helpers_measure_not_assert(
     runtime: ModuleType,
 ) -> None:

@@ -83,6 +83,21 @@ _ROLE_SEMANTIC_IDS = {
     "vegetation-enclosure": 10,
 }
 
+_AUXILIARY_MATERIAL_BINDINGS = (
+    ReciprocalRouteMaterialBinding(
+        material_alias="material-perimeter-bark-01",
+        runtime_slot_id="material-broadleaf-bark-01",
+        material_family="weathered-timber",
+        material_id=10,
+    ),
+    ReciprocalRouteMaterialBinding(
+        material_alias="material-perimeter-canopy-01",
+        runtime_slot_id="material-broadleaf-canopy-01",
+        material_family="orchard-leaf",
+        material_id=4,
+    ),
+)
+
 
 class PerimeterClosureRuntimeError(RuntimeError):
     """The exact-266 runtime request or measured build cannot be trusted."""
@@ -118,6 +133,50 @@ def _canonical_material_bindings_sha256(
             [row.model_dump(mode="json") for row in bindings]
         )
     ).hexdigest()
+
+
+def _closure_material_bindings(
+    base_bindings: tuple[ReciprocalRouteMaterialBinding, ...],
+) -> tuple[ReciprocalRouteMaterialBinding, ...]:
+    aliases = {row.material_alias for row in base_bindings}
+    if len(aliases) != len(base_bindings) or any(
+        row.material_alias in aliases for row in _AUXILIARY_MATERIAL_BINDINGS
+    ):
+        raise PerimeterClosureRuntimeError(
+            "base material bindings collide with perimeter auxiliary materials"
+        )
+    return tuple(
+        sorted(
+            (*base_bindings, *_AUXILIARY_MATERIAL_BINDINGS),
+            key=lambda row: row.material_alias,
+        )
+    )
+
+
+def _validate_closure_material_bindings(
+    bindings: tuple[ReciprocalRouteMaterialBinding, ...],
+) -> None:
+    by_alias = {row.material_alias: row for row in bindings}
+    if len(by_alias) != len(bindings):
+        raise ValueError("perimeter material binding aliases must be unique")
+    auxiliary_aliases = {
+        row.material_alias for row in _AUXILIARY_MATERIAL_BINDINGS
+    }
+    if len(bindings) == 14:
+        if auxiliary_aliases & set(by_alias):
+            raise ValueError(
+                "legacy-14 material bindings cannot contain closure auxiliaries"
+            )
+        return
+    if len(bindings) != 16:
+        raise ValueError(
+            "material bindings must be legacy-14 or exact closure-16"
+        )
+    if any(
+        by_alias.get(expected.material_alias) != expected
+        for expected in _AUXILIARY_MATERIAL_BINDINGS
+    ):
+        raise ValueError("auxiliary material bindings are not exact")
 
 
 def _overlay_registry(
@@ -177,7 +236,7 @@ class PerimeterClosureRuntimeRequest(FrozenModel):
     perimeter_closure_plan: PerimeterClosurePlan
     material_bindings: tuple[ReciprocalRouteMaterialBinding, ...] = Field(
         min_length=14,
-        max_length=14,
+        max_length=16,
     )
     object_registry: tuple[canary.ObjectRegistryEntry, ...] = Field(
         min_length=266,
@@ -194,6 +253,7 @@ class PerimeterClosureRuntimeRequest(FrozenModel):
 
     @model_validator(mode="after")
     def _identities_are_exact(self) -> PerimeterClosureRuntimeRequest:
+        _validate_closure_material_bindings(self.material_bindings)
         if self.perimeter_closure_plan_sha256 != (
             perimeter_closure_plan_sha256(self.perimeter_closure_plan)
         ):
@@ -358,7 +418,7 @@ class PerimeterClosureBuildReport(FrozenModel):
     )
     material_bindings: tuple[ReciprocalRouteMaterialBinding, ...] = Field(
         min_length=14,
-        max_length=14,
+        max_length=16,
     )
     counts: PerimeterClosureBuildCounts
     validation: PerimeterClosureBuildValidation
@@ -370,6 +430,7 @@ class PerimeterClosureBuildReport(FrozenModel):
 
     @model_validator(mode="after")
     def _report_is_exact(self) -> PerimeterClosureBuildReport:
+        _validate_closure_material_bindings(self.material_bindings)
         if tuple(row.instance_id for row in self.object_registry) != tuple(
             range(1, 267)
         ):
@@ -642,7 +703,7 @@ def build_perimeter_closure_runtime_request(
         label="perimeter-closure runtime script",
     )
     base_registry = tuple(base.report.object_registry)
-    bindings = tuple(base.report.material_bindings)
+    bindings = _closure_material_bindings(tuple(base.report.material_bindings))
     object_registry = (*base_registry, *_overlay_registry(plan, bindings))
     payload = {
         "schema_version": PERIMETER_CLOSURE_RUNTIME_SCHEMA,

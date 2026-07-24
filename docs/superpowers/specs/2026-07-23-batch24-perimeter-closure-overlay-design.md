@@ -81,7 +81,12 @@ The runtime request additionally binds:
 - Batch24 closure-plan SHA-256;
 - Batch24 private candidate manifest SHA-256;
 - Blender runtime script SHA-256;
-- the verified exact-218 Blender material-binding-table SHA-256.
+- the fourteen verified exact-218 Blender material-binding rows, preserved
+  without remapping;
+- two additive auxiliary bindings that explicitly resolve
+  `material-broadleaf-bark-01` and `material-broadleaf-canopy-01` from the
+  bound base `.blend`. The extended sixteen-row table has its own canonical
+  SHA-256; a partial or drifted auxiliary pair fails closed.
 
 Unknown, missing, uppercase, malformed or mismatched hashes fail closed.
 
@@ -124,7 +129,12 @@ model, not a flat image card:
 - drainage/water parts have an open, continuous discharge path;
 - seam parts overlap neither neighbor and terminate within the seam tolerance;
 - vegetation/enclosure parts use sparse explicit proxy geometry and never seal
-  the walking corridor or camera sky.
+  the walking corridor or camera sky. The current audited implementation uses
+  four bark trunks, twenty overlapping low-poly canopy lobes and eight
+  understory clusters per sector. Every foliage face is bound to the existing
+  broadleaf canopy material, every trunk face to broadleaf bark, the complete
+  mesh remains at least `4.0m` from the route centerline, and every crown
+  overlaps its trunk vertically by at least `0.25m`.
 
 The Blender builder may create auxiliary mesh children, but only the 48
 canonical roots carry `nv_root=True`. Image planes, hidden black boxes and

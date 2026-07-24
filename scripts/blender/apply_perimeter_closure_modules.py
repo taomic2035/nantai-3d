@@ -1,8 +1,10 @@
 """Append the measured Batch24 perimeter overlay to a verified exact-218 scene.
 
 This file is executed by the pinned Blender runtime.  It creates exactly 48
-new canonical roots and one render mesh per root.  All source images remain
-design-only provenance; no pixel-derived geometry or trust promotion occurs.
+new canonical roots and one render mesh per root.  Vegetation meshes use two
+explicitly bound materials (bark and canopy); other meshes use one.  All source
+images remain design-only provenance; no pixel-derived geometry or trust
+promotion occurs.
 """
 
 from __future__ import annotations
@@ -82,6 +84,14 @@ MATERIAL_BINDINGS = {
         "weathered-timber",
     ),
     "material-creek-stone-01": ("material-creek-rock-01", "fieldstone"),
+    "material-perimeter-bark-01": (
+        "material-broadleaf-bark-01",
+        "weathered-timber",
+    ),
+    "material-perimeter-canopy-01": (
+        "material-broadleaf-canopy-01",
+        "orchard-leaf",
+    ),
     "material-service-iron-01": ("material-aged-metal-01", "dark-timber"),
     "material-service-stone-01": (
         "material-wet-stone-paving-01",
@@ -106,6 +116,10 @@ MATERIAL_BINDINGS = {
         "weathered-timber",
     ),
 }
+VEGETATION_MATERIAL_ALIASES = (
+    "material-perimeter-bark-01",
+    "material-perimeter-canopy-01",
+)
 UV_POLICIES = frozenset(
     {
         "world-xy",
@@ -428,17 +442,28 @@ class MeshAssembler:
     def __init__(self):
         self.vertices = []
         self.faces = []
+        self.face_material_indices = []
 
-    def add(self, vertices, faces):
+    def add(self, vertices, faces, material_index=0):
+        if (
+            isinstance(material_index, bool)
+            or not isinstance(material_index, int)
+            or material_index < 0
+        ):
+            raise RuntimeBuildError("mesh material index must be a non-negative integer")
         offset = len(self.vertices)
         self.vertices.extend(
             tuple(float(value) for value in vertex) for vertex in vertices
         )
-        self.faces.extend(
+        new_faces = [
             tuple(offset + index for index in face) for face in faces
+        ]
+        self.faces.extend(new_faces)
+        self.face_material_indices.extend(
+            material_index for _face in new_faces
         )
 
-    def add_box(self, center, size, yaw=0.0):
+    def add_box(self, center, size, yaw=0.0, material_index=0):
         cx, cy, cz = center
         sx, sy, sz = size
         hx, hy, hz = sx / 2.0, sy / 2.0, sz / 2.0
@@ -464,9 +489,10 @@ class MeshAssembler:
                 (0, 2, 6, 4),
                 (1, 5, 7, 3),
             ),
+            material_index=material_index,
         )
 
-    def add_ribbon(self, start, end, width, thickness):
+    def add_ribbon(self, start, end, width, thickness, material_index=0):
         ax, ay, az = start
         bx, by, bz = end
         dx, dy = bx - ax, by - ay
@@ -494,9 +520,17 @@ class MeshAssembler:
                 (0, 4, 6, 2),
                 (1, 3, 7, 5),
             ),
+            material_index=material_index,
         )
 
-    def add_cylinder(self, center, radius, depth, segments=10):
+    def add_cylinder(
+        self,
+        center,
+        radius,
+        depth,
+        segments=10,
+        material_index=0,
+    ):
         cx, cy, cz = center
         vertices = [(cx, cy, cz - depth / 2), (cx, cy, cz + depth / 2)]
         for z_value in (-depth / 2, depth / 2):
@@ -523,7 +557,75 @@ class MeshAssembler:
             )
             faces.append((0, first + following, first + index))
             faces.append((1, second + index, second + following))
-        self.add(vertices, faces)
+        self.add(vertices, faces, material_index=material_index)
+
+    def add_ellipsoid(
+        self,
+        center,
+        radii,
+        *,
+        segments=10,
+        rings=5,
+        yaw=0.0,
+        material_index=0,
+    ):
+        cx, cy, cz = (float(value) for value in center)
+        rx, ry, rz = (float(value) for value in radii)
+        if (
+            not all(math.isfinite(value) for value in (cx, cy, cz, rx, ry, rz, yaw))
+            or min(rx, ry, rz) <= 0.0
+            or isinstance(segments, bool)
+            or not isinstance(segments, int)
+            or segments < 6
+            or isinstance(rings, bool)
+            or not isinstance(rings, int)
+            or rings < 3
+        ):
+            raise RuntimeBuildError("ellipsoid parameters are invalid")
+        cosine, sine = math.cos(yaw), math.sin(yaw)
+        vertices = [(cx, cy, cz - rz), (cx, cy, cz + rz)]
+        for ring in range(1, rings):
+            latitude = -math.pi / 2.0 + math.pi * ring / rings
+            radial = math.cos(latitude)
+            z_value = cz + rz * math.sin(latitude)
+            for segment in range(segments):
+                longitude = 2.0 * math.pi * segment / segments
+                local_x = rx * radial * math.cos(longitude)
+                local_y = ry * radial * math.sin(longitude)
+                vertices.append(
+                    (
+                        cx + local_x * cosine - local_y * sine,
+                        cy + local_x * sine + local_y * cosine,
+                        z_value,
+                    )
+                )
+        faces = []
+        first_ring = 2
+        for segment in range(segments):
+            following = (segment + 1) % segments
+            faces.append(
+                (0, first_ring + following, first_ring + segment)
+            )
+        for ring in range(rings - 2):
+            lower = first_ring + ring * segments
+            upper = lower + segments
+            for segment in range(segments):
+                following = (segment + 1) % segments
+                faces.append(
+                    (
+                        lower + segment,
+                        lower + following,
+                        upper + following,
+                        upper + segment,
+                    )
+                )
+        last_ring = first_ring + (rings - 2) * segments
+        for segment in range(segments):
+            following = (segment + 1) % segments
+            faces.append(
+                (1, last_ring + segment, last_ring + following)
+            )
+        self.add(vertices, faces, material_index=material_index)
 
     def bounds(self):
         if not self.vertices:
@@ -680,6 +782,8 @@ def _build_vegetation_enclosure(part, _collection):
     ux, uy = dx / route_length_xy, dy / route_length_xy
     px, py = -uy, ux
     trunk_centers = []
+    crown_lobe_count = 0
+    crown_trunk_overlaps_m = []
     for index, (route_fraction, side_offset_m, scale) in enumerate(
         (
             (0.68, -6.0, 0.72),
@@ -697,19 +801,125 @@ def _build_vegetation_enclosure(part, _collection):
             (x, y, z + trunk_height / 2.0),
             radius=0.22 + 0.03 * index,
             depth=trunk_height,
+            material_index=0,
         )
-        crown = max(2.5, height * scale * 0.38)
-        assembler.add_box(
-            (x, y, z + trunk_height + crown / 2.0),
-            (3.0 + index * 0.3, 2.5 + index * 0.2, crown),
-            yaw=math.radians(part["orientation_deg"] + index * 17.0),
+        crown_height = max(3.0, height * scale * 0.34)
+        crown_center_z = z + trunk_height + crown_height * 0.30
+        radius_x = 1.35 + index * 0.12
+        radius_y = 1.15 + index * 0.08
+        radius_z = max(1.4, crown_height * 0.38)
+        lowest_crown_z = float("inf")
+        for lobe_index, (
+            along_offset_m,
+            side_lobe_offset_m,
+            height_offset_m,
+            lobe_scale,
+        ) in enumerate(
+            (
+                (-0.70, 0.16, -0.10, 0.82),
+                (0.72, -0.16, 0.00, 0.82),
+                (0.00, 0.00, -0.18, 1.00),
+                (0.05, 0.52, 0.38, 0.72),
+                (-0.05, -0.48, 0.32, 0.70),
+            )
+        ):
+            lobe_x = x + ux * along_offset_m + px * side_lobe_offset_m
+            lobe_y = y + uy * along_offset_m + py * side_lobe_offset_m
+            lobe_center_z = crown_center_z + height_offset_m
+            lobe_radius_z = radius_z * lobe_scale
+            assembler.add_ellipsoid(
+                (
+                    lobe_x,
+                    lobe_y,
+                    lobe_center_z,
+                ),
+                (
+                    radius_x * lobe_scale,
+                    radius_y * lobe_scale,
+                    lobe_radius_z,
+                ),
+                segments=10,
+                rings=5,
+                yaw=math.radians(
+                    part["orientation_deg"]
+                    + index * 17.0
+                    + lobe_index * 31.0
+                ),
+                material_index=1,
+            )
+            lowest_crown_z = min(
+                lowest_crown_z,
+                lobe_center_z - lobe_radius_z,
+            )
+            crown_lobe_count += 1
+        crown_trunk_overlaps_m.append(
+            z + trunk_height - lowest_crown_z
         )
+
+    understory_centers = []
+    for index, (route_fraction, side_offset_m, scale) in enumerate(
+        (
+            (0.58, -8.2, 0.72),
+            (0.62, 8.1, 0.88),
+            (0.72, -8.8, 1.00),
+            (0.76, 8.7, 0.82),
+            (0.82, -9.2, 0.92),
+            (0.86, 9.0, 0.76),
+            (0.93, -8.4, 0.84),
+            (0.96, 8.3, 0.68),
+        )
+    ):
+        x = inner[0] + dx * route_fraction + px * side_offset_m
+        y = inner[1] + dy * route_fraction + py * side_offset_m
+        z = inner[2] + (outer[2] - inner[2]) * route_fraction
+        radius_z = 0.62 + 0.28 * scale
+        understory_centers.append((x, y, z))
+        assembler.add_ellipsoid(
+            (x, y, z + radius_z),
+            (
+                0.82 + 0.22 * scale,
+                0.68 + 0.18 * scale,
+                radius_z,
+            ),
+            segments=8,
+            rings=4,
+            yaw=math.radians(part["orientation_deg"] + index * 23.0),
+            material_index=1,
+        )
+    route_clearances = [
+        abs(
+            dy * x_m
+            - dx * y_m
+            + outer[0] * inner[1]
+            - outer[1] * inner[0]
+        )
+        / route_length_xy
+        for x_m, y_m, _z_m in assembler.vertices
+    ]
+    minimum_geometry_route_clearance_m = min(route_clearances)
+    if minimum_geometry_route_clearance_m < 4.0:
+        raise RuntimeBuildError(
+            "vegetation geometry enters the bidirectional route clearance"
+        )
+    minimum_crown_trunk_overlap_m = min(crown_trunk_overlaps_m)
+    if minimum_crown_trunk_overlap_m < 0.25:
+        raise RuntimeBuildError("vegetation crown is detached from its trunk")
     return GeometryResult(
         assembler,
         {
             "bounds": assembler.bounds(),
             "trunk_centers_m": trunk_centers,
-            "minimum_route_clearance_m": 6.0,
+            "understory_centers_m": understory_centers,
+            "crown_primitive": "low-poly-ellipsoid-lobes",
+            "crown_lobe_count": crown_lobe_count,
+            "understory_cluster_count": len(understory_centers),
+            "minimum_crown_trunk_overlap_m": minimum_crown_trunk_overlap_m,
+            "material_slots": VEGETATION_MATERIAL_ALIASES,
+            "minimum_trunk_center_route_clearance_m": 6.0,
+            "minimum_geometry_route_clearance_m": (
+                minimum_geometry_route_clearance_m
+            ),
+            "minimum_route_clearance_m": minimum_geometry_route_clearance_m,
         },
     )
 
@@ -907,11 +1117,20 @@ def _dominant_projection_axes(normal):
     return tuple(index for index in range(3) if index != dominant)
 
 
-def _assign_material_contract(obj, material):
-    _policy, tile_m, layer_name = _material_contract(material)
+def _assign_material_contract(obj, materials):
+    contracts = tuple(_material_contract(material) for material in materials)
+    if not contracts:
+        raise RuntimeBuildError("overlay face material contract is invalid")
+    layer_names = {contract[2] for contract in contracts}
+    if layer_names != {"nv_surface_color"}:
+        raise RuntimeBuildError("overlay surface color inputs disagree")
+    layer_name = "nv_surface_color"
     mesh = obj.data
     uv_layer = mesh.uv_layers.get("nv_uv0") or mesh.uv_layers.new(name="nv_uv0")
     for polygon in mesh.polygons:
+        if polygon.material_index >= len(contracts):
+            raise RuntimeBuildError("overlay polygon material index is invalid")
+        tile_m = contracts[polygon.material_index][1]
         axes = _dominant_projection_axes(polygon.normal)
         coordinates = [mesh.vertices[index].co for index in polygon.vertices]
         values = [
@@ -951,7 +1170,16 @@ def _assign_material_contract(obj, material):
     obj["nv_material_contract"] = "textured-pbr-v1"
 
 
-def _link_geometry(root, result, material, row, collection):
+def _link_geometry(root, result, materials, row, collection):
+    materials = tuple(materials)
+    if (
+        not materials
+        or len(result.assembler.face_material_indices)
+        != len(result.assembler.faces)
+        or max(result.assembler.face_material_indices, default=-1)
+        >= len(materials)
+    ):
+        raise RuntimeBuildError("overlay geometry material assignment is invalid")
     mesh = bpy.data.meshes.new(f"m__{row['object_id']}")
     mesh.from_pydata(result.assembler.vertices, [], result.assembler.faces)
     mesh.update()
@@ -961,8 +1189,19 @@ def _link_geometry(root, result, material, row, collection):
     collection.objects.link(obj)
     obj.parent = root
     _tag_mesh(obj, row)
-    mesh.materials.append(material)
-    _assign_material_contract(obj, material)
+    for material in materials:
+        mesh.materials.append(material)
+    for polygon, material_index in zip(
+        mesh.polygons,
+        result.assembler.face_material_indices,
+        strict=True,
+    ):
+        polygon.material_index = material_index
+    obj["nv_material_slots"] = json.dumps(
+        [material.get("nv_slot_id") for material in materials],
+        separators=(",", ":"),
+    )
+    _assign_material_contract(obj, materials)
     return obj
 
 
@@ -1025,24 +1264,39 @@ def _build_overlay(request):
         evidence = {}
         for part in module["parts"]:
             row = registry[part["part_id"]]
-            binding = bindings[part["material_slot_id"]]
-            material = bpy.data.materials.get(
-                f"nv__mat-{binding['runtime_slot_id']}"
+            material_aliases = (
+                VEGETATION_MATERIAL_ALIASES
+                if part["semantic_role"] == "vegetation-enclosure"
+                else (part["material_slot_id"],)
             )
-            if (
-                material is None
-                or material.get("nv_slot_id") != binding["runtime_slot_id"]
-            ):
-                raise RuntimeBuildError(
-                    f"verified runtime material is absent: "
-                    f"{binding['runtime_slot_id']}"
+            materials = []
+            for alias in material_aliases:
+                binding = bindings[alias]
+                material = bpy.data.materials.get(
+                    f"nv__mat-{binding['runtime_slot_id']}"
                 )
+                if (
+                    material is None
+                    or material.get("nv_slot_id")
+                    != binding["runtime_slot_id"]
+                ):
+                    raise RuntimeBuildError(
+                        f"verified runtime material is absent: "
+                        f"{binding['runtime_slot_id']}"
+                    )
+                materials.append(material)
             root = bpy.data.objects.new(f"nv__{part['part_id']}", None)
             root.empty_display_size = 0.05
             collection.objects.link(root)
             _tag_root(root, row, module, part)
             result = GEOMETRY_BUILDERS[part["semantic_role"]](part, collection)
-            mesh = _link_geometry(root, result, material, row, collection)
+            mesh = _link_geometry(
+                root,
+                result,
+                materials,
+                row,
+                collection,
+            )
             roots.append(root)
             meshes.append(mesh)
             evidence[part["semantic_role"]] = result.evidence
@@ -1086,7 +1340,27 @@ def _validate_built_overlay(
     for object_id, signature in base_signatures.items():
         if _root_signature(by_id[object_id]) != signature:
             raise RuntimeBuildError("base canonical root changed during overlay build")
+    bindings = {
+        row["material_alias"]: row for row in request["material_bindings"]
+    }
+    parts_by_id = {
+        part["part_id"]: part
+        for module in request["perimeter_closure_plan"]["modules"]
+        for part in module["parts"]
+    }
     for root, mesh in zip(overlay_roots, overlay_meshes, strict=True):
+        part = parts_by_id[root.get("nv_stable_id")]
+        expected_aliases = (
+            VEGETATION_MATERIAL_ALIASES
+            if part["semantic_role"] == "vegetation-enclosure"
+            else (part["material_slot_id"],)
+        )
+        expected_slots = tuple(
+            bindings[alias]["runtime_slot_id"] for alias in expected_aliases
+        )
+        actual_slots = tuple(
+            material.get("nv_slot_id") for material in mesh.data.materials
+        )
         if (
             root.get("nv_stage") != "modeled-unverified"
             or root.get("nv_trust_effect") != "none-quality-filter-only"
@@ -1100,7 +1374,9 @@ def _validate_built_overlay(
             or mesh.get("nv_material_contract") != "textured-pbr-v1"
             or not mesh.data.vertices
             or not mesh.data.polygons
-            or len(mesh.data.materials) != 1
+            or actual_slots != expected_slots
+            or mesh.get("nv_material_slots")
+            != json.dumps(expected_slots, separators=(",", ":"))
         ):
             raise RuntimeBuildError(
                 f"overlay structural evidence is invalid: "
@@ -1128,9 +1404,10 @@ def _validate_built_overlay(
 def _material_counts(meshes):
     textured = valid_uv = valid_surface = 0
     for obj in meshes:
-        if len(obj.data.materials) != 1:
+        if not obj.data.materials:
             continue
-        _material_contract(obj.data.materials[0])
+        for material in obj.data.materials:
+            _material_contract(material)
         textured += 1
         uv_layer = obj.data.uv_layers.get("nv_uv0")
         if uv_layer is not None and all(
