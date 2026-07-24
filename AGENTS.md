@@ -33,6 +33,12 @@
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
+- **2026-07-24 GLM 连续取件规则**：GLM 的 creek/contact（`c1ca38b`）与重建
+  artifact 完整性校验（`9b8c0d7`）已交付；当前应完成 base scene 的世界/天空/雾与
+  材质畸变审计，然后依次推进 streamed chunk/LOD 逐 payload SHA 绑定、真实 COLMAP
+  executable 的合成采集 rehearsal。完整路径、门禁和不可提升的信任边界见
+  `handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md`。等待 Codex
+  exact-266 review 不等于“无事可做”；五项真实场景证据未齐前不得报告项目完成。
 
 ### HANDOFF-006 Phase 1 fresh evidence
 
