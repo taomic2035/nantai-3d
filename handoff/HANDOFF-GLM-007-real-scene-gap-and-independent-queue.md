@@ -8,10 +8,26 @@ Coordinator/reviewer: Codex
 
 The project is not finished.
 
-- The current verified Blender production artifact is exact-218 and remains
+- The currently accepted Blender production artifact is exact-218 and remains
   `synthetic / L0 / preview-only / modeled-unverified`.
-- Codex is building a separate additive Batch24 exact-266 perimeter overlay.
-  Its first real Blender RGB evidence does not exist yet.
+- Codex has produced the first machine-verified additive Batch24 exact-266
+  candidate:
+  - build ID
+    `db52d46befc727e2d4c923b4922743a1db2818d266a523ddf976651d37abcf89`;
+  - `.blend` SHA-256
+    `ed119c0e8147dc7cee1466576b6c79da3e71e20a1e76237654a538b1cedae211`;
+  - perimeter plan SHA-256
+    `ea6438b1dbb0628def1fc2fe31d02ac94db66f022175f9b022db519610e8bb96`;
+  - exact roots `1..266`, with 48 non-empty, material-bound overlay meshes.
+- Sixteen private reciprocal RGB views were rendered from that exact byte
+  artifact. They are audit-only, not the formal six-layer/post-render
+  acceptance run. A first candidate was rejected because terrain, retaining
+  structures and vegetation blocked the route; the current candidate leaves
+  the centerline open.
+- Visual inspection still shows blocky vegetation, repeated/stretched
+  materials, flat grey world/sky, terrain seams and sparse/distant proxy
+  geometry. Therefore exact-266 is not accepted as a realistic scene and must
+  not replace the exact-218 production baseline yet.
 - A visually better exact-266 scene will still not be a real reconstruction.
 - The decisive real-scene evidence is still absent:
   1. real overlapping capture with known acquisition provenance;
@@ -34,7 +50,9 @@ pipeline/synthetic_village/perimeter_closure_runtime.py
 scripts/blender/apply_perimeter_closure_modules.py
 pipeline/synthetic_village/perimeter_closure_audit.py
 scripts/blender/render_perimeter_closure_audit.py
+scripts/synthetic_village.py
 tests/test_synthetic_village_perimeter_closure_*.py
+tests/test_synthetic_village_cli.py
 docs/superpowers/specs/2026-07-23-batch24-perimeter-closure-overlay-design.md
 docs/superpowers/plans/2026-07-24-batch24-perimeter-closure-overlay.md
 ```
@@ -117,6 +135,11 @@ If P1 artifact integrity is already owned elsewhere, take this task instead:
 This work may touch the base Blender builder only after the creek/contact P0 is
 committed. It must not edit the exact-266 overlay paths.
 
+Codex's next exact-266 work is the formal sixteen-camera preflight, six-layer,
+target/seam visibility and post-render-v2 chain. GLM must not wait on that work:
+finish section 3, then immediately start section 4; use section 5 only if
+section 4 has an explicit owner elsewhere.
+
 ## 6. Reporting rule
 
 Do not report “all high-value work is complete” while any of the five real
@@ -128,4 +151,3 @@ evidence items in section 1 is absent. At the end of each task, report:
 - artifact/report SHA values;
 - remaining real-scene blockers;
 - the next independent queue item from this handoff.
-
