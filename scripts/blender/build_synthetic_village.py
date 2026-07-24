@@ -70,7 +70,7 @@ ELEVATED_LOOP_IDS = (
     "bridge-loop",
     "valley-loop",
 )
-TERRAIN_TEXTURE_SCALE = 3.0
+TERRAIN_TEXTURE_SCALE = 1.0  # P2b: normalize aux-terrain to match all other terrain objects
 TERRAIN_TEXTURE_SLOTS = (
     "material-moss-stone-01",
     "material-packed-earth-01",
@@ -2494,6 +2494,7 @@ def _assign_textured_terrain_materials(terrain_obj, materials):
     if any(count <= 0 for count in counts.values()):
         raise RuntimeBuildError("textured terrain material zoning is incomplete")
     terrain_obj["nv_uv_tile_scale"] = TERRAIN_TEXTURE_SCALE
+    terrain_obj["nv_uv_audit_category"] = "terrain"
     terrain_obj["nv_terrain_material_profile"] = "slope-macro-patch-v1"
     terrain_obj["nv_terrain_material_counts"] = json.dumps(
         counts,
