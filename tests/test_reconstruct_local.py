@@ -404,3 +404,87 @@ def test_non_tee_logging_unchanged(tmp_path, capsys):
     assert b"LOG-ONLY" in log.read_bytes()
     body = capsys.readouterr().out.split("\n", 1)[1]  # 首行是 run 回显的命令本身
     assert "LOG-ONLY" not in body
+
+
+# ============================================================
+# _find + _colmap_group: binary discovery + GPU flag heuristic
+# ============================================================
+
+class TestFind:
+    """_find resolves binaries via file-exists check then shutil.which."""
+
+    def test_find_returns_candidate_path_when_file_exists(self, tmp_path):
+        fake_bin = tmp_path / "colmap.exe"
+        fake_bin.write_bytes(b"fake")
+        result = rl._find("colmap", fake_bin)
+        assert result == str(fake_bin)
+
+    def test_find_falls_back_to_shutil_which(self, monkeypatch, tmp_path):
+        nonexistent = tmp_path / "missing.exe"
+        monkeypatch.setattr(rl.shutil, "which", lambda name: "/usr/bin/colmap")
+        result = rl._find("colmap", nonexistent)
+        assert result == "/usr/bin/colmap"
+
+    def test_find_raises_system_exit_when_not_found(self, monkeypatch, tmp_path):
+        nonexistent = tmp_path / "missing.exe"
+        monkeypatch.setattr(rl.shutil, "which", lambda name: None)
+        with pytest.raises(SystemExit, match="找不到 colmap"):
+            rl._find("colmap", nonexistent)
+
+
+class TestColmapGroup:
+    """_colmap_group probes COLMAP feature_extractor help to pick 'Sift' vs 'Feature'."""
+
+    def test_returns_sift_when_only_legacy_use_gpu_present(self, monkeypatch):
+        class _Fake:
+            def __init__(self, stdout, stderr=""):
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = 0
+
+        # Legacy COLMAP: only SiftExtraction.use_gpu, no FeatureExtraction.use_gpu
+        monkeypatch.setattr(
+            rl.subprocess, "run",
+            lambda *a, **k: _Fake(
+                stdout="SiftExtraction.use_gpu\n  Whether to use GPU"))
+        assert rl._colmap_group("fake-colmap") == "Sift"
+
+    def test_returns_feature_when_both_use_gpu_present(self, monkeypatch):
+        class _Fake:
+            def __init__(self, stdout, stderr=""):
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = 0
+
+        monkeypatch.setattr(
+            rl.subprocess, "run",
+            lambda *a, **k: _Fake(
+                stdout="FeatureExtraction.use_gpu\nSiftExtraction.use_gpu"))
+        assert rl._colmap_group("fake-colmap") == "Feature"
+
+    def test_returns_feature_when_neither_present(self, monkeypatch):
+        class _Fake:
+            def __init__(self, stdout, stderr=""):
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = 0
+
+        monkeypatch.setattr(
+            rl.subprocess, "run",
+            lambda *a, **k: _Fake(stdout="some other help text"))
+        assert rl._colmap_group("fake-colmap") == "Feature"
+
+    def test_returns_feature_on_subprocess_error(self, monkeypatch):
+        def _raise(*a, **k):
+            raise OSError("colmap not found")
+
+        monkeypatch.setattr(rl.subprocess, "run", _raise)
+        # Fail-closed: default to 'Feature' (current COLMAP convention)
+        assert rl._colmap_group("fake-colmap") == "Feature"
+
+    def test_returns_feature_on_timeout(self, monkeypatch):
+        def _raise(*a, **k):
+            raise rl.subprocess.TimeoutExpired(cmd=a, timeout=30)
+
+        monkeypatch.setattr(rl.subprocess, "run", _raise)
+        assert rl._colmap_group("fake-colmap") == "Feature"
