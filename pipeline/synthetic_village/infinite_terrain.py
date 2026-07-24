@@ -142,3 +142,107 @@ def terrain_material_slot(
     if macro_patch < -0.28:
         return "material-packed-earth-01"
     return "material-terrace-soil-01"
+
+
+# --------------------------------------------------------------------------- #
+# Creek-bed cut: deterministic terrain depression along a creek polyline.
+#
+# The base ``terrain_height_m`` function is pure noise and does not know
+# where the creek flows.  Without a cut, the creek water ribbon lies on top
+# of an unmodified terrain surface, producing the "flat ribbon through
+# terrain" defect documented in HANDOFF-GLM-005 §P2 #2.
+#
+# ``apply_creek_bed_cut`` lowers the terrain within the creek corridor so
+# that ``water_z <= bank_z <= terrain_z`` holds at every cross-section,
+# matching the ``CreekCrossSectionSpec`` invariant in ``environment_module``.
+#
+# This function is pure and deterministic: same (x, y, creek_points) always
+# produces the same cut depth.  It does **not** upgrade provenance — the
+# output is still ``synthetic / preview-only``.
+# --------------------------------------------------------------------------- #
+
+_CREEK_BED_MAX_DEPTH_M = 1.2  #: deepest cut below base terrain (water_z - 0.4)
+
+
+def point_to_polyline_distance_m(
+    x: float,
+    y: float,
+    points: tuple[tuple[float, float], ...],
+) -> float:
+    """Return the minimum Euclidean distance from (x, y) to a polyline."""
+
+    if len(points) < 2:
+        raise ValueError("polyline must have at least 2 points")
+    best = float("inf")
+    for i in range(len(points) - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        dx = x1 - x0
+        dy = y1 - y0
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-18:
+            # Degenerate segment — treat as a point.
+            d = math.hypot(x - x0, y - y0)
+        else:
+            t = ((x - x0) * dx + (y - y0) * dy) / seg_len_sq
+            t = max(0.0, min(1.0, t))
+            proj_x = x0 + t * dx
+            proj_y = y0 + t * dy
+            d = math.hypot(x - proj_x, y - proj_y)
+        if d < best:
+            best = d
+    return best
+
+
+def creek_bed_depth_m(
+    distance_m: float,
+    creek_half_width_m: float,
+    bank_margin_m: float,
+) -> float:
+    """Return how many metres to lower terrain at a given distance from creek centre.
+
+    The cut is deepest at the creek centre (``_CREEK_BED_MAX_DEPTH_M``),
+    stays constant within the creek half-width, then linearly tapers to zero
+    across ``bank_margin_m``.  Beyond ``creek_half_width + bank_margin`` the
+    cut is zero.
+    """
+
+    bank_edge = creek_half_width_m + bank_margin_m
+    if distance_m >= bank_edge:
+        return 0.0
+    if distance_m < creek_half_width_m:
+        return _CREEK_BED_MAX_DEPTH_M
+    # Linear taper from creek_half_width to bank_edge.
+    t = (bank_edge - distance_m) / bank_margin_m
+    return _CREEK_BED_MAX_DEPTH_M * t
+
+
+def apply_creek_bed_cut(
+    base_height_m: float,
+    x: float,
+    y: float,
+    creek_polyline_xy: tuple[tuple[float, float], ...],
+    creek_half_width_m: float,
+    bank_margin_m: float,
+) -> float:
+    """Return terrain height with creek-bed cut applied.
+
+    Parameters
+    ----------
+    base_height_m:
+        The unmodified terrain height at (x, y) from ``terrain_height_m``.
+    x, y:
+        World coordinates of the sample point.
+    creek_polyline_xy:
+        Sequence of (x, y) tuples tracing the creek centre line.
+    creek_half_width_m:
+        Half the creek width (e.g. 4.0 for an 8 m wide creek).
+    bank_margin_m:
+        How far beyond the creek banks the cut tapers to zero.
+    """
+
+    distance = point_to_polyline_distance_m(x, y, creek_polyline_xy)
+    depth = creek_bed_depth_m(distance, creek_half_width_m, bank_margin_m)
+    if depth <= 0.0:
+        return base_height_m
+    return base_height_m - depth

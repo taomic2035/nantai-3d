@@ -7,9 +7,13 @@ import sys
 from pathlib import Path
 
 from pipeline.synthetic_village.infinite_terrain import (
+    _CREEK_BED_MAX_DEPTH_M,
     TERRAIN_ALGORITHM_ID,
     TERRAIN_MATERIAL_PROFILE_ID,
     TERRAIN_MATERIAL_SLOTS,
+    apply_creek_bed_cut,
+    creek_bed_depth_m,
+    point_to_polyline_distance_m,
     terrain_height_m,
     terrain_macro_tint,
     terrain_material_slot,
@@ -117,3 +121,90 @@ def test_terrain_samples_are_stable_across_processes() -> None:
         return proc.stdout.strip()
 
     assert run() == run()
+
+
+# ============================================================
+# Creek-bed cut: terrain depression along creek polyline
+# ============================================================
+
+
+def test_point_to_polyline_distance_on_segment() -> None:
+    """Distance from a point to a 2-point polyline."""
+    d = point_to_polyline_distance_m(0.0, 0.0, ((-10.0, 0.0), (10.0, 0.0)))
+    assert abs(d - 0.0) < 1e-9  # point is on the segment
+
+
+def test_point_to_polyline_distance_off_segment() -> None:
+    """Distance from a point 5m above the segment."""
+    d = point_to_polyline_distance_m(0.0, 5.0, ((-10.0, 0.0), (10.0, 0.0)))
+    assert abs(d - 5.0) < 1e-9
+
+
+def test_point_to_polyline_distance_past_endpoint() -> None:
+    """Distance to the nearest endpoint when projection is past segment end."""
+    d = point_to_polyline_distance_m(15.0, 4.0, ((-10.0, 0.0), (10.0, 0.0)))
+    assert abs(d - (5.0**2 + 4.0**2) ** 0.5) < 1e-9
+
+
+def test_point_to_polyline_distance_multi_segment() -> None:
+    """Nearest distance across a multi-segment polyline."""
+    d = point_to_polyline_distance_m(
+        0.0, 3.0, ((-10.0, 0.0), (0.0, 0.0), (10.0, 0.0)))
+    assert abs(d - 3.0) < 1e-9
+
+
+def test_creek_bed_depth_zero_outside_bank_margin() -> None:
+    """No cut beyond bank margin."""
+    assert creek_bed_depth_m(distance_m=10.0, creek_half_width_m=4.0,
+                             bank_margin_m=2.0) == 0.0
+
+
+def test_creek_bed_depth_max_at_center() -> None:
+    """Deepest cut at creek center."""
+    d = creek_bed_depth_m(distance_m=0.0, creek_half_width_m=4.0,
+                          bank_margin_m=2.0)
+    assert d > 0.0
+
+
+def test_creek_bed_depth_decreases_with_distance() -> None:
+    """Cut is constant within creek half-width, then tapers to zero."""
+    d0 = creek_bed_depth_m(0.0, 4.0, 2.0)
+    d2 = creek_bed_depth_m(2.0, 4.0, 2.0)
+    d4 = creek_bed_depth_m(4.0, 4.0, 2.0)   # creek edge, t=1.0 (still max)
+    d45 = creek_bed_depth_m(4.5, 4.0, 2.0)  # mid-taper, t=0.75
+    d5 = creek_bed_depth_m(5.0, 4.0, 2.0)  # mid-taper, t=0.5
+    d6 = creek_bed_depth_m(6.0, 4.0, 2.0)  # bank edge, t=0.0
+    # Within creek half-width: constant max depth.
+    assert d0 == d2 == d4 == _CREEK_BED_MAX_DEPTH_M
+    # Taper: mid < max, decreasing, bank edge == 0.
+    assert d45 < d4
+    assert d5 < d45
+    assert d5 > 0.0
+    assert d6 == 0.0
+
+
+def test_apply_creek_bed_cut_lowers_terrain_on_creek() -> None:
+    """Terrain on creek path is lower than unmodified terrain."""
+    creek_points = ((-100.0, 0.0), (100.0, 0.0))
+    base = terrain_height_m(0.0, 0.0, world_seed=42)
+    cut = apply_creek_bed_cut(base, 0.0, 0.0, creek_points,
+                              creek_half_width_m=4.0, bank_margin_m=2.0)
+    assert cut < base
+
+
+def test_apply_creek_bed_cut_preserves_terrain_far_from_creek() -> None:
+    """Terrain far from creek is unchanged."""
+    creek_points = ((-100.0, 0.0), (100.0, 0.0))
+    base = terrain_height_m(0.0, 200.0, world_seed=42)
+    cut = apply_creek_bed_cut(base, 0.0, 200.0, creek_points,
+                              creek_half_width_m=4.0, bank_margin_m=2.0)
+    assert cut == base
+
+
+def test_apply_creek_bed_cut_is_deterministic() -> None:
+    """Same input produces same output."""
+    creek_points = ((-100.0, 0.0), (100.0, 0.0))
+    base = terrain_height_m(0.0, 0.0, world_seed=42)
+    c1 = apply_creek_bed_cut(base, 0.0, 0.0, creek_points, 4.0, 2.0)
+    c2 = apply_creek_bed_cut(base, 0.0, 0.0, creek_points, 4.0, 2.0)
+    assert c1 == c2
