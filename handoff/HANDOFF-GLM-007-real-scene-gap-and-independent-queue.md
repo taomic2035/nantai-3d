@@ -1,7 +1,7 @@
 # HANDOFF-GLM-007 — Real-scene gap and independent high-value queue
 
 Date: 2026-07-24  
-Last coordinated update: 2026-07-24, after commits `c1ca38b` and `9b8c0d7`
+Last coordinated update: 2026-07-24, after commit `338a345`
 Owner: GLM lane  
 Coordinator/reviewer: Codex
 
@@ -11,24 +11,32 @@ The project is not finished.
 
 - The currently accepted Blender production artifact is exact-218 and remains
   `synthetic / L0 / preview-only / modeled-unverified`.
-- Codex has produced the first machine-verified additive Batch24 exact-266
-  candidate:
+- Codex has produced a newer machine-verified additive Batch24 exact-266
+  candidate after rejecting the first visually defective vegetation pass:
   - build ID
-    `db52d46befc727e2d4c923b4922743a1db2818d266a523ddf976651d37abcf89`;
+    `937afaca82fcb12f841318f4ebc0bbcdd5388f3a45d6ca57243fb1154d825a66`;
   - `.blend` SHA-256
-    `ed119c0e8147dc7cee1466576b6c79da3e71e20a1e76237654a538b1cedae211`;
+    `f3efbddc845f83e613f9a1c570306ded32aba1d3da0a0e40e8ce4fd9d61db4a0`;
+  - request SHA-256
+    `79b36742267272d0310b6b655c24b0e537566ed6fb4b5b5e368f39ed83aa4730`;
+  - report SHA-256
+    `1b523966c769f23e6531bddb30457276e627b9b5a8f8ee364be1d277bf4b07e1`;
   - perimeter plan SHA-256
     `ea6438b1dbb0628def1fc2fe31d02ac94db66f022175f9b022db519610e8bb96`;
-  - exact roots `1..266`, with 48 non-empty, material-bound overlay meshes.
+  - exact roots `1..266`, with 48 non-empty overlay meshes and all `48/48`
+    material, UV and surface records present.
+- The replacement vegetation is now closed, deterministic low-poly geometry
+  with measured route clearance, crown/trunk overlap and exact bark/canopy
+  material bindings. The former giant timber-textured boxes are gone.
 - Sixteen private reciprocal RGB views were rendered from that exact byte
-  artifact. They are audit-only, not the formal six-layer/post-render
-  acceptance run. A first candidate was rejected because terrain, retaining
-  structures and vegetation blocked the route; the current candidate leaves
-  the centerline open.
-- Visual inspection still shows blocky vegetation, repeated/stretched
-  materials, flat grey world/sky, terrain seams and sparse/distant proxy
-  geometry. Therefore exact-266 is not accepted as a realistic scene and must
-  not replace the exact-218 production baseline yet.
+  artifact and every PNG was SHA/size verified. They are audit-only, not the
+  formal fresh-clearance, frame-identity, six-layer, target/seam-visibility and
+  post-render-v2 acceptance run.
+- Visual inspection still shows low-poly/lollipop vegetation, repeated or
+  stretched materials, flat grey world/sky, terrain seams, sparse distant
+  geometry, large proxy forms and some near-wall/ground framing. Therefore
+  exact-266 is not accepted as a realistic scene and must not replace the
+  exact-218 production baseline yet.
 - A visually better exact-266 scene will still not be a real reconstruction.
 - The decisive real-scene evidence is still absent:
   1. real overlapping capture with known acquisition provenance;
@@ -53,6 +61,9 @@ evidence.
   without waiting for Codex's exact-266 work.** Codex review may interrupt with
   corrections, but a pending review is not a reason to report that no work
   remains.
+- Default continuation order is **P2a -> P2b -> P3 -> P4 -> next audited,
+  unowned prerequisite**. “Tests are green”, “design is complete” and “waiting
+  for Codex review” are checkpoints, not stop conditions.
 - Do not say “all high-value tasks are complete” while either:
   - any item in sections 5–7 is unfinished; or
   - any of the five real-scene evidence items above is absent.
@@ -258,6 +269,22 @@ After P4, reread
 still absent, propose and start the highest-value unowned prerequisite that
 reduces one of its seven dimensions. Do not self-declare the queue exhausted;
 send Codex a concrete next-item proposal with paths and acceptance evidence.
+
+Preferred proposal order after P4:
+
+1. close any machine-proven chunk/import integrity gap exposed by P3/P4;
+2. rehearse the real capture-to-registration caller with a different immutable
+   synthetic capture topology to detect overfitting, while preserving
+   `synthetic-capture` trust;
+3. audit the cloud-training request/result boundary against the real installed
+   CLI or a disposable cloud GPU when credentials and budget exist;
+4. add measured Viewer performance evidence for a content-addressed imported
+   reconstruction without changing its provenance.
+
+GLM should choose only an unowned item, write a short path/acceptance proposal
+to Codex, and start its RED test or evidence collection in the same turn unless
+the item requires new credentials, paid infrastructure or user-provided real
+capture.
 
 ## 8. Reporting rule
 
