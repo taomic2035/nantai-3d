@@ -548,6 +548,123 @@ def test_build_environment_modules_uses_runtime_default_build_root(
     ) == 0
 
 
+def test_build_perimeter_closure_forwards_explicit_inputs_and_prints_truth(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = []
+    build_id = "f" * 64
+    final_directory = tmp_path / "perimeter-builds" / build_id
+    counts = {
+        "base_canonical_roots": 218,
+        "overlay_canonical_roots": 48,
+        "canonical_roots": 266,
+        "overlay_mesh_objects": 48,
+        "textured_overlay_meshes": 48,
+        "valid_uv_overlay_meshes": 48,
+        "valid_surface_color_overlay_meshes": 48,
+    }
+    result = SimpleNamespace(
+        final_directory=final_directory,
+        request=SimpleNamespace(
+            build_id=build_id,
+            base_build_id="a" * 64,
+            batch24_manifest_sha256="b" * 64,
+            perimeter_closure_plan_sha256="c" * 64,
+        ),
+        report=SimpleNamespace(
+            counts=SimpleNamespace(model_dump=lambda **_kwargs: counts),
+            artifact=SimpleNamespace(
+                name="village-perimeter-closure.blend",
+                sha256="d" * 64,
+                size_bytes=8192,
+            ),
+        ),
+    )
+
+    def run_default_perimeter_closure_build(**kwargs):
+        calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_default_perimeter_closure_build",
+        lambda: run_default_perimeter_closure_build,
+        raising=False,
+    )
+
+    assert synthetic_village_cli.main(
+        [
+            "build-perimeter-closure",
+            "--base-build",
+            str(tmp_path / "exact218"),
+            "--batch24-manifest",
+            str(tmp_path / "batch24" / "manifest.json"),
+            "--build-root",
+            str(tmp_path / "perimeter-builds"),
+            "--blender",
+            str(tmp_path / "blender.exe"),
+            "--timeout-seconds",
+            "900",
+        ],
+    ) == 0
+
+    assert calls == [
+        {
+            "base_build_directory": tmp_path / "exact218",
+            "batch24_manifest_path": tmp_path / "batch24" / "manifest.json",
+            "build_root": tmp_path / "perimeter-builds",
+            "blender_executable": tmp_path / "blender.exe",
+            "repo_root": synthetic_village_cli.ROOT,
+            "timeout_seconds": 900,
+        },
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "artifact_name": "village-perimeter-closure.blend",
+        "artifact_sha256": "d" * 64,
+        "artifact_size_bytes": 8192,
+        "base_build_id": "a" * 64,
+        "batch24_manifest_sha256": "b" * 64,
+        "build_adapter": "perimeter-closure-runtime-v1",
+        "build_id": build_id,
+        "counts": counts,
+        "final_directory": str(final_directory),
+        "geometry_usability": "preview-only",
+        "perimeter_closure_plan_sha256": "c" * 64,
+        "report_path": str(
+            final_directory / "perimeter-closure-build-report.json"
+        ),
+        "synthetic": True,
+        "trust_effect": "none-quality-filter-only",
+        "verification_level": "L0",
+    }
+
+
+def test_build_perimeter_closure_requires_all_explicit_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def no_call(**_kwargs):
+        raise AssertionError("perimeter closure builder must not be called")
+
+    monkeypatch.setattr(
+        synthetic_village_cli,
+        "_run_default_perimeter_closure_build",
+        lambda: no_call,
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit):
+        synthetic_village_cli.main(
+            [
+                "build-perimeter-closure",
+                "--base-build",
+                str(tmp_path / "exact218"),
+            ],
+        )
+
+
 def test_render_reciprocal_production_runs_resumable_six_role_batch(
     tmp_path: Path,
     monkeypatch,

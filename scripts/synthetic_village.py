@@ -283,6 +283,82 @@ def _run_environment_module_build():
     return run_environment_module_build
 
 
+def _run_default_perimeter_closure_build():
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from pipeline.synthetic_village import canary
+    from pipeline.synthetic_village.perimeter_closure_module import (
+        build_default_perimeter_closure_plan,
+    )
+    from pipeline.synthetic_village.perimeter_closure_runtime import (
+        build_perimeter_closure_runtime_request,
+        run_perimeter_closure_build,
+    )
+    from pipeline.synthetic_village.production_profile import (
+        build_production_camera_plan,
+        canonical_production_plan_bytes,
+    )
+    from pipeline.synthetic_village.reciprocal_route_module_runtime import (
+        RECIPROCAL_ROUTE_REQUEST_NAME,
+        load_reciprocal_route_runtime_request,
+    )
+    from pipeline.synthetic_village.scene_plan import terrain_height_m
+
+    def run(
+        *,
+        base_build_directory: Path,
+        batch24_manifest_path: Path,
+        build_root: Path,
+        blender_executable: Path,
+        repo_root: Path,
+        timeout_seconds: int,
+    ):
+        manifest_raw = canary._read_stable_metadata(  # noqa: SLF001
+            Path(batch24_manifest_path).absolute(),
+            label="Batch24 manifest",
+        )
+        manifest = json.loads(
+            manifest_raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(manifest, dict):
+            raise ValueError("Batch24 manifest root must be an object")
+        base_request = load_reciprocal_route_runtime_request(
+            Path(base_build_directory).absolute()
+            / RECIPROCAL_ROUTE_REQUEST_NAME,
+        )
+        production_plan = build_production_camera_plan()
+        plan = build_default_perimeter_closure_plan(
+            batch24_manifest=manifest,
+            batch24_manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
+            production_plan_sha256=hashlib.sha256(
+                canonical_production_plan_bytes(production_plan),
+            ).hexdigest(),
+            topology_plan_sha256=(
+                base_request.reciprocal_route_module_plan.elevated_topology_sha256
+            ),
+            terrain_height_at=terrain_height_m,
+        )
+        request = build_perimeter_closure_runtime_request(
+            base_build_directory=base_build_directory,
+            plan=plan,
+            batch24_manifest_path=batch24_manifest_path,
+            blender_executable=blender_executable,
+            repo_root=repo_root,
+        )
+        return run_perimeter_closure_build(
+            request,
+            base_build_directory=base_build_directory,
+            blender_executable=blender_executable,
+            repo_root=repo_root,
+            build_root=build_root,
+            timeout_seconds=timeout_seconds,
+        )
+
+    return run
+
+
 def _verify_windows_production_build():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
@@ -908,6 +984,40 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=20 * 60,
     )
+    build_perimeter_closure = commands.add_parser(
+        "build-perimeter-closure",
+        help=(
+            "Apply the canonical Batch24 perimeter-closure plan to one explicit "
+            "byte-verified exact-218 Blender build and publish a private "
+            "synthetic exact-266 scene."
+        ),
+    )
+    build_perimeter_closure.add_argument(
+        "--base-build",
+        type=Path,
+        required=True,
+        help="Exact private exact-218 build directory named by build ID.",
+    )
+    build_perimeter_closure.add_argument(
+        "--batch24-manifest",
+        type=Path,
+        required=True,
+    )
+    build_perimeter_closure.add_argument(
+        "--build-root",
+        type=Path,
+        required=True,
+    )
+    build_perimeter_closure.add_argument(
+        "--blender",
+        type=Path,
+        required=True,
+    )
+    build_perimeter_closure.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=20 * 60,
+    )
     weather_variants = commands.add_parser(
         "weather-variants",
         help=(
@@ -1486,6 +1596,46 @@ def main(argv: list[str] | None = None) -> int:
                     "wheel_visible_frame_count": (
                         result.report.wheel_visible_frame_count
                     ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+        return 0
+    if args.command == "build-perimeter-closure":
+        result = _run_default_perimeter_closure_build()(
+            base_build_directory=args.base_build,
+            batch24_manifest_path=args.batch24_manifest,
+            build_root=args.build_root,
+            blender_executable=args.blender,
+            repo_root=ROOT,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(
+            json.dumps(
+                {
+                    "artifact_name": result.report.artifact.name,
+                    "artifact_sha256": result.report.artifact.sha256,
+                    "artifact_size_bytes": result.report.artifact.size_bytes,
+                    "base_build_id": result.request.base_build_id,
+                    "batch24_manifest_sha256": (
+                        result.request.batch24_manifest_sha256
+                    ),
+                    "build_adapter": "perimeter-closure-runtime-v1",
+                    "build_id": result.request.build_id,
+                    "counts": result.report.counts.model_dump(mode="json"),
+                    "final_directory": str(result.final_directory),
+                    "geometry_usability": "preview-only",
+                    "perimeter_closure_plan_sha256": (
+                        result.request.perimeter_closure_plan_sha256
+                    ),
+                    "report_path": str(
+                        result.final_directory
+                        / "perimeter-closure-build-report.json"
+                    ),
+                    "synthetic": True,
+                    "trust_effect": "none-quality-filter-only",
+                    "verification_level": "L0",
                 },
                 ensure_ascii=False,
                 sort_keys=True,
