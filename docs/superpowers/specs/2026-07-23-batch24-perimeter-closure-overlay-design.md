@@ -1,8 +1,8 @@
 # Batch24 Perimeter-Closure Overlay Design
 
-Date: 2026-07-23  
-Status: approved (option A)  
-Owner: Codex  
+Date: 2026-07-23
+Status: approved (option A)
+Owner: Codex
 Input: Batch24 reciprocal-perimeter and section-closure design pack
 
 ## 1. Purpose
