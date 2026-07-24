@@ -521,3 +521,116 @@ class TestEmitTrainingProvenance:
         trusted = f"training_provenance.v1={result_sha}"
         assert trusted not in evidence, \
             f"trusted prefix present without registration quality: {evidence}"
+
+
+# ============================================================
+# GPU auto-detection helpers (unit-level, monkeypatched subprocess)
+# ============================================================
+
+class TestGpuAutoDetection:
+    """Cover _detect_gpu / _nvidia_smi_has_cuda / _detect_cuda_from_nvcc.
+
+    These internal helpers are not exercised by the CLI tests above, which
+    always pass GPU fields explicitly to avoid nvidia-smi.  We monkeypatch
+    subprocess.run to simulate the GPU/nvcc environment.
+    """
+
+    def test_nvidia_smi_has_cuda_true_when_stdout_nonempty(self, monkeypatch):
+        from scripts import emit_training_provenance as etp
+
+        class _Fake:
+            def __init__(self, stdout="", stderr="", returncode=0):
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        monkeypatch.setattr(
+            "scripts.emit_training_provenance.subprocess.run",
+            lambda *a, **k: _Fake(stdout="11.8\n"))
+        assert etp._nvidia_smi_has_cuda() is True
+
+    def test_nvidia_smi_has_cuda_false_when_command_fails(self, monkeypatch):
+        from scripts import emit_training_provenance as etp
+
+        def _raise(*a, **k):
+            raise FileNotFoundError("nvidia-smi not found")
+
+        monkeypatch.setattr(
+            "scripts.emit_training_provenance.subprocess.run", _raise)
+        assert etp._nvidia_smi_has_cuda() is False
+
+    def test_nvidia_smi_has_cuda_false_when_stdout_empty(self, monkeypatch):
+        from scripts import emit_training_provenance as etp
+
+        class _Fake:
+            def __init__(self):
+                self.stdout = ""
+                self.stderr = ""
+                self.returncode = 0
+
+        monkeypatch.setattr(
+            "scripts.emit_training_provenance.subprocess.run",
+            lambda *a, **k: _Fake())
+        assert etp._nvidia_smi_has_cuda() is False
+
+    def test_detect_cuda_from_nvcc_extracts_version(self, monkeypatch):
+        from scripts import emit_training_provenance as etp
+
+        class _Fake:
+            def __init__(self):
+                self.stdout = ""
+                self.stderr = (
+                    "nvcc: NVIDIA (R) Cuda compiler driver\n"
+                    "Cuda compilation tools, release 12.2, V12.2.140\n")
+                self.returncode = 0
+
+        monkeypatch.setattr(
+            "scripts.emit_training_provenance.subprocess.run",
+            lambda *a, **k: _Fake())
+        assert etp._detect_cuda_from_nvcc() == "12.2"
+
+    def test_detect_cuda_from_nvcc_raises_when_unavailable(self, monkeypatch):
+        from scripts import emit_training_provenance as etp
+
+        def _raise(*a, **k):
+            raise FileNotFoundError("nvcc not found")
+
+        monkeypatch.setattr(
+            "scripts.emit_training_provenance.subprocess.run", _raise)
+        with pytest.raises(RuntimeError, match="cannot determine CUDA version"):
+            etp._detect_cuda_from_nvcc()
+
+    def test_detect_gpu_returns_fields_from_nvidia_smi(self, monkeypatch):
+        """Full _detect_gpu path: nvidia-smi provides name/memory/driver/cuda."""
+        from scripts import emit_training_provenance as etp
+
+        # Sequence of subprocess.run calls:
+        # 1. _query("name")
+        # 2. _query("memory.total")
+        # 3. driver_version query
+        # 4. _nvidia_smi_has_cuda() -> cuda_version probe (non-empty => True)
+        # 5. _query("cuda_version") (since has_cuda returned True)
+        responses = iter([
+            _FakeRun("Tesla T4\n"),        # 1. name
+            _FakeRun("15109\n"),            # 2. memory.total
+            _FakeRun("525.60.13\n"),        # 3. driver_version
+            _FakeRun("11.8\n"),             # 4. _nvidia_smi_has_cuda probe
+            _FakeRun("11.8\n"),             # 5. _query("cuda_version")
+        ])
+
+        monkeypatch.setattr(
+            "scripts.emit_training_provenance.subprocess.run",
+            lambda *a, **k: next(responses))
+        name, mem, cuda, driver = etp._detect_gpu()
+        assert name == "Tesla T4"
+        assert mem == 15109
+        assert cuda == "11.8"
+        assert driver == "525.60.13"
+
+
+class _FakeRun:
+    """Minimal subprocess.CompletedProcess substitute for monkeypatching."""
+    def __init__(self, stdout: str, stderr: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
