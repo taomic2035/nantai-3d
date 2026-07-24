@@ -507,6 +507,44 @@ coverage_use=forbidden / trust_effect=none`。
 seam、camera clearance、visibility、六层与 post-render v2；完整绑定、QA 和消费顺序见
 [Batch24 image2 回执](handoff/FEEDBACK-IMAGE2-028-batch24-reciprocal-perimeter-section.md)。
 
+### Batch 25 环境真实感与可通行边界参考
+
+[Batch 25 Environment Realism Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch25-2026-07-24)
+针对 exact-266 RGB 审计中最明显的视觉缺口补充 8 张通用设计输入：开路植被边界、果园梯田、
+森林—果园过渡、切槽溪床与湿/干岸层、石路—土坡—排水接触、变化挡墙、村庄远景层次，以及
+阴天世界/山脊光照参考。它们用于替换方块树冠、重复地表、平面溪水、硬拼缝和空灰天空，
+不绑定某一个固定村庄资产。
+
+```powershell
+$releaseDir = ".nantai-studio\release-inputs\batch25"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+
+gh release download synthetic-village-design-inputs-batch25-2026-07-24 `
+  --repo taomic2035/nantai-3d `
+  --dir $releaseDir
+
+$archive = Join-Path $releaseDir "synthetic-village-environment-realism-pack-batch25-2026-07-24.zip"
+$sumFile = Join-Path $releaseDir "synthetic-village-environment-realism-pack-batch25-2026-07-24.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 25 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch25" -Force
+```
+
+ZIP SHA-256 为 `6673d94c7651a21d73706b1810626d0a9559668eb229dd13a7aa028599906575`，
+严格只含 8 张最终 PNG、8 份精确 prompt、manifest、使用说明与 payload checksum；没有
+contact sheet、失败请求、浏览器中间态或生成缓存。全部图像仍为
+`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
+metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
+coverage_use=forbidden / trust_effect=none`。
+
+这批图能指导可替换 Blender 几何、材质变化、植被密度、地表接触和合成天空设计；其中 panorama
+也不是校准的 equirectangular HDRI。它们不能证明同一物理场景的 360° 一致性、任意坐标可达性、
+真实模型或真实纹理。完整 QA、逐图 SHA 和消费顺序见
+[Batch25 image2 回执](handoff/FEEDBACK-IMAGE2-029-batch25-environment-realism.md)。
+
 ## 核心工作流
 
 ### 1. 混合媒体输入
