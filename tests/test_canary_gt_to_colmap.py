@@ -447,3 +447,84 @@ class TestMainSuccess:
         # Identity c2w + depth 10 → all points at Euclidean distance ≈ 10
         x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
         assert abs(np.sqrt(x ** 2 + y ** 2 + z ** 2) - 10.0) < 0.5
+
+
+# ============================================================
+# check_cross_camera_depth: isolated unit tests
+# ============================================================
+
+class TestCheckCrossCameraDepth:
+    """Isolated tests for check_cross_camera_depth beyond the main() path.
+
+    The existing test_cross_camera_depth_mismatch_exits exercises the
+    mismatch → SystemExit path via main().  These tests cover the skip
+    branch (insufficient overlap) and the pass branch (consistent depth)
+    by calling check_cross_camera_depth directly.
+    """
+
+    def test_skips_pair_when_overlap_insufficient(self, tmp_path, monkeypatch):
+        """When in-frame projection < 50 points, the pair is skipped (no exit)."""
+        import scripts.canary_gt_to_colmap as mod
+
+        # Camera A at origin looking +Z; Camera B translated far away so
+        # A's points project outside B's frame → inb.sum() < 50 → skip.
+        intr = _INTR_A
+        c2w_a = np.eye(4)
+        c2w_b = np.eye(4).copy()
+        c2w_b[0, 3] = 5000.0  # huge translation → points project way off-frame
+
+        metas = [
+            {"camera_id": "cam_000", "intrinsics": intr,
+             "measured_c2w_opencv": c2w_a.tolist()},
+            {"camera_id": "cam_001", "intrinsics": intr,
+             "measured_c2w_opencv": c2w_b.tolist()},
+        ]
+        renders = tmp_path / "renders"
+        (renders / "depth").mkdir(parents=True)
+        depth = np.full((intr["height_px"], intr["width_px"]), 10.0)
+        _patch_load_depth(monkeypatch, {"cam_000": depth, "cam_001": depth})
+
+        # Should NOT raise — both pairs skip due to insufficient overlap.
+        mod.check_cross_camera_depth(metas, renders, stride=5)
+
+    def test_passes_when_depths_consistent(self, tmp_path, monkeypatch):
+        """When two cameras share consistent depth, no SystemExit is raised."""
+        import scripts.canary_gt_to_colmap as mod
+
+        intr = _INTR_A
+        # Both cameras at origin, same depth → rel error ≈ 0 → pass.
+        c2w = np.eye(4)
+        metas = [
+            {"camera_id": "cam_000", "intrinsics": intr,
+             "measured_c2w_opencv": c2w.tolist()},
+            {"camera_id": "cam_001", "intrinsics": intr,
+             "measured_c2w_opencv": c2w.tolist()},
+        ]
+        renders = tmp_path / "renders"
+        (renders / "depth").mkdir(parents=True)
+        depth = np.full((intr["height_px"], intr["width_px"]), 10.0)
+        _patch_load_depth(monkeypatch, {"cam_000": depth, "cam_001": depth})
+
+        # Should NOT raise — depths are identical, rel error ≈ 0.
+        mod.check_cross_camera_depth(metas, renders, stride=5)
+
+    def test_raises_when_depth_mismatch(self, tmp_path, monkeypatch):
+        """When cross-camera depth median rel error > tol, SystemExit is raised."""
+        import scripts.canary_gt_to_colmap as mod
+
+        intr = _INTR_A
+        c2w = np.eye(4)
+        metas = [
+            {"camera_id": "cam_000", "intrinsics": intr,
+             "measured_c2w_opencv": c2w.tolist()},
+            {"camera_id": "cam_001", "intrinsics": intr,
+             "measured_c2w_opencv": c2w.tolist()},
+        ]
+        renders = tmp_path / "renders"
+        (renders / "depth").mkdir(parents=True)
+        depth_a = np.full((intr["height_px"], intr["width_px"]), 10.0)
+        depth_b = np.full((intr["height_px"], intr["width_px"]), 20.0)
+        _patch_load_depth(monkeypatch, {"cam_000": depth_a, "cam_001": depth_b})
+
+        with pytest.raises(SystemExit, match="跨相机深度不一致"):
+            mod.check_cross_camera_depth(metas, renders, stride=5)
