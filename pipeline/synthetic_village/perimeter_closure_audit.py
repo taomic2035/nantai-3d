@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
+from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
@@ -37,7 +38,10 @@ from .production_quality_gates import (
     production_frame_quality_policy_v2_sha256,
 )
 from .production_render import (
+    LocalProductionCameraMetadata,
     LocalProductionQualityPolicy,
+    LocalProductionRenderFrameReport,
+    expected_production_artifacts,
     local_production_quality_policy_sha256,
 )
 
@@ -1102,6 +1106,434 @@ def canonical_perimeter_closure_render_request_bytes(
     return _canonical(request.model_dump(mode="json"))
 
 
+class PerimeterClosureRenderStatistics(FrozenModel):
+    """Measured layer summary whose registered instance range is 0..266."""
+
+    depth_min_m: float = Field(ge=0.0, le=1200.0, allow_inf_nan=False)
+    depth_max_m: float = Field(gt=0.0, le=2000.0, allow_inf_nan=False)
+    depth_background_pixels: int = Field(ge=0, le=1024 * 576)
+    depth_max_range_error_m: float = Field(
+        ge=0.0,
+        le=0.01,
+        allow_inf_nan=False,
+    )
+    normal_max_unit_error: float = Field(
+        ge=0.0,
+        le=0.001,
+        allow_inf_nan=False,
+    )
+    instance_ids: tuple[int, ...] = Field(min_length=1)
+    semantic_ids: tuple[int, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_ids(self) -> PerimeterClosureRenderStatistics:
+        if self.instance_ids != tuple(sorted(set(self.instance_ids))) or any(
+            value < 0 or value > 266 for value in self.instance_ids
+        ):
+            raise ValueError(
+                "observed instance IDs must be unique stable IDs "
+                "from 0 through 266"
+            )
+        if self.semantic_ids != tuple(sorted(set(self.semantic_ids))) or any(
+            value < 0 or value > 14 for value in self.semantic_ids
+        ):
+            raise ValueError(
+                "observed semantic IDs must be unique stable IDs "
+                "from 0 through 14"
+            )
+        if self.depth_max_m < self.depth_min_m:
+            raise ValueError("depth statistics are inverted")
+        return self
+
+
+class PerimeterClosureRenderFrameReport(LocalProductionRenderFrameReport):
+    """Six measured layers emitted by the exact-266 audit adapter."""
+
+    schema_version: Literal[
+        "nantai.synthetic-village.local-production-render-frame-report.v4"
+    ] = "nantai.synthetic-village.local-production-render-frame-report.v4"
+    statistics: PerimeterClosureRenderStatistics
+
+    @model_validator(mode="after")
+    def _content_digest_is_exact(self) -> PerimeterClosureRenderFrameReport:
+        payload = self.model_dump(mode="json", exclude={"content_sha256"})
+        if self.content_sha256 != hashlib.sha256(_canonical(payload)).hexdigest():
+            raise ValueError("perimeter closure frame report SHA-256 is invalid")
+        return self
+
+
+class PerimeterClosureCameraMetadata(LocalProductionCameraMetadata):
+    """Measured camera metadata emitted by the exact-266 audit adapter."""
+
+    schema_version: Literal[
+        "nantai.synthetic-village.local-production-camera-metadata.v4"
+    ] = "nantai.synthetic-village.local-production-camera-metadata.v4"
+
+
+class PerimeterClosureVisibilityMeasurement(FrozenModel):
+    """Measured target/seam visibility for one exact audit camera."""
+
+    camera_id: str = Field(pattern=r"^camera-audit-overview-[0-9]{3}$")
+    observed_instance_ids: tuple[int, ...] = Field(min_length=1)
+    required_target_instance_ids: tuple[int, ...] = Field(
+        min_length=6,
+        max_length=6,
+    )
+    visible_target_instance_ids: tuple[int, ...]
+    missing_target_instance_ids: tuple[int, ...]
+    target_visibility_passed: bool
+    required_seam_instance_ids: tuple[int, int]
+    visible_seam_instance_ids: tuple[int, ...]
+    missing_seam_instance_ids: tuple[int, ...]
+    seam_visibility_passed: bool
+    trust_effect: Literal["none-quality-filter-only"] = (
+        "none-quality-filter-only"
+    )
+
+    @model_validator(mode="after")
+    def _measurement_is_derived(
+        self,
+    ) -> PerimeterClosureVisibilityMeasurement:
+        observed = set(self.observed_instance_ids)
+        expected_visible_targets = tuple(
+            value
+            for value in self.required_target_instance_ids
+            if value in observed
+        )
+        expected_missing_targets = tuple(
+            value
+            for value in self.required_target_instance_ids
+            if value not in observed
+        )
+        expected_visible_seams = tuple(
+            value
+            for value in self.required_seam_instance_ids
+            if value in observed
+        )
+        expected_missing_seams = tuple(
+            value
+            for value in self.required_seam_instance_ids
+            if value not in observed
+        )
+        if (
+            self.observed_instance_ids
+            != tuple(sorted(set(self.observed_instance_ids)))
+            or self.visible_target_instance_ids != expected_visible_targets
+            or self.missing_target_instance_ids != expected_missing_targets
+            or self.target_visibility_passed != (not expected_missing_targets)
+            or self.visible_seam_instance_ids != expected_visible_seams
+            or self.missing_seam_instance_ids != expected_missing_seams
+            or self.seam_visibility_passed != (not expected_missing_seams)
+        ):
+            raise ValueError(
+                "perimeter closure visibility is not derived from mask IDs"
+            )
+        return self
+
+
+def measure_perimeter_closure_visibility(
+    *,
+    request: PerimeterClosureRenderFrameRequest,
+    statistics: PerimeterClosureRenderStatistics,
+) -> PerimeterClosureVisibilityMeasurement:
+    """Derive exact module and adjacent-seam visibility from instance IDs."""
+
+    observed = set(statistics.instance_ids)
+    visible_targets = tuple(
+        value
+        for value in request.required_target_instance_ids
+        if value in observed
+    )
+    missing_targets = tuple(
+        value
+        for value in request.required_target_instance_ids
+        if value not in observed
+    )
+    visible_seams = tuple(
+        value
+        for value in request.required_seam_instance_ids
+        if value in observed
+    )
+    missing_seams = tuple(
+        value
+        for value in request.required_seam_instance_ids
+        if value not in observed
+    )
+    return PerimeterClosureVisibilityMeasurement(
+        camera_id=request.camera.camera_id,
+        observed_instance_ids=statistics.instance_ids,
+        required_target_instance_ids=request.required_target_instance_ids,
+        visible_target_instance_ids=visible_targets,
+        missing_target_instance_ids=missing_targets,
+        target_visibility_passed=not missing_targets,
+        required_seam_instance_ids=request.required_seam_instance_ids,
+        visible_seam_instance_ids=visible_seams,
+        missing_seam_instance_ids=missing_seams,
+        seam_visibility_passed=not missing_seams,
+    )
+
+
+def canonical_perimeter_closure_render_report_bytes(
+    report: PerimeterClosureRenderFrameReport,
+    *,
+    exclude_sha256: bool = False,
+) -> bytes:
+    """Serialize one exact-266 frame report as canonical JSON."""
+
+    return _canonical(
+        report.model_dump(
+            mode="json",
+            exclude={"content_sha256"} if exclude_sha256 else None,
+        )
+    )
+
+
+def canonical_perimeter_closure_camera_metadata_bytes(
+    metadata: PerimeterClosureCameraMetadata,
+) -> bytes:
+    """Serialize exact-266 measured camera metadata as canonical JSON."""
+
+    return _canonical(metadata.model_dump(mode="json"))
+
+
+def load_perimeter_closure_camera_metadata(
+    path: Path,
+) -> PerimeterClosureCameraMetadata:
+    """Load one canonical measured exact-266 camera sidecar."""
+
+    try:
+        raw = canary._read_stable_metadata(  # noqa: SLF001
+            Path(path),
+            label="perimeter closure camera metadata",
+        )
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
+        )
+        metadata = PerimeterClosureCameraMetadata.model_validate_json(raw)
+        if raw != canonical_perimeter_closure_camera_metadata_bytes(metadata):
+            raise PerimeterClosureAuditError(
+                "perimeter closure camera metadata is not canonical JSON"
+            )
+        return metadata
+    except PerimeterClosureAuditError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        canary.CanaryBuildError,
+    ) as exc:
+        raise PerimeterClosureAuditError(
+            f"perimeter closure camera metadata validation failed: {exc}"
+        ) from exc
+
+
+def verify_perimeter_closure_camera_metadata(
+    metadata: PerimeterClosureCameraMetadata,
+    *,
+    request: PerimeterClosureRenderFrameRequest,
+) -> None:
+    """Cross-check measured exact-266 camera identity and pose."""
+
+    expected_settings_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(  # noqa: SLF001
+            request.settings.model_dump(mode="json")
+        )
+    ).hexdigest()
+    camera = request.camera
+    immutable = (
+        metadata.build_id,
+        metadata.render_id,
+        metadata.blender_executable_sha256,
+        metadata.camera_id,
+        metadata.settings_sha256,
+        metadata.intrinsics,
+        metadata.requested_c2w_opencv,
+        metadata.requested_c2w_blender,
+        metadata.object_registry_sha256,
+        metadata.semantic_registry,
+        metadata.profile_id,
+        metadata.production_plan_sha256,
+        metadata.camera_registry_sha256,
+        metadata.elevated_topology_sha256,
+        metadata.group_id,
+        metadata.topology_ref,
+        metadata.arc_length_m,
+        metadata.audit_only,
+        metadata.disclosure,
+        metadata.preflight_id,
+        metadata.quality_policy_sha256,
+        metadata.post_render_policy_sha256,
+    )
+    expected = (
+        request.build_id,
+        request.render_id,
+        request.blender_executable_sha256,
+        camera.camera_id,
+        expected_settings_sha256,
+        camera.intrinsics,
+        camera.c2w_opencv,
+        request.requested_c2w_blender,
+        request.object_registry_sha256,
+        request.semantic_registry,
+        "synthetic-village-coverage-180-v1",
+        request.audit_plan_sha256,
+        request.camera_registry_sha256,
+        request.audit_plan.perimeter_closure_plan.topology_plan_sha256,
+        camera.group_id,
+        camera.topology_ref,
+        camera.arc_length_m,
+        camera.audit_only,
+        camera.disclosure,
+        request.preflight_id,
+        request.local_quality_policy_sha256,
+        request.post_render_policy_sha256,
+    )
+    if (
+        immutable != expected
+        or not np.allclose(
+            metadata.measured_c2w_opencv,
+            camera.c2w_opencv,
+            atol=4e-5,
+            rtol=0.0,
+        )
+        or not np.allclose(
+            metadata.measured_c2w_blender,
+            request.requested_c2w_blender,
+            atol=4e-5,
+            rtol=0.0,
+        )
+    ):
+        raise PerimeterClosureAuditError(
+            "perimeter closure camera metadata disagrees with render request"
+        )
+
+
+def load_perimeter_closure_render_report(
+    path: Path,
+) -> PerimeterClosureRenderFrameReport:
+    """Load one canonical content-addressed exact-266 frame report."""
+
+    try:
+        raw = canary._read_stable_metadata(  # noqa: SLF001
+            Path(path),
+            label="perimeter closure render frame report",
+        )
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=canary._reject_duplicate_keys,  # noqa: SLF001
+        )
+        report = PerimeterClosureRenderFrameReport.model_validate_json(raw)
+        if raw != canonical_perimeter_closure_render_report_bytes(report):
+            raise PerimeterClosureAuditError(
+                "perimeter closure render report is not canonical JSON"
+            )
+        return report
+    except PerimeterClosureAuditError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValidationError,
+        canary.CanaryBuildError,
+    ) as exc:
+        raise PerimeterClosureAuditError(
+            f"perimeter closure render report validation failed: {exc}"
+        ) from exc
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_perimeter_closure_render_frame(
+    report: PerimeterClosureRenderFrameReport,
+    *,
+    request: PerimeterClosureRenderFrameRequest,
+    frame_root: Path,
+) -> None:
+    """Verify exact-266 runtime identities and all six artifact bytes."""
+
+    expected_settings_sha256 = hashlib.sha256(
+        canary._canonical_json_bytes(  # noqa: SLF001
+            request.settings.model_dump(mode="json")
+        )
+    ).hexdigest()
+    identity_pairs = (
+        (report.build_id, request.build_id),
+        (report.render_id, request.render_id),
+        (
+            report.blender_executable_sha256,
+            request.blender_executable_sha256,
+        ),
+        (report.camera_id, request.camera.camera_id),
+        (report.settings_sha256, expected_settings_sha256),
+        (report.production_plan_sha256, request.audit_plan_sha256),
+        (report.camera_registry_sha256, request.camera_registry_sha256),
+        (
+            report.elevated_topology_sha256,
+            request.audit_plan.perimeter_closure_plan.topology_plan_sha256,
+        ),
+        (report.group_id, request.camera.group_id),
+        (report.topology_ref, request.camera.topology_ref),
+        (report.preflight_id, request.preflight_id),
+        (
+            report.quality_policy_sha256,
+            request.local_quality_policy_sha256,
+        ),
+        (
+            report.post_render_policy_sha256,
+            request.post_render_policy_sha256,
+        ),
+    )
+    if any(left != right for left, right in identity_pairs):
+        raise PerimeterClosureAuditError(
+            "perimeter closure frame report identity disagrees"
+        )
+    if tuple((row.kind, row.path) for row in report.artifacts) != (
+        expected_production_artifacts(request.camera.camera_id)
+    ):
+        raise PerimeterClosureAuditError(
+            "perimeter closure frame artifact contract disagrees"
+        )
+    if not all(report.validation.model_dump(mode="python").values()):
+        raise PerimeterClosureAuditError(
+            "perimeter closure frame validation is not fully passing"
+        )
+
+    frame_root = Path(frame_root).resolve(strict=True)
+    for artifact in report.artifacts:
+        artifact_path = frame_root / Path(artifact.path)
+        try:
+            resolved = artifact_path.resolve(strict=True)
+            resolved.relative_to(frame_root)
+        except (OSError, ValueError) as exc:
+            raise PerimeterClosureAuditError(
+                f"perimeter closure render artifact path is invalid: "
+                f"{artifact.path}"
+            ) from exc
+        if canary._is_linklike(resolved):  # noqa: SLF001
+            raise PerimeterClosureAuditError(
+                f"perimeter closure render artifact is redirected: "
+                f"{artifact.path}"
+            )
+        if (
+            resolved.stat().st_size != artifact.size_bytes
+            or _sha256_file(resolved) != artifact.sha256
+        ):
+            raise PerimeterClosureAuditError(
+                f"perimeter closure render artifact digest disagrees: "
+                f"{artifact.path}"
+            )
+
+
 def verify_perimeter_closure_audit_plan(
     plan: PerimeterClosureAuditPlan,
     *,
@@ -1153,9 +1585,13 @@ __all__ = [
     "PerimeterClosureAuditCamera",
     "PerimeterClosureAuditError",
     "PerimeterClosureAuditPlan",
+    "PerimeterClosureCameraMetadata",
     "PerimeterClosureClearanceReport",
     "PerimeterClosureClearanceRequest",
+    "PerimeterClosureRenderFrameReport",
     "PerimeterClosureRenderFrameRequest",
+    "PerimeterClosureRenderStatistics",
+    "PerimeterClosureVisibilityMeasurement",
     "build_perimeter_closure_audit_plan",
     "build_perimeter_closure_clearance_report",
     "build_perimeter_closure_clearance_request",
@@ -1163,10 +1599,17 @@ __all__ = [
     "canonical_perimeter_closure_audit_plan_bytes",
     "canonical_perimeter_closure_clearance_report_bytes",
     "canonical_perimeter_closure_clearance_request_bytes",
+    "canonical_perimeter_closure_camera_metadata_bytes",
+    "canonical_perimeter_closure_render_report_bytes",
     "canonical_perimeter_closure_render_request_bytes",
+    "load_perimeter_closure_render_report",
+    "load_perimeter_closure_camera_metadata",
+    "measure_perimeter_closure_visibility",
     "perimeter_closure_audit_plan_sha256",
     "perimeter_closure_object_registry_sha256",
     "perimeter_closure_renderer_capability_sha256",
     "verify_perimeter_closure_audit_plan",
     "verify_perimeter_closure_clearance_report",
+    "verify_perimeter_closure_camera_metadata",
+    "verify_perimeter_closure_render_frame",
 ]

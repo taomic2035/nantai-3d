@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
+import json
 import math
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,19 +20,29 @@ from pipeline.synthetic_village import perimeter_closure_module as closure_modul
 from pipeline.synthetic_village.perimeter_closure_audit import (
     PERIMETER_CLOSURE_AUDIT_CAMERA_ORDER,
     PerimeterClosureAuditPlan,
+    PerimeterClosureCameraMetadata,
+    PerimeterClosureRenderFrameReport,
+    PerimeterClosureRenderStatistics,
     build_perimeter_closure_audit_plan,
     build_perimeter_closure_clearance_report,
     build_perimeter_closure_clearance_request,
     build_perimeter_closure_render_frame_request,
     canonical_perimeter_closure_audit_plan_bytes,
+    canonical_perimeter_closure_camera_metadata_bytes,
     canonical_perimeter_closure_clearance_report_bytes,
     canonical_perimeter_closure_clearance_request_bytes,
+    canonical_perimeter_closure_render_report_bytes,
     canonical_perimeter_closure_render_request_bytes,
+    load_perimeter_closure_camera_metadata,
+    load_perimeter_closure_render_report,
+    measure_perimeter_closure_visibility,
     perimeter_closure_audit_plan_sha256,
     perimeter_closure_object_registry_sha256,
     perimeter_closure_renderer_capability_sha256,
     verify_perimeter_closure_audit_plan,
+    verify_perimeter_closure_camera_metadata,
     verify_perimeter_closure_clearance_report,
+    verify_perimeter_closure_render_frame,
 )
 from pipeline.synthetic_village.perimeter_closure_module import (
     PERIMETER_CLOSURE_MODULE_ORDER,
@@ -48,7 +63,15 @@ from pipeline.synthetic_village.production_quality_gates import (
 )
 from pipeline.synthetic_village.production_render import (
     LocalProductionQualityPolicy,
+    ProductionArtifactRecord,
+    ProductionFrameLayerStatistics,
+    expected_production_artifacts,
     local_production_quality_policy_sha256,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+BLENDER_AUDIT_SCRIPT = (
+    ROOT / "scripts/blender/render_perimeter_closure_audit.py"
 )
 
 
@@ -171,6 +194,58 @@ def _clearance_evidence(
         )
         for camera in plan.cameras
     )
+
+
+def _render_request(
+    plan: PerimeterClosureAuditPlan,
+):
+    registry = _registry()
+    clearance_request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        object_registry=registry,
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    clearance_report = build_perimeter_closure_clearance_report(
+        request=clearance_request,
+        evidence=_clearance_evidence(plan),
+    )
+    return build_perimeter_closure_render_frame_request(
+        plan=plan,
+        audit_camera_id=plan.cameras[0].audit_camera_id,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256="3" * 64,
+        engine_script_sha256="4" * 64,
+        object_registry=registry,
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        clearance_report=clearance_report,
+        local_quality_policy=_local_quality_policy(),
+        post_render_policy=_post_render_policy(),
+    )
+
+
+@pytest.fixture(scope="module")
+def blender_adapter() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "_test_render_perimeter_closure_audit",
+        BLENDER_AUDIT_SCRIPT,
+    )
+    assert spec is not None and spec.loader is not None
+    previous = sys.modules.get("bpy")
+    sys.modules["bpy"] = SimpleNamespace()
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if previous is None:
+            sys.modules.pop("bpy", None)
+        else:
+            sys.modules["bpy"] = previous
 
 
 def _payload(plan: PerimeterClosureAuditPlan) -> dict[str, Any]:
@@ -582,3 +657,730 @@ def test_render_request_rejects_failed_or_wrong_camera_clearance(
             local_quality_policy=_local_quality_policy(),
             post_render_policy=_post_render_policy(),
         )
+
+
+def test_exact266_render_statistics_accepts_registered_overlay_ids() -> None:
+    statistics = PerimeterClosureRenderStatistics(
+        depth_min_m=0.0,
+        depth_max_m=10.0,
+        depth_background_pixels=1,
+        depth_max_range_error_m=0.0,
+        normal_max_unit_error=0.0,
+        instance_ids=(0, 218, 219, 266),
+        semantic_ids=(0, 3, 14),
+    )
+
+    assert statistics.instance_ids[-1] == 266
+    with pytest.raises(ValidationError, match="0 through 266"):
+        PerimeterClosureRenderStatistics.model_validate(
+            {
+                **statistics.model_dump(mode="python"),
+                "instance_ids": (0, 267),
+            }
+        )
+
+
+def test_visibility_measurement_requires_all_targets_and_both_seams(
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    request = _render_request(_build(closure_plan))
+    observed = tuple(
+        sorted(
+            {
+                0,
+                *request.required_target_instance_ids[:-2],
+                *request.required_seam_instance_ids,
+            }
+        )
+    )
+    statistics = PerimeterClosureRenderStatistics(
+        depth_min_m=0.0,
+        depth_max_m=10.0,
+        depth_background_pixels=1,
+        depth_max_range_error_m=0.0,
+        normal_max_unit_error=0.0,
+        instance_ids=observed,
+        semantic_ids=(0, 3),
+    )
+
+    measurement = measure_perimeter_closure_visibility(
+        request=request,
+        statistics=statistics,
+    )
+
+    assert measurement.visible_target_instance_ids == (
+        request.required_target_instance_ids[:-1]
+    )
+    assert measurement.missing_target_instance_ids == (
+        request.required_target_instance_ids[-1:]
+    )
+    assert not measurement.target_visibility_passed
+    assert measurement.visible_seam_instance_ids == (
+        request.required_seam_instance_ids
+    )
+    assert measurement.missing_seam_instance_ids == ()
+    assert measurement.seam_visibility_passed
+    assert measurement.trust_effect == "none-quality-filter-only"
+
+
+def test_exact266_render_report_is_content_and_artifact_bound(
+    closure_plan: PerimeterClosurePlan,
+    tmp_path: Path,
+) -> None:
+    request = _render_request(_build(closure_plan))
+    artifacts: list[ProductionArtifactRecord] = []
+    for index, (kind, portable_path) in enumerate(
+        expected_production_artifacts(request.camera.camera_id),
+        start=1,
+    ):
+        artifact_path = tmp_path / portable_path
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_bytes(f"closure-artifact-{index}".encode())
+        artifacts.append(
+            ProductionArtifactRecord(
+                kind=kind,
+                path=portable_path,
+                sha256=hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+                size_bytes=artifact_path.stat().st_size,
+            )
+        )
+    payload = {
+        "schema_version": (
+            "nantai.synthetic-village.local-production-render-frame-report.v4"
+        ),
+        "build_id": request.build_id,
+        "render_id": request.render_id,
+        "content_sha256": "0" * 64,
+        "synthetic": True,
+        "verification_level": "L0",
+        "fidelity": "simplified-pbr-not-render-parity",
+        "blender_executable_sha256": request.blender_executable_sha256,
+        "camera_id": request.camera.camera_id,
+        "image_width_px": 1024,
+        "image_height_px": 576,
+        "depth_encoding": "euclidean-camera-center-range-m",
+        "normal_encoding": "world-space-unit-vector",
+        "depth_channel_layout": "V-float32-zip",
+        "normal_channel_layout": "X,Y,Z-float32-zip",
+        "instance_pixel_type": "uint16-grayscale-png",
+        "semantic_pixel_type": "uint8-grayscale-png",
+        "settings_sha256": hashlib.sha256(
+            canary._canonical_json_bytes(  # noqa: SLF001
+                request.settings.model_dump(mode="json")
+            )
+        ).hexdigest(),
+        "artifacts": tuple(artifacts),
+        "statistics": PerimeterClosureRenderStatistics(
+            depth_min_m=0.0,
+            depth_max_m=10.0,
+            depth_background_pixels=1,
+            depth_max_range_error_m=0.0,
+            normal_max_unit_error=0.0,
+            instance_ids=(
+                0,
+                *request.required_target_instance_ids,
+                *tuple(
+                    value
+                    for value in request.required_seam_instance_ids
+                    if value not in request.required_target_instance_ids
+                ),
+            ),
+            semantic_ids=(0, 3),
+        ),
+        "layer_statistics": ProductionFrameLayerStatistics(
+            camera_id=request.camera.camera_id,
+            upper_pixel_count=1024 * 288,
+            valid_depth_pixel_count=500000,
+            valid_normal_pixel_count=500000,
+            registered_instance_pixel_count=500000,
+            valid_semantic_pixel_count=500000,
+            sky_pixel_count=89824,
+            upper_ground_pixel_count=10000,
+            near_depth_pixel_count=0,
+            dominant_near_instance_pixel_count=0,
+            dominant_upper_instance_id=(
+                request.required_target_instance_ids[0]
+            ),
+            dominant_upper_instance_pixel_count=10000,
+        ),
+        "validation": canary.RenderValidation(
+            dimensions_match=True,
+            depth_finite_nonnegative=True,
+            depth_camera_range_consistent=True,
+            normal_finite_unit_world_space=True,
+            instance_ids_registered=True,
+            semantic_ids_registered=True,
+            camera_metadata_matches=True,
+        ),
+        "profile_id": "synthetic-village-coverage-180-v1",
+        "production_plan_sha256": request.audit_plan_sha256,
+        "camera_registry_sha256": request.camera_registry_sha256,
+        "elevated_topology_sha256": (
+            request.audit_plan.perimeter_closure_plan.topology_plan_sha256
+        ),
+        "group_id": request.camera.group_id,
+        "topology_ref": request.camera.topology_ref,
+        "preflight_id": request.preflight_id,
+        "quality_policy_sha256": request.local_quality_policy_sha256,
+        "post_render_policy_sha256": request.post_render_policy_sha256,
+    }
+    unsigned = PerimeterClosureRenderFrameReport.model_construct(**payload)
+    payload["content_sha256"] = hashlib.sha256(
+        canonical_perimeter_closure_render_report_bytes(
+            unsigned,
+            exclude_sha256=True,
+        )
+    ).hexdigest()
+    report = PerimeterClosureRenderFrameReport.model_validate(payload)
+    report_path = tmp_path / "frame-report.json"
+    report_path.write_bytes(
+        canonical_perimeter_closure_render_report_bytes(report)
+    )
+
+    loaded = load_perimeter_closure_render_report(report_path)
+    verify_perimeter_closure_render_frame(
+        loaded,
+        request=request,
+        frame_root=tmp_path,
+    )
+
+    (tmp_path / artifacts[0].path).write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="artifact"):
+        verify_perimeter_closure_render_frame(
+            loaded,
+            request=request,
+            frame_root=tmp_path,
+        )
+
+
+def test_exact266_camera_metadata_round_trip_binds_measured_pose(
+    closure_plan: PerimeterClosurePlan,
+    tmp_path: Path,
+) -> None:
+    request = _render_request(_build(closure_plan))
+    payload = {
+        "schema_version": (
+            "nantai.synthetic-village.local-production-camera-metadata.v4"
+        ),
+        "build_id": request.build_id,
+        "render_id": request.render_id,
+        "synthetic": True,
+        "verification_level": "L0",
+        "blender_executable_sha256": request.blender_executable_sha256,
+        "camera_id": request.camera.camera_id,
+        "image_width_px": 1024,
+        "image_height_px": 576,
+        "coordinate_system": "opencv-c2w-right-down-forward-meters",
+        "pixel_origin": "top-left",
+        "pixel_center_offset": (0.5, 0.5),
+        "depth_encoding": "euclidean-camera-center-range-m",
+        "depth_units": "m",
+        "depth_invalid_value_m": 0.0,
+        "normal_encoding": "world-space-unit-vector",
+        "normal_axes": "blender-right-handed-z-up",
+        "normal_background_xyz": (0.0, 0.0, 0.0),
+        "clip_start_m": 0.1,
+        "clip_end_m": 1200.0,
+        "depth_channel_layout": "V-float32-zip",
+        "normal_channel_layout": "X,Y,Z-float32-zip",
+        "instance_pixel_type": "uint16-grayscale-png",
+        "semantic_pixel_type": "uint8-grayscale-png",
+        "settings_sha256": hashlib.sha256(
+            canary._canonical_json_bytes(  # noqa: SLF001
+                request.settings.model_dump(mode="json")
+            )
+        ).hexdigest(),
+        "intrinsics": request.camera.intrinsics,
+        "requested_c2w_opencv": request.camera.c2w_opencv,
+        "requested_c2w_blender": request.requested_c2w_blender,
+        "measured_c2w_opencv": request.camera.c2w_opencv,
+        "measured_c2w_blender": request.requested_c2w_blender,
+        "object_registry_sha256": request.object_registry_sha256,
+        "semantic_registry": request.semantic_registry,
+        "profile_id": "synthetic-village-coverage-180-v1",
+        "production_plan_sha256": request.audit_plan_sha256,
+        "camera_registry_sha256": request.camera_registry_sha256,
+        "elevated_topology_sha256": (
+            request.audit_plan.perimeter_closure_plan.topology_plan_sha256
+        ),
+        "group_id": request.camera.group_id,
+        "topology_ref": request.camera.topology_ref,
+        "arc_length_m": request.camera.arc_length_m,
+        "audit_only": request.camera.audit_only,
+        "disclosure": request.camera.disclosure,
+        "preflight_id": request.preflight_id,
+        "quality_policy_sha256": request.local_quality_policy_sha256,
+        "post_render_policy_sha256": request.post_render_policy_sha256,
+    }
+    metadata = PerimeterClosureCameraMetadata.model_validate(payload)
+    metadata_path = tmp_path / "camera.json"
+    metadata_path.write_bytes(
+        canonical_perimeter_closure_camera_metadata_bytes(metadata)
+    )
+
+    loaded = load_perimeter_closure_camera_metadata(metadata_path)
+    verify_perimeter_closure_camera_metadata(loaded, request=request)
+
+    measured = [list(row) for row in loaded.measured_c2w_opencv]
+    measured[0][3] += 1.0
+    changed = loaded.model_copy(
+        update={"measured_c2w_opencv": tuple(tuple(row) for row in measured)}
+    )
+    with pytest.raises(ValueError, match="metadata"):
+        verify_perimeter_closure_camera_metadata(changed, request=request)
+
+
+def _scene_lineage(plan: PerimeterClosureAuditPlan) -> dict[str, str]:
+    return {
+        "nv_perimeter_closure_build": json.dumps(
+            {
+                "build_id": plan.exact_build_id,
+                "canonical_roots": 266,
+                "geometry_usability": "preview-only",
+                "overlay_roots": 48,
+                "stage": "modeled-unverified",
+                "trust_effect": "none-quality-filter-only",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    }
+
+
+def test_blender_adapter_literal_locks_exact266_and_dual_modes(
+    blender_adapter: ModuleType,
+) -> None:
+    assert blender_adapter.CLEARANCE_REQUEST_SCHEMA == (
+        "nantai.synthetic-village.perimeter-closure-clearance-request.v1"
+    )
+    assert blender_adapter.CLEARANCE_REPORT_SCHEMA == (
+        "nantai.synthetic-village.perimeter-closure-clearance-report.v1"
+    )
+    assert blender_adapter.RENDER_REQUEST_SCHEMA == (
+        "nantai.synthetic-village.perimeter-closure-render-frame-request.v1"
+    )
+    assert blender_adapter.EXPECTED_INSTANCE_IDS == list(range(1, 267))
+    assert blender_adapter.EXPECTED_CAMERA_IDS == [
+        f"camera-audit-overview-{index:03d}" for index in range(1, 17)
+    ]
+    assert blender_adapter._runtime_mode_args(
+        ["blender", "--", "--mode", "preflight", "--request", "a", "--output", "b"]
+    ) == ("preflight", Path("a"), Path("b"))
+    assert blender_adapter._runtime_mode_args(
+        ["blender", "--", "--mode", "render", "--request", "a", "--output", "b"]
+    ) == ("render", Path("a"), Path("b"))
+
+
+def test_blender_adapter_validates_clearance_boundary_before_engine(
+    blender_adapter: ModuleType,
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    script_sha = hashlib.sha256(BLENDER_AUDIT_SCRIPT.read_bytes()).hexdigest()
+    request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    payload = request.model_dump(mode="json")
+
+    blender_adapter._validate_clearance_boundary(
+        payload,
+        scene=_scene_lineage(plan),
+        script_path=BLENDER_AUDIT_SCRIPT,
+    )
+
+    payload["object_registry"][-1]["instance_id"] = 999
+    with pytest.raises(blender_adapter.RuntimeAuditError, match="1..266"):
+        blender_adapter._validate_clearance_boundary(
+            payload,
+            scene=_scene_lineage(plan),
+            script_path=BLENDER_AUDIT_SCRIPT,
+        )
+
+
+def test_blender_adapter_validates_render_boundary_before_engine(
+    blender_adapter: ModuleType,
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    script_sha = hashlib.sha256(BLENDER_AUDIT_SCRIPT.read_bytes()).hexdigest()
+    clearance_request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    clearance_report = build_perimeter_closure_clearance_report(
+        request=clearance_request,
+        evidence=_clearance_evidence(plan),
+    )
+    request = build_perimeter_closure_render_frame_request(
+        plan=plan,
+        audit_camera_id=plan.cameras[0].audit_camera_id,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        engine_script_sha256="4" * 64,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        clearance_report=clearance_report,
+        local_quality_policy=_local_quality_policy(),
+        post_render_policy=_post_render_policy(),
+    )
+
+    blender_adapter._validate_render_boundary(
+        request.model_dump(mode="json"),
+        scene=_scene_lineage(plan),
+        script_path=BLENDER_AUDIT_SCRIPT,
+    )
+
+    changed = request.model_dump(mode="json")
+    changed["renderer_capability_sha256"] = "9" * 64
+    with pytest.raises(blender_adapter.RuntimeAuditError, match="capability"):
+        blender_adapter._validate_render_boundary(
+            changed,
+            scene=_scene_lineage(plan),
+            script_path=BLENDER_AUDIT_SCRIPT,
+        )
+
+
+def test_blender_adapter_builds_exact_host_clearance_report_payload(
+    blender_adapter: ModuleType,
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    script_sha = hashlib.sha256(BLENDER_AUDIT_SCRIPT.read_bytes()).hexdigest()
+    request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    request_payload = request.model_dump(mode="json")
+    raw = canonical_perimeter_closure_clearance_request_bytes(request)
+    evidence = _clearance_evidence(plan)
+    host_report = build_perimeter_closure_clearance_report(
+        request=request,
+        evidence=evidence,
+    )
+    measured = tuple(
+        (
+            evidence_row.model_dump(mode="json"),
+            decision.model_dump(mode="json"),
+        )
+        for evidence_row, decision in zip(
+            host_report.evidence,
+            host_report.decisions,
+            strict=True,
+        )
+    )
+
+    payload = blender_adapter._build_clearance_report_payload(
+        request_payload,
+        raw,
+        measured,
+    )
+
+    assert payload == host_report.model_dump(mode="json")
+    assert hashlib.sha256(raw).hexdigest() == payload["request_sha256"]
+
+
+def test_blender_adapter_translates_only_bound_fields_to_frozen_renderer(
+    blender_adapter: ModuleType,
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    script_sha = hashlib.sha256(BLENDER_AUDIT_SCRIPT.read_bytes()).hexdigest()
+    clearance_request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    clearance_report = build_perimeter_closure_clearance_report(
+        request=clearance_request,
+        evidence=_clearance_evidence(plan),
+    )
+    request = build_perimeter_closure_render_frame_request(
+        plan=plan,
+        audit_camera_id=plan.cameras[0].audit_camera_id,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        engine_script_sha256="4" * 64,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        clearance_report=clearance_report,
+        local_quality_policy=_local_quality_policy(),
+        post_render_policy=_post_render_policy(),
+    )
+
+    internal = blender_adapter._to_engine_render_request(
+        request.model_dump(mode="json")
+    )
+
+    assert internal["schema_version"] == (
+        "nantai.synthetic-village.perimeter-closure-render-frame-request.v1"
+    )
+    assert internal["profile_id"] == "synthetic-village-coverage-180-v1"
+    assert internal["production_plan"] == request.audit_plan.model_dump(
+        mode="json"
+    )
+    assert internal["production_plan_sha256"] == request.audit_plan_sha256
+    assert internal["renderer_script_sha256"] == request.audit_script_sha256
+    assert internal["quality_policy_sha256"] == (
+        request.local_quality_policy_sha256
+    )
+    assert internal["build_adapter"] == "windows-textured-v2"
+    assert tuple(
+        row["instance_id"] for row in internal["object_registry"]
+    ) == tuple(range(1, 267))
+    for removed in (
+        "audit_plan",
+        "audit_plan_sha256",
+        "audit_camera_id",
+        "audit_script_sha256",
+        "engine_script_sha256",
+        "perimeter_closure_plan_sha256",
+        "clearance_report_sha256",
+        "clearance_policy_sha256",
+        "clearance_decision",
+        "renderer_capability_sha256",
+        "local_quality_policy",
+        "local_quality_policy_sha256",
+        "required_target_instance_ids",
+        "required_seam_instance_ids",
+        "geometry_usability",
+        "stage",
+        "trust_effect",
+    ):
+        assert removed not in internal
+
+
+def test_blender_adapter_measures_all_sixteen_cameras_in_plan_order(
+    blender_adapter: ModuleType,
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    script_sha = hashlib.sha256(BLENDER_AUDIT_SCRIPT.read_bytes()).hexdigest()
+    request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    measured_ids: list[str] = []
+    policy_calls: list[dict[str, Any]] = []
+
+    def measure(camera, _request, depsgraph):
+        assert depsgraph == "depsgraph"
+        measured_ids.append(camera["camera_id"])
+        return ({"camera_id": camera["camera_id"]}, {"passes": True})
+
+    engine = SimpleNamespace(
+        _validate_policy=lambda policy: policy_calls.append(policy),
+        _measure_camera=measure,
+    )
+    context = SimpleNamespace(
+        view_layer=SimpleNamespace(update=lambda: None),
+        evaluated_depsgraph_get=lambda: "depsgraph",
+    )
+
+    measured = blender_adapter._measure_clearance(
+        request.model_dump(mode="json"),
+        engine,
+        context,
+    )
+
+    assert policy_calls == [request.policy.model_dump(mode="json")]
+    assert measured_ids == list(request.selected_camera_ids)
+    assert len(measured) == 16
+
+
+def test_blender_adapter_prepares_frozen_engine_for_exact266_only(
+    blender_adapter: ModuleType,
+    closure_plan: PerimeterClosurePlan,
+) -> None:
+    plan = _build(closure_plan)
+    script_sha = hashlib.sha256(BLENDER_AUDIT_SCRIPT.read_bytes()).hexdigest()
+    clearance_request = build_perimeter_closure_clearance_request(
+        plan=plan,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        policy=_clearance_policy(),
+    )
+    clearance_report = build_perimeter_closure_clearance_report(
+        request=clearance_request,
+        evidence=_clearance_evidence(plan),
+    )
+    request = build_perimeter_closure_render_frame_request(
+        plan=plan,
+        audit_camera_id=plan.cameras[0].audit_camera_id,
+        blender_executable_sha256="2" * 64,
+        audit_script_sha256=script_sha,
+        engine_script_sha256="4" * 64,
+        object_registry=_registry(),
+        auxiliary_registry=canary.AUXILIARY_REGISTRY,
+        semantic_registry=canary._semantic_registry(),
+        clearance_report=clearance_report,
+        local_quality_policy=_local_quality_policy(),
+        post_render_policy=_post_render_policy(),
+    )
+    internal = blender_adapter._to_engine_render_request(
+        request.model_dump(mode="json")
+    )
+
+    class FakeEngineError(RuntimeError):
+        pass
+
+    engine = SimpleNamespace(RuntimeRenderError=FakeEngineError)
+    prepared = blender_adapter._prepare_render_engine(engine)
+
+    assert prepared is engine
+    assert engine.LOCAL_PRODUCTION_REQUEST_SCHEMA == (
+        "nantai.synthetic-village.perimeter-closure-render-frame-request.v1"
+    )
+    assert engine.LOCAL_PRODUCTION_REPORT_SCHEMA == (
+        "nantai.synthetic-village.local-production-render-frame-report.v4"
+    )
+    assert engine.LOCAL_PRODUCTION_CAMERA_SCHEMA == (
+        "nantai.synthetic-village.local-production-camera-metadata.v4"
+    )
+    engine._validate_object_registry_contract(internal["object_registry"])
+    engine._validate_production_camera_request(internal)
+
+    changed_registry = copy.deepcopy(internal["object_registry"])
+    changed_registry[-1]["instance_id"] = 999
+    with pytest.raises(FakeEngineError, match="1 through 266"):
+        engine._validate_object_registry_contract(changed_registry)
+
+    changed_request = copy.deepcopy(internal)
+    changed_request["camera"]["camera_id"] = "camera-audit-overview-016"
+    with pytest.raises(FakeEngineError, match="immutable plan"):
+        engine._validate_production_camera_request(changed_request)
+
+
+def test_blender_adapter_loads_only_content_bound_frozen_module(
+    blender_adapter: ModuleType,
+    tmp_path: Path,
+) -> None:
+    module_path = tmp_path / "frozen_engine.py"
+    module_path.write_text("VALUE = 7\n", encoding="utf-8")
+    expected_sha = hashlib.sha256(module_path.read_bytes()).hexdigest()
+
+    loaded = blender_adapter._load_frozen_module(
+        module_path,
+        expected_sha,
+        "test_bound_engine",
+    )
+
+    assert loaded.VALUE == 7
+    with pytest.raises(blender_adapter.RuntimeAuditError, match="digest"):
+        blender_adapter._load_frozen_module(
+            module_path,
+            "0" * 64,
+            "test_rejected_engine",
+        )
+
+
+def test_blender_adapter_validates_actual_blender_and_blend_bytes(
+    blender_adapter: ModuleType,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "blender.exe"
+    blend = tmp_path / "scene.blend"
+    executable.write_bytes(b"blender")
+    blend.write_bytes(b"blend")
+    request = {
+        "blender_executable_sha256": hashlib.sha256(
+            executable.read_bytes()
+        ).hexdigest(),
+        "blend_sha256": hashlib.sha256(blend.read_bytes()).hexdigest(),
+    }
+    bpy_module = SimpleNamespace(
+        app=SimpleNamespace(
+            binary_path=str(executable),
+            version_string="4.5.11 LTS",
+            build_hash=b"4db51e9d1e1e",
+        ),
+        data=SimpleNamespace(filepath=str(blend)),
+        context=SimpleNamespace(
+            scene={
+                "nv_synthetic": True,
+                "nv_fidelity": "simplified-pbr-not-render-parity",
+            }
+        ),
+    )
+
+    blender_adapter._validate_runtime_identity(request, bpy_module)
+
+    changed = dict(request)
+    changed["blend_sha256"] = "0" * 64
+    with pytest.raises(blender_adapter.RuntimeAuditError, match="Blender file"):
+        blender_adapter._validate_runtime_identity(changed, bpy_module)
+
+
+def test_blender_adapter_writes_clearance_report_once_and_canonically(
+    blender_adapter: ModuleType,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "clearance-report.json"
+    payload = {"schema_version": "test", "value": 1}
+
+    blender_adapter._write_clearance_report(output, payload)
+
+    assert output.read_bytes() == blender_adapter._canonical_bytes(payload)
+    with pytest.raises(blender_adapter.RuntimeAuditError, match="already exists"):
+        blender_adapter._write_clearance_report(output, payload)
+
+
+def test_blender_adapter_normalizes_only_exact_hidden_topology_proxies(
+    blender_adapter: ModuleType,
+) -> None:
+    proxies = [
+        SimpleNamespace(
+            type="MESH",
+            hide_render=True,
+            hide_viewport=False,
+            pass_index=0,
+            get=lambda key, default=None, index=index: {
+                "nv_proxy_topology": True,
+                "nv_stable_id": f"topology-proxy-{index}",
+                "nv_root": False,
+                "nv_stage": "modeled-unverified",
+                "nv_trust_effect": "none",
+                "nv_geometry_usability": "preview-only",
+            }.get(key, default),
+        )
+        for index in range(6)
+    ]
+
+    blender_adapter._prepare_topology_proxies(proxies)
+
+    assert all(proxy.hide_viewport for proxy in proxies)
+    proxies[0].hide_render = False
+    with pytest.raises(
+        blender_adapter.RuntimeAuditError,
+        match="topology proxy",
+    ):
+        blender_adapter._prepare_topology_proxies(proxies)
