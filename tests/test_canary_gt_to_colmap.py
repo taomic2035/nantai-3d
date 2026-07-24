@@ -57,29 +57,105 @@ def _rot_z(deg: float) -> np.ndarray:
 
 
 class TestC2wFieldResolution:
-    """``_c2w_opencv`` must support both v1 ``c2w_opencv`` and ``measured_c2w_opencv``."""
+    """``_c2w_opencv`` must support both v1 ``c2w_opencv`` and ``measured_c2w_opencv``.
+
+    Per HANDOFF-GLM-007 section 8: if both fields exist, parse both and reject
+    any numeric disagreement. Require a finite numeric 4x4 homogeneous matrix
+    with bottom row [0,0,0,1]. Reject NaN/Inf, ragged, string and
+    non-homogeneous values with an explicit camera ID in the error.
+    """
 
     def _identity_c2w(self) -> list[list[float]]:
         return [[1, 0, 0, 5], [0, 1, 0, 3], [0, 0, 1, 2], [0, 0, 0, 1]]
 
-    def test_prefers_measured_when_present(self):
+    def test_returns_value_when_both_present_and_agree(self):
         meta = {
+            "camera_id": "cam-001",
             "measured_c2w_opencv": self._identity_c2w(),
-            "c2w_opencv": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+            "c2w_opencv": self._identity_c2w(),
         }
         result = _c2w_opencv(meta)
         assert result[0, 3] == 5
 
+    def test_rejects_when_both_present_but_disagree(self):
+        meta = {
+            "camera_id": "cam-002",
+            "measured_c2w_opencv": self._identity_c2w(),
+            "c2w_opencv": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        }
+        with pytest.raises(ValueError, match="cam-002"):
+            _c2w_opencv(meta)
+
     def test_falls_back_to_c2w_opencv_v1(self):
-        meta = {"c2w_opencv": self._identity_c2w()}
+        meta = {"camera_id": "cam-003", "c2w_opencv": self._identity_c2w()}
         result = _c2w_opencv(meta)
         assert result.shape == (4, 4)
         assert result[0, 3] == 5
         assert result[2, 3] == 2
 
+    def test_falls_back_to_measured_only(self):
+        meta = {"camera_id": "cam-004", "measured_c2w_opencv": self._identity_c2w()}
+        result = _c2w_opencv(meta)
+        assert result.shape == (4, 4)
+        assert result[0, 3] == 5
+
     def test_raises_on_missing_both(self):
-        with pytest.raises(KeyError):
-            _c2w_opencv({"camera_id": "x"})
+        with pytest.raises((KeyError, ValueError), match="cam-005"):
+            _c2w_opencv({"camera_id": "cam-005"})
+
+    def test_raises_on_missing_camera_id(self):
+        with pytest.raises((KeyError, ValueError)):
+            _c2w_opencv({"c2w_opencv": self._identity_c2w()})
+
+    def test_rejects_non_4x4_matrix(self):
+        meta = {"camera_id": "cam-006", "c2w_opencv": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}
+        with pytest.raises(ValueError, match="cam-006"):
+            _c2w_opencv(meta)
+
+    def test_rejects_ragged_matrix(self):
+        meta = {
+            "camera_id": "cam-007",
+            "c2w_opencv": [[1, 0, 0, 5], [0, 1, 0], [0, 0, 1, 2], [0, 0, 0, 1]],
+        }
+        with pytest.raises(ValueError, match="cam-007"):
+            _c2w_opencv(meta)
+
+    def test_rejects_nan_values(self):
+        meta = {
+            "camera_id": "cam-008",
+            "c2w_opencv": [[1, 0, 0, float("nan")], [0, 1, 0, 3], [0, 0, 1, 2], [0, 0, 0, 1]],
+        }
+        with pytest.raises(ValueError, match="cam-008"):
+            _c2w_opencv(meta)
+
+    def test_rejects_inf_values(self):
+        meta = {
+            "camera_id": "cam-009",
+            "c2w_opencv": [[1, 0, 0, float("inf")], [0, 1, 0, 3], [0, 0, 1, 2], [0, 0, 0, 1]],
+        }
+        with pytest.raises(ValueError, match="cam-009"):
+            _c2w_opencv(meta)
+
+    def test_rejects_non_homogeneous_bottom_row(self):
+        meta = {
+            "camera_id": "cam-010",
+            "c2w_opencv": [[1, 0, 0, 5], [0, 1, 0, 3], [0, 0, 1, 2], [0, 0, 1, 1]],
+        }
+        with pytest.raises(ValueError, match="cam-010"):
+            _c2w_opencv(meta)
+
+    def test_rejects_string_values(self):
+        meta = {
+            "camera_id": "cam-011",
+            "c2w_opencv": [["a", 0, 0, 5], [0, 1, 0, 3], [0, 0, 1, 2], [0, 0, 0, 1]],
+        }
+        with pytest.raises((ValueError, TypeError), match="cam-011"):
+            _c2w_opencv(meta)
+
+    def test_error_includes_camera_id_when_available(self):
+        meta = {"camera_id": "cam-012", "c2w_opencv": [[1, 0], [0, 1]]}
+        with pytest.raises(ValueError, match="cam-012"):
+            _c2w_opencv(meta)
 
 
 class TestRotmatQuatRoundTrip:

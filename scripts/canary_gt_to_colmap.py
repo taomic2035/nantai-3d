@@ -39,13 +39,60 @@ DEPTH_REL_TOL = 0.05  # 跨相机深度中位相对误差上限
 
 
 def _c2w_opencv(meta: dict) -> np.ndarray:
-    """Get the OpenCV c2w matrix from camera metadata.
+    """Get the OpenCV c2w matrix from camera metadata with fail-closed validation.
 
     Supports both ``measured_c2w_opencv`` (test fixtures) and ``c2w_opencv``
     (``nantai.synthetic-village.camera-metadata.v1`` production renders).
+
+    Per HANDOFF-GLM-007 section 8:
+    - if both fields exist, parse both and reject any numeric disagreement;
+    - require a finite numeric 4x4 homogeneous matrix with bottom row [0,0,0,1];
+    - reject NaN/Inf, ragged, string and non-homogeneous values with an
+      explicit camera ID in the error.
     """
-    key = "measured_c2w_opencv" if "measured_c2w_opencv" in meta else "c2w_opencv"
-    return np.array(meta[key])
+    cam_id = meta.get("camera_id")
+    if not isinstance(cam_id, str) or not cam_id:
+        raise ValueError("camera metadata is missing a valid camera_id")
+
+    has_measured = "measured_c2w_opencv" in meta
+    has_v1 = "c2w_opencv" in meta
+    if not has_measured and not has_v1:
+        raise ValueError(f"camera {cam_id} has neither measured_c2w_opencv nor c2w_opencv")
+
+    def _parse_and_validate(raw, field: str) -> np.ndarray:
+        try:
+            mat = np.array(raw, dtype=np.float64)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"camera {cam_id} {field} is not a numeric matrix: {exc}"
+            ) from exc
+        if mat.shape != (4, 4):
+            raise ValueError(
+                f"camera {cam_id} {field} must be 4x4, got shape {mat.shape}"
+            )
+        if not np.all(np.isfinite(mat)):
+            raise ValueError(
+                f"camera {cam_id} {field} contains non-finite values (NaN/Inf)"
+            )
+        expected_bottom = np.array([0.0, 0.0, 0.0, 1.0])
+        if not np.allclose(mat[3, :], expected_bottom, atol=1e-9):
+            raise ValueError(
+                f"camera {cam_id} {field} bottom row is not [0,0,0,1]: {mat[3, :].tolist()}"
+            )
+        return mat
+
+    if has_measured and has_v1:
+        measured = _parse_and_validate(meta["measured_c2w_opencv"], "measured_c2w_opencv")
+        v1 = _parse_and_validate(meta["c2w_opencv"], "c2w_opencv")
+        if not np.allclose(measured, v1, atol=1e-9):
+            raise ValueError(
+                f"camera {cam_id} measured_c2w_opencv and c2w_opencv disagree"
+            )
+        return measured
+    elif has_measured:
+        return _parse_and_validate(meta["measured_c2w_opencv"], "measured_c2w_opencv")
+    else:
+        return _parse_and_validate(meta["c2w_opencv"], "c2w_opencv")
 
 
 def _require_openexr():
