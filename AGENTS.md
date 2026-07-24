@@ -18,7 +18,7 @@
 - **单一 main 分支，无其它分支/worktree**；多 agent 共享工作树 → **路径限定提交**（`git add <明确文件>` + `git commit -- <路径>`，禁用 `git add -A`/`commit -a`，避免卷入他人 WIP）。
 - 提交仅在完成且验证（门禁绿）后；消息尾行 `Co-Authored-By`。push 时机需协调（他人可能有未推送/未提交工作）。
 
-## 当前协作与接管状态（2026-07-20）
+## 当前协作与接管状态（2026-07-24）
 
 - **Opus 当前不可用；GLM-5.2 已作为临时接替 lane 加入。** Codex 独立完成
   HANDOFF-006 Phase 1 的 production clearance 合同、Blender runtime、
@@ -33,12 +33,19 @@
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
-- **2026-07-24 GLM 连续取件规则**：GLM 的 creek/contact（`c1ca38b`）与重建
-  artifact 完整性校验（`9b8c0d7`）已交付；当前应完成 base scene 的世界/天空/雾与
-  材质畸变审计，然后依次推进 streamed chunk/LOD 逐 payload SHA 绑定、真实 COLMAP
-  executable 的合成采集 rehearsal。完整路径、门禁和不可提升的信任边界见
-  `handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md`。等待 Codex
-  exact-266 review 不等于“无事可做”；五项真实场景证据未齐前不得报告项目完成。
+- **2026-07-24 GLM 连续取件规则**：P0/P1/P2a/P3 已闭环，P4 `18a1b48` 的真实
+  COLMAP `0/24` 失败路径已接受。P2b `acc320d` 的代码可保留，但对象数 `572/554`、
+  terrain triangles `70,010/39,548`，必须用 parent `18a1b48` 与当前脚本重跑等几何因果
+  A/B。`960ec55` 恢复了生产 `c2w_opencv`，但双 alias 冲突时仍静默选值且未拒绝非法矩阵，
+  必须先 fail-closed 修正；GT pose 直转绝不能冒充 SfM。P5 `256ccf5` 与 P6 `ed2dc84`
+  只接受为复用低纹理 v1、全部 `0` 注册的失败路径 smoke，不算拓扑成功或长视频闭环。
+  GLM 应自动连续推进：GT alias 修正 → P2b 因果重跑 → P5b 24–120 张高纹理密集重叠
+  真实 COLMAP（目标 `>=80%` 注册）→ P6b 120+ 源帧真实降采样/`max_frames` 截断 → P7
+  COLMAP recovered-pose 的真实 Brush 训练与私有导入。exact-266 仍未接受：clearance
+  `15/16`、六层/RGB `15/15`、完整六目标 `0/15`、双 seam `3/15`。不得编辑 Codex
+  exact-266 caller/overlay，也不得因等待 review 停工。完整门禁见
+  `handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md`；真实采集、真实 SfM、
+  非 mock 云 GPU 3DGS、实测对齐和真实 Viewer QA五项未齐前不得报告项目完成。
 
 ### HANDOFF-006 Phase 1 fresh evidence
 

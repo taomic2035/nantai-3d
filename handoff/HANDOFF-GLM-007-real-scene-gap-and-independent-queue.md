@@ -1,8 +1,8 @@
 # HANDOFF-GLM-007 — Real-scene gap and independent high-value queue
 
 Date: 2026-07-24  
-Last coordinated update: 2026-07-24, after Codex review of `f564e4f` and
-`535d33e`
+Last coordinated update: 2026-07-24, after Codex review of GLM `960ec55`,
+`256ccf5` and `ed2dc84`
 Owner: GLM lane  
 Coordinator/reviewer: Codex
 
@@ -29,10 +29,12 @@ The project is not finished.
 - The replacement vegetation is now closed, deterministic low-poly geometry
   with measured route clearance, crown/trunk overlap and exact bark/canopy
   material bindings. The former giant timber-textured boxes are gone.
-- Sixteen private reciprocal RGB views were rendered from that exact byte
-  artifact and every PNG was SHA/size verified. They are audit-only, not the
-  formal fresh-clearance, frame-identity, six-layer, target/seam-visibility and
-  post-render-v2 acceptance run.
+- Codex completed the fresh exact-266 formal run on that exact byte artifact:
+  15/16 cameras passed clearance; all 15 allowed cameras produced bound
+  six-layer + RGB artifacts and passed local/post-render-v2 distribution
+  gates; **0/15** saw all six required module targets and only **3/15** saw
+  both required seam targets. Camera 003 was rejected before rendering and no
+  substitute frame was fabricated.
 - Visual inspection still shows low-poly/lollipop vegetation, repeated or
   stretched materials, flat grey world/sky, terrain seams, sparse distant
   geometry, large proxy forms and some near-wall/ground framing. Therefore
@@ -50,6 +52,22 @@ Image2 design references cannot satisfy any of these five items. They are
 replaceable modeling inputs only and remain forbidden as multiview training
 evidence.
 
+### Gap-to-owner matrix
+
+| Goal dimension | Fresh evidence | Gap / owner |
+|---|---|---|
+| synthetic roaming | 15 bound RGB views render | target visibility `0/15`, seam visibility `3/15`, camera 003 rejected; Codex owns exact-266 caller/overlay correction |
+| modeled geometry | deterministic exact-266 low-poly meshes | proxy forms, terrain seams, sparse distance and weak supports remain; Codex owns overlay, GLM may improve only the base builder |
+| surface realism | synthetic material slots and a real Blender repeat-density probe | terrain `232.37x`, creek `40.48x`, long-wall `4.79x` UV-area variation; GLM P2b owns the base-builder correction and bound before/after proof |
+| capture/SfM | real COLMAP failure-path rehearsals on low-texture synthetic subsets | no real overlapping capture and no successful recovered sparse model; GLM P5b must exercise a dense textured success-path candidate without GT poses |
+| 3DGS appearance | caller contracts and stub/non-production evidence | no non-mock cloud-GPU training artifact; external GPU/credentials or user data are still required |
+| scale/alignment | synthetic metre convention only | no measured real control-point/GPS alignment |
+| real Viewer QA | synthetic previews only | no imported real splat exists for Viewer streaming/roaming QA |
+
+The formal exact-266 report is
+`handoff/FEEDBACK-HANDOFF-CODEX-028-batch24-exact266-perimeter-closure.md`.
+GLM must cite it rather than repeating older “sixteen audit-only RGBs” status.
+
 ### Queue status and automatic continuation rule
 
 - **Completed and pushed:** P0 creek/contact closure, commit `c1ca38b`.
@@ -58,41 +76,56 @@ evidence.
 - **Completed and pushed:** P2a gradient-sky approximation and render-quality
   metrics, commit `66552b3`. This improved the synthetic base canary only; it did
   not rebuild or accept exact-266 and it added no real-scene evidence.
-- **P2b review rejected as incomplete:** GLM commit `f564e4f` only delivered
-  declared repeat-distance arithmetic and a draft probe. It did not satisfy the
-  already-written requirements at lines 184–199: it mislabeled UV area as
-  texels, skipped quads/ngons, omitted runtime/build bindings and did not run a
-  real Blender probe or same-camera before/after render. Codex's follow-up now
-  closes the unit naming, non-finite/duplicate/category gates, evaluated
-  loop-triangle measurement and source/runtime SHA binding, and has run it
-  against the exact-266 `.blend`. **P2b remains open** until GLM makes a
-  base-builder-only mapping correction and produces bound before/after RGB and
-  repeat-density evidence.
-- **P3 review required corrections:** GLM commit `535d33e` added payload hashes
-  but treated a missing integrity block as valid and did not reject missing
-  rows, duplicate paths, `lod` disagreement, path escape or non-canonical
-  manifests. Codex's follow-up adds those fail-closed contracts plus explicit
-  `per_chunk_sha_verified=True/None/False`. After that follow-up is committed
-  and pushed, P3 is accepted; GLM must not duplicate the fix.
+- **P2b mapping committed, causal evidence still rejected:** GLM `acc320d`
+  changes only the base builder and reports real Blender probes/RGBs, but its
+  BEFORE artifact predates P0 and is not the same build input. BEFORE/AFTER have
+  `572/554` audited objects and `70,010/39,548` terrain triangles. Byte-different
+  RGB and a `232.37x -> 70.17x` terrain ratio cannot be attributed solely to the
+  scale change while geometry and source differ. Keep the code correction, but
+  P2b remains open until the causal A/B rerun in section 5 passes.
+- **P3 accepted after Codex corrections:** GLM commit `535d33e` added payload
+  hashes but treated a missing integrity block as valid and did not reject
+  missing rows, duplicate paths, `lod` disagreement, path escape or
+  non-canonical manifests. Codex follow-up `650c472` adds those fail-closed
+  contracts, streamed hashing, atomic PLY writes, canonical manifests and
+  explicit `per_chunk_sha_verified=True/None/False`. P3 is closed; GLM must not
+  duplicate the fix.
 - **Codex exact-266 formal audit executed:** commit `8cfd0d6` binds the real
   Blender adapter and exact-266 frame verifier. Fresh evidence is 15/16
   clearance passes, 15/15 rendered-frame local and post-render-v2 passes,
   **0/15 complete six-target visibility** and **3/15 two-seam visibility**.
   Camera 003 remains preflight-rejected. This is modeled-scene failure evidence,
   not real-scene acceptance. GLM must not edit the exact-266 caller paths.
-- **GLM immediate continuation:** finish the P2b base-builder mapping correction
-  with the same bound cameras before/after, then start P4's real COLMAP
-  executable rehearsal. Do not wait for another Codex prompt after either
-  checkpoint.
-- **After each pushed item, start the next unblocked item in sections 6 and 7
+- **P4 accepted as fail-closed rehearsal:** `18a1b48` ran real COLMAP 4.1.0
+  through the production caller on 24 immutable untextured canary renders.
+  Mapper produced `0/24` registered images and no sparse model; the caller
+  raised and promoted no trust. This closes only the executable failure-path
+  rehearsal, not real SfM.
+- **GT metadata fix requires correction:** `960ec55` made production
+  `c2w_opencv` readable, but silently prefers `measured_c2w_opencv` when both
+  aliases disagree and accepts malformed/non-finite matrices. The synthetic
+  import-chain evidence is useful, but the reader remains fail-open until
+  section 8 is complete.
+- **P5/P6 accepted only as failure-path smoke:** `256ccf5` adds orbit/adversarial
+  matching-vs-mapper failures; `ed2dc84` adds an eight-frame OpenCV video decode
+  and sequential-matcher failure. Both reuse the same low-texture v1 images and
+  every COLMAP run registers `0` images. They do not close topology-overfit,
+  successful SfM, frame-sampling, `max_frames`, long-video or backend-binding
+  evidence.
+- **GLM immediate continuation:** correct `960ec55`, rerun P2b causally, then
+  execute P5b, P6b and P7 in sections 9–11. Do not wait for another Codex prompt
+  after any checkpoint.
+- **After each pushed item, start the next unblocked item in sections 8–11
   without waiting for Codex's exact-266 work.** Codex review may interrupt with
   corrections, but a pending review is not a reason to report that no work
   remains.
-- Default continuation order is **P2a -> P2b -> P3 -> P4 -> next audited,
-  unowned prerequisite**. “Tests are green”, “design is complete” and “waiting
-  for Codex review” are checkpoints, not stop conditions.
+- Current continuation order is **GT fail-closed correction -> P2b causal rerun
+  -> P5b dense textured SfM -> P6b sampled video -> P7 recovered-pose training
+  -> next audited prerequisite**. P0, P1, P2a, P3 and the P4–P6 failure-path
+  smokes are closed. “Tests are green”, “design is complete” and “waiting for
+  Codex review” are checkpoints, not stop conditions.
 - Do not say “all high-value tasks are complete” while either:
-  - any item in sections 5–7 is unfinished; or
+  - any corrective or active item in sections 5 or 8–11 is unfinished; or
   - any of the five real-scene evidence items above is absent.
 
 ## 2. Codex-owned paths — do not edit
@@ -157,9 +190,9 @@ tests/test_reconstruction_artifact_integrity.py
 Completion feedback:
 `handoff/FEEDBACK-HANDOFF-GLM-007-p1-artifact-integrity-closure.md`.
 
-Known remaining limitation: legacy `chunks.json` has no per-payload SHA/size,
-so the verifier can prove path and structural closure but cannot prove chunk
-PLY bytes. Section 6 is the queued closure for that limitation.
+Legacy `chunks.json` files still have no per-payload SHA/size and must report
+that byte verification is unknown. Fresh complete manifests are closed by P3
+and can prove full/LOD PLY bytes.
 
 ## 5. Active P2 — P2a complete, P2b material audit in progress
 
@@ -218,16 +251,35 @@ Finish P2b as its own path-limited commit:
      measured ratios; a visual screenshot or pure-function report alone is not
      completion.
 
-   When P2b is pushed, start P3 in the same work cycle. A pending Codex review is
-   not a stop condition unless the review identifies a correctness or ownership
-   conflict.
+   `acc320d` may retain the base-builder correction, but its A/B evidence is not
+   causal because BEFORE used the old `4f38ecf4...` artifact while AFTER used
+   `704a0b6c...`; object and triangle populations changed. Repeat the proof as
+   follows:
+
+   - extract the parent `18a1b48` version of
+     `scripts/blender/build_synthetic_village.py` to a private, SHA-bound path;
+     do not create a branch or worktree;
+   - run that frozen parent script and the current `acc320d` script with the
+     identical request, seed, registry, topology, resolution, renderer, color
+     management and cameras;
+   - require equal stable object identities, category object counts and
+     per-category triangle counts before comparing UV ratios or RGBs;
+   - bind both script SHAs, build requests/reports, `.blend` files, camera
+     matrices, probe reports and RGBs;
+   - if geometry or camera bindings differ, report the run as invalid rather
+     than calling the material change an improvement.
+
+   When this causal P2b proof is committed, start or resume P5 in the same work
+   cycle. A pending Codex review is not a stop condition unless it identifies a
+   correctness or ownership conflict.
 
 This work may touch the base Blender builder only after the creek/contact P0 is
 committed. It must not edit the exact-266 overlay paths.
 
-Codex's next exact-266 work is the formal sixteen-camera preflight, six-layer,
-target/seam visibility and post-render-v2 chain. GLM must not wait on that work:
-finish P2a, push it, then finish P2b and continue with section 6.
+Codex's exact-266 formal sixteen-camera preflight, six-layer,
+target/seam-visibility and post-render-v2 chain is complete and rejected on
+task-specific visibility. GLM must not edit that caller or wait for its next
+overlay iteration: finish P2b, push it, then continue with section 7.
 
 Focused minimum verification for P2:
 
@@ -246,10 +298,11 @@ third\blender\blender.exe --background --version
 The final evidence must also include the actual build/render commands used;
 `blender.exe --version` alone is not a real-build gate.
 
-## 6. Queued P3 — bind every streamed chunk and LOD payload
+## 6. Completed P3 — bind every streamed chunk and LOD payload
 
-Start immediately after P2b. This is additive and does not require real photos,
-cloud GPU or Codex's exact-266 acceptance.
+GLM delivered the initial implementation in `535d33e`; Codex closed the
+fail-closed review findings in `650c472`. Do not reopen or duplicate this item
+without a measured regression.
 
 Owned paths:
 
@@ -292,12 +345,17 @@ Minimum verification:
   tests/test_reconstruction_artifact_integrity.py
 ```
 
-Publish this as its own path-limited commit and then continue with section 7.
+The closed contract preserves legacy manifests as explicit unknown, requires
+complete integrity rows for verified status, streams SHA-256 over payloads and
+rejects missing/duplicate/escaping/disagreeing full or LOD paths.
 
-## 7. Queued P4 — real COLMAP executable rehearsal on synthetic captures
+## 7. Completed P4 — real COLMAP executable rehearsal on synthetic captures
 
-This item tests the actual local executable/caller boundary while real photos
-are still absent. It is **not** real-scene evidence.
+Commit `18a1b48` records a real COLMAP 4.1.0 production-caller run on 24
+immutable untextured canary renders. The result was `0/24` registered images,
+zero sparse models and a fail-closed `RuntimeError`; no partial registration or
+trust promotion was emitted. This is accepted failure-path evidence only. It is
+**not** real-scene evidence and does not predict textured/overlapping captures.
 
 1. Select one immutable private Blender RGB capture set with enough overlap;
    record every input image SHA, camera/frame identity and the source build
@@ -317,30 +375,128 @@ are still absent. It is **not** real-scene evidence.
    fail-closed defect; use TDD and a separate path-limited commit for that
    defect. Otherwise deliver an evidence-only feedback document.
 
-After P4, reread
-`handoff/AUDIT-2026-07-22-real-3d-scene-gap-assessment.md`. If real input is
-still absent, propose and start the highest-value unowned prerequisite that
-reduces one of its seven dimensions. Do not self-declare the queue exhausted;
-send Codex a concrete next-item proposal with paths and acceptance evidence.
+The preferred caller is the production `pipeline.registration.colmap_register`
+boundary, optionally reached through `scripts/reconstruct_local.py`. The result
+must prove that the real executable was used; a direct GT-to-COLMAP conversion
+or mock/stub is not a substitute.
 
-Preferred proposal order after P4:
+P4 evidence is committed. Complete the causal P2b rerun, then continue directly to P5.
 
-1. close any machine-proven chunk/import integrity gap exposed by P3/P4;
-2. rehearse the real capture-to-registration caller with a different immutable
-   synthetic capture topology to detect overfitting, while preserving
-   `synthetic-capture` trust;
-3. audit the cloud-training request/result boundary against the real installed
-   CLI or a disposable cloud GPU when credentials and budget exist;
-4. add measured Viewer performance evidence for a content-addressed imported
-   reconstruction without changing its provenance.
+## 8. Immediate correction — camera-metadata alias fail-closed
 
-GLM should choose only an unowned item, write a short path/acceptance proposal
-to Codex, and start its RED test or evidence collection in the same turn unless
-the item requires new credentials, paid infrastructure or user-provided real
-capture.
+Commit `960ec55` restores production-v1 `c2w_opencv` consumption and proves a
+valuable synthetic GT-pose import/training/chunk rehearsal. It is not P5 SfM
+evidence, and its alias reader must be corrected before further reuse:
 
-## 8. Reporting rule
+1. if `measured_c2w_opencv` and `c2w_opencv` both exist, parse both and reject
+   any numeric disagreement instead of selecting one by precedence;
+2. require a finite numeric `4x4` homogeneous matrix with bottom row
+   `[0, 0, 0, 1]` before indexing or conversion;
+3. reject missing, ragged, string/object, NaN/Inf and non-homogeneous values with
+   an explicit camera ID in the error;
+4. add pure tests for each case plus a full `main()` integration test using
+   production v1 metadata with only `c2w_opencv`;
+5. retain the explicit declaration that this tool injects GT poses and bypasses
+   SfM. Never use its output as P5/P6 registration evidence.
 
+Use only:
+
+```text
+scripts/canary_gt_to_colmap.py
+tests/test_canary_gt_to_colmap.py
+```
+
+Publish the correction as one path-limited commit, then complete the P2b causal
+A/B rerun in section 5 and continue immediately to P5b.
+
+## 9. Active P5b — dense textured real-COLMAP success-path candidate
+
+Commit `256ccf5` is accepted as an additional failure-stage matrix, not as
+successful topology-overfit closure. Its orbit/adversarial sets are 8/4-image
+subsets of the same low-texture v1 capture and all register `0` images.
+
+The next rehearsal must move toward the real path rather than repeat a known
+failure:
+
+1. render or select an immutable **textured**, densely overlapping ordered or
+   orbital Blender sequence with at least 24 images, preferably 48–120, at
+   human-eye height and at least 1280x720;
+2. bind source build/blend/report, camera IDs and matrices, renderer, every RGB
+   SHA, COLMAP executable/version, exact argv and timeout;
+3. run `check_capture` and the real production COLMAP caller. Do not use
+   `canary_gt_to_colmap.py`, GT poses, fake executables or relaxed trust gates;
+4. record per-frame feature counts, verified adjacent-pair matches, connected
+   sparse model count, registered/total images, sparse points and all report
+   SHAs;
+5. success-path acceptance requires at least one sparse model, nonzero sparse
+   points and `>=80%` registered images. If it fails, keep the failure evidence,
+   repair capture overlap/texture and rerun; do not weaken COLMAP quality gates;
+6. any success remains
+   `synthetic-capture / sfm-local / arbitrary-units / unaligned` and must not be
+   reported as real capture or metric alignment.
+
+After P5b is committed, encode the same successful dense ordered sequence for
+P6b. If P5b cannot succeed after honest capture corrections, report the exact
+failure and continue P6b caller sampling evidence without claiming SfM closure.
+
+## 10. Active P6b — sampled and bounded video-input proof
+
+Commit `ed2dc84` is accepted as an eight-frame OpenCV decode/sequential-matcher
+smoke only. Source FPS equaled requested FPS, `8 < max_frames=20`, blur filtering
+was disabled, and the same low-texture sequence produced zero matches. It does
+not prove actual subsampling, truncation, realistic filtering or the long-video
+resource boundary.
+
+1. encode the P5b dense ordered sequence into a video with at least 120 source
+   frames and a source FPS strictly higher than the requested extraction FPS;
+2. set `max_frames` below the number that sampling would otherwise produce, so
+   both temporal subsampling and truncation execute in one real run;
+3. bind source frame indices/SHAs, video SHA, codec/container, duration,
+   resolution, source/requested FPS, `max_frames`, extracted order/SHAs, elapsed
+   time and peak/output disk bytes;
+4. bind the actual OpenCV video backend using `cv2.getBuildInformation()` and
+   `VideoCapture.getBackendName()`. Do not claim an external FFmpeg CLI/version
+   unless that executable was actually invoked and its argv captured;
+5. exercise the production `scripts/reconstruct_local.py`/`pipeline.ingest`
+   boundary and prove the sequential matcher from machine evidence, not a
+   manually supplied `ordered=True` assertion;
+6. keep the normal blur policy for the textured sequence or report each rejected
+   frame and the explicit operator override. Never generalize this bounded run
+   into “1 GB / 20 minutes completed”.
+
+After P6b is committed, continue directly to P7.
+
+## 11. Queued P7 — recovered-pose synthetic training and private import
+
+This is the highest-value credential-free bridge after P5b succeeds:
+
+1. consume the **real COLMAP-recovered** P5b sparse model, not GT-injected poses;
+2. run the installed real Brush trainer on the same synthetic RGBs with bounded
+   iterations and bind executable, argv, inputs, timestamps and PLY SHA;
+3. normalize, prepare import and chunk the result in a new private output root;
+   do not touch `web/data/` or Codex-owned Viewer paths;
+4. verify every import/chunk payload SHA and preserve
+   `synthetic-capture / sfm-local / arbitrary-units / unaligned` provenance;
+5. hand Codex the immutable private manifest/PLY/chunk root plus machine report
+   for Viewer streaming and roaming QA;
+6. if training fails, publish the machine failure and continue with the highest
+   unowned caller/integrity defect it exposes. Do not substitute GT poses and do
+   not claim cloud-GPU or real-photo training.
+
+P7 will still not close the five real-scene evidence items, but it will prove
+that the non-GT capture -> real SfM -> real local training -> import boundary is
+wired before real user footage arrives.
+
+After P7, reread
+`handoff/AUDIT-2026-07-22-real-3d-scene-gap-assessment.md` and immediately start
+the highest-value unowned prerequisite. Prefer real installed training CLI
+validation or a concrete Viewer evidence proposal to Codex; paid cloud work
+still requires credentials/budget.
+
+GLM should choose only an unowned path, start its RED test or evidence
+collection in the same turn, and never stop merely because a review is pending.
+
+## 12. Reporting rule
 Do not report “all high-value work is complete” while any of the five real
 evidence items in section 1 is absent. At the end of each task, report:
 
