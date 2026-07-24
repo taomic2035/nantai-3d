@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.canary_gt_to_colmap import (  # noqa: E402
+    _c2w_opencv,
     backproject,
     main,
     project,
@@ -53,6 +54,32 @@ def _rot_z(deg: float) -> np.ndarray:
     r = np.radians(deg)
     c, s = np.cos(r), np.sin(r)
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+
+class TestC2wFieldResolution:
+    """``_c2w_opencv`` must support both v1 ``c2w_opencv`` and ``measured_c2w_opencv``."""
+
+    def _identity_c2w(self) -> list[list[float]]:
+        return [[1, 0, 0, 5], [0, 1, 0, 3], [0, 0, 1, 2], [0, 0, 0, 1]]
+
+    def test_prefers_measured_when_present(self):
+        meta = {
+            "measured_c2w_opencv": self._identity_c2w(),
+            "c2w_opencv": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        }
+        result = _c2w_opencv(meta)
+        assert result[0, 3] == 5
+
+    def test_falls_back_to_c2w_opencv_v1(self):
+        meta = {"c2w_opencv": self._identity_c2w()}
+        result = _c2w_opencv(meta)
+        assert result.shape == (4, 4)
+        assert result[0, 3] == 5
+        assert result[2, 3] == 2
+
+    def test_raises_on_missing_both(self):
+        with pytest.raises(KeyError):
+            _c2w_opencv({"camera_id": "x"})
 
 
 class TestRotmatQuatRoundTrip:

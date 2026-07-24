@@ -2,7 +2,7 @@
 """合成村庄 canary 渲染 → COLMAP 文本数据集（GT 相机直训 3DGS，绕过 COLMAP SfM）。
 
 消费 codex 的 `nantai.synthetic-village.camera-metadata.v1` 相机契约：读取 renders/
-下的 cameras/*.json (measured_c2w_opencv + 内参) 与 depth/*.exr (相机中心欧氏距离,
+下的 cameras/*.json (c2w_opencv + 内参) 与 depth/*.exr (相机中心欧氏距离,
 通道 'V')，产出 Brush/3DGS 训练器可直接吃的 COLMAP 布局:
 
     <out>/images/*.png + <out>/sparse/0/{cameras,images,points3D}.txt
@@ -36,6 +36,16 @@ import numpy as np
 
 EXPECTED_COORD = "opencv-c2w-right-down-forward-meters"
 DEPTH_REL_TOL = 0.05  # 跨相机深度中位相对误差上限
+
+
+def _c2w_opencv(meta: dict) -> np.ndarray:
+    """Get the OpenCV c2w matrix from camera metadata.
+
+    Supports both ``measured_c2w_opencv`` (test fixtures) and ``c2w_opencv``
+    (``nantai.synthetic-village.camera-metadata.v1`` production renders).
+    """
+    key = "measured_c2w_opencv" if "measured_c2w_opencv" in meta else "c2w_opencv"
+    return np.array(meta[key])
 
 
 def _require_openexr():
@@ -125,8 +135,8 @@ def check_cross_camera_depth(metas: list[dict], renders: Path, stride: int) -> N
     """相邻两对相机互投影，GT 深度中位相对误差超限 = 坐标约定有误，拒绝产出。"""
     pairs = [(metas[0], metas[1]), (metas[-1], metas[-2])]
     for a, b in pairs:
-        m_a = np.array(a["measured_c2w_opencv"])
-        m_b = np.array(b["measured_c2w_opencv"])
+        m_a = _c2w_opencv(a)
+        m_b = _c2w_opencv(b)
         pts, _ = backproject(
             load_depth(renders / "depth" / f"{a['camera_id']}.exr"), a["intrinsics"], m_a, stride
         )
@@ -167,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 f"坐标系非预期: {m['camera_id']}: {m.get('coordinate_system')} != {EXPECTED_COORD}"
             )
-        rot = np.array(m["measured_c2w_opencv"])[:3, :3]
+        rot = _c2w_opencv(m)[:3, :3]
         rigid = np.allclose(rot @ rot.T, np.eye(3), atol=1e-5)
         if not rigid or abs(np.linalg.det(rot) - 1) > 1e-5:
             raise SystemExit(f"R 非刚性: {m['camera_id']}")
@@ -197,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     pid = 0
     for idx, m in enumerate(metas, start=1):
         cid = m["camera_id"]
-        c2w = np.array(m["measured_c2w_opencv"])
+        c2w = _c2w_opencv(m)
         rot, center = c2w[:3, :3], c2w[:3, 3]
         q = rotmat_to_quat(rot.T)
         t = -rot.T @ center
