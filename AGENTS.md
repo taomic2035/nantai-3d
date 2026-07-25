@@ -72,9 +72,17 @@
   `handoff/HANDOFF-GLM-009-roaming-graph-producer.md`。
 - **Batch33 材质源片已发布**：8 张 synthetic RGB source plate 的干净 Release SHA
   `85ccfc05569f6139dc4d81e851c4de9147088cdf58a4e163d43c5690a0109a0b` 已远端回读验证；
-  它们不是真实照片、无缝纹理或已测 PBR。GLM 的 seam/channel derivation、材质槽绑定、
-  2x2/8x8 重复探针与 exact-build 实渲任务见
+  它们不是真实照片、无缝纹理或已测 PBR。仓库已有完整 H3 source/4096
+  authoring/PBR/KTX2 链，不得再造重复 derivation 工具；直接/禁止映射与 exact-build
+  实渲任务见
   `handoff/FEEDBACK-IMAGE2-038-batch33-material-source-plates.md`。
+- **Batch34 私有 H3 扩展候选已完成**：为现有 `creek-rock`、`wet-stone-paving`、
+  `aged-metal`、`pale-plaster` 四槽补齐 `3 candidates/slot`；其中 8 张为新 imagegen，
+  4 张精确复用 Batch33，冻结 H3 source audit `12/12` 通过并完成 Codex 视觉选择。
+  GLM 只做 additive source-pack extension，保持 H3 v1 与 `H3_HERO_SLOTS` 不变，
+  复用现有 authoring/KTX2 链；未过私有实渲 review 前不 registry、不 `web/data`、不
+  Release。完整 SHA、选择与 RED 任务见
+  `handoff/FEEDBACK-IMAGE2-039-batch34-h3-material-expansion.md`。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
