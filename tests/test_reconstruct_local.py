@@ -859,6 +859,46 @@ class TestPrecomputedColmapBoundary:
         assert photo.read_bytes() == src_bytes, \
             "ws photo byte tamper (same size/mtime) must trigger re-copy"
 
+    def test_work_equals_precomputed_rejected(self, env, tmp_path, photos_dir):
+        """REVIEW-CODEX-030 P7a-5: --work == --precomputed-colmap →
+        rmtree(ws/images) would delete source images. Reject before any rmtree."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        web = tmp_path / "web2"
+        with pytest.raises(SystemExit, match="重叠|overlap"):
+            rl.main([str(photos_dir), "--work", str(ws), "--web", str(web),
+                     "--precomputed-colmap", str(ws)])
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_photos_inside_work_rejected(self, env, tmp_path, photos_dir):
+        """REVIEW-CODEX-030 P7a-5: --photos inside --work → rmtree(ws/images)
+        could delete source photos. Reject before any rmtree."""
+        call, fake, ws, _ = env
+        photos_in_work = ws / "images"
+        photos_in_work.mkdir(parents=True, exist_ok=True)
+        for p in photos_dir.iterdir():
+            if p.is_file():
+                shutil.copy2(p, photos_in_work / p.name)
+        web = tmp_path / "web2"
+        with pytest.raises(SystemExit, match="重叠|overlap"):
+            rl.main([str(photos_in_work), "--work", str(ws), "--web", str(web)])
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_work_inside_precomputed_rejected(self, env, tmp_path, photos_dir):
+        """REVIEW-CODEX-030 P7a-5: --work inside --precomputed-colmap →
+        rmtree could delete source. Reject before any rmtree."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        work_in_precomp = precomp / "sub_ws"
+        web = tmp_path / "web2"
+        with pytest.raises(SystemExit, match="重叠|overlap"):
+            rl.main([str(photos_dir), "--work", str(work_in_precomp),
+                     "--web", str(web),
+                     "--precomputed-colmap", str(precomp)])
+        assert _colmap_subprocess_cmds(fake) == []
+
 
 class TestColmapExtrasBoundary:
     """REVIEW-CODEX-030 P1 (P6c): COLMAP normal branch must bind real

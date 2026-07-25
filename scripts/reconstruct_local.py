@@ -244,6 +244,25 @@ def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
     shutil.copytree(src_img, dst_img)
 
 
+def _assert_no_overlap(roots: dict[str, Path]) -> None:
+    """拒绝相等或嵌套的已解析根路径——在任何 rmtree 前。
+
+    REVIEW-CODEX-030 P7a-5：若 --work == --precomputed-colmap（或 --photos 在
+    --work 内），rmtree(ws/images) 会删掉源照片/sparse。这些路径重叠意味着工作
+    目录的清理操作会破坏输入，是破坏性的。用 resolve() 比较绝对路径，挡住相等和
+    父子嵌套两种情况。
+    """
+    resolved = {name: p.resolve() for name, p in roots.items() if p is not None}
+    names = list(resolved)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            ra, rb = resolved[a], resolved[b]
+            if ra == rb or ra in rb.parents or rb in ra.parents:
+                raise SystemExit(
+                    f"路径重叠（拒绝执行避免 rmtree 删源）: "
+                    f"{a}={ra} 与 {b}={rb} 重叠")
+
+
 def _file_fp(path: Path) -> list:
     """单文件廉价指纹 (名字, 字节数, mtime_ns)。局限见 FINGERPRINT_CAVEAT。"""
     st = path.stat()
@@ -511,6 +530,14 @@ def main(argv: list[str] | None = None) -> int:
     # 传 argv=… 时 sys.argv 是 pytest/IDE 的，不是 reconstruct_local 的），这样
     # matcher 子命令等身份可从 extras 直接验证，无需从日志文本推断。
     caller_argv: list[str] = list(argv) if argv is not None else list(sys.argv)
+
+    # REVIEW-CODEX-030 P7a-5：在任何 rmtree/mkdir 前拒绝路径重叠——否则
+    # rmtree(ws/images) 会删掉源照片/sparse。
+    _assert_no_overlap({
+        "--work": args.work,
+        "--photos": args.photos,
+        "--precomputed-colmap": args.precomputed_colmap,
+    })
 
     if args.precomputed_colmap is not None and not args.precomputed_colmap.is_dir():
         raise SystemExit(
