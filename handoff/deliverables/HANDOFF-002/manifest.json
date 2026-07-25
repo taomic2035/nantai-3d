@@ -8,7 +8,7 @@
   "generator": {
     "name": "nantai-handoff-002-canonical-proxies",
     "version": "2.0.0",
-    "script_sha256": "17257f52c4677b4fd357cd497ce625204a5b566d16007d04bf086c53bd482790",
+    "script_sha256": "be64155f2cc557715b2357f6f1a403a21c3187c54877f69a5889caa4609b7b62",
     "source_handoff": "HANDOFF-001",
     "canonical_decimals": 6
   },
