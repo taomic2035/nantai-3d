@@ -188,6 +188,21 @@ num_params`, so the tests certify an invented format. Bind the parser to the
 pinned official model schema and make a real-converter fixture the independent
 green baseline.
 
+The first uncommitted repair is also incorrect. A fresh one-camera conversion
+for every model accepted by the pinned executable measured:
+
+```text
+0 SIMPLE_PINHOLE=3; 1 PINHOLE=4; 2 SIMPLE_RADIAL=4; 3 RADIAL=5
+4 OPENCV=8; 5 OPENCV_FISHEYE=8; 6 FULL_OPENCV=12; 7 FOV=5
+8 SIMPLE_RADIAL_FISHEYE=4; 9 RADIAL_FISHEYE=5
+10 THIN_PRISM_FISHEYE=12; 11 RAD_TAN_THIN_PRISM_FISHEYE=16
+```
+
+The uncommitted table instead invents `8 FULL_FOV=6`, shifts the fisheye ids
+and omits model 11's 16 parameters. Real `model_converter` rejected
+`FULL_FOV`. Correct the table from measured output and test the boundary with
+independently converted bytes, not the production parser's own fake writer.
+
 The same semantic boundary must also reject unknown model id, duplicate/zero
 camera and image ids, zero dimensions, invalid focal parameters, invalid UTF-8
 names, unsafe absolute/traversing names, absent camera references,
@@ -223,8 +238,34 @@ Status:
 0978ee7 = held
 P7a-4 = not accepted
 P7a-6 = not accepted
-P7a-2 materialized source report = still open
+30d0e7a = held
+P7a-2 materialized source report = not accepted
 ```
 
 Follow the exact correction and Git proxy queue in
 `HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`.
+
+## Live P7a-2 review — `30d0e7a` held
+
+The report now makes more source fields recoverable, but it does not yet meet
+the machine-verifiable report contract:
+
+1. The filename digest excludes both `materialized_at_utc` and
+   `manifest_sha256`; it is not the SHA-256 of the final report bytes.
+2. Existing-file validation compares only the embedded digest string. Changing
+   `caller_argv`, a source hash or the timestamp while keeping that string is
+   accepted on the next run. The test changes only the string itself.
+3. The report omits schema version, per-file byte sizes and exact safe file set,
+   parsed image/camera ids and mapping, explicit
+   `sfm-local/arbitrary/unaligned` pose frame, Brush binary SHA and bounded
+   measurement times.
+4. There is no independent verifier for canonical-payload SHA, report-byte
+   SHA, path safety, exact sets and current source bytes.
+5. CLI normalization uses `sys.argv` when `argv is None`, including the script
+   name, while `argparse.parse_args(None)` consumes `sys.argv[1:]`. Equivalent
+   CLI and programmatic calls therefore do not bind the same effective intent.
+
+Keep the payload-digest idea, but name it distinctly from the final report-byte
+digest, recompute both in a standalone verifier and cover arbitrary-field
+tampering. This commit also depends on the still-broken real `cameras.bin`
+parser, so no real P5b-to-P7 rehearsal can accept it yet.

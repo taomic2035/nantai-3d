@@ -61,6 +61,31 @@ resulting binary begins with count, camera id, model id, width, height and then
 the first focal parameter. The current parser mistakes that focal double for
 `num_params`.
 
+Do not copy the current uncommitted `_COLMAP_MODEL_NUM_PARAMS` table: its ids
+`8..11` are shifted and `FULL_FOV` is not accepted by this pinned executable.
+Codex independently converted one text camera for every supported model. The
+fresh authoritative map is:
+
+```text
+model_id  model_name                        num_params  one-camera BIN bytes
+0         SIMPLE_PINHOLE                    3           56
+1         PINHOLE                           4           64
+2         SIMPLE_RADIAL                     4           64
+3         RADIAL                            5           72
+4         OPENCV                            8           96
+5         OPENCV_FISHEYE                    8           96
+6         FULL_OPENCV                       12          128
+7         FOV                               5           72
+8         SIMPLE_RADIAL_FISHEYE             4           64
+9         RADIAL_FISHEYE                    5           72
+10        THIN_PRISM_FISHEYE                12          128
+11        RAD_TAN_THIN_PRISM_FISHEYE        16          160
+```
+
+`FULL_FOV` was rejected by real `model_converter` and must not be invented as
+model id 8. Add real-converter coverage for ids 0, 1, 8, 10 and 11 at minimum,
+plus an unknown-id rejection case. Prefer all 12 measured models.
+
 Required RED-to-green work:
 
 1. Bind the parser to the pinned local COLMAP version's official camera-model
@@ -131,20 +156,34 @@ intact and must never run COLMAP.
 
 Start only after task 3 is committed and pushed.
 
+Commit `30d0e7a` started this item early and remains held with `0978ee7`. Its
+current filename digest is a logical payload digest, not the SHA-256 of the
+report bytes: `materialized_at_utc` and `manifest_sha256` are added after the
+digest. On an existing file it checks only the embedded digest string, so an
+attacker can change `caller_argv`, file hashes or timestamps while retaining
+that string and the next run accepts the tampered report. The current test
+corrupts only `manifest_sha256`, which misses this case.
+
 Emit a content-addressed, machine-verifiable report that contains:
 
-- exact source root and safe relative file set;
+- schema version, exact source root and safe relative file set;
 - every photo relative path, byte size and SHA-256;
 - `cameras.bin`, `images.bin`, `points3D.bin`, optional files and database SHA;
 - parsed registered-image count, unique image/camera ids and image-to-camera
   mapping;
 - pose frame explicitly declared `sfm-local / arbitrary / unaligned`;
 - effective caller argv and COLMAP/Brush binary SHA-256;
-- report schema version, content SHA and UTC measurement times.
+- UTC measurement start/end times;
+- a canonical-payload SHA and a separate final report-byte SHA, with clearly
+  different field names.
 
 Keep `.stage_state.json` described as mutable local resume state. It is not
-immutable evidence. Write a separate verifier that rejects missing, extra,
-path-escaping or SHA-mismatched files.
+immutable evidence. Write a separate verifier that recomputes the canonical
+payload SHA, rejects any modified field even when the embedded string was
+retained, and rejects missing, extra, path-escaping or SHA-mismatched files.
+Normalize the real argument list as
+`argv if argv is not None else sys.argv[1:]`; `sys.argv` includes the script
+name and is not equivalent to `argparse.parse_args(None)`.
 
 ## 5. Next task — fresh real P5b to P7 exact-copy rehearsal
 
