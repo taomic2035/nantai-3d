@@ -1357,3 +1357,130 @@ class TestBrushExportSnapshot:
         assert end.endswith("+00:00") or end.endswith("Z")
         assert start <= end
 
+
+class TestSourceManifestMaterialization:
+    """REVIEW-CODEX-030 P7a-2: the fingerprint digest is just a sha256 string.
+    A reviewer cannot recover the payload (which files, which SHAs, which argv)
+    from the digest alone. The complete source manifest must be materialized
+    into a content-addressed machine report (independent JSON file named by
+    its own SHA-256) so review can independently verify the payload."""
+
+    def _manifest_files(self, ws: Path) -> list[Path]:
+        return sorted(ws.glob("source_manifest_*.json"))
+
+    def test_source_manifest_file_written(self, env, tmp_path, photos_dir):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        files = self._manifest_files(ws)
+        assert len(files) == 1, f"expected exactly 1 source manifest, got {files}"
+
+    def test_manifest_contains_all_source_hashes_and_intent(self, env, tmp_path,
+                                                            photos_dir):
+        """The materialized report must contain the recoverable payload:
+        all source file SHAs, photos_sha256, caller_argv, colmap_binary_sha256,
+        manifest_sha256 (self-address), mode, source_root."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        report = json.loads(self._manifest_files(ws)[0].read_text("utf-8"))
+        for key in ("cameras.bin_sha256", "images.bin_sha256",
+                    "points3D.bin_sha256", "photos_sha256",
+                    "caller_argv", "colmap_binary_sha256",
+                    "manifest_sha256", "mode", "source_root",
+                    "materialized_at_utc"):
+            assert key in report, f"manifest missing recoverable field: {key}"
+        assert report["mode"] == "precomputed"
+        assert "--precomputed-colmap" in report["caller_argv"]
+
+    def test_manifest_sha_matches_filename(self, env, tmp_path, photos_dir):
+        """Content-addressed: the manifest_sha256 field must equal the SHA
+        suffix in the filename, and re-hashing the payload must reproduce it."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        path = self._manifest_files(ws)[0]
+        manifest_sha = path.stem.removeprefix("source_manifest_")
+        report = json.loads(path.read_text("utf-8"))
+        assert report["manifest_sha256"] == manifest_sha
+        # Re-derive: payload = report minus manifest_sha256 + materialized_at_utc
+        payload = {k: v for k, v in report.items()
+                   if k not in ("manifest_sha256", "materialized_at_utc")}
+        assert rl._digest(payload) == manifest_sha, \
+            "re-hashing the payload must reproduce the content-address"
+
+    def test_manifest_idempotent_same_source(self, env, tmp_path, photos_dir):
+        """Re-running with the same source → no error, same file, same SHA
+        (write-once semantics, not a fresh file each run)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        files_a = self._manifest_files(ws)
+        sha_a = json.loads(files_a[0].read_text("utf-8"))["manifest_sha256"]
+        # Second run (--resume, same source) must not error or create a 2nd file
+        call("--resume", "--precomputed-colmap", str(precomp))
+        files_b = self._manifest_files(ws)
+        assert len(files_b) == 1, "idempotent re-run must not create duplicate"
+        sha_b = json.loads(files_b[0].read_text("utf-8"))["manifest_sha256"]
+        assert sha_a == sha_b
+
+    def test_manifest_sha_recorded_in_colmap_extras(self, env, tmp_path,
+                                                    photos_dir):
+        """The materialized manifest SHA must be cross-referenced in
+        .stage_state.json colmap entry so a reviewer can link the digest to
+        the recoverable report. Extras are merged into the stage entry
+        directly (not nested under an 'extras' key)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        colmap_entry = _state(ws)["stages"]["colmap"]
+        recorded_sha = colmap_entry["source_manifest_sha256"]
+        report_sha = json.loads(
+            self._manifest_files(ws)[0].read_text("utf-8"))["manifest_sha256"]
+        assert recorded_sha == report_sha, \
+            "colmap entry must cross-reference the materialized manifest SHA"
+
+    def test_manifest_write_once_rejects_hash_conflict(self, env, tmp_path,
+                                                      photos_dir):
+        """If a file with the target name already exists but its
+        manifest_sha256 differs (hash collision / tampering), the caller must
+        fail-closed instead of silently overwriting the audit evidence."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        path = self._manifest_files(ws)[0]
+        # Corrupt the manifest_sha256 field in the existing file
+        report = json.loads(path.read_text("utf-8"))
+        report["manifest_sha256"] = "0" * 64
+        path.write_text(json.dumps(report), encoding="utf-8")
+        with pytest.raises(SystemExit, match="冲突|conflict|manifest"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+    def test_different_source_produces_different_manifest(self, env, tmp_path,
+                                                          photos_dir):
+        """Changing the source bytes must produce a different manifest SHA
+        and a separate file (so both old and new evidence are preserved)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        files_a = self._manifest_files(ws)
+        sha_a = json.loads(files_a[0].read_text("utf-8"))["manifest_sha256"]
+        # Change a source sparse file byte → different source → different SHA
+        (precomp / "sparse" / "0" / "points3D.bin").write_bytes(b"changed")
+        call("--resume", "--precomputed-colmap", str(precomp))
+        files_b = self._manifest_files(ws)
+        assert len(files_b) == 2, "new source must produce a new manifest file"
+        sha_b = json.loads(
+            [f for f in files_b if f != files_a[0]][0].read_text("utf-8")
+            )["manifest_sha256"]
+        assert sha_a != sha_b, \
+            "different source bytes must yield different manifest SHA"
+
+

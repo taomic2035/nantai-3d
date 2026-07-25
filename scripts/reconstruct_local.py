@@ -196,6 +196,57 @@ def _build_precomputed_manifest(colmap_ws: Path, photos: Path) -> dict:
     return manifest
 
 
+def _materialize_source_manifest(
+    ws: Path,
+    manifest: dict,
+    caller_argv: list[str],
+    colmap_bin_sha: str,
+) -> str:
+    """物化 content-addressed source manifest 报告（可恢复 payload，不只是 digest）。
+
+    REVIEW-CODEX-030 P7a-2：fingerprint digest 只是一个 sha256 字符串——reviewer
+    无法从 digest 恢复出原始 payload（哪些文件、哪些 SHA、哪个 argv 消费了源）。
+    本函数把完整的源清单 payload 写成独立 JSON 文件，文件名按 payload 自身的
+    SHA-256 命名（content-addressed），让 reviewer 可以直接读取并复核。
+
+    报告包含：
+    - 所有源文件 SHA-256（cameras/images/points3D + optional bins + colmap.db）
+    - photos_sha256（逐张照片字节级指纹）
+    - caller_argv（有效调用意图——换 flag 即视为不同消费）
+    - colmap_binary_sha256（COLMAP 二进制身份）
+    - manifest_sha256（payload 自身的 content-address）
+    - materialized_at_utc（物化时间戳）
+
+    write-once：同 SHA 文件已存在 → no-op（幂等重跑）；不同 SHA 文件已存在 →
+    fail-closed（拒绝覆盖，source manifest 是审计凭证，覆盖等于销毁证据）。
+
+    返回 manifest_sha256（供 colmap extras 交叉引用 .stage_state.json 中的 digest）。
+    """
+    payload = {
+        **manifest,  # mode, source_root, *_sha256, photos_sha256
+        "caller_argv": caller_argv,
+        "colmap_binary_sha256": colmap_bin_sha,
+    }
+    manifest_sha = _digest(payload)
+    report = {
+        **payload,
+        "manifest_sha256": manifest_sha,
+        "materialized_at_utc": datetime.now(UTC).isoformat(),
+    }
+    report_path = ws / f"source_manifest_{manifest_sha}.json"
+    if report_path.is_file():
+        existing = json.loads(report_path.read_text(encoding="utf-8"))
+        if existing.get("manifest_sha256") != manifest_sha:
+            raise SystemExit(
+                f"source manifest 冲突: {report_path} 已存在但 manifest_sha256 不匹配 "
+                f"(existing={existing.get('manifest_sha256')}, new={manifest_sha})；"
+                f"拒绝覆盖审计凭证")
+    else:
+        blob = json.dumps(report, sort_keys=True, ensure_ascii=False, indent=2)
+        report_path.write_text(blob, encoding="utf-8")
+    return manifest_sha
+
+
 def _validate_ws_precomputed(ws: Path, manifest: dict) -> bool:
     """工作目录里的 precomputed 拷贝是否与源清单逐字节一致。
 
@@ -789,7 +840,11 @@ def main(argv: list[str] | None = None) -> int:
     # REVIEW-CODEX-030 P1 (P6c)：caller_argv 必须绑定真实传入的 argv（测试/库调用
     # 传 argv=… 时 sys.argv 是 pytest/IDE 的，不是 reconstruct_local 的），这样
     # matcher 子命令等身份可从 extras 直接验证，无需从日志文本推断。
-    caller_argv: list[str] = list(argv) if argv is not None else list(sys.argv)
+    raw_argv = list(argv) if argv is not None else list(sys.argv)
+    # --resume 是 flow-control（决定是否复用），不是 consumption intent（决定如何
+    # 消费源）。剥掉它，否则加 --resume 会改变 caller_argv → 改变 fingerprint /
+    # source manifest SHA → 触发重拷（P7a-2/P7a-3 回归：幂等重跑应产生同一 manifest）。
+    caller_argv: list[str] = [a for a in raw_argv if a != "--resume"]
 
     # REVIEW-CODEX-030 P7a-5：在任何 rmtree/mkdir 前拒绝路径重叠——否则
     # rmtree(ws/images) 会删掉源照片/sparse。
@@ -873,6 +928,14 @@ def main(argv: list[str] | None = None) -> int:
         # 不同的消费意图，触发重拷（便宜）。binary 用 SHA-256 而非 (name/size/mtime)：
         # 同名同大小同 mtime 的不同 build 也要被发现。
         colmap_bin_sha = _sha256_file(Path(colmap))
+        # REVIEW-CODEX-030 P7a-2：物化 content-addressed source manifest 报告。
+        # digest 只是 sha256 字符串，reviewer 无法从它恢复原始 payload。本调用把
+        # 完整源清单（所有 SHA + caller_argv + binary SHA + provenance）写成独立
+        # JSON 文件，文件名按 payload 自身 SHA-256 命名。在 state.begin 之外调用：
+        # source manifest 描述的是**源**，与本次是否拷贝无关（--resume 跳过拷贝时
+        # 也要物化，让 reviewer 能独立复核源清单）。
+        source_manifest_sha = _materialize_source_manifest(
+            ws, manifest, caller_argv, colmap_bin_sha)
         parent, unprovable = _fingerprint("colmap", {
             "parent": parent,
             **manifest,
@@ -906,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
             colmap_extras: dict[str, object] = {
                 "caller_argv": caller_argv,
                 "colmap_binary_sha256": colmap_bin_sha,
+                "source_manifest_sha256": source_manifest_sha,
                 "precomputed_source_root": str(args.precomputed_colmap.resolve()),
                 "precomputed_post_copy_validated": True,
                 "precomputed_ws_cameras_bin_sha256":
