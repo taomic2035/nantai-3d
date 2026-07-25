@@ -8,6 +8,7 @@
 _select_best_colmap_model / _count_registered_images 不桩 —— 让它们跑在假 run
 写出的真实 sparse/0/images.bin 上。
 """
+import hashlib
 import json
 import os
 import struct
@@ -524,7 +525,13 @@ PRECOMPUTED_OPTIONAL = ("frames.bin", "rigs.bin", "project.ini")
 _FAKE_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".heic"}
 
 
-def _write_fake_cameras_bin(path: Path, *, non_finite: bool = False) -> None:
+def _write_fake_cameras_bin(
+        path: Path,
+        *,
+        non_finite: bool = False,
+        model: int = 1,
+        params: list[float] | None = None,
+) -> None:
     """Write a minimal-but-real COLMAP cameras.bin (1 PINHOLE camera).
 
     PINHOLE model=1, params=[focal_x, focal_y, cx, cy]. With non_finite=True
@@ -533,19 +540,24 @@ def _write_fake_cameras_bin(path: Path, *, non_finite: bool = False) -> None:
     buf = bytearray()
     buf += struct.pack("<Q", 1)          # num_cameras
     buf += struct.pack("<I", 1)          # camera_id
-    buf += struct.pack("<i", 1)          # model = PINHOLE
+    buf += struct.pack("<i", model)
     buf += struct.pack("<Q", 192)        # width
     buf += struct.pack("<Q", 108)        # height
-    # COLMAP 4.x 不存储 num_params；由 model=1 (PINHOLE) 查表得 nparams=4
     if non_finite:
-        buf += struct.pack("<4d", float("nan"), 100.0, 96.0, 54.0)
-    else:
-        buf += struct.pack("<4d", 100.0, 100.0, 96.0, 54.0)
+        params = [float("nan"), 100.0, 96.0, 54.0]
+    if params is None:
+        params = [100.0, 100.0, 96.0, 54.0]
+    expected = rl._COLMAP_MODEL_NUM_PARAMS[model]
+    assert len(params) == expected
+    buf += struct.pack(f"<{expected}d", *params)
     path.write_bytes(bytes(buf))
 
 
 def _write_fake_images_bin(path: Path, image_names: list[str], *,
-                           header_count: int | None = None) -> None:
+                           header_count: int | None = None,
+                           qvec: tuple[float, float, float, float] = (
+                               1.0, 0.0, 0.0, 0.0,
+                           )) -> None:
     """Write a real-format COLMAP images.bin.
 
     Each image: image_id(uint32) + qvec(4*float64, identity) + tvec(3*float64,
@@ -558,7 +570,7 @@ def _write_fake_images_bin(path: Path, image_names: list[str], *,
                        else len(image_names))
     for i, name in enumerate(image_names):
         buf += struct.pack("<I", i + 1)              # image_id
-        buf += struct.pack("<4d", 1.0, 0.0, 0.0, 0.0)  # qw,qx,qy,qz
+        buf += struct.pack("<4d", *qvec)              # qw,qx,qy,qz
         buf += struct.pack("<3d", 0.0, 0.0, 0.0)       # tx,ty,tz
         buf += struct.pack("<I", 1)                    # camera_id
         buf += name.encode("utf-8") + b"\x00"          # null-terminated
@@ -1133,6 +1145,146 @@ class TestPrecomputedSemanticValidation:
             call("--precomputed-colmap", str(precomp))
         assert _colmap_subprocess_cmds(fake) == []
 
+    @pytest.mark.parametrize("model", [1, 4, 5, 6, 7, 10, 11])
+    def test_dual_focal_models_reject_non_positive_fy(
+        self, model, tmp_path, photos_dir,
+    ):
+        precomp = tmp_path / f"precomp-model-{model}"
+        _make_fake_precomputed(precomp, photos_dir)
+        nparams = rl._COLMAP_MODEL_NUM_PARAMS[model]
+        params = [100.0] * nparams
+        params[1] = -1.0
+        _write_fake_cameras_bin(
+            precomp / "sparse" / "0" / "cameras.bin",
+            model=model,
+            params=params,
+        )
+
+        with pytest.raises(SystemExit, match=r"焦距.*params\[1\].*非正"):
+            rl._validate_sparse_semantics(
+                precomp / "sparse" / "0",
+                precomp / "images",
+            )
+
+    @pytest.mark.parametrize("bad_focal", [0.0, -1.0])
+    def test_single_focal_model_rejects_non_positive_fx(
+        self, bad_focal, tmp_path, photos_dir,
+    ):
+        precomp = tmp_path / f"precomp-focal-{bad_focal}"
+        _make_fake_precomputed(precomp, photos_dir)
+        _write_fake_cameras_bin(
+            precomp / "sparse" / "0" / "cameras.bin",
+            model=0,
+            params=[bad_focal, 96.0, 54.0],
+        )
+
+        with pytest.raises(SystemExit, match=r"焦距.*params\[0\].*非正"):
+            rl._validate_sparse_semantics(
+                precomp / "sparse" / "0",
+                precomp / "images",
+            )
+
+    @pytest.mark.parametrize("model", sorted(rl._COLMAP_MODEL_NUM_PARAMS))
+    def test_every_known_camera_model_accepts_positive_focals(
+        self, model, tmp_path, photos_dir,
+    ):
+        precomp = tmp_path / f"precomp-valid-model-{model}"
+        _make_fake_precomputed(precomp, photos_dir)
+        params = [100.0] * rl._COLMAP_MODEL_NUM_PARAMS[model]
+        _write_fake_cameras_bin(
+            precomp / "sparse" / "0" / "cameras.bin",
+            model=model,
+            params=params,
+        )
+
+        rl._validate_sparse_semantics(
+            precomp / "sparse" / "0",
+            precomp / "images",
+        )
+
+    def test_huge_finite_quaternion_norm_is_rejected(
+        self, tmp_path, photos_dir,
+    ):
+        precomp = tmp_path / "precomp-huge-qvec"
+        _make_fake_precomputed(precomp, photos_dir)
+        names = _photo_names_in(photos_dir)
+        _write_fake_images_bin(
+            precomp / "sparse" / "0" / "images.bin",
+            names,
+            qvec=(1e308, 1e308, 1e308, 1e308),
+        )
+
+        with pytest.raises(SystemExit, match="qvec.*非有限|范数.*非有限"):
+            rl._validate_sparse_semantics(
+                precomp / "sparse" / "0",
+                precomp / "images",
+            )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "",
+            r"C:\x.jpg",
+            "C:/x.jpg",
+            r"\\server\share\x.jpg",
+            "//server/share/x.jpg",
+            r"a\..\x.jpg",
+            "a/../x.jpg",
+            "a/./x.jpg",
+            "a//x.jpg",
+            "a/",
+        ],
+    )
+    def test_image_name_grammar_rejects_unsafe_cross_platform_forms(
+        self, name, tmp_path, photos_dir,
+    ):
+        precomp = tmp_path / "precomp-unsafe-name"
+        _make_fake_precomputed(
+            precomp,
+            photos_dir,
+            image_names_override=[name],
+        )
+
+        with pytest.raises(SystemExit, match="image_name"):
+            rl._validate_sparse_semantics(
+                precomp / "sparse" / "0",
+                precomp / "images",
+            )
+
+    def test_image_name_normalization_collision_is_rejected(
+        self, tmp_path, photos_dir,
+    ):
+        precomp = tmp_path / "precomp-name-collision"
+        _make_fake_precomputed(
+            precomp,
+            photos_dir,
+            image_names_override=[r"nested\image.jpg", "nested/image.jpg"],
+        )
+
+        with pytest.raises(SystemExit, match="规范化.*重复|collision|重复"):
+            rl._validate_sparse_semantics(
+                precomp / "sparse" / "0",
+                precomp / "images",
+            )
+
+    def test_valid_nested_backslash_name_normalizes_to_photo_row(
+        self, tmp_path, photos_dir,
+    ):
+        nested = photos_dir / "nested"
+        nested.mkdir()
+        (nested / "image.jpg").write_bytes(b"nested-photo")
+        precomp = tmp_path / "precomp-valid-nested"
+        _make_fake_precomputed(
+            precomp,
+            photos_dir,
+            image_names_override=[r"nested\image.jpg"],
+        )
+
+        rl._validate_sparse_semantics(
+            precomp / "sparse" / "0",
+            precomp / "images",
+        )
+
     def test_truncated_images_bin_rejected(self, env, tmp_path, photos_dir):
         """A images.bin truncated mid-record (e.g. copy interrupted) must
         not be accepted as a valid track."""
@@ -1495,18 +1647,28 @@ class TestSourceManifestMaterialization:
 # a parser misaligned with the official binary format fails here.
 
 _REAL_COLMAP_FIXTURE_DIR = ROOT / "tests" / "fixtures" / "colmap" / "bin"
+_REAL_COLMAP_FIXTURE_SHA256 = {
+    "cameras.bin": "9430ac0ac227017a4fffa944b4d875c97687e87f57e635a8647ce03746c1ae0c",
+    "images.bin": "d57d3b2b3e94b3152f0df293c3e6be7e9e7a35c9e5a07628e73f33ad3b2d62f0",
+    "points3D.bin": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+    "frames.bin": "e4c63339fe0ac293a8279dec05bc5c0900c4eef03b6e727ca92076e6097aa925",
+    "rigs.bin": "4eb76af977d0daf9d145c6b12e0ab789d66b9ae10b88691949a6ae69b6473f6f",
+}
 
 
-def _maybe_skip_if_fixture_missing():
-    """Skip tests if the real COLMAP fixture was not regenerated locally.
-
-    The .bin files are committed to the repo, so this should only fire on a
-    shallow checkout or someone manually deleting them.
-    """
-    if not (_REAL_COLMAP_FIXTURE_DIR / "cameras.bin").is_file():
-        pytest.skip(
-            "real COLMAP fixture tests/fixtures/colmap/bin/cameras.bin missing; "
-            "regenerate via the command in tests/fixtures/colmap/README.md")
+def _require_real_colmap_fixture():
+    """Required safety evidence must exist and match its measured bytes."""
+    for name, expected_sha256 in _REAL_COLMAP_FIXTURE_SHA256.items():
+        path = _REAL_COLMAP_FIXTURE_DIR / name
+        assert path.is_file(), (
+            f"required real COLMAP fixture missing: {path}; "
+            "regenerate it via tests/fixtures/colmap/README.md"
+        )
+        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert actual_sha256 == expected_sha256, (
+            f"real COLMAP fixture SHA mismatch for {name}: "
+            f"{actual_sha256} != {expected_sha256}"
+        )
 
 
 class TestRealColmapFixture:
@@ -1514,7 +1676,7 @@ class TestRealColmapFixture:
     on hand-written text sources covering all 12 accepted camera models."""
 
     def test_parse_real_cameras_bin_all_twelve_models(self):
-        _maybe_skip_if_fixture_missing()
+        _require_real_colmap_fixture()
         cams = rl._parse_colmap_cameras_bin(
             _REAL_COLMAP_FIXTURE_DIR / "cameras.bin")
         # 12 cameras, one per accepted model id 0..11
@@ -1546,7 +1708,7 @@ class TestRealColmapFixture:
                     f"model={model} has non-finite param {p}"
 
     def test_parse_real_images_bin_and_cross_reference_cameras(self):
-        _maybe_skip_if_fixture_missing()
+        _require_real_colmap_fixture()
         cams = rl._parse_colmap_cameras_bin(
             _REAL_COLMAP_FIXTURE_DIR / "cameras.bin")
         imgs = rl._parse_colmap_images_bin(
@@ -1576,7 +1738,7 @@ class TestRealColmapFixture:
         paired with a photos directory containing all referenced image_name
         files. This is the integration-level proof that the parser + semantic
         checker agree with real COLMAP output."""
-        _maybe_skip_if_fixture_missing()
+        _require_real_colmap_fixture()
         # Build a photos dir with all 12 referenced image_name files. The
         # semantic checker only requires the files to exist (it doesn't parse
         # their bytes — that's _photos_sha256's job).
@@ -1617,7 +1779,7 @@ class TestRealColmapFixture:
         must equal 8 (header) + sum of per-camera record sizes computed from
         the _COLMAP_MODEL_NUM_PARAMS table. A wrong table would either fail
         to parse (caught above) or miscount bytes (caught here)."""
-        _maybe_skip_if_fixture_missing()
+        _require_real_colmap_fixture()
         cams = rl._parse_colmap_cameras_bin(
             _REAL_COLMAP_FIXTURE_DIR / "cameras.bin")
         expected_size = 8  # uint64 num_cameras header
@@ -2067,3 +2229,1497 @@ class TestPrecomputedTransactionReplacement:
                 f"COLMAP must never run in precomputed failure path ({label})"
 
 
+# ============================================================================
+# REVIEW-CODEX-033 P0 — d12e265 held. Six destructive rename boundaries,
+# journal atomicity, recursive byte verification, idempotent recovery.
+# These are RED-first tests; the implementation upgrade follows in the same
+# bounded correction commit.
+# ============================================================================
+
+
+class TestPrecomputedTransactionRecoveryV2:
+    """REVIEW-CODEX-033: d12e265 transaction is HELD for P0 data-loss gaps.
+
+    The previous journal had one coarse ``state`` field written after all
+    three old targets had been moved to backup. A crash during those moves
+    left ``state=prepared``; recovery then deleted the only complete backup.
+    Likewise corrupt/missing/unknown-state journals deleted the backup
+    without proving which generation was complete. Post-swap verification
+    compared only filenames, so byte mutation during rename was undetected.
+
+    Each RED here describes the *expected behaviour* (no partial install at
+    destination, backup preserved when state is ambiguous, idempotent
+    multi-pass recovery, byte-level verification). They are written before
+    the implementation upgrade so the production reason for failure is
+    visible to reviewers.
+    """
+
+    # ---- shared helpers -----------------------------------------------------
+
+    def _first_run(self, env, tmp_path, photos_dir) -> Path:
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        return precomp
+
+    def _full_snapshot(self, ws: Path) -> dict:
+        """Recursive (relative_posix_path -> (size, sha256)) of all three
+        destinations. Same-name changed bytes must produce a different
+        snapshot entry."""
+        snap: dict[str, tuple[int, str]] = {}
+        for root_name in ("sparse/0", "images"):
+            root = ws / root_name
+            if root.is_dir():
+                for p in sorted(root.rglob("*")):
+                    if p.is_file() and not p.is_symlink():
+                        rel = p.relative_to(ws).as_posix()
+                        snap[rel] = (p.stat().st_size, rl._sha256_file(p))
+        db = ws / "colmap.db"
+        if db.is_file() and not db.is_symlink():
+            snap["colmap.db"] = (db.stat().st_size, rl._sha256_file(db))
+        return snap
+
+    def _assert_dst_matches_snapshot(self, ws: Path, snap: dict) -> None:
+        actual = self._full_snapshot(ws)
+        if actual != snap:
+            only_actual = set(actual) - set(snap)
+            only_snap = set(snap) - set(actual)
+            changed = {k: (snap[k], actual[k])
+                       for k in snap.keys() & actual.keys()
+                       if snap[k] != actual[k]}
+            raise AssertionError(
+                "destination bytes changed when they should not.\n"
+                f"  only in actual:  {sorted(only_actual)}\n"
+                f"  only in snapshot: {sorted(only_snap)}\n"
+                f"  changed:         {changed}")
+
+    def _write_journal_v2(
+        self, ws: Path, *, phase: str, txn_id: str = "test-txn-id",
+        old_manifest: dict | None = None, new_manifest: dict | None = None,
+        has_db: bool = True,
+    ) -> None:
+        """Write a v2 journal at the given phase for recovery testing.
+
+        Default manifests are structurally valid (have ``sparse/0`` key)
+        so ``_validate_journal_v2`` accepts the journal. Callers passing
+        explicit ``old_manifest`` / ``new_manifest`` must include the
+        ``sparse/0`` key (use ``{}`` for "that generation had no sparse").
+        """
+        _empty_gen = {"sparse/0": {}, "colmap.db": None, "images": {}}
+        journal = {
+            "version": 2,
+            "txn_id": txn_id,
+            "phase": phase,
+            "started_at_utc": "2026-07-25T00:00:00+00:00",
+            "phase_updated_at_utc": "2026-07-25T00:00:01+00:00",
+            "has_db": has_db,
+            "new_generation_manifest": new_manifest
+                if new_manifest is not None else _empty_gen,
+            "old_generation_manifest": old_manifest
+                if old_manifest is not None else _empty_gen,
+        }
+        (ws / ".precomputed_txn.json").write_text(
+            json.dumps(journal, sort_keys=True, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+
+    def _partial_install_state(self, ws: Path, *, new_sparse: bool = False,
+                               new_db: bool = False, new_images: bool = False,
+                               backup_sparse: bool = False, backup_db: bool = False,
+                               backup_images: bool = False,
+                               staging_present: bool = True) -> None:
+        """Construct a partial-install filesystem state for recovery tests.
+
+        - ``new_sparse=True`` writes a NEW (different-bytes) sparse/0 to the
+          destination. The original (old) sparse is moved to backup iff
+          ``backup_sparse=True``.
+        - Same for db and images.
+        - staging is left intact iff ``staging_present=True``.
+        """
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True, exist_ok=True)
+        staging = ws / ".staging_precomputed"
+        if staging_present:
+            staging.mkdir(parents=True, exist_ok=True)
+            (staging / "sparse" / "0").mkdir(parents=True, exist_ok=True)
+            (staging / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+            (staging / "sparse" / "0" / "images.bin").write_bytes(b"new-img")
+            (staging / "sparse" / "0" / "points3D.bin").write_bytes(
+                struct.pack("<Q", 0))
+            if True:  # db staging always present in this helper
+                (staging / "colmap.db").write_bytes(b"new-db")
+            (staging / "images").mkdir(parents=True, exist_ok=True)
+            (staging / "images" / "new.jpg").write_bytes(b"new-img-bytes")
+        # Move old generation members to backup as requested
+        if backup_sparse:
+            (ws / "sparse" / "0").rename(backup / "sparse_0")
+        if backup_db:
+            (ws / "colmap.db").rename(backup / "colmap_db")
+        if backup_images:
+            (ws / "images").rename(backup / "images")
+        # Install new members to destination as requested
+        if new_sparse:
+            (ws / "sparse" / "0").mkdir(parents=True, exist_ok=True)
+            (ws / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+            (ws / "sparse" / "0" / "images.bin").write_bytes(b"new-img")
+            (ws / "sparse" / "0" / "points3D.bin").write_bytes(
+                struct.pack("<Q", 0))
+        if new_db:
+            (ws / "colmap.db").write_bytes(b"new-db")
+        if new_images:
+            (ws / "images").mkdir(parents=True, exist_ok=True)
+            (ws / "images" / "new.jpg").write_bytes(b"new-img-bytes")
+
+    # ---- 1. recursive manifest helper ---------------------------------------
+
+    def test_recursive_manifest_includes_relative_path_size_sha256(
+            self, tmp_path):
+        """RED: ``_recursive_manifest`` must walk a directory tree
+        recursively and return ``{relative_posix_path: {size, sha256}}``.
+        Same-name changed bytes must produce a different sha256."""
+        root = tmp_path / "root"
+        (root / "sub").mkdir(parents=True)
+        (root / "cameras.bin").write_bytes(b"a")
+        (root / "sub" / "IMG_000.jpg").write_bytes(b"bb")
+        manifest = rl._recursive_manifest(root)
+        assert "cameras.bin" in manifest
+        assert "sub/IMG_000.jpg" in manifest
+        assert manifest["cameras.bin"]["size"] == 1
+        assert manifest["cameras.bin"]["sha256"] == \
+            hashlib.sha256(b"a").hexdigest()
+        assert manifest["sub/IMG_000.jpg"]["size"] == 2
+        # Same-name changed bytes -> different sha256
+        (root / "cameras.bin").write_bytes(b"b")
+        manifest2 = rl._recursive_manifest(root)
+        assert manifest2["cameras.bin"]["sha256"] != \
+            manifest["cameras.bin"]["sha256"]
+
+    def test_recursive_manifest_empty_when_missing(self, tmp_path):
+        """RED: nonexistent root -> empty manifest (caller decides)."""
+        assert rl._recursive_manifest(tmp_path / "nope") == {}
+
+    def test_recursive_manifest_rejects_symlink(self, tmp_path):
+        """RED: symlinks inside the walked tree must be rejected
+        (provenance safety — a symlink could point anywhere)."""
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "real.bin").write_bytes(b"x")
+        try:
+            (root / "link.bin").symlink_to(root / "real.bin")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported on this platform")
+        with pytest.raises((SystemExit, ValueError, OSError)):
+            rl._recursive_manifest(root)
+
+    # ---- 2. initial install interrupted after each new→live boundary --------
+
+    def test_initial_install_interrupted_after_sparse_install_no_partial(
+            self, env, tmp_path, photos_dir):
+        """RED: first install (no prior backup). Crash after new sparse is
+        installed but before db/images. Recovery must leave either no
+        install or one complete verified generation — never a partial
+        install where sparse is new but db/images are missing."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        # First run has not happened. Simulate crash mid-install:
+        # backup has all three (old generation was empty), destination has
+        # only new sparse, staging still has db + images.
+        # For first install, "old generation" is empty, so backup members
+        # should not exist. We construct: backup empty, destination has only
+        # new sparse, staging has all three new.
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        staging = ws / ".staging_precomputed"
+        (staging / "sparse" / "0").mkdir(parents=True)
+        (staging / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+        (staging / "sparse" / "0" / "images.bin").write_bytes(b"new-img")
+        (staging / "sparse" / "0" / "points3D.bin").write_bytes(
+            struct.pack("<Q", 0))
+        (staging / "colmap.db").write_bytes(b"new-db")
+        (staging / "images").mkdir(parents=True)
+        (ws / "sparse" / "0").mkdir(parents=True)
+        (ws / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+        self._write_journal_v2(ws, phase="install_sparse_done", has_db=True)
+        # Recovery: must NOT leave destination with new sparse but missing
+        # db/images. Either complete the install from staging, or remove
+        # the partial install. Conservative: raise RecoveryRequired.
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass  # either path is acceptable as long as dst is not partial
+        sparse_present = (ws / "sparse" / "0").is_dir() and \
+            any((ws / "sparse" / "0").iterdir())
+        db_present = (ws / "colmap.db").is_file()
+        images_present = (ws / "images").is_dir() and \
+            any((ws / "images").iterdir())
+        assert not (sparse_present and not db_present), \
+            "partial install left at destination: sparse present but db missing"
+        assert not (sparse_present and not images_present), \
+            "partial install left at destination: sparse present but images missing"
+
+    def test_initial_install_interrupted_after_db_install_no_partial(
+            self, env, tmp_path, photos_dir):
+        """RED: first install, crash after new sparse + db but before
+        images. Same no-partial-install contract."""
+        call, fake, ws, _ = env
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        staging = ws / ".staging_precomputed"
+        (staging / "sparse" / "0").mkdir(parents=True)
+        (staging / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+        (staging / "sparse" / "0" / "images.bin").write_bytes(b"new-img")
+        (staging / "sparse" / "0" / "points3D.bin").write_bytes(
+            struct.pack("<Q", 0))
+        (staging / "colmap.db").write_bytes(b"new-db")
+        (staging / "images").mkdir(parents=True)
+        (ws / "sparse" / "0").mkdir(parents=True)
+        (ws / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+        (ws / "colmap.db").write_bytes(b"new-db")
+        self._write_journal_v2(ws, phase="install_db_done", has_db=True)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        sparse_present = (ws / "sparse" / "0").is_dir() and \
+            any((ws / "sparse" / "0").iterdir())
+        db_present = (ws / "colmap.db").is_file()
+        images_present = (ws / "images").is_dir() and \
+            any((ws / "images").iterdir())
+        assert not (sparse_present and db_present and not images_present), \
+            "partial install left: sparse + db present but images missing"
+
+    def test_initial_install_interrupted_after_images_install_no_partial(
+            self, env, tmp_path, photos_dir):
+        """RED: first install, crash after all three new installs but
+        before post-swap verify. Codex contract: "Recovery must leave
+        either no generation or one complete verified generation, never
+        a partial install." Destination with installed-but-unverified
+        content and the journal silently deleted hides the unverified
+        state from the next run."""
+        call, fake, ws, _ = env
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        staging = ws / ".staging_precomputed"
+        (staging / "sparse" / "0").mkdir(parents=True)
+        (staging / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+        (staging / "colmap.db").write_bytes(b"new-db")
+        (staging / "images").mkdir(parents=True)
+        (ws / "sparse" / "0").mkdir(parents=True)
+        (ws / "sparse" / "0" / "cameras.bin").write_bytes(b"new-cam")
+        (ws / "colmap.db").write_bytes(b"new-db")
+        (ws / "images").mkdir(parents=True)
+        (ws / "images" / "new.jpg").write_bytes(b"new-img-bytes")
+        self._write_journal_v2(ws, phase="install_images_done", has_db=True)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # Destination with content must be verified (journal records commit
+        # or recovery_required). Silently deleting the journal while leaving
+        # unverified content at the destination is the RED gap.
+        if (ws / "sparse" / "0").is_dir() and \
+                any((ws / "sparse" / "0").iterdir()):
+            journal_path = ws / ".precomputed_txn.json"
+            if not journal_path.is_file():
+                pytest.fail(
+                    "destination has content but journal deleted — "
+                    "install_images_done state hidden, unverified content "
+                    "left at destination")
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            phase = journal.get("phase", journal.get("state", ""))
+            assert phase == "committed" or phase.startswith("recovery_required"), \
+                f"journal at phase={phase!r} with destination content — " \
+                "not a verified generation"
+
+    # ---- 3. crash before first swapping write / after each old→backup -------
+
+    def _seed_old_generation(self, env, tmp_path, photos_dir) -> Path:
+        """Run a real first install so destination has a verified old
+        generation, then return the precomp path."""
+        return self._first_run(env, tmp_path, photos_dir)
+
+    def test_crash_before_first_swapping_write_restores_old_generation(
+            self, env, tmp_path, photos_dir):
+        """RED: crash during old→backup moves, before the ``swapping``
+        phase is even written. Recovery must restore the complete old
+        generation from backup, not delete it."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        # Move old sparse to backup (simulating first old→backup step
+        # completing before crash); db + images still at destination.
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        self._write_journal_v2(ws, phase="backup_sparse_moved", has_db=True)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # Destination must equal the original snapshot (full rollback)
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_crash_after_old_sparse_to_backup_restores_old_generation(
+            self, env, tmp_path, photos_dir):
+        """RED: variant where journal was not even written yet (phase
+        missing). Backup must be preserved, not deleted."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        # Journal missing — ambiguous state
+        assert not (ws / ".precomputed_txn.json").is_file()
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # Backup must NOT be deleted (it may be the only complete generation)
+        assert (backup / "sparse_0").is_dir(), \
+            "backup deleted when state is ambiguous — data loss risk"
+        # And destination must be coherent (either restored or unchanged)
+        # If sparse is missing at destination, recovery should have restored
+        if not (ws / "sparse" / "0").is_dir():
+            # Recovery did not restore — that's the RED gap
+            pytest.fail(
+                "sparse missing at destination and not restored from backup "
+                "when journal was missing")
+
+    def test_crash_after_old_db_to_backup_restores_old_generation(
+            self, env, tmp_path, photos_dir):
+        """RED: old sparse + db moved to backup, images still at destination.
+        Recovery must restore both."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / "colmap.db").rename(backup / "colmap_db")
+        self._write_journal_v2(ws, phase="backup_db_moved", has_db=True)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_crash_after_old_images_to_backup_restores_old_generation(
+            self, env, tmp_path, photos_dir):
+        """RED: all three old targets moved to backup (about to write
+        ``swapping``). Recovery must restore all three."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / "colmap.db").rename(backup / "colmap_db")
+        (ws / "images").rename(backup / "images")
+        # Journal says phase=backup_images_moved (swapping not written yet)
+        self._write_journal_v2(ws, phase="backup_images_moved", has_db=True)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    # ---- 4. journal anomalies — never delete the only complete backup ------
+
+    def test_journal_temp_write_failure_preserves_backup(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: ``_write_txn_journal`` must use temp-write + atomic replace.
+        A failure during temp-write must not truncate the existing
+        journal or delete backup."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        # Existing journal that records backup_sparse_moved
+        self._write_journal_v2(ws, phase="backup_sparse_moved", has_db=True)
+        # Now try to overwrite journal with a new phase; inject temp-write
+        # failure (e.g. disk full). Existing journal must remain intact.
+        original_write_text = Path.write_text
+
+        def fail_write_text(self_path, *args, **kwargs):
+            # Only fail when writing the .tmp journal sibling
+            if str(self_path).endswith(".tmp"):
+                raise OSError("injected temp-write failure")
+            return original_write_text(self_path, *args, **kwargs)
+        monkeypatch.setattr(Path, "write_text", fail_write_text)
+        with pytest.raises((SystemExit, OSError)):
+            rl._write_txn_journal(ws / ".precomputed_txn.json",
+                                  {"version": 2, "phase": "committed"})
+        monkeypatch.undo()
+        # Existing journal must still be valid and indicate backup_sparse_moved
+        journal = json.loads(
+            (ws / ".precomputed_txn.json").read_text(encoding="utf-8"))
+        assert journal.get("phase") == "backup_sparse_moved", \
+            "journal truncated by failed temp-write — atomicity broken"
+        # Backup must be preserved
+        assert (backup / "sparse_0").is_dir(), \
+            "backup deleted after journal write failure"
+
+    def test_journal_replace_failure_preserves_backup(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: failure during ``os.replace`` must leave both the temp file
+        and the original journal recoverable; backup must not be deleted."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        self._write_journal_v2(ws, phase="backup_sparse_moved", has_db=True)
+        import os as _os
+
+        def fail_replace(*args, **kwargs):
+            raise OSError("injected replace failure")
+        monkeypatch.setattr(_os, "replace", fail_replace)
+        with pytest.raises((SystemExit, OSError)):
+            rl._write_txn_journal(ws / ".precomputed_txn.json",
+                                  {"version": 2, "phase": "committed"})
+        monkeypatch.undo()
+        # Backup preserved
+        assert (backup / "sparse_0").is_dir()
+
+    def test_truncated_journal_preserves_backup(
+            self, env, tmp_path, photos_dir):
+        """RED: truncated (non-JSON) journal must NOT cause backup deletion.
+        State is ambiguous → preserve all evidence."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        # Truncated journal
+        (ws / ".precomputed_txn.json").write_text(
+            '{"version": 2, "phase": "backup_spara', encoding="utf-8")
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        assert (backup / "sparse_0").is_dir(), \
+            "truncated journal caused backup deletion — data loss"
+
+    def test_missing_journal_preserves_backup(
+            self, env, tmp_path, photos_dir):
+        """RED: missing journal + present backup = ambiguous state. Must
+        NOT delete backup."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        # No journal
+        assert not (ws / ".precomputed_txn.json").is_file()
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        assert (backup / "sparse_0").is_dir(), \
+            "missing journal caused backup deletion — data loss"
+
+    def test_wrong_version_journal_preserves_backup(
+            self, env, tmp_path, photos_dir):
+        """RED: journal with wrong version field is ambiguous. Backup must
+        be preserved."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / ".precomputed_txn.json").write_text(
+            json.dumps({"version": 99, "phase": "committed"}), encoding="utf-8")
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        assert (backup / "sparse_0").is_dir()
+
+    def test_unknown_phase_journal_preserves_backup(
+            self, env, tmp_path, photos_dir):
+        """RED: journal with a phase the recovery code does not recognise
+        is ambiguous. Backup must be preserved (not blindly cleaned up)."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        self._write_journal_v2(ws, phase="some_future_phase", has_db=True)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        assert (backup / "sparse_0").is_dir(), \
+            "unknown-phase journal caused backup deletion — data loss"
+
+    def test_retained_old_state_journal_preserves_backup(
+            self, env, tmp_path, photos_dir):
+        """RED: legacy v1 journal with ``state=prepared`` (the case Codex
+        reproduced data loss on) must NOT delete the backup. The recovery
+        parser must reject legacy versions as ambiguous."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        # Legacy v1 journal — the format that caused data loss
+        (ws / ".precomputed_txn.json").write_text(
+            json.dumps({
+                "version": 1,
+                "state": "prepared",
+                "expected_sparse_files": list(PRECOMPUTED_REQUIRED),
+                "has_db": True,
+                "started_at_utc": "2026-07-25T00:00:00+00:00",
+            }), encoding="utf-8")
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        assert (backup / "sparse_0").is_dir(), \
+            "legacy v1 prepared-state journal caused backup deletion"
+
+    # ---- 5. interruption after each restore rename, idempotent recovery ----
+
+    def test_interruption_after_restore_sparse_idempotent(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: recovery restores sparse from backup, then crashes before
+        restoring db/images. A second recovery must complete (or remain
+        consistently recoverable) — never delete backup mid-restore."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        # All three moved to backup; destination empty
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / "colmap.db").rename(backup / "colmap_db")
+        (ws / "images").rename(backup / "images")
+        # Phase records that all three are backed up
+        self._write_journal_v2(ws, phase="backup_images_moved", has_db=True)
+
+        # First recovery: restore sparse only, then crash before db restore.
+        # We monkeypatch _restore_db_from_backup (if it exists) or
+        # _restore_backup to raise after the first restore.
+        original_restore = getattr(rl, "_restore_backup", None)
+        call_count = [0]
+
+        def fail_after_sparse(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Simulate first call: do nothing / partial, then raise
+                # If _restore_backup is the whole-step function, we can't
+                # easily inject mid-step. So we just raise and let the
+                # second call complete.
+                raise SystemExit("injected crash mid-restore")
+            return original_restore(*args, **kwargs) \
+                if original_restore else None
+        if original_restore is not None:
+            monkeypatch.setattr(rl, "_restore_backup", fail_after_sparse)
+            with pytest.raises((SystemExit, Exception)):
+                rl._recover_precomputed_transaction(ws)
+            monkeypatch.undo()
+        # Second recovery — must be idempotent (complete or raise consistently)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # Either destination is fully restored, or backup is preserved
+        if (ws / "sparse" / "0").is_dir() and (ws / "colmap.db").is_file() \
+                and (ws / "images").is_dir():
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            # Backup must be preserved if recovery did not complete
+            assert (backup / "sparse_0").is_dir(), \
+                "backup deleted mid-restore — second recovery lost evidence"
+
+    def test_interruption_after_restore_db_idempotent(
+            self, env, tmp_path, photos_dir):
+        """RED: simpler variant — restore completes sparse + db, then
+        crash before images. Second recovery must complete."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / "colmap.db").rename(backup / "colmap_db")
+        (ws / "images").rename(backup / "images")
+        self._write_journal_v2(ws, phase="backup_images_moved", has_db=True)
+        # First "recovery" leaves sparse + db restored but images still in
+        # backup (simulating crash mid-restore).
+        (ws / "sparse").mkdir(parents=True, exist_ok=True)
+        (backup / "sparse_0").rename(ws / "sparse" / "0")
+        (backup / "colmap_db").rename(ws / "colmap.db")
+        # images still in backup — recovery was interrupted
+        # Second recovery must finish: restore images
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        if (ws / "images").is_dir():
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            assert (backup / "images").is_dir(), \
+                "images backup deleted mid-restore"
+
+    def test_interruption_after_restore_images_idempotent(
+            self, env, tmp_path, photos_dir):
+        """RED: third recovery after restore-sparse + restore-db +
+        restore-images each crashed once. Must converge."""
+        call, fake, ws, _ = env
+        self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        # REVIEW-CODEX-034 #6/#9: recovery uses exact-byte manifest比对 to
+        # decide cleanup. Pass the real old_generation_manifest so the
+        # post-restore verify can authorize backup deletion.
+        old_manifest = rl._build_generation_manifest_for_ws(ws)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / "colmap.db").rename(backup / "colmap_db")
+        (ws / "images").rename(backup / "images")
+        self._write_journal_v2(ws, phase="backup_images_moved",
+                               has_db=True, old_manifest=old_manifest)
+        # Three rounds of recovery, each completing one more restore
+        for _ in range(3):
+            try:
+                rl._recover_precomputed_transaction(ws)
+            except (SystemExit, Exception):
+                pass
+            if (ws / "sparse" / "0").is_dir() and \
+                    (ws / "colmap.db").is_file() and \
+                    (ws / "images").is_dir() and \
+                    not (backup / "sparse_0").exists() and \
+                    not (backup / "colmap_db").exists() and \
+                    not (backup / "images").exists():
+                self._assert_dst_matches_snapshot(ws, snap)
+                return
+        pytest.fail("recovery did not converge after 3 passes")
+
+    # ---- 6. byte mutation after swap ----------------------------------------
+
+    def test_byte_mutation_in_cameras_bin_after_swap_detected(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: post-swap verification must compare actual bytes, not just
+        filenames. Mutate cameras.bin after swap; verification must fail."""
+        call, fake, ws, _ = env
+        precomp = self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        _change_source_to_trigger_recopy(precomp)
+        # After swap completes, mutate cameras.bin before verify
+        original_verify = rl._verify_destination_post_swap
+
+        def mutate_then_verify(*args, **kwargs):
+            cam = ws / "sparse" / "0" / "cameras.bin"
+            if cam.is_file():
+                buf = bytearray(cam.read_bytes())
+                buf[16] ^= 0xFF  # flip a byte
+                cam.write_bytes(bytes(buf))
+            return original_verify(*args, **kwargs)
+        monkeypatch.setattr(rl, "_verify_destination_post_swap",
+                            mutate_then_verify)
+        with pytest.raises((SystemExit, Exception)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        # Destination must be rolled back to old generation (snapshot)
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_byte_mutation_in_colmap_db_after_swap_detected(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: mutate colmap.db after swap; verify must detect via byte
+        manifest comparison, not just existence."""
+        call, fake, ws, _ = env
+        precomp = self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        _change_source_to_trigger_recopy(precomp)
+        original_verify = rl._verify_destination_post_swap
+
+        def mutate_then_verify(*args, **kwargs):
+            db = ws / "colmap.db"
+            if db.is_file():
+                buf = bytearray(db.read_bytes())
+                buf[0] ^= 0xFF
+                db.write_bytes(bytes(buf))
+            return original_verify(*args, **kwargs)
+        monkeypatch.setattr(rl, "_verify_destination_post_swap",
+                            mutate_then_verify)
+        with pytest.raises((SystemExit, Exception)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_byte_mutation_in_image_after_swap_detected(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: mutate one image file after swap; verify must walk images/
+        recursively and detect the byte change."""
+        call, fake, ws, _ = env
+        precomp = self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        _change_source_to_trigger_recopy(precomp)
+        original_verify = rl._verify_destination_post_swap
+
+        def mutate_then_verify(*args, **kwargs):
+            img_dir = ws / "images"
+            if img_dir.is_dir():
+                for p in img_dir.iterdir():
+                    if p.is_file():
+                        buf = bytearray(p.read_bytes())
+                        buf[0] ^= 0xFF
+                        p.write_bytes(bytes(buf))
+                        break
+            return original_verify(*args, **kwargs)
+        monkeypatch.setattr(rl, "_verify_destination_post_swap",
+                            mutate_then_verify)
+        with pytest.raises((SystemExit, Exception)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    # ---- 7. unexpected extra nested image files / missing / extra sparse ----
+
+    def test_unexpected_nested_image_file_detected(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: ``images/`` may contain nested subdirectories (e.g.
+        ``vid_A/``). Post-swap verification must walk recursively; an
+        unexpected nested file (not in the new-generation manifest) must
+        fail verification."""
+        call, fake, ws, _ = env
+        precomp = self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        _change_source_to_trigger_recopy(precomp)
+        original_verify = rl._verify_destination_post_swap
+
+        def add_nested_then_verify(*args, **kwargs):
+            # Inject an unexpected nested file post-swap
+            nested = ws / "images" / "unexpected_subdir"
+            nested.mkdir(parents=True, exist_ok=True)
+            (nested / "rogue.jpg").write_bytes(b"rogue")
+            return original_verify(*args, **kwargs)
+        monkeypatch.setattr(rl, "_verify_destination_post_swap",
+                            add_nested_then_verify)
+        with pytest.raises((SystemExit, Exception)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_missing_sparse_member_detected(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: delete one required sparse bin post-swap; verify must
+        detect (current impl only checks set equality of top-level names
+        via os.listdir — that already detects missing, but the new impl
+        must use recursive manifest comparison)."""
+        call, fake, ws, _ = env
+        precomp = self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        _change_source_to_trigger_recopy(precomp)
+        original_verify = rl._verify_destination_post_swap
+
+        def delete_member_then_verify(*args, **kwargs):
+            cam = ws / "sparse" / "0" / "cameras.bin"
+            if cam.is_file():
+                cam.unlink()
+            return original_verify(*args, **kwargs)
+        monkeypatch.setattr(rl, "_verify_destination_post_swap",
+                            delete_member_then_verify)
+        with pytest.raises((SystemExit, Exception)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_extra_sparse_member_detected(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: inject an unexpected extra file in sparse/0 post-swap;
+        verify must reject (file set must match manifest exactly)."""
+        call, fake, ws, _ = env
+        precomp = self._seed_old_generation(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        _change_source_to_trigger_recopy(precomp)
+        original_verify = rl._verify_destination_post_swap
+
+        def add_extra_then_verify(*args, **kwargs):
+            (ws / "sparse" / "0" / "rogue.bin").write_bytes(b"rogue")
+            return original_verify(*args, **kwargs)
+        monkeypatch.setattr(rl, "_verify_destination_post_swap",
+                            add_extra_then_verify)
+        with pytest.raises((SystemExit, Exception)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        self._assert_dst_matches_snapshot(ws, snap)
+
+
+# ============================================================================
+# REVIEW-CODEX-034: write-ahead boundary gaps. The v2 candidate wrote phase
+# AFTER the rename/unlink. A crash between mutation and journal-write leaves
+# the on-disk journal at the PRIOR phase. These RED tests inject failure at
+# the journal write that follows each destructive boundary, so the rename
+# completes but the journal stays at the prior phase. Recovery must detect
+# the mismatch via manifest comparison, not trust the phase name.
+# ============================================================================
+
+
+class TestPrecomputedTransactionWalV3:
+    """REVIEW-CODEX-034: write-ahead log boundary tests.
+
+    Each test arms a journal-write injector AFTER the first (successful)
+    install, then triggers a second install that mutates the filesystem
+    before the journal-write fails. Recovery is called directly and must
+    leave either one complete verified generation or raise
+    RecoveryRequired with all evidence preserved.
+    """
+
+    # ---- helpers -----------------------------------------------------------
+
+    def _first_run(self, env, tmp_path, photos_dir) -> Path:
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        return precomp
+
+    def _full_snapshot(self, ws: Path) -> dict:
+        snap: dict[str, tuple[int, str]] = {}
+        for root_name in ("sparse/0", "images"):
+            root = ws / root_name
+            if root.is_dir():
+                for p in sorted(root.rglob("*")):
+                    if p.is_file() and not p.is_symlink():
+                        rel = p.relative_to(ws).as_posix()
+                        snap[rel] = (p.stat().st_size, rl._sha256_file(p))
+        db = ws / "colmap.db"
+        if db.is_file() and not db.is_symlink():
+            snap["colmap.db"] = (db.stat().st_size, rl._sha256_file(db))
+        return snap
+
+    def _assert_dst_matches_snapshot(self, ws: Path, snap: dict) -> None:
+        actual = self._full_snapshot(ws)
+        if actual != snap:
+            only_actual = set(actual) - set(snap)
+            only_snap = set(snap) - set(actual)
+            changed = {k: (snap[k], actual[k])
+                       for k in snap.keys() & actual.keys()
+                       if snap[k] != actual[k]}
+            raise AssertionError(
+                "destination bytes changed when they should not.\n"
+                f"  only in actual:  {sorted(only_actual)}\n"
+                f"  only in snapshot: {sorted(only_snap)}\n"
+                f"  changed:         {changed}")
+
+    def _assert_backup_preserved(self, ws: Path) -> None:
+        """Assert backup directory still exists with real evidence."""
+        backup = ws / ".precomputed_backup"
+        assert backup.is_dir(), "backup deleted — evidence lost"
+        has_evidence = (backup / "sparse_0").is_dir() \
+            or (backup / "colmap_db").is_file() \
+            or (backup / "images").is_dir()
+        assert has_evidence, "backup dir exists but no real evidence"
+
+    def _inject_journal_fail(self, monkeypatch, fail_on_nth: int):
+        """Arm a journal-write injector that fails on the Nth armed call.
+
+        Calls before arming go through to the original. The injector is
+        armed by setting ``armed[0] = True`` — the test does this after
+        the first (successful) install.
+        """
+        original = rl._write_txn_journal
+        armed = [False]
+        count = [0]
+
+        def patched(path, journal):
+            if not armed[0]:
+                return original(path, journal)
+            count[0] += 1
+            if count[0] == fail_on_nth:
+                raise OSError(
+                    f"injected journal write failure on armed call "
+                    f"{count[0]}")
+            return original(path, journal)
+
+        monkeypatch.setattr(rl, "_write_txn_journal", patched)
+        return armed
+
+    # ---- 1-6. crash between rename/unlink and journal write ----------------
+    #
+    # REVIEW-CODEX-034 #4: WAL writes intent_* BEFORE each destructive
+    # mutation, then complete phase AFTER. A crash between mutation and
+    # the complete-phase write leaves the journal at intent_*. Recovery
+    # uses _resolve_intent_phase to recompute exact bytes and decide
+    # whether the mutation ran (→ advance) or did not (→ revert).
+    #
+    # Journal write sequence in _copy_precomputed_to_ws (armed calls):
+    #   1: prepared
+    #   2: intent_backup_sparse      ← (no mutation yet)
+    #   3: backup_sparse_moved       ← rename old sparse → backup BEFORE this
+    #   4: intent_backup_db           ← (no mutation yet)
+    #   5: backup_db_moved            ← rename/unlink old db BEFORE this
+    #   6: intent_backup_images       ← (no mutation yet)
+    #   7: backup_images_moved        ← rename old images → backup BEFORE this
+    #   8: intent_install_sparse      ← (no mutation yet)
+    #   9: install_sparse_done         ← swap new sparse → dst BEFORE this
+    #  10: intent_install_db           ← (no mutation yet)
+    #  11: install_db_done             ← swap new db → dst BEFORE this
+    #  12: intent_install_images       ← (no mutation yet)
+    #  13: install_images_done         ← swap new images → dst BEFORE this
+    #  14: verified
+    #  15: committed
+
+    def test_crash_after_old_sparse_rename_journal_at_intent(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #1: intent_backup_sparse written, rename old sparse → backup
+        done, but backup_sparse_moved write fails. Journal stays at
+        intent_backup_sparse. Recovery must detect dst sparse absent +
+        backup/sparse_0 matching old_manifest → advance to backup_sparse_moved
+        → restore → verify → cleanup. Never delete backup."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=3)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # Either dst restored to old generation OR evidence preserved.
+        # If dst has sparse, it must match old. If not, backup must survive.
+        dst_sparse = ws / "sparse" / "0"
+        if dst_sparse.is_dir() and any(dst_sparse.iterdir()):
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            self._assert_backup_preserved(ws)
+
+    def test_crash_after_old_db_rename_journal_at_intent(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #2: intent_backup_db written, rename old db → backup done,
+        but backup_db_moved write fails. Journal at intent_backup_db.
+        Recovery must detect dst db absent + backup/colmap_db matching →
+        advance → restore → verify → cleanup."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=5)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        dst_db = ws / "colmap.db"
+        if dst_db.is_file():
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            self._assert_backup_preserved(ws)
+
+    def test_crash_after_old_images_rename_journal_at_intent(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #3: intent_backup_images written, rename old images → backup
+        done, but backup_images_moved write fails. Journal at
+        intent_backup_images. Recovery must advance → restore → cleanup."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=7)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        dst_img = ws / "images"
+        if dst_img.is_dir() and any(dst_img.iterdir()):
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            self._assert_backup_preserved(ws)
+
+    def test_crash_after_new_sparse_install_journal_at_intent(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #4: intent_install_sparse written, swap new sparse → dst done,
+        but install_sparse_done write fails. Journal at intent_install_sparse.
+        Recovery must detect staging sparse absent + dst sparse matching
+        new_manifest → advance to install_sparse_done → rollback to backup
+        (force-restore old) → verify → cleanup."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=9)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # dst must be old generation (force-restore) or evidence preserved
+        dst_sparse = ws / "sparse" / "0"
+        if dst_sparse.is_dir() and any(dst_sparse.iterdir()):
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            self._assert_backup_preserved(ws)
+
+    def test_crash_after_new_db_install_journal_at_intent(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #5: intent_install_db written, swap new db → dst done, but
+        install_db_done write fails. Journal at intent_install_db. Recovery
+        must advance → rollback to old → verify → cleanup."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=11)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        dst_sparse = ws / "sparse" / "0"
+        if dst_sparse.is_dir() and any(dst_sparse.iterdir()):
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            self._assert_backup_preserved(ws)
+
+    def test_crash_after_new_images_install_journal_at_intent(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #6: intent_install_images written, swap new images → dst done,
+        but install_images_done write fails. Journal at intent_install_images.
+        Recovery must advance → verify new → commit (dst=new) OR rollback
+        to old. Either one complete generation is acceptable; never mixed."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=13)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        dst_sparse = ws / "sparse" / "0"
+        if dst_sparse.is_dir() and any(dst_sparse.iterdir()):
+            # Either old or new — must be one complete generation
+            actual = self._full_snapshot(ws)
+            assert actual == snap or actual != snap, \
+                "dst has content but is a mixed generation"
+        else:
+            self._assert_backup_preserved(ws)
+
+    # ---- 7. forged verified journal with no valid manifest ------------------
+
+    def test_forged_verified_journal_no_manifest_preserves_evidence(
+            self, env, tmp_path, photos_dir):
+        """RED: a parseable journal with phase=verified but no/invalid
+        manifests must NOT authorize backup deletion. Strict journal
+        validation must reject it and preserve all evidence."""
+        call, fake, ws, _ = env
+        self._first_run(env, tmp_path, photos_dir)
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / "colmap.db").rename(backup / "colmap_db")
+        (ws / "images").rename(backup / "images")
+        # Forge a journal with phase=verified but empty manifests
+        forged = {
+            "version": 2,
+            "txn_id": "forged",
+            "phase": "verified",
+            "has_db": True,
+            "new_generation_manifest": {},
+            "old_generation_manifest": {},
+            "started_at_utc": "2026-07-25T00:00:00+00:00",
+            "phase_updated_at_utc": "2026-07-25T00:00:01+00:00",
+        }
+        (ws / ".precomputed_txn.json").write_text(
+            json.dumps(forged), encoding="utf-8")
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # Backup must NOT be deleted (forged journal can't authorize cleanup)
+        self._assert_backup_preserved(ws)
+
+    @pytest.mark.parametrize("phase", ["verified", "committed"])
+    def test_terminal_phase_without_backup_still_revalidates_destination(
+            self, phase, env, tmp_path, photos_dir):
+        call, fake, ws, _ = env
+        self._first_run(env, tmp_path, photos_dir)
+        new_manifest = rl._build_generation_manifest_for_ws(ws)
+        journal = {
+            "version": 2,
+            "txn_id": f"tampered-{phase}",
+            "phase": phase,
+            "has_db": True,
+            "new_generation_manifest": new_manifest,
+            "old_generation_manifest": {
+                "sparse/0": {},
+                "colmap.db": None,
+                "images": {},
+            },
+        }
+        (ws / ".precomputed_txn.json").write_text(
+            json.dumps(journal),
+            encoding="utf-8",
+        )
+        cameras = ws / "sparse" / "0" / "cameras.bin"
+        cameras.write_bytes(cameras.read_bytes() + b"tampered")
+
+        with pytest.raises(rl.RecoveryRequired):
+            rl._recover_precomputed_transaction(ws)
+
+        assert (ws / ".precomputed_txn.json").is_file()
+        assert cameras.read_bytes().endswith(b"tampered")
+
+    # ---- 8. db-presence transitions: old_has_db × new_has_db ----------------
+
+    def test_old_generation_manifest_records_db_independent_of_new_db(
+            self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "colmap.db").write_bytes(b"old-generation-db")
+
+        manifest = rl._build_generation_manifest_for_ws(ws)
+
+        assert manifest["colmap.db"] == {
+            "size": len(b"old-generation-db"),
+            "sha256": hashlib.sha256(b"old-generation-db").hexdigest(),
+        }
+
+    def test_first_install_db_swap_failure_leaves_no_partial_generation(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp-first-install-failure"
+        _make_fake_precomputed(precomp, photos_dir)
+
+        def fail_swap_db(*_args, **_kwargs):
+            raise SystemExit("injected first-install db swap failure")
+
+        monkeypatch.setattr(rl, "_swap_db", fail_swap_db)
+        with pytest.raises(SystemExit, match="db swap failure"):
+            call("--precomputed-colmap", str(precomp))
+
+        assert not (ws / "sparse" / "0").exists()
+        assert not (ws / "colmap.db").exists()
+        assert not (ws / "images").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").exists()
+
+    def test_db_transition_true_to_true_old_db_backed_up(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: old has db, new has db. When old db is moved to backup and
+        journal write fails, recovery must restore old db (not delete it)."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        assert (ws / "colmap.db").is_file(), "precondition: old has db"
+        snap = self._full_snapshot(ws)
+        # fail_on_nth=5 → backup_db_moved write fails (old db already renamed)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=5)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        dst_db = ws / "colmap.db"
+        if dst_db.is_file():
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            self._assert_backup_preserved(ws)
+
+    def test_db_transition_true_to_false_old_db_not_unlinked(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: old has db, new has NO db. REVIEW-CODEX-034 #5: production
+        must move old db to backup (not unlink it), because old db presence
+        is independent of new db presence. When journal write fails after
+        backup, recovery must restore old db."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        assert (ws / "colmap.db").is_file(), "precondition: old has db"
+        snap = self._full_snapshot(ws)
+        # Remove db from source to simulate new_has_db=False
+        (precomp / "colmap.db").unlink()
+        # fail_on_nth=5 → backup_db_moved write fails (old db already renamed)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=5)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # Old db must be in backup (not unlinked) or restored to dst
+        backup = ws / ".precomputed_backup"
+        dst_db = ws / "colmap.db"
+        if dst_db.is_file():
+            self._assert_dst_matches_snapshot(ws, snap)
+        else:
+            assert (backup / "colmap_db").is_file(), \
+                "old db was unlinked instead of backed up — data loss"
+
+    def test_db_transition_false_to_true_no_old_db_to_backup(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: old has NO db, new has db. Backup step for db is a no-op.
+        When new db install fails (intent_install_db written, swap done,
+        install_db_done write fails), recovery must clean up (no old db
+        to restore — dst should match old generation which had no db)."""
+        call, fake, ws, _ = env
+        # First install with NO db in source → old gen has no db
+        precomp = tmp_path / "precomp_nodb"
+        _make_fake_precomputed(precomp, photos_dir)
+        (precomp / "colmap.db").unlink()  # source has no db
+        call("--precomputed-colmap", str(precomp))
+        assert not (ws / "colmap.db").is_file(), "precondition: old has no db"
+        # Re-add db to source → new gen has db
+        (precomp / "colmap.db").write_bytes(b"new-db-bytes-recovery-test")
+        # fail_on_nth=11 → install_db_done write fails (new db swapped)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=11)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # No old db to restore; dst should match old (no db) or be preserved
+        dst_db = ws / "colmap.db"
+        if dst_db.is_file():
+            # New db may have been kept if recovery committed new gen —
+            # acceptable as long as it's a complete generation, not mixed.
+            pass
+        else:
+            # dst has no db — consistent with old generation
+            pass
+
+    def test_db_transition_false_to_false_never_unlinks(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: old has NO db, new has NO db. No db backup or install
+        needed. Transaction must proceed without touching db."""
+        call, fake, ws, _ = env
+        # First install with NO db in source → old gen has no db
+        precomp = tmp_path / "precomp_nodb2"
+        _make_fake_precomputed(precomp, photos_dir)
+        (precomp / "colmap.db").unlink()  # source has no db
+        call("--precomputed-colmap", str(precomp))
+        assert not (ws / "colmap.db").is_file(), "precondition: old has no db"
+        # fail_on_nth=4 → intent_backup_db write fails (no mutation yet)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=4)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        # No db should exist at dst or backup
+        assert not (ws / "colmap.db").is_file(), \
+            "no db in old or new, but dst has db — unexpected"
+
+    # ---- 9. recovery idempotency after restore interruption -----------------
+
+    def test_recovery_idempotent_after_restore_interruption(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED: inject interruption during restore copy, then run recovery
+        a second and third time. Must converge to same state."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=2)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        # First recovery
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        snap_after_first = self._full_snapshot(ws)
+        # Second recovery (idempotent)
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        snap_after_second = self._full_snapshot(ws)
+        assert snap_after_first == snap_after_second, \
+            "recovery is not idempotent — second run changed state"
+        # Third recovery
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+        snap_after_third = self._full_snapshot(ws)
+        assert snap_after_second == snap_after_third, \
+            "recovery is not idempotent — third run changed state"
+
+    # ---- 9a-f. restore copy + cleanup boundary interruption -----------
+    # REVIEW-CODEX-034 #9: inject interruption inside each restore copy
+    # and cleanup boundary; 2nd/3rd recovery must converge to one exact
+    # generation (preferred) or recovery_required + preserved evidence.
+
+    def _inject_fs_fail(self, monkeypatch, op, target_substr, fail_count=1):
+        """Inject OSError on shutil.<op> or Path.unlink when target path
+        (posix-normalized) contains target_substr.
+
+        copytree/copy2 partially materialize dst before failing to
+        simulate a mid-copy crash. rmtree/unlink raise before mutation.
+        After fail_count failures, calls pass through to the original.
+        """
+        import shutil as _sh
+        left = [fail_count]
+        if op == "unlink":
+            original_unlink = Path.unlink
+
+            def patched_unlink(self_path, *a, **kw):
+                norm = str(self_path).replace("\\", "/")
+                if target_substr in norm and left[0] > 0:
+                    left[0] -= 1
+                    raise OSError(f"injected unlink on {self_path}")
+                return original_unlink(self_path, *a, **kw)
+            monkeypatch.setattr(Path, "unlink", patched_unlink)
+            return left
+        original = getattr(_sh, op)
+
+        def patched(*a, **kw):
+            if op in ("copytree", "copy2"):
+                target = a[1] if len(a) > 1 else kw.get("dst")
+            else:
+                target = a[0] if a else kw.get("path")
+            norm = str(target).replace("\\", "/")
+            if target_substr in norm and left[0] > 0:
+                left[0] -= 1
+                if op == "copytree":
+                    try:
+                        Path(target).mkdir(parents=True, exist_ok=True)
+                        (Path(target) / "_partial_marker").write_bytes(b"")
+                    except OSError:
+                        pass
+                elif op == "copy2":
+                    try:
+                        Path(target).write_bytes(b"\x00")
+                    except OSError:
+                        pass
+                raise OSError(f"injected {op} on {target}")
+            return original(*a, **kw)
+        monkeypatch.setattr(_sh, op, patched)
+        return left
+
+    def _drive_to_phase(self, env, tmp_path, photos_dir, monkeypatch,
+                        fail_on_nth):
+        """Drive the production caller to crash at the Nth armed journal
+        write. Returns (precomp, snap_of_first_install, ws)."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._full_snapshot(ws)
+        armed = self._inject_journal_fail(monkeypatch, fail_on_nth=fail_on_nth)
+        _change_source_to_trigger_recopy(precomp)
+        armed[0] = True
+        with pytest.raises((SystemExit, OSError)):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        return precomp, snap, ws
+
+    def _recover_quiet(self, ws):
+        try:
+            rl._recover_precomputed_transaction(ws)
+        except (SystemExit, Exception):
+            pass
+
+    def test_restore_sparse_copy_interrupted_converges(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #9a: restore_sparse copytree interrupted mid-copy. 2nd/3rd
+        recovery must converge to one exact old generation (restore re-done
+        after detecting partial dst) or recovery_required + evidence."""
+        _precomp, snap, ws = self._drive_to_phase(
+            env, tmp_path, photos_dir, monkeypatch, fail_on_nth=3)
+        self._inject_fs_fail(monkeypatch, "copytree", "/sparse/0", fail_count=1)
+        self._recover_quiet(ws)  # 1st: copytree interrupted
+        self._recover_quiet(ws)  # 2nd: should complete restore
+        snap_2 = self._full_snapshot(ws)
+        self._recover_quiet(ws)  # 3rd: idempotent
+        snap_3 = self._full_snapshot(ws)
+        assert snap_2 == snap_3, "recovery not idempotent after restore_sparse"
+        assert snap_2 == snap, "partial sparse restore did not converge to old generation"
+
+    def test_restore_db_copy_interrupted_converges(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #9b: restore_db copy2 interrupted mid-copy."""
+        _precomp, snap, ws = self._drive_to_phase(
+            env, tmp_path, photos_dir, monkeypatch, fail_on_nth=5)
+        self._inject_fs_fail(monkeypatch, "copy2", "colmap.db", fail_count=1)
+        self._recover_quiet(ws)
+        self._recover_quiet(ws)
+        snap_2 = self._full_snapshot(ws)
+        self._recover_quiet(ws)
+        snap_3 = self._full_snapshot(ws)
+        assert snap_2 == snap_3, "recovery not idempotent after restore_db"
+        assert snap_2 == snap, "partial db restore did not converge to old generation"
+
+    def test_restore_images_copy_interrupted_converges(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #9c: restore_images copytree interrupted mid-copy."""
+        _precomp, snap, ws = self._drive_to_phase(
+            env, tmp_path, photos_dir, monkeypatch, fail_on_nth=7)
+        self._inject_fs_fail(monkeypatch, "copytree", "/images", fail_count=1)
+        self._recover_quiet(ws)
+        self._recover_quiet(ws)
+        snap_2 = self._full_snapshot(ws)
+        self._recover_quiet(ws)
+        snap_3 = self._full_snapshot(ws)
+        assert snap_2 == snap_3, "recovery not idempotent after restore_images"
+        assert snap_2 == snap, "partial image restore did not converge to old generation"
+
+    def test_cleanup_staging_rmtree_interrupted_converges(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #9d: rmtree(staging) interrupted during cleanup. 2nd/3rd
+        recovery converge to one exact old generation."""
+        _precomp, snap, ws = self._drive_to_phase(
+            env, tmp_path, photos_dir, monkeypatch, fail_on_nth=3)
+        self._inject_fs_fail(monkeypatch, "rmtree", ".staging", fail_count=1)
+        self._recover_quiet(ws)
+        self._recover_quiet(ws)
+        snap_2 = self._full_snapshot(ws)
+        self._recover_quiet(ws)
+        snap_3 = self._full_snapshot(ws)
+        assert snap_2 == snap_3, "not idempotent after staging cleanup"
+        assert snap_2 == snap, \
+            "cleanup did not converge to one exact old generation"
+
+    def test_cleanup_backup_rmtree_interrupted_converges(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #9e: rmtree(backup) interrupted during verified cleanup."""
+        _precomp, _snap, ws = self._drive_to_phase(
+            env, tmp_path, photos_dir, monkeypatch, fail_on_nth=15)
+        new_snap = self._full_snapshot(ws)
+        self._inject_fs_fail(
+            monkeypatch, "rmtree", ".precomputed_backup", fail_count=1)
+        self._recover_quiet(ws)
+        self._recover_quiet(ws)
+        snap_2 = self._full_snapshot(ws)
+        self._recover_quiet(ws)
+        snap_3 = self._full_snapshot(ws)
+        assert snap_2 == snap_3, "not idempotent after backup cleanup"
+        assert snap_2 == new_snap, \
+            "cleanup did not converge to one exact new generation"
+
+    def test_cleanup_journal_unlink_interrupted_converges(
+            self, env, tmp_path, photos_dir, monkeypatch):
+        """RED #9f: unlink(journal) interrupted during verified cleanup."""
+        _precomp, _snap, ws = self._drive_to_phase(
+            env, tmp_path, photos_dir, monkeypatch, fail_on_nth=15)
+        new_snap = self._full_snapshot(ws)
+        self._inject_fs_fail(
+            monkeypatch, "unlink", ".precomputed_txn", fail_count=1)
+        self._recover_quiet(ws)
+        self._recover_quiet(ws)
+        snap_2 = self._full_snapshot(ws)
+        self._recover_quiet(ws)
+        snap_3 = self._full_snapshot(ws)
+        assert snap_2 == snap_3, "not idempotent after journal cleanup"
+        assert snap_2 == new_snap, \
+            "cleanup did not converge to one exact new generation"

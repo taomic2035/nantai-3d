@@ -30,40 +30,19 @@
      （Phase 1 已完成，Phase 2 仍未交付）；
   2. `handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`。
   007 仅可在独立新路径上并行，触及 renderer/runtime/journal 时必须先协调。
-- **2026-07-25 GLM 明确连续队列与 Git 网络规则**：先修 P7a-6 当前真实
-  `cameras.bin` 格式偏差，再做 exact-file-set 原子替换、content-addressed source
-  report、fresh P5b→P7 exact-copy rehearsal，之后才进入 P6c/P7b 与 Batch27/28/29
-  LOD 几何消费。GitHub 网络命令统一用单次临时代理
+- **2026-07-25 GLM 明确连续队列与 Git 网络规则**：P7a-6 解析器与
+  precomputed-COLMAP WAL v3 已由 Codex 对抗性复核并修正；后续做
+  content-addressed source report、fresh P5b→P7 exact-copy rehearsal，
+  之后才进入 P6c/P7b 与 Batch27/28/29 LOD 几何消费。GitHub 网络命令统一用单次临时代理
   `git -c http.proxy=http://127.0.0.1:7890 ...`，不得写全局代理。完整输入、RED
   测试、完成证据、禁止路径和连续工作规则见
-  `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。当前 shared-main
-  含 held P7 祖先，GLM 继续小步本地提交但不得单独 push；Codex 全部放行后才用该
-  临时代理一次推送并以 `ls-remote` 核对 SHA。
-- **GLM `5a98ed9` corrective commit 仍 held**：精确 0–11 camera-model 表和真实
-  `model_converter` fixture 已由 Codex 独立重生并确认 5 个 BIN 逐字节一致；但实测
-  PINHOLE `fy=-1` 与四元数有限分量平方和溢出为 `inf` 均被当前 validator 接受。
-  驱动器/UNC/反斜杠路径和 normalization collision 也仍未形成 host-independent
-  fail-closed 合同，fixture 缺失还会 skip。必须按
-  `handoff/REVIEW-CODEX-031-glm-5a98ed9-colmap-parser.md` 修正并补 RED；不得 push。
-- **GLM transaction RED WIP 需先修测试合同**：损坏 journal 时不得删除唯一 backup
-  并保留可能混代的 live destination；图片快照必须比较 exact set + size + SHA，而非
-  只有文件名；六个 old→backup/new→live rename 边界、journal 写入、rollback 中断和
-  restart 幂等必须分别注入。详见
-  `handoff/REVIEW-CODEX-032-glm-transaction-red-tests.md`。
-- **GLM `d12e265` 仍 held，且是当前唯一任务**：119 tests + Ruff 绿不构成放行。
-  Codex fresh probe 已证明 journal=`prepared` 且第一次 old→backup 后崩溃、journal
-  损坏、journal 缺失三条路径都会删除唯一 backup，并分别留下缺失 sparse 或新旧混代。
-  根因是非原子 journal + 粗粒度 state，不能鉴别六个 rename 边界，也没有 old/new
-  exact-byte manifest 和可中断幂等 rollback。GLM 不得先做 source report；必须按
-  `handoff/REVIEW-CODEX-033-glm-d12e265-transaction.md` 的固定 RED 顺序修正。
-- **GLM transaction v2 candidate 仍 HELD**：虽然 144/145、283/287 与 Ruff 绿，
-  Codex 以“rename/unlink 已完成、下一 phase 尚未落盘”的真实 prior-phase 窗口重跑
-  6 个 fresh probe，结果 `6/6 ok=false`：缺 sparse/db/images、NEW sparse + OLD
-  db/images 混代、伪 `verified` 删 backup、old-db→new-no-db 丢失均已实测。测试不能先
-  手写 post-operation phase；必须改成 WAL intent/completion、严格 journal schema、
-  独立 old/new db presence，并以 old/new exact manifest 选代和验证后清理。唯一当前
-  任务与固定 RED 顺序见
-  `handoff/REVIEW-CODEX-034-glm-transaction-v2-candidate.md`。
+  `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。
+- **P7 解析器/WAL held 已清除**：Codex 在 GLM v3 基础上补出并修复双焦距 `fy`、
+  qvec overflow、跨平台路径规范化、fixture 强制 SHA、旧/新 DB 独立性、首次安装半代、
+  中断 restore 收敛与无 backup 终态复验。`tests/test_reconstruct_local.py` 当前
+  `200 passed, 1 skipped`（Windows 无 symlink 权限），Ruff 绿。旧 review 031–034
+  只作历史缺陷记录；最终边界见
+  `handoff/REVIEW-CODEX-035-glm-p7-parser-wal-v3.md`。
 - **GLM 后续明确任务，不得以“无事可做”停工**：P7 transaction 等 Codex review 时，
   可在独立新路径实现 exact-build roaming-graph v1 的纯模型、Blender emitter 与
   fail-closed 测试；先交至少 2 个真实 modeled space、1 个实测 portal、2 条 reciprocal

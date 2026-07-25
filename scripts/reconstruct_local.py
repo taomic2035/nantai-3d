@@ -18,12 +18,14 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import struct
 import subprocess
 import sys
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -315,6 +317,24 @@ _COLMAP_MODEL_NUM_PARAMS: dict[int, int] = {
     11: 16,  # RAD_TAN_THIN_PRISM_FISHEYE
 }
 
+# Explicit focal-parameter layout from the same COLMAP 4.1.0 model table.
+# Models with independent fx/fy must validate both; parameter count alone is
+# not a safe way to infer focal layout.
+_COLMAP_MODEL_FOCAL_INDICES: dict[int, tuple[int, ...]] = {
+    0: (0,),
+    1: (0, 1),
+    2: (0,),
+    3: (0,),
+    4: (0, 1),
+    5: (0, 1),
+    6: (0, 1),
+    7: (0, 1),
+    8: (0,),
+    9: (0,),
+    10: (0, 1),
+    11: (0, 1),
+}
+
 
 def _parse_colmap_cameras_bin(path: Path) -> list[dict]:
     """解析 COLMAP cameras.bin 二进制 → list of camera dicts。
@@ -429,15 +449,36 @@ def _parse_colmap_images_bin(path: Path) -> list[dict]:
     return images
 
 
+def _normalize_colmap_image_name(name: str) -> str:
+    """Return one host-independent safe POSIX-relative COLMAP image name."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("image_name 必须是非空 UTF-8 字符串")
+    normalized = name.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        raise ValueError(
+            f"image_name={name!r} 是绝对/驱动器路径（必须为相对路径）"
+        )
+    parts = normalized.split("/")
+    if any(part == "" for part in parts):
+        raise ValueError(
+            f"image_name={name!r} 含空路径组件或重复分隔符"
+        )
+    if any(part in {".", ".."} for part in parts):
+        raise ValueError(
+            f"image_name={name!r} 含不安全路径组件 '.' 或 '..'"
+        )
+    return "/".join(parts)
+
+
 def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
     """校验 precomputed COLMAP sparse/0 的语义完整性（不止前 8 字节 header）。
 
     HANDOFF-GLM-008 Task 2：仅读 images.bin 头 8 字节 num_reg_images 不等于一个
     合法的 recovered camera track。一个可信的 sparse model 需要：
     1. cameras.bin：无重复/零 camera_id、非零 width/height、params 全 finite、
-       焦距（params[0]）为正；
-    2. images.bin：无重复/零 image_id、无重复 name、name 为安全相对路径（非绝对/
-       非遍历）、qvec/tvec 全 finite、qvec 可归一化（非近零）、camera_id 引用存在；
+       每个模型声明的 fx/fy 焦距均为正；
+    2. images.bin：无重复/零 image_id、规范化后 name 无碰撞、name 满足统一的
+       POSIX-relative grammar、qvec/tvec 全 finite、qvec 可归一化、camera_id 引用存在；
     3. 每个 image_name 在 photos/ 找得到对应文件（无 phantom image）。
 
     不要求 num_reg_images == len(photos)：COLMAP 正常会丢弃未注册的图像，这是
@@ -479,11 +520,19 @@ def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
                 raise SystemExit(
                     f"--precomputed-colmap: cameras.bin camera_id={cid} "
                     f"param[{j}]={p} 非有限（NaN/Inf）→ 位姿不可信")
-        # 焦距是所有 COLMAP 模型的第一个参数，必须为正
-        if cam["params"] and cam["params"][0] <= 0:
+        focal_indices = _COLMAP_MODEL_FOCAL_INDICES.get(cam["model"])
+        if focal_indices is None:
             raise SystemExit(
                 f"--precomputed-colmap: cameras.bin camera_id={cid} "
-                f"焦距 params[0]={cam['params'][0]} 非正 → 位姿不可信")
+                f"model={cam['model']} 缺少焦距布局合同"
+            )
+        for focal_index in focal_indices:
+            focal = cam["params"][focal_index]
+            if focal <= 0:
+                raise SystemExit(
+                    f"--precomputed-colmap: cameras.bin camera_id={cid} "
+                    f"焦距 params[{focal_index}]={focal} 非正 → 位姿不可信"
+                )
 
     # --- images.bin 语义校验 ---
     img_ids: set[int] = set()
@@ -498,21 +547,20 @@ def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
                 f"--precomputed-colmap: images.bin 有重复 image_id={iid}")
         img_ids.add(iid)
 
-        name = img["name"]
+        raw_name = img["name"]
+        try:
+            name = _normalize_colmap_image_name(raw_name)
+        except ValueError as exc:
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_name 无效: {exc}"
+            ) from exc
         if name in seen_names:
             raise SystemExit(
-                f"--precomputed-colmap: images.bin 有重复 image_name: {name!r}")
+                "--precomputed-colmap: images.bin image_name 规范化后重复: "
+                f"{raw_name!r} -> {name!r}"
+            )
         seen_names.add(name)
-
-        # 安全相对路径：非绝对、非遍历
-        if name.startswith("/") or name.startswith("\\") or name.startswith("\\\\"):
-            raise SystemExit(
-                f"--precomputed-colmap: images.bin image_name={name!r} "
-                f"是绝对路径（必须为相对路径）")
-        if ".." in Path(name).parts:
-            raise SystemExit(
-                f"--precomputed-colmap: images.bin image_name={name!r} "
-                f"含遍历组件 '..'（安全拒绝）")
+        img["normalized_name"] = name
 
         # qvec/tvec finite
         qvec = img["qvec"]
@@ -527,7 +575,12 @@ def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
                 f"tvec={tvec} 含非有限值")
 
         # qvec 可归一化（非近零）
-        qnorm = math.sqrt(sum(v * v for v in qvec))
+        qnorm = math.hypot(*qvec)
+        if not math.isfinite(qnorm):
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_id={iid} "
+                f"qvec 范数非有限 → 不可归一化 → 位姿不可信"
+            )
         if qnorm < 1e-12:
             raise SystemExit(
                 f"--precomputed-colmap: images.bin image_id={iid} "
@@ -540,11 +593,24 @@ def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
                 f"引用 camera_id={img['camera_id']} 不在 cameras.bin 中")
 
     # --- image_name ↔ photos 绑定 ---
-    names = [img["name"] for img in images]
+    names = [img["normalized_name"] for img in images]
     photo_names: set[str] = set()
     for p in photos.rglob("*"):
         if p.is_file() and p.suffix.lower() in FINGERPRINT_SUFFIXES:
-            photo_names.add(p.relative_to(photos).as_posix())
+            relative = p.relative_to(photos).as_posix()
+            try:
+                normalized = _normalize_colmap_image_name(relative)
+            except ValueError as exc:
+                raise SystemExit(
+                    "--precomputed-colmap: photos 目录含不可绑定的路径 "
+                    f"{relative!r}: {exc}"
+                ) from exc
+            if normalized in photo_names:
+                raise SystemExit(
+                    "--precomputed-colmap: photos 路径规范化碰撞: "
+                    f"{relative!r} -> {normalized!r}"
+                )
+            photo_names.add(normalized)
     missing = [name for name in names if name not in photo_names]
     if missing:
         raise SystemExit(
@@ -571,48 +637,542 @@ def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
 _PRECOMPUTED_TXN_JOURNAL = ".precomputed_txn.json"
 _PRECOMPUTED_STAGING = ".staging_precomputed"
 _PRECOMPUTED_BACKUP = ".precomputed_backup"
-_TXN_VERSION = 1
+_TXN_VERSION = 2
+
+# v2 transaction phases (in order). Each destructive rename boundary gets its
+# own phase so recovery can resume precisely. REVIEW-CODEX-034 #4: each
+# destructive action is preceded by an ``intent_*`` phase (write-ahead) —
+# recovery seeing an intent phase must NOT assume the mutation ran; it must
+# recompute exact bytes (REVIEW-CODEX-034 #6) to decide whether the mutation
+# completed (→ advance to the matching ``*_moved``/``*_done`` phase) or did
+# not run (→ revert to the prior phase).
+#
+#   prepared                  : staging copy + semantic validate done; no backup
+#   intent_backup_sparse      : about to rename old sparse/0 → backup
+#   backup_sparse_moved       : old sparse/0 moved to backup
+#   intent_backup_db          : about to rename/unlink old colmap.db
+#   backup_db_moved           : old colmap.db handled
+#   intent_backup_images      : about to rename old images/
+#   backup_images_moved       : old images/ moved to backup
+#   intent_install_sparse     : about to swap new sparse → dst
+#   install_sparse_done       : new sparse installed
+#   intent_install_db         : about to swap new db → dst
+#   install_db_done           : new db installed
+#   intent_install_images     : about to swap new images → dst
+#   install_images_done       : all three new installed; verify pending
+#   verified                  : post-swap byte+semantic verify passed
+#   committed                 : cleanup done; transaction complete
+#   recovery_required         : ambiguous state; preserve evidence, raise
+_PHASE_PREPARED = "prepared"
+_PHASE_INTENT_BACKUP_SPARSE = "intent_backup_sparse"
+_PHASE_BACKUP_SPARSE = "backup_sparse_moved"
+_PHASE_INTENT_BACKUP_DB = "intent_backup_db"
+_PHASE_BACKUP_DB = "backup_db_moved"
+_PHASE_INTENT_BACKUP_IMAGES = "intent_backup_images"
+_PHASE_BACKUP_IMAGES = "backup_images_moved"
+_PHASE_INTENT_INSTALL_SPARSE = "intent_install_sparse"
+_PHASE_INSTALL_SPARSE = "install_sparse_done"
+_PHASE_INTENT_INSTALL_DB = "intent_install_db"
+_PHASE_INSTALL_DB = "install_db_done"
+_PHASE_INTENT_INSTALL_IMAGES = "intent_install_images"
+_PHASE_INSTALL_IMAGES = "install_images_done"
+_PHASE_VERIFIED = "verified"
+_PHASE_COMMITTED = "committed"
+_PHASE_RECOVERY_REQUIRED = "recovery_required"
+
+# Ordered list for "have we passed this boundary" checks.
+_PHASE_ORDER = (
+    _PHASE_PREPARED,
+    _PHASE_INTENT_BACKUP_SPARSE,
+    _PHASE_BACKUP_SPARSE,
+    _PHASE_INTENT_BACKUP_DB,
+    _PHASE_BACKUP_DB,
+    _PHASE_INTENT_BACKUP_IMAGES,
+    _PHASE_BACKUP_IMAGES,
+    _PHASE_INTENT_INSTALL_SPARSE,
+    _PHASE_INSTALL_SPARSE,
+    _PHASE_INTENT_INSTALL_DB,
+    _PHASE_INSTALL_DB,
+    _PHASE_INTENT_INSTALL_IMAGES,
+    _PHASE_INSTALL_IMAGES,
+    _PHASE_VERIFIED,
+    _PHASE_COMMITTED,
+)
+
+# Map each intent phase → (matching complete phase, prior phase). Used by
+# recovery to advance or revert when it sees an intent phase on disk.
+_INTENT_NEXT = {
+    _PHASE_INTENT_BACKUP_SPARSE: _PHASE_BACKUP_SPARSE,
+    _PHASE_INTENT_BACKUP_DB: _PHASE_BACKUP_DB,
+    _PHASE_INTENT_BACKUP_IMAGES: _PHASE_BACKUP_IMAGES,
+    _PHASE_INTENT_INSTALL_SPARSE: _PHASE_INSTALL_SPARSE,
+    _PHASE_INTENT_INSTALL_DB: _PHASE_INSTALL_DB,
+    _PHASE_INTENT_INSTALL_IMAGES: _PHASE_INSTALL_IMAGES,
+}
+_INTENT_PRIOR = {
+    _PHASE_INTENT_BACKUP_SPARSE: _PHASE_PREPARED,
+    _PHASE_INTENT_BACKUP_DB: _PHASE_BACKUP_SPARSE,
+    _PHASE_INTENT_BACKUP_IMAGES: _PHASE_BACKUP_DB,
+    _PHASE_INTENT_INSTALL_SPARSE: _PHASE_BACKUP_IMAGES,
+    _PHASE_INTENT_INSTALL_DB: _PHASE_INSTALL_SPARSE,
+    _PHASE_INTENT_INSTALL_IMAGES: _PHASE_INSTALL_DB,
+}
+
+
+class RecoveryRequired(SystemExit):
+    """Recovery could not safely converge — evidence preserved for manual
+    inspection. Caller must abort; do not start a new transaction."""
 
 
 def _write_txn_journal(path: Path, journal: dict) -> None:
+    """Atomic journal write: temp file in same dir + os.replace.
+
+    REVIEW-CODEX-033 #4: direct write_text can truncate the journal on
+    interruption. A same-directory temp + atomic replace guarantees the
+    journal is either fully the old version or fully the new version —
+    never a partial mix. Temp-write and replace failures raise (caller
+    decides); the existing journal is left intact.
+    """
     blob = json.dumps(journal, sort_keys=True, ensure_ascii=False, indent=2)
-    path.write_text(blob, encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(blob, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise SystemExit(f"事务日志写入失败 (atomic): {e}") from e
+
+
+def _recursive_manifest(root: Path) -> dict[str, dict[str, int | str]]:
+    """Recursive byte manifest of a directory tree.
+
+    Returns ``{relative_posix_path: {"size": int, "sha256": str}}`` for
+    every regular file under ``root``. Same-name changed bytes produce a
+    different sha256, so byte-level mutation is detectable. Symlinks are
+    rejected (provenance safety — a symlink could point anywhere).
+
+    Nonexistent root → empty manifest (caller decides what to do).
+    """
+    manifest: dict[str, dict[str, int | str]] = {}
+    if not root.exists():
+        return manifest
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink():
+            raise SystemExit(
+                f"拒绝符号链接（provenance safety）: {p}")
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        manifest[rel] = {
+            "size": p.stat().st_size,
+            "sha256": _sha256_file(p),
+        }
+    return manifest
+
+
+def _manifests_equal(a: dict, b: dict) -> tuple[bool, str]:
+    """Compare two recursive manifests. Returns (equal, reason).
+
+    Used by post-swap verification. Both manifests must have the same set
+    of relative paths, and each entry's size + sha256 must match.
+    """
+    a_keys = set(a)
+    b_keys = set(b)
+    if a_keys != b_keys:
+        only_a = sorted(a_keys - b_keys)
+        only_b = sorted(b_keys - a_keys)
+        return False, (
+            f"file set mismatch: only_in_actual={only_a} only_in_expected={only_b}")
+    for k in a_keys:
+        if a[k] != b[k]:
+            return False, f"byte mismatch at {k}: actual={a[k]} expected={b[k]}"
+    return True, ""
+
+
+def _dirs_byte_equal(a: Path, b: Path) -> bool:
+    """True iff two directories have identical recursive byte manifests.
+
+    REVIEW-CODEX-034 #9: restore helpers use this to detect a partial dst
+    left by an interrupted copy (e.g. ``shutil.copytree`` crashed mid-way).
+    If dst exists but bytes differ from backup, the restore must rmtree
+    dst and re-copy so 2nd/3rd recovery converges to one exact generation
+    instead of stalling at ``recovery_required`` with a partial live dst.
+    """
+    if not a.is_dir() or not b.is_dir():
+        return False
+    ma = _recursive_manifest(a)
+    mb = _recursive_manifest(b)
+    ok, _ = _manifests_equal(ma, mb)
+    return ok
+
+
+def _dst_matches_generation(ws: Path, manifest: dict) -> bool:
+    """Check if the current destination bytes exactly match a generation
+    manifest.
+
+    REVIEW-CODEX-034 #6: recovery must identify a complete candidate by
+    recomputing exact bytes, not from phase names or path existence.
+
+    The manifest has the shape::
+
+        {
+            "sparse/0": {rel_path: {size, sha256}, ...} | {},
+            "colmap.db": {size, sha256} | None,
+            "images":    {rel_path: {size, sha256}, ...} | {},
+        }
+
+    An empty sparse/0 manifest means the old generation had no sparse
+    (first install). A None colmap.db means that generation had no db.
+
+    Returns True only if ALL three targets match exactly: same file set,
+    same sizes, same SHA-256s. Any mismatch → False (caller decides
+    whether to rollback or preserve evidence).
+    """
+    # sparse/0
+    actual_sparse = _recursive_manifest(ws / "sparse" / "0")
+    expected_sparse = manifest.get("sparse/0") or {}
+    ok, _ = _manifests_equal(actual_sparse, expected_sparse)
+    if not ok:
+        return False
+    # colmap.db
+    expected_db = manifest.get("colmap.db")
+    dst_db = ws / "colmap.db"
+    if expected_db is None:
+        if dst_db.is_file():
+            return False  # expected no db, but dst has one
+    else:
+        if not dst_db.is_file():
+            return False  # expected db, but dst missing
+        actual_db = {"size": dst_db.stat().st_size,
+                     "sha256": _sha256_file(dst_db)}
+        if actual_db != expected_db:
+            return False
+    # images/
+    actual_img = _recursive_manifest(ws / "images")
+    expected_img = manifest.get("images") or {}
+    ok, _ = _manifests_equal(actual_img, expected_img)
+    if not ok:
+        return False
+    return True
+
+
+def _validate_journal_v2(journal: dict) -> tuple[bool, str]:
+    """Strict validation of a v2 journal before any cleanup decision.
+
+    REVIEW-CODEX-034 #3/#5: a parseable but structurally invalid journal
+    must NOT authorize backup deletion. Validates:
+    - version == 2
+    - txn_id is a non-empty string
+    - phase is in the allowlist
+    - has_db is a real bool
+    - new_generation_manifest is structurally valid (has sparse/0 key)
+    - old_generation_manifest is structurally valid (has sparse/0 key)
+
+    Returns (valid, reason). Invalid journals with real backup evidence
+    must preserve everything and raise RecoveryRequired.
+    """
+    if not isinstance(journal, dict):
+        return False, "journal is not a dict"
+    if journal.get("version") != 2:
+        return False, f"version != 2 (got {journal.get('version')!r})"
+    txn_id = journal.get("txn_id")
+    if not isinstance(txn_id, str) or not txn_id:
+        return False, f"txn_id missing or not a non-empty string ({txn_id!r})"
+    phase = journal.get("phase")
+    if phase not in _PHASE_ORDER and phase != _PHASE_RECOVERY_REQUIRED:
+        return False, f"phase {phase!r} not in allowlist"
+    has_db = journal.get("has_db")
+    if not isinstance(has_db, bool):
+        return False, f"has_db is not a bool ({has_db!r})"
+    new_manifest = journal.get("new_generation_manifest")
+    if not isinstance(new_manifest, dict) or "sparse/0" not in new_manifest:
+        return False, "new_generation_manifest missing or invalid (no sparse/0 key)"
+    old_manifest = journal.get("old_generation_manifest")
+    if not isinstance(old_manifest, dict) or "sparse/0" not in old_manifest:
+        return False, "old_generation_manifest missing or invalid (no sparse/0 key)"
+    return True, ""
+
+
+def _has_real_backup_evidence(backup: Path) -> bool:
+    """True iff backup dir contains at least one real backup member
+    (sparse_0 dir, colmap_db file, or images dir).
+
+    Used by recovery to decide whether to preserve evidence vs cleanup
+    stray staging/backup dirs. A backup dir containing only junk files
+    (e.g. from a corrupt test setup) is NOT real evidence.
+    """
+    if not backup.is_dir():
+        return False
+    return (backup / "sparse_0").is_dir() \
+        or (backup / "colmap_db").is_file() \
+        or (backup / "images").is_dir()
+
+
+def _restore_sparse_from_backup(ws: Path, backup: Path) -> None:
+    """Restore only sparse/0 from backup (idempotent, COPY — preserves backup).
+
+    If backup has sparse_0 and destination doesn't: copy backup → dst.
+    If backup has sparse_0 and destination also has sparse: leave both
+    (already restored — idempotent). If backup has no sparse_0: noop.
+
+    Uses COPY (shutil.copytree) not rename, so the backup member is preserved
+    as audit evidence. Callers that have already verified the destination
+    must explicitly rmtree backup when commit/cleanup is appropriate.
+    """
+    bk_sparse = backup / "sparse_0"
+    dst_sparse = ws / "sparse" / "0"
+    if not bk_sparse.is_dir():
+        return  # nothing to restore
+    if dst_sparse.exists():
+        if _dirs_byte_equal(dst_sparse, bk_sparse):
+            return
+        shutil.rmtree(dst_sparse)
+    (ws / "sparse").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(bk_sparse, dst_sparse)
+
+
+def _restore_db_from_backup(ws: Path, backup: Path) -> None:
+    """Restore only colmap.db from backup (idempotent, COPY — preserves backup).
+
+    If backup has colmap_db and destination doesn't: copy backup → dst.
+    If backup has colmap_db and destination has colmap.db: leave both.
+    If backup has no colmap_db: noop (do NOT delete destination db — that's
+    a destructive action reserved for commit/cleanup).
+    """
+    bk_db = backup / "colmap_db"
+    dst_db = ws / "colmap.db"
+    if not bk_db.is_file():
+        return
+    if dst_db.exists():
+        if dst_db.is_file() \
+                and dst_db.stat().st_size == bk_db.stat().st_size \
+                and _sha256_file(dst_db) == _sha256_file(bk_db):
+            return
+        dst_db.unlink()
+    shutil.copy2(bk_db, dst_db)
+
+
+def _restore_images_from_backup(ws: Path, backup: Path) -> None:
+    """Restore only images/ from backup (idempotent, COPY — preserves backup).
+
+    If backup has images/ and destination doesn't: copy backup → dst.
+    If both have images/: leave both (idempotent).
+    If backup has no images/: noop.
+    """
+    bk_img = backup / "images"
+    dst_img = ws / "images"
+    if not bk_img.is_dir():
+        return
+    if dst_img.exists():
+        if _dirs_byte_equal(dst_img, bk_img):
+            return
+        shutil.rmtree(dst_img)
+    shutil.copytree(bk_img, dst_img)
 
 
 def _restore_backup(ws: Path, backup: Path) -> None:
-    """Restore all three targets from backup (full rollback).
+    """Restore all three targets from backup (idempotent, full rollback).
 
-    Moves backup/{sparse_0, colmap_db, images} back to the destination,
-    overwriting any partial new content left by a failed swap. Each target
-    is only restored if the backup actually has it (first run has no backup).
+    Calls per-target restore helpers. Each target is only renamed if the
+    backup has it AND the destination doesn't (idempotent — safe to call
+    multiple times during multi-pass recovery).
     """
     if not backup.is_dir():
         return
-    # sparse/0
-    bk_sparse = backup / "sparse_0"
+    _restore_sparse_from_backup(ws, backup)
+    _restore_db_from_backup(ws, backup)
+    _restore_images_from_backup(ws, backup)
+
+
+def _resolve_intent_phase(
+        intent_phase: str,
+        ws: Path,
+        backup: Path,
+        staging: Path,
+        old_manifest: dict,
+        new_manifest: dict,
+        has_db: bool) -> str:
+    """Decide whether the destructive mutation described by an intent phase
+    actually ran, by recomputing exact bytes against immutable manifests.
+
+    REVIEW-CODEX-034 #4/#6: write-ahead logging means the journal may
+    persist the intent phase BEFORE the mutation runs (e.g. a crash or
+    injected journal-write failure between ``_write_txn_journal`` and the
+    following ``rename``/``unlink``). Recovery cannot assume the mutation
+    completed just because the intent is on disk.
+
+    Decision matrix per intent phase (using sparse/db/images target pairs):
+
+    backup_sparse intent (rename old dst sparse → backup/sparse_0):
+      - dst sparse/0 exists and bytes match old_manifest.sparse/0 →
+        mutation did NOT run → return "prior" (revert to prepared)
+      - dst sparse/0 absent AND backup/sparse_0 exists and bytes match
+        old_manifest.sparse/0 → mutation DID run → return "complete"
+      - else → "ambiguous"
+
+    backup_db intent (rename/unlink old dst db):
+      - has_db=True (mutation = rename old db → backup/colmap_db):
+          * dst db exists and matches old_manifest.colmap.db → NOT run
+          * dst db absent AND backup/colmap_db exists and matches
+            old_manifest.colmap.db → complete
+          * else → ambiguous
+      - has_db=False (mutation = unlink stale dst db if exists):
+          * dst db exists and matches old_manifest.colmap.db (which is
+            None) — wait, has_db=False means new gen has no db, but the
+            OLD gen might still have a db that needs unlinking.
+            old_manifest.colmap.db describes the OLD generation's db.
+            If old_manifest.colmap.db is None → old gen had no db,
+            mutation is a no-op → "complete" (idempotent noop).
+            Else → dst db should not exist post-mutation.
+              * dst db absent → complete
+              * dst db present and matches old_manifest.colmap.db → NOT run
+              * else → ambiguous
+
+    backup_images intent (rename old dst images → backup/images):
+      - dst images/ exists and bytes match old_manifest.images → NOT run
+      - dst images/ absent AND backup/images/ exists and bytes match
+        old_manifest.images → complete
+      - else → ambiguous
+
+    install_sparse intent (swap staging sparse → dst sparse):
+      - staging sparse/0 exists and bytes match new_manifest.sparse/0 →
+        mutation did NOT run → "prior"
+      - staging sparse/0 absent AND dst sparse/0 exists and bytes match
+        new_manifest.sparse/0 → mutation DID run → "complete"
+      - else → ambiguous
+
+    install_db intent (swap staging db → dst db):
+      - has_db=True:
+          * staging db exists and matches new_manifest.colmap.db → NOT run
+          * staging db absent AND dst db matches new_manifest.colmap.db → complete
+          * else → ambiguous
+      - has_db=False: mutation is a no-op (no new db to install; dst db
+        was already unlinked in backup_db phase) → "complete"
+
+    install_images intent (swap staging images → dst images):
+      - staging images/ exists and matches new_manifest.images → NOT run
+      - staging images/ absent AND dst images/ matches new_manifest.images → complete
+      - else → ambiguous
+
+    Manifest-shape note:
+      - new_manifest["sparse/0"] and old_manifest["sparse/0"] are dicts
+        ``{rel_path: {size, sha256}, ...}`` (possibly empty for old gen
+        on first install — empty dict means "that generation had no sparse
+        dir", not "missing").
+      - new_manifest["colmap.db"] and old_manifest["colmap.db"] are either
+        None (no db) or ``{"size": int, "sha256": str}``.
+      - new_manifest["images"] and old_manifest["images"] are dicts.
+    """
+    # Helper: does a target's bytes match a manifest entry?
+    def _sparse_matches(actual_dir: Path, expected: dict) -> bool:
+        if not expected:
+            return False  # empty expected → no sparse dir; caller handles
+        if not actual_dir.is_dir():
+            return False
+        actual = _recursive_manifest(actual_dir)
+        ok, _ = _manifests_equal(actual, expected)
+        return ok
+
+    def _db_matches(actual_path: Path, expected) -> bool:
+        if expected is None:
+            return not actual_path.is_file()
+        if not actual_path.is_file():
+            return False
+        return (actual_path.stat().st_size == expected["size"]
+                and _sha256_file(actual_path) == expected["sha256"])
+
+    def _images_matches(actual_dir: Path, expected: dict) -> bool:
+        if not actual_dir.is_dir():
+            return False
+        actual = _recursive_manifest(actual_dir)
+        ok, _ = _manifests_equal(actual, expected)
+        return ok
+
     dst_sparse = ws / "sparse" / "0"
-    if bk_sparse.is_dir():
-        (ws / "sparse").mkdir(parents=True, exist_ok=True)
-        if dst_sparse.exists():
-            shutil.rmtree(dst_sparse)
-        bk_sparse.rename(dst_sparse)
-    # colmap.db
-    bk_db = backup / "colmap_db"
     dst_db = ws / "colmap.db"
-    if bk_db.is_file():
-        if dst_db.exists():
-            dst_db.unlink()
-        bk_db.rename(dst_db)
-    elif dst_db.exists():
-        # Old generation had no db → remove stale dst db too
-        dst_db.unlink()
-    # images/
-    bk_img = backup / "images"
     dst_img = ws / "images"
-    if bk_img.is_dir():
-        if dst_img.exists():
-            shutil.rmtree(dst_img)
-        bk_img.rename(dst_img)
+    staging_sparse = staging / "sparse" / "0"
+    staging_db = staging / "colmap.db"
+    staging_img = staging / "images"
+    bk_sparse = backup / "sparse_0"
+    bk_db = backup / "colmap_db"
+    bk_img = backup / "images"
+
+    old_sparse = old_manifest.get("sparse/0") or {}
+    old_db = old_manifest.get("colmap.db")
+    old_images = old_manifest.get("images") or {}
+    new_sparse = new_manifest.get("sparse/0") or {}
+    new_db = new_manifest.get("colmap.db")
+    new_images = new_manifest.get("images") or {}
+
+    if intent_phase == _PHASE_INTENT_BACKUP_SPARSE:
+        # Mutation: rename old dst sparse → backup/sparse_0 (only if old
+        # gen actually had a sparse dir).
+        if not old_sparse:
+            # Old gen had no sparse (first install). Mutation is a no-op.
+            return "complete"
+        if _sparse_matches(dst_sparse, old_sparse):
+            return "prior"  # mutation did NOT run; dst still has old sparse
+        if (not dst_sparse.exists() and bk_sparse.is_dir()
+                and _sparse_matches(bk_sparse, old_sparse)):
+            return "complete"
+        return "ambiguous"
+
+    if intent_phase == _PHASE_INTENT_BACKUP_DB:
+        # Backup behavior depends only on OLD db presence. NEW db presence
+        # controls the later install step and must never erase old evidence.
+        if old_db is None:
+            # Old generation had no db, so backup is a no-op.
+            return "complete"
+        if _db_matches(dst_db, old_db):
+            return "prior"
+        if (not dst_db.is_file() and bk_db.is_file()
+                and _db_matches(bk_db, old_db)):
+            return "complete"
+        return "ambiguous"
+
+    if intent_phase == _PHASE_INTENT_BACKUP_IMAGES:
+        if not old_images:
+            return "complete"  # no-op
+        if _images_matches(dst_img, old_images):
+            return "prior"
+        if (not dst_img.exists() and bk_img.is_dir()
+                and _images_matches(bk_img, old_images)):
+            return "complete"
+        return "ambiguous"
+
+    if intent_phase == _PHASE_INTENT_INSTALL_SPARSE:
+        # Mutation: swap staging sparse → dst sparse (staging → dst).
+        if _sparse_matches(staging_sparse, new_sparse):
+            return "prior"  # staging still has new sparse → not installed
+        if (not staging_sparse.exists() and dst_sparse.is_dir()
+                and _sparse_matches(dst_sparse, new_sparse)):
+            return "complete"
+        return "ambiguous"
+
+    if intent_phase == _PHASE_INTENT_INSTALL_DB:
+        if not has_db:
+            # No new db to install. Mutation is a no-op.
+            return "complete"
+        if _db_matches(staging_db, new_db):
+            return "prior"
+        if (not staging_db.is_file() and _db_matches(dst_db, new_db)):
+            return "complete"
+        return "ambiguous"
+
+    if intent_phase == _PHASE_INTENT_INSTALL_IMAGES:
+        if _images_matches(staging_img, new_images):
+            return "prior"
+        if (not staging_img.exists() and dst_img.is_dir()
+                and _images_matches(dst_img, new_images)):
+            return "complete"
+        return "ambiguous"
+
+    return "ambiguous"
 
 
 def _recover_precomputed_transaction(ws: Path) -> None:
@@ -620,33 +1180,264 @@ def _recover_precomputed_transaction(ws: Path) -> None:
     coherent destination.
 
     Called at the top of _copy_precomputed_to_ws and safe to call
-    independently. Decision matrix:
+    independently. Phase-based decision matrix (v2):
 
-    - No journal → noop (conservatively remove any stray staging/backup).
-    - Corrupt journal (not JSON / missing fields) → conservative cleanup:
-      remove staging + backup + journal; destination stays as-is.
-    - state="prepared" → no swap happened; clean up staging + backup + journal.
-    - state="swapping" or "verified" → transaction crashed mid/post swap;
-      restore backup → destination, then clean up staging + backup + journal.
-    - state="committed" → transaction completed but cleanup didn't finish;
-      clean up staging + backup + journal.
+    Ambiguous cases (preserve all evidence, raise RecoveryRequired):
+      - missing / corrupt / wrong-version / unknown-phase journal AND
+        backup has real evidence (sparse_0 / colmap_db / images).
+      - v1 ``state=prepared`` + real backup (the data-loss case Codex
+        reproduced on d12e265).
+      - v2 ``phase=install_*_done`` + first install (no backup) +
+        destination fails byte verify (can't safely commit).
+      - ``phase=recovery_required`` (already marked by a prior recovery).
+
+    Recovery-completes-silently cases:
+      - no journal + no real backup → noop (clean stray staging/backup).
+      - corrupt / unknown journal + no real backup → cleanup (no evidence
+        to preserve).
+      - v2 ``phase=prepared`` → cleanup staging + journal (no swap started).
+      - v2 ``phase=backup_sparse_moved`` → restore sparse from backup
+        (idempotent; db+images still at dst, untouched).
+      - v2 ``phase=backup_db_moved`` → restore sparse + db.
+      - v2 ``phase=backup_images_moved`` → restore all three.
+      - v2 ``phase=install_sparse_done`` / ``install_db_done`` → rollback
+        partial install: restore from backup if exists; else delete partial
+        new content (first install).
+      - v2 ``phase=install_images_done`` → run post-swap verify against
+        new_generation_manifest; commit if pass, else mark recovery_required.
+      - v2 ``phase=verified`` → commit (cleanup staging + backup + journal).
+      - v2 ``phase=committed`` → noop (already done; clean stray staging).
+      - v1 ``state=swapping`` / ``state=verified`` → restore from backup
+        (legacy backward compat for tests that write v1 journals).
+      - v1 ``state=committed`` → noop.
     """
     journal_path = ws / _PRECOMPUTED_TXN_JOURNAL
     staging = ws / _PRECOMPUTED_STAGING
     backup = ws / _PRECOMPUTED_BACKUP
 
-    if not journal_path.is_file():
+    def _cleanup_strays() -> None:
+        """Remove staging + backup (only if no real evidence) + journal."""
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
-        if backup.exists():
+        if backup.exists() and not _has_real_backup_evidence(backup):
             shutil.rmtree(backup, ignore_errors=True)
+        journal_path.unlink(missing_ok=True)
+
+    def _preserve_and_raise(reason: str) -> None:
+        """Mark recovery_required in journal (if writable) and raise.
+
+        REVIEW-CODEX-033 #9: "Never delete staging/backup/journal until one
+        live generation has passed the expected exact-byte manifest plus
+        semantic validation. If state is ambiguous or both generations fail,
+        stop with a recovery-required error and preserve all evidence."
+
+        Before raising, attempt to copy-restore any missing piece from backup
+        → destination (idempotent: skips targets that already exist at dst,
+        which may be a partial new install we cannot safely overwrite without
+        a journal telling us the phase). This leaves the destination as
+        coherent as the evidence allows without destroying the backup. The
+        backup is preserved verbatim for human audit.
+        """
+        _restore_backup(ws, backup)
+        try:
+            existing = json.loads(journal_path.read_text(encoding="utf-8")) \
+                if journal_path.is_file() else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            existing = {}
+        existing["version"] = _TXN_VERSION
+        existing["phase"] = _PHASE_RECOVERY_REQUIRED
+        existing["recovery_reason"] = reason
+        existing["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        try:
+            _write_txn_journal(journal_path, existing)
+        except SystemExit:
+            pass  # journal write failure shouldn't mask the original reason
+        raise RecoveryRequired(
+            f"恢复中止：{reason}；保留 staging/backup/journal 等待人工审计 "
+            f"(ws={ws})")
+
+    # --- no journal ---
+    if not journal_path.is_file():
+        if _has_real_backup_evidence(backup):
+            _preserve_and_raise(
+                "journal 缺失但 backup 含真实证据 — 状态不明确")
+        _cleanup_strays()
         return
 
+    # --- parse journal ---
     try:
         journal = json.loads(journal_path.read_text(encoding="utf-8"))
-        txn_state = journal.get("state", "")
     except (OSError, ValueError, json.JSONDecodeError):
-        # Corrupt journal → conservative cleanup, never touch destination
+        if _has_real_backup_evidence(backup):
+            _preserve_and_raise("journal 损坏且 backup 含真实证据")
+        _cleanup_strays()
+        return
+
+    version = journal.get("version")
+    if version == 1:
+        # Legacy v1 journal — only handle swapping/verified (existing tests).
+        # state=prepared + real backup → ambiguous (data-loss case).
+        state = journal.get("state", "")
+        if state == "swapping":
+            # v1 state=swapping means "old → backup done, new → live in
+            # progress, crashed mid-install." Destination may hold a partial
+            # NEW install that must be overwritten (not preserved alongside
+            # backup — that would mix generations). Use _force_restore_backup
+            # (rmtree dst member, copy backup → dst) so the destination ends
+            # up as the verified-old generation. Backup is preserved (copy
+            # semantics); explicit rmtree at commit.
+            _force_restore_backup(ws, backup)
+            _cleanup_strays_with_evidence(backup, journal_path, staging)
+            return
+        if state == "verified":
+            # Post-swap verify passed; only cleanup was interrupted. Don't
+            # restore — destination is the verified new generation.
+            _cleanup_strays_with_evidence(backup, journal_path, staging)
+            return
+        if state == "committed":
+            _cleanup_strays()
+            return
+        # state=prepared / unknown state + real backup → ambiguous
+        if _has_real_backup_evidence(backup):
+            _preserve_and_raise(
+                f"v1 state={state!r} + 真实 backup — 状态不明确")
+        _cleanup_strays()
+        return
+
+    if version != _TXN_VERSION:
+        if _has_real_backup_evidence(backup):
+            _preserve_and_raise(
+                f"journal version={version!r} 不支持且 backup 含真实证据")
+        _cleanup_strays()
+        return
+
+    # REVIEW-CODEX-034 #3: strict v2 journal validation BEFORE any cleanup
+    # decision. A parseable but structurally invalid journal (missing
+    # txn_id, unknown phase, non-bool has_db, missing/invalid manifests)
+    # must NOT authorize backup deletion — preserve evidence and raise.
+    valid, reason = _validate_journal_v2(journal)
+    if not valid:
+        if _has_real_backup_evidence(backup):
+            _preserve_and_raise(
+                f"journal 结构无效 ({reason}) 且 backup 含真实证据")
+        # No real backup evidence → safe to clean up strays (no data to lose).
+        _cleanup_strays()
+        return
+
+    phase = journal.get("phase", "")
+    new_manifest = journal.get("new_generation_manifest") or {}
+    has_db = journal.get("has_db", True)
+    old_manifest = journal.get("old_generation_manifest") or {}
+
+    # --- REVIEW-CODEX-034 #4/#6: intent phase resolution ---
+    # Write-ahead logging means an intent phase on disk describes what was
+    # ABOUT to happen, not what did happen. We must recompute exact bytes
+    # against the immutable old/new manifests to decide:
+    #   - mutation did NOT run → revert journal to the prior phase and
+    #     re-dispatch (fall through to the prior phase's recovery branch);
+    #   - mutation DID run → advance journal to the matching complete phase
+    #     and re-dispatch (fall through to the complete phase's branch);
+    #   - ambiguous (both/neither match, or backup member mismatch) →
+    #     preserve all evidence and raise RecoveryRequired.
+    if phase in _INTENT_NEXT:
+        resolved = _resolve_intent_phase(
+            phase, ws, backup, staging,
+            old_manifest, new_manifest, has_db)
+        if resolved == "ambiguous":
+            _preserve_and_raise(
+                f"intent phase {phase!r} 状态不明确 "
+                f"(dst/backup/manifests 不可判定 mutation 是否已完成)")
+        new_phase = _INTENT_NEXT[phase] if resolved == "complete" \
+            else _INTENT_PRIOR[phase]
+        journal["phase"] = new_phase
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        journal["intent_resolution"] = {
+            "from": phase,
+            "to": new_phase,
+            "evidence": resolved,
+            "resolved_at_utc": datetime.now(UTC).isoformat(),
+        }
+        _write_txn_journal(journal_path, journal)
+        phase = new_phase  # fall through to the resolved phase's branch
+
+    # --- v2 phase-based recovery ---
+    if phase == _PHASE_COMMITTED:
+        # REVIEW-CODEX-034 #8: a parseable phase=committed journal does NOT
+        # bypass validation when a real backup still exists. If cleanup
+        # was interrupted mid-way (backup survives), recompute dst bytes
+        # against new_generation_manifest before authorizing backup removal.
+        # A forged or stale committed journal with a tampered destination
+        # must not authorize destroying the only rollback evidence.
+        if not _dst_matches_generation(ws, new_manifest):
+            _preserve_and_raise(
+                "phase=committed 但 dst 字节与 new_generation_manifest "
+                "不匹配 — 拒绝清理事务证据"
+            )
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if _has_real_backup_evidence(backup):
+            shutil.rmtree(backup, ignore_errors=True)
+        elif backup.exists():
+            # No real evidence in backup — safe to remove stray dir.
+            shutil.rmtree(backup, ignore_errors=True)
+        journal_path.unlink(missing_ok=True)
+        return
+
+    if phase == _PHASE_VERIFIED:
+        # REVIEW-CODEX-034 #7/#8: post-swap verify was claimed, but if a
+        # real backup still exists the cleanup was interrupted. Recompute
+        # dst bytes against new_generation_manifest before deleting backup.
+        # If dst fails verification, either rollback to backup (if backup
+        # holds a complete old generation) or preserve all evidence.
+        if _dst_matches_generation(ws, new_manifest):
+            # dst verified as complete new generation — safe to clean all
+            # redundant transaction evidence, whether backup exists or not.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+            journal_path.unlink(missing_ok=True)
+            return
+        if _has_real_backup_evidence(backup):
+            # dst does not match new manifest. Try rolling back to backup
+            # (the old generation). If backup is also incomplete, preserve.
+            _force_restore_backup(ws, backup)
+            if _dst_matches_generation(ws, old_manifest):
+                # Successfully rolled back to old generation.
+                shutil.rmtree(backup, ignore_errors=True)
+                journal_path.unlink(missing_ok=True)
+                return
+            _preserve_and_raise(
+                "phase=verified: dst 不匹配 new_manifest 且 rollback 后"
+                "也不匹配 old_manifest — 双向都不完整")
+        _preserve_and_raise(
+            "phase=verified 且无 backup，但 dst 字节不匹配 "
+            "new_generation_manifest — 拒绝隐藏损坏"
+        )
+
+    if phase == _PHASE_PREPARED:
+        # Staging done, no backup yet. Safe to clean up — destination is
+        # still the old committed generation.
+        _cleanup_strays()
+        return
+
+    if phase in (_PHASE_BACKUP_SPARSE, _PHASE_BACKUP_DB, _PHASE_BACKUP_IMAGES):
+        # Crashed during old→backup moves. Restore incrementally based on
+        # what's in backup. Idempotent — safe to call multiple times.
+        if phase == _PHASE_BACKUP_SPARSE:
+            _restore_sparse_from_backup(ws, backup)
+        elif phase == _PHASE_BACKUP_DB:
+            _restore_sparse_from_backup(ws, backup)
+            _restore_db_from_backup(ws, backup)
+        else:  # _PHASE_BACKUP_IMAGES
+            _restore_backup(ws, backup)
+        # REVIEW-CODEX-034 #7: verify the restored destination exactly
+        # matches the old_generation_manifest before deleting backup. If
+        # restore was partial or backup was already incomplete, preserve.
+        if not _dst_matches_generation(ws, old_manifest):
+            _preserve_and_raise(
+                f"phase={phase}: restore 后 dst 不匹配 old_generation_manifest "
+                f"— 拒绝删除 backup")
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         if backup.exists():
@@ -654,17 +1445,167 @@ def _recover_precomputed_transaction(ws: Path) -> None:
         journal_path.unlink(missing_ok=True)
         return
 
-    if txn_state in ("swapping", "verified"):
-        # Crashed mid-swap or post-swap → restore the last committed generation
-        _restore_backup(ws, backup)
-    # "prepared" / "committed": no restore needed (no swap happened, or swap
-    # fully completed and only cleanup was interrupted).
+    if phase in (_PHASE_INSTALL_SPARSE, _PHASE_INSTALL_DB):
+        # Partial new install at destination. Rollback to old generation.
+        if _has_real_backup_evidence(backup):
+            # Replace: restore from backup (overwrites partial new install).
+            # _restore_*_from_backup is idempotent but won't overwrite an
+            # existing dst member. For install_*_done rollback we MUST
+            # overwrite (the new install is invalid). Use _force_restore.
+            _force_restore_backup(ws, backup)
+            # REVIEW-CODEX-034 #7: verify exact bytes after rollback.
+            if not _dst_matches_generation(ws, old_manifest):
+                _preserve_and_raise(
+                    f"phase={phase}: rollback 后 dst 不匹配 "
+                    f"old_generation_manifest — 拒绝删除 backup")
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            shutil.rmtree(backup, ignore_errors=True)
+            journal_path.unlink(missing_ok=True)
+            return
+        # First install (no backup): delete partial new install. Only safe
+        # if there's no old generation to preserve.
+        _delete_partial_install(ws, has_db)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        journal_path.unlink(missing_ok=True)
+        return
 
+    if phase == _PHASE_INSTALL_IMAGES:
+        # All three new installed but post-swap verify pending. Try to
+        # verify; commit if pass, else preserve evidence.
+        if not new_manifest:
+            _preserve_and_raise(
+                "phase=install_images_done 但 new_generation_manifest 缺失 "
+                "— 无法验证新安装")
+        try:
+            _verify_destination_post_swap(ws, new_manifest, has_db)
+        except SystemExit as e:
+            # Verify failed — destination has unverified content. Rollback
+            # if we have a backup; else preserve evidence.
+            if _has_real_backup_evidence(backup):
+                _force_restore_backup(ws, backup)
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+                shutil.rmtree(backup, ignore_errors=True)
+                journal_path.unlink(missing_ok=True)
+                raise SystemExit(
+                    f"install_images verify 失败，已回滚到旧 generation: {e}"
+                ) from e
+            _preserve_and_raise(
+                f"install_images verify 失败且无 backup: {e}")
+        # Verify passed → commit (cleanup).
+        journal["phase"] = _PHASE_VERIFIED
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        journal["phase"] = _PHASE_COMMITTED
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
+        journal_path.unlink(missing_ok=True)
+        return
+
+    if phase == _PHASE_RECOVERY_REQUIRED:
+        # Already marked by prior recovery — preserve evidence.
+        raise RecoveryRequired(
+            f"journal 已标记 recovery_required — 等待人工审计 (ws={ws})")
+
+    # Unknown phase
+    if _has_real_backup_evidence(backup):
+        _preserve_and_raise(f"未知 phase={phase!r} 且 backup 含真实证据")
+    _cleanup_strays()
+
+
+def _cleanup_strays_with_evidence(backup: Path, journal_path: Path,
+                                    staging: Path) -> None:
+    """After restoring from backup, clean up everything (backup is now empty
+    or only has stale members that were already renamed back)."""
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)
     if backup.exists():
         shutil.rmtree(backup, ignore_errors=True)
     journal_path.unlink(missing_ok=True)
+
+
+def _force_restore_backup(ws: Path, backup: Path) -> None:
+    """Aggressive restore: overwrite any partial new install at destination
+    with backup members. Used for install_*_done rollback and v1
+    state=swapping (legacy journal where dst may hold partial new install).
+
+    Unlike _restore_backup (idempotent, preserves existing dst), this
+    rmtree/unlinks the destination member before copying backup → dst.
+    Uses COPY (shutil.copytree / copy2) so the backup member is preserved
+    as audit evidence — callers must explicitly rmtree backup at commit.
+    """
+    if not backup.is_dir():
+        return
+    bk_sparse = backup / "sparse_0"
+    dst_sparse = ws / "sparse" / "0"
+    if bk_sparse.is_dir():
+        (ws / "sparse").mkdir(parents=True, exist_ok=True)
+        if dst_sparse.exists():
+            shutil.rmtree(dst_sparse)
+        shutil.copytree(bk_sparse, dst_sparse)
+    bk_db = backup / "colmap_db"
+    dst_db = ws / "colmap.db"
+    if bk_db.is_file():
+        if dst_db.exists():
+            dst_db.unlink()
+        shutil.copy2(bk_db, dst_db)
+    elif dst_db.exists():
+        dst_db.unlink()  # old gen had no db → remove stale
+    bk_img = backup / "images"
+    dst_img = ws / "images"
+    if bk_img.is_dir():
+        if dst_img.exists():
+            shutil.rmtree(dst_img)
+        shutil.copytree(bk_img, dst_img)
+
+
+def _rollback_to_old_generation(
+        ws: Path,
+        backup: Path,
+        old_manifest: dict,
+        has_db: bool,
+) -> None:
+    """Restore one exact old generation or preserve evidence and abort."""
+    old_has_content = bool(old_manifest.get("sparse/0")) \
+        or old_manifest.get("colmap.db") is not None \
+        or bool(old_manifest.get("images"))
+    if old_has_content:
+        if not _has_real_backup_evidence(backup):
+            raise RecoveryRequired(
+                "旧 generation 有内容但 backup 缺失，拒绝清理事务证据"
+            )
+        _force_restore_backup(ws, backup)
+    else:
+        # First install: there is no committed old generation to restore.
+        _delete_partial_install(ws, has_db)
+    if not _dst_matches_generation(ws, old_manifest):
+        raise RecoveryRequired(
+            "rollback 后 dst 不匹配 old_generation_manifest，拒绝清理事务证据"
+        )
+
+
+def _delete_partial_install(ws: Path, has_db: bool) -> None:
+    """Delete partial new install at destination (first install rollback).
+
+    Used when phase=install_sparse_done / install_db_done and there's no
+    backup (first install). The partial new install is unverified and
+    cannot be committed — delete it so destination returns to empty.
+    """
+    dst_sparse = ws / "sparse" / "0"
+    if dst_sparse.exists():
+        shutil.rmtree(dst_sparse, ignore_errors=True)
+    dst_db = ws / "colmap.db"
+    if dst_db.exists():
+        dst_db.unlink()
+    dst_img = ws / "images"
+    if dst_img.exists():
+        shutil.rmtree(dst_img, ignore_errors=True)
 
 
 def _swap_sparse(staging_sparse: Path, dst_sparse: Path) -> None:
@@ -707,59 +1648,145 @@ def _swap_images(staging_img: Path, dst_img: Path) -> None:
     staging_img.rename(dst_img)
 
 
-def _verify_destination_post_swap(ws: Path, expected_sparse: set[str],
+def _verify_destination_post_swap(ws: Path, expected_manifest: dict,
                                    has_db: bool) -> None:
-    """Post-swap byte + exact-file-set + semantic verification.
+    """Post-swap recursive byte-manifest verification.
 
-    Runs after all three swaps complete but before commit. Catches disk
-    corruption during rename (byte flip) or partial install that somehow
-    passed the swap step. On failure, caller rolls back to backup.
+    REVIEW-CODEX-033 #6: previous impl compared only top-level sparse
+    filenames + existence of db/images. A byte mutation during rename
+    (disk corruption) or a same-name changed bytes attack would pass.
+    This impl walks sparse/0, colmap.db and images/ recursively and
+    compares size + sha256 against ``expected_manifest`` (built from the
+    staging copy before swap).
+
+    ``expected_manifest`` shape::
+
+        {
+            "sparse/0": {rel_posix_path: {size, sha256}, ...},
+            "colmap.db": {size, sha256} | None,
+            "images":    {rel_posix_path: {size, sha256}, ...},
+        }
+
+    On any mismatch (file set, size, or sha256), raises SystemExit so the
+    caller rolls back to backup. Also re-runs semantic validation on the
+    swapped-in sparse/0 to catch format-level corruption that byte-equality
+    can't detect (e.g. a structurally invalid cameras.bin with same bytes
+    as another valid file — extremely unlikely but defense-in-depth).
     """
     sparse_0 = ws / "sparse" / "0"
     if not sparse_0.is_dir():
         raise SystemExit(f"post-swap 校验失败: {sparse_0} 不存在")
-    actual_sparse = {p.name for p in sparse_0.iterdir() if p.is_file()}
-    if actual_sparse != expected_sparse:
-        raise SystemExit(
-            f"post-swap 校验失败: sparse/0 文件集不匹配 "
-            f"(expected={sorted(expected_sparse)}, actual={sorted(actual_sparse)})")
-    # Re-validate semantics on the swapped-in destination
+    actual_sparse = _recursive_manifest(sparse_0)
+    expected_sparse_manifest = expected_manifest.get("sparse/0") or {}
+    ok, reason = _manifests_equal(actual_sparse, expected_sparse_manifest)
+    if not ok:
+        raise SystemExit(f"post-swap 校验失败: sparse/0 字节 manifest 不匹配 — {reason}")
+    # Semantic re-validation on the swapped-in destination
     _validate_sparse_semantics(sparse_0, ws / "images")
     dst_db = ws / "colmap.db"
-    if has_db and not dst_db.is_file():
-        raise SystemExit("post-swap 校验失败: 期望 colmap.db 存在但缺失")
-    if not has_db and dst_db.is_file():
-        raise SystemExit("post-swap 校验失败: 源无 db 但目标有 stale db")
-    if not (ws / "images").is_dir():
+    expected_db = expected_manifest.get("colmap.db")
+    if has_db and expected_db is not None:
+        if not dst_db.is_file():
+            raise SystemExit("post-swap 校验失败: 期望 colmap.db 存在但缺失")
+        actual_db_size = dst_db.stat().st_size
+        actual_db_sha = _sha256_file(dst_db)
+        if actual_db_size != expected_db["size"] \
+                or actual_db_sha != expected_db["sha256"]:
+            raise SystemExit(
+                f"post-swap 校验失败: colmap.db 字节不匹配 "
+                f"(actual=({actual_db_size},{actual_db_sha}), "
+                f"expected=({expected_db['size']},{expected_db['sha256']}))")
+    elif not has_db and expected_db is None:
+        if dst_db.is_file():
+            raise SystemExit("post-swap 校验失败: 源无 db 但目标有 stale db")
+    else:
+        raise SystemExit(
+            f"post-swap 校验失败: colmap.db 期望状态 (has_db={has_db}, "
+            f"expected_present={expected_db is not None}) 不一致")
+    dst_img = ws / "images"
+    if not dst_img.is_dir():
         raise SystemExit("post-swap 校验失败: images/ 缺失")
+    actual_img = _recursive_manifest(dst_img)
+    expected_img_manifest = expected_manifest.get("images") or {}
+    ok, reason = _manifests_equal(actual_img, expected_img_manifest)
+    if not ok:
+        raise SystemExit(f"post-swap 校验失败: images/ 字节 manifest 不匹配 — {reason}")
+
+
+def _build_generation_manifest_for_ws(ws: Path) -> dict:
+    """Build a generation manifest (recursive byte snapshot) of the current
+    destination sparse/0 + colmap.db + images/.
+
+    Used to capture the OLD generation manifest before backup, so recovery
+    can verify which generation is complete. Also used in tests to compare
+    pre/post snapshots.
+    """
+    sparse_0 = ws / "sparse" / "0"
+    manifest: dict = {
+        "sparse/0": _recursive_manifest(sparse_0),
+        "colmap.db": None,
+        "images": _recursive_manifest(ws / "images"),
+    }
+    dst_db = ws / "colmap.db"
+    if dst_db.is_file():
+        manifest["colmap.db"] = {
+            "size": dst_db.stat().st_size,
+            "sha256": _sha256_file(dst_db),
+        }
+    return manifest
+
+
+def _build_new_generation_manifest_from_staging(
+        staging: Path, has_db: bool) -> dict:
+    """Build a manifest of the staging copy (the NEW generation about to be
+    installed). Same shape as _build_generation_manifest_for_ws.
+    """
+    staging_sparse = staging / "sparse" / "0"
+    staging_img = staging / "images"
+    manifest: dict = {
+        "sparse/0": _recursive_manifest(staging_sparse),
+        "colmap.db": None,
+        "images": _recursive_manifest(staging_img),
+    }
+    staging_db = staging / "colmap.db"
+    if has_db and staging_db.is_file():
+        manifest["colmap.db"] = {
+            "size": staging_db.stat().st_size,
+            "sha256": _sha256_file(staging_db),
+        }
+    return manifest
 
 
 def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
     """Transactional three-target replacement: sparse/0 + colmap.db + images/.
 
-    REVIEW-CODEX-030 P0 (0978ee7 held): three independent renames are not
-    atomic — Codex injected failure into db swap after sparse swap and
-    measured mixed_generation=true. Fix uses a journal with states
-    prepared → swapping → verified → committed, plus backup + full rollback
-    + restart recovery.
+    REVIEW-CODEX-033 v2 (held d12e265 transaction): the v1 single-state
+    journal could not distinguish "crashed during old→backup moves" from
+    "crashed during new→live installs" — recovery deleted the only complete
+    backup in both cases. The v2 journal records a phase per destructive
+    rename boundary so recovery can resume precisely or preserve evidence
+    when state is ambiguous.
 
-    Steps:
-    0. Recover any prior crashed transaction (_recover_precomputed_transaction).
-    1. Fresh staging: copy source sparse/0/*.bin + colmap.db + images/ into
-       ws/.staging_precomputed/. Only copy files that actually exist in source
-       (so dropping an optional file removes it from ws too).
-    2. Staging validation: semantic check on staging sparse/0. Failure here
-       cleans up staging + journal; no backup, no swap, destination unchanged.
-    3. Backup: move current destination (sparse/0, colmap.db, images) to
-       ws/.precomputed_backup/.
-    4. Swap (journal=swapping): _swap_sparse → _swap_db → _swap_images. Any
-       failure rolls back ALL three targets from backup, cleans up, re-raises.
-    5. Post-swap verify (journal=verified): byte + exact-file-set + semantic
-       check on the swapped-in destination. Failure rolls back from backup.
-    6. Commit (journal=committed): cleanup staging + backup + journal.
+    Phase progression:
+      prepared → backup_sparse_moved → backup_db_moved → backup_images_moved
+              → install_sparse_done → install_db_done → install_images_done
+              → verified → committed
 
-    A failed run leaves the last verified destination intact and never runs
-    COLMAP (the precomputed branch skips COLMAP entirely).
+    Each phase is written atomically (temp + os.replace) AFTER the rename
+    completes. A crash leaves the journal at the last completed phase;
+    _recover_precomputed_transaction resumes from there.
+
+    Failure handling:
+      - staging validate fail → cleanup staging + journal (no backup yet).
+      - swap fail → _force_restore_backup (overwrite partial new install),
+        cleanup, re-raise.
+      - post-swap verify fail → _force_restore_backup, cleanup, re-raise.
+      - any failure leaves the LAST VERIFIED destination intact and never
+        runs COLMAP (precomputed branch skips COLMAP entirely).
+
+    A failed run preserves a coherent verified destination. An ambiguous
+    restart (corrupt journal + real backup) preserves all evidence and
+    raises RecoveryRequired.
     """
     _recover_precomputed_transaction(ws)
 
@@ -792,79 +1819,156 @@ def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
         shutil.rmtree(staging, ignore_errors=True)
         raise SystemExit(f"staging 拷贝失败 (copytree): {e}") from e
 
-    # Expected file set = required + optional-that-actually-exist-in-staging
-    expected_sparse = set(PRECOMPUTED_REQUIRED_BIN)
-    for name in PRECOMPUTED_OPTIONAL_BIN:
-        if (staging_sparse / name).is_file():
-            expected_sparse.add(name)
-
-    journal = {
-        "version": _TXN_VERSION,
-        "state": "prepared",
-        "expected_sparse_files": sorted(expected_sparse),
-        "has_db": has_db,
-        "started_at_utc": datetime.now(UTC).isoformat(),
-    }
-    _write_txn_journal(journal_path, journal)
-
     # --- Step 2: staging semantic validation ---
     # Catches source corruption between manifest build and staging copy. If
     # this fails, no backup has been made and no swap happened — just clean
-    # up staging + journal. Destination is untouched.
+    # up staging. Destination is untouched.
     try:
         _validate_sparse_semantics(staging_sparse, src_img)
     except SystemExit:
         shutil.rmtree(staging, ignore_errors=True)
-        journal_path.unlink(missing_ok=True)
         raise
 
-    # --- Step 3: backup current destination ---
-    backup.mkdir(parents=True)
+    # --- Step 3: build manifests + journal phase=prepared ---
+    new_manifest = _build_new_generation_manifest_from_staging(staging, has_db)
+    old_manifest = _build_generation_manifest_for_ws(ws)
+    txn_id = uuid.uuid4().hex
+    started_at = datetime.now(UTC).isoformat()
+    journal = {
+        "version": _TXN_VERSION,
+        "txn_id": txn_id,
+        "phase": _PHASE_PREPARED,
+        "has_db": has_db,
+        "new_generation_manifest": new_manifest,
+        "old_generation_manifest": old_manifest,
+        "started_at_utc": started_at,
+        "phase_updated_at_utc": started_at,
+    }
+    _write_txn_journal(journal_path, journal)
+
+    # --- Step 4: backup old destination (per-target, WAL + complete) ---
+    # REVIEW-CODEX-034 #4: write intent phase BEFORE each destructive
+    # rename/unlink. If recovery sees an intent phase on disk, it must
+    # recompute exact bytes (REVIEW-CODEX-034 #6) to decide whether the
+    # mutation ran (→ advance to matching complete phase) or did not
+    # (→ revert to prior phase). Recovery never assumes mutation completed.
+    backup.mkdir(parents=True, exist_ok=True)
     dst_sparse = ws / "sparse" / "0"
     dst_db = ws / "colmap.db"
     dst_img = ws / "images"
+
+    # 4a. backup sparse (intent → mutate → complete)
+    journal["phase"] = _PHASE_INTENT_BACKUP_SPARSE
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+    _write_txn_journal(journal_path, journal)
     if dst_sparse.is_dir():
         dst_sparse.rename(backup / "sparse_0")
-    if dst_db.is_file():
-        dst_db.rename(backup / "colmap_db")
+    journal["phase"] = _PHASE_BACKUP_SPARSE
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+    _write_txn_journal(journal_path, journal)
+
+    # 4b. backup db (intent → mutate → complete)
+    # REVIEW-CODEX-034 #5: never unlink a live old db before its bytes are
+    # captured in backup. The OLD generation's db presence is independent
+    # of the NEW generation's db presence (has_db). If old_manifest has a
+    # db, ALWAYS rename it to backup — even when the new gen has no db
+    # (the new gen's "no db" is enforced at install_db by not swapping a
+    # new db in; the old db must still be preserved as rollback evidence).
+    journal["phase"] = _PHASE_INTENT_BACKUP_DB
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+    _write_txn_journal(journal_path, journal)
+    old_has_db = old_manifest.get("colmap.db") is not None
+    if old_has_db:
+        if dst_db.is_file():
+            dst_db.rename(backup / "colmap_db")
+        # If dst_db absent but old_manifest says it should exist: the live
+        # destination is already inconsistent — treat as ambiguous (recovery
+        # will preserve evidence). For now, leave the backup empty; the
+        # post-swap verify will fail and trigger rollback.
+    else:
+        # Old gen had no db. has_db=False → mutation is a no-op.
+        # has_db=True → no old db to remove; new db will be installed at
+        # install_db phase. Either way, no destructive action here.
+        pass
+    journal["phase"] = _PHASE_BACKUP_DB
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+    _write_txn_journal(journal_path, journal)
+
+    # 4c. backup images (intent → mutate → complete)
+    journal["phase"] = _PHASE_INTENT_BACKUP_IMAGES
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+    _write_txn_journal(journal_path, journal)
     if dst_img.is_dir():
         dst_img.rename(backup / "images")
-
-    # --- Step 4: swap (journal=swapping) ---
-    journal["state"] = "swapping"
+    journal["phase"] = _PHASE_BACKUP_IMAGES
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
     _write_txn_journal(journal_path, journal)
 
+    # --- Step 5: install new (per-target, WAL + complete) ---
     try:
         (ws / "sparse").mkdir(parents=True, exist_ok=True)
+        journal["phase"] = _PHASE_INTENT_INSTALL_SPARSE
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
         _swap_sparse(staging_sparse, dst_sparse)
+        journal["phase"] = _PHASE_INSTALL_SPARSE
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
+
+        journal["phase"] = _PHASE_INTENT_INSTALL_DB
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
         _swap_db(staging_db, dst_db, has_db)
+        journal["phase"] = _PHASE_INSTALL_DB
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
+
+        journal["phase"] = _PHASE_INTENT_INSTALL_IMAGES
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
         _swap_images(staging_img, dst_img)
+        journal["phase"] = _PHASE_INSTALL_IMAGES
+        journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+        _write_txn_journal(journal_path, journal)
     except (SystemExit, Exception):
-        # Full rollback: restore all three targets from backup
-        _restore_backup(ws, backup)
-        shutil.rmtree(staging, ignore_errors=True)
-        shutil.rmtree(backup, ignore_errors=True)
+        # Partial install — restore the exact old generation. On a first
+        # install the old manifest is empty, so remove all partial new targets.
+        _rollback_to_old_generation(ws, backup, old_manifest, has_db)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
         journal_path.unlink(missing_ok=True)
         raise
 
-    # --- Step 5: post-swap verify (journal=verified) ---
-    journal["state"] = "verified"
-    _write_txn_journal(journal_path, journal)
-
+    # --- Step 6: post-swap verify (phase=verified) ---
     try:
-        _verify_destination_post_swap(ws, expected_sparse, has_db)
+        _verify_destination_post_swap(ws, new_manifest, has_db)
     except SystemExit:
-        _restore_backup(ws, backup)
-        shutil.rmtree(staging, ignore_errors=True)
-        shutil.rmtree(backup, ignore_errors=True)
+        _rollback_to_old_generation(ws, backup, old_manifest, has_db)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
         journal_path.unlink(missing_ok=True)
         raise
 
-    # --- Step 6: commit + cleanup ---
-    journal["state"] = "committed"
+    journal["phase"] = _PHASE_VERIFIED
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
     _write_txn_journal(journal_path, journal)
 
-    shutil.rmtree(staging, ignore_errors=True)
+    # --- Step 7: commit (cleanup staging + backup) ---
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+    journal["phase"] = _PHASE_COMMITTED
+    journal["phase_updated_at_utc"] = datetime.now(UTC).isoformat()
+    _write_txn_journal(journal_path, journal)
+    # Journal removed once committed — a clean workspace has no journal.
+    # _recover_precomputed_transaction treats "no journal + no real backup"
+    # as noop, so this is safe.
+    journal_path.unlink(missing_ok=True)
     shutil.rmtree(backup, ignore_errors=True)
     journal_path.unlink(missing_ok=True)
 
