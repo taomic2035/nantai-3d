@@ -56,6 +56,14 @@
   根因是非原子 journal + 粗粒度 state，不能鉴别六个 rename 边界，也没有 old/new
   exact-byte manifest 和可中断幂等 rollback。GLM 不得先做 source report；必须按
   `handoff/REVIEW-CODEX-033-glm-d12e265-transaction.md` 的固定 RED 顺序修正。
+- **GLM transaction v2 candidate 仍 HELD**：虽然 144/145、283/287 与 Ruff 绿，
+  Codex 以“rename/unlink 已完成、下一 phase 尚未落盘”的真实 prior-phase 窗口重跑
+  6 个 fresh probe，结果 `6/6 ok=false`：缺 sparse/db/images、NEW sparse + OLD
+  db/images 混代、伪 `verified` 删 backup、old-db→new-no-db 丢失均已实测。测试不能先
+  手写 post-operation phase；必须改成 WAL intent/completion、严格 journal schema、
+  独立 old/new db presence，并以 old/new exact manifest 选代和验证后清理。唯一当前
+  任务与固定 RED 顺序见
+  `handoff/REVIEW-CODEX-034-glm-transaction-v2-candidate.md`。
 - **GLM 后续明确任务，不得以“无事可做”停工**：P7 transaction 等 Codex review 时，
   可在独立新路径实现 exact-build roaming-graph v1 的纯模型、Blender emitter 与
   fail-closed 测试；先交至少 2 个真实 modeled space、1 个实测 portal、2 条 reciprocal
