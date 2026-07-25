@@ -74,6 +74,27 @@ Add RED tests first, then implement rejection for:
 Keep unregistered source photos legal. Registered count may be smaller than
 the source photo count.
 
+Use the actual focal layout, not a single `params[0]` rule:
+
+```text
+one focal parameter at index 0:
+  ids 0, 2, 3, 8, 9
+two focal parameters at indices 0 and 1:
+  ids 1, 4, 5, 6, 7, 10, 11
+```
+
+Both `fx` and `fy` must be finite and positive for the two-focal models.
+For names, do not rely only on host-dependent `Path(name).parts`. Reject empty
+names, POSIX absolute paths, Windows drive-prefixed/UNC absolute paths and
+traversal after canonicalizing separators. Bind canonical safe relative names
+to the exact manifest photo rows and reject normalization collisions. A string
+that merely fails the later “photo exists” check is not proof the path-safety
+boundary itself works.
+
+For qvec, reject a non-finite norm as well as a near-zero norm. Add a test with
+huge finite components whose squared-sum overflows; `all(math.isfinite(v))`
+alone is insufficient.
+
 ## Task 4 — close the transaction P0 separately
 
 After tasks 1–3 are one bounded green commit, fix `0978ee7` in a second commit:
@@ -103,4 +124,3 @@ Do not push while a Codex-held commit remains. Do not change Git proxy config;
 use only the per-command proxy. Commit only the two owned paths plus your
 evidence handoff, with the GLM trailer. Then continue automatically with the
 transaction task; do not report “no work”.
-
