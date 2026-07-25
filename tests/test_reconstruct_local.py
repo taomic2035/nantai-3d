@@ -1022,10 +1022,12 @@ class TestPrecomputedColmapBoundary:
         entry = _state(ws)["stages"]["colmap"]
         assert "caller_argv" in entry, \
             "precomputed colmap extras must bind caller_argv for audit"
-        assert "--precomputed-colmap" in entry["caller_argv"]
-        assert str(precomp) in entry["caller_argv"]
-        # Must not leak pytest's sys.argv.
-        assert not any("pytest" in t for t in entry["caller_argv"])
+        assert entry["caller_argv"] == [
+            str(photos_dir),
+            "--work", str(ws),
+            "--web", str(ws.parent / "web"),
+            "--precomputed-colmap", str(precomp),
+        ]
 
     def test_precomputed_binary_sha_in_fingerprint(self, env, tmp_path,
                                                      photos_dir):
@@ -1432,11 +1434,12 @@ class TestColmapExtrasBoundary:
         call("--sequential")
         entry = _state(ws)["stages"]["colmap"]
         caller = entry["caller_argv"]
-        assert "--sequential" in caller
-        assert str(photos_dir) in caller  # photos positional arg is bound
-        # Must NOT leak pytest's sys.argv (would contain "pytest" / "-m"):
-        assert not any("pytest" in t for t in caller), \
-            "caller_argv must be reconstruct_local's argv, not pytest's sys.argv"
+        assert caller == [
+            str(photos_dir),
+            "--work", str(ws),
+            "--web", str(ws.parent / "web"),
+            "--sequential",
+        ]
 
 
 class TestBrushExportSnapshot:
