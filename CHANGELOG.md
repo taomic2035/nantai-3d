@@ -17,8 +17,3 @@ accepted real-photo SfM、非 mock GPU 3DGS、实测米制对齐和真实 Viewer
 
 下载、校验和运行见
 [`docs/releases/1.0-preview.md`](docs/releases/1.0-preview.md)。
-
-## 0.1.0 — Initial takeover
-
-初始接管基线见
-[`docs/verification/2026-07-14-takeover-report.md`](docs/verification/2026-07-14-takeover-report.md)。

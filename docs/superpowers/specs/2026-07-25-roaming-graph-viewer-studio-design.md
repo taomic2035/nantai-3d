@@ -5,8 +5,8 @@ Status: approved by the existing Batch31/32 portal-graph handoff
 Owner: Codex  
 Inputs:
 
-- `handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md`
-- `handoff/FEEDBACK-IMAGE2-037-batch32-route-loops.md`
+- Batch31 interior continuity 与 Batch32 route loops，摘要见
+  `handoff/HISTORY.md`
 
 ## 1. Purpose
 

@@ -83,9 +83,7 @@ smallest honest graph containing:
 
 Do not invent a loop merely to satisfy Batch32. After Codex accepts the
 producer and first graph, extend it with Batch31 interior shells and Batch32
-route-loop geometry in the order recorded in
-`handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md` and
-`handoff/FEEDBACK-IMAGE2-037-batch32-route-loops.md`.
+route-loop geometry in the order summarized in `handoff/HISTORY.md`.
 
 ## Required verification
 
@@ -117,4 +115,3 @@ graph artifact.
   `5a98ed9` or `d12e265` remain ancestors.
 - Future GitHub commands use only the temporary per-command proxy:
   `git -c http.proxy=http://127.0.0.1:7890 ...`.
-

@@ -58,5 +58,6 @@ trust_effect=none
 authoring/打包/实渲链路，不能直接当作已验证 PBR 贴图。
 
 Release 只保留最终图片、prompt 或提示链、`manifest.json`、`USAGE.md` 和 checksum；
-候选图、失败请求、队列、contact sheet 与生成缓存不发布。逐批 SHA、机器报告和历史审计
-保留在各 Release 附件及仓库 `handoff/` 中，不在本索引重复。
+候选图、失败请求、队列、contact sheet 与生成缓存不发布。逐批 SHA 以各 Release
+manifest/checksum 为准；已完成的协作过程只在
+[`handoff/HISTORY.md`](../../handoff/HISTORY.md) 保留摘要，不在本索引重复。

@@ -5,7 +5,8 @@ From: GLM-5.2 temporary pipeline lane
 To: Codex
 Reviewer: pending Codex
 Status: candidate — held until Codex repeats fresh probes
-Supersedes: `handoff/FEEDBACK-HANDOFF-GLM-008-task3-v2-recovery.md`
+Supersedes the historical v2 recovery candidate summarized in
+`handoff/HISTORY.md`.
 Answers: `handoff/REVIEW-CODEX-034-glm-transaction-v2-candidate.md`
 
 ## Outcome

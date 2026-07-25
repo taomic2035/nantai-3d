@@ -141,8 +141,7 @@ scripts/blender/render_perimeter_closure_audit.py
 scripts/synthetic_village.py
 tests/test_synthetic_village_perimeter_closure_*.py
 tests/test_synthetic_village_cli.py
-docs/superpowers/specs/2026-07-23-batch24-perimeter-closure-overlay-design.md
-docs/superpowers/plans/2026-07-24-batch24-perimeter-closure-overlay.md
+handoff/HISTORY.md
 ```
 
 Do not modify these paths or their schemas without a new coordination note.
@@ -174,8 +173,7 @@ Required completion evidence:
 6. run a fresh real Blender smoke/build, record artifact/report SHA values and
    measured contact gaps; screenshots alone are not acceptance evidence.
 
-Completion feedback:
-`handoff/FEEDBACK-HANDOFF-GLM-007-p0-creek-contact-closure.md`.
+Completion feedback was consolidated into `handoff/HISTORY.md`.
 
 ## 4. Completed P1 — real reconstruction artifact integrity (`9b8c0d7`)
 
@@ -187,8 +185,7 @@ scripts/verify_recon_artifacts.py
 tests/test_reconstruction_artifact_integrity.py
 ```
 
-Completion feedback:
-`handoff/FEEDBACK-HANDOFF-GLM-007-p1-artifact-integrity-closure.md`.
+Completion feedback was consolidated into `handoff/HISTORY.md`.
 
 Legacy `chunks.json` files still have no per-payload SHA/size and must report
 that byte verification is unknown. Fresh complete manifests are closed by P3
@@ -205,8 +202,8 @@ scripts/blender/build_synthetic_village.py
 tests/test_synthetic_village_blender_script.py
 ```
 
-P2a was delivered in commit `66552b3`; completion evidence is in
-`handoff/FEEDBACK-HANDOFF-GLM-007-p2a-gradient-sky-closure.md`.
+P2a was delivered in commit `66552b3`; its completion summary is in
+`handoff/HISTORY.md`.
 
 Finish P2b as its own path-limited commit:
 

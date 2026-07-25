@@ -16,7 +16,7 @@
 不能只实现一个固定距离阈值。Codex 已完成 180 台全量私有探针，证据见：
 
 ```text
-handoff/REVIEW-CODEX-011-production-camera-clearance-180.md
+handoff/HISTORY.md
 ```
 
 ## 已确认的坏机位
@@ -129,7 +129,7 @@ Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>
 完成后请回执：
 
 ```text
-handoff/FEEDBACK-HANDOFF-OPUS-006.md
+handoff/HISTORY.md
 ```
 
 Codex 收到后负责：

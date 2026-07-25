@@ -1,395 +1,102 @@
-# AGENTS.md — Nantai 3D 多智能体协作上下文
+# AGENTS.md — Nantai 3D 协作约定
 
-> 本文件给所有协作 agent（Opus / Codex / GPT）共享项目级事实与约定。**信息以此为准，随进展更新。**
+本文件只保留所有 agent 当前必须知道的事实。阶段过程见
+[`handoff/HISTORY.md`](handoff/HISTORY.md)，不要把历史对话重新堆回本文件。
 
 ## 分工
 
-| 角色 | 负责 |
+| 角色 | 主要责任 |
 |---|---|
-| **Opus** | 整理、架构、代码逻辑、技术选型、决策；pipeline/坐标/3DGS 核心、registry、构建工具链、跨平台/可移植性、集成 |
-| **Codex** | UX、呈现、设计、交互、**审计/review**；Web Viewer + Studio 层（含 studio_server.py、web/studio/*、Studio jobs/ledger）；review Opus 改动 |
-| **GPT (image2)** | 素材生成、设计、图像处理（按 HANDOFF 规格；见 `handoff/`）|
-| 共同 | 重难点问题分析与解决 |
+| Opus / GLM 接替 lane | pipeline、坐标、SfM/3DGS 外围合同、registry、Blender 构建与跨平台集成 |
+| Codex | UX、Viewer/Studio、发布、审计/review、真实浏览器 QA |
+| GPT image2 | 通用可替换的素材生成、设计和图像处理 |
+| 共同 | 重难点分析、fail-closed 修复与发布门 |
+
+GLM 交付必须经 Codex review；“测试绿”不能替代真实 scene/layer/render 证据。
 
 ## 非协商约定
 
-- **Provenance safety / fail-closed**：可信度只从机器可验证字段推导（CoordinateFrame、内容寻址 FrameTransform id、实测 SHA、transform history、renderer capability），**绝不**从文件名/engine 名推断；未知 → 可预览但**永不**静默提升为 measured/metric/aligned。
-- **不假装可以又不说实际问题**（用户明确要求，2026-07-15）：如实标注每个限制、外部依赖、真实耗时。
-- **单一 main 分支，无其它分支/worktree**；多 agent 共享工作树 → **路径限定提交**（`git add <明确文件>` + `git commit -- <路径>`，禁用 `git add -A`/`commit -a`，避免卷入他人 WIP）。
-- 提交仅在完成且验证（门禁绿）后；消息尾行 `Co-Authored-By`。push 时机需协调（他人可能有未推送/未提交工作）。
+- **Provenance fail closed**：信任只从机器字段、内容 SHA、FrameTransform、
+  transform history、renderer capability 和实测报告推导。未知可以预览，但不能静默
+  提升为 measured/metric/aligned。
+- **如实报告边界**：不把 design-only、mock、stub、失败 smoke 或 synthetic 实渲
+  描述成真实照片重建。
+- **Git**：只保留 `main` 和一个 worktree；多 agent 共用工作树，必须路径限定
+  `git add` / `git commit -- <paths>`，禁止 `git add -A`、`commit -a`。
+- **提交门**：代码完成、专项测试与 lint 通过后再提交；Codex 提交尾行：
+  `Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>`。
+- **网络**：push 使用一次性代理，不修改持久 Git 配置：
 
-## 当前协作与接管状态（2026-07-24）
-
-- **Opus 当前不可用；GLM-5.2 已作为临时接替 lane 加入。** Codex 独立完成
-  HANDOFF-006 Phase 1 的 production clearance 合同、Blender runtime、
-  frame identity v2 与 journal/runner 接入；GLM 提供 post-render quality/repose
-  草案与 Batch 6 environment-module 草案。GLM 未提交代码仍须 Codex review 后才能进入
-  main，不能以“测试绿”替代真实 layer/scene 证据。
-- 当前核心交办按顺序为：
-  1. `handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`
-     （Phase 1 已完成，Phase 2 仍未交付）；
-  2. `handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`。
-  007 仅可在独立新路径上并行，触及 renderer/runtime/journal 时必须先协调。
-- **2026-07-25 GLM 明确连续队列与 Git 网络规则**：P7a-6 解析器与
-  precomputed-COLMAP WAL v3 已由 Codex 对抗性复核并修正；后续做
-  content-addressed source report、fresh P5b→P7 exact-copy rehearsal，
-  之后才进入 P6c/P7b 与 Batch27/28/29 LOD 几何消费。GitHub 网络命令统一用单次临时代理
-  `git -c http.proxy=http://127.0.0.1:7890 ...`，不得写全局代理。完整输入、RED
-  测试、完成证据、禁止路径和连续工作规则见
-  `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。
-- **P7 解析器/WAL held 已清除**：Codex 在 GLM v3 基础上补出并修复双焦距 `fy`、
-  qvec overflow、跨平台路径规范化、fixture 强制 SHA、旧/新 DB 独立性、首次安装半代、
-  中断 restore 收敛与无 backup 终态复验。`tests/test_reconstruct_local.py` 当前
-  `200 passed, 1 skipped`（Windows 无 symlink 权限），Ruff 绿。旧 review 031–034
-  只作历史缺陷记录；最终边界见
-  `handoff/REVIEW-CODEX-035-glm-p7-parser-wal-v3.md`。
-- **GLM roaming-graph v1 最小里程碑已接受用于 Preview**：checked-in fixture
-  SHA `69fe973870937e838a0d8e6876c519200e371aa03820c8a628649e7385ace8e8`，
-  仅声明 2 rooms、1 个 plan-declared portal、2 条 reciprocal edge、0 loop。
-  Blender 实测只覆盖 collision-proxy 几何 SHA；端点与 clearance 仍是计划声明，
-  不得提升为可行走、360 coverage、metric 或真实场景证据。Python `44 passed`、
-  Viewer `7 passed`、Ruff 绿；边界见
-  `handoff/REVIEW-CODEX-036-glm-roaming-graph-v1.md`。
-- **Batch33 材质源片已发布**：8 张 synthetic RGB source plate 的干净 Release SHA
-  `85ccfc05569f6139dc4d81e851c4de9147088cdf58a4e163d43c5690a0109a0b` 已远端回读验证；
-  它们不是真实照片、无缝纹理或已测 PBR。仓库已有完整 H3 source/4096
-  authoring/PBR/KTX2 链，不得再造重复 derivation 工具；直接/禁止映射与 exact-build
-  实渲任务见
-  `handoff/FEEDBACK-IMAGE2-038-batch33-material-source-plates.md`。
-- **Batch34 私有 H3 扩展候选已完成**：为现有 `creek-rock`、`wet-stone-paving`、
-  `aged-metal`、`pale-plaster` 四槽补齐 `3 candidates/slot`；其中 8 张为新 imagegen，
-  4 张精确复用 Batch33，冻结 H3 source audit `12/12` 通过并完成 Codex 视觉选择。
-  GLM 只做 additive source-pack extension，保持 H3 v1 与 `H3_HERO_SLOTS` 不变，
-  复用现有 authoring/KTX2 链；未过私有实渲 review 前不 registry、不 `web/data`、不
-  Release。完整 SHA、选择与 RED 任务见
-  `handoff/FEEDBACK-IMAGE2-039-batch34-h3-material-expansion.md`。
-- **Batch35 道具六视图已发布**：八张 synthetic 建模板逐一对应已有 water-jar、
-  firewood、basket、bench、tools、grain-rack、trough、handcart 槽；干净 Release
-  ZIP SHA `00261044d27f7d7d4889bd23255f1e6a17e9450e15d6f7b725bbb026aff2a28a`
-  已远端回读。它们仅是 `design-only`，不能当同步多视图；GLM 后续以 canonical
-  part graph 替换当前 `_build_prop` 块体代理，先做纯模型/RED，实渲前不 registry、
-  不 `web/data`。完整消费任务见
-  `handoff/FEEDBACK-IMAGE2-040-batch35-prop-turnarounds.md`。
-- Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
-  验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
-  用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
-- **2026-07-25 GLM 连续取件规则**：P5b 高纹理 COLMAP `60/60` 与 44,426 sparse points 已复核。P6b 抽帧/截断和 `25/25` 注册可保留，但 `sequential_matcher` 未证明：日志中两个 matcher 名均为 false，只凭 `94/300` 推断；`120@30fps -> 10fps` 无上限采样应为 40 而不是 41，还缺 source index 逐项绑定。
-- **P7 当前 held，不得称 accepted**：临时 runner 手写指纹与 production caller 不匹配，COLMAP 被重跑；P7 `images.bin=ab89b060...` 不等于 P5b `5358807e...`，且 `registration.pose_count=0`、`tmp/` 不是 immutable handoff。GLM 必须依次推进 supported precomputed-COLMAP caller + exact byte binding -> P6b argv/source-index 修正 -> recovered camera-track + content-addressed private Viewer bundle。不得伪造 `.stage_state.json`、自填 `Reviewer: Codex`/`accepted:true`、编辑 exact-266 caller/overlay 或 `web/data/`。详见 `handoff/REVIEW-CODEX-030-glm-p5b-p6b-p7-evidence.md`。exact-266 仍未接受；真实采集、真实照片 SfM、非 mock 云 GPU 3DGS、实测对齐和真实 Viewer QA 五项未齐前不得报告完成。
-
-### HANDOFF-006 Phase 1 fresh evidence
-
-- canonical 180-camera preflight：
-  `preflight_id=42f65291a55f58c5b064a2785b3ee868a5d9c77c107ad233a4f9f235d7f10b9a`；
-  report SHA
-  `0b63bc6759e8a36d7ace04d760e43d27862082d084cc0cd50b73e30449224418`。
-- 显式 `<2m / 5-of-15` operator policy 下仅 `ground-route-010`（15）与
-  `ground-route-039`（5）拒绝，其它 178 台为 0；`034=0` 仍只表示几何门未拒绝，
-  **不表示** post-render/training 通过。
-- 实现与边界见 `handoff/FEEDBACK-HANDOFF-CODEX-006-phase1.md`；GLM 006 草案的
-  阻断审计见 `handoff/REVIEW-CODEX-014-glm-006-quality-repose.md`；下一阶段计划见
-  `docs/superpowers/plans/2026-07-20-production-camera-postrender-quality.md`。
-
-## Batch 6 image2 素材与 v2 场景差距（2026-07-20）
-
-Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未注册候选区：
-
-```text
-.nantai-studio/synthetic-village/hybrid-v4-candidates/
+```powershell
+git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-| 素材 | SHA-256 |
-|---|---|
-| `design-route-central-courtyard-eye-01.png` | `19b40a84322ab7d343716bd684fc83a3207ae42ad94993d28446707f7a5537df` |
-| `design-detail-bridge-undercroft-01.png` | `16b9f390f4550b2ec64bd98e4ccd799e05c4f44cd924a5da1503eec73ae8b4be` |
-| `design-detail-rear-service-courtyard-01.png` | `2c3900ab686cb45252538c8bdb6e507396ec9084ca7809a44fa3524810ab8b51` |
+- **Release**：只包含最终白名单产物、manifest、使用说明与 checksum；候选图、失败
+  请求、contact sheet、缓存、私有 Blender 工作目录和中间日志不发布。
 
-- 三张图均为独立 `design-only` 参考；`camera_calibration=unknown`、
-  `geometry_consistency=not-verified`、`training_use=forbidden-as-multiview`、
-  `trust_effect=none`。不得组合成 SfM/NeRF/3DGS 多视图训练集。
-- 精确提示词、SHA、字节数和 queue/manifest 位于同一私有候选区；Release 不放候选中间态。
-- image2 的 generation 与 reference-edit 端点均出现间歇网络错误：允许低频重试；失败请求
-  不占候选记录、不写空文件。
-- 模块拆分、现有 ScenePlan/Topology 绑定和 180 相机验收候选见
-  `handoff/HANDOFF-CODEX-008-batch6-to-blender-modular-consumption.md`。
-- 三张成功参考现已转换为私有 `modeled-unverified` Blender 原型：中央院落、桥拱/水车、
-  后场服务院共 3 个模块、47 个独立对象；审计 RGB 确认几何可读，同时暴露 creek/terrain
-  无真实河床切槽和正式最近相机看不到模块的问题。原型不进 registry/Git/Release，
-  详见 `handoff/REVIEW-CODEX-012-batch6-private-blender-prototype.md`。
-- 同一中央院落人眼坐标已完成六面 cubemap 审计：天顶/脚下未封死，但四周反复出现悬空
-  建筑、高架步道横切视野和地面三角接缝。同点六向没有平移基线，绝不是 SfM/3DGS
-  coverage 证明，详见 `handoff/REVIEW-CODEX-013-central-cubemap-360-audit.md`。
-- 当前 Windows textured L2 build
-  `4f38ecf49ff8182e02c426df314dab90b91502673164330d3b704f234d02f1dc`
-  确实包含 Blender 几何、PBR 材质和四张实渲预览，但仍是稀疏块体村庄：
-  中央院落、石拱/水车桥底节点和建筑后场尚未进入正式几何。它继续声明
-  `geometry_usability=preview-only`、`fidelity=simplified-pbr-not-render-parity`。
-  机器身份和逐图差距见 `handoff/REVIEW-CODEX-008-batch6-vs-v2-blender-preview.md`。
-- 用该 v2 `.blend` 内已登记的 `camera-ground-001`、`camera-courtyard-001`、
-  `camera-bridge-001` 做私有 RGB 实渲：前两者分别以 `-35.517°`、`-24.781°`
-  明显俯视地表；桥相机虽仅 `-1.516°`，但被极近石材表面严重遮挡。它们属于
-  24-camera canary registry，**不是** 180-camera production plan。valid-pixel
-  门无法拒绝“全是地面/近墙”的帧，详见
-  `handoff/REVIEW-CODEX-009-v2-canary-ground-view-diagnostic.md`。
-- 把正式 180-camera 计划中的 `ground-route-010/011/025/026` 瞬态注入同一 v2
-  `.blend` 做私有 RGB 探针：`011/025/026` 能形成方向合理的人眼路线视图，
-  `010` 被近表面严重遮挡；可读帧同时暴露悬空建筑、稀疏街巷和支撑缺失。
-  这证明相机计划可被当前坐标合同消费，但不等于六层帧或训练质量通过，详见
-  `handoff/REVIEW-CODEX-010-v2-production-camera-rgb-probe.md`。
-- 对这四个 production camera 做 Blender 九宫格射线探针后确认：`010` 的上/中
-  `6/9` 射线均在 `0.433–0.574m` 命中
-  `bridge-lower-001 / stone-deck-parapets-piers`；其它三相机没有相同近表面模式。
-  后续已扩展为 180 台 × 25 射线全量审计：`010` 与 `039` 可由近表面模式明确拒绝，
-  但 `034` 证明单一距离门仍会漏掉斜穿木廊/近坡面坏帧，必须结合正式六层质量门。
-  详见 `handoff/REVIEW-CODEX-011-production-camera-clearance-180.md`。
+## 当前发布状态
 
-## ⚠️ 机器现实与重建能力边界（2026-07-15，已确认）
+首个公开版本为 **Nantai 3D 1.0 Preview**：
 
-- **开发机无 NVIDIA GPU**：仅 Intel UHD Graphics 770 集显（无 CUDA），i7-14700 / 32GB / D盘 1.4TB。
-  （核对**任意**机器的同样事实：`python make.py doctor` 实测并报告，不必信本节的记录——详见下方「诚实 UX 三件套」。）
-- **本仓库不训练 3DGS**：它是重建管线**外围**的诚实封装层——摄取 → 坐标/位姿契约 → 米制 ENU 对齐（`pipeline/alignment.py`）→ 3DGS 导入/拼接/LOD/素材 → Spark Viewer（360° 漫游可用）。**把图片变成 3D 几何的两步是外部的**：
-  1. **相机位姿（SfM）**：COLMAP（本机 CPU 可跑，慢；未安装则回退 mock/synthetic，非真实）。
-  2. **3DGS 训练**：**仓库无训练器**。CUDA 训练器（gsplat/nerfstudio/Inria）本机跑不了。**实际主路径 = 云 GPU 租赁**；本机 Intel 集显跑 Brush 仅为受限的小场景试验档。
-- **"完美"不可达**：3DGS 对天空/玻璃/水面/无纹理面有空洞与漂浮物；只能漫游拍到的体积。
-- 端到端安装/使用手册（COLMAP + 云 GPU 训练 + 导入本仓库）：见 **`docs/manual/reconstruction-setup.md`**（Opus 编写中；用户配合云 GPU 账号/注册）。
+- Git tag：`v1.0.0-preview.1`
+- Python version：`1.0.0rc1`
+- 交互数据：25 个围绕原点的 synthetic point-preview chunks，LOD 0/1/2；
+- 封面：独立 synthetic Blender audit render，不与 point-preview 冒充同一 scene；
+- 信任：`synthetic / preview-only`，不可测量，也不证明任意坐标可达。
 
-### macOS Apple Silicon 本机实测（2026-07-17）
+发布与运行说明：
+[`docs/releases/1.0-preview.md`](docs/releases/1.0-preview.md)。
 
-- 机器：macOS 26.5.2 / arm64 / 32 GB。`make.py doctor` 实测 COLMAP 4.1.0（CPU SfM）、
-  Brush 0.3.0（wgpu 受限训练）、Python 必需/可选依赖均可用；仍无 NVIDIA CUDA 栈。
-- MLX 0.32.0 已隔离安装到 `.nantai-studio/venvs/mlx`，Metal 矩阵探针实测
-  `Device(gpu, 0)`；它不是 gsplat/nerfstudio CUDA 自定义算子的透明替代。
-- Blender 4.5.11 LTS Apple Silicon 官方包已安装到 `/Applications/Blender.app` 并通过
-  SHA-256、codesign 与 headless version 探针；但正式 canary 工具链仍严格锁定
-  Windows x64 `third/blender/blender.exe`，因此 Mac Blender **尚不能**被该链路当成已验证运行时。
-- 素材 registry 当前本机实测为 **11/11**：`stone_wall_01`、`fence_wood_01`
-  已通过 Linux/x86_64 容器生成与登记 SHA 逐字节一致的权威 payload 并幂等恢复。
-  **这不表示 Mac 原生生成器已修复**：Mac / NumPy 2.3.5 重生成仍漂移，绝不能
-  重新登记本机漂移字节来掩盖跨平台差异。原始环境审计见
-  `handoff/FEEDBACK-CODEX-007-macos-environment-audit.md`，恢复证据与未决项见
-  `handoff/FEEDBACK-CODEX-008-macos-asset-payload-recovery.md`。
+## 真实重建能力边界
 
-## Batch 20 角色拓扑与相机包络（2026-07-23）
+仓库负责：
 
-- 新增 8 张已目视筛选的 image2 设计输入，成对覆盖桥折线接近/院落回望、水车检修环/上层回望、
-  森林折返/林内返村，以及桥—水车、森林—果园共享空间；私有候选位于
-  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch20/`。
-- 干净发布 tag 为 `synthetic-village-design-inputs-batch20-2026-07-23`，ZIP SHA-256 为
-  `55251c47fd4b25fa1bca9a2a5b5ee1cc98a567ce98131fdb0d628f00ce8cb360`；包只含 8 PNG、
-  8 prompt、manifest、USAGE 与校验和，没有 contact sheet 或生成中间态。
-- 素材仍为独立 `design-only`、`geometry_consistency=not-verified`、`training_use=forbidden-as-multiview`。
-  它们用于指导 bridge/watermill/forest 的非共线 `part_layout` 与相机包络；正式接受仍依赖 fresh
-  exact-218、Phase 4.3、六层 visibility 与 post-render v2，不得据图片提升 coverage 信任。
+```text
+摄取/抽帧 → 采集预检 → COLMAP 位姿合同 → 外部 3DGS 产物
+→ SH/四元数处理 → 导入/拼接/LOD → Sim3/ENU → Studio/Viewer
+```
 
-## Batch 22 exact-218 与 local-360（2026-07-23）
+仓库不内置高质量 3DGS 训练器。当前开发机没有可用 NVIDIA CUDA；COLMAP CPU 可跑
+但慢，本机 Brush 只适合受限小场景，高质量主路径是外部云 GPU。
 
-- fresh exact-218 build
-  `ebb936346ea2f31a4d551f6fa9bf64d5e48bcac46593fa0ff195b34d699f6cdd`，
-  `.blend` SHA `b13b435310f5505a98e6f181a506a5663acabbdca102498cda47242df552cf3c`，
-  report SHA `3421d3f199e954773588b39548be271cb6db16ff7e83b4d2c0dc5e0dd05c03bc`。
-- Phase 4.3 四组结果为 route `6/6`、module pairs `15/15`、environment intersections
-  `6/6`、topology attachments `6/6`。
-- 水车 8 方向 local-orbit final report SHA
-  `4ce4bc97ffce2af6f7748cecead9b3f10f2670383ff008878f4722d278e52d05`：机器门
-  `8/8`，构件/水轮均 `7/8` 可见，`az000` 为桥体自然遮挡。
-- 这些产物仍是 `synthetic / L0 / preview-only / forbidden-as-multiview`。目视仍有
-  悬空支撑、平面化 creek/water、重复拉伸纹理、空 world/sky 与近物遮挡。
-  详见 `handoff/FEEDBACK-HANDOFF-CODEX-027-batch22-exact218-local360.md`。
-- GLM P1 cloud caller 的 REVIEW-CODEX-023 四项 findings 已全部修复
-  （commit `e587a23`）：config drift 归零（request/result 绑定同一份
-  operator-intent `config.yml`）、`--max-num-iterations`/`--machine.seed`
-  通过真实 ns-train CLI argv 传入、`ns-process-data` 预处理失败也 emit
-  failed result、真实训练 UTC 时间戳。新增两个 canary：`TestP1CanaryNonMock`
-  （COLMAP → `training_allowed=true` → trusted prefix）和
-  `TestP1CanaryStubArgv`（stub `ns-train` 记录 argv，验证 request intent
-  与实际 CLI 一致）。`emit_registration_quality.py` 零覆盖缺口已补 11 个测试
-  （commit `20ede74`）。143 测试全绿。详见
-  `handoff/FEEDBACK-HANDOFF-GLM-006-review-codex-023-fixes.md`。
-  **仍不证明**真实云 GPU 训练、真实照片、accepted SfM 或 metric 对齐——
-  stub 只证 argv 一致性，不证 nerfstudio 真实接受 flag 或 PLY 输出。
+真实场景完成必须同时具备：
 
-## Batch 27 近景构造转台素材（2026-07-25）
+1. 真实重叠采集；
+2. accepted real-photo SfM；
+3. 非 mock GPU 3DGS；
+4. 实测米制对齐；
+5. 真实重建 Viewer QA。
 
-- 新增 8 张已目视筛选的 image2 设计输入，覆盖住宅四面、作坊后场、坡地架空层、
-  屋面/檐口、水车机构、桥廊底部、森林冠层/根部和道路排水连接；私有候选位于
-  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch27/`。
-- 干净发布 tag 为 `synthetic-village-design-inputs-batch27-2026-07-25`，ZIP SHA-256
-  为 `79d9555e24f7f37c02fb7e10aabe1a99277d7c79ef7f9e693e8dd66545916a09`；包只含
-  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
-- 每张虽要求同一模块的多方向/细节一致，仍为独立 `design-only` 参考：
-  `camera_calibration=unknown`、`geometry_consistency=not-verified`、
-  `training_use=forbidden-as-multiview`、`coverage_use=forbidden`、
-  `trust_effect=none`。不得作为 SfM/NeRF/3DGS 输入或提升 geometry trust。
-- GLM/Blender 消费优先级：先补建筑四面/架空层/檐口，再补水车/桥廊底部，最后补
-  森林近景与路线排水；每次仍须重建 content-addressed build 并重跑正式相机、
-  六层 visibility 与 post-render v2。详见
-  `handoff/FEEDBACK-IMAGE2-031-batch27-nearfield-turnarounds.md`。
+任何一项缺失都必须保持 preview/unknown。天空、玻璃、水、无纹理面和未拍摄体积仍会
+产生空洞或漂浮物，“完美 360° 任意坐标漫游”不是可承诺目标。
 
-## Batch 28 跨距离 LOD 连续性素材（2026-07-25）
+## Synthetic / Blender 当前边界
 
-- 新增 8 张已目视筛选的 image2 设计输入，分别覆盖住宅群、路线/挡墙、溪流 crossing、
-  果园、森林边缘、桥—水磨坊、村庄边界和 world enclosure；每张含同一设计家族的
-  近景、中景、远景和反向面板，私有候选位于
-  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch28/`。
-- 干净发布 tag 为 `synthetic-village-design-inputs-batch28-2026-07-25`，ZIP SHA-256
-  为 `3f83d4a588d75471b98ee6b4bbf93d264c8a5851f9a4637afd83e66e4fc19f3c`；包只含
-  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
-- 面板仍为 `design-only`、`geometry_consistency=not-verified`、
-  `distance_thresholds=authoring-guidance-not-measured`、
-  `training_use=forbidden-as-multiview`、`coverage_use=forbidden`、
-  `trust_effect=none`；不得用图像外观冒充 runtime LOD 或跨分块证明。
-- GLM 必须从一个 canonical LOD0 模块确定性派生 LOD1/2，稳定保留 anchor、route
-  topology、地面接触和特征轮廓，再以 content-addressed build、reciprocal cameras、
-  seam visibility、六层与 post-render v2 实测。详见
-  `handoff/FEEDBACK-IMAGE2-032-batch28-lod-continuity.md`。
-
-## Batch 29 材质宏观变化素材（2026-07-25）
-
-- 新增 8 张已目视筛选的 image2 四面板设计输入，覆盖灰泥、毛石、深色木构、灰瓦、
-  夯土路线、浅溪床、夯土/切坡和林地/果园地表；每张包含近表面、接触节点、中尺度与
-  远尺度表现，私有候选位于
-  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch29/`。
-- 干净发布 tag 为 `synthetic-village-design-inputs-batch29-2026-07-25`，ZIP SHA-256
-  为 `c3ff4cd08c7f2a2bf115f71e79d86afae2775d7f6c4a73efa00166d93f83469a`；包只含
-  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
-- 面板只可指导程序材质区域、UV 尺度层次、trim/decal、wet/dry mask 和承载材质变化
-  的几何。它们仍为 `design-only`、`real_photo_texture=false`、
-  `pbr_channel_alignment=not-provided`、`direct_projection_use=forbidden-as-measured-texture`、
+- image2 素材是独立设计输入：`geometry_consistency=not-verified`、
   `training_use=forbidden-as-multiview`、`trust_effect=none`。
-- GLM 在 P7 安全项闭环后，须从 canonical geometry 和独立可授权/程序 payload 实现
-  材质变化，绑定 payload SHA、UV/区域报告并重跑 exact build、UV audit、reciprocal
-  RGB、六层与 post-render v2；不得把面板裁切成贴图后称为真实 PBR。详见
-  `handoff/FEEDBACK-IMAGE2-034-batch29-material-macrovariation.md`。
+- exact-218 / exact-266、local-360、六层与 post-render 只证明对应 synthetic build；
+  不证明真实纹理、真实 SfM/3DGS 或 measured alignment。
+- roaming graph 当前是 scene-bound 的纯模型合同；不能与不同 scene identity 的
+  point-preview 数据强行拼接。
+- Batch35 八类道具已进入纯模型 part graph；Blender emission、exact build 和实渲
+  验收仍是后续门。
 
-## Batch 30 高密度空间地标素材（2026-07-25）
+## 当前协作入口
 
-- 新增 8 张已目视筛选的 image2 六视角设计输入，覆盖住宅各面、院落/作坊、架空层/
-  垂直交通、桥—水车维护、路线/排水/挡墙、果园、林缘和公用设施/边界；私有候选位于
-  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch30/`。
-- 干净发布 tag 为 `synthetic-village-design-inputs-batch30-2026-07-25`，ZIP SHA-256
-  为 `e7c0417d5f61f6063388264677fbd635adfcfaf16e7e400cdeef9d58dbad20a1`；包只含
-  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
-- 这些输入只可指导 canonical part/prop family、稳定 semantic id、实例落位、碰撞代理和
-  路线外 landmark zone。它们仍为 `design-only`、
-  `spatial_landmark_positions=authoring-guidance-not-measured`、
-  `training_use=forbidden-as-multiview`、`clearance_use=forbidden-as-evidence`、
-  `trust_effect=none`。
-- GLM 在 P7 安全项闭环后，应按住宅/架空层 → 路线/排水 → 桥水车 → 果园/林缘 →
-  utility/perimeter 的顺序消费；每次用确定性 part/instance report 绑定几何和变换 SHA，
-  并重跑 exact build、collision/clearance、reciprocal target/seam visibility、六层和
-  post-render v2。详见
-  `handoff/FEEDBACK-IMAGE2-035-batch30-spatial-landmarks.md`。
+- [`handoff/README.md`](handoff/README.md) — 当前 handoff 索引
+- [`handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md`](handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md)
+- [`handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`](handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md)
+- [`handoff/HANDOFF-GLM-009-roaming-graph-producer.md`](handoff/HANDOFF-GLM-009-roaming-graph-producer.md)
+- [`handoff/HANDOFF-CODEX-013-viewer-qa-p7-recovered-pose-splat.md`](handoff/HANDOFF-CODEX-013-viewer-qa-p7-recovered-pose-splat.md)
+- [`handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`](handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md)
+- [`handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`](handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md)
 
-## Batch 31 室内连通性素材（2026-07-25）
+## 权威用户文档
 
-- 新增 8 张已目视筛选的 image2 六视角设计输入，覆盖入口阈值、主室、厨房/服务间、
-  阁楼屋架、楼梯/平台、有顶连廊、架空层/地窖和水车机械房；私有候选位于
-  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch31/`。
-- 干净发布 tag 为 `synthetic-village-design-inputs-batch31-2026-07-25`，ZIP SHA-256
-  为 `a29c4032449367fe4efa376b2158b1fed807049fa2ac2bf535185153cdcf9805`；包只含
-  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
-- 这些输入只可指导 canonical room shell、portal graph、楼梯/连廊/屋架/架空层、
-  collision proxy、通风排水和可读的 reciprocal exit。它们仍为 `design-only`、
-  `interior_connectivity=authoring-guidance-not-measured`、
-  `training_use=forbidden-as-multiview`、`clearance_use=forbidden-as-evidence`、
-  `trust_effect=none`。
-- GLM 在 P7 parser/transaction/source-report/source-reality 全部通过 Codex review 后，
-  才可按入口阈值 → 主室/厨房 → 楼梯/连廊 → 阁楼/架空层 → 水车机械房的顺序消费。
-  每一步必须输出 stable room/portal id、双向 edge、transform/material/collision SHA，
-  再重跑 exact build、portal reachability、reciprocal clearance/visibility、六层、
-  seam/target visibility 和 post-render v2。详见
-  `handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md`。
+- [`README.md`](README.md) — 产品定位、能力、快速入口
+- [`docs/README.md`](docs/README.md) — 文档导航
+- [`docs/manual/reconstruction-setup.md`](docs/manual/reconstruction-setup.md) — 真实重建手册
+- [`docs/real-data-workflow.md`](docs/real-data-workflow.md) — 坐标、证据与导入合同
+- [`docs/releases/synthetic-design-inputs.md`](docs/releases/synthetic-design-inputs.md) — 素材 Releases
 
-## Batch 32 闭环路线节点素材（2026-07-25）
-
-- 8 张 image2 设计板覆盖四门院落、分层住宅、巷道/拱廊、桥—水车服务环、公共厅、
-  作坊、梯田住宅簇和村边仓棚；私有候选位于
-  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch32/`。
-- 干净 Release tag 为 `synthetic-village-design-inputs-batch32-2026-07-25`，ZIP SHA-256
-  为 `737d0dc502ad67eb586d7f4565427f34d94763f81c1385f9afbda2edf06905bd`。
-- 仍为 `design-only`、`route_loop_topology/portal_graph=authoring-guidance-not-measured`、
-  `training_use=forbidden-as-multiview`、`trust_effect=none`。GLM 仅在 P7 P0 闭环后按
-  `FEEDBACK-IMAGE2-037` 消费并重跑 graph/clearance/六层/post-render 门。
-- 所有素材 Release 统一索引移至 `docs/releases/synthetic-design-inputs.md`；README
-  不再保留逐批下载过程。
-
-## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
-
-「无限村庄任意坐标漫游」的**管线内核已完整并对抗性验证 CLEAN**（Opus lane）：
-- `pipeline.render_chunk_to_ply.render_single_chunk(cx, cy, world_seed=42, registry=None, lod=None)`
-  → ply 字节（纯内存零落盘、任意含负坐标、确定性、**跨进程字节一致**可内容寻址缓存、
-  LOD 0/1/2 分级省带宽、registry 真实素材路径亦已验证字节确定且纯读无副作用）。
-- world manifest 已带无限网格元数据：`grid{on_demand:false, url_template, world_seed}`、全局
-  `bounds`、per-chunk `aabb`、`baked_extent`（均 additive、LF 字节可复现）。
-- `python -m pipeline.generate_world --center` 支持以原点为中心烘焙（含负象限）。
-
-**Codex 集成已完成**：
-1. HTTP 端点支持负坐标、LOD 0/1/2、ETag/304、HEAD、结构化失败与 stream-only 无落盘。
-2. Viewer 预烘焙优先，越界时经严格同源模板按需请求，并消费真实三维 bounds。
-3. 预烘焙 manifest 保持 `on_demand:false`；Studio server 仅在合法 seed/template 与端点实际
-   可用时无落盘投影为 true，普通静态服务不会虚假宣称按需能力。
-
-详细回执见 `handoff/FEEDBACK-HANDOFF-CODEX-003.md`。当前按需端点使用确定性合成代理
-(`registry=None`)；真实可替换素材的跨 worker 缓存须先有 asset version/SHA 内容键，且跨异构
-平台共享前仍须解 HANDOFF-002。
-
-## 真实重建链路（2026-07-17，Opus lane 与 Codex 分块 Viewer 均已就位）
-
-真实数据链路已端到端打通，每步的**真实限制均如实文档化**（`docs/manual/reconstruction-setup.md` /
-`docs/real-data-workflow.md`）：
-
-采集 → **`check_capture` 预检**（在烧掉 COLMAP 的几小时之前）→ COLMAP（本机 CPU，**每阶段 6h 卡死 backstop**）→
-**外部云 GPU 训练 3DGS** → `normalize_ply_quats` → `flatten_ply_sh`（**可选降级，不再必须**）→ `prepare_import` →
-`reconstruct --engine import [--chunk-size-m 50]` → `alignment --from-gps | --control-points` →
-**`inspect_recon`**（读懂产物能不能量）→ 360° 漫游
-
-Opus lane 近期补齐的能力与**已知边界**（均 TDD 锁定）：
-- **高阶 SH 旋转（degree 0–3）**：`pipeline/spherical_harmonics.py` 实现了 INRIA 3DGS 约定下的
-  Wigner-D SH 系数旋转（数值采样法 + Gauss-Legendre 积分网格），含高阶 SH 的场景可直接经非恒等
-  Sim3 旋转对齐到 ENU，**无需** 先 `flatten_sh()`。`flatten_sh()` 保留为有损降级工具（丢高阶保 DC），
-  适用于仅需视角无关基色或减小 PLY 体积的场景。已知精度限制：INRIA `SH_C3` 常数在 float64 中有
-  ~2e-8 损失（`sqrt(n)/(2*sqrt(pi))` vs `sqrt(n/(4*pi))`），正交性容差放宽至 1e-6（50x margin）。
-- **GPS 对齐的精度现实**：`alignment --from-gps <ingest-manifest>` 可从逐图 EXIF GPS 一键 turnkey
-  对齐，但**消费级 GPS 精度 3~10m**，噪声无法被相似变换解释 → **默认 `--max-rms 2.0` 基本必然
-  fail-closed**（这是正确的：拒绝为噪声盖米制章）。放宽到 5~10 才可能过门，但**精度不优于 GPS 本身**；
-  要 sub-metre 须实测控制点（`enu_xyz`）。失败信息自解释。
-- **大重建分块流式**：`reconstruct --chunk-size-m 50`（或 `scripts/chunk_reconstruction.py`）把上百万
-  高斯的单个 `.ply` 切成 per-chunk ply + LOD + `chunks.json`。纯空间重打包：无损（每高斯恰好落一块）、
-  坐标绝对不动、**provenance 不增不减**（分块**绝不**把 preview-only 变 metric-aligned）。
-  **Codex 已完成**：Viewer 消费 `chunks.json`，按相机距离流式调度 Spark/DC 分块与声明的 LOD 密度，
-  并以顶层 `source` 原样显示 provenance（验收见 `handoff/FEEDBACK-HANDOFF-CODEX-004.md`）。注意其
-  **无 `grid`** —— 重建**不可**程序化续渲，**绝不可**对它投影 `on_demand:true`。
-- **诚实 UX 三件套**（纯 CPU、零 GPU 依赖；`tests/test_doctor.py` / `test_capture_quality.py` /
-  `test_inspect_recon.py` 锁定）。三者都是 provenance-safety 面向人的一侧：**把已有的严谨证据说成人话，
-  绝不新增信任**。改它们时别破坏各自的诚实性约束（源码顶部有逐条说明）：
-  - `scripts/doctor.py` ≡ `make.py doctor` —— 实测本机能跑重建的哪几步（COLMAP/Brush/GPU/Python 依赖/
-    素材注册表/磁盘），给 can / cannot / **unclear** 小结（探不准进 unclear，**不替用户下结论**）。
-    **退出码恒为 0**：报的是机器状态，「缺 COLMAP」是**结论**不是失败，非 0 会逼 CI 把正常报告当故障。
-    GPU 只判「未探测到**可用的** CUDA 栈」（依据 `nvidia-smi` 缺席，**证据推理非硬件事实**）；
-    素材 sha **默认不校验**，报告明写「未校验」，`--verify-assets` 才实测（`make.py doctor` 不带此开关）。
-  - `scripts/check_capture.py` ≡ `make.py check-capture`（`PHOTOS=` 传目录）—— 跑 COLMAP 前用**单图证据**
-    预检（张数/模糊/分辨率/EXIF GPS + 匹配器建议 + 由手册 §4 实测锚点外推的耗时**粗估**）。
-    **红线**：**重叠度是图之间的关系，单图分析测不到** → `likely` 仅意味「没发现明显硬伤」，
-    **绝不可**被描述成「预检通过就能重建」。退出码 `0` = 出了报告（无论结论好坏），`2` = 没法分析。
-  - `scripts/inspect_recon.py` ≡ `make.py inspect-recon`（`MANIFEST=` 传路径）—— 把 `recon_manifest.json`
-    翻成人话（能不能量 / 精度 / 变换链 / **未知项**）。**只翻译不提升信任**；矛盾（声称 `metric-*` 但证据
-    `passed:false` / 无法解析 / 非米制 / `synthetic=true`）→ 指出矛盾 + 按 `preview-only` 处理 +
-    **退出码 2**（可当 CI 门；判据与 `reconstruct._derive_geometry_usability` 同源）。
-    **限制**：只读 manifest 声称 + 内部自洽性，**不碰 PLY 字节**、不校验 `artifacts.*.sha256`、不重算残差。
-
-## 关键文档
-
-- `README.md` — 能力矩阵、快速开始、核心工作流。
-- `docs/manual/reconstruction-setup.md` — 真实重建端到端手册（本机/云 GPU）。
-- `docs/real-data-workflow.md` — 已就绪的对齐/导入契约（control_points.json、SplatInput、metric-aligned 判定）。
-- `handoff/HANDOFF-CODEX-003-render-on-demand-infinite-world.md` — render-on-demand 集成规格（内核 API + 端点 + 缓存约束）。
-- `handoff/FEEDBACK-HANDOFF-CODEX-003.md` — Codex 集成回执（运行时开闸决策 + 真实素材未决项）。
-- `handoff/REVIEW-CODEX-003-render-on-demand-integration.md` — Opus review 回执（字节/纯度/投影 sign-off + 4 项待处理：真实素材密度断崖 CRITICAL、布局引擎不对称 HIGH、投影 fail-open MEDIUM、越界码 LOW）。
-- `handoff/HANDOFF-CODEX-004-stream-large-reconstructions.md` — 大重建分块流式交办（`chunks.json` 契约；与合成村庄 manifest 同构但**无 `grid`**、坐标绝对、`source` 是标注信任的唯一依据）。
-- `handoff/HANDOFF-CODEX-008-batch6-to-blender-modular-consumption.md` — Batch 6 三张设计参考到 Blender 模块、现有 topology 与 180 相机验收候选的消费规格。
-- `handoff/REVIEW-CODEX-008-batch6-vs-v2-blender-preview.md` — 三张 Batch 6 参考与当前 Windows v2 Blender 四张实渲预览的机器身份绑定差距审计。
-- `handoff/REVIEW-CODEX-009-v2-canary-ground-view-diagnostic.md` — v2 `.blend` 三个近地 canary 相机的真实 RGB、姿态与近表面/俯视坏帧诊断；说明 valid-pixel 门为何不足。
-- `handoff/REVIEW-CODEX-010-v2-production-camera-rgb-probe.md` — 四个正式 ground-route 相机瞬态注入 v2 `.blend` 的 RGB 探针；证明三张人眼方向可用并暴露近表面遮挡、悬空与支撑缺失。
-- `docs/verification/2026-07-16-pipeline-reproducibility-audit.md` — pipeline 可复现性审计（随机源/字节/平台三维度）。
-- `docs/verification/2026-07-16-failclosed-audit-and-fixes.md` — fail-closed/provenance 审计 + 四项 TDD 修复（含 1 项 medium fail-open：矛盾对齐证据不再被提升为 metric）。
-- `handoff/` — Claude↔GPT 素材交办/回执（HANDOFF-00x）。
-- CI：`.github/workflows/ci.yml`（ubuntu+windows × py3.11/3.13 + 素材跨平台可复现门）。
+历史 plan/spec/review 仅在回归追溯时读取，不是当前执行入口。

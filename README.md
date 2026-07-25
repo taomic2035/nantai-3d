@@ -1,92 +1,79 @@
 # Nantai 3D Studio
 
-照片与视频驱动的 3D 重建、Gaussian Splat 导入/拼接、可替换场景素材和浏览器漫游工作台。
+照片/视频重建外围管线与浏览器 3D 漫游工作台：负责采集预检、COLMAP 位姿、
+外部 Gaussian Splat 导入、坐标/尺度、分块/LOD、Studio 和 Viewer。
 
-本仓库负责输入预检、COLMAP 位姿、坐标与尺度契约、外部 3DGS 产物导入、分块/LOD、
-Viewer 和 Studio。证据不足时始终标记为 `synthetic`、`mock` 或 `preview-only`，
-不会把演示结果冒充真实重建。
+当前可以直接运行 **Nantai 3D 1.0 Preview**，查看 synthetic 山村的 25 个空间分块
+和三级 LOD。它是实际可交互的预览，但不是照片重建，也没有真实纹理贴图。
 
-> **当前状态：** synthetic 场景与验证框架可运行；真实场景验收仍缺真实重叠采集、
-> accepted real-photo SfM、非 mock 云 GPU 3DGS、实测对齐和真实 Viewer QA。
+## 先看效果
 
-## 核心能力
-
-| 能力 | 当前边界 |
-|---|---|
-| 图片/视频摄取 | 输入归一化、抽帧、质量预检和 source/session 绑定 |
-| COLMAP 与坐标 | 可消费真实位姿；裸 SfM 保持 arbitrary/unaligned，通过控制点或 GPS 门后才提升 |
-| 3DGS 处理 | 导入、拼接、高阶 SH 旋转、空间分块和三级 LOD |
-| Viewer / Studio | Spark 3DGS、明确标注的 fallback、项目状态与 provenance 审计 |
-| Synthetic 世界 | 可替换素材、确定性分块、按需生成和路线图；不代表真实 coverage |
-| 3DGS 训练 | 外部能力；高质量主路径需要云端 NVIDIA GPU |
-
-## 快速预览
-
-需要 Python 3.11+ 和 Node.js 20+。Windows：
-
-要直接查看本次带数据的版本，先按
-[Nantai 3D 1.0 Preview 下载与运行说明](docs/releases/1.0-preview.md)
-安装 Release 附件；从源码自行生成则使用下面命令。
+按 [1.0 Preview 下载与运行说明](docs/releases/1.0-preview.md) 安装 Release 数据，
+然后：
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"
-.venv\Scripts\python make.py assets world
-.venv\Scripts\python make.py serve
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe make.py serve
 ```
 
-Linux/macOS 将虚拟环境路径替换为 `.venv/bin/python`，也可使用同名 `make` target。
-启动后打开 <http://127.0.0.1:8000/web/studio/>。
+打开 <http://127.0.0.1:8000/web/studio/>。
 
-## 真实数据工作流
-
-真实任务开始前先检查本机运行时和采集质量：
+从源码生成 synthetic 世界：
 
 ```powershell
-.venv\Scripts\python make.py doctor
+.\.venv\Scripts\python.exe make.py assets world
+.\.venv\Scripts\python.exe make.py serve
+```
+
+Linux/macOS 将虚拟环境路径替换为 `.venv/bin/python`。
+
+## 能力与边界
+
+| 能力 | 当前状态 |
+|---|---|
+| 图片/视频摄取 | 归一化、抽帧、质量预检、source/session 绑定 |
+| COLMAP / SfM | 可消费真实位姿；注册质量必须单独验收 |
+| 3DGS | 外部训练，本仓库负责导入、拼接、高阶 SH、分块与 LOD |
+| 坐标与尺度 | Sim3、控制点/GPS、ENU；证据不足时保持 arbitrary/unaligned |
+| Studio / Viewer | provenance 状态、Spark/fallback、分块加载与漫游 |
+| Synthetic 场景 | 可替换素材、确定性世界与 Blender 质量门 |
+
+高质量 3DGS 训练需要外部 NVIDIA GPU。本机无可用 CUDA；Brush 仅适合受限小场景。
+
+## 真实场景工作流
+
+```text
+重叠照片/视频 → check-capture → COLMAP SfM → 外部 GPU 3DGS
+→ 导入/分块/LOD → 控制点或 GPS 对齐 → inspect-recon → Viewer QA
+```
+
+开始前：
+
+```powershell
+.\.venv\Scripts\python.exe make.py doctor
 $env:PHOTOS = "input"
-.venv\Scripts\python make.py check-capture
+.\.venv\Scripts\python.exe make.py check-capture
 Remove-Item Env:PHOTOS
 ```
 
-```mermaid
-flowchart LR
-    A["重叠照片 / 视频"] --> B["预检与 ingest"]
-    B --> C["COLMAP SfM"]
-    C --> D["外部 GPU 训练 3DGS"]
-    D --> E["导入 / 分块 / LOD"]
-    C --> F["控制点或 GPS Sim3"]
-    F --> E
-    E --> G["inspect_recon"]
-    G --> H["Studio / Viewer QA"]
-```
-
-- 视频抽帧不等于配准成功，必须检查逐图 registration coverage。
-- `check-capture` 只做单图预检，不能证明照片之间有足够重叠。
-- 本仓库不包含高质量 3DGS 训练器；开发机无 NVIDIA CUDA。
-- 对齐或证据门失败时，不提升为米制、ENU 或 measured。
-
-## 可信度原则
-
-- 信任只由机器字段、内容 SHA、transform history 和实测报告推导。
-- `preview-only` 不允许测量；`full-3dgs` 也不等于 Viewer 已完整渲染。
-- 素材已登记不等于已被场景消费，仍需匹配的 build/render report。
-- 矛盾、缺失或不可解析的证据一律 fail closed。
+真实场景仍需五项验收：真实重叠采集、accepted real-photo SfM、非 mock GPU 3DGS、
+实测米制对齐、真实 Viewer QA。`check-capture` 不能测跨图重叠，synthetic/mock
+也不能提升这些信任。
 
 ## 验证
 
 ```powershell
-.venv\Scripts\python make.py test lint
+.\.venv\Scripts\python.exe make.py test lint
 git diff --check
 ```
 
 ## 文档
 
-- [Nantai 3D 1.0 Preview 下载、校验与运行](docs/releases/1.0-preview.md)
-- [端到端重建、COLMAP 与云 GPU 手册](docs/manual/reconstruction-setup.md)
-- [真实数据工作流与 Sim3/ENU 坐标契约](docs/real-data-workflow.md)
-- [Synthetic 素材 Release 与使用说明](docs/releases/synthetic-design-inputs.md)
-- [Studio adapter snapshot schema](docs/contracts/studio-adapter-v2.schema.json)
+- [文档总入口](docs/README.md)
+- [真实重建端到端手册](docs/manual/reconstruction-setup.md)
+- [真实数据与 Sim3/ENU 契约](docs/real-data-workflow.md)
+- [Synthetic 素材 Releases](docs/releases/synthetic-design-inputs.md)
 
-历史实现、阶段审计和多智能体交接保留在 `docs/verification/`、`docs/superpowers/`
-与 `handoff/`，不作为首次使用入口。
+可信度只从机器字段、内容 SHA、transform history 和实测报告推导；未知或矛盾证据
+一律 fail closed。

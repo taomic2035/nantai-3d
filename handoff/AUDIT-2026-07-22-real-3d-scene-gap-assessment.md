@@ -77,7 +77,7 @@
 - `assets/registry.json` 在本 Windows 工作树存在；`PYTHONPATH=. python scripts/doctor.py --verify-assets` 实测 **11/11** 字节校验通过
 - `assets/*.ply` 有 11 个已登记 payload，但 registry 的 `origin` 均为 `gpt-mock`；它们是合成代理素材，**不是**真实照片纹理或真实重建
 - `pipeline/` 下无 `materials/` 目录；PBR 材质由 `pipeline/synthetic_village/` 下 `material_bundle.py`、`h3_material_authoring.py` 等模块管理（合成）
-- `handoff/FEEDBACK-IMAGE2-019-batch15-material-albedo-sources.md` 关键事实：
+- Batch15 材质源图的历史交付（摘要见 `handoff/HISTORY.md`）关键事实：
   - 12 张原始来源全部为 imagegen 生成
   - 信任字段：`synthetic=true`、`metric_texel_scale=unknown`、`seamless_edges=not-verified`、`color_space=unknown-unprofiled-png`、`pbr_map_consistency=not-generated`、`texture_use=albedo-source-only-not-registered`、`real_photo_textures=false`、`trust_effect=none`
   - 接缝审计：12 张全部 `not seamless`

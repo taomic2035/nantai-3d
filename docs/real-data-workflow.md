@@ -1,8 +1,9 @@
 # 真实数据 measured 重建工作流
 
 把真实拍摄（照片/视频）+ COLMAP + GPU 训练的 3DGS 变成一个 **metric-aligned ENU 世界**。
-管线机制已就位并经 CI 验证（`tests/test_reconstruct.py::...::test_import_into_aligned_world_is_metric_aligned`）；
-本文档给出输入文件格式与逐步命令。**唯一外部依赖是真实 COLMAP 与训练产物**。
+管线合同已由自动化测试覆盖；本文档给出输入文件格式与逐步命令。真实验收还需要
+真实采集、accepted COLMAP、非 mock GPU 训练产物、实测控制点/可接受 GPS 证据和
+真实 Viewer QA，不能由 CI fixture 代替。
 
 > 命令示例用 `.venv/bin/python`（macOS/Linux）。Windows 用 `.venv\Scripts\python`。
 
@@ -21,8 +22,7 @@
 
 ## 步骤 0 · 采集预检（可选，但下一步很贵）
 
-步骤 1 的 COLMAP 是整条链最贵的一步（无序 ~300 图实测 2–5+ 小时，见
-[reconstruction-setup.md §4](manual/reconstruction-setup.md)）。开跑前先用单图证据看一眼这批照片：
+步骤 1 的 COLMAP 通常是本机最贵的一步。开跑前先用单图证据看一眼这批照片：
 
 ```bash
 .venv/bin/python scripts/check_capture.py photos/

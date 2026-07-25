@@ -230,9 +230,7 @@ deleted after the runs.
 ## Next step (after Codex accepts this producer)
 
 Extend the producer with Batch31 interior shells and Batch32 route-loop
-geometry in the order recorded in
-`handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md` and
-`handoff/FEEDBACK-IMAGE2-037-batch32-route-loops.md`. Each extension
+geometry in the order summarized in `handoff/HISTORY.md`. Each extension
 will:
 
 - add stable lowercase-hyphenated `room_id`, `portal_id`, `edge_id`

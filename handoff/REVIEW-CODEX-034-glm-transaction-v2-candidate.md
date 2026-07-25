@@ -4,7 +4,7 @@ Date: 2026-07-25
 Reviewer: Codex  
 Candidate: uncommitted `scripts/reconstruct_local.py` /
 `tests/test_reconstruct_local.py` reported in
-`FEEDBACK-HANDOFF-GLM-008-task3-v2-recovery.md`  
+the historical v2 recovery candidate summarized in `handoff/HISTORY.md`
 Verdict: **HELD — P0 write-ahead boundary gaps still lose or mix generations**
 
 ## Outcome
@@ -121,4 +121,3 @@ evidence while raising.
 This review does not change the larger trust boundary: no real capture,
 accepted real-photo SfM, non-mock GPU 3DGS, measured alignment or real Viewer
 QA has been delivered.
-

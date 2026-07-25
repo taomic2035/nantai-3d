@@ -22,9 +22,7 @@
 设计与审计规格：
 
 ```text
-handoff/HANDOFF-CODEX-008-batch6-to-blender-modular-consumption.md
-handoff/REVIEW-CODEX-012-batch6-private-blender-prototype.md
-handoff/REVIEW-CODEX-013-central-cubemap-360-audit.md
+handoff/HISTORY.md
 ```
 
 私有可复跑原型：
@@ -247,7 +245,7 @@ Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>
 完成后请回执：
 
 ```text
-handoff/FEEDBACK-HANDOFF-OPUS-007.md
+handoff/HISTORY.md
 ```
 
 Codex 后续负责：

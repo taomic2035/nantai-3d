@@ -1,266 +1,181 @@
-# 真实重建端到端手册：照片/视频 → 可漫游 3D 场景
+# 真实重建端到端手册
 
-> 面向使用者。**诚实优先**——明确区分「本仓库已做的」「你需要做的」「真实限制」。
-> 工具版本/命令为 2026-07-15 联网查证。标注：✅ 已验证 · ⚠️ 有风险/未在本机实测。
+目标：把有足够重叠的照片或视频变成可在 Nantai Studio 中查看的 3DGS 场景。
 
-## 0. 先认清系统边界（重要）
+## 先看清边界
 
-**本仓库不把图片变成 3D 几何。** 它是重建管线**外围**的诚实封装层：
-摄取抽帧 → 坐标/位姿契约 → 米制 ENU 对齐 → 3DGS **导入**/拼接/LOD/素材 → Spark Viewer（360° 漫游）。
+- 本仓库负责摄取、COLMAP、证据合同、导入、对齐、分块、LOD 和 Viewer。
+- 高质量 3DGS 训练需要外部 GPU 训练器；本仓库不内置训练器。
+- 当前 Windows 开发机没有可用 NVIDIA CUDA。本机 Brush 可做受限小场景试验；
+  高质量主路径是云端 NVIDIA GPU。
+- 只能漫游被充分拍摄和成功重建的体积。天空、水、玻璃、无纹理面、移动物体和
+  遮挡区可能出现空洞或漂浮物。
+- `check-capture` 只分析单图，不能证明相邻图有足够重叠。
 
-把图片变成 3D 的**两步是外部的**：
+## 1. 安装与体检
 
-| 步骤 | 做什么 | 本机(Intel UHD 770, 无 CUDA) |
-|---|---|---|
-| **A. 相机位姿 (SfM)** | COLMAP 求每张图的相机位姿 | ✅ CPU 可跑（我已把仓库默认改成 CPU）|
-| **B. 3DGS 训练** | 从图+位姿优化出高斯泼溅 `.ply`（真正的"重建大脑"）| ✅ **本机 Brush 实测可跑**（Intel 集显, 中小场景）；大场景/高质量仍首选云 GPU（gsplat 等要 CUDA）|
-| C. 导入+对齐+漫游 | 本仓库 `reconstruct --engine import` + `alignment` + Viewer | ✅ 已就绪 |
-
-**"完美"做不到**（任何技术都不行）：3DGS 对天空/玻璃/水面/无纹理面有空洞和漂浮物；只能漫游你**拍到过**的体积；移动物体会糊。合理预期是"好但有瑕疵"。
-
-## 1. 本机现实（已确认 2026-07-15）
-
-Windows 11 / i7-14700(20核) / 32GB / D盘 1.4TB / **Intel UHD 770 集显（无 NVIDIA、无 CUDA）**。
-→ **实测：位姿(A)本机 COLMAP CPU 可跑（30 图 ~46 秒）；训练(B)本机 Brush 也能跑（中小场景）——全本机闭环已跑通**。大场景/高质量仍首选云 GPU。
-
-**核对你自己的机器**（上面是这台开发机的记录，不是你的机器）——跑一次体检，实测同样的事实：
+需要 Python 3.11+、Node.js 20+。Windows：
 
 ```powershell
-.venv\Scripts\python make.py doctor
-.venv\Scripts\python scripts\doctor.py --json        # 机读，供脚本/CI 消费
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe make.py doctor
 ```
 
-它实测 COLMAP / Brush / GPU / Python 依赖 / 素材注册表 / 磁盘，并给出「本机能跑 / 本机不能跑 / **无法判定**」小结——探测不确定的一律进「无法判定」，不替你下结论。
+`doctor` 会报告 COLMAP、Brush、CUDA、Python 依赖、素材 registry 和磁盘状态。
+缺少 GPU 是机器结论，不是 `doctor` 命令失败。
 
-- **退出码恒为 0**：报的是机器状态，不是「合不合格」。「缺 COLMAP」是体检的**结论**（也是很多机器的正常状态），不是体检失败。要按结论决策，请读 `--json` 的 `checks[*].status`（`ok` / `missing` / `degraded` / `unknown`）。
-- ⚠️ **GPU 那条是证据推理，不是硬件事实**：它判的是「**未探测到可用的 NVIDIA CUDA 栈**」，依据是找不到随 NVIDIA 驱动一起安装的 `nvidia-smi`。它**不**声称你机器里没有 N 卡（比如驱动没装的 N 卡机也会报这个）。
-- ⚠️ **素材 sha 默认不校验**：报告会明写「sha **未校验**」（要哈希全部 PLY，慢）。要实测校验加 `--verify-assets`（`make.py doctor` 不带这个开关，直接调脚本）。
+## 2. 采集
 
-## 2. 已为你准备好的（`third/`，我下载的）
+建议：
 
-| 工具 | 用途 | 位置 | 能否本机跑 |
-|---|---|---|---|
-| **COLMAP 4.1.0 no-CUDA** | 相机位姿 (SfM) | `third/colmap/` | ✅ CPU |
-| **Brush v0.3.0** | 无 CUDA 的 3DGS 训练器（wgpu/Vulkan）| `third/brush/` | ✅ **实测在 Intel UHD 770 上能训练**（见 §5b）；大场景/高质量受显存与速度限制 |
+- 绕目标形成闭环，保持连续移动；
+- 相邻视角约 60%–80% 重叠；
+- 同一区域有前后、左右和高低视差；
+- 锁定曝光/焦距，避免数码变焦、运动模糊和大面积动态物体；
+- 室内外转场、门洞、桥底和窄路要补双向视角。
 
-> `third/` 内容不入库（`.gitignore`），需要时重下即可。
-
-## 3. 需要你做的（我做不了）
-
-1. **拍摄**：50–300 张**高重叠(≥60%)、清晰、曝光稳定**的照片，或一段缓慢平稳的视频（静态主体）。数据质量是结果上限，自动化替代不了。
-2. **租云 GPU + 注册账号**（训练那步）：二选一——
-   - **Google Colab 免费 T4**（零成本，但会话有时限/断线会清空）：需 Google 账号；
-   - **AutoDL / vast.ai / RunPod**（更稳，按小时付费）：需注册+充值。
-   账号/实名/付费只能你来。
-3. **在云机上跑并看护训练**（~60–90 min on T4），**导出 `.ply` 后再关机**（Colab 断线即清空）。
-4. 把训练出的 `point_cloud.ply` 下载回本机。
-5. （可选，若要米制/地理对齐）提供控制点或 GPS——见 §6 与 [real-data-workflow.md](../real-data-workflow.md)。
-
----
-
-## 先跑采集预检（在烧掉几小时之前）
-
-下面那条一键命令的第一步就是 COLMAP——**无序 ~300 图可能跑 2–5+ 小时**（§4 实测）才发现这批图根本没法重建。开跑之前先用**单图就能拿到的证据**看一眼：
+图片目录或视频都可先做预检：
 
 ```powershell
-.venv\Scripts\python make.py check-capture                        # 默认检 photos\
-$env:PHOTOS='<你的图片目录>'; .venv\Scripts\python make.py check-capture
-.venv\Scripts\python scripts\check_capture.py photos\ --json      # 机读
+$env:PHOTOS = "input"
+.\.venv\Scripts\python.exe make.py check-capture
+Remove-Item Env:PHOTOS
 ```
 
-它只做单图分析（解码 + Laplacian 模糊分 + 读 EXIF），**不跑匹配**，成本远低于它想帮你省下的那步。报告内容：张数（对照建议的 50–300）、模糊度、分辨率、EXIF 拍摄时间/GPS 覆盖、建议匹配器（`exhaustive` / `sequential`）与图对数、**由 §4 实测锚点外推的耗时粗估**，最后给一个 `likely` / `risky` / `unlikely` 结论。
+视频会在重建时抽帧。长视频应使用 `--fps` 和 `--max-frames` 控制规模；CPU
+COLMAP 不适合把全部视频帧直接投入匹配。
 
-> **只吃图片目录**（递归扫描；支持 `.bmp` `.heic` `.jpeg` `.jpg` `.png` `.tif` `.tiff` `.webp`）。**视频输入先抽帧再预检**：`.venv\Scripts\python make.py ingest`（`input\` → `photos\`），再 `make.py check-capture`。直接把 `.mp4` 或只含视频的目录喂给它 → fail-closed 退出码 `2`（实测），报错本身就会告诉你先去抽帧。
+## 3. 本机一键链路
 
-⚠️ **别把预检当成功保证**——工具自己在报告末尾也会把这些限制重复一遍，请一起读：
-
-- **重叠度它测不到。** 相邻图重叠 ≥60% 是 SfM 成败的**首要**因素，但那是图**之间**的关系，**单图分析测不出来**。要确知只能真跑 COLMAP——而那正是最贵的一步。
-- 所以 `likely` 只意味着「**没发现明显硬伤**」，**不等于能重建**；`unlikely` 也不保证一定失败。
-- 一律测不到的还有：曝光一致性、纹理独特性、玻璃/水面/天空占比、移动物体、是否绕拍成环。
-- 模糊阈值（默认 `80.0`，与 `pipeline.ingest` 抽帧一致）是**启发式**经验值，受分辨率/纹理/曝光影响：低分不等于一定匹配失败，高分也不保证匹配得上。请自己抽查低分图再决定重不重拍。
-- 耗时是**粗估**（由 §4 实测锚点线性外推），不是承诺；小批量（<50 图）它会明显过估，报告里会自己说明。
-- **退出码**：`0` = 出了报告（**无论结论好坏**）；`2` = 没法分析（目录不存在 / 没有图片），fail-closed。
-
-## 最简：一键本机重建 ✅（已实测）
-
-拍好图后，一条命令跑完 COLMAP→Brush→导入（无需手动分步）。已在本机合成场景实测通过：
+本机 COLMAP + Brush 的受限路径：
 
 ```powershell
-# 输入可以是图片目录, 或直接一个视频文件 (自动抽帧)
-.venv\Scripts\python scripts\reconstruct_local.py <图片目录或视频.mp4> --steps 3000 --max-res 1024
-# 完成后:  .venv\Scripts\python make.py serve   # http://127.0.0.1:8000/web/studio/  360° 漫游
+.\.venv\Scripts\python.exe scripts\reconstruct_local.py input `
+  --steps 3000 --max-res 1024 --max-frames 300 --chunk-size-m 50
 ```
 
-- 自动找 `third/` 下的 COLMAP/Brush，探测选项组，全 CPU/集显，无需 CUDA。
-- **视频输入**自动抽帧（`--fps`/`--max-frames`，20 分钟视频建议 `--max-frames 300` 左右，别全帧喂 COLMAP）。
-- **匹配器自动选**：视频（时序连续帧）→ `sequential_matcher`（只配相邻帧，CPU 上远快于全配对，真实几百帧才跑得动）；无序照片 ≤400 张 → `exhaustive_matcher`。航拍/环绕**连拍照片**若按拍摄顺序命名，加 `--sequential` 同样走快路径。
-- `--steps` 越大质量越好越慢（集显上 2000 步 ~5.5 分钟）；`--max-res` 控显存。
-- **大场景加 `--chunk-size-m 50`**：额外产出可流式空间分块，viewer 只载相机附近的块（上百万高斯才漫游得动）；本次重建的信任判定自动随分块产物走。缺省不分块。
-- 想理解每一步或单独调，看下面 §4–§6 的分步版。
+关键选项：
 
----
+- 视频自动使用 sequential matcher；
+- 有序连拍照片可加 `--sequential`；
+- `--resume` 只复用内容指纹、状态和日志都一致的已完成阶段；
+- 已有 COLMAP workspace 可用 `--precomputed-colmap <workspace>`；
+- `--chunk-size-m 50` 适合大场景流式加载。
 
-## 4. 步骤 A · COLMAP 相机位姿（本机 CPU）✅
+本机 Brush 的质量和规模受集显限制。该路径跑通不等于已经获得可发布的真实场景。
 
-> **这就是可能烧掉 2–5 小时的那一步。** 跑之前先过一遍上面的[采集预检](#先跑采集预检在烧掉几小时之前)（`make.py check-capture`）——它只做单图分析、不跑匹配。但记住它**测不到重叠度**，通过预检不是能重建的保证。
+## 4. 高质量路径：COLMAP + 云 GPU
 
-**已下到 `third/colmap/`。** 加入 PATH 后本仓库会自动调用（我已把仓库默认改为 **CPU SIFT**，无 N 卡也可靠；有卡想提速加 `--colmap-gpu`）：
+### 4.1 COLMAP
 
 ```powershell
-# 1) 解压后把 colmap 目录加进 PATH（当前会话）
-$env:Path = 'D:\vibecoding\nantai\third\colmap\bin;' + $env:Path ; colmap -h   # 验证
-
-# 2) 放图：photos/ 下放照片；视频先抽帧
-.venv\Scripts\python -m pipeline.ingest --input input --output photos
-
-# 3) 让仓库驱动 COLMAP → registration.json（CPU，自动）
-.venv\Scripts\python -m pipeline.reconstruct --photos photos --reg-engine colmap --engine mock
-#   （此步只为得到 recon/registration.json 的真实位姿；engine=mock 的几何是占位，B 步才是真几何）
+.\.venv\Scripts\python.exe -m pipeline.ingest --input input --output photos
+.\.venv\Scripts\python.exe -m pipeline.reconstruct `
+  --photos photos --reg-engine colmap --engine mock
 ```
 
-- **⏱ 真实耗时（CPU，i7-14700）**：~100 图 ≈ 20–60 min；~300 图 ≈ 2–5+ 小时（穷举匹配是 O(n²)，视频帧务必控制在几百张、用顺序匹配）。
-- ⚠️ 若重叠不足，mapper 可能只注册部分图或不产模型；仓库会报错并建议加重叠/提高帧率。
-- COLMAP 只出**稀疏**位姿（`cameras.txt`/`images.txt`），**不是** 3DGS；dense/MVS 需 CUDA，本仓库从不调用（不需要）。
+这里 `engine=mock` 只用于先得到/验证相机位姿；mock 几何不是最终 3DGS。
+必须检查逐图注册覆盖和拒绝原因，不能只看 COLMAP 是否生成了目录。
 
-## 5. 步骤 B · 3DGS 训练
+### 4.2 云 GPU 训练
 
-### 5a. 云 GPU（推荐 / 质量路）✅
-
-用 **nerfstudio `ns-train splatfacto`**（gsplat 后端）。免费档 = Colab T4；稳定档 = AutoDL RTX 3060 12GB+。
-把 `cloud/train_3dgs_nerfstudio.sh` 上传到云机一键跑（内含下列步骤 + 排错提示）：`bash train_3dgs_nerfstudio.sh <图片目录|视频>`。手动等价命令：
+仓库提供 `cloud/train_3dgs_nerfstudio.sh`。云机示例：
 
 ```bash
-# 云机上（Colab 官方 notebook 会自动装 nerfstudio；AutoDL 选 PyTorch2.x+CUDA11.8 镜像后 pip install nerfstudio，
-#   或直接用上面的 cloud/train_3dgs_nerfstudio.sh 一键装+跑。注意: cloud/setup_autodl.sh 是旧素材生成愿景, 不装 nerfstudio）
-ns-process-data images --data ./my_images --output-dir ./processed   # 视频用 'video --data my.mp4'
-ns-train splatfacto --data ./processed                                # 普通版 ~6GB 显存, 适合免费 T4
+bash cloud/train_3dgs_nerfstudio.sh ./photos
+```
+
+或手动：
+
+```bash
+ns-process-data images --data ./photos --output-dir ./processed
+ns-train splatfacto --data ./processed
 ns-export gaussian-splat \
-  --load-config outputs/<scene>/splatfacto/<时间戳>/config.yml \
-  --output-dir exports/splat                                          # 得 exports/splat/point_cloud.ply
+  --load-config outputs/<scene>/splatfacto/<run>/config.yml \
+  --output-dir exports/splat
 ```
 
-- **⏱** T4 上约 60–90 min。**导出 `.ply` 后再断开**（Colab 断线清空一切）。
-- 把 `point_cloud.ply` 下回本机 `trained/point_cloud.ply`。
-- 输出是标准 INRIA-3DGS PLY，本仓库直接认（`f_dc_*`/`f_rest_*`/`opacity`/`scale_*`/`rot_*`）。
-- ⚠️ nerfstudio 历史上 `ns-export` 有颜色/opacity 小 quirk，且四元数可能未归一化 → §6 的 Step 0 归一化**必做**。
+下载以下最终产物：
 
-### 5a-2. Provenance manifests（训练前后自动产出）✅
-
-`cloud/train_3dgs_nerfstudio.sh` 在训练前后自动产出两个 content-addressed manifest，本机 `prepare_import.py` 会重算每个 SHA 并 fail-closed 拒绝任何字节漂移：
-
-- **`training-request.json`**（训练前）：绑定输入照片/视频 SHA + operator-intent `config.yml` SHA + 训练意图（trainer / max_res / total_steps / seed）。
-- **`training-result.json`**（训练后）：从实际 PLY / config / training.log 字节派生所有 SHA + GPU 环境（nvidia-smi）+ trainer 版本 + 退出码 + 真实训练 UTC 起止时间。
-
-**关键设计**（REVIEW-CODEX-023 修复后）：
-- request 和 result 绑定**同一份** operator-intent `config.yml` → `actual_config_sha256 == requested_config_sha256` → 零 drift。nerfstudio 内部生成的 `config.yml` 是诊断 artefact，不作为 provenance 合同 config。
-- `--max-num-iterations` 和 `--machine.seed` 通过真实 ns-train CLI 参数传入（不只写在 intent 文件里）。
-- `ns-process-data` 预处理失败时也会 emit failed result（不静默退出）。
-- 把这两个 manifest 和 PLY 一起下回本机 `trained/`，§6 Step 1 会消费它们。
-
-**三层 evidence**（`prepare_import` 根据证据强度选择追加哪层）：
-
-| Evidence | 条件 | 含义 |
-|---|---|---|
-| `training_provenance.v1=<result_sha>` | registration quality `training_allowed=True`（non-mock engine + capture manifest + 无拒绝原因）+ content closed + trainer identified | **trusted prefix**——仍不证明真实照片或米制 |
-| `training_content_closed.v1=<result_sha>` | content closed 但 registration quality 未通过或缺 capture manifest | **content-only receipt**——只证明输入/输出字节闭合 |
-| 无 evidence | 无 training-request/result 或验证失败 | 不追加任何 trust evidence |
-
-### 5b. 本机 Brush（✅ 已实测在 Intel UHD 770 上跑通）
-
-**实测结果（2026-07-15，本机 Intel UHD 770，30 图合成场景）**：Brush 在集显上**成功训练并导出标准 3DGS `.ply`**，**未 OOM、未崩**：
-- 200 步 / max-res 512 → 约 **13 秒**，6.9MB ply（29389 高斯）；
-- 2000 步 / max-res 1024 → 约 **5.5 分钟**，9.0MB ply。
-
-四元数已是单位、无需归一化，直接被本仓库导入（`geometry_usability=preview-only, synthetic=False`）。**本机确实能做 3DGS 训练，不是只能上云。** 外推：真实质量（数千~上万步）约数十分钟一场景——慢但可用。
-
-用法（COLMAP 数据集布局 `<root>/images/` + `<root>/sparse/0/`）：
-```powershell
-third\brush\brush_app.exe <数据集目录> --total-steps 2000 --max-resolution 1024 `
-  --export-every 2000 --export-path trained --export-name scene.ply
-#   --with-viewer 可开训练可视化窗口; 导出普通 .ply(非 .compressed.ply, 加载器不认)
+```text
+point_cloud.ply
+training-request.json
+training-result.json
 ```
 
-**诚实的限制（仍成立）**：集显共享系统内存，**图多/分辨率高/步数大时会显著变慢，超大场景可能 OOM 或驱动超时**；`--total-steps` 越大质量越好但越慢（200 步只是打通流程的欠训练结果，真实质量需数千步）。**用 `--max-resolution` 与 `--max-frames` 控制规模**。质量/速度的天花板仍在云 GPU，但"本机能不能行"的答案是：**能，中小场景可用。**
+request/result 只证明其声明并通过内容闭合检查的事实；stub 或失败 result 不能冒充
+真实训练。
 
-## 6. 步骤 C · 导入本仓库 → 漫游 ✅（契约已就绪）
+## 5. 导入、对齐和分块
 
-拿到 `trained/point_cloud.ply` 后（纯 CPU，本机）：
+先归一化训练器可能输出的非单位四元数：
 
 ```powershell
-# Step 0（若训练器输出非单位四元数）：归一化 rot_0..3——加载器 fail-closed 拒绝非单位四元数
-.venv\Scripts\python scripts\normalize_ply_quats.py trained\point_cloud.ply
-
-# Step 1（一键生成导入契约 registration.json + splat-input.json，并打印导入命令）
-.venv\Scripts\python scripts\prepare_import.py trained\point_cloud.ply
-#   —— 生成的是诚实的 sfm-local（arbitrary/unaligned）契约；要 metric 见下方与 real-data-workflow.md
-#
-# 有云训练 provenance manifests 时，追加以下参数让 prepare_import 绑定 trust evidence：
-#   --training-request trained\training-request.json `
-#   --training-result   trained\training-result.json
-# 有 COLMAP registration quality report 时再追加（engine=colmap 才能获 trusted prefix）：
-#   --registration-quality-report rq\quality-report.json `
-#   --registration-json         rq\registration.json `
-#   --registration-quality-policy rq\policy.json `
-#   --capture-manifest           rq\capture_manifest.json `
-#   --sparse-model-dir           rq\sparse\
-# 三层 evidence：trusted prefix 需 non-mock engine + training_allowed=True；
-#   只 content closed 得 content-only receipt；都没有则不追加 evidence。
-#   详见 §5a-2 和 handoff/REVIEW-CODEX-022-glm-registration-training-trust-contracts.md
-
-# Step 2：导入（prepare_import 打印的命令；--dedup-voxel 0 必须：非米制 frame 拒绝 0.10 默认）
-.venv\Scripts\python -m pipeline.reconstruct --engine import `
-  --registration recon\registration.json --splat recon\splat-input.json `
-  --dedup-voxel 0 --replace-margin 0 --photos photos
-
-# Step 3：读懂你拿到的东西 —— 这几何到底能不能拿去量？
-.venv\Scripts\python make.py inspect-recon
-#   默认读 web\data\recon\recon_manifest.json；换一份: $env:MANIFEST='<路径>'
-
-# Step 4：查看，360° 漫游
-.venv\Scripts\python make.py serve   # http://127.0.0.1:8000/web/studio/
+.\.venv\Scripts\python.exe scripts\normalize_ply_quats.py trained\point_cloud.ply
 ```
 
-- **大场景流式（可选，推荐一步到位）**：真实重建是**单个**可能上百万高斯的 `.ply`，viewer 整块加载——大场景下载慢、无空间裁剪。给导入加 `--chunk-size-m` 即额外产出可流式的块 + LOD，viewer 只载相机附近的块：
-  ```powershell
-  # 在上面 Step 2 的导入命令后追加即可（本次重建的信任判定自动随分块产物走）
-  .venv\Scripts\python -m pipeline.reconstruct --engine import ... --chunk-size-m 50
-  ```
-  也可对已有 `.ply` 单独分块（需手工传 `--recon-manifest` 才能带上信任判定，否则该字段缺席=未知）：
-  ```powershell
-  .venv\Scripts\python scripts\chunk_reconstruction.py trained\point_cloud.ply `
-    --out-dir web\data\recon-chunks --chunk-size-m 50 --recon-manifest recon\recon_manifest.json
-  ```
-  纯空间重打包：**不改几何/坐标/provenance**（每个高斯恰好落一个块，无损不重复；每块继承源 `frame_id`/`units`/transform 历史）。**分块不会**把 `preview-only` 变成 `metric-aligned`——米制要在对齐那步挣。实测 12 万高斯/400m 场景 → 64 块（50m 网格）。（viewer 消费 `chunks.json` 待 Codex 接线，见 `handoff/HANDOFF-CODEX-004`。）
-- **Step 3 在做什么**：`recon_manifest.json` 里的 `geometry_usability` / `coordinate_contract` / `metric_evidence` 是机器可验证的严谨字段，但人读不出「**这玩意儿能不能量尺寸**」。`inspect-recon` 只做翻译：高斯数、包围盒（**带单位**——不是米制时会直说「不是米，别拿去量」）、能不能测量、精度、变换链、LOD/分块产物，以及**哪些是未知**。
-  - **只翻译，绝不提升信任**：manifest 说 `preview-only` 就是 `preview-only`，哪怕包围盒数字看起来像米制。缺字段一律报「未知」，不给好看的数字。
-  - **矛盾时证据打败声称**：manifest 声称 `metric-*` 却带 `passed:false` / 对齐证据无法解析 / 单位不是米 / `synthetic=true` —— 它**指出矛盾并按 `preview-only` 处理**，退出码 **2**（可当 CI 门用）。反过来，**检查通过不等于产物能用**：它只说明 manifest **自洽**。
-  - **限制**：只读 manifest **声称**的内容 + manifest 内部自洽性。**不碰 PLY 字节**、不校验 artifacts 的 `sha256`、不重算残差——所以它查不出「manifest 自洽但 PLY 被换了」（那要另跑完整性校验）。精度只从 `sim3.alignment.v1` 证据串读；米制若靠别的证据（如实测标尺）挣得，它只能如实说「精度未知」。
-  - **退出码**：`0` = 读通了；`2` = manifest 自相矛盾；`1` = 文件不存在 / 不是合法 JSON。
-- 结果 `geometry_usability` = **`preview-only`**（sfm-local 非米制/未对齐）——这是**诚实**的：没有控制点就不冒充米制。`inspect-recon` 会把它翻成「不能测量：尺度是任意的，只能看」，并告诉你怎么升级。
-- 想要 **`metric-aligned`**（真实尺度/地理对齐）：提供控制点/GPS，走 `pipeline.alignment`（见 [real-data-workflow.md](../real-data-workflow.md)），流程我已打通并验证。
-  - **高阶 SH 与米制对齐（degree 0–3 已实现）**：米制/地理对齐会把场景经含**旋转**的 Sim3 变到 ENU 世界。`pipeline/spherical_harmonics.py` 已实现 INRIA 3DGS 约定下的 Wigner-D SH 系数旋转（degree 0–3，数值采样法 + Gauss-Legendre 积分网格），含高阶 SH 的场景可直接经非恒等 Sim3 旋转对齐，**无需** 先 `flatten_sh()`。`flatten_sh()` 保留为有损降级工具（丢高阶保 DC），适用于仅需视角无关基色或减小 PLY 体积的场景。已知精度限制：INRIA `SH_C3` 常数在 float64 中有 ~2e-8 损失，正交性容差放宽至 1e-6。详见 `handoff/HANDOFF-OPUS-010-degree3-sh-rotation.md`。
+生成导入合同：
 
----
+```powershell
+.\.venv\Scripts\python.exe scripts\prepare_import.py trained\point_cloud.ply `
+  --training-request trained\training-request.json `
+  --training-result trained\training-result.json
+```
 
-## 真实风险清单（不藏）
+默认合同是 `sfm-local / arbitrary / unaligned`。需要米制 ENU 时，用实测控制点：
 
-- 本机 Brush **已实测跑通**（Intel UHD 770，中小场景，见 §5b）；但集显共享内存，**图多/高分辨率/大步数仍可能 OOM 或驱动超时**，高质量天花板仍在云 GPU。
-- COLMAP CPU 计时看匹配器：**无序照片走 exhaustive（O(n²)），~300 图可能 2–5+ 小时**；**视频/有序连拍走 sequential（只配相邻帧），同样帧数快一个数量级**（脚本已自动选，见一键段）。
-- **COLMAP 卡死 backstop**：每阶段（feature/match/map/convert）子进程有 **6 小时** 墙钟上界（`colmap_register(stage_timeout_s=...)` 默认 21600s）。这只防**真正卡死**（headless/集显 OpenGL SIFT 停滞、病态输入、I/O 挂起）时管线无限 hang——6h 远超上面的合法 2–5h，不会误杀慢但在推进的重建。超大 CPU 数据集若合法超 6h/阶段可调大（但已超本手册范围，宜改用云 GPU / sequential）。超时按 fail-closed 抛 `RuntimeError`。
-- **长视频的帧密度权衡**：`--max-frames 300` 从 20 分钟里只抽 ~300 帧≈每 4 秒一帧，漫游可能太稀疏→空洞。要么拍更短/更聚焦的视频，要么调大 `--max-frames`（COLMAP 更慢），要么大场景直接上云 GPU。**宁可多段短视频分别重建，也别一条 20 分钟长视频稀疏抽帧。**
-- Colab 免费档会断线清空——导出后立即下载。
-- AutoDL 是国内云，计费与 GitHub/HuggingFace 权重拉取可能需要相应网络配置。
-- COLMAP 选项组命名跨版本不同（`--FeatureExtraction.use_gpu` vs 旧 `--SiftExtraction.use_gpu`）——仓库现**自动探测**已装 build 的命名，两者都适配（本机实测 4.1.0 nocuda 通过）。
-- `third/` 大文件自动下载依赖 GitHub 可达；不可达时你手动下（URL 见 `third/README.md`）。
-- 结果只覆盖拍到的体积；反光/透明/天空/动体是已知弱项。
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.alignment `
+  --registration recon\registration.json `
+  --control-points control_points.json `
+  --max-rms 0.25 `
+  --out recon\registration-aligned.json
+```
 
-## 我已为此做的代码改动
+也可使用 EXIF GPS：
 
-- `pipeline/registration.py`：COLMAP SIFT **默认走 CPU**（`use_gpu=False`），无 N 卡/headless 可靠；`reconstruct --colmap-gpu` 可显式开 GPU 提速。
-- `scripts/normalize_ply_quats.py`：训练器 PLY 的四元数归一化预处理（加载器 fail-closed 拒绝非单位四元数，Studio 复用同一语义校验，故不改门、提供预处理）。
-- `scripts/flatten_ply_sh.py`：扁平化高阶球谐（丢 `f_rest_*` 保 DC）的**可选降级**工具——`pipeline/spherical_harmonics.py` 已实现 degree 0–3 Wigner-D SH 旋转，含高阶 SH 的场景可直接经非恒等 Sim3 旋转对齐，**无需** 先 flatten。flatten 适用于仅需视角无关基色或减小 PLY 体积的场景（`GaussianScene.flatten_sh()` 同语义，均有测试）。
-- `pipeline/spatial_chunk.py` + `scripts/chunk_reconstruction.py`：大重建的空间分块（XY 网格 → per-chunk ply + LOD + `chunks.json` 流式 manifest），让上百万高斯的真实重建可只载相机附近的块。纯重打包：半开区间分箱保证无损不重复，provenance 逐块继承、manifest 如实记录源契约，绝不提升信任。
-- `scripts/prepare_import.py`：一键生成导入契约（registration.json + splat-input.json），消除手写易错步骤；生成诚实的 sfm-local frame。
-- `scripts/reconstruct_local.py`：**一键本机重建**——串起 COLMAP→Brush→normalize→prepare_import→import。**图片目录与视频文件两种输入均已本机实测端到端跑通**（视频自动抽帧，时序帧走 sequential 匹配）。
-- `pipeline/recon_schema.py`：RegistrationResult.engine 增 `"external"`（外部声明的导入配准，比冒充 colmap/mock 诚实）。
-- `third/`（gitignored）下载物 + `third/README.md`（下载清单/URL）+ 本手册。整条本机导入链有端到端认证测试（`test_full_local_import_flow_via_scripts`）。
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.alignment `
+  --registration recon\registration.json `
+  --from-gps ingest\manifest.json `
+  --out recon\registration-aligned.json
+```
+
+消费级 GPS 常见误差为数米；不能据此承诺 sub-metre。
+
+导入并分块：
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.reconstruct `
+  --engine import `
+  --registration recon\registration.json `
+  --splat recon\splat-input.json `
+  --dedup-voxel 0 --replace-margin 0 `
+  --chunk-size-m 50 --photos photos
+```
+
+分块只做空间重打包，不改变坐标或 provenance，也不会把 `preview-only` 变成
+`metric-aligned`。
+
+## 6. 验证与查看
+
+```powershell
+.\.venv\Scripts\python.exe make.py inspect-recon
+.\.venv\Scripts\python.exe make.py verify-recon-artifacts
+.\.venv\Scripts\python.exe make.py serve
+```
+
+打开 <http://127.0.0.1:8000/web/studio/>。
+
+验收时至少确认：
+
+1. 注册覆盖率和输入来源；
+2. PLY、训练 request/result 与配置 SHA；
+3. 坐标 frame、units、transform history；
+4. 对齐残差和控制点 span；
+5. chunks/LOD 的内容 SHA；
+6. 真实 Viewer 中的空洞、漂浮物、遮挡和可达范围。
+
+详细字段与 `control_points.json` / `SplatInput` 结构见
+[真实数据工作流](../real-data-workflow.md)。
