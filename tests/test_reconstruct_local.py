@@ -536,7 +536,7 @@ def _write_fake_cameras_bin(path: Path, *, non_finite: bool = False) -> None:
     buf += struct.pack("<i", 1)          # model = PINHOLE
     buf += struct.pack("<Q", 192)        # width
     buf += struct.pack("<Q", 108)        # height
-    buf += struct.pack("<Q", 4)           # num_params
+    # COLMAP 4.x 不存储 num_params；由 model=1 (PINHOLE) 查表得 nparams=4
     if non_finite:
         buf += struct.pack("<4d", float("nan"), 100.0, 96.0, 54.0)
     else:

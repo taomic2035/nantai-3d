@@ -297,15 +297,36 @@ def _validate_ws_precomputed(ws: Path, manifest: dict) -> bool:
     return True
 
 
+_COLMAP_MODEL_NUM_PARAMS: dict[int, int] = {
+    0: 3,    # SIMPLE_PINHOLE
+    1: 4,    # PINHOLE
+    2: 4,    # SIMPLE_RADIAL
+    3: 5,    # RADIAL
+    4: 8,    # OPENCV
+    5: 8,    # OPENCV_FISHEYE
+    6: 12,   # FULL_OPENCV
+    7: 5,    # FOV
+    8: 6,    # FULL_FOV
+    9: 5,    # SIMPLE_RADIAL_FISHEYE
+    10: 6,   # RADIAL_FISHEYE
+    11: 12,  # THIN_PRISM_FISHEYE
+}
+
+
 def _parse_colmap_cameras_bin(path: Path) -> list[dict]:
     """解析 COLMAP cameras.bin 二进制 → list of camera dicts。
 
-    格式参考 COLMAP src/base/reconstruction.cc ReadCamerasBinary:
+    格式（COLMAP 4.x，实测 P5b cameras.bin 校验）：
       num_cameras(uint64) + 每相机 {camera_id(uint32), model(int32),
-      width(uint64), height(uint64), num_params(uint64),
-      params(float64[num_params])}。
+      width(uint64), height(uint64), params(double[num_params])}。
 
-    解析失败（文件过短/字段越界）→ ValueError（由调用方决定 fail-closed）。
+    **注意**：COLMAP 4.x **不存储 num_params**——参数数量由 model_id 推导
+    （SIMPLE_RADIAL=2→4 params, PINHOLE=1→4, RADIAL=3→5, OPENCV=4→8, …）。
+    旧版解析器错误地从文件读 num_params，实际读到了 params 的第一个 double，
+    导致 nparams=4.6e18 → struct.calcsize 爆炸。用 _COLMAP_MODEL_NUM_PARAMS
+    查表；未知 model → ValueError（fail-closed，不让残缺/未知模型静默通过）。
+
+    解析失败（文件过短/字段越界/未知模型）→ ValueError（由调用方决定 fail-closed）。
     """
     data = path.read_bytes()
     pos = 0
@@ -327,7 +348,11 @@ def _parse_colmap_cameras_bin(path: Path) -> list[dict]:
         model = read("<i")[0]
         width = read("<Q")[0]
         height = read("<Q")[0]
-        nparams = read("<Q")[0]
+        nparams = _COLMAP_MODEL_NUM_PARAMS.get(model)
+        if nparams is None:
+            raise ValueError(
+                f"cameras.bin 相机 #{i} (camera_id={camera_id}) model={model} "
+                f"不在已知 COLMAP 模型表 → 无法确定参数数量（拒绝猜测）")
         params = list(read(f"<{nparams}d")) if nparams else []
         cameras.append({"index": i, "camera_id": camera_id, "model": model,
                         "width": width, "height": height, "params": params})
