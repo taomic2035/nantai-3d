@@ -608,12 +608,16 @@ def main(argv: list[str] | None = None) -> int:
         # 唯一的"重跑"路径是把源字节重新拷进 ws（绝不执行 COLMAP）。
         print(f"    模式: precomputed (跳过 COLMAP; 源 = {args.precomputed_colmap})")
         manifest = _build_precomputed_manifest(args.precomputed_colmap, args.photos)
+        # REVIEW-CODEX-030 P7a-3：caller_argv + 二进制 SHA-256 纳入指纹。
+        # caller_argv 绑定"哪个命令消费了源"——换 flag（如 --sequential）即视为
+        # 不同的消费意图，触发重拷（便宜）。binary 用 SHA-256 而非 (name/size/mtime)：
+        # 同名同大小同 mtime 的不同 build 也要被发现。
+        colmap_bin_sha = _sha256_file(Path(colmap))
         parent, unprovable = _fingerprint("colmap", {
             "parent": parent,
             **manifest,
-            # 即便本模式不执行 COLMAP，也绑定二进制身份——这把"换了一个 COLMAP build"
-            # 视为下游需要重训的信号（不同 build 的稀疏模型语义可能不同）。
-            "binary": _file_fp(Path(colmap)),
+            "caller_argv": caller_argv,
+            "binary_sha256": colmap_bin_sha,
         })
         outputs_ok = _validate_ws_precomputed(ws, manifest)
         if state.begin("colmap", parent, unprovable=unprovable,
@@ -634,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
             # 是为了让审计能直接读 state 文件确认 ws 字节 == 源字节。
             ws_sparse_0 = ws / "sparse" / "0"
             colmap_extras: dict[str, object] = {
+                "caller_argv": caller_argv,
+                "colmap_binary_sha256": colmap_bin_sha,
                 "precomputed_source_root": str(args.precomputed_colmap.resolve()),
                 "precomputed_post_copy_validated": True,
                 "precomputed_ws_cameras_bin_sha256":

@@ -899,6 +899,63 @@ class TestPrecomputedColmapBoundary:
                      "--precomputed-colmap", str(precomp)])
         assert _colmap_subprocess_cmds(fake) == []
 
+    def test_precomputed_extras_bind_caller_argv(self, env, tmp_path,
+                                                  photos_dir):
+        """REVIEW-CODEX-030 P7a-3: caller_argv must be in precomputed
+        colmap extras (not only in brush extras) so the exact caller
+        that consumed the source is auditable at the colmap stage."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        entry = _state(ws)["stages"]["colmap"]
+        assert "caller_argv" in entry, \
+            "precomputed colmap extras must bind caller_argv for audit"
+        assert "--precomputed-colmap" in entry["caller_argv"]
+        assert str(precomp) in entry["caller_argv"]
+        # Must not leak pytest's sys.argv.
+        assert not any("pytest" in t for t in entry["caller_argv"])
+
+    def test_precomputed_binary_sha_in_fingerprint(self, env, tmp_path,
+                                                     photos_dir):
+        """REVIEW-CODEX-030 P7a-3: binary identity in the precomputed
+        fingerprint must be SHA-256, not (name/size/mtime). A same-size
+        same-mtime byte swap of the COLMAP binary must alter the digest."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        digest_a = _state(ws)["stages"]["colmap"]["fingerprint"]
+        # Tamper the fake COLMAP binary: flip a byte, keep size + mtime.
+        colmap_exe = tmp_path / "bin" / "colmap.exe"
+        data = bytearray(colmap_exe.read_bytes())
+        data[0] ^= 0xFF
+        st = colmap_exe.stat()
+        colmap_exe.write_bytes(bytes(data))
+        os.utime(colmap_exe, ns=(st.st_atime_ns, st.st_mtime_ns))
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
+        assert digest_a != digest_b, \
+            "binary byte change (same size/mtime) must alter fingerprint"
+
+    def test_precomputed_caller_flag_in_fingerprint(self, env, tmp_path,
+                                                     photos_dir):
+        """REVIEW-CODEX-030 P7a-3: caller_argv is part of the precomputed
+        colmap fingerprint, so changing a caller flag (--sequential)
+        alters the digest (the exact caller that consumed the source is
+        bound, not just the source bytes)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        digest_a = _state(ws)["stages"]["colmap"]["fingerprint"]
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp), "--sequential")
+        digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
+        assert digest_a != digest_b, \
+            "caller flag change (--sequential) must alter precomputed fingerprint"
+
 
 class TestColmapExtrasBoundary:
     """REVIEW-CODEX-030 P1 (P6c): COLMAP normal branch must bind real
