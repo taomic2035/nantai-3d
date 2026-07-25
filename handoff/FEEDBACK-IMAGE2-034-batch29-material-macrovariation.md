@@ -110,4 +110,3 @@ arbitrary-coordinate coverage.
 This batch reduces synthetic material-authoring ambiguity. It does not replace
 real overlapping capture, accepted real-photo SfM, non-mock cloud-GPU 3DGS,
 measured alignment, real imported geometry/appearance or real Viewer QA.
-
