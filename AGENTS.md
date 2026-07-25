@@ -56,6 +56,12 @@
   根因是非原子 journal + 粗粒度 state，不能鉴别六个 rename 边界，也没有 old/new
   exact-byte manifest 和可中断幂等 rollback。GLM 不得先做 source report；必须按
   `handoff/REVIEW-CODEX-033-glm-d12e265-transaction.md` 的固定 RED 顺序修正。
+- **GLM 后续明确任务，不得以“无事可做”停工**：P7 transaction 等 Codex review 时，
+  可在独立新路径实现 exact-build roaming-graph v1 的纯模型、Blender emitter 与
+  fail-closed 测试；先交至少 2 个真实 modeled space、1 个实测 portal、2 条 reciprocal
+  edge 的最小私有 candidate，不能伪造 loop/collision SHA，不能写 `web/data/`。
+  完整输入、交付、禁止路径和验证命令见
+  `handoff/HANDOFF-GLM-009-roaming-graph-producer.md`。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。

@@ -78,6 +78,16 @@
         <button class="button button-quiet" id="showcase-camera" type="button"
                 data-viewer-command="setCameraPose" disabled>近景预览</button>
       </div>
+      <div class="roaming-toolbar" aria-label="漫游图节点工具">
+        <span class="roaming-kicker">ROOM / PORTAL</span>
+        <strong id="roaming-summary">漫游图 · 未加载</strong>
+        <select id="roaming-node-select" aria-label="入口可达房间" disabled>
+          <option value="">无可验证节点</option>
+        </select>
+        <button class="button button-quiet" id="roaming-node-jump"
+                type="button" disabled>前往节点</button>
+        <span class="roaming-disclosure">坐标跳转只移动相机，不证明该点可行走</span>
+      </div>
       <div class="viewer-frame-wrap">
         <iframe
           id="viewer-frame"

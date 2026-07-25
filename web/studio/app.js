@@ -18,6 +18,7 @@ import { loadOptionalCoverageAudit } from './coverage-audit-loader.mjs';
 import {
   loadOptionalProductionCameraPlan,
 } from './production-camera-plan-loader.mjs';
+import { loadOptionalRoamingGraph } from './roaming-graph-loader.mjs';
 import {
   loadProductionQualityEvidence,
   renderProductionQualityPanel,
@@ -546,6 +547,52 @@ function setupViewerBridge() {
   const status = byId('viewer-status');
   let coverageProbe = null;
   let productionPlanProbe = null;
+  let roamingGraphProbe = null;
+  let roamingNodes = new Map();
+  const roamingSummary = byId('roaming-summary');
+  const roamingNodeSelect = byId('roaming-node-select');
+  const roamingNodeJump = byId('roaming-node-jump');
+
+  const resetRoamingControls = (summary) => {
+    roamingNodes = new Map();
+    roamingSummary.textContent = summary;
+    roamingNodeSelect.replaceChildren(new Option('无可验证节点', ''));
+    roamingNodeSelect.disabled = true;
+    roamingNodeJump.disabled = true;
+  };
+
+  const applyRoamingGraphModel = (model) => {
+    const candidates = Array.isArray(model?.navigation_nodes)
+      ? model.navigation_nodes
+      : [];
+    const nodes = candidates.filter((node) => (
+      typeof node?.room_id === 'string'
+      && typeof node.label === 'string'
+      && node.position
+      && ['east', 'north', 'up'].every(
+        (axis) => Number.isFinite(node.position[axis]),
+      )
+    ));
+    roamingNodes = new Map(nodes.map((node) => [
+      node.room_id,
+      {
+        ...node,
+        position: {
+          east: node.position.east,
+          north: node.position.north,
+          up: node.position.up,
+        },
+      },
+    ]));
+    roamingSummary.textContent = `漫游图 · ${model.summary}`;
+    roamingNodeSelect.replaceChildren(new Option('选择入口可达节点', ''));
+    for (const node of roamingNodes.values()) {
+      roamingNodeSelect.append(new Option(`${node.label} · ${node.room_id}`, node.room_id));
+    }
+    roamingNodeSelect.disabled = roamingNodes.size === 0;
+    roamingNodeJump.disabled = true;
+  };
+
   const viewerButtons = [...document.querySelectorAll('[data-viewer-command]')];
   viewerButtons.forEach((button) => { button.disabled = true; });
   const bridge = new StudioViewerBridge({
@@ -607,6 +654,27 @@ function setupViewerBridge() {
               productionPlanProbe = null;
             });
         }
+        if (!roamingGraphProbe) {
+          roamingGraphProbe = loadOptionalRoamingGraph({ bridge })
+            .then((result) => {
+              if (result.status === 'loaded') {
+                applyRoamingGraphModel(result.roaming_graph);
+                announce(`漫游图已加载：${result.roaming_graph.summary}`);
+              } else if (result.status === 'absent') {
+                resetRoamingControls('漫游图 · 未提供 exact build 产物');
+              } else {
+                resetRoamingControls('漫游图 · Viewer 不支持');
+              }
+              return result;
+            })
+            .catch((error) => {
+              resetRoamingControls('漫游图 · 加载失败');
+              announce(`漫游图加载失败：${error.message}`);
+            })
+            .finally(() => {
+              roamingGraphProbe = null;
+            });
+        }
       }
     },
   });
@@ -645,6 +713,21 @@ function setupViewerBridge() {
         jumpToCoordinates();
       }
     });
+  });
+  roamingNodeSelect.addEventListener('change', () => {
+    roamingNodeJump.disabled = (
+      !roamingNodes.has(roamingNodeSelect.value)
+      || !bridge.supports('setCameraPose')
+    );
+  });
+  roamingNodeJump.addEventListener('click', () => {
+    const selected = roamingNodes.get(roamingNodeSelect.value);
+    if (!selected || roamingNodeJump.disabled) return;
+    bridge.command('setCameraPose', { position: selected.position })
+      .then(() => {
+        announce(`已移动到漫游图节点：${selected.label}；图节点不等于连续空间已验收`);
+      })
+      .catch((error) => announce(error.message));
   });
   byId('lod-select').addEventListener('change', (event) => {
     const value = event.target.value;

@@ -71,6 +71,10 @@ import {
   productionCameraPlanViewModel,
 } from './production-camera-plan.mjs';
 import {
+  isRoamingGraph,
+  roamingGraphViewModel,
+} from './roaming-graph.mjs';
+import {
   atmosphereLightForRenderer,
   environmentNotice,
   meshWeatherResponse,
@@ -144,6 +148,8 @@ let coverageAudit = null;             // 独立覆盖审计，不改变重建 ar
 let coverageAuditUrl = null;
 let productionCameraPlan = null;       // 机位规划证据，不提升重建或覆盖可信度
 let productionCameraPlanUrl = null;
+let roamingGraph = null;                // 图连通只证明声明的节点/边，不证明连续空间可走
+let roamingGraphUrl = null;
 let reconMesh = null;
 let reconLodLoaded = -1;
 let reconVisible = true;
@@ -2491,6 +2497,20 @@ function updateHUD() {
     element.style.color = productionPlan.color;
   }
 
+  const roaming = roamingGraphViewModel(roamingGraph);
+  const roamingFields = {
+    'hud-roaming-status': roaming.summary,
+    'hud-roaming-reachability': roaming.reachability_label,
+    'hud-roaming-portals': roaming.portal_label,
+    'hud-roaming-provenance': roaming.provenance_label,
+  };
+  for (const [id, value] of Object.entries(roamingFields)) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.textContent = value;
+    element.style.color = roaming.color;
+  }
+
   const coverage = coverageAuditViewModel(coverageAudit);
   const coverageFields = {
     'hud-coverage-status': {
@@ -2738,6 +2758,7 @@ async function main() {
       artifact: artifactProvenance(reconManifest ?? {}, viewerCapabilities),
       coverage: coverageAuditViewModel(coverageAudit),
       production_plan: productionCameraPlanViewModel(productionCameraPlan),
+      roaming_graph: roamingGraphViewModel(roamingGraph),
       camera: { position: { east, north, up }, mode: cameraMode },
       mesh_resources: {
         ...meshResourceStore.diagnostics(),
@@ -2837,6 +2858,7 @@ async function main() {
           && kind !== 'chunk-manifest'
           && kind !== 'coverage-audit'
           && kind !== 'production-camera-plan'
+          && kind !== 'roaming-graph'
         ) {
           throw new Error(`不支持的 artifact kind: ${kind}`);
         }
@@ -2897,6 +2919,36 @@ async function main() {
             kind,
             url: productionCameraPlanUrl,
             production_plan: productionCameraPlanViewModel(productionCameraPlan),
+            state: readState(),
+          };
+        }
+        if (kind === 'roaming-graph') {
+          let nextGraph = artifact;
+          let nextUrl = window.location.href;
+          if (url) {
+            const absoluteUrl = new URL(url, window.location.href);
+            if (absoluteUrl.origin !== window.location.origin) {
+              throw new Error('artifact URL 必须与 viewer 同源');
+            }
+            const response = await fetch(absoluteUrl.href);
+            if (!response.ok) {
+              throw new Error(`无法加载 roaming graph: ${response.status}`);
+            }
+            nextGraph = await response.json();
+            nextUrl = absoluteUrl.href;
+          } else if (!artifact) {
+            throw new Error('loadArtifact 需要 url 或 manifest');
+          }
+          if (!isRoamingGraph(nextGraph)) {
+            throw new Error('无效的 roaming-graph artifact');
+          }
+          roamingGraph = nextGraph;
+          roamingGraphUrl = nextUrl;
+          updateHUD();
+          return {
+            kind,
+            url: roamingGraphUrl,
+            roaming_graph: roamingGraphViewModel(roamingGraph),
             state: readState(),
           };
         }

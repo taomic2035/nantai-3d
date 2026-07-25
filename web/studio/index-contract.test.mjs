@@ -80,6 +80,41 @@ test('Studio quietly probes the canonical production camera plan after Viewer re
   assert.match(app, /production_plan\.target/);
 });
 
+test('Studio exposes only validated roaming nodes and distinguishes camera move from walkability', () => {
+  assert.match(
+    app,
+    /import\s*\{[^}]*loadOptionalRoamingGraph[^}]*\}\s*from\s*['"]\.\/roaming-graph-loader\.mjs['"]/s,
+  );
+  for (const id of [
+    'roaming-summary',
+    'roaming-node-select',
+    'roaming-node-jump',
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /坐标跳转只移动相机，不证明该点可行走/);
+  assert.match(
+    app,
+    /next\s*===\s*['"]ready['"][\s\S]*loadOptionalRoamingGraph\(\{\s*bridge\s*\}\)/s,
+  );
+  assert.match(app, /navigation_nodes/);
+  assert.match(app, /new Option\(/);
+  assert.match(app, /bridge\.command\('setCameraPose',\s*\{\s*position:\s*selected\.position\s*\}\)/);
+  assert.match(app, /roamingSummary\.textContent/);
+  assert.doesNotMatch(app, /roamingSummary\.innerHTML/);
+});
+
+test('stage toolbars keep primary controls readable at a medium desktop width', () => {
+  assert.match(css, /\.stage-toolbar\s+\.button\s*\{[^}]*white-space:\s*nowrap/s);
+  assert.match(css, /\.segmented button\s*\{[^}]*white-space:\s*nowrap/s);
+  assert.match(css, /\.roaming-kicker\s*\{[^}]*white-space:\s*nowrap/s);
+  assert.match(css, /#roaming-node-select\s*\{[^}]*min-width:\s*120px/s);
+  assert.match(
+    css,
+    /@media\s*\(max-width:\s*1399px\)\s*\{[^}]*\.roaming-disclosure[^}]*display:\s*none/s,
+  );
+});
+
 test('B1 ingest uses an explicit confirmation without command or path fields', () => {
   assert.match(html, /id="ingest-dialog"/);
   assert.match(html, /id="ingest-cancel-notice"/);

@@ -203,6 +203,30 @@ test('production camera plan has a dedicated incomplete HUD and dynamic consumer
   assert.doesNotMatch(production, /360.?ready|360.?coverage|production.?ready/i);
 });
 
+test('roaming graph has a fail-closed HUD and dynamic graph-only consumer', () => {
+  const roaming = html.match(
+    /<div class="roaming-graph"[^>]*>([\s\S]*?)<\/div>\s*<div class="coverage"/,
+  )?.[1];
+  assert.ok(roaming, 'roaming graph HUD must exist before coverage');
+  for (const id of [
+    'hud-roaming-status',
+    'hud-roaming-reachability',
+    'hud-roaming-portals',
+    'hud-roaming-provenance',
+  ]) {
+    assert.match(roaming, new RegExp(`id="${id}"`));
+  }
+  assert.match(main, /from ['"]\.\/roaming-graph\.mjs['"]/);
+  assert.match(main, /kind\s*===\s*['"]roaming-graph['"]/);
+  assert.match(main, /isRoamingGraph\(/);
+  assert.match(main, /roamingGraphViewModel\(/);
+  assert.match(main, /roaming_graph:\s*roamingGraphViewModel\(/);
+  assert.doesNotMatch(
+    roaming,
+    /360.?ready|coverage.?complete|arbitrary.?coordinate.?ready|metric.?aligned/i,
+  );
+});
+
 test('terminal world-envelope failures do not enter the chunk retry loop', () => {
   assert.match(main, /shouldRetryWorldChunkFailure/);
   assert.match(main, /terminalChunkFailures/);

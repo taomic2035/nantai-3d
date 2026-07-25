@@ -69,6 +69,7 @@ test('start announces same-origin ready with honest DC point capabilities', () =
       'chunk-manifest',
       'coverage-audit',
       'production-camera-plan',
+      'roaming-graph',
     ],
   );
   assert.equal(VIEWER_CAPABILITIES.artifact_kinds.includes('coverage-audit'), false);
@@ -76,6 +77,7 @@ test('start announces same-origin ready with honest DC point capabilities', () =
     VIEWER_CAPABILITIES.artifact_kinds.includes('production-camera-plan'),
     false,
   );
+  assert.equal(VIEWER_CAPABILITIES.artifact_kinds.includes('roaming-graph'), false);
   assert.deepEqual(VIEWER_CAPABILITIES.three_dgs_properties.consumed, []);
   assert.ok(VIEWER_CAPABILITIES.commands.includes('resetCamera'));
   assert.ok(VIEWER_CAPABILITIES.commands.includes('setBounds'));

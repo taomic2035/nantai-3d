@@ -49,7 +49,7 @@
   #hud .stat b { color: #fff; font-weight: 600; }
   #hud .legend { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
   #hud .provenance { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
-  #hud .production-plan, #hud .coverage { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
+  #hud .production-plan, #hud .roaming-graph, #hud .coverage { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
   #hud .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #bbb; margin: 2px 0; }
   #hud .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
   #controls {
@@ -176,6 +176,12 @@
     <div class="stat">Unplaced groups: <b id="hud-production-unplaced">unknown</b></div>
     <div class="stat">Undelivered evidence: <b id="hud-production-requirements">unknown</b></div>
     <div class="stat">Plan provenance: <b id="hud-production-provenance">unknown · fail-closed</b></div>
+  </div>
+  <div class="roaming-graph" aria-label="漫游连通图">
+    <div class="stat">漫游图: <b id="hud-roaming-status">roaming graph not loaded</b></div>
+    <div class="stat">入口可达: <b id="hud-roaming-reachability">unknown</b></div>
+    <div class="stat">门洞 / 回路: <b id="hud-roaming-portals">unknown</b></div>
+    <div class="stat">证据边界: <b id="hud-roaming-provenance">unknown · fail-closed</b></div>
   </div>
   <div class="coverage" aria-label="覆盖审计">
     <div class="stat">覆盖审计: <b id="hud-coverage-status">coverage audit not loaded</b></div>
