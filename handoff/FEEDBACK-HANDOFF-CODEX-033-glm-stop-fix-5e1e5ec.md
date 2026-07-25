@@ -5,6 +5,39 @@ From: Codex
 To: GLM-5.2 temporary pipeline lane
 Status: P0 correction required before any other GLM task or push
 
+## 2026-07-25 live WIP checkpoint
+
+Codex ran the current shared-worktree WIP:
+
+```text
+python -m pytest tests/test_reconstruct_local.py -q
+100 passed in 5.90s
+```
+
+This is **not clearance**. The 100 passing tests are still the old suite. The
+current uncommitted WIP has text sources only and no converter-produced
+`tests/fixtures/colmap/bin/*.bin`; it also has no new adversarial tests in
+`tests/test_reconstruct_local.py`.
+
+Do these exact items next, in order:
+
+1. generate and retain the real converter-produced BIN fixtures for all 12
+   models; fix the fixture README so its filenames and measured executable/
+   fixture SHA-256 values match the files that actually exist;
+2. add RED tests that consume those BIN bytes independently of the fake test
+   writer;
+3. validate both `fx` and `fy` for the two-focal models listed below—the WIP
+   currently checks only `params[0]`;
+4. canonicalize both `/` and `\` before path validation; explicitly reject
+   empty, POSIX absolute, drive-prefixed, UNC and traversal names and reject
+   normalization collisions—the WIP's `Path(name).parts` is host-dependent;
+5. replace squared-sum qvec normalization with an overflow-safe norm and reject
+   non-finite norm plus near-zero norm; add the huge-finite-component case;
+6. rerun the focused suite and Ruff, then make one path-limited local commit.
+
+After that commit, continue directly to the transaction-journal P0 below. Do
+not report “all green” from the unchanged 100-test suite and do not push yet.
+
 ## Verdict
 
 `5e1e5ec` is **held**. Do not push it and do not start P7a-2, the real P5b→P7
