@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -703,6 +704,7 @@ class TestP1CanaryStubArgv:
         bin_dir.mkdir()
         stub = bin_dir / "ns-train"
         stub.write_text(_NS_TRAIN_STUB, encoding="utf-8", newline="\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         probe = tmp_path / "probe.sh"
         probe.write_text(_NS_TRAIN_PROBE, encoding="utf-8", newline="\n")
         argv_file = tmp_path / "argv.txt"
@@ -757,6 +759,7 @@ class TestP1CanaryStubArgv:
         bin_dir.mkdir()
         stub = bin_dir / "ns-train"
         stub.write_text(_NS_TRAIN_STUB, encoding="utf-8", newline="\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         probe = tmp_path / "probe.sh"
         probe.write_text(_NS_TRAIN_PROBE, encoding="utf-8", newline="\n")
         argv_file = tmp_path / "argv.txt"

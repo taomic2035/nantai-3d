@@ -306,6 +306,7 @@ def test_powershell_authenticode_passes_path_via_environment(
         )
 
     monkeypatch.setattr(ktx2_toolchain, "_require_success", process_runner)
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
 
     assert ktx2_toolchain._powershell_authenticode_signature(target) == expected
 

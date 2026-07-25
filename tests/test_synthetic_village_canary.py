@@ -423,7 +423,8 @@ def test_textured_builder_uses_baked_normal_strength_once_and_zones_terrain() ->
     ).read_text("utf-8")
 
     assert 'normal_map.inputs["Strength"].default_value = 1.0' in source
-    assert "TERRAIN_TEXTURE_SCALE = 3.0" in source
+    assert "TERRAIN_TEXTURE_SCALE = 1.0" in source
+    assert 'terrain_obj["nv_uv_audit_category"] = "terrain"' in source
     assert "_assign_textured_terrain_materials" in source
     for slot_id in (
         "material-moss-stone-01",

@@ -185,6 +185,12 @@ def _write_colmap_model(workspace, cameras: str, images: str):
 
 def _stub_colmap_commands(monkeypatch):
     monkeypatch.setattr(
+        registration_module,
+        "_find_colmap_binary",
+        lambda: "colmap",
+    )
+    registration_module._colmap_sift_group.cache_clear()
+    monkeypatch.setattr(
         registration_module.subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=""),
@@ -326,6 +332,12 @@ class TestColmapSubprocessTimeout:
                 return SimpleNamespace(returncode=0, stderr="", stdout="")
             raise subprocess.TimeoutExpired(cmd=args, timeout=timeout or 1)
 
+        monkeypatch.setattr(
+            registration_module,
+            "_find_colmap_binary",
+            lambda: "colmap",
+        )
+        registration_module._colmap_sift_group.cache_clear()
         monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
         with pytest.raises(RuntimeError, match="超时|timeout|timed out"):
             registration_module.colmap_register(photos_dir, workspace)
@@ -346,6 +358,12 @@ class TestColmapSubprocessTimeout:
                 seen.append((args[1], timeout))
             return SimpleNamespace(returncode=0, stderr="", stdout="")
 
+        monkeypatch.setattr(
+            registration_module,
+            "_find_colmap_binary",
+            lambda: "colmap",
+        )
+        registration_module._colmap_sift_group.cache_clear()
         monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
         registration_module.colmap_register(photos_dir, workspace)
 

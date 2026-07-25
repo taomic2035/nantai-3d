@@ -229,6 +229,10 @@ class TestRegistrationFrameClaims:
                 )
             return SimpleNamespace(returncode=0, stderr="", stdout="")
 
+        monkeypatch.setattr(
+            "pipeline.registration._find_colmap_binary",
+            lambda: "colmap",
+        )
         monkeypatch.setattr("pipeline.registration.subprocess.run", fake_run)
         result = colmap_register(photos, workspace, sessions=[session])
 
