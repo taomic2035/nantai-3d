@@ -157,3 +157,74 @@ After each item, commit only owned paths with the required co-author trailer,
 push, and immediately start the next unblocked item. Waiting for Codex review or
 real footage is not a stop condition. Do not touch `web/data/`, exact-266
 caller/overlay paths, or Batch26 candidates.
+
+## Live P7a-4/P7a-6 review — `0978ee7` held
+
+`0978ee7` reports 93 focused tests passing; the fresh Codex run reports
+`100 passed` and Ruff clean. Those green tests do not cover the real binary
+format or a multi-target replacement failure.
+
+### P0 — fake and production camera formats agree with each other, not COLMAP
+
+The pinned local executable reports:
+
+```text
+COLMAP 4.1.0 (Commit fa8e3b3 on 2026-06-26 without CUDA)
+```
+
+Codex created a one-camera PINHOLE text model and converted it with the real
+`colmap model_converter --output_type BIN`. The measured result was:
+
+```text
+model_converter_rc 0
+real_cameras_bin_bytes 64
+current _parse_colmap_cameras_bin:
+  struct.error: total struct size too long
+```
+
+Real `cameras.bin` does not serialize `num_params`; the camera model id
+determines parameter count. The current fake writer adds a `uint64
+num_params`, so the tests certify an invented format. Bind the parser to the
+pinned official model schema and make a real-converter fixture the independent
+green baseline.
+
+The same semantic boundary must also reject unknown model id, duplicate/zero
+camera and image ids, zero dimensions, invalid focal parameters, invalid UTF-8
+names, unsafe absolute/traversing names, absent camera references,
+non-finite qvec/tvec and near-zero/non-normalizable quaternions.
+
+### P0 — three renames are not one atomic replacement
+
+Codex injected a failure into `_atomic_replace_file` after the sparse
+directory swap. The destination state was:
+
+```text
+sparse_after_failure = NEW
+db_after_failure = OLD
+images_after_failure = OLD
+mixed_generation = true
+```
+
+The implementation deletes each backup immediately after its individual swap,
+so it cannot roll the already-replaced sparse directory back when database or
+images replacement fails. Startup also deletes `*.old` before deciding whether
+an interrupted transaction must be recovered. This contradicts the commit
+claim that a failed run preserves a coherent verified destination.
+
+Use a prepared/verified/committed transaction journal or equivalent rollback
+protocol. Keep every old target until all new targets are installed and the
+combined destination passes exact-set, SHA and semantic verification. Inject
+failure at every swap boundary and prove that restart restores one complete
+old or new generation, never a mixture.
+
+Status:
+
+```text
+0978ee7 = held
+P7a-4 = not accepted
+P7a-6 = not accepted
+P7a-2 materialized source report = still open
+```
+
+Follow the exact correction and Git proxy queue in
+`HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`.

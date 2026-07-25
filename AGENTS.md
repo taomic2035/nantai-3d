@@ -30,6 +30,13 @@
      （Phase 1 已完成，Phase 2 仍未交付）；
   2. `handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`。
   007 仅可在独立新路径上并行，触及 renderer/runtime/journal 时必须先协调。
+- **2026-07-25 GLM 明确连续队列与 Git 网络规则**：先修 P7a-6 当前真实
+  `cameras.bin` 格式偏差，再做 exact-file-set 原子替换、content-addressed source
+  report、fresh P5b→P7 exact-copy rehearsal，之后才进入 P6c/P7b 与 Batch27/28
+  LOD 几何消费。GitHub 网络命令统一用单次临时代理
+  `git -c http.proxy=http://127.0.0.1:7890 ...`，不得写全局代理。完整输入、RED
+  测试、完成证据、禁止路径和连续工作规则见
+  `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
@@ -183,6 +190,24 @@ Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未�
   森林近景与路线排水；每次仍须重建 content-addressed build 并重跑正式相机、
   六层 visibility 与 post-render v2。详见
   `handoff/FEEDBACK-IMAGE2-031-batch27-nearfield-turnarounds.md`。
+
+## Batch 28 跨距离 LOD 连续性素材（2026-07-25）
+
+- 新增 8 张已目视筛选的 image2 设计输入，分别覆盖住宅群、路线/挡墙、溪流 crossing、
+  果园、森林边缘、桥—水磨坊、村庄边界和 world enclosure；每张含同一设计家族的
+  近景、中景、远景和反向面板，私有候选位于
+  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch28/`。
+- 干净发布 tag 为 `synthetic-village-design-inputs-batch28-2026-07-25`，ZIP SHA-256
+  为 `3f83d4a588d75471b98ee6b4bbf93d264c8a5851f9a4637afd83e66e4fc19f3c`；包只含
+  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
+- 面板仍为 `design-only`、`geometry_consistency=not-verified`、
+  `distance_thresholds=authoring-guidance-not-measured`、
+  `training_use=forbidden-as-multiview`、`coverage_use=forbidden`、
+  `trust_effect=none`；不得用图像外观冒充 runtime LOD 或跨分块证明。
+- GLM 必须从一个 canonical LOD0 模块确定性派生 LOD1/2，稳定保留 anchor、route
+  topology、地面接触和特征轮廓，再以 content-addressed build、reciprocal cameras、
+  seam visibility、六层与 post-render v2 实测。详见
+  `handoff/FEEDBACK-IMAGE2-032-batch28-lod-continuity.md`。
 
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 

@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 124 张路线/包络/跨分块过渡/方向/模块板/构造与材质设计输入（Batch 8–14 各 6 张 + Batch 20–21 各 8 张 + Batch 22 12 张 + Batch 23–24 各 16 张 + Batch 25 8 张 + Batch 26 6 张 + Batch 27 8 张），均有 SHA 与来源边界 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 132 张路线/包络/跨分块过渡/方向/模块板/构造与材质设计输入（Batch 8–14 各 6 张 + Batch 20–21 各 8 张 + Batch 22 12 张 + Batch 23–24 各 16 张 + Batch 25 8 张 + Batch 26 6 张 + Batch 27–28 各 8 张），均有 SHA 与来源边界 |
 | 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
 | 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
@@ -626,6 +626,42 @@ ZIP SHA-256 为 `79d9555e24f7f37c02fb7e10aabe1a99277d7c79ef7f9e693e8dd66545916a0
 也不能证明 360° 覆盖、任意坐标可达、真实模型或真实照片纹理。逐图 SHA、目视结论和
 消费顺序见
 [Batch27 image2 回执](handoff/FEEDBACK-IMAGE2-031-batch27-nearfield-turnarounds.md)。
+
+### Batch 28 跨距离 LOD / 分块连续性参考
+
+[Batch 28 LOD Continuity Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch28-2026-07-25)
+新增 8 张通用设计板，分别覆盖住宅群、山路/挡墙、溪流 crossing、果园、森林边缘、
+桥—水磨坊、村庄边界和远山/world enclosure。每张都要求同一设计家族的近景、中景、
+远景和反向视图，用于指导 LOD0/1/2、按需分块边界和 reciprocal route 的连续性。
+
+```powershell
+$releaseDir = ".nantai-studio\release-inputs\batch28"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+
+gh release download synthetic-village-design-inputs-batch28-2026-07-25 `
+  --repo taomic2035/nantai-3d `
+  --pattern "synthetic-village-lod-continuity-batch28-2026-07-25.zip" `
+  --pattern "synthetic-village-lod-continuity-batch28-2026-07-25.SHA256SUMS.txt" `
+  --dir $releaseDir
+
+$archive = Join-Path $releaseDir "synthetic-village-lod-continuity-batch28-2026-07-25.zip"
+$sumFile = Join-Path $releaseDir "synthetic-village-lod-continuity-batch28-2026-07-25.SHA256SUMS.txt"
+$expected = ((Get-Content $sumFile) -split '\s+')[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 28 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch28" -Force
+```
+
+ZIP SHA-256 为 `3f83d4a588d75471b98ee6b4bbf93d264c8a5851f9a4637afd83e66e4fc19f3c`，
+严格只含 8 张最终 PNG、8 份精确 prompt、`USAGE.md`、`manifest.json` 和
+`PAYLOAD-SHA256SUMS.txt`；queue、候选来源记录和生成缓存不在发布包中。
+
+这些图仍是 `design-only`，图中近/中/远/反向面板的共享几何没有机器验证，距离阈值也
+不是实测值；不得作为 SfM/NeRF/3DGS 输入，也不能证明无缝 LOD、跨分块连续性、
+360° 覆盖或任意坐标可达。逐图 SHA、目视结论和 GLM 消费顺序见
+[Batch28 image2 回执](handoff/FEEDBACK-IMAGE2-032-batch28-lod-continuity.md)。
 
 ## 核心工作流
 
