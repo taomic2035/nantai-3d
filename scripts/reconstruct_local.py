@@ -297,6 +297,9 @@ def _validate_ws_precomputed(ws: Path, manifest: dict) -> bool:
     return True
 
 
+# 权威映射：COLMAP 4.1.0 (Commit fa8e3b3) model_converter 实测全部 12 个模型。
+# FULL_FOV 不被此版本接受——不得发明为 model id 8。
+# 来源：Codex 独立用 model_converter 转换每个模型的文本相机，测量 one-camera BIN 字节数反推。
 _COLMAP_MODEL_NUM_PARAMS: dict[int, int] = {
     0: 3,    # SIMPLE_PINHOLE
     1: 4,    # PINHOLE
@@ -306,10 +309,10 @@ _COLMAP_MODEL_NUM_PARAMS: dict[int, int] = {
     5: 8,    # OPENCV_FISHEYE
     6: 12,   # FULL_OPENCV
     7: 5,    # FOV
-    8: 6,    # FULL_FOV
-    9: 5,    # SIMPLE_RADIAL_FISHEYE
-    10: 6,   # RADIAL_FISHEYE
-    11: 12,  # THIN_PRISM_FISHEYE
+    8: 4,    # SIMPLE_RADIAL_FISHEYE
+    9: 5,    # RADIAL_FISHEYE
+    10: 12,  # THIN_PRISM_FISHEYE
+    11: 16,  # RAD_TAN_THIN_PRISM_FISHEYE
 }
 
 
@@ -400,7 +403,11 @@ def _parse_colmap_images_bin(path: Path) -> list[dict]:
         end = data.find(b"\x00", pos)
         if end == -1:
             raise ValueError(f"images.bin 图像 #{i} name 未找到 null 终止符")
-        name = data[pos:end].decode("utf-8", errors="replace")
+        try:
+            name = data[pos:end].decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise ValueError(
+                f"images.bin 图像 #{i} name 不是合法 UTF-8: {e}") from e
         pos = end + 1
         npts = read("<Q")[0]
         # points2D: 2*npts float64 (x,y) + npts int64 (point3D_id)
@@ -425,13 +432,13 @@ def _parse_colmap_images_bin(path: Path) -> list[dict]:
 def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
     """校验 precomputed COLMAP sparse/0 的语义完整性（不止前 8 字节 header）。
 
-    REVIEW-CODEX-030 P7a-6：仅读 images.bin 头 8 字节 num_reg_images 不等于一个
+    HANDOFF-GLM-008 Task 2：仅读 images.bin 头 8 字节 num_reg_images 不等于一个
     合法的 recovered camera track。一个可信的 sparse model 需要：
-    1. images.bin 可完整解析（header count == 实际记录数；否则格式残缺）；
-    2. image_name 在 photos/ 目录都能找到对应文件（无 phantom image，否则
-       Brush 会训在一批不存在的照片的"位姿"上）；
-    3. image_name 无重复（无 ghost track，否则同一张照片被算两次）；
-    4. cameras.bin params 全部 finite（无 NaN/Inf，否则位姿不可数值使用）。
+    1. cameras.bin：无重复/零 camera_id、非零 width/height、params 全 finite、
+       焦距（params[0]）为正；
+    2. images.bin：无重复/零 image_id、无重复 name、name 为安全相对路径（非绝对/
+       非遍历）、qvec/tvec 全 finite、qvec 可归一化（非近零）、camera_id 引用存在；
+    3. 每个 image_name 在 photos/ 找得到对应文件（无 phantom image）。
 
     不要求 num_reg_images == len(photos)：COLMAP 正常会丢弃未注册的图像，这是
     算法结果不是错误。本函数只挡 sparse model **自相矛盾**或**与 photos 不一致**
@@ -452,27 +459,88 @@ def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
         raise SystemExit(
             f"--precomputed-colmap: images.bin 语义校验失败（解析错误）: {e}") from e
 
-    # 1. cameras.bin params 全部 finite
+    # --- cameras.bin 语义校验 ---
+    cam_ids: set[int] = set()
     for cam in cameras:
+        cid = cam["camera_id"]
+        if cid == 0:
+            raise SystemExit(
+                "--precomputed-colmap: cameras.bin 有零 camera_id（COLMAP 从 1 开始）")
+        if cid in cam_ids:
+            raise SystemExit(
+                f"--precomputed-colmap: cameras.bin 有重复 camera_id={cid}")
+        cam_ids.add(cid)
+        if cam["width"] == 0 or cam["height"] == 0:
+            raise SystemExit(
+                f"--precomputed-colmap: cameras.bin camera_id={cid} "
+                f"维度为零 ({cam['width']}x{cam['height']})")
         for j, p in enumerate(cam["params"]):
             if not math.isfinite(p):
                 raise SystemExit(
-                    f"--precomputed-colmap: cameras.bin camera_id={cam['camera_id']} "
+                    f"--precomputed-colmap: cameras.bin camera_id={cid} "
                     f"param[{j}]={p} 非有限（NaN/Inf）→ 位姿不可信")
+        # 焦距是所有 COLMAP 模型的第一个参数，必须为正
+        if cam["params"] and cam["params"][0] <= 0:
+            raise SystemExit(
+                f"--precomputed-colmap: cameras.bin camera_id={cid} "
+                f"焦距 params[0]={cam['params'][0]} 非正 → 位姿不可信")
 
-    # 2. image_name 无重复
+    # --- images.bin 语义校验 ---
+    img_ids: set[int] = set()
+    seen_names: set[str] = set()
+    for img in images:
+        iid = img["image_id"]
+        if iid == 0:
+            raise SystemExit(
+                "--precomputed-colmap: images.bin 有零 image_id（COLMAP 从 1 开始）")
+        if iid in img_ids:
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin 有重复 image_id={iid}")
+        img_ids.add(iid)
+
+        name = img["name"]
+        if name in seen_names:
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin 有重复 image_name: {name!r}")
+        seen_names.add(name)
+
+        # 安全相对路径：非绝对、非遍历
+        if name.startswith("/") or name.startswith("\\") or name.startswith("\\\\"):
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_name={name!r} "
+                f"是绝对路径（必须为相对路径）")
+        if ".." in Path(name).parts:
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_name={name!r} "
+                f"含遍历组件 '..'（安全拒绝）")
+
+        # qvec/tvec finite
+        qvec = img["qvec"]
+        tvec = img["tvec"]
+        if not all(math.isfinite(v) for v in qvec):
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_id={iid} "
+                f"qvec={qvec} 含非有限值")
+        if not all(math.isfinite(v) for v in tvec):
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_id={iid} "
+                f"tvec={tvec} 含非有限值")
+
+        # qvec 可归一化（非近零）
+        qnorm = math.sqrt(sum(v * v for v in qvec))
+        if qnorm < 1e-12:
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_id={iid} "
+                f"qvec 范数 {qnorm:.2e} 近零 → 不可归一化 → 位姿不可信")
+
+        # camera_id 引用必须存在
+        if img["camera_id"] not in cam_ids:
+            raise SystemExit(
+                f"--precomputed-colmap: images.bin image_id={iid} "
+                f"引用 camera_id={img['camera_id']} 不在 cameras.bin 中")
+
+    # --- image_name ↔ photos 绑定 ---
     names = [img["name"] for img in images]
-    seen: set[str] = set()
-    dups: list[str] = []
-    for name in names:
-        if name in seen and name not in dups:
-            dups.append(name)
-        seen.add(name)
-    if dups:
-        raise SystemExit(
-            f"--precomputed-colmap: images.bin 有重复 image_name: {dups[:3]}")
-
-    # 3. 每个 image_name 在 photos/ 找得到对应文件
     photo_names: set[str] = set()
     for p in photos.rglob("*"):
         if p.is_file() and p.suffix.lower() in FINGERPRINT_SUFFIXES:

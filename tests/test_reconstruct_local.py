@@ -1484,3 +1484,151 @@ class TestSourceManifestMaterialization:
             "different source bytes must yield different manifest SHA"
 
 
+# ---------------------------------------------------------------------------
+# HANDOFF-GLM-008 Task 2 item 2 — real COLMAP binary fixture
+# ---------------------------------------------------------------------------
+# The fake-camera/image writers above and the production parser are authored
+# by the same lane. A parser that agrees with its sibling writer but
+# disagrees with real COLMAP would pass every fake-fixture test. These tests
+# load a fixture produced by the pinned local COLMAP 4.1.0 (Commit fa8e3b3,
+# `third/colmap/bin/colmap.exe`) from independently authored text sources, so
+# a parser misaligned with the official binary format fails here.
+
+_REAL_COLMAP_FIXTURE_DIR = ROOT / "tests" / "fixtures" / "colmap" / "bin"
+
+
+def _maybe_skip_if_fixture_missing():
+    """Skip tests if the real COLMAP fixture was not regenerated locally.
+
+    The .bin files are committed to the repo, so this should only fire on a
+    shallow checkout or someone manually deleting them.
+    """
+    if not (_REAL_COLMAP_FIXTURE_DIR / "cameras.bin").is_file():
+        pytest.skip(
+            "real COLMAP fixture tests/fixtures/colmap/bin/cameras.bin missing; "
+            "regenerate via the command in tests/fixtures/colmap/README.md")
+
+
+class TestRealColmapFixture:
+    """Parser must accept the byte-exact output of `colmap model_converter`
+    on hand-written text sources covering all 12 accepted camera models."""
+
+    def test_parse_real_cameras_bin_all_twelve_models(self):
+        _maybe_skip_if_fixture_missing()
+        cams = rl._parse_colmap_cameras_bin(
+            _REAL_COLMAP_FIXTURE_DIR / "cameras.bin")
+        # 12 cameras, one per accepted model id 0..11
+        assert len(cams) == 12
+        # Build a {model_id: camera_dict} map. Camera ids in the fixture are
+        # 1..12 but the model id is what matters for the parameter-count
+        # contract.
+        expected_nparams = {0: 3, 1: 4, 2: 4, 3: 5, 4: 8, 5: 8, 6: 12,
+                             7: 5, 8: 4, 9: 5, 10: 12, 11: 16}
+        seen_models = {cam["model"] for cam in cams}
+        assert seen_models == set(expected_nparams.keys()), \
+            f"missing models: {set(expected_nparams) - seen_models}; " \
+            f"extra: {seen_models - set(expected_nparams)}"
+        for cam in cams:
+            model = cam["model"]
+            assert len(cam["params"]) == expected_nparams[model], \
+                f"model={model}: expected {expected_nparams[model]} params, " \
+                f"got {len(cam['params'])}"
+            # Fixture was authored with width=1024, height=768, focal=1024
+            assert cam["width"] == 1024
+            assert cam["height"] == 768
+            # Focal is params[0] for every COLMAP model; must be positive.
+            assert cam["params"][0] == 1024.0
+            # Finite check (NaN/Inf must already be rejected, but assert here
+            # too so a regression that lets non-finite through is caught).
+            import math
+            for p in cam["params"]:
+                assert math.isfinite(p), \
+                    f"model={model} has non-finite param {p}"
+
+    def test_parse_real_images_bin_and_cross_reference_cameras(self):
+        _maybe_skip_if_fixture_missing()
+        cams = rl._parse_colmap_cameras_bin(
+            _REAL_COLMAP_FIXTURE_DIR / "cameras.bin")
+        imgs = rl._parse_colmap_images_bin(
+            _REAL_COLMAP_FIXTURE_DIR / "images.bin")
+        # 12 images, one bound to each camera id 1..12
+        assert len(imgs) == 12
+        cam_ids = {c["camera_id"] for c in cams}
+        for img in imgs:
+            assert img["camera_id"] in cam_ids, \
+                f"image {img['image_id']} refs missing camera {img['camera_id']}"
+            # Identity quaternion (qw=1, qx=qy=qz=0) — must be normalizable
+            # and finite. Parser returns a list, not a tuple.
+            qvec = img["qvec"]
+            assert list(qvec) == [1.0, 0.0, 0.0, 0.0]
+            tvec = img["tvec"]
+            # Translations were authored as iid, 2*iid, 3*iid — all finite.
+            import math
+            assert all(math.isfinite(v) for v in tvec)
+            # Name format img_XXX.jpg — safe relative path, no traversal.
+            name = img["name"]
+            assert name.startswith("img_") and name.endswith(".jpg")
+            assert ".." not in Path(name).parts
+            assert not name.startswith(("/", "\\"))
+
+    def test_real_fixture_passes_semantic_validation(self, tmp_path):
+        """The real COLMAP fixture must pass _validate_sparse_semantics when
+        paired with a photos directory containing all referenced image_name
+        files. This is the integration-level proof that the parser + semantic
+        checker agree with real COLMAP output."""
+        _maybe_skip_if_fixture_missing()
+        # Build a photos dir with all 12 referenced image_name files. The
+        # semantic checker only requires the files to exist (it doesn't parse
+        # their bytes — that's _photos_sha256's job).
+        photos = tmp_path / "photos"
+        photos.mkdir()
+        for i in range(1, 13):
+            (photos / f"img_{i:03d}.jpg").write_bytes(b"fake-photo-bytes")
+        # Copy the real fixture into a sparse/0 layout the validator expects.
+        sparse_0 = tmp_path / "sparse" / "0"
+        sparse_0.mkdir(parents=True)
+        for name in ("cameras.bin", "images.bin", "points3D.bin"):
+            src = _REAL_COLMAP_FIXTURE_DIR / name
+            (sparse_0 / name).write_bytes(src.read_bytes())
+        # Should not raise.
+        rl._validate_sparse_semantics(sparse_0, photos)
+
+    def test_unknown_model_id_rejected_with_hand_crafted_bytes(self, tmp_path):
+        """Unknown model id (e.g. 99) must be rejected — the parser must not
+        infer parameter count from remaining bytes. This is a byte-level
+        adversarial fixture: we craft a cameras.bin whose header looks valid
+        but whose model id is not in COLMAP's accepted table."""
+        buf = bytearray()
+        buf += struct.pack("<Q", 1)          # num_cameras = 1
+        buf += struct.pack("<I", 1)          # camera_id = 1
+        buf += struct.pack("<i", 99)         # model = 99 (unknown)
+        buf += struct.pack("<Q", 1024)       # width
+        buf += struct.pack("<Q", 768)        # height
+        # Append 8 doubles so the file has plausible remaining bytes — a
+        # parser that inferred nparams from len(data)-pos would accept this.
+        buf += struct.pack("<8d", *([1024.0] * 8))
+        bad = tmp_path / "cameras_unknown_model.bin"
+        bad.write_bytes(bytes(buf))
+        with pytest.raises(ValueError, match="model=99"):
+            rl._parse_colmap_cameras_bin(bad)
+
+    def test_real_cameras_bin_byte_size_matches_model_table(self):
+        """Independent cross-check: the file size of real COLMAP cameras.bin
+        must equal 8 (header) + sum of per-camera record sizes computed from
+        the _COLMAP_MODEL_NUM_PARAMS table. A wrong table would either fail
+        to parse (caught above) or miscount bytes (caught here)."""
+        _maybe_skip_if_fixture_missing()
+        cams = rl._parse_colmap_cameras_bin(
+            _REAL_COLMAP_FIXTURE_DIR / "cameras.bin")
+        expected_size = 8  # uint64 num_cameras header
+        for cam in cams:
+            # camera_id(uint32) + model(int32) + width(uint64) + height(uint64)
+            # + params(double * nparams)
+            nparams = len(cam["params"])
+            expected_size += 4 + 4 + 8 + 8 + 8 * nparams
+        actual_size = (_REAL_COLMAP_FIXTURE_DIR / "cameras.bin").stat().st_size
+        assert actual_size == expected_size, \
+            f"file size {actual_size} != expected {expected_size} " \
+            f"computed from parsed records"
+
+

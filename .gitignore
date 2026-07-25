@@ -64,6 +64,7 @@ tmp/
 *.ply
 !verification/**/*.ply
 *.bin
+!tests/fixtures/colmap/bin/*.bin
 *.pth
 *.ckpt
 *.safetensors
