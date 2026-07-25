@@ -4,7 +4,8 @@
 
 - [GitHub Releases](https://github.com/taomic2035/nantai-3d/releases)
 - [基础 68 槽视觉包](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-canary-2026-07-16)
-- [最新 Batch 33 材质源图](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch33-2026-07-25)
+- [最新 Batch 35 道具六视图](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch35-2026-07-25)
+- [Batch 33 材质源图](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch33-2026-07-25)
 
 ## 内容概览
 
@@ -14,8 +15,10 @@
 | Batch 8–14 | 42 张 | 互逆路线、遮挡、垂直与跨分块结构 |
 | Batch 20–25 | 68 张 | 角色拓扑、相机包络、环境支撑与局部 360° 建模 |
 | Batch 26–33 | 62 张 | 近场转向、LOD、入口/室内、闭环路线与材质源图 |
+| Batch 35 | 8 张 | 八类既有道具槽的六视图建模参考 |
 
-设计与材质批次共 172 张最终输入。发布 tag 遵循：
+设计与材质批次共 180 张最终输入。Batch 34 是未发布的私有 H3 候选，不计入
+Release。发布 tag 遵循：
 
 ```text
 synthetic-village-design-inputs-batch<编号>-<日期>
@@ -26,11 +29,11 @@ synthetic-village-design-inputs-batch<编号>-<日期>
 通过网页下载，或使用 GitHub CLI：
 
 ```powershell
-$tag = "synthetic-village-design-inputs-batch33-2026-07-25"
+$tag = "synthetic-village-design-inputs-batch35-2026-07-25"
 gh release download $tag --repo taomic2035/nantai-3d
 ```
 
-先校验 Release 附带的 `*.SHA256SUMS.txt`，解压后再按
+先校验 Release 附带的 `.sha256` 或 `*.SHA256SUMS.txt`，解压后再按
 `PAYLOAD-SHA256SUMS.txt` 校验包内文件。基础视觉包安装到：
 
 ```text

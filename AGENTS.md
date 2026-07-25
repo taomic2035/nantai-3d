@@ -83,6 +83,13 @@
   复用现有 authoring/KTX2 链；未过私有实渲 review 前不 registry、不 `web/data`、不
   Release。完整 SHA、选择与 RED 任务见
   `handoff/FEEDBACK-IMAGE2-039-batch34-h3-material-expansion.md`。
+- **Batch35 道具六视图已发布**：八张 synthetic 建模板逐一对应已有 water-jar、
+  firewood、basket、bench、tools、grain-rack、trough、handcart 槽；干净 Release
+  ZIP SHA `00261044d27f7d7d4889bd23255f1e6a17e9450e15d6f7b725bbb026aff2a28a`
+  已远端回读。它们仅是 `design-only`，不能当同步多视图；GLM 后续以 canonical
+  part graph 替换当前 `_build_prop` 块体代理，先做纯模型/RED，实渲前不 registry、
+  不 `web/data`。完整消费任务见
+  `handoff/FEEDBACK-IMAGE2-040-batch35-prop-turnarounds.md`。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
