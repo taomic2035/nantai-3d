@@ -488,3 +488,295 @@ class TestColmapGroup:
 
         monkeypatch.setattr(rl.subprocess, "run", _raise)
         assert rl._colmap_group("fake-colmap") == "Feature"
+
+
+# ============================================================
+# --precomputed-colmap: byte-bound skip of COLMAP stage (P7a)
+#
+# Reviewer-Codex-030 finding P0: production reconstruct_local.py --resume
+# computes its own digest, so externally written stage fingerprints like
+# 'p7_reused_from_p5b' silently fail and COLMAP reruns. P7a adds a *supported*
+# fail-closed precomputed-COLMAP input boundary: COLMAP never runs, the colmap
+# stage fingerprint is the real SHA-256 of source bytes (not a fake string),
+# and the only "rerun" path is byte-precise re-copy from source.
+# ============================================================
+
+import shutil  # noqa: E402  (late import keeps top-of-file minimal)
+
+PRECOMPUTED_REQUIRED = ("cameras.bin", "images.bin", "points3D.bin")
+PRECOMPUTED_OPTIONAL = ("frames.bin", "rigs.bin", "project.ini")
+
+
+def _make_fake_precomputed(colmap_ws: Path, photos: Path, *,
+                           n_registered: int = 12) -> None:
+    """Build a fake precomputed COLMAP workspace for tests.
+
+    Layout matches what P5b produced: <colmap_ws>/{colmap.db, sparse/0/*.bin,
+    images/}. images.bin starts with uint64 num_registered so
+    _count_registered_images returns > 0 (Brush stage needs a valid model).
+    """
+    sparse_0 = colmap_ws / "sparse" / "0"
+    sparse_0.mkdir(parents=True, exist_ok=True)
+    (sparse_0 / "images.bin").write_bytes(
+        struct.pack("<Q", n_registered) + b"\x00" * 100)
+    (sparse_0 / "cameras.bin").write_bytes(b"fake-cameras")
+    (sparse_0 / "points3D.bin").write_bytes(b"fake-points")
+    (sparse_0 / "project.ini").write_text("[test]\n", encoding="utf-8")
+    (sparse_0 / "frames.bin").write_bytes(b"fake-frames")
+    (sparse_0 / "rigs.bin").write_bytes(b"fake-rigs")
+    img_dir = colmap_ws / "images"
+    if img_dir.exists():
+        shutil.rmtree(img_dir)
+    shutil.copytree(photos, img_dir)
+    (colmap_ws / "colmap.db").write_bytes(b"fake-db")
+
+
+def _colmap_subprocess_cmds(fake) -> list[list[str]]:
+    """Filter fake.calls to only COLMAP subprocess commands."""
+    return [c for c in fake.calls
+            if any(t in " ".join(c) for t in
+                   ("feature_extractor", "_matcher", " mapper"))]
+
+
+class TestPrecomputedColmapBoundary:
+    """--precomputed-colmap: COLMAP never runs; bytes bind the fingerprint."""
+
+    def test_skips_colmap_subprocesses_but_runs_downstream(self, env, tmp_path,
+                                                            photos_dir):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+
+        call("--precomputed-colmap", str(precomp))
+
+        assert _colmap_subprocess_cmds(fake) == [], \
+            "precomputed mode must never run feature_extractor/matcher/mapper"
+        assert {"brush", "prepare", "import"} <= fake.stages, \
+            "downstream stages must still run"
+
+    def test_fingerprint_is_real_sha256_not_fake_string(self, env, tmp_path,
+                                                         photos_dir):
+        """Reviewer-Codex-030 P0: prior P7 wrote 'p7_reused_from_p5b' as the
+        colmap fingerprint. The fingerprint must be a real digest of source
+        bytes so any byte change forces downstream rerun."""
+        call, fake, ws, photos = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos)
+        call("--precomputed-colmap", str(precomp))
+
+        entry = _state(ws)["stages"]["colmap"]
+        fp = entry["fingerprint"]
+        assert len(fp) == 64
+        int(fp, 16)  # raises if not hex
+        assert "reused" not in fp.lower()
+        assert "p7_" not in fp.lower()
+        assert "unprovable" not in entry, \
+            "precomputed bytes ARE observed; fingerprint must not be unprovable"
+
+    def test_fingerprint_binds_all_required_bin_shas(self, env, tmp_path,
+                                                      photos_dir):
+        """Fingerprint payload must include SHA-256 of cameras.bin, images.bin,
+        points3D.bin so a byte change in any of them changes the digest."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+
+        digest_a = _state(ws)["stages"]["colmap"]["fingerprint"]
+        # Mutate one required bin
+        (precomp / "sparse" / "0" / "cameras.bin").write_bytes(b"different")
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
+        assert digest_a != digest_b, \
+            "cameras.bin byte change must alter colmap fingerprint"
+
+    def test_source_byte_change_triggers_recopy_not_colmap(self, env, tmp_path,
+                                                            photos_dir):
+        """If source images.bin changes, ws is re-copied (NOT rerun COLMAP)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir, n_registered=12)
+        call("--precomputed-colmap", str(precomp))
+
+        # Change source bytes (keep n_registered=99 to distinguish)
+        (precomp / "sparse" / "0" / "images.bin").write_bytes(
+            struct.pack("<Q", 99) + b"\x00" * 100)
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+
+        assert _colmap_subprocess_cmds(fake) == [], \
+            "COLMAP must never run in precomputed mode, even on byte change"
+        ws_bytes = (ws / "sparse" / "0" / "images.bin").read_bytes()
+        src_bytes = (precomp / "sparse" / "0" / "images.bin").read_bytes()
+        assert ws_bytes == src_bytes, \
+            "source byte change must trigger byte-exact re-copy into ws"
+
+    def test_resume_skips_when_source_and_ws_match(self, env, tmp_path,
+                                                    capsys, photos_dir):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        capsys.readouterr()
+
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        assert "colmap" not in fake.stages
+        assert _colmap_subprocess_cmds(fake) == []
+        assert "跳过" in capsys.readouterr().out
+
+    def test_ws_corruption_triggers_recopy(self, env, tmp_path, photos_dir):
+        """If ws/sparse/0/images.bin is corrupted (bytes differ from source),
+        --resume must detect mismatch and re-copy from source (NOT run COLMAP)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+
+        # Corrupt ws copy
+        (ws / "sparse" / "0" / "images.bin").write_bytes(b"corrupted")
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+        ws_bytes = (ws / "sparse" / "0" / "images.bin").read_bytes()
+        src_bytes = (precomp / "sparse" / "0" / "images.bin").read_bytes()
+        assert ws_bytes == src_bytes, \
+            "ws corruption must trigger byte-exact re-copy from source"
+
+    def test_missing_required_bin_fails_closed(self, env, tmp_path, photos_dir):
+        """Missing cameras.bin / images.bin / points3D.bin -> SystemExit,
+        and COLMAP must not have run before the failure."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        for required in PRECOMPUTED_REQUIRED:
+            (precomp / "sparse" / "0" / required).unlink()
+            with pytest.raises(SystemExit, match=required):
+                call("--precomputed-colmap", str(precomp))
+            assert _colmap_subprocess_cmds(fake) == [], \
+                f"missing {required}: COLMAP must not run"
+            fake.reset()
+            _make_fake_precomputed(precomp, photos_dir)
+
+    def test_missing_sparse_dir_fails_closed(self, env, tmp_path, photos_dir):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "no_sparse"
+        precomp.mkdir()
+        # has images/ but no sparse/0/
+        shutil.copytree(photos_dir, precomp / "images")
+        with pytest.raises(SystemExit, match="sparse"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_missing_images_dir_fails_closed(self, env, tmp_path, photos_dir):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        shutil.rmtree(precomp / "images")
+        with pytest.raises(SystemExit, match="images"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_photos_mismatch_fails_closed(self, env, tmp_path, photos_dir):
+        """--photos different from <precomp>/images/ -> SystemExit (would lie
+        about which photos produced the sparse model)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        # Build a different photo set: same names, different bytes
+        other = tmp_path / "other_photos"
+        other.mkdir()
+        for p in photos_dir.iterdir():
+            if p.is_file():
+                (other / p.name).write_bytes(b"different " + p.read_bytes())
+        with pytest.raises(SystemExit, match="不一致"):
+            call("--precomputed-colmap", str(precomp), photos=other)
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_not_a_directory_fails_closed(self, env, tmp_path, photos_dir):
+        call, fake, ws, _ = env
+        not_dir = tmp_path / "file.txt"
+        not_dir.write_text("not a dir")
+        with pytest.raises(SystemExit, match="--precomputed-colmap"):
+            call("--precomputed-colmap", str(not_dir))
+
+    def test_optional_bins_bound_when_present(self, env, tmp_path, photos_dir):
+        """frames.bin, rigs.bin, project.ini are optional but, if present,
+        their SHAs must be in the fingerprint."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)  # writes optional bins
+        call("--precomputed-colmap", str(precomp))
+        digest_a = _state(ws)["stages"]["colmap"]["fingerprint"]
+
+        # Mutate an optional bin
+        (precomp / "sparse" / "0" / "frames.bin").write_bytes(b"changed")
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
+        assert digest_a != digest_b, \
+            "frames.bin (optional) byte change must still alter fingerprint"
+
+    def test_colmap_db_bound_when_present(self, env, tmp_path, photos_dir):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        digest_a = _state(ws)["stages"]["colmap"]["fingerprint"]
+
+        (precomp / "colmap.db").write_bytes(b"different-db")
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
+        assert digest_a != digest_b, \
+            "colmap.db byte change must alter colmap fingerprint"
+
+    def test_optional_bin_absent_does_not_break_run(self, env, tmp_path,
+                                                     photos_dir):
+        """If optional bins are absent, run still succeeds and fingerprint
+        excludes them (no KeyError)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        for opt in PRECOMPUTED_OPTIONAL:
+            (precomp / "sparse" / "0" / opt).unlink()
+        # Should succeed
+        assert call("--precomputed-colmap", str(precomp)) == 0
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_ws_images_matches_source_after_copy(self, env, tmp_path,
+                                                  photos_dir):
+        """ws/images/ must be a byte-exact copy of <precomp>/images/ so Brush
+        trains on the same photos that produced sparse/0."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+
+        for src in (precomp / "images").iterdir():
+            if not src.is_file():
+                continue
+            assert (ws / "images" / src.name).read_bytes() == src.read_bytes(), \
+                f"ws/images/{src.name} must match <precomp>/images/{src.name}"
+
+    def test_fingerprint_stable_across_identical_runs(self, env, tmp_path,
+                                                       photos_dir):
+        """Same source, same params -> identical fingerprint across runs."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        fp_a = _state(ws)["stages"]["colmap"]["fingerprint"]
+        call("--precomputed-colmap", str(precomp))
+        fp_b = _state(ws)["stages"]["colmap"]["fingerprint"]
+        assert fp_a == fp_b
+
+    def test_state_file_lf_newline_preserved(self, env, tmp_path, photos_dir):
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        raw = (ws / STATE).read_bytes()
+        assert b"\r\n" not in raw, \
+            "precomputed mode must keep LF-only state file (cross-platform)"

@@ -47,6 +47,13 @@ FINGERPRINT_CAVEAT = (
     "同名同大小同 mtime 的**不同内容**照片发现不了。这是避免每次 hash 几百 MB 的"
     "工程折中，不是密码学强度的校验。不放心就别加 --resume。")
 
+# --precomputed-colmap：必需与可选的 COLMAP sparse/0 文件名。
+# REVIEW-CODEX-030 P0 要求 cameras.bin / images.bin / points3D.bin 必须存在且
+# 字节绑定；frames.bin / rigs.bin / project.ini 是 COLMAP 可选产物，存在则同样绑定，
+# 缺失不阻断（旧版 COLMAP / 简化导入路径可能不输出）。
+PRECOMPUTED_REQUIRED_BIN = ("cameras.bin", "images.bin", "points3D.bin")
+PRECOMPUTED_OPTIONAL_BIN = ("frames.bin", "rigs.bin", "project.ini")
+
 
 def _find(name: str, *candidates: Path) -> str:
     for c in candidates:
@@ -112,6 +119,127 @@ def _digest(payload: dict) -> str:
     """任意可 JSON 化的指纹载荷 → 稳定 sha256（sort_keys：字段顺序不影响结果）。"""
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    """稳定 SHA-256（分块读，避免大 colmap.db 一次 load 进内存）。"""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _build_precomputed_manifest(colmap_ws: Path, photos: Path) -> dict:
+    """为 --precomputed-colmap 构建字节绑定的源清单。
+
+    REVIEW-CODEX-030 P0 要求把 cameras.bin / images.bin / points3D.bin / colmap.db /
+    caller argv 都绑进不可变清单；这里产出的是 colmap 阶段指纹的载荷字段（不是单独
+    写一个 JSON 文件——写入 .stage_state.json 只能由 StageState 类做，避免重蹈
+    P7 手工写假指纹的覆辙）。
+
+    fail-closed：
+    - 缺 sparse/0 → 拒；
+    - 缺任一必需 .bin → 拒；
+    - 缺 images/ → 拒；
+    - --photos 与 <colmap_ws>/images/ 的廉价指纹不同 → 拒（否则 Brush 会训在
+      与 sparse/0 来源不同的另一批照片上，产出一个谎称来自这批 sparse 的重建）。
+
+    返回字段全部是已实测 SHA-256；可选文件缺失则不绑（指纹载荷也不含），保证
+    “删除可选文件”不会改变指纹——只有改必需文件或加/删可选文件才会变。
+    """
+    sparse_0 = colmap_ws / "sparse" / "0"
+    if not sparse_0.is_dir():
+        raise SystemExit(
+            f"--precomputed-colmap: 缺 sparse/0 目录: {sparse_0} "
+            f"(期望 <colmap_ws>/sparse/0/{{cameras,images,points3D}}.bin)")
+    manifest: dict = {"mode": "precomputed",
+                      "source_root": str(colmap_ws.resolve())}
+    for name in PRECOMPUTED_REQUIRED_BIN:
+        p = sparse_0 / name
+        if not p.is_file():
+            raise SystemExit(f"--precomputed-colmap: 缺必需文件 {p}")
+        manifest[f"{name}_sha256"] = _sha256_file(p)
+    for name in PRECOMPUTED_OPTIONAL_BIN:
+        p = sparse_0 / name
+        if p.is_file():
+            manifest[f"{name}_sha256"] = _sha256_file(p)
+    db = colmap_ws / "colmap.db"
+    if db.is_file():
+        manifest["colmap_db_sha256"] = _sha256_file(db)
+    img_dir = colmap_ws / "images"
+    if not img_dir.is_dir():
+        raise SystemExit(
+            f"--precomputed-colmap: 缺 images/ 目录: {img_dir} "
+            f"(--photos 必须与产生 sparse/0 的那一批照片同源)")
+    src_img_fp = _photos_fp(img_dir)
+    if not src_img_fp:
+        raise SystemExit(f"--precomputed-colmap: images/ 为空: {img_dir}")
+    caller_photos_fp = _photos_fp(photos)
+    if src_img_fp != caller_photos_fp:
+        raise SystemExit(
+            "--precomputed-colmap: --photos 与 <colmap_ws>/images/ 内容不一致 "
+            "(廉价指纹不同；必须使用产生 sparse/0 的那一批照片，否则重建会谎称来源)")
+    manifest["photos"] = caller_photos_fp
+    return manifest
+
+
+def _validate_ws_precomputed(ws: Path, manifest: dict) -> bool:
+    """工作目录里的 precomputed 拷贝是否与源清单逐字节一致。
+
+    任一文件缺失或 SHA 不匹配 → 返回 False（**不**抛错；由调用方决定是
+    fail-closed 还是触发 re-copy）。读 PLY/colmap.db 几百 MB 时只算一次 SHA。
+    """
+    sparse_0 = ws / "sparse" / "0"
+    if not sparse_0.is_dir():
+        return False
+    for name in PRECOMPUTED_REQUIRED_BIN:
+        p = sparse_0 / name
+        if not p.is_file():
+            return False
+        if _sha256_file(p) != manifest[f"{name}_sha256"]:
+            return False
+    for name in PRECOMPUTED_OPTIONAL_BIN:
+        key = f"{name}_sha256"
+        if key not in manifest:
+            continue
+        p = sparse_0 / name
+        if not p.is_file() or _sha256_file(p) != manifest[key]:
+            return False
+    if "colmap_db_sha256" in manifest:
+        db = ws / "colmap.db"
+        if not db.is_file() or _sha256_file(db) != manifest["colmap_db_sha256"]:
+            return False
+    img_dir = ws / "images"
+    if not img_dir.is_dir():
+        return False
+    # images/ 也必须与清单的照片指纹一致（防止外部把 ws/images 改了）
+    if _photos_fp(img_dir) != manifest["photos"]:
+        return False
+    return True
+
+
+def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
+    """把源 sparse/0/*.bin + colmap.db + images/ 字节拷贝进 ws。
+
+    只拷不重命名、不重排——保证拷贝后 ws 字节 == 源字节，由 _validate_ws_precomputed
+    二次校验。images/ 在拷前先清空：避免旧帧残留导致 Brush 训在混了新旧照片的目录上。
+    """
+    src_sparse = colmap_ws / "sparse" / "0"
+    dst_sparse = ws / "sparse" / "0"
+    dst_sparse.mkdir(parents=True, exist_ok=True)
+    for name in PRECOMPUTED_REQUIRED_BIN + PRECOMPUTED_OPTIONAL_BIN:
+        s = src_sparse / name
+        if s.is_file():
+            shutil.copy2(s, dst_sparse / name)
+    db = colmap_ws / "colmap.db"
+    if db.is_file():
+        shutil.copy2(db, ws / "colmap.db")
+    src_img = colmap_ws / "images"
+    dst_img = ws / "images"
+    if dst_img.exists():
+        shutil.rmtree(dst_img)
+    shutil.copytree(src_img, dst_img)
 
 
 def _file_fp(path: Path) -> list:
@@ -240,11 +368,20 @@ class StageState:
             self.stages.pop(s, None)
         self._save()
 
-    def record(self, stage: str, fingerprint: str) -> None:
-        self.stages[stage] = {
+    def record(self, stage: str, fingerprint: str, *,
+               extras: dict[str, object] | None = None) -> None:
+        """记录阶段完成。fingerprint 是跑**前**算的；extras 是跑**后**测的
+        (log SHA / PLY SHA / argv / returncode / UTC 起止)——后者不参与跳过
+        判定（_can_skip 只比对 fingerprint），只为审计留下不可篡改的运行证据。
+        """
+        entry: dict[str, object] = {
             "fingerprint": fingerprint,
             "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
+        if extras:
+            # 拷一份避免外部改字典影响状态文件；值必须是 JSON 可序列化的。
+            entry.update(extras)
+        self.stages[stage] = entry
         # 状态文件是 --resume 的信任根：证明不了输入的指纹要当场标出来，别让它看起来
         # 像个能用的指纹（也让用户看得懂为什么 --resume 老是重跑这一阶段）。
         if self._unprovable.get(stage):
@@ -342,7 +479,19 @@ def main(argv: list[str] | None = None) -> int:
                     help=("跳过已完成且输入未变的阶段 (Brush 挂了不用重做几小时 COLMAP)。"
                           "只在阶段指纹逐字节相同才复用；指纹变了/记录缺失/产物不齐 → "
                           "重跑该阶段及其所有下游。指纹局限见 --resume 启动时的提示"))
+    ap.add_argument("--precomputed-colmap", type=Path, default=None,
+                    metavar="COLMAP_WS",
+                    help=("使用**已算好的** COLMAP 稀疏模型，跳过 COLMAP 执行。"
+                          "<COLMAP_WS> 须含 sparse/0/{cameras,images,points3D}.bin "
+                          "和 images/。--photos 必须与 <COLMAP_WS>/images/ 同源。"
+                          "fail-closed：源字节变化或拷贝失配 → 重拷（不重跑 COLMAP）；"
+                          "缺必需文件 → 拒。本模式仍输出 preview-only (sfm-local)，"
+                          "不提升任何信任。"))
     args = ap.parse_args(argv)
+
+    if args.precomputed_colmap is not None and not args.precomputed_colmap.is_dir():
+        raise SystemExit(
+            f"--precomputed-colmap: 不是目录: {args.precomputed_colmap}")
 
     colmap = _find("colmap", ROOT / "third/colmap/bin/colmap.exe",
                    ROOT / "third/colmap/colmap.exe")
@@ -401,64 +550,134 @@ def main(argv: list[str] | None = None) -> int:
     # "COLMAP 实际读得了几张"反而要去猜某个 build 的 FreeImage 带不带 HEIF/WebP 解码,
     # 那是不可机器验证的假设。宁可不猜: 数多了的后果有界(见下面注册率那段)。
     n = len(photos_fp)
-    matcher = "sequential_matcher" if (ordered or n > 400) else "exhaustive_matcher"
-    parent, unprovable = _fingerprint("colmap", {
-        "parent": parent, "photos": photos_fp, "matcher": matcher, "gpu": gpu,
-        "group": grp, "camera_model": "SIMPLE_RADIAL", "binary": _file_fp(Path(colmap))})
-    # 产物齐全 = db + images/ + sparse/0 里真有已注册影像（空模型不可信 → 重跑）。
-    model_ok = (db.is_file() and images_dir.is_dir()
-                and _count_registered_images(sparse / "0") > 0)
-    if state.begin("colmap", parent, unprovable=unprovable, outputs_ok=model_ok,
-                   outputs_desc="缺 colmap.db / images/ / sparse/0 中的有效模型"):
-        clog.write_text("", encoding="utf-8")
-        print(f"    匹配器: {matcher} ({'时序连续' if ordered else '无序'}, {n} 图)")
-        run([colmap, "feature_extractor", "--database_path", str(db),
-             "--image_path", str(args.photos), "--ImageReader.camera_model",
-             "SIMPLE_RADIAL", f"--{grp}Extraction.use_gpu", gpu], log=clog, tee=True)
-        run([colmap, matcher, "--database_path", str(db),
-             f"--{grp}Matching.use_gpu", gpu], log=clog, tee=True)
-        sparse.mkdir(exist_ok=True)
-        run([colmap, "mapper", "--database_path", str(db),
-             "--image_path", str(args.photos), "--output_path", str(sparse)],
-            log=clog, tee=True)
-        best_n, n_models = _select_best_colmap_model(sparse)
-        frac = best_n / n if n else 0.0
-        split = "" if n_models == 1 else f"，COLMAP 分裂成 {n_models} 个子模型(用最大的)"
-        print(f"    COLMAP 注册 {best_n}/{n} 张 ({frac:.0%}){split}")
-        if frac < 0.6:
-            print(f"    ⚠ 注册率偏低 ({frac:.0%})：重叠不足会导致大量空洞/漂浮。"
-                  "建议加拍过渡角度、放慢绕拍、避开纯无纹理/反光面。")
-            # 分母数的是"候选照片", 不是"COLMAP 解得开的照片"。别让用户拿着一个其实是
-            # 格式问题的低注册率跑去重拍 —— 但也别反过来断言 COLMAP 读不了什么, 那要看
-            # 该 build 的 FreeImage, 跑之前无法验证。只陈述事实, 让用户自己判。
-            exotic = sorted({Path(f[0]).suffix.lower() for f in photos_fp}
-                            - {".jpg", ".jpeg", ".png"})
-            if exotic:
-                print(f"    ⚠ 也可能不是重叠问题：分母里含 {'、'.join(exotic)}，"
-                      "COLMAP 解不解得开取决于该 build 的 FreeImage 带哪些格式"
-                      "（跑之前没法验证）。若这些图一张都没进模型，先转成 JPEG 再试。")
-        # 重开 images/：它必须是产出 sparse/0 的那一批照片, 留旧副本会让 Brush 训在
-        # 旧图上, 出一个谎称来自这批照片的重建。
-        if images_dir.exists():
-            shutil.rmtree(images_dir)
-        shutil.copytree(args.photos, images_dir)
-        state.record("colmap", parent)
+    if args.precomputed_colmap is not None:
+        # --precomputed-colmap：跳过 COLMAP 执行，用源字节绑定 colmap 阶段指纹。
+        # REVIEW-CODEX-030 P0：之前 P7 在 .stage_state.json 写了 'p7_reused_from_p5b'
+        # 这样的伪造字符串，生产 caller --resume 重算自己的 digest 后必失败 → COLMAP
+        # 重跑。本分支只让 StageState 写它**自己**算出的、源字节真实的 digest；
+        # 唯一的"重跑"路径是把源字节重新拷进 ws（绝不执行 COLMAP）。
+        print(f"    模式: precomputed (跳过 COLMAP; 源 = {args.precomputed_colmap})")
+        manifest = _build_precomputed_manifest(args.precomputed_colmap, args.photos)
+        parent, unprovable = _fingerprint("colmap", {
+            "parent": parent,
+            **manifest,
+            # 即便本模式不执行 COLMAP，也绑定二进制身份——这把"换了一个 COLMAP build"
+            # 视为下游需要重训的信号（不同 build 的稀疏模型语义可能不同）。
+            "binary": _file_fp(Path(colmap)),
+        })
+        outputs_ok = _validate_ws_precomputed(ws, manifest)
+        if state.begin("colmap", parent, unprovable=unprovable,
+                       outputs_ok=outputs_ok,
+                       outputs_desc=f"{ws}/sparse/0 与源字节不一致或缺失"):
+            _copy_precomputed_to_ws(args.precomputed_colmap, ws)
+            # 拷贝后**立即**二次校验：磁盘满 / 拷贝中断 / 权限回写 → fail-closed，
+            # 不让 Brush 训在残缺的 sparse/0 上。
+            if not _validate_ws_precomputed(ws, manifest):
+                raise SystemExit(
+                    f"--precomputed-colmap: 拷贝到 {ws}/sparse/0 后字节校验失败 "
+                    f"(源 {args.precomputed_colmap} 与工作目录不一致；检查磁盘空间/权限)")
+            best_n = _count_registered_images(ws / "sparse" / "0")
+            print(f"    已拷贝预计算 COLMAP: 注册 {best_n}/{n} 张 "
+                  f"(来自 {args.precomputed_colmap})")
+            # 记录 post-copy 实测 SHA：fingerprint 绑的是源 SHA，extras 绑的是工作
+            # 目录拷贝后的实测 SHA。两者应一致——不一致就在上面 raise 了；记下来
+            # 是为了让审计能直接读 state 文件确认 ws 字节 == 源字节。
+            ws_sparse_0 = ws / "sparse" / "0"
+            colmap_extras: dict[str, object] = {
+                "precomputed_source_root": str(args.precomputed_colmap.resolve()),
+                "precomputed_post_copy_validated": True,
+                "precomputed_ws_cameras_bin_sha256":
+                    _sha256_file(ws_sparse_0 / "cameras.bin"),
+                "precomputed_ws_images_bin_sha256":
+                    _sha256_file(ws_sparse_0 / "images.bin"),
+                "precomputed_ws_points3D_bin_sha256":
+                    _sha256_file(ws_sparse_0 / "points3D.bin"),
+            }
+            state.record("colmap", parent, extras=colmap_extras)
+        else:
+            best_n = _count_registered_images(ws / "sparse" / "0")
+            print(f"    复用预计算 COLMAP: 注册 {best_n}/{n} 张 "
+                  f"(工作目录字节与源一致)")
     else:
-        print(f"    复用已有位姿: sparse/0 注册 {_count_registered_images(sparse / '0')}/{n} 张")
+        matcher = "sequential_matcher" if (ordered or n > 400) else "exhaustive_matcher"
+        parent, unprovable = _fingerprint("colmap", {
+            "parent": parent, "photos": photos_fp, "matcher": matcher, "gpu": gpu,
+            "group": grp, "camera_model": "SIMPLE_RADIAL", "binary": _file_fp(Path(colmap))})
+        # 产物齐全 = db + images/ + sparse/0 里真有已注册影像（空模型不可信 → 重跑）。
+        model_ok = (db.is_file() and images_dir.is_dir()
+                    and _count_registered_images(sparse / "0") > 0)
+        if state.begin("colmap", parent, unprovable=unprovable, outputs_ok=model_ok,
+                       outputs_desc="缺 colmap.db / images/ / sparse/0 中的有效模型"):
+            clog.write_text("", encoding="utf-8")
+            print(f"    匹配器: {matcher} ({'时序连续' if ordered else '无序'}, {n} 图)")
+            run([colmap, "feature_extractor", "--database_path", str(db),
+                 "--image_path", str(args.photos), "--ImageReader.camera_model",
+                 "SIMPLE_RADIAL", f"--{grp}Extraction.use_gpu", gpu], log=clog, tee=True)
+            run([colmap, matcher, "--database_path", str(db),
+                 f"--{grp}Matching.use_gpu", gpu], log=clog, tee=True)
+            sparse.mkdir(exist_ok=True)
+            run([colmap, "mapper", "--database_path", str(db),
+                 "--image_path", str(args.photos), "--output_path", str(sparse)],
+                log=clog, tee=True)
+            best_n, n_models = _select_best_colmap_model(sparse)
+            frac = best_n / n if n else 0.0
+            split = "" if n_models == 1 else f"，COLMAP 分裂成 {n_models} 个子模型(用最大的)"
+            print(f"    COLMAP 注册 {best_n}/{n} 张 ({frac:.0%}){split}")
+            if frac < 0.6:
+                print(f"    ⚠ 注册率偏低 ({frac:.0%})：重叠不足会导致大量空洞/漂浮。"
+                      "建议加拍过渡角度、放慢绕拍、避开纯无纹理/反光面。")
+                # 分母数的是"候选照片", 不是"COLMAP 解得开的照片"。别让用户拿着一个其实是
+                # 格式问题的低注册率跑去重拍 —— 但也别反过来断言 COLMAP 读不了什么, 那要看
+                # 该 build 的 FreeImage, 跑之前无法验证。只陈述事实, 让用户自己判。
+                exotic = sorted({Path(f[0]).suffix.lower() for f in photos_fp}
+                                - {".jpg", ".jpeg", ".png"})
+                if exotic:
+                    print(f"    ⚠ 也可能不是重叠问题：分母里含 {'、'.join(exotic)}，"
+                          "COLMAP 解不解得开取决于该 build 的 FreeImage 带哪些格式"
+                          "（跑之前没法验证）。若这些图一张都没进模型，先转成 JPEG 再试。")
+            # 重开 images/：它必须是产出 sparse/0 的那一批照片, 留旧副本会让 Brush 训在
+            # 旧图上, 出一个谎称来自这批照片的重建。
+            if images_dir.exists():
+                shutil.rmtree(images_dir)
+            shutil.copytree(args.photos, images_dir)
+            state.record("colmap", parent)
+        else:
+            print(f"    复用已有位姿: sparse/0 注册 {_count_registered_images(sparse / '0')}/{n} 张")
 
     print(f"\n=== 2/4 Brush 训练 3DGS ({args.steps} 步, max-res {args.max_res}) ===")
     trained = ws / "trained.ply"
+    brush_log = ws / "brush.log"
+    brush_argv = [brush, str(ws), "--total-steps", str(args.steps),
+                  "--max-resolution", str(args.max_res),
+                  "--export-every", str(args.steps),
+                  "--export-path", str(ws), "--export-name", "trained.ply"]
     parent, unprovable = _fingerprint("brush", {
         "parent": parent, "steps": args.steps, "max_res": args.max_res,
         "binary": _file_fp(Path(brush))})
     if state.begin("brush", parent, unprovable=unprovable,
                    outputs_ok=trained.is_file() or next(ws.glob("*.ply"), None) is not None,
                    outputs_desc="工作目录里没有 .ply"):
-        run([brush, str(ws), "--total-steps", str(args.steps),
-             "--max-resolution", str(args.max_res), "--export-every", str(args.steps),
-             "--export-path", str(ws), "--export-name", "trained.ply"],
-            log=ws / "brush.log", tee=True)
-        state.record("brush", parent)
+        # REVIEW-CODEX-030 P0 #5：post-run 绑定完整 argv + UTC 起止 + returncode
+        # + log SHA + PLY SHA。run() 在 rc!=0 时抛 SystemExit，所以走到 record
+        # 时 rc 必为 0；不抛这一支的 rc 用 None 表示（理论上不可达，写出来防漂移）。
+        brush_start = datetime.now(UTC)
+        run(brush_argv, log=brush_log, tee=True)
+        brush_end = datetime.now(UTC)
+        export_now = trained if trained.is_file() else next(ws.glob("*.ply"), None)
+        brush_extras = {
+            "brush_argv": brush_argv,
+            "caller_argv": list(sys.argv),
+            "brush_started_at": brush_start.isoformat(timespec="seconds"),
+            "brush_finished_at": brush_end.isoformat(timespec="seconds"),
+            "brush_returncode": 0,  # run() 在非 0 时已 SystemExit
+            "brush_log_sha256": (_sha256_file(brush_log)
+                                 if brush_log.is_file() else None),
+            "trained_ply_sha256": (_sha256_file(export_now)
+                                   if export_now and export_now.is_file() else None),
+            "trained_ply_size_bytes": (export_now.stat().st_size
+                                       if export_now and export_now.is_file() else None),
+        }
+        state.record("brush", parent, extras=brush_extras)
     export = trained if trained.is_file() else next(ws.glob("*.ply"), None)
     if export is None:
         raise SystemExit("Brush 未导出 .ply：见 brush.log（可能显存不足，调小 --max-res）")
