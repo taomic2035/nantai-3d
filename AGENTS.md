@@ -285,6 +285,19 @@ Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未�
   seam/target visibility 和 post-render v2。详见
   `handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md`。
 
+## Batch 32 闭环路线节点素材（2026-07-25）
+
+- 8 张 image2 设计板覆盖四门院落、分层住宅、巷道/拱廊、桥—水车服务环、公共厅、
+  作坊、梯田住宅簇和村边仓棚；私有候选位于
+  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch32/`。
+- 干净 Release tag 为 `synthetic-village-design-inputs-batch32-2026-07-25`，ZIP SHA-256
+  为 `737d0dc502ad67eb586d7f4565427f34d94763f81c1385f9afbda2edf06905bd`。
+- 仍为 `design-only`、`route_loop_topology/portal_graph=authoring-guidance-not-measured`、
+  `training_use=forbidden-as-multiview`、`trust_effect=none`。GLM 仅在 P7 P0 闭环后按
+  `FEEDBACK-IMAGE2-037` 消费并重跑 graph/clearance/六层/post-render 门。
+- 所有素材 Release 统一索引移至 `docs/releases/synthetic-design-inputs.md`；README
+  不再保留逐批下载过程。
+
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 
 「无限村庄任意坐标漫游」的**管线内核已完整并对抗性验证 CLEAN**（Opus lane）：

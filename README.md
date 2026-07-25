@@ -1,66 +1,139 @@
 # Nantai 3D Studio
 
-照片与视频驱动的 3D 重建、Gaussian Splat 拼接和可替换村庄素材工作台。
+照片与视频驱动的 3D 重建、Gaussian Splat 导入/拼接、可替换山村素材和浏览器漫游工作台。
 
-当前仓库交付的是一条可在本机复现的编排与审计链：混合媒体归一化、联合配准、显式坐标契约、外部训练器 3DGS 导入、拼接/区域增清/LOD、素材版本替换、Web Viewer 与 Studio。没有可用重建运行时时会使用明确标注的 synthetic/proxy 数据，不把演示产物冒充实测重建。
+本仓库负责重建外围的可复现编排与审计：输入预检、图视频摄取、COLMAP 位姿、坐标/尺度契约、
+外部 3DGS 训练产物导入、分块/LOD、Viewer 与 Studio。没有真实运行时或证据时，系统会明确
+标记 `synthetic / mock / preview-only`，不会把演示结果冒充真实重建。
 
-## 能力矩阵
+> 当前已有可漫游的 synthetic 场景和完整验证框架，但真实场景验收仍缺真实重叠采集、
+> accepted real-photo SfM、非 mock 云 GPU 3DGS、实测对齐和真实 Viewer QA。
 
-| 能力 | 状态 | 当前边界 |
+## 能力与边界
+
+| 能力 | 状态 | 边界 |
 |---|---|---|
-| 图片 + 视频输入 | **verified** | 图片复制、视频抽帧、模糊筛选；两者进入同一 session/registration 契约 |
-| 图视频联合配准 | **verified / optional runtime** | COLMAP 可用时读取真实相机模型与注册覆盖率；否则使用确定性 synthetic mock |
-| 统一 3D 坐标 | **verified, fail closed** | 所有 artifact 声明完整 `CoordinateFrame`；跨 frame 只接受显式、内容寻址的 `FrameTransform` |
-| ENU 米制对齐 | **external evidence required** | 裸 COLMAP 结果保持 `sfm-arbitrary / arbitrary / unaligned`；只有外部控制点/GPS Sim3 证据才可升级 |
-| 混合 3DGS 拼接 | **verified** | 导入 artifact 的 frame/units/transform history 一致后才 merge；不一致时拒绝 |
-| 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
-| 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
-| Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 156 张路线/包络/跨分块过渡/方向/模块板/构造、材质、空间地标与室内连通性设计输入（Batch 8–14 各 6 张 + Batch 20–21 各 8 张 + Batch 22 12 张 + Batch 23–24 各 16 张 + Batch 25 8 张 + Batch 26 6 张 + Batch 27–31 各 8 张），均有 SHA 与来源边界 |
-| 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
-| Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
-| 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
+| 图片/视频摄取 | verified | 混合输入归一化、抽帧、模糊筛选和 source/session 绑定 |
+| COLMAP 配准 | optional runtime | 有真实 COLMAP 时读取相机/位姿/覆盖率；否则只允许显式 mock |
+| 坐标与米制对齐 | fail-closed | 裸 SfM 保持 arbitrary/unaligned；控制点或 GPS Sim3 通过门后才可提升 |
+| 3DGS 导入与拼接 | verified | frame、units、transform history 一致后才 merge |
+| SH/旋转/LOD/分块 | verified | 高阶 SH degree 0–3、空间分块、区域替换和三级 LOD |
+| Viewer | verified with fallback | Spark 2.1.0 完整渲染；不可用时明确降级为 DC point preview |
+| Studio | verified local snapshot | 项目状态、provenance、LOD/图层、覆盖审计和 production-plan HUD |
+| 可替换素材 | verified inputs | 11 个程序素材、68 个 synthetic 视觉槽位、164 张设计板；见 [Release 索引](docs/releases/synthetic-design-inputs.md) |
+| 180 机位计划 | plan verified | 机位计划不是渲染质量、真实 coverage 或训练成功的证据 |
+| 3DGS 训练 | external | 本仓库不自研训练器；本机 Brush 只适合小规模试验，高质量主路径为云 GPU |
 
 ## 快速开始
 
-Python 3.11+、Node.js 20+。建议在项目根目录执行：
+需要 Python 3.11+、Node.js 20+。Linux/macOS：
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 
-# 生成、验收并幂等注册 11 个模拟素材
 make assets PY=.venv/bin/python
-
-# input/ 中可混放 jpg/png 与 mp4/mov/avi
 make ingest PY=.venv/bin/python
-
-# 本机可复现的 synthetic 重建；产物会明确显示 mock-proxy
 make reconstruct PY=.venv/bin/python
-
-# 生成 5×5 村庄与逐素材消费证据
 make world PY=.venv/bin/python
-
-# Studio: http://127.0.0.1:8000/
 make serve PY=.venv/bin/python
 ```
 
-> **Windows / 无 GNU make 的环境**：用跨平台任务运行器 `make.py` 替代 `make`（同名 target），
-> venv 解释器为 `.venv\Scripts\python`。它强制 UTF-8 输出，规避 CJK/emoji 在管道下的编码错误：
->
-> ```powershell
-> .venv\Scripts\python -m pip install -e ".[dev]"
-> .venv\Scripts\python make.py assets   # 生成+验收+注册 11 素材
-> .venv\Scripts\python make.py world     # 5×5 村庄
-> .venv\Scripts\python make.py serve     # Studio
-> .venv\Scripts\python make.py test lint  # 门禁
-> ```
->
-> 素材字节跨平台可复现（HANDOFF-002：写盘前量化到 1e-6 网格）；registration.json /
-> recon_manifest.json 均以 LF 写出，保证信任根跨 OS 字节一致。CI 矩阵 (ubuntu+windows ×
-> py3.11/3.13) 强制 `make.py test/lint` 与素材跨平台字节一致。
+Windows 或没有 GNU make 时使用跨平台任务入口：
 
-完整门禁：
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+
+.venv\Scripts\python make.py assets
+.venv\Scripts\python make.py ingest
+.venv\Scripts\python make.py reconstruct
+.venv\Scripts\python make.py world
+.venv\Scripts\python make.py serve
+```
+
+Studio 默认地址：<http://127.0.0.1:8000/>
+
+以上 `reconstruct` 快速路径允许 synthetic mock，只用于验证管线。开始真实任务前先运行：
+
+```powershell
+.venv\Scripts\python make.py doctor
+$env:PHOTOS = "input"
+.venv\Scripts\python make.py check-capture
+Remove-Item Env:PHOTOS
+```
+
+`doctor` 报告本机可用能力；`check-capture` 只做单图质量预检，不能证明照片之间有足够重叠。
+
+## 从真实素材到可漫游场景
+
+```mermaid
+flowchart LR
+    A["重叠照片 / 视频"] --> B["capture 预检与 ingest"]
+    B --> C["COLMAP SfM 位姿"]
+    C --> D["外部 GPU 训练 3DGS"]
+    D --> E["导入 / 分块 / LOD"]
+    C --> F["控制点或 GPS Sim3"]
+    F --> E
+    E --> G["inspect_recon"]
+    G --> H["Studio / Viewer QA"]
+```
+
+关键边界：
+
+1. 视频抽帧不等于配准成功；只看 registration 的逐图覆盖率。
+2. COLMAP 输出默认是 `sfm-local / arbitrary / unaligned`。
+3. 真实 3DGS 训练需要外部训练器；开发机没有 NVIDIA CUDA。
+4. 控制点/GPS 对齐必须通过非退化、正尺度和 RMS 门，失败时不提升为米制 ENU。
+5. 导入后的 provenance、artifact fidelity 与 Viewer runtime fidelity 分开报告。
+
+完整安装、云 GPU、命令和耗时边界：
+
+- [端到端重建手册](docs/manual/reconstruction-setup.md)
+- [真实数据工作流与坐标契约](docs/real-data-workflow.md)
+
+## Synthetic 演示与设计素材
+
+- `make assets` 生成、验收并注册 11 个确定性程序素材。
+- `make world` 生成带来源与消费证据的 synthetic 分块世界。
+- 68 个视觉槽位和 Batch 8–32 共 164 张通用设计输入统一列在
+  [Synthetic design input Releases](docs/releases/synthetic-design-inputs.md)。
+
+这些素材可以被真实素材逐槽替换，但不能作为真实照片、多视图训练集、米制尺度或 360°
+coverage 证据。Release 只保留最终 PNG、prompt/提示链、manifest、USAGE 和 checksum；
+生成队列、失败请求、候选中间态与 contact sheet 不发布。
+
+## Viewer 与 Studio
+
+`make serve` 或 `python make.py serve` 启动本地服务器：
+
+- Studio：`/web/studio/`
+- Viewer：`/web/viewer/`
+- Project API：`GET /api/project`
+- Runs API：`GET /api/runs`
+
+Studio 从 Viewer bridge 读取实际 runtime capability。只有 Spark 初始化成功后才显示完整
+anisotropic covariance、alpha composite 和 spherical harmonics；fallback 不会伪装成完整
+3DGS。Production camera plan 与 coverage audit 也不会提升 reconstruction provenance。
+
+## 可信度模型
+
+- 信任只从机器字段、内容 SHA、transform history 和实测报告推导，不从文件名或 engine 名推断。
+- `synthetic=true` / `mock-proxy` 只代表流程演示。
+- `preview-only` 不允许测量；`full-3dgs` 只描述文件属性，不保证 Viewer 已完整渲染。
+- `registered` 不等于素材已被场景消费；消费需要 build/render report 和匹配 SHA。
+- 真实 reconstruction chunk 没有程序化 `grid`，绝不能投影为 `on_demand:true`。
+- 矛盾、缺证据或无法解析时保持低信任并 fail closed。
+
+主要产物：
+
+- `recon/registration.json`：相机、位姿、session、frame 与 registration evidence。
+- `recon/scene_full.ply`：完整导入/拼接结果。
+- `web/data/recon/recon_manifest.json`：artifact、LOD、transform chain 与可信度。
+- `web/data/manifest.json`：world bounds、chunks 与素材消费证据。
+- `assets/registry.json`：素材版本、历史、payload SHA 与来源。
+
+## 验证
 
 ```bash
 make test PY=.venv/bin/python
@@ -69,869 +142,35 @@ make verify PY=.venv/bin/python
 git diff --check
 ```
 
-## Release 模拟视觉素材包
-
-没有真实素材时，可使用 [Synthetic Mountain Village Canary Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-canary-2026-07-16)
-中的最终视觉包 `synthetic-mountain-village-visual-pack-hybrid-v3-2026-07-17.zip`。它包含 68 个通用山村设计槽位：
-16 个关键视角、8 个环境视角、24 个材质、12 个建筑细节和 8 个道具；每条记录都指向内容寻址 PNG，并携带可核验的来源 manifest。
-
-在 Windows PowerShell 中下载、校验并安装到 Studio/Canary 的默认读取位置：
+Windows：
 
 ```powershell
-$releaseDir = ".nantai-studio\release-downloads\hybrid-v3"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-canary-2026-07-16 `
-  --pattern "synthetic-mountain-village-visual-pack-hybrid-v3-2026-07-17.zip" `
-  --pattern "SHA256SUMS.txt" --dir $releaseDir --clobber
-
-$archive = Join-Path $releaseDir "synthetic-mountain-village-visual-pack-hybrid-v3-2026-07-17.zip"
-$expected = ((Get-Content (Join-Path $releaseDir "SHA256SUMS.txt")) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "visual pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v3" -Force
+.venv\Scripts\python make.py test lint
+git diff --check
 ```
 
-macOS/Linux 可在下载目录执行 `sha256sum -c SHA256SUMS.txt`，再将 ZIP 解压到
-`.nantai-studio/synthetic-village/hybrid-v3/`。安装后，默认 manifest 应位于
-`.nantai-studio/synthetic-village/hybrid-v3/visual-sources/visual-sources.json`；可用下面的加载器校验数量与 synthetic 标记：
+CI 覆盖 Ubuntu/Windows 与 Python 3.11/3.13，并检查素材和关键 manifest 的跨平台字节一致性。
 
-```bash
-python -c "from pathlib import Path; from pipeline.synthetic_village.visual_sources import load_visual_source_manifest; m=load_visual_source_manifest(Path('.nantai-studio/synthetic-village/hybrid-v3/visual-sources/visual-sources.json')); assert m.synthetic and len(m.records) == 68; print('visual pack verified:', len(m.records))"
-python scripts/synthetic_village.py build-canary
-```
-
-ZIP 内的 `default-resources/` 与 `source-evidence/` 是审计快照，不应覆盖仓库中受版本控制的
-`assets/default-resources/`。槽位记录不可原地改写；替换图片时应通过
-`pipeline.synthetic_village.visual_sources.import_visual_source(..., pack_root=<新目录>)` 创建新的 pack revision，
-再将 `visual_pack_root` 显式传给 `run_canary_build`。CLI 的 `import-visual` 固定写默认 pack，已占用槽位会 fail closed。
-
-这些图片全部明确标记为 `synthetic=true`，用途是可替换的设计参考、材质/细节/道具输入和流程演示；
-它们不是同一真实场景的几何一致多视图，不是训练完成的 3DGS，也不能单独证明可在任意坐标 360° 漫游。
-真实重建仍需按[端到端重建手册](docs/manual/reconstruction-setup.md)完成真实采集、COLMAP 位姿和外部 GPU 3DGS 训练。
-
-### Batch 8 反向路线与近景遮挡补充包
-
-[Batch 8 Reciprocal-Route Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch8-2026-07-20)
-额外提供 6 张经过人工视觉筛选的 image2 设计输入：中央院落下行回望、桥面第一人称穿越、
-水车尾水维修面、廊下跨层通道、森林/果园边界回望和下谷返村视角。包内同时包含精确提示词、
-内容寻址 manifest、使用边界和逐文件 SHA-256；没有收录未满足视角角色的桥区高位中间图。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch8-reciprocal-route"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch8-2026-07-20 `
-  --pattern "synthetic-village-reciprocal-route-design-pack-batch8-2026-07-20.zip" `
-  --pattern "synthetic-village-reciprocal-route-design-pack-batch8-2026-07-20.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-reciprocal-route-design-pack-batch8-2026-07-20.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-reciprocal-route-design-pack-batch8-2026-07-20.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 8 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch8" -Force
-```
-
-该补充包不是默认 registry payload，也不是可直接训练的“360 多视图”。它只补足 Blender 建模时容易遗漏的
-反向路线、结构背面、跨层通道和近景遮挡设计；必须经过显式模块建模、相机规划、碰撞/可行走审计和真实六层渲染，
-才能进入 Viewer 漫游场景。不得把图片边缘的宽幅构图解释为 equirectangular 全景。
-
-### Batch 9 侧向路线与隐藏结构补充包
-
-[Batch 9 Lateral-Route Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch9-2026-07-20)
-继续提供 6 张 image2 原始 PNG：中央院落横向巷口、桥区下游岸侧、水车对岸检修面、
-廊下下层反向通道、林果边界三岔路和下谷田边交叉口。它们与 Batch 8 形成前/后/侧向设计参考，
-但仍是相互独立的生成结果，不是同一相机系统的几何一致多视图。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch9-lateral-route"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch9-2026-07-20 `
-  --pattern "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.zip" `
-  --pattern "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-lateral-route-design-pack-batch9-2026-07-20.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 9 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch9" -Force
-```
-
-ZIP 只包含 6 张选中图片、6 份精确提示词、manifest、使用说明和 payload checksum。
-桥侧图额外出现一个小型泄水孔，因此只能指导主桥拱、桥面厚度、桥台和岸侧路线；canonical
-bridge topology 必须由版本化 recipe 决定。其余图片也只能指导建模，不能提升 coverage、
-metric、alignment 或 training 信任。
-
-### Batch 10 垂直包络与近景遮挡补充包
-
-[Batch 10 Vertical-Enclosure Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch10-2026-07-21)
-补充 6 张 image2 原始 PNG：中央院落檐底与有顶侧廊、桥拱底面与桥台、水车轴端检修平台、
-廊下楼板结构与净空、林果边界挡墙/排水/树冠接触，以及下谷建筑基础/涵洞/溪岸回接。
-它们与 Batch 8 的前后互逆、Batch 9 的侧向路线形成平面方向之外的垂直包络参考。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch10-vertical-enclosure"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch10-2026-07-21 `
-  --pattern "synthetic-village-vertical-enclosure-design-pack-batch10-2026-07-21.zip" `
-  --pattern "synthetic-village-vertical-enclosure-design-pack-batch10-2026-07-21.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-vertical-enclosure-design-pack-batch10-2026-07-21.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-vertical-enclosure-design-pack-batch10-2026-07-21.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 10 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch10" -Force
-```
-
-包内严格只有 6 张入选图片、6 份精确提示词、manifest、使用说明和 payload checksum。
-这些图片仍是独立生成、相机未标定且几何一致性未验证的可替换设计输入；不能直接用于
-SfM/3DGS，不能证明 360° coverage、任意坐标几何、碰撞安全、米制尺度或 training
-适用性。桥拱、水车轴承、排水和基础的最终拓扑必须来自版本化 recipe，并经过 fresh
-Blender topology/collision、standing-eye 六层实渲和 post-render v2 policy。
-
-### Batch 11 跨分块连续过渡补充包
-
-[Batch 11 Boundary-Transition Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch11-2026-07-21)
-补充 6 张通用 image2 设计输入：东西向等高道路、南北向折返步道与道路交会、连续溪流/岸路/
-桥涵、梯田与灌溉、森林/竹林/果园到聚落，以及下谷道路/步道/溪流/田地/民居汇合。
-它们面向跨 chunk transition module，不绑定某一个具体村庄，可以被真实素材逐槽替换。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch11-boundary-transition"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch11-2026-07-21 `
-  --pattern "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.zip" `
-  --pattern "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-boundary-transition-design-pack-batch11-2026-07-21.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 11 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch11" -Force
-```
-
-ZIP 严格只有 6 张图片、6 份精确 prompt、manifest、使用说明和 payload checksum。
-这些图片只指导跨分块道路、步道、水系、梯田、植被和聚落过渡的建模；共享边界坐标必须来自
-确定性的 world-edge anchor，不能从像素推断。即使画面看起来连续，也不代表六张图共享相机或
-几何，更不能作为 SfM/3DGS 多视图、360° coverage 或任意坐标场景完成度的证据。
-
-### Batch 12 同一视觉家族六方向参考补充包
-
-[Batch 12 Directional Reference Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch12-2026-07-21)
-以 Batch 11 下谷汇合区的一张入选图作为 `scene-identity-only` 参考，补充东/下游、西/上游、
-上坡聚落、下坡谷地、仰视檐底/树冠/线缆和俯视铺地/台阶/排水六个方向角色。相较完全独立的
-提示词，它们更接近同一建筑与材质语言，适合指导一个通用 transition hub 的四周和上下包络建模。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch12-directional-reference"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch12-2026-07-21 `
-  --pattern "synthetic-village-directional-reference-design-pack-batch12-2026-07-21.zip" `
-  --pattern "synthetic-village-directional-reference-design-pack-batch12-2026-07-21.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-directional-reference-design-pack-batch12-2026-07-21.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-directional-reference-design-pack-batch12-2026-07-21.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 12 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch12" -Force
-```
-
-ZIP 严格只有 6 张图片、6 份精确 prompt、manifest、使用说明和 payload checksum。
-参考图约束只能提高视觉家族一致性，不能证明六张图共享精确几何。它们尺寸与相机内参不一致，
-不是 cubemap、全景或已标定多视图，不得拼接后声称 360° coverage，也不得直接送入 SfM/3DGS。
-真实方向、共享锚点、碰撞和可行走结论必须来自版本化 3D recipe 与 fresh Blender 六层实渲。
-
-### Batch 13 模块化资产建模参考板
-
-[Batch 13 Modular Asset Reference Boards Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch13-2026-07-21)
-六张 `1536×1024` 板把整景素材拆成可复用部件：住宅构造、桥涵/挡墙/排水、步道/台阶/
-坡道/架空通行、梯田/灌溉/水车、植被/岩石/围栏，以及电杆/灯/井/推车/棚架/小道具。
-每张同时展示大量隔离部件和隐藏侧、底面、接头、基础或细节建议，面向 Blender recipe、
-instancing、LOD、collision proxy 和可行走拓扑建模。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch13-modular-assets"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch13-2026-07-21 `
-  --pattern "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.zip" `
-  --pattern "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-modular-asset-reference-pack-batch13-2026-07-21.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 13 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch13" -Force
-```
-
-模块板是设计参考，不是有尺寸的工程图、精确 turntable 或已完成 3D 资产；同一部件在一张板上的
-多个视图也不能证明共享同一个 mesh。画面材质不是 seamless PBR atlas，不得裁切后登记为真实
-texture payload。最终尺度、连接锚点、拓扑、碰撞、材质图和实例身份必须在版本化 recipe 中声明
-并经过 Blender 实测。
-
-### Batch 14 斜向路线与平移检查点参考
-
-[Batch 14 Diagonal Navigation Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch14-2026-07-21)
-补充上坡左斜、下坡右斜、后场服务巷、林果边界、前移检查点和后移检查点六个角色。它们重点
-暴露挡墙背面、屋檐/阳台底面、基础支撑、排水出口、溪床/桥台、隐藏侧巷和反向立面，帮助
-Blender 建模摆脱只做正面“景观图”的问题。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch14-diagonal-navigation"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch14-2026-07-21 `
-  --pattern "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.zip" `
-  --pattern "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-diagonal-navigation-design-pack-batch14-2026-07-21.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 14 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch14" -Force
-```
-
-ZIP 严格只有 6 张原始 `1536×1024` PNG、6 份精确 prompt、manifest、使用说明和 payload
-checksum。六张图是独立生成的设计输入，不是同一场景的标定多视图；其中“前移/后移约 8 米”
-只是提示词中的构图意图，没有实测 pose、baseline、intrinsics 或像素对应。不得把本包直接送入
-SfM/NeRF/3DGS 或声称 360° coverage。应先建立 canonical 3D recipe 和已知相机，再由 collision/
-topology 与 fresh RGB/depth/normal/instance/semantic/camera evidence 决定受测位置是否可漫游。
-
-### Batch 20 角色拓扑与相机包络参考
-
-[Batch 20 Role-Topology Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch20-2026-07-23)
-提供 8 张最终筛选的 image2 原始 PNG：桥梁折线接近与院落侧回望、水车环形检修路线与上层平台
-回望、森林折返节点与林内返村视角，以及桥—水车、森林—果园两个共享空间包络。它们针对正式
-实渲中桥、水车、森林角色的构图缺口，强调非共线路线、近中远景密度和结构背面。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch20-role-topology"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch20-2026-07-23 `
-  --pattern "synthetic-village-role-topology-design-pack-batch20-2026-07-23.zip" `
-  --pattern "synthetic-village-role-topology-design-pack-batch20-2026-07-23.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-role-topology-design-pack-batch20-2026-07-23.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-role-topology-design-pack-batch20-2026-07-23.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 20 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch20" -Force
-```
-
-ZIP 只含 8 张入选图、8 份精确 prompt、manifest、使用说明和 payload checksum；不含 contact
-sheet、生成队列、失败请求或旧批次。引用条件只传递视觉语言，不建立像素对应、共享几何、标定相机、
-米制尺度或 360° coverage。Blender 消费后仍须通过 topology/clearance、平移相机六层实渲、
-visibility 与 post-render v2，才能证明受测位置可漫游。
-
-### Batch 21 角色构造与模拟材质参考
-
-[Batch 21 Role-Construction & Simulated-Material Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch21-2026-07-23)
-提供 6 张桥梁、水车、森林的互补构造视角，以及 2 张石材/旧木材模拟 albedo 原型。构造图重点
-暴露拱腹、桥台、轮轴、引水槽、尾水、挡墙、涵洞、楼梯底部和路线支撑，供下一轮 Blender
-独立构件建模；材质图只用于合成视觉 QA，不是实拍纹理或完整 PBR 材质组。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch21-role-construction"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch21-2026-07-23 `
-  --pattern "synthetic-village-role-construction-material-pack-batch21-2026-07-23.zip" `
-  --pattern "synthetic-village-role-construction-material-pack-batch21-2026-07-23.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-role-construction-material-pack-batch21-2026-07-23.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-role-construction-material-pack-batch21-2026-07-23.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 21 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch21" -Force
-```
-
-ZIP 只含 8 张最终 PNG、8 份精确 prompt、manifest、使用说明和 payload checksum；不含 contact
-sheet、生成队列、失败请求或旧批次。6 张场景图是独立生成的设计参考，不是标定多视图；2 张材质图
-未经色彩标定、物理尺度或无缝平铺验证，也没有 normal/roughness/displacement 通道。所有输入保持
-`synthetic=true`、`design-only`、`preview-only` 和 `trust_effect=none`。
-
-### Batch 22 水车局部环绕、构造与模拟材质参考
-
-[Batch 22 Watermill Local-360 Design Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch22-2026-07-23)
-提供 8 张围绕通用山村水车的前、右前、右、右后、后、左后、左、左前独立环境参考，另有
-2 张引水槽/轮轴及架空层/尾水构造细节、2 张旧木与老铁模拟材质输入。它们用于完善单水轮
-Blender 构件、环形巡游路线、近中远景密度与材质方向，不是同一物理现场的标定多视图。
-
-```powershell
-$releaseDir = ".nantai-studio\release-downloads\batch22-watermill-local360"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-gh release download synthetic-village-design-inputs-batch22-2026-07-23 `
-  --pattern "synthetic-village-watermill-local360-design-pack-batch22-2026-07-23.zip" `
-  --pattern "synthetic-village-watermill-local360-design-pack-batch22-2026-07-23.SHA256SUMS.txt" `
-  --dir $releaseDir --clobber
-
-$archiveName = "synthetic-village-watermill-local360-design-pack-batch22-2026-07-23.zip"
-$archive = Join-Path $releaseDir $archiveName
-$sumFile = Join-Path $releaseDir "synthetic-village-watermill-local360-design-pack-batch22-2026-07-23.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 22 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch22" -Force
-```
-
-ZIP SHA-256 为 `1f842f8ce5eb52bafb5bb6d8a581816e1c7571187537e45ace6af669365fb07f`，
-严格只含 12 张最终 PNG、12 份逐图 prompt、manifest、使用说明与 payload checksum；不含旧候选、
-判废图、联系表或生成队列。八个方向只是独立的设计角色，没有共享 intrinsics、pose、像素对应、
-米制尺度或 360° coverage；禁止作为 SfM/NeRF/3DGS 多视图训练集。两张材质图也只是模拟 albedo
-参考，未验证无缝平铺且不含 normal/roughness/metallic/displacement 通道。消费后仍须重建 exact
-Blender 场景，并通过平移相机六层实渲、visibility 与 post-render v2 才能形成漫游验收证据。
-
-Batch22 的 fresh exact-218 和 8 方向 local-orbit caller 已于 2026-07-23 完成机器复核：
-`8/8` 帧通过六层/post-render 门，水轮与整体构件均在 `7/8` 帧可见；
-final report SHA 为
-`4ce4bc97ffce2af6f7748cecead9b3f10f2670383ff008878f4722d278e52d05`。但它仍是
-`synthetic / L0 / preview-only / forbidden-as-multiview`，目视仍有悬空结构、简化材质、
-平面水体与桥体遮挡；完整证据见
-[Batch22 exact-218/local-360 回执](handoff/FEEDBACK-HANDOFF-CODEX-027-batch22-exact218-local360.md)。
-
-### Batch 23 环境包络、结构支撑与表面过渡参考
-
-[Batch 23 Environment Envelope & Support Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch23-2026-07-23)
-提供 16 张可替换的独立设计输入：8 张山谷/森林/果园/村庄边缘环境包络、4 张桥梁/水车/溪岸/
-挡墙结构参考，以及 4 张水陆/石墙排水/木石承托/道路材质过渡研究。它们用于下一轮 Blender
-地形包络、支撑构造和材质遮罩建模，不进入 Git 素材 payload；干净 Release 是正式分发入口。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch23"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch23-2026-07-23 `
-  --repo taomic2035/nantai-3d `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-environment-envelope-support-pack-batch23-2026-07-23.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-environment-envelope-support-pack-batch23-2026-07-23.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 23 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch23" -Force
-```
-
-ZIP SHA-256 为 `549dc14d59feeab29771fce8addbf599adebe6d1f6e5ba301de63397b7cf3e1b`，
-严格只含 16 张最终 PNG、16 份精确 prompt、manifest、使用说明与 payload checksum；没有
-rejected、联系表或生成中间态。全部图像均为
-`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
-metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
-coverage_use=forbidden / trust_effect=none`。
-
-因此这批图能指导环境封闭、支撑落地和材质过渡，却不能证明 360° 重建、任意坐标漫游、真实模型
-或真实纹理。消费后必须重建 exact Blender 场景、登记内容 SHA，并重新通过 camera clearance、
-Phase 4.3、六层 visibility 与 post-render v2；完整清单与 QA 见
-[Batch23 image2 回执](handoff/FEEDBACK-IMAGE2-027-batch23-environment-envelope-support.md)。
-
-### Batch 24 外圈回望与构造剖面闭合参考
-
-[Batch 24 Reciprocal Perimeter & Section Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch24-2026-07-23)
-提供 16 张与 Batch23 环境扇区逐项绑定的设计输入：8 张从外圈向村庄回望的平移视点，以及
-8 张强调基础、挡墙、道路挖填、排水、水位和支撑传力路径的斜向构造研究。绑定只表示视觉上下文，
-不是相机标定、反向位姿或几何对应。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch24"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch24-2026-07-23 `
-  --repo taomic2035/nantai-3d `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-reciprocal-perimeter-section-pack-batch24-2026-07-23.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-reciprocal-perimeter-section-pack-batch24-2026-07-23.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 24 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch24" -Force
-```
-
-ZIP SHA-256 为 `1318656f2019889470bcf47d2765f6cfee335194e735995c104405936edc1723`，
-严格只含 16 张最终 PNG、16 份精确 prompt、manifest、使用说明与 payload checksum；没有
-私有 source bindings、QA 明细、rejected、旧批次源图或生成中间态。全部图像仍为
-`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
-metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
-coverage_use=forbidden / trust_effect=none`。
-
-这批图能更直接地指导反向表面、双向外圈路线和地形/基础闭合，但不能证明 360° 重建、任意坐标
-漫游、真实模型或真实纹理。消费后必须重建 exact Blender 场景和 chunk registry，再跑 reciprocal/
-seam、camera clearance、visibility、六层与 post-render v2；完整绑定、QA 和消费顺序见
-[Batch24 image2 回执](handoff/FEEDBACK-IMAGE2-028-batch24-reciprocal-perimeter-section.md)。
-
-Batch24 已被消费为 additive exact-266 Blender 候选并完成 fresh 16 机位正式审计：
-`15/16` clearance、`15/15` 已渲染帧通过六层字节/相机身份/local/post-render-v2，
-但完整六目标可见性为 **`0/15`**，相邻双接缝可见性仅 **`3/15`**。因此当前画面可查看、
-路线可读，却不能声称外圈闭合或 360° 完整覆盖。真实 Blender UV repeat-density 探针还测得
-terrain `232.37×`、creek `40.48×`、long-wall `4.79×` 的内部变化，和画面中的重复/拉伸
-缺陷一致。exact-266 继续严格标注为
-`synthetic / L0 / preview-only / modeled-unverified / real_photo_textures=false`；
-完整 SHA、机位矩阵与目视结论见
-[Batch24 exact-266 正式审计](handoff/FEEDBACK-HANDOFF-CODEX-028-batch24-exact266-perimeter-closure.md)。
-
-### Batch 25 环境真实感与可通行边界参考
-
-[Batch 25 Environment Realism Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch25-2026-07-24)
-针对 exact-266 RGB 审计中最明显的视觉缺口补充 8 张通用设计输入：开路植被边界、果园梯田、
-森林—果园过渡、切槽溪床与湿/干岸层、石路—土坡—排水接触、变化挡墙、村庄远景层次，以及
-阴天世界/山脊光照参考。它们用于替换方块树冠、重复地表、平面溪水、硬拼缝和空灰天空，
-不绑定某一个固定村庄资产。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch25"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch25-2026-07-24 `
-  --repo taomic2035/nantai-3d `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-environment-realism-pack-batch25-2026-07-24.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-environment-realism-pack-batch25-2026-07-24.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 25 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch25" -Force
-```
-
-ZIP SHA-256 为 `6673d94c7651a21d73706b1810626d0a9559668eb229dd13a7aa028599906575`，
-严格只含 8 张最终 PNG、8 份精确 prompt、manifest、使用说明与 payload checksum；没有
-contact sheet、失败请求、浏览器中间态或生成缓存。全部图像仍为
-`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
-metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
-coverage_use=forbidden / trust_effect=none`。
-
-这批图能指导可替换 Blender 几何、材质变化、植被密度、地表接触和合成天空设计；其中 panorama
-也不是校准的 equirectangular HDRI。它们不能证明同一物理场景的 360° 一致性、任意坐标可达性、
-真实模型或真实纹理。完整 QA、逐图 SHA 和消费顺序见
-[Batch25 image2 回执](handoff/FEEDBACK-IMAGE2-029-batch25-environment-realism.md)。
-
-### Batch 26 360° 建模构造板
-
-[Batch 26 360 Modeling Boards Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch26-2026-07-25)
-补充 6 张面向 Blender 建模的通用构造板：地面/水体/挡墙过渡、植被/果园/森林边界、
-建筑后场与服务支撑、桥—水车—溪流连接、分层地形/天空/世界密度，以及材质接触过渡。
-它们用于把稀疏块体场景拆成可替换模块，不绑定某一个固定山村资产。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch26"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch26-2026-07-25 `
-  --repo taomic2035/nantai-3d `
-  --pattern "synthetic-village-360-modeling-boards-batch26-2026-07-25.zip" `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-360-modeling-boards-batch26-2026-07-25.zip"
-$expected = "91f75d265357f9ff25785c466aafe5dd6a1e104b0608ffc0b40e0972a76dcb39"
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 26 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch26" -Force
-```
-
-压缩包严格只含 6 张最终 PNG、6 份精确 prompt、`USAGE.md`、`manifest.json` 和
-`PAYLOAD-SHA256SUMS.txt`；没有 queue、失败变体、contact sheet 或生成缓存。全部输入仍为
-`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
-metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
-coverage_use=forbidden / trust_effect=none`。
-
-它们能指导通用几何、支撑、密度和材质接触建模，但不能证明同一物理场景的多视图一致性、
-360° 覆盖、任意坐标可达性、真实模型或真实照片纹理。逐图 SHA、消费优先级与限制见
-[Batch26 image2 回执](handoff/FEEDBACK-IMAGE2-030-batch26-360-modeling-boards.md)。
-
-### Batch 27 近景 360° 构造转台参考
-
-[Batch 27 Near-field Turnaround Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch27-2026-07-25)
-补充 8 张面向近距离自由漫游的通用构造输入：住宅四面、侧门作坊/后场、坡地架空住宅、
-屋面/檐口连接、水车机构、桥廊底部、森林边界/冠层底面，以及道路/排水连接。每张把同一
-模块族的多个方向或细节集中在一张板上，优先补齐绕到反面、底面和结构下方时暴露的空洞。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch27"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch27-2026-07-25 `
-  --repo taomic2035/nantai-3d `
-  --pattern "synthetic-village-nearfield-turnarounds-batch27-2026-07-25.zip" `
-  --pattern "synthetic-village-nearfield-turnarounds-batch27-2026-07-25.SHA256SUMS.txt" `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-nearfield-turnarounds-batch27-2026-07-25.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-nearfield-turnarounds-batch27-2026-07-25.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 27 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch27" -Force
-```
-
-ZIP SHA-256 为 `79d9555e24f7f37c02fb7e10aabe1a99277d7c79ef7f9e693e8dd66545916a09`，
-严格只含 8 张最终 PNG、8 份精确 prompt、`USAGE.md`、`manifest.json` 和
-`PAYLOAD-SHA256SUMS.txt`；queue、候选来源记录和生成缓存不在发布包中。
-
-虽然提示词要求各面板保持同一模块，图像生成的一致性仍是
-`geometry_consistency=not-verified`；这些面板不是校准多视图，不能送入 SfM/NeRF/3DGS，
-也不能证明 360° 覆盖、任意坐标可达、真实模型或真实照片纹理。逐图 SHA、目视结论和
-消费顺序见
-[Batch27 image2 回执](handoff/FEEDBACK-IMAGE2-031-batch27-nearfield-turnarounds.md)。
-
-### Batch 28 跨距离 LOD / 分块连续性参考
-
-[Batch 28 LOD Continuity Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch28-2026-07-25)
-新增 8 张通用设计板，分别覆盖住宅群、山路/挡墙、溪流 crossing、果园、森林边缘、
-桥—水磨坊、村庄边界和远山/world enclosure。每张都要求同一设计家族的近景、中景、
-远景和反向视图，用于指导 LOD0/1/2、按需分块边界和 reciprocal route 的连续性。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch28"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch28-2026-07-25 `
-  --repo taomic2035/nantai-3d `
-  --pattern "synthetic-village-lod-continuity-batch28-2026-07-25.zip" `
-  --pattern "synthetic-village-lod-continuity-batch28-2026-07-25.SHA256SUMS.txt" `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-lod-continuity-batch28-2026-07-25.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-lod-continuity-batch28-2026-07-25.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 28 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch28" -Force
-```
-
-ZIP SHA-256 为 `3f83d4a588d75471b98ee6b4bbf93d264c8a5851f9a4637afd83e66e4fc19f3c`，
-严格只含 8 张最终 PNG、8 份精确 prompt、`USAGE.md`、`manifest.json` 和
-`PAYLOAD-SHA256SUMS.txt`；queue、候选来源记录和生成缓存不在发布包中。
-
-这些图仍是 `design-only`，图中近/中/远/反向面板的共享几何没有机器验证，距离阈值也
-不是实测值；不得作为 SfM/NeRF/3DGS 输入，也不能证明无缝 LOD、跨分块连续性、
-360° 覆盖或任意坐标可达。逐图 SHA、目视结论和 GLM 消费顺序见
-[Batch28 image2 回执](handoff/FEEDBACK-IMAGE2-032-batch28-lod-continuity.md)。
-
-### Batch 29 材质宏观变化 / 接触区参考
-
-[Batch 29 Material Macrovariation Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch29-2026-07-25)
-新增 8 张四面板设计板，覆盖灰泥、毛石、深色木构、灰瓦、夯土路面、浅溪床、夯土墙/
-切坡和林地/果园地表。每张同时提供近表面、接触节点、中尺度对象和远尺度质量表现，
-用于指导程序材质分区、UV 岛尺度、trim/decal、wet/dry mask 和接地几何，减少当前实测
-高达 `551×` 的 UV 面积密度差与肉眼可见重复/拉伸。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch29"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch29-2026-07-25 `
-  --repo taomic2035/nantai-3d `
-  --pattern "synthetic-village-material-macrovariation-batch29-2026-07-25.zip" `
-  --pattern "synthetic-village-material-macrovariation-batch29-2026-07-25.SHA256SUMS.txt" `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-material-macrovariation-batch29-2026-07-25.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-material-macrovariation-batch29-2026-07-25.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 29 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch29" -Force
-```
-
-ZIP SHA-256 为 `c3ff4cd08c7f2a2bf115f71e79d86afae2775d7f6c4a73efa00166d93f83469a`，
-严格只含 8 张最终 PNG、8 份精确 prompt、`USAGE.md`、`manifest.json` 和
-`PAYLOAD-SHA256SUMS.txt`；queue、候选来源记录和生成缓存不在发布包中。
-
-这些图不是无缝真实纹理，也不提供对齐的 albedo/normal/roughness/height 通道。
-它们仍为 `design-only`、`real_photo_texture=false`、
-`pbr_channel_alignment=not-provided`、`training_use=forbidden-as-multiview`；
-不得直接投影后宣称真实纹理或 PBR 校准通过。逐图 SHA、目视结论和消费门禁见
-[Batch29 image2 回执](handoff/FEEDBACK-IMAGE2-034-batch29-material-macrovariation.md)。
-
-### Batch 30 高密度空间地标 / 遮挡后表面参考
-
-[Batch 30 Spatial Landmark Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch30-2026-07-25)
-新增 8 张六视角设计板，覆盖住宅各面、院落/作坊、垂直交通与架空层、桥—水车维护、
-路线/排水/挡墙、果园农事、林缘以及公用设施/村庄边界。它们用于指导 Blender 增加
-背面、底面、接地支撑和路线外的独特小型地标，提升近景视差与局部坐标辨识度，同时
-避免“细节越多、通道越堵”的退化。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch30"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-gh release download synthetic-village-design-inputs-batch30-2026-07-25 `
-  --repo taomic2035/nantai-3d `
-  --pattern "synthetic-village-spatial-landmarks-batch30-2026-07-25.zip" `
-  --pattern "synthetic-village-spatial-landmarks-batch30-2026-07-25.SHA256SUMS.txt" `
-  --dir $releaseDir
-
-$archive = Join-Path $releaseDir "synthetic-village-spatial-landmarks-batch30-2026-07-25.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-spatial-landmarks-batch30-2026-07-25.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 30 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch30" -Force
-```
-
-ZIP SHA-256 为 `e7c0417d5f61f6063388264677fbd635adfcfaf16e7e400cdeef9d58dbad20a1`，
-严格只含 8 张最终 PNG、8 份精确 prompt、`USAGE.md`、`manifest.json` 和
-`PAYLOAD-SHA256SUMS.txt`；queue、候选来源记录、构建验证副本和生成缓存均未发布。
-
-这些板面仍是相互独立的 `design-only` 输入，不是同一场景的标定多视图。图中的路线宽度、
-地标坐标、结构关系和净空没有机器验证；不得用于 SfM/NeRF/3DGS，也不能证明 360° 覆盖、
-任意坐标可达、碰撞安全或真实纹理。逐图 SHA、目视结论和 GLM 消费顺序见
-[Batch30 image2 回执](handoff/FEEDBACK-IMAGE2-035-batch30-spatial-landmarks.md)。
-
-### Batch 31 室内—门洞—阈值连续性参考
-
-[Batch 31 Interior Continuity Inputs Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch31-2026-07-25)
-新增 8 张六视角设计板，覆盖住宅入口阈值、主室四向、厨房/服务间、屋顶阁楼、
-楼梯/平台、有顶连廊、架空层/地窖以及水车机械房。它们用于指导 Blender 把外部路线
-连接到可读的真实室内体积，补足厚墙门洞、地面过渡、垂直交通、通风排水、承重支撑和
-回望出口，避免把门窗继续处理成黑色平面或无内容空洞。
-
-```powershell
-$releaseDir = ".nantai-studio\release-inputs\batch31"
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-
-$env:HTTPS_PROXY = "http://127.0.0.1:7890"
-$env:HTTP_PROXY = "http://127.0.0.1:7890"
-gh release download synthetic-village-design-inputs-batch31-2026-07-25 `
-  --repo taomic2035/nantai-3d `
-  --pattern "synthetic-village-interior-continuity-batch31-2026-07-25.zip" `
-  --pattern "synthetic-village-interior-continuity-batch31-2026-07-25.SHA256SUMS.txt" `
-  --dir $releaseDir
-Remove-Item Env:HTTPS_PROXY,Env:HTTP_PROXY
-
-$archive = Join-Path $releaseDir "synthetic-village-interior-continuity-batch31-2026-07-25.zip"
-$sumFile = Join-Path $releaseDir "synthetic-village-interior-continuity-batch31-2026-07-25.SHA256SUMS.txt"
-$expected = ((Get-Content $sumFile) -split '\s+')[0]
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "Batch 31 design pack SHA-256 mismatch" }
-
-Expand-Archive $archive `
-  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch31" -Force
-```
-
-ZIP SHA-256 为 `a29c4032449367fe4efa376b2158b1fed807049fa2ac2bf535185153cdcf9805`，
-严格只含 8 张最终 PNG、8 份精确 prompt、`USAGE.md`、`manifest.json` 和
-`PAYLOAD-SHA256SUMS.txt`；queue、候选来源记录、构建验证副本和生成缓存均未发布。
-
-这些板面仍是相互独立的 `design-only` 输入，不是同一建筑的标定多视图。图中的门洞图、
-楼层关系、楼梯净空、机械安全和室内可达性没有机器验证；不得用于 SfM/NeRF/3DGS，也不能
-证明 360° 覆盖、任意坐标可达、碰撞安全、真实纹理或真实场景完成度。逐图 SHA、目视结论
-和 GLM 消费顺序见
-[Batch31 image2 回执](handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md)。
-
-## 核心工作流
-
-### 1. 混合媒体输入
-
-```bash
-.venv/bin/python -m pipeline.ingest \
-  --input input --output photos --fps 2 \
-  --max-frames 300 --blur-threshold 80
-```
-
-照片和视频帧保留来源/session 信息。视频抽帧不是“视频已重建”的证据；只有 registration 的逐图覆盖率才能说明哪些帧真正注册成功。
-
-### 2. 配准与坐标契约
-
-```bash
-# 自动选择 COLMAP；不可用时回退 synthetic mock
-.venv/bin/python -m pipeline.reconstruct \
-  --photos photos --reg-engine auto --engine mock
-```
-
-坐标模型包含：
-
-- `CoordinateFrame`：handedness、axes、units、metric status、geo alignment、provenance 与证据。
-- `FrameTransform`：source/target、Sim3、method 与内容寻址 `transform_id`。
-- PLY `nantai_meta`：frame、units、已应用 transform history。
-
-Viewer 的世界约定为右手 ENU：`(E, N, U) → Three.js (E, U, -N)`，行列式为 `+1`。裸 COLMAP 的相机与点位仍处于联合 SfM local frame，不会被静默重标为米制 ENU。COLMAP 相机模型和 `images.txt`/`cameras.txt` 的解析遵循其[官方输出格式](https://colmap.github.io/format.html)。
-
-**从 sfm-local 升级到米制 ENU（`pipeline.alignment`）**：裸 COLMAP 停在 arbitrary sfm-local。只有提供控制点或 GPS 锚点（计数 ≥3，且源点需张成 3D → 实际 ≥4 非共面），用闭式 Umeyama 拟合 SfM→ENU Sim3（强制 det=+1，绝不产出反射），且非退化、scale>0、RMS 残差 ≤ 阈值时，才升级为 `world-enu`（MEASURED / metric / ALIGNED）：
-
-```bash
-# 配准得到 sfm-local registration.json 后，用控制点/GPS 拟合 Sim3；
-# 退化(共线/共面)、高残差或缺 geo origin 均 fail-closed，registration 保持 sfm-local/UNALIGNED
-.venv/bin/python -m pipeline.alignment \
-  --registration recon/registration.json \
-  --control-points control_points.json \
-  --geo-origin 26.0801,119.2967,12.5 \
-  --max-rms 2.0 --out recon/registration_aligned.json
-
-# 用对齐后的 registration 驱动导入重建 → manifest 报告 metric-aligned ENU world
-.venv/bin/python -m pipeline.reconstruct \
-  --photos photos --engine import --splat trained/drone.json \
-  --registration recon/registration_aligned.json
-```
-
-拟合的每点残差、退化裕度（源点奇异值）、阈值与门禁结果记入 `Sim3AlignmentEvidence`（`sim3.alignment.v1=<json>` 证据串），写在 `world_frame` 与 `pose_to_world` 上，可机器复核。这是把管线从 provenance-honest-mock 推进到 measured 的关键步骤；唯一外部依赖是真实的 COLMAP + GPU 训练 3DGS 产物。
-
-完整输入格式（`control_points.json` / `SplatInput`）、逐步命令与 `metric-aligned` 判定模型见 [docs/real-data-workflow.md](docs/real-data-workflow.md)。
-
-**想从零把照片/视频变成可漫游场景**（含 COLMAP 位姿、云 GPU 训练 3DGS、再导入本仓库）？看端到端手册 [docs/manual/reconstruction-setup.md](docs/manual/reconstruction-setup.md)——诚实说明本机能做什么、需要你做什么、以及真实限制。
-
-### 3. 导入真实 3DGS 并混合拼接
-
-每个外部 PLY 用 JSON 声明完整 `SplatInput`。如果 source 与 registration target 不同，必须携带显式 `FrameTransform`：
-
-```json
-{
-  "session_id": "video_drone_orbit",
-  "path": "trained/drone.ply",
-  "source_frame": {
-    "frame_id": "trainer-local",
-    "handedness": "right",
-    "axes": "local-z-up",
-    "units": "meters",
-    "metric_status": "metric",
-    "geo_aligned": "unaligned",
-    "provenance": "measured",
-    "evidence": ["trainer export contract"]
-  },
-  "transform": {
-    "source_frame": "trainer-local",
-    "target_frame": "mock-local",
-    "sim3": {
-      "scale": 1.0,
-      "quat_wxyz": [1.0, 0.0, 0.0, 0.0],
-      "t_xyz": [0.0, 0.0, 0.0]
-    },
-    "method": "external-sim3",
-    "evidence": ["control-point fit"]
-  }
-}
-```
-
-`transform_id` 可省略，由内容计算；传入错误 ID 会被拒绝。
-
-```bash
-.venv/bin/python -m pipeline.reconstruct \
-  --photos photos --reg-engine mock --engine import \
-  --splat trained/drone-splat-input.json
-```
-
-补拍增清使用旧的全量场景作为 base；frame/units/history 不匹配时不会替换：
-
-```bash
-.venv/bin/python -m pipeline.reconstruct \
-  --photos photos --engine mock \
-  --base-scene recon/scene_full.ply
-```
-
-高阶 SH 在平移和统一缩放时保持不变；涉及空间旋转时由 `pipeline/spherical_harmonics.py` 的 Wigner-D 旋转（degree 0–3）正确变换，保留视角相关颜色。`flatten_sh()` 保留为可选降级工具（丢高阶保 DC）。
-
-### 4. 可替换素材
-
-```bash
-# generator → manifest/SHA 验收 → registry 注册
-make assets PY=.venv/bin/python
-
-# 验收任意 handoff；通过后才能注册
-.venv/bin/python -m pipeline.validate_handoff \
-  handoff/deliverables/HANDOFF-001 --register --assets-dir assets
-```
-
-布局只引用稳定 `asset_id`。替换会创建新版本并保留历史；重跑 world 后，只有实际加载且 SHA 匹配的素材才会出现在 `asset_consumption` 证据中。素材本地坐标契约固定为右手、米制、Z-up、地面 `z≈0`。
-
-### 5. Viewer 与 Studio
-
-`make serve` 启动带安全静态白名单的本地服务器，并将 `/` 重定向到 Studio。Studio 自动优先连接 `/api/project`；在普通静态服务器下才进入永久标注的 mock adapter。
-
-- Studio：`/web/studio/`
-- 独立 Viewer：`/web/viewer/`
-- API：`GET /api/project`、`GET /api/runs`
-- 无落盘 production plan：`GET /web/data/production-camera-plan.json`
-
-Studio 通过 bridge 读取 Viewer 的实际 runtime capability。只有 Spark 初始化成功后才显示 anisotropic covariance、alpha composite 和 spherical harmonics；否则显示降级预览。Production plan 与 coverage audit 是独立证据层，不会提升 reconstruction provenance。实现固定使用 [Spark 2.1.0](https://sparkjs.dev/docs/) 与兼容 Three.js 版本。
-
-## 目录
+## 项目结构
 
 ```text
-pipeline/                 输入、配准、坐标、3DGS、素材、world、Studio server
-tests/                    Python 合约与端到端回归
-web/viewer/               Spark 3DGS + DC fallback + iframe bridge
-web/studio/               reducer/adapter 驱动的工作台 UX
-docs/contracts/           Studio snapshot JSON Schema v2
-docs/superpowers/         UX 规格与接管实施计划
-handoff/                  Handoff / Feedback 与可复现模拟素材
-assets/registry.json      活跃版本、历史与 payload SHA
-verification/             独立技术验证脚本
+pipeline/             摄取、配准、坐标、3DGS、素材、分块与 Studio server
+scripts/              本机重建、预检、诊断和转换工具
+tests/                合约、fail-closed 与端到端回归
+web/viewer/           Spark 3DGS、fallback 和 iframe bridge
+web/studio/           reducer/adapter 驱动的工作台 UX
+assets/               程序素材、registry 和版本历史
+docs/                 手册、契约、验证、计划与 Release 索引
+handoff/              当前协作交办、review 与机器证据
 ```
 
-## 产物与可信度
+## 文档入口
 
-- `recon/registration.json`：位姿、相机内参、session、frame 与 coverage evidence。
-- `recon/scene_full.ply`：审计用完整 3DGS PLY。
-- `web/data/recon/recon_manifest.json`：artifact、LOD、ancestry、transform chain、requested/actual engine、synthetic 与 fidelity。
-- `web/data/manifest.json`：world bounds、chunk LOD 和 `asset_consumption`。
-- `/web/data/production-camera-plan.json`：Studio server 从当前 deterministic 180 机位契约按需投影；不写入 `web/data/`，未交付证据仍保留在 plan 中。
-- `assets/registry.json`：素材 active/history、版本、SHA 与来源。
+- [真实重建安装与云 GPU 手册](docs/manual/reconstruction-setup.md)
+- [真实数据与 Sim3/ENU 对齐](docs/real-data-workflow.md)
+- [Synthetic 素材 Release 索引](docs/releases/synthetic-design-inputs.md)
+- [Studio adapter snapshot schema](docs/contracts/studio-adapter-v2.schema.json)
+- [接管背景与未决项](handoff/TAKEOVER-2026-07-14.md)
 
-可信度从机器字段推导，不从文件名或 engine 名推断：
-
-- `synthetic=true` 或 `actual_engine=mock-proxy` 只表示流程演示。
-- `geometry_usability=preview-proxy` 不可用于测量。
-- `artifact_fidelity=full-3dgs` 描述文件属性；`render_fidelity` 由 Viewer 实际能力决定。
-- “registered” 不等于“consumed”；消费必须有渲染报告和实测 SHA。
-
-接管背景、尚存限制和 Opus 恢复入口见 [handoff/TAKEOVER-2026-07-14.md](handoff/TAKEOVER-2026-07-14.md)。
+历史实现过程和逐批审计留在 `handoff/` 与 `docs/verification/`，README 只维护当前能力、
+真实边界、最短使用路径和权威索引。
