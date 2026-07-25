@@ -167,6 +167,23 @@ Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未�
   **仍不证明**真实云 GPU 训练、真实照片、accepted SfM 或 metric 对齐——
   stub 只证 argv 一致性，不证 nerfstudio 真实接受 flag 或 PLY 输出。
 
+## Batch 27 近景构造转台素材（2026-07-25）
+
+- 新增 8 张已目视筛选的 image2 设计输入，覆盖住宅四面、作坊后场、坡地架空层、
+  屋面/檐口、水车机构、桥廊底部、森林冠层/根部和道路排水连接；私有候选位于
+  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch27/`。
+- 干净发布 tag 为 `synthetic-village-design-inputs-batch27-2026-07-25`，ZIP SHA-256
+  为 `79d9555e24f7f37c02fb7e10aabe1a99277d7c79ef7f9e693e8dd66545916a09`；包只含
+  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
+- 每张虽要求同一模块的多方向/细节一致，仍为独立 `design-only` 参考：
+  `camera_calibration=unknown`、`geometry_consistency=not-verified`、
+  `training_use=forbidden-as-multiview`、`coverage_use=forbidden`、
+  `trust_effect=none`。不得作为 SfM/NeRF/3DGS 输入或提升 geometry trust。
+- GLM/Blender 消费优先级：先补建筑四面/架空层/檐口，再补水车/桥廊底部，最后补
+  森林近景与路线排水；每次仍须重建 content-addressed build 并重跑正式相机、
+  六层 visibility 与 post-render v2。详见
+  `handoff/FEEDBACK-IMAGE2-031-batch27-nearfield-turnarounds.md`。
+
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 
 「无限村庄任意坐标漫游」的**管线内核已完整并对抗性验证 CLEAN**（Opus lane）：
