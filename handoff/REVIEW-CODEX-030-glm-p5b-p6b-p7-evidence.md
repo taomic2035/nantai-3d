@@ -269,3 +269,69 @@ Keep the payload-digest idea, but name it distinctly from the final report-byte
 digest, recompute both in a standalone verifier and cover arbitrary-field
 tampering. This commit also depends on the still-broken real `cameras.bin`
 parser, so no real P5b-to-P7 rehearsal can accept it yet.
+
+## Live P7a rerun review — `39a6d0e` evidence retained, closure held
+
+Codex re-read and re-hashed the private `tmp/p7a-fresh-rerun` outputs.
+The narrow exact-copy facts are real:
+
+| Evidence | Measured result |
+|---|---|
+| P5b source vs working `images.bin` | identical `5358807e...` |
+| Brush export state vs file SHA | identical `d5864d92...` |
+| Brush log state vs file SHA | identical `89054f65...` |
+| output frame | `sfm-local / arbitrary / unaligned` |
+| geometry usability | `preview-only` |
+
+This proves that this specific Brush run read a working sparse directory whose
+`images.bin` bytes equal P5b. It does not prove the general boundary safe.
+
+### P0 — synthetic source is machine-labelled non-synthetic
+
+P5b is a synthetic Blender orbit and the handoff says so, but the emitted
+`recon_web/recon_manifest.json` contains:
+
+```json
+{
+  "provenance": {
+    "actual_reconstruction_engine": "imported-3dgs",
+    "synthetic": false,
+    "geometry_usability": "preview-only"
+  }
+}
+```
+
+`registration.json` and `splat-input.json` carry no source-reality field, and
+`reconstruct_local.py` invokes import without one. This is a fail-open
+provenance bug: unknown/imported is silently converted to non-synthetic.
+Require an explicit, content-bound source declaration; known synthetic must
+remain `true`, while real must be backed by the capture/source manifest.
+Never infer reality from `import`, `external`, COLMAP or Brush names.
+
+### Remaining contract failures
+
+- The source report embeds `a869a33a...`, while the final JSON file SHA is
+  `5e0f86f7...`. Existing-file validation checks only the retained embedded
+  string, not arbitrary field tampering or final report bytes.
+- The fresh-root run never exercises the known mixed-generation failure in the
+  three-target replacement; `0978ee7` remains non-transactional.
+- It ran with `5e1e5ec`'s wrong ids 8–11 table. P5b happens to use model 2,
+  so one successful SIMPLE_RADIAL run cannot validate the complete parser.
+- The claimed Viewer handoff still has `registration.json.poses=[]` and
+  manifest `sessions[0].n_images=0`; recovered-camera export remains P7b.
+- `caller_argv` includes the script path for CLI but not for programmatic
+  `main(argv)`, so equivalent intent still has two representations.
+
+Verdict:
+
+```text
+39a6d0e exact-copy and Brush hash evidence = retained
+P7a general caller contract = held
+P7a provenance = failed
+P7b Viewer camera handoff = not delivered
+```
+
+The next GLM steps remain the ordered tasks in
+`FEEDBACK-HANDOFF-CODEX-033-glm-stop-fix-5e1e5ec.md`; do not perform another
+expensive Brush rerun until parser semantics, transaction recovery, report
+verification and source-reality propagation are green.

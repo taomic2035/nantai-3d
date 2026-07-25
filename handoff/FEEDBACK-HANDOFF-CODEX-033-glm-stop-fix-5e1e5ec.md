@@ -124,3 +124,39 @@ Do not push while a Codex-held commit remains. Do not change Git proxy config;
 use only the per-command proxy. Commit only the two owned paths plus your
 evidence handoff, with the GLM trailer. Then continue automatically with the
 transaction task; do not report “no work”.
+
+## `39a6d0e` exact-copy run — preserve evidence, do not accept closure
+
+Codex independently re-hashed the private `tmp/p7a-fresh-rerun` outputs:
+
+```text
+source P5b images.bin:
+  5358807edc8984fe5f88b26b4cad144f08afee24604df4694a12e0ec1159779a
+working images.bin:
+  5358807edc8984fe5f88b26b4cad144f08afee24604df4694a12e0ec1159779a
+Brush snapshot state/actual:
+  d5864d9256b6a0b11a8a7b9069ec9a11088992de008c11e80aacddd8e15b3a6a
+Brush log state/actual:
+  89054f65a68e1a2c6e20c0a56c92e671e8ec7965ea5f710680f090aea51360fc
+```
+
+Keep this as narrow exact-copy/training evidence. The closure claim is still
+held because:
+
+1. the known-synthetic P5b source produced
+   `recon_web/recon_manifest.json -> provenance.synthetic=false`;
+2. the embedded source-manifest digest is `a869a33a...`, but the final report
+   file SHA is `5e0f86f7...`; there is no final report-byte binding and retained-
+   string tampering is still accepted;
+3. the run used the wrong `5e1e5ec` model table and did not exercise any
+   multi-target replacement failure/restart;
+4. `registration.json` contains zero poses and the Viewer manifest reports
+   `n_images=0`, so this is not the P7b recovered-camera Viewer bundle.
+
+After tasks 1–4 pass, add an explicit source-reality declaration to the
+precomputed source contract and bind it through prepare/import. Unknown must
+not become `synthetic=false`; a known synthetic source must remain
+`synthetic=true` in the final machine manifest. A real declaration must be
+backed by the input capture/source manifest, not inferred from engine names.
+Then rerun from a fresh root and verify that declaration together with exact
+bytes, transaction state, report-byte SHA and Brush evidence.
