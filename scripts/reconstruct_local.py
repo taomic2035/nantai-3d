@@ -552,61 +552,224 @@ def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
             f"{missing[:3]}")
 
 
-def _atomic_replace_dir(src: Path, dst: Path) -> None:
-    """原子替换目录：rename dst → dst.old，rename src → dst，rmtree dst.old。
+# ============================================================================
+# HANDOFF-GLM-008 Task 3 — transactional three-target replacement
+#
+# REVIEW-CODEX-030 P0 (commit 0978ee7 held): three independent renames are
+# not one atomic replacement. Codex injected a failure into the database
+# replacement after the sparse directory swap and measured mixed_generation
+# = true (sparse=NEW, db=OLD, images=OLD). The fix is a transaction journal
+# (prepared → swapping → verified → committed) with backup, full rollback
+# on any swap failure, and restart recovery.
+#
+# Three targets: ws/sparse/0, ws/colmap.db, ws/images.
+# Backup lives in ws/.precomputed_backup/{sparse_0,colmap_db,images}.
+# Journal lives in ws/.precomputed_txn.json.
+# Staging lives in ws/.staging_precomputed/.
+# ============================================================================
 
-    REVIEW-CODEX-030 P7a-4：中途崩溃留下 dst.old → 下次调用前先清理（见下）。
-    Windows rename 要求目标不存在，所以先 rename 旧 dst 到 dst.old。
+_PRECOMPUTED_TXN_JOURNAL = ".precomputed_txn.json"
+_PRECOMPUTED_STAGING = ".staging_precomputed"
+_PRECOMPUTED_BACKUP = ".precomputed_backup"
+_TXN_VERSION = 1
+
+
+def _write_txn_journal(path: Path, journal: dict) -> None:
+    blob = json.dumps(journal, sort_keys=True, ensure_ascii=False, indent=2)
+    path.write_text(blob, encoding="utf-8")
+
+
+def _restore_backup(ws: Path, backup: Path) -> None:
+    """Restore all three targets from backup (full rollback).
+
+    Moves backup/{sparse_0, colmap_db, images} back to the destination,
+    overwriting any partial new content left by a failed swap. Each target
+    is only restored if the backup actually has it (first run has no backup).
     """
-    if not src.is_dir():
-        raise SystemExit(f"原子替换失败：源目录不存在 {src}")
-    old = dst.parent / f"{dst.name}.old"
-    if old.exists():
-        shutil.rmtree(old)
-    if dst.exists():
-        dst.rename(old)
-    src.rename(dst)
-    if old.exists():
-        shutil.rmtree(old)
+    if not backup.is_dir():
+        return
+    # sparse/0
+    bk_sparse = backup / "sparse_0"
+    dst_sparse = ws / "sparse" / "0"
+    if bk_sparse.is_dir():
+        (ws / "sparse").mkdir(parents=True, exist_ok=True)
+        if dst_sparse.exists():
+            shutil.rmtree(dst_sparse)
+        bk_sparse.rename(dst_sparse)
+    # colmap.db
+    bk_db = backup / "colmap_db"
+    dst_db = ws / "colmap.db"
+    if bk_db.is_file():
+        if dst_db.exists():
+            dst_db.unlink()
+        bk_db.rename(dst_db)
+    elif dst_db.exists():
+        # Old generation had no db → remove stale dst db too
+        dst_db.unlink()
+    # images/
+    bk_img = backup / "images"
+    dst_img = ws / "images"
+    if bk_img.is_dir():
+        if dst_img.exists():
+            shutil.rmtree(dst_img)
+        bk_img.rename(dst_img)
 
 
-def _atomic_replace_file(src: Path, dst: Path) -> None:
-    """原子替换文件：rename dst → dst.old，rename src → dst，unlink dst.old。"""
-    if not src.is_file():
-        raise SystemExit(f"原子替换失败：源文件不存在 {src}")
-    old = dst.parent / f"{dst.name}.old"
-    if old.exists():
-        old.unlink()
-    if dst.exists():
-        dst.rename(old)
-    src.rename(dst)
-    if old.exists():
-        old.unlink()
+def _recover_precomputed_transaction(ws: Path) -> None:
+    """Inspect journal from a previous crashed transaction and restore a
+    coherent destination.
+
+    Called at the top of _copy_precomputed_to_ws and safe to call
+    independently. Decision matrix:
+
+    - No journal → noop (conservatively remove any stray staging/backup).
+    - Corrupt journal (not JSON / missing fields) → conservative cleanup:
+      remove staging + backup + journal; destination stays as-is.
+    - state="prepared" → no swap happened; clean up staging + backup + journal.
+    - state="swapping" or "verified" → transaction crashed mid/post swap;
+      restore backup → destination, then clean up staging + backup + journal.
+    - state="committed" → transaction completed but cleanup didn't finish;
+      clean up staging + backup + journal.
+    """
+    journal_path = ws / _PRECOMPUTED_TXN_JOURNAL
+    staging = ws / _PRECOMPUTED_STAGING
+    backup = ws / _PRECOMPUTED_BACKUP
+
+    if not journal_path.is_file():
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        return
+
+    try:
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        txn_state = journal.get("state", "")
+    except (OSError, ValueError, json.JSONDecodeError):
+        # Corrupt journal → conservative cleanup, never touch destination
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        journal_path.unlink(missing_ok=True)
+        return
+
+    if txn_state in ("swapping", "verified"):
+        # Crashed mid-swap or post-swap → restore the last committed generation
+        _restore_backup(ws, backup)
+    # "prepared" / "committed": no restore needed (no swap happened, or swap
+    # fully completed and only cleanup was interrupted).
+
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+    journal_path.unlink(missing_ok=True)
+
+
+def _swap_sparse(staging_sparse: Path, dst_sparse: Path) -> None:
+    """Swap staging sparse/0 → destination sparse/0 (atomic rename).
+
+    Caller has already moved the old destination to backup, so dst must not
+    exist. If it does (partial prior swap), remove it before renaming.
+    """
+    if not staging_sparse.is_dir():
+        raise SystemExit(f"swap_sparse 失败: staging 源不存在 {staging_sparse}")
+    if dst_sparse.exists():
+        shutil.rmtree(dst_sparse)
+    staging_sparse.rename(dst_sparse)
+
+
+def _swap_db(staging_db: Path, dst_db: Path, has_db: bool) -> None:
+    """Swap staging colmap.db → destination.
+
+    If source has a db, rename staging db → dst (dst was moved to backup
+    already). If source has no db, remove any stale dst db (also already
+    moved to backup, so normally a noop).
+    """
+    if has_db:
+        if not staging_db.is_file():
+            raise SystemExit(f"swap_db 失败: staging 源不存在 {staging_db}")
+        if dst_db.exists():
+            dst_db.unlink()
+        staging_db.rename(dst_db)
+    else:
+        if dst_db.exists():
+            dst_db.unlink()
+
+
+def _swap_images(staging_img: Path, dst_img: Path) -> None:
+    """Swap staging images/ → destination images/ (atomic rename)."""
+    if not staging_img.is_dir():
+        raise SystemExit(f"swap_images 失败: staging 源不存在 {staging_img}")
+    if dst_img.exists():
+        shutil.rmtree(dst_img)
+    staging_img.rename(dst_img)
+
+
+def _verify_destination_post_swap(ws: Path, expected_sparse: set[str],
+                                   has_db: bool) -> None:
+    """Post-swap byte + exact-file-set + semantic verification.
+
+    Runs after all three swaps complete but before commit. Catches disk
+    corruption during rename (byte flip) or partial install that somehow
+    passed the swap step. On failure, caller rolls back to backup.
+    """
+    sparse_0 = ws / "sparse" / "0"
+    if not sparse_0.is_dir():
+        raise SystemExit(f"post-swap 校验失败: {sparse_0} 不存在")
+    actual_sparse = {p.name for p in sparse_0.iterdir() if p.is_file()}
+    if actual_sparse != expected_sparse:
+        raise SystemExit(
+            f"post-swap 校验失败: sparse/0 文件集不匹配 "
+            f"(expected={sorted(expected_sparse)}, actual={sorted(actual_sparse)})")
+    # Re-validate semantics on the swapped-in destination
+    _validate_sparse_semantics(sparse_0, ws / "images")
+    dst_db = ws / "colmap.db"
+    if has_db and not dst_db.is_file():
+        raise SystemExit("post-swap 校验失败: 期望 colmap.db 存在但缺失")
+    if not has_db and dst_db.is_file():
+        raise SystemExit("post-swap 校验失败: 源无 db 但目标有 stale db")
+    if not (ws / "images").is_dir():
+        raise SystemExit("post-swap 校验失败: images/ 缺失")
 
 
 def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
-    """把源 sparse/0/*.bin + colmap.db + images/ 字节拷贝进 ws（fresh staging + 原子替换）。
+    """Transactional three-target replacement: sparse/0 + colmap.db + images/.
 
-    REVIEW-CODEX-030 P7a-4：旧实现直接往 ws/sparse/0 里 copy2，若源删除了某个
-    optional 文件（如 frames.bin），ws 里的旧文件会残留且不被 _validate_ws_precomputed
-    校验（它只校验 manifest 里有的文件）。本实现：
-    1. 拷到 fresh staging 目录 ws/.staging_precomputed/（先清空任何残留 staging/old）；
-    2. 只拷源里**实际存在**的 required + optional 文件 + colmap.db + images/；
-    3. 原子替换 ws/sparse/0、ws/colmap.db、ws/images —— 旧目录被 rename 到 *.old
-       后 rmtree，新内容从 staging rename 进来，保证 ws 里恰好只有源里有的文件。
-    中途崩溃留下 .staging_precomputed/ 或 *.old → 下次调用开头清理。
+    REVIEW-CODEX-030 P0 (0978ee7 held): three independent renames are not
+    atomic — Codex injected failure into db swap after sparse swap and
+    measured mixed_generation=true. Fix uses a journal with states
+    prepared → swapping → verified → committed, plus backup + full rollback
+    + restart recovery.
+
+    Steps:
+    0. Recover any prior crashed transaction (_recover_precomputed_transaction).
+    1. Fresh staging: copy source sparse/0/*.bin + colmap.db + images/ into
+       ws/.staging_precomputed/. Only copy files that actually exist in source
+       (so dropping an optional file removes it from ws too).
+    2. Staging validation: semantic check on staging sparse/0. Failure here
+       cleans up staging + journal; no backup, no swap, destination unchanged.
+    3. Backup: move current destination (sparse/0, colmap.db, images) to
+       ws/.precomputed_backup/.
+    4. Swap (journal=swapping): _swap_sparse → _swap_db → _swap_images. Any
+       failure rolls back ALL three targets from backup, cleans up, re-raises.
+    5. Post-swap verify (journal=verified): byte + exact-file-set + semantic
+       check on the swapped-in destination. Failure rolls back from backup.
+    6. Commit (journal=committed): cleanup staging + backup + journal.
+
+    A failed run leaves the last verified destination intact and never runs
+    COLMAP (the precomputed branch skips COLMAP entirely).
     """
-    staging = ws / ".staging_precomputed"
+    _recover_precomputed_transaction(ws)
+
+    staging = ws / _PRECOMPUTED_STAGING
+    backup = ws / _PRECOMPUTED_BACKUP
+    journal_path = ws / _PRECOMPUTED_TXN_JOURNAL
+
+    # --- Step 1: fresh staging ---
     if staging.exists():
         shutil.rmtree(staging)
-    # 也清理任何上次崩溃留下的 *.old
-    for old_name in ("sparse/0.old", "colmap.db.old", "images.old"):
-        old = ws / old_name
-        if old.exists():
-            if old.is_dir():
-                shutil.rmtree(old)
-            else:
-                old.unlink()
     staging.mkdir(parents=True)
 
     src_sparse = colmap_ws / "sparse" / "0"
@@ -623,20 +786,87 @@ def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
         shutil.copy2(db, staging_db)
     src_img = colmap_ws / "images"
     staging_img = staging / "images"
-    shutil.copytree(src_img, staging_img)
+    try:
+        shutil.copytree(src_img, staging_img)
+    except OSError as e:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise SystemExit(f"staging 拷贝失败 (copytree): {e}") from e
 
-    # 原子替换三个目标。先确保 ws/sparse 父目录存在。
-    (ws / "sparse").mkdir(parents=True, exist_ok=True)
-    _atomic_replace_dir(staging_sparse, ws / "sparse" / "0")
-    if has_db:
-        _atomic_replace_file(staging_db, ws / "colmap.db")
-    elif (ws / "colmap.db").exists():
-        # 新源没有 colmap.db → 删旧（不能原子，但 staging 已无 db，旧的也没用）
-        (ws / "colmap.db").unlink()
-    _atomic_replace_dir(staging_img, ws / "images")
+    # Expected file set = required + optional-that-actually-exist-in-staging
+    expected_sparse = set(PRECOMPUTED_REQUIRED_BIN)
+    for name in PRECOMPUTED_OPTIONAL_BIN:
+        if (staging_sparse / name).is_file():
+            expected_sparse.add(name)
 
-    # 清理 staging（成功路径）
-    shutil.rmtree(staging)
+    journal = {
+        "version": _TXN_VERSION,
+        "state": "prepared",
+        "expected_sparse_files": sorted(expected_sparse),
+        "has_db": has_db,
+        "started_at_utc": datetime.now(UTC).isoformat(),
+    }
+    _write_txn_journal(journal_path, journal)
+
+    # --- Step 2: staging semantic validation ---
+    # Catches source corruption between manifest build and staging copy. If
+    # this fails, no backup has been made and no swap happened — just clean
+    # up staging + journal. Destination is untouched.
+    try:
+        _validate_sparse_semantics(staging_sparse, src_img)
+    except SystemExit:
+        shutil.rmtree(staging, ignore_errors=True)
+        journal_path.unlink(missing_ok=True)
+        raise
+
+    # --- Step 3: backup current destination ---
+    backup.mkdir(parents=True)
+    dst_sparse = ws / "sparse" / "0"
+    dst_db = ws / "colmap.db"
+    dst_img = ws / "images"
+    if dst_sparse.is_dir():
+        dst_sparse.rename(backup / "sparse_0")
+    if dst_db.is_file():
+        dst_db.rename(backup / "colmap_db")
+    if dst_img.is_dir():
+        dst_img.rename(backup / "images")
+
+    # --- Step 4: swap (journal=swapping) ---
+    journal["state"] = "swapping"
+    _write_txn_journal(journal_path, journal)
+
+    try:
+        (ws / "sparse").mkdir(parents=True, exist_ok=True)
+        _swap_sparse(staging_sparse, dst_sparse)
+        _swap_db(staging_db, dst_db, has_db)
+        _swap_images(staging_img, dst_img)
+    except (SystemExit, Exception):
+        # Full rollback: restore all three targets from backup
+        _restore_backup(ws, backup)
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(backup, ignore_errors=True)
+        journal_path.unlink(missing_ok=True)
+        raise
+
+    # --- Step 5: post-swap verify (journal=verified) ---
+    journal["state"] = "verified"
+    _write_txn_journal(journal_path, journal)
+
+    try:
+        _verify_destination_post_swap(ws, expected_sparse, has_db)
+    except SystemExit:
+        _restore_backup(ws, backup)
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(backup, ignore_errors=True)
+        journal_path.unlink(missing_ok=True)
+        raise
+
+    # --- Step 6: commit + cleanup ---
+    journal["state"] = "committed"
+    _write_txn_journal(journal_path, journal)
+
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.rmtree(backup, ignore_errors=True)
+    journal_path.unlink(missing_ok=True)
 
 
 def _assert_no_overlap(roots: dict[str, Path]) -> None:

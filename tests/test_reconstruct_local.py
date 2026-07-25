@@ -1632,3 +1632,438 @@ class TestRealColmapFixture:
             f"computed from parsed records"
 
 
+# ============================================================
+# HANDOFF-GLM-008 Task 3 — transactional three-target replacement
+#
+# REVIEW-CODEX-030 P0 (commit 0978ee7 held): three independent renames
+# are not one atomic replacement. Codex injected a failure into the
+# database replacement after the sparse directory swap and measured
+# mixed_generation=true (sparse=NEW, db=OLD, images=OLD). The fix is
+# a transaction journal (prepared/swapping/verified/committed) with
+# full rollback and restart recovery.
+#
+# Required RED coverage:
+# - stale optional files removed when source drops them
+# - missing optional files when source never had them
+# - absent-source database with stale destination database
+# - interrupted staging copy rolls back to previous state
+# - failure at every swap step rolls back all three targets
+# - process-restart recovery restores the last complete generation
+# - validation failure in staging rolls back
+# - post-swap destination validation failure rolls back
+# - failed run preserves the last verified destination
+# - no COLMAP subprocess runs in any failure path
+# ============================================================
+
+
+def _change_source_to_trigger_recopy(precomp: Path) -> None:
+    """Flip a byte in source cameras.bin width field (stays finite/valid
+    so P7a-6 semantic validation still passes) so the fingerprint changes
+    and the production caller triggers a fresh re-copy."""
+    cam_path = precomp / "sparse" / "0" / "cameras.bin"
+    buf = bytearray(cam_path.read_bytes())
+    buf[16] ^= 0x01
+    cam_path.write_bytes(bytes(buf))
+
+
+class TestPrecomputedTransactionReplacement:
+    """HANDOFF-GLM-008 Task 3: three-target replacement must be transactional.
+
+    Each RED case must SystemExit before any COLMAP subprocess and must
+    leave the destination in a coherent state (either old or new, never
+    a mixture)."""
+
+    def _first_run(self, env, tmp_path, photos_dir) -> Path:
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        return precomp
+
+    def _snapshot_dst(self, ws: Path) -> dict:
+        """Snapshot the byte-state of the destination for later comparison."""
+        snap = {}
+        for name in PRECOMPUTED_REQUIRED + PRECOMPUTED_OPTIONAL:
+            p = ws / "sparse" / "0" / name
+            snap[f"sparse/{name}"] = rl._sha256_file(p) if p.is_file() else None
+        db = ws / "colmap.db"
+        snap["colmap.db"] = db.read_bytes() if db.is_file() else None
+        snap["images_files"] = sorted(
+            p.name for p in (ws / "images").iterdir() if p.is_file()) \
+            if (ws / "images").is_dir() else None
+        return snap
+
+    def _assert_dst_matches_snapshot(self, ws: Path, snap: dict) -> None:
+        for name in PRECOMPUTED_REQUIRED + PRECOMPUTED_OPTIONAL:
+            p = ws / "sparse" / "0" / name
+            actual = rl._sha256_file(p) if p.is_file() else None
+            assert actual == snap[f"sparse/{name}"], \
+                f"dst sparse/{name} changed when it should not (rollback failed)"
+        db = ws / "colmap.db"
+        actual_db = db.read_bytes() if db.is_file() else None
+        assert actual_db == snap["colmap.db"], \
+            "dst colmap.db changed when it should not (rollback failed)"
+        actual_imgs = sorted(
+            p.name for p in (ws / "images").iterdir() if p.is_file()) \
+            if (ws / "images").is_dir() else None
+        assert actual_imgs == snap["images_files"], \
+            "dst images/ changed when it should not (rollback failed)"
+
+    def test_stale_optional_files_removed_when_source_drops_them(self, env,
+                                                                  tmp_path,
+                                                                  photos_dir):
+        """REVIEW-CODEX-030 P7a-4: when source drops frames.bin/rigs.bin/
+        project.ini, ws must not retain stale copies. The previous three
+        independent renames did not remove stale optional files because
+        _validate_ws_precomputed only checked files in the manifest."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        # Sanity: first run installed optional bins
+        for opt in PRECOMPUTED_OPTIONAL:
+            assert (ws / "sparse" / "0" / opt).is_file(), \
+                f"sanity: first run should install {opt}"
+
+        # Drop all optional bins from source
+        for opt in PRECOMPUTED_OPTIONAL:
+            (precomp / "sparse" / "0" / opt).unlink()
+        # Re-run: fingerprint changes (optional SHAs removed) → trigger re-copy
+        call("--resume", "--precomputed-colmap", str(precomp))
+
+        # ws must not have stale optional files
+        for opt in PRECOMPUTED_OPTIONAL:
+            assert not (ws / "sparse" / "0" / opt).is_file(), \
+                f"stale optional {opt} must be removed when source drops it"
+        # Required bins still present
+        for req in PRECOMPUTED_REQUIRED:
+            assert (ws / "sparse" / "0" / req).is_file()
+        # No staging/backup/journal leftover
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+
+    def test_missing_optional_files_when_source_never_had_them(self, env,
+                                                                tmp_path,
+                                                                photos_dir):
+        """Source never had frames.bin → ws must not have it either."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        for opt in PRECOMPUTED_OPTIONAL:
+            (precomp / "sparse" / "0" / opt).unlink()
+        call("--precomputed-colmap", str(precomp))
+        for opt in PRECOMPUTED_OPTIONAL:
+            assert not (ws / "sparse" / "0" / opt).is_file(), \
+                f"{opt} should not exist when source never had it"
+
+    def test_absent_source_db_removes_stale_destination_db(self, env, tmp_path,
+                                                             photos_dir):
+        """REVIEW-CODEX-030 P7a-4: if source has no colmap.db but ws has a
+        stale one from a previous run, the swap must remove the stale db
+        (otherwise the next stage may bind a stale database)."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        assert (ws / "colmap.db").is_file()  # sanity
+
+        # Drop colmap.db from source
+        (precomp / "colmap.db").unlink()
+        # Re-run: fingerprint changes → trigger re-copy
+        call("--resume", "--precomputed-colmap", str(precomp))
+
+        assert not (ws / "colmap.db").is_file(), \
+            "stale colmap.db must be removed when source has no db"
+        # Required bins still present
+        for req in PRECOMPUTED_REQUIRED:
+            assert (ws / "sparse" / "0" / req).is_file()
+
+    def test_interrupted_staging_copy_rolls_back(self, env, tmp_path,
+                                                  photos_dir, monkeypatch):
+        """Failure during staging copytree (e.g. disk full mid-copy) must
+        not leave a partial staging dir; the destination must remain
+        unchanged."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        _change_source_to_trigger_recopy(precomp)
+
+        # Inject failure into copytree during staging prepare
+        original_copytree = shutil.copytree
+        call_count = [0]
+
+        def fail_first_copytree(*args, **kwargs):
+            call_count[0] += 1
+            # Only fail the staging images copy (the only copytree in
+            # _copy_precomputed_to_ws); let later copytrees succeed.
+            if call_count[0] == 1:
+                raise OSError("injected copytree failure")
+            return original_copytree(*args, **kwargs)
+
+        monkeypatch.setattr(shutil, "copytree", fail_first_copytree)
+
+        with pytest.raises(SystemExit, match="拷贝|copy|staging|prepare|copytree"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+        # Destination must equal the snapshot (full rollback)
+        self._assert_dst_matches_snapshot(ws, snap)
+        # No staging/backup/journal leftover
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_failure_after_sparse_swap_rolls_back_all_three(self, env, tmp_path,
+                                                              photos_dir,
+                                                              monkeypatch):
+        """REVIEW-CODEX-030 P0 (0978ee7 held): Codex injected failure into
+        the database replacement after the sparse swap and measured
+        mixed_generation=true. Fix must roll back sparse too."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        _change_source_to_trigger_recopy(precomp)
+
+        # Inject failure into _swap_db so it raises after sparse is swapped
+        def fail_swap_db(*args, **kwargs):
+            raise SystemExit("injected swap_db failure")
+        monkeypatch.setattr(rl, "_swap_db", fail_swap_db)
+
+        with pytest.raises(SystemExit, match="swap|替换|rolled|回滚"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+        # All three targets must be rolled back to the snapshot
+        self._assert_dst_matches_snapshot(ws, snap)
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_failure_after_db_swap_rolls_back_all_three(self, env, tmp_path,
+                                                         photos_dir,
+                                                         monkeypatch):
+        """Failure during the third swap (images) must roll back sparse and
+        colmap.db too — never leave mixed generations."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        _change_source_to_trigger_recopy(precomp)
+
+        def fail_swap_images(*args, **kwargs):
+            raise SystemExit("injected swap_images failure")
+        monkeypatch.setattr(rl, "_swap_images", fail_swap_images)
+
+        with pytest.raises(SystemExit, match="swap|替换|rolled|回滚"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+        self._assert_dst_matches_snapshot(ws, snap)
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_failure_during_sparse_swap_rolls_back(self, env, tmp_path,
+                                                    photos_dir, monkeypatch):
+        """Failure during the first swap (sparse) must leave the destination
+        unchanged — no rollback needed, but no partial install either."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        _change_source_to_trigger_recopy(precomp)
+
+        def fail_swap_sparse(*args, **kwargs):
+            raise SystemExit("injected swap_sparse failure")
+        monkeypatch.setattr(rl, "_swap_sparse", fail_swap_sparse)
+
+        with pytest.raises(SystemExit, match="swap|替换|rolled|回滚"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+        self._assert_dst_matches_snapshot(ws, snap)
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_validation_failure_in_staging_rolls_back(self, env, tmp_path,
+                                                       photos_dir, monkeypatch):
+        """If staging semantic validation fails (source semantics corrupted
+        between manifest build and staging copy), destination must be
+        unchanged. No swap should happen."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        _change_source_to_trigger_recopy(precomp)
+
+        def fail_validate(sparse_0, photos):
+            raise SystemExit("injected staging semantic failure")
+        monkeypatch.setattr(rl, "_validate_sparse_semantics", fail_validate)
+
+        with pytest.raises(SystemExit, match="staging|语义|prepare|语义校验"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+        # Destination unchanged — no swap happened
+        self._assert_dst_matches_snapshot(ws, snap)
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_post_swap_validation_failure_rolls_back(self, env, tmp_path,
+                                                      photos_dir, monkeypatch):
+        """REVIEW-CODEX-030 P0 (0978ee7 held): swap completed but
+        destination validation fails (e.g. byte SHA mismatch from disk
+        corruption during rename). The transaction must roll back to the
+        previous committed generation, never leave the new-but-invalid
+        destination."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        _change_source_to_trigger_recopy(precomp)
+
+        def fail_post_swap(*args, **kwargs):
+            raise SystemExit("injected post-swap validation failure")
+        monkeypatch.setattr(rl, "_verify_destination_post_swap", fail_post_swap)
+
+        with pytest.raises(SystemExit,
+                           match="post-swap|verify|validation|回滚"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+        # Destination must be rolled back to the snapshot
+        self._assert_dst_matches_snapshot(ws, snap)
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_restart_recovery_restores_committed_generation(self, env, tmp_path,
+                                                              photos_dir):
+        """REVIEW-CODEX-030 P0 (0978ee7 held): startup deletes *.old before
+        deciding whether an interrupted transaction must be recovered. Fix
+        must first inspect the journal state: if state=swapping, restore
+        backup → destination and clean up staging, regardless of whether
+        the process restart decides to run colmap."""
+        call, fake, ws, _ = env
+        self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+
+        # Simulate a crashed swap: backup has OLD sparse/db/images,
+        # destination has partial NEW content (only sparse installed, db
+        # and images missing), journal state=swapping.
+        backup = ws / ".precomputed_backup"
+        backup.mkdir(parents=True)
+        (ws / "sparse" / "0").rename(backup / "sparse_0")
+        (ws / "colmap.db").rename(backup / "colmap_db")
+        (ws / "images").rename(backup / "images")
+        # Destination now has empty sparse; pretend install_sparse ran
+        # with NEW (different-bytes) content.
+        new_sparse = ws / "sparse" / "0"
+        new_sparse.mkdir(parents=True)
+        new_buf = bytearray((backup / "sparse_0" / "cameras.bin").read_bytes())
+        new_buf[16] ^= 0xFF
+        (new_sparse / "cameras.bin").write_bytes(bytes(new_buf))
+        # Journal says swapping — process died mid-install.
+        journal = {
+            "version": 1,
+            "state": "swapping",
+            "expected_sparse_files": list(PRECOMPUTED_REQUIRED),
+            "has_db": True,
+            "started_at_utc": "2026-07-25T00:00:00+00:00",
+        }
+        (ws / ".precomputed_txn.json").write_text(
+            json.dumps(journal), encoding="utf-8")
+
+        # Recovery must restore the committed generation from backup.
+        rl._recover_precomputed_transaction(ws)
+
+        # Destination must equal the snapshot (old committed generation)
+        self._assert_dst_matches_snapshot(ws, snap)
+        # Cleanup happened
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+
+    def test_restart_recovery_with_no_journal_is_noop(self, env, tmp_path,
+                                                       photos_dir):
+        """No journal → no recovery needed. Must not raise or alter dst."""
+        call, fake, ws, _ = env
+        self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        # No journal exists
+        assert not (ws / ".precomputed_txn.json").is_file()
+        rl._recover_precomputed_transaction(ws)
+        # Destination unchanged
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_restart_recovery_with_corrupt_journal_cleans_up(self, env, tmp_path,
+                                                               photos_dir):
+        """Corrupt journal (not JSON) → conservative cleanup: remove staging
+        and backup, delete journal. Destination stays as-is."""
+        call, fake, ws, _ = env
+        self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+        # Write corrupt journal
+        (ws / ".precomputed_txn.json").write_text("not json {", encoding="utf-8")
+        # Add stray staging and backup dirs
+        (ws / ".staging_precomputed").mkdir()
+        (ws / ".staging_precomputed" / "junk").write_text("junk", encoding="utf-8")
+        (ws / ".precomputed_backup").mkdir()
+        (ws / ".precomputed_backup" / "junk").write_text("junk", encoding="utf-8")
+        rl._recover_precomputed_transaction(ws)
+        # Destination unchanged
+        self._assert_dst_matches_snapshot(ws, snap)
+        # Stray dirs cleaned up
+        assert not (ws / ".staging_precomputed").exists()
+        assert not (ws / ".precomputed_backup").exists()
+        assert not (ws / ".precomputed_txn.json").is_file()
+
+    def test_failed_run_preserves_last_verified_destination(self, env, tmp_path,
+                                                              photos_dir,
+                                                              monkeypatch):
+        """A failed re-copy must leave the last verified destination intact
+        (not partial new content, not empty). This is the property reviewers
+        rely on: 'a failed run preserves a coherent verified destination'."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+        snap = self._snapshot_dst(ws)
+
+        # Second run: change source + fail swap → destination must remain
+        # at the snapshot (the last verified generation).
+        _change_source_to_trigger_recopy(precomp)
+        def fail_swap_db(*args, **kwargs):
+            raise SystemExit("injected swap_db failure")
+        monkeypatch.setattr(rl, "_swap_db", fail_swap_db)
+
+        with pytest.raises(SystemExit):
+            call("--resume", "--precomputed-colmap", str(precomp))
+
+        self._assert_dst_matches_snapshot(ws, snap)
+
+    def test_no_colmap_runs_in_any_failure_path(self, env, tmp_path,
+                                                  photos_dir, monkeypatch):
+        """REVIEW-CODEX-030 P7a-4 boundary: 'A failed run must leave the
+        last verified destination intact and must never run COLMAP.'
+        Cover three failure points (staging validation, sparse swap,
+        post-swap validation) and assert no COLMAP subprocess ran."""
+        call, fake, ws, _ = env
+        precomp = self._first_run(env, tmp_path, photos_dir)
+
+        failure_injections = [
+            ("staging validation", "_validate_sparse_semantics",
+             lambda *a, **k: SystemExit("injected")),
+            ("sparse swap", "_swap_sparse",
+             lambda *a, **k: SystemExit("injected")),
+            ("post-swap validation", "_verify_destination_post_swap",
+             lambda *a, **k: SystemExit("injected")),
+        ]
+        for label, attr, raiser in failure_injections:
+            _change_source_to_trigger_recopy(precomp)
+            fake.reset()
+
+            def make_fail(_raiser=raiser):
+                def fail(*args, **kwargs):
+                    raise _raiser()
+                return fail
+            monkeypatch.setattr(rl, attr, make_fail())
+
+            with pytest.raises(SystemExit):
+                call("--resume", "--precomputed-colmap", str(precomp))
+            assert _colmap_subprocess_cmds(fake) == [], \
+                f"COLMAP must never run in precomputed failure path ({label})"
+
+
