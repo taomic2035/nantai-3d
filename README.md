@@ -24,6 +24,10 @@ Viewer 和 Studio。证据不足时始终标记为 `synthetic`、`mock` 或 `pre
 
 需要 Python 3.11+ 和 Node.js 20+。Windows：
 
+要直接查看本次带数据的版本，先按
+[Nantai 3D 1.0 Preview 下载与运行说明](docs/releases/1.0-preview.md)
+安装 Release 附件；从源码自行生成则使用下面命令。
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -e ".[dev]"
@@ -78,6 +82,7 @@ git diff --check
 
 ## 文档
 
+- [Nantai 3D 1.0 Preview 下载、校验与运行](docs/releases/1.0-preview.md)
 - [端到端重建、COLMAP 与云 GPU 手册](docs/manual/reconstruction-setup.md)
 - [真实数据工作流与 Sim3/ENU 坐标契约](docs/real-data-workflow.md)
 - [Synthetic 素材 Release 与使用说明](docs/releases/synthetic-design-inputs.md)

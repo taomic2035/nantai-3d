@@ -1,6 +1,6 @@
 [project]
 name = "nantai-infinite-village"
-version = "0.1.0"
+version = "1.0.0rc1"
 description = "照片驱动的无限3D村庄世界生成系统"
 requires-python = ">=3.11"
 dependencies = [
