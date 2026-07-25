@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import struct
@@ -131,12 +132,18 @@ def _sha256_file(path: Path) -> str:
 
 
 def _build_precomputed_manifest(colmap_ws: Path, photos: Path) -> dict:
-    """为 --precomputed-colmap 构建字节绑定的源清单。
+    """为 --precomputed-colmap 构建字节绑定的源清单（fingerprint payload）。
 
     REVIEW-CODEX-030 P0 要求把 cameras.bin / images.bin / points3D.bin / colmap.db /
-    caller argv 都绑进不可变清单；这里产出的是 colmap 阶段指纹的载荷字段（不是单独
-    写一个 JSON 文件——写入 .stage_state.json 只能由 StageState 类做，避免重蹈
-    P7 手工写假指纹的覆辙）。
+    caller argv 都绑进 colmap 阶段指纹的载荷字段。注意：本函数返回的是**载荷字段**
+    （被 _fingerprint 消费成 digest），不是一份物化的、content-addressed 的独立
+    报告——后者是 P7a-2 的工作（见 handoff）。载荷字段只能由 StageState 类写入
+    .stage_state.json，避免重蹈 P7 手工写假指纹的覆辙。
+
+    诚实边界：载荷字段本身**不是** tamper-evident——它只是 fingerprint digest 的
+    输入。真正可审计的 source manifest 需要物化成独立文件并 content-addressed
+    （P7a-2）。当前阶段，fingerprint digest 的可复现性已由 _digest 的 sort_keys
+    保证，但"载荷不可被悄悄替换"这一层要等 P7a-2 物化后才闭合。
 
     fail-closed：
     - 缺 sparse/0 → 拒；
@@ -182,6 +189,10 @@ def _build_precomputed_manifest(colmap_ws: Path, photos: Path) -> dict:
             "--precomputed-colmap: --photos 与 <colmap_ws>/images/ 内容不一致 "
             "(逐张 SHA-256 不同；必须使用产生 sparse/0 的那一批照片，否则重建会谎称来源)")
     manifest["photos_sha256"] = caller_photos_sha
+    # REVIEW-CODEX-030 P7a-6：源端语义校验——sparse/0 不仅要字节绑定，还要语义
+    # 完整（image_name 无 phantom/duplicate、cameras 有限元）。源端 fail-closed
+    # 阻止 bad source 进入；ws 端拷贝后再校验一次（防拷贝损坏）。
+    _validate_sparse_semantics(sparse_0, photos)
     return manifest
 
 
@@ -190,9 +201,23 @@ def _validate_ws_precomputed(ws: Path, manifest: dict) -> bool:
 
     任一文件缺失或 SHA 不匹配 → 返回 False（**不**抛错；由调用方决定是
     fail-closed 还是触发 re-copy）。读 PLY/colmap.db 几百 MB 时只算一次 SHA。
+
+    REVIEW-CODEX-030 P7a-4：除逐文件 SHA 校验外，还要校验 ws/sparse/0 里的文件集
+    **恰好**等于 manifest 声明的文件集——不多不少。多出来的文件（stale frames.bin
+    / rigs.bin / project.ini / 未知文件）即使 SHA 不被校验，也可能误导下游或污染
+    审计。_copy_precomputed_to_ws 的 fresh staging + 原子替换已保证不产生 stale，
+    但这层校验是 fail-closed 的双保险。
     """
     sparse_0 = ws / "sparse" / "0"
     if not sparse_0.is_dir():
+        return False
+    # exact file set: ws/sparse/0 里的文件集应恰好等于 manifest 声明的 sparse 文件
+    expected_sparse = set(PRECOMPUTED_REQUIRED_BIN)
+    for name in PRECOMPUTED_OPTIONAL_BIN:
+        if f"{name}_sha256" in manifest:
+            expected_sparse.add(name)
+    actual_sparse = {p.name for p in sparse_0.iterdir() if p.is_file()}
+    if actual_sparse != expected_sparse:
         return False
     for name in PRECOMPUTED_REQUIRED_BIN:
         p = sparse_0 / name
@@ -221,27 +246,253 @@ def _validate_ws_precomputed(ws: Path, manifest: dict) -> bool:
     return True
 
 
-def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
-    """把源 sparse/0/*.bin + colmap.db + images/ 字节拷贝进 ws。
+def _parse_colmap_cameras_bin(path: Path) -> list[dict]:
+    """解析 COLMAP cameras.bin 二进制 → list of camera dicts。
 
-    只拷不重命名、不重排——保证拷贝后 ws 字节 == 源字节，由 _validate_ws_precomputed
-    二次校验。images/ 在拷前先清空：避免旧帧残留导致 Brush 训在混了新旧照片的目录上。
+    格式参考 COLMAP src/base/reconstruction.cc ReadCamerasBinary:
+      num_cameras(uint64) + 每相机 {camera_id(uint32), model(int32),
+      width(uint64), height(uint64), num_params(uint64),
+      params(float64[num_params])}。
+
+    解析失败（文件过短/字段越界）→ ValueError（由调用方决定 fail-closed）。
     """
+    data = path.read_bytes()
+    pos = 0
+
+    def read(fmt: str) -> tuple:
+        nonlocal pos
+        size = struct.calcsize(fmt)
+        if pos + size > len(data):
+            raise ValueError(
+                f"cameras.bin 在 offset {pos} 读 {fmt} 越界（文件 {len(data)} 字节）")
+        val = struct.unpack_from(fmt, data, pos)
+        pos += size
+        return val
+
+    num = read("<Q")[0]
+    cameras: list[dict] = []
+    for i in range(num):
+        camera_id = read("<I")[0]
+        model = read("<i")[0]
+        width = read("<Q")[0]
+        height = read("<Q")[0]
+        nparams = read("<Q")[0]
+        params = list(read(f"<{nparams}d")) if nparams else []
+        cameras.append({"index": i, "camera_id": camera_id, "model": model,
+                        "width": width, "height": height, "params": params})
+    # 尾字节检查：合法 COLMAP cameras.bin 解析完后 pos == len(data)。若有
+    # 残余字节，说明 header count 与实际记录数不符（或文件被拼接/截断）→
+    # fail-closed，不让"header 说 3 但实际有 12 records"的文件静默通过。
+    if pos != len(data):
+        raise ValueError(
+            f"cameras.bin header 声明 {num} 个相机，但解析后仍有 "
+            f"{len(data) - pos} 字节尾数据（header 与记录数不符）")
+    return cameras
+
+
+def _parse_colmap_images_bin(path: Path) -> list[dict]:
+    """解析 COLMAP images.bin 二进制 → list of image dicts。
+
+    格式参考 COLMAP src/base/reconstruction.cc ReadImagesBinary:
+      num_reg_images(uint64) + 每图像 {image_id(uint32), qvec(4*float64),
+      tvec(3*float64), camera_id(uint32), image_name(null-terminated string),
+      num_points2D(uint64), points2D(2*num_points2D*float64 + num_points2D*int64)}。
+
+    只提取 image_id/name/camera_id/qvec/tvec，跳过 points2D 字节。
+    解析失败 → ValueError。
+    """
+    data = path.read_bytes()
+    pos = 0
+
+    def read(fmt: str) -> tuple:
+        nonlocal pos
+        size = struct.calcsize(fmt)
+        if pos + size > len(data):
+            raise ValueError(
+                f"images.bin 在 offset {pos} 读 {fmt} 越界（文件 {len(data)} 字节）")
+        val = struct.unpack_from(fmt, data, pos)
+        pos += size
+        return val
+
+    num = read("<Q")[0]
+    images: list[dict] = []
+    for i in range(num):
+        image_id = read("<I")[0]
+        qvec = list(read("<4d"))
+        tvec = list(read("<3d"))
+        camera_id = read("<I")[0]
+        end = data.find(b"\x00", pos)
+        if end == -1:
+            raise ValueError(f"images.bin 图像 #{i} name 未找到 null 终止符")
+        name = data[pos:end].decode("utf-8", errors="replace")
+        pos = end + 1
+        npts = read("<Q")[0]
+        # points2D: 2*npts float64 (x,y) + npts int64 (point3D_id)
+        pts_size = 2 * npts * 8 + npts * 8
+        if pos + pts_size > len(data):
+            raise ValueError(
+                f"images.bin 图像 #{i} points2D 越界（需 {pts_size} 字节，"
+                f"剩余 {len(data) - pos}）")
+        pos += pts_size
+        images.append({"index": i, "image_id": image_id, "qvec": qvec,
+                       "tvec": tvec, "camera_id": camera_id, "name": name})
+    # 尾字节检查：合法 COLMAP images.bin 解析完后 pos == len(data)。若有
+    # 残余字节，说明 header count 与实际记录数不符（或文件被拼接/截断）→
+    # fail-closed。这挡住"header 说 3 但实际有 12 records"的静默截断。
+    if pos != len(data):
+        raise ValueError(
+            f"images.bin header 声明 {num} 张图像，但解析后仍有 "
+            f"{len(data) - pos} 字节尾数据（header 与记录数不符）")
+    return images
+
+
+def _validate_sparse_semantics(sparse_0: Path, photos: Path) -> None:
+    """校验 precomputed COLMAP sparse/0 的语义完整性（不止前 8 字节 header）。
+
+    REVIEW-CODEX-030 P7a-6：仅读 images.bin 头 8 字节 num_reg_images 不等于一个
+    合法的 recovered camera track。一个可信的 sparse model 需要：
+    1. images.bin 可完整解析（header count == 实际记录数；否则格式残缺）；
+    2. image_name 在 photos/ 目录都能找到对应文件（无 phantom image，否则
+       Brush 会训在一批不存在的照片的"位姿"上）；
+    3. image_name 无重复（无 ghost track，否则同一张照片被算两次）；
+    4. cameras.bin params 全部 finite（无 NaN/Inf，否则位姿不可数值使用）。
+
+    不要求 num_reg_images == len(photos)：COLMAP 正常会丢弃未注册的图像，这是
+    算法结果不是错误。本函数只挡 sparse model **自相矛盾**或**与 photos 不一致**
+    的情形。
+
+    解析失败 / 语义错误 → SystemExit（fail-closed，不让 Brush 训在残缺 track 上）。
+    """
+    cameras_path = sparse_0 / "cameras.bin"
+    images_path = sparse_0 / "images.bin"
+    try:
+        cameras = _parse_colmap_cameras_bin(cameras_path)
+    except (OSError, ValueError, struct.error) as e:
+        raise SystemExit(
+            f"--precomputed-colmap: cameras.bin 语义校验失败（解析错误）: {e}") from e
+    try:
+        images = _parse_colmap_images_bin(images_path)
+    except (OSError, ValueError, struct.error) as e:
+        raise SystemExit(
+            f"--precomputed-colmap: images.bin 语义校验失败（解析错误）: {e}") from e
+
+    # 1. cameras.bin params 全部 finite
+    for cam in cameras:
+        for j, p in enumerate(cam["params"]):
+            if not math.isfinite(p):
+                raise SystemExit(
+                    f"--precomputed-colmap: cameras.bin camera_id={cam['camera_id']} "
+                    f"param[{j}]={p} 非有限（NaN/Inf）→ 位姿不可信")
+
+    # 2. image_name 无重复
+    names = [img["name"] for img in images]
+    seen: set[str] = set()
+    dups: list[str] = []
+    for name in names:
+        if name in seen and name not in dups:
+            dups.append(name)
+        seen.add(name)
+    if dups:
+        raise SystemExit(
+            f"--precomputed-colmap: images.bin 有重复 image_name: {dups[:3]}")
+
+    # 3. 每个 image_name 在 photos/ 找得到对应文件
+    photo_names: set[str] = set()
+    for p in photos.rglob("*"):
+        if p.is_file() and p.suffix.lower() in FINGERPRINT_SUFFIXES:
+            photo_names.add(p.relative_to(photos).as_posix())
+    missing = [name for name in names if name not in photo_names]
+    if missing:
+        raise SystemExit(
+            f"--precomputed-colmap: images.bin 引用了 photos 目录中不存在的图像: "
+            f"{missing[:3]}")
+
+
+def _atomic_replace_dir(src: Path, dst: Path) -> None:
+    """原子替换目录：rename dst → dst.old，rename src → dst，rmtree dst.old。
+
+    REVIEW-CODEX-030 P7a-4：中途崩溃留下 dst.old → 下次调用前先清理（见下）。
+    Windows rename 要求目标不存在，所以先 rename 旧 dst 到 dst.old。
+    """
+    if not src.is_dir():
+        raise SystemExit(f"原子替换失败：源目录不存在 {src}")
+    old = dst.parent / f"{dst.name}.old"
+    if old.exists():
+        shutil.rmtree(old)
+    if dst.exists():
+        dst.rename(old)
+    src.rename(dst)
+    if old.exists():
+        shutil.rmtree(old)
+
+
+def _atomic_replace_file(src: Path, dst: Path) -> None:
+    """原子替换文件：rename dst → dst.old，rename src → dst，unlink dst.old。"""
+    if not src.is_file():
+        raise SystemExit(f"原子替换失败：源文件不存在 {src}")
+    old = dst.parent / f"{dst.name}.old"
+    if old.exists():
+        old.unlink()
+    if dst.exists():
+        dst.rename(old)
+    src.rename(dst)
+    if old.exists():
+        old.unlink()
+
+
+def _copy_precomputed_to_ws(colmap_ws: Path, ws: Path) -> None:
+    """把源 sparse/0/*.bin + colmap.db + images/ 字节拷贝进 ws（fresh staging + 原子替换）。
+
+    REVIEW-CODEX-030 P7a-4：旧实现直接往 ws/sparse/0 里 copy2，若源删除了某个
+    optional 文件（如 frames.bin），ws 里的旧文件会残留且不被 _validate_ws_precomputed
+    校验（它只校验 manifest 里有的文件）。本实现：
+    1. 拷到 fresh staging 目录 ws/.staging_precomputed/（先清空任何残留 staging/old）；
+    2. 只拷源里**实际存在**的 required + optional 文件 + colmap.db + images/；
+    3. 原子替换 ws/sparse/0、ws/colmap.db、ws/images —— 旧目录被 rename 到 *.old
+       后 rmtree，新内容从 staging rename 进来，保证 ws 里恰好只有源里有的文件。
+    中途崩溃留下 .staging_precomputed/ 或 *.old → 下次调用开头清理。
+    """
+    staging = ws / ".staging_precomputed"
+    if staging.exists():
+        shutil.rmtree(staging)
+    # 也清理任何上次崩溃留下的 *.old
+    for old_name in ("sparse/0.old", "colmap.db.old", "images.old"):
+        old = ws / old_name
+        if old.exists():
+            if old.is_dir():
+                shutil.rmtree(old)
+            else:
+                old.unlink()
+    staging.mkdir(parents=True)
+
     src_sparse = colmap_ws / "sparse" / "0"
-    dst_sparse = ws / "sparse" / "0"
-    dst_sparse.mkdir(parents=True, exist_ok=True)
+    staging_sparse = staging / "sparse" / "0"
+    staging_sparse.mkdir(parents=True)
     for name in PRECOMPUTED_REQUIRED_BIN + PRECOMPUTED_OPTIONAL_BIN:
         s = src_sparse / name
         if s.is_file():
-            shutil.copy2(s, dst_sparse / name)
+            shutil.copy2(s, staging_sparse / name)
     db = colmap_ws / "colmap.db"
-    if db.is_file():
-        shutil.copy2(db, ws / "colmap.db")
+    staging_db = staging / "colmap.db"
+    has_db = db.is_file()
+    if has_db:
+        shutil.copy2(db, staging_db)
     src_img = colmap_ws / "images"
-    dst_img = ws / "images"
-    if dst_img.exists():
-        shutil.rmtree(dst_img)
-    shutil.copytree(src_img, dst_img)
+    staging_img = staging / "images"
+    shutil.copytree(src_img, staging_img)
+
+    # 原子替换三个目标。先确保 ws/sparse 父目录存在。
+    (ws / "sparse").mkdir(parents=True, exist_ok=True)
+    _atomic_replace_dir(staging_sparse, ws / "sparse" / "0")
+    if has_db:
+        _atomic_replace_file(staging_db, ws / "colmap.db")
+    elif (ws / "colmap.db").exists():
+        # 新源没有 colmap.db → 删旧（不能原子，但 staging 已无 db，旧的也没用）
+        (ws / "colmap.db").unlink()
+    _atomic_replace_dir(staging_img, ws / "images")
+
+    # 清理 staging（成功路径）
+    shutil.rmtree(staging)
 
 
 def _assert_no_overlap(roots: dict[str, Path]) -> None:
@@ -320,7 +571,14 @@ def _fingerprint(stage: str, payload: dict) -> tuple[str, str | None]:
 
 
 class StageState:
-    """阶段指纹状态 (ws/.stage_state.json) —— --resume 的信任根。
+    """阶段指纹状态 (ws/.stage_state.json) —— --resume 的本地可审计状态。
+
+    **诚实边界（REVIEW-CODEX-030 P7a-7）**：这是一份工作目录里的普通 JSON 文件，
+    任何能写该目录的进程都能改它——它**不是** immutable、也**不是**
+    tamper-evident（防篡改）。它只是 --resume 在本机本工作目录上的"上次跑到哪、
+    指纹是什么"的备忘，让重跑不必从零开始。**生产 acceptance 不写在这里**：真正的
+    验收凭证应放在独立的、content-addressed 的 verifier report（见
+    `handoff/FEEDBACK-HANDOFF-GLM-007-*` 系列与 P7a-2 的 source manifest 物化）。
 
     fail-closed：只有 (开了 --resume) + (指纹逐字节相同) + (产物齐全) 三者同时成立
     才跳过。指纹不同 / 无记录 / 状态文件损坏 / 产物缺失 → 重跑，并打印为什么。
@@ -420,8 +678,9 @@ class StageState:
             # 拷一份避免外部改字典影响状态文件；值必须是 JSON 可序列化的。
             entry.update(extras)
         self.stages[stage] = entry
-        # 状态文件是 --resume 的信任根：证明不了输入的指纹要当场标出来，别让它看起来
-        # 像个能用的指纹（也让用户看得懂为什么 --resume 老是重跑这一阶段）。
+        # 状态文件是 --resume 的本地可审计状态（非 tamper-evident）：证明不了输入的
+        # 指纹要当场标出来，别让它看起来像个能用的指纹（也让用户看得懂为什么
+        # --resume 老是重跑这一阶段）。
         if self._unprovable.get(stage):
             self.stages[stage]["unprovable"] = self._unprovable[stage]
         self._save()
@@ -430,7 +689,8 @@ class StageState:
         payload = {"version": STATE_VERSION,
                    "fingerprint_caveat": FINGERPRINT_CAVEAT,
                    "stages": {s: self.stages[s] for s in STAGE_ORDER if s in self.stages}}
-        # newline="\n": 状态文件是 --resume 的信任根, LF 让字节跨平台可复现。
+        # newline="\n": 状态文件是 --resume 的本地可审计状态（非 tamper-evident），
+        # LF 让字节跨平台可复现。
         self.path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
                              encoding="utf-8", newline="\n")
 
@@ -630,6 +890,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(
                     f"--precomputed-colmap: 拷贝到 {ws}/sparse/0 后字节校验失败 "
                     f"(源 {args.precomputed_colmap} 与工作目录不一致；检查磁盘空间/权限)")
+            # REVIEW-CODEX-030 P7a-6：ws 端语义校验——字节 SHA 通过后，再校验
+            # images.bin/cameras.bin 的语义完整性。拷贝本身不改字节，所以这层
+            # 主要挡的是源端语义错误但源端被绕过（例如源 manifest 是旧版本算的、
+            # 或源 sparse/0 被外部替换）和拷贝中途的位翻转（SHA 碰巧没变但语义
+            # 已坏——理论极小概率，但 fail-closed 不留窗口）。
+            _validate_sparse_semantics(ws / "sparse" / "0", args.photos)
             best_n = _count_registered_images(ws / "sparse" / "0")
             print(f"    已拷贝预计算 COLMAP: 注册 {best_n}/{n} 张 "
                   f"(来自 {args.precomputed_colmap})")

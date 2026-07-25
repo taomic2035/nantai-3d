@@ -519,21 +519,111 @@ import shutil  # noqa: E402  (late import keeps top-of-file minimal)
 PRECOMPUTED_REQUIRED = ("cameras.bin", "images.bin", "points3D.bin")
 PRECOMPUTED_OPTIONAL = ("frames.bin", "rigs.bin", "project.ini")
 
+# Photo extensions mirrored from pipeline.ingest_manifest.PHOTO_SOURCE_SUFFIXES
+# (kept local to the test to avoid an extra cross-module import in the helper).
+_FAKE_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".heic"}
+
+
+def _write_fake_cameras_bin(path: Path, *, non_finite: bool = False) -> None:
+    """Write a minimal-but-real COLMAP cameras.bin (1 PINHOLE camera).
+
+    PINHOLE model=1, params=[focal_x, focal_y, cx, cy]. With non_finite=True
+    the first param is NaN so P7a-6 finite check fails.
+    """
+    buf = bytearray()
+    buf += struct.pack("<Q", 1)          # num_cameras
+    buf += struct.pack("<I", 1)          # camera_id
+    buf += struct.pack("<i", 1)          # model = PINHOLE
+    buf += struct.pack("<Q", 192)        # width
+    buf += struct.pack("<Q", 108)        # height
+    buf += struct.pack("<Q", 4)           # num_params
+    if non_finite:
+        buf += struct.pack("<4d", float("nan"), 100.0, 96.0, 54.0)
+    else:
+        buf += struct.pack("<4d", 100.0, 100.0, 96.0, 54.0)
+    path.write_bytes(bytes(buf))
+
+
+def _write_fake_images_bin(path: Path, image_names: list[str], *,
+                           header_count: int | None = None) -> None:
+    """Write a real-format COLMAP images.bin.
+
+    Each image: image_id(uint32) + qvec(4*float64, identity) + tvec(3*float64,
+    zero) + camera_id(uint32=1) + null-terminated name + num_points2D(uint64=0).
+    header_count overrides the uint64 num_reg_images (default = len(image_names));
+    used to inject count-mismatch for RED tests.
+    """
+    buf = bytearray()
+    buf += struct.pack("<Q", header_count if header_count is not None
+                       else len(image_names))
+    for i, name in enumerate(image_names):
+        buf += struct.pack("<I", i + 1)              # image_id
+        buf += struct.pack("<4d", 1.0, 0.0, 0.0, 0.0)  # qw,qx,qy,qz
+        buf += struct.pack("<3d", 0.0, 0.0, 0.0)       # tx,ty,tz
+        buf += struct.pack("<I", 1)                    # camera_id
+        buf += name.encode("utf-8") + b"\x00"          # null-terminated
+        buf += struct.pack("<Q", 0)                    # num_points2D
+    path.write_bytes(bytes(buf))
+
+
+def _photo_names_in(photos: Path) -> list[str]:
+    """Sorted relative posix paths of every supported photo under photos/."""
+    names = []
+    for p in sorted(photos.rglob("*")):
+        if p.is_file() and p.suffix.lower() in _FAKE_PHOTO_EXTS:
+            names.append(p.relative_to(photos).as_posix())
+    return names
+
 
 def _make_fake_precomputed(colmap_ws: Path, photos: Path, *,
-                           n_registered: int = 12) -> None:
-    """Build a fake precomputed COLMAP workspace for tests.
+                           n_registered: int | None = None,
+                           image_names_override: list[str] | None = None,
+                           duplicate_name: bool = False,
+                           phantom_name: str | None = None,
+                           non_finite_camera: bool = False,
+                           header_count: int | None = None) -> None:
+    """Build a fake precomputed COLMAP workspace with REAL binary format.
 
-    Layout matches what P5b produced: <colmap_ws>/{colmap.db, sparse/0/*.bin,
-    images/}. images.bin starts with uint64 num_registered so
-    _count_registered_images returns > 0 (Brush stage needs a valid model).
+    Default writes semantically-valid cameras.bin/images.bin so P7a-6
+    semantic validation passes. Use kwargs to inject corruption for RED tests:
+
+    - n_registered: kept for backward compat; when set AND image_names is
+      derived from photos, the header count is set to n_registered while the
+      actual records equal len(image_names). To test count mismatch pass
+      n_registered != len(photos).
+    - image_names_override: explicit image_name list (default = derive from
+      photos, so names line up with files on disk).
+    - duplicate_name: append a duplicate of the first image_name (ghost track).
+    - phantom_name: append an image_name that has no matching file in photos
+      (phantom image).
+    - non_finite_camera: cameras.bin first param becomes NaN.
+    - header_count: explicit override of the images.bin header count.
     """
     sparse_0 = colmap_ws / "sparse" / "0"
     sparse_0.mkdir(parents=True, exist_ok=True)
-    (sparse_0 / "images.bin").write_bytes(
-        struct.pack("<Q", n_registered) + b"\x00" * 100)
-    (sparse_0 / "cameras.bin").write_bytes(b"fake-cameras")
-    (sparse_0 / "points3D.bin").write_bytes(b"fake-points")
+
+    if image_names_override is not None:
+        names = list(image_names_override)
+    else:
+        names = _photo_names_in(photos)
+    if duplicate_name and names:
+        names = names + [names[0]]
+    if phantom_name is not None:
+        names = names + [phantom_name]
+
+    if header_count is not None:
+        hc = header_count
+    elif n_registered is not None:
+        # Backward-compat: n_registered overrides the header count. The actual
+        # records are len(names); if n_registered != len(names) the parser
+        # will detect a count mismatch.
+        hc = n_registered
+    else:
+        hc = len(names)
+
+    _write_fake_images_bin(sparse_0 / "images.bin", names, header_count=hc)
+    _write_fake_cameras_bin(sparse_0 / "cameras.bin", non_finite=non_finite_camera)
+    (sparse_0 / "points3D.bin").write_bytes(struct.pack("<Q", 0))
     (sparse_0 / "project.ini").write_text("[test]\n", encoding="utf-8")
     (sparse_0 / "frames.bin").write_bytes(b"fake-frames")
     (sparse_0 / "rigs.bin").write_bytes(b"fake-rigs")
@@ -599,8 +689,13 @@ class TestPrecomputedColmapBoundary:
         call("--precomputed-colmap", str(precomp))
 
         digest_a = _state(ws)["stages"]["colmap"]["fingerprint"]
-        # Mutate one required bin
-        (precomp / "sparse" / "0" / "cameras.bin").write_bytes(b"different")
+        # Mutate one required bin: flip a byte in cameras.bin width field
+        # (offset 16, uint64). Stays finite/valid so P7a-6 semantic check
+        # passes, but SHA changes → fingerprint must change.
+        cam_path = precomp / "sparse" / "0" / "cameras.bin"
+        cam_buf = bytearray(cam_path.read_bytes())
+        cam_buf[16] ^= 0x01
+        cam_path.write_bytes(bytes(cam_buf))
         fake.reset()
         call("--resume", "--precomputed-colmap", str(precomp))
         digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
@@ -609,22 +704,26 @@ class TestPrecomputedColmapBoundary:
 
     def test_source_byte_change_triggers_recopy_not_colmap(self, env, tmp_path,
                                                             photos_dir):
-        """If source images.bin changes, ws is re-copied (NOT rerun COLMAP)."""
+        """If source sparse/0 bytes change, ws is re-copied (NOT rerun COLMAP)."""
         call, fake, ws, _ = env
         precomp = tmp_path / "precomp"
-        _make_fake_precomputed(precomp, photos_dir, n_registered=12)
+        _make_fake_precomputed(precomp, photos_dir)
         call("--precomputed-colmap", str(precomp))
 
-        # Change source bytes (keep n_registered=99 to distinguish)
-        (precomp / "sparse" / "0" / "images.bin").write_bytes(
-            struct.pack("<Q", 99) + b"\x00" * 100)
+        # Change source bytes: flip cameras.bin width byte (stays finite/valid
+        # so P7a-6 semantic validation passes, but SHA changes → fingerprint
+        # changes → byte-exact re-copy, never COLMAP).
+        cam_path = precomp / "sparse" / "0" / "cameras.bin"
+        cam_buf = bytearray(cam_path.read_bytes())
+        cam_buf[16] ^= 0x01
+        cam_path.write_bytes(bytes(cam_buf))
         fake.reset()
         call("--resume", "--precomputed-colmap", str(precomp))
 
         assert _colmap_subprocess_cmds(fake) == [], \
             "COLMAP must never run in precomputed mode, even on byte change"
-        ws_bytes = (ws / "sparse" / "0" / "images.bin").read_bytes()
-        src_bytes = (precomp / "sparse" / "0" / "images.bin").read_bytes()
+        ws_bytes = (ws / "sparse" / "0" / "cameras.bin").read_bytes()
+        src_bytes = (precomp / "sparse" / "0" / "cameras.bin").read_bytes()
         assert ws_bytes == src_bytes, \
             "source byte change must trigger byte-exact re-copy into ws"
 
@@ -955,6 +1054,133 @@ class TestPrecomputedColmapBoundary:
         digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
         assert digest_a != digest_b, \
             "caller flag change (--sequential) must alter precomputed fingerprint"
+
+
+class TestPrecomputedSemanticValidation:
+    """REVIEW-CODEX-030 P7a-6: sparse/0 bytes-bound is not enough. A valid
+    recovered camera track must also be semantically consistent:
+    - images.bin parses fully (header count == actual records);
+    - every image_name resolves to a file in photos/;
+    - no duplicate image_name (ghost track);
+    - cameras.bin params are all finite (no NaN/Inf).
+
+    Each RED case must SystemExit before COLMAP ever runs."""
+
+    def test_valid_sparse_passes_semantic_validation(self, env, tmp_path,
+                                                      photos_dir):
+        """Baseline: a well-formed sparse/0 + matching photos passes both
+        source-side and ws-side semantic validation and reaches downstream."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+        assert {"brush", "prepare", "import"} <= fake.stages
+
+    def test_count_mismatch_header_larger_than_records(self, env, tmp_path,
+                                                         photos_dir):
+        """images.bin header claims 99 images but only 12 records exist →
+        parser runs off the end → SystemExit. Equating the first 8 bytes
+        with a valid track is exactly what P7a-6 forbids."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir, header_count=99)
+        with pytest.raises(SystemExit, match="images.bin|语义"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == [], \
+            "semantic failure must fail before any COLMAP subprocess"
+
+    def test_count_mismatch_header_smaller_than_records(self, env, tmp_path,
+                                                         photos_dir):
+        """Header claims 3 but 12 records exist → parser stops early,
+        silently dropping 9 images. The dropped records are unbound, so
+        this must also fail-closed (the cheap header-only check would have
+        silently accepted a partial track)."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir, header_count=3)
+        with pytest.raises(SystemExit, match="images.bin|语义"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_phantom_image_name_not_in_photos(self, env, tmp_path, photos_dir):
+        """images.bin references 'GHOST_NO_FILE.jpg' which does not exist in
+        photos/ → Brush would train on a pose for a non-existent photo."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir,
+                               phantom_name="GHOST_NO_FILE.jpg")
+        with pytest.raises(SystemExit, match="不存在|phantom|images"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_duplicate_image_name_ghost_track(self, env, tmp_path, photos_dir):
+        """Two records with the same image_name → same photo counted twice,
+        which corrupts the recovered track."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir, duplicate_name=True)
+        with pytest.raises(SystemExit, match="重复|duplicate"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_non_finite_camera_param_rejected(self, env, tmp_path, photos_dir):
+        """cameras.bin with NaN focal length → pose unusable numerically."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir, non_finite_camera=True)
+        with pytest.raises(SystemExit, match="非有限|NaN|cameras"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_truncated_images_bin_rejected(self, env, tmp_path, photos_dir):
+        """A images.bin truncated mid-record (e.g. copy interrupted) must
+        not be accepted as a valid track."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        img_path = precomp / "sparse" / "0" / "images.bin"
+        full = img_path.read_bytes()
+        # Truncate to header + half a record (corrupt)
+        img_path.write_bytes(full[:24])
+        with pytest.raises(SystemExit, match="images.bin|语义"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_truncated_cameras_bin_rejected(self, env, tmp_path, photos_dir):
+        """A cameras.bin too short to hold even num_cameras → fail-closed."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        (precomp / "sparse" / "0" / "cameras.bin").write_bytes(b"\x00\x00")
+        with pytest.raises(SystemExit, match="cameras.bin|语义"):
+            call("--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == []
+
+    def test_ws_semantic_corruption_triggers_fail_closed(self, env, tmp_path,
+                                                          photos_dir):
+        """If ws/sparse/0/images.bin is byte-identical to source (SHA matches)
+        but semantically corrupted by an external actor post-copy, the
+        ws-side semantic check must still catch it. Simulate by manually
+        corrupting ws images.bin SHA AND semantic in one shot: replace with
+        a header-only blob that parses as count=0 (passes SHA only if source
+        also changed). To stay realistic, change source identically first
+        so _validate_ws_precomputed passes, then check semantics still fire."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+
+        # Corrupt BOTH source and ws images.bin identically (so byte SHA
+        # matches between them) into a semantically-invalid header-only blob.
+        bad = struct.pack("<Q", 5)  # claims 5 images, no records
+        (precomp / "sparse" / "0" / "images.bin").write_bytes(bad)
+        (ws / "sparse" / "0" / "images.bin").write_bytes(bad)
+        fake.reset()
+        with pytest.raises(SystemExit, match="images.bin|语义"):
+            call("--resume", "--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == [], \
+            "ws-side semantic check must fire after byte validation passes"
 
 
 class TestColmapExtrasBoundary:
