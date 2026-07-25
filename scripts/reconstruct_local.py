@@ -142,8 +142,9 @@ def _build_precomputed_manifest(colmap_ws: Path, photos: Path) -> dict:
     - 缺 sparse/0 → 拒；
     - 缺任一必需 .bin → 拒；
     - 缺 images/ → 拒；
-    - --photos 与 <colmap_ws>/images/ 的廉价指纹不同 → 拒（否则 Brush 会训在
-      与 sparse/0 来源不同的另一批照片上，产出一个谎称来自这批 sparse 的重建）。
+    - --photos 与 <colmap_ws>/images/ 的逐张 SHA-256 不同 → 拒（否则 Brush 会
+      训在与 sparse/0 来源不同的另一批照片上，产出一个谎称来自这批 sparse 的
+      重建。用 SHA-256 而非廉价指纹：同名同大小同 mtime 的字节篡改也要被发现）。
 
     返回字段全部是已实测 SHA-256；可选文件缺失则不绑（指纹载荷也不含），保证
     “删除可选文件”不会改变指纹——只有改必需文件或加/删可选文件才会变。
@@ -172,15 +173,15 @@ def _build_precomputed_manifest(colmap_ws: Path, photos: Path) -> dict:
         raise SystemExit(
             f"--precomputed-colmap: 缺 images/ 目录: {img_dir} "
             f"(--photos 必须与产生 sparse/0 的那一批照片同源)")
-    src_img_fp = _photos_fp(img_dir)
-    if not src_img_fp:
+    src_img_sha = _photos_sha256(img_dir)
+    if not src_img_sha:
         raise SystemExit(f"--precomputed-colmap: images/ 为空: {img_dir}")
-    caller_photos_fp = _photos_fp(photos)
-    if src_img_fp != caller_photos_fp:
+    caller_photos_sha = _photos_sha256(photos)
+    if src_img_sha != caller_photos_sha:
         raise SystemExit(
             "--precomputed-colmap: --photos 与 <colmap_ws>/images/ 内容不一致 "
-            "(廉价指纹不同；必须使用产生 sparse/0 的那一批照片，否则重建会谎称来源)")
-    manifest["photos"] = caller_photos_fp
+            "(逐张 SHA-256 不同；必须使用产生 sparse/0 的那一批照片，否则重建会谎称来源)")
+    manifest["photos_sha256"] = caller_photos_sha
     return manifest
 
 
@@ -213,8 +214,9 @@ def _validate_ws_precomputed(ws: Path, manifest: dict) -> bool:
     img_dir = ws / "images"
     if not img_dir.is_dir():
         return False
-    # images/ 也必须与清单的照片指纹一致（防止外部把 ws/images 改了）
-    if _photos_fp(img_dir) != manifest["photos"]:
+    # images/ 也必须与清单的照片 SHA 一致（防止外部把 ws/images 改了，包括
+    # 同名同大小同 mtime 的字节篡改——廉价指纹发现不了的，SHA 能发现）。
+    if _photos_sha256(img_dir) != manifest["photos_sha256"]:
         return False
     return True
 
@@ -260,6 +262,23 @@ def _photos_fp(d: Path) -> list[list]:
         if p.is_file() and p.suffix.lower() in FINGERPRINT_SUFFIXES:
             st = p.stat()
             out.append([p.relative_to(d).as_posix(), st.st_size, st.st_mtime_ns])
+    return out
+
+
+def _photos_sha256(d: Path) -> list[list[str]]:
+    """照片集**字节级**指纹：(相对路径, SHA-256) 的排序列表。
+
+    与 _photos_fp 的区别：读文件内容算 SHA-256，所以同名同大小同 mtime 的**不同
+    内容**照片也能被发现。用于 --precomputed-colmap 路径——那里要求精确字节绑定
+    (源 sparse/0 必须与产生它的那批照片字节一致)，廉价指纹不足以证明这一点。
+
+    正常 --resume 路径仍用 _photos_fp：那里要挡的是"换了一批照片"，廉价指纹够用，
+    且对几百张照片不必每次 hash 几百 MB。precomputed 路径是信任关键点，值得这个成本。
+    """
+    out: list[list[str]] = []
+    for p in sorted(d.rglob("*")):
+        if p.is_file() and p.suffix.lower() in FINGERPRINT_SUFFIXES:
+            out.append([p.relative_to(d).as_posix(), _sha256_file(p)])
     return out
 
 

@@ -9,6 +9,7 @@ _select_best_colmap_model / _count_registered_images 不桩 —— 让它们跑�
 写出的真实 sparse/0/images.bin 上。
 """
 import json
+import os
 import struct
 import sys
 from pathlib import Path
@@ -795,6 +796,68 @@ class TestPrecomputedColmapBoundary:
         raw = (ws / STATE).read_bytes()
         assert b"\r\n" not in raw, \
             "precomputed mode must keep LF-only state file (cross-platform)"
+
+    def test_source_photo_byte_change_alters_fingerprint(self, env, tmp_path,
+                                                          photos_dir):
+        """REVIEW-CODEX-030 P7a-1: per-photo SHA-256 binding. The cheap
+        fingerprint (path/size/mtime) cannot detect a same-size same-mtime
+        byte swap in source images/ — Brush would silently train on photos
+        that didn't produce sparse/0. Bind per-photo SHA-256 so any byte
+        change alters the digest.
+
+        Tamper the same photo in BOTH precomp/images/ and --photos (so the
+        source/caller SHA comparison still passes), and assert the fingerprint
+        changed because the photo bytes changed."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+        digest_a = _state(ws)["stages"]["colmap"]["fingerprint"]
+
+        # Flip one byte in the same photo in both source and --photos dir,
+        # keeping size + mtime identical (defeats the cheap fp).
+        name = next(p.name for p in (precomp / "images").glob("IMG_*.jpg"))
+        for d in (precomp / "images", photos_dir):
+            photo = d / name
+            data = bytearray(photo.read_bytes())
+            data[0] ^= 0xFF
+            st = photo.stat()
+            photo.write_bytes(bytes(data))
+            os.utime(photo, ns=(st.st_atime_ns, st.st_mtime_ns))
+        # Sanity: cheap fingerprint (path/size/mtime) is unchanged by the swap.
+        assert rl._photos_fp(precomp / "images") == rl._photos_fp(photos_dir)
+
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        digest_b = _state(ws)["stages"]["colmap"]["fingerprint"]
+        assert digest_a != digest_b, \
+            "source photo byte change (same size/mtime) must alter fingerprint"
+
+    def test_ws_photo_byte_change_triggers_recopy(self, env, tmp_path,
+                                                   photos_dir):
+        """REVIEW-CODEX-030 P7a-1: ws/images photo bytes tampered (same
+        name/size/mtime) must be detected by post-copy validation → re-copy,
+        not silent skip. The cheap fp can't see this; SHA-256 can."""
+        call, fake, ws, _ = env
+        precomp = tmp_path / "precomp"
+        _make_fake_precomputed(precomp, photos_dir)
+        call("--precomputed-colmap", str(precomp))
+
+        # Tamper ws copy: flip a byte, keep size + mtime.
+        photo = next((ws / "images").glob("IMG_*.jpg"))
+        data = bytearray(photo.read_bytes())
+        data[0] ^= 0xFF
+        st = photo.stat()
+        photo.write_bytes(bytes(data))
+        os.utime(photo, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+        fake.reset()
+        call("--resume", "--precomputed-colmap", str(precomp))
+        assert _colmap_subprocess_cmds(fake) == [], "COLMAP must never run"
+        # ws must be re-copied from source (untampered).
+        src_bytes = (precomp / "images" / photo.name).read_bytes()
+        assert photo.read_bytes() == src_bytes, \
+            "ws photo byte tamper (same size/mtime) must trigger re-copy"
 
 
 class TestColmapExtrasBoundary:
