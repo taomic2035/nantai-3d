@@ -45,6 +45,11 @@
   驱动器/UNC/反斜杠路径和 normalization collision 也仍未形成 host-independent
   fail-closed 合同，fixture 缺失还会 skip。必须按
   `handoff/REVIEW-CODEX-031-glm-5a98ed9-colmap-parser.md` 修正并补 RED；不得 push。
+- **GLM transaction RED WIP 需先修测试合同**：损坏 journal 时不得删除唯一 backup
+  并保留可能混代的 live destination；图片快照必须比较 exact set + size + SHA，而非
+  只有文件名；六个 old→backup/new→live rename 边界、journal 写入、rollback 中断和
+  restart 幂等必须分别注入。详见
+  `handoff/REVIEW-CODEX-032-glm-transaction-red-tests.md`。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
