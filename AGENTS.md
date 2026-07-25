@@ -50,6 +50,12 @@
   只有文件名；六个 old→backup/new→live rename 边界、journal 写入、rollback 中断和
   restart 幂等必须分别注入。详见
   `handoff/REVIEW-CODEX-032-glm-transaction-red-tests.md`。
+- **GLM `d12e265` 仍 held，且是当前唯一任务**：119 tests + Ruff 绿不构成放行。
+  Codex fresh probe 已证明 journal=`prepared` 且第一次 old→backup 后崩溃、journal
+  损坏、journal 缺失三条路径都会删除唯一 backup，并分别留下缺失 sparse 或新旧混代。
+  根因是非原子 journal + 粗粒度 state，不能鉴别六个 rename 边界，也没有 old/new
+  exact-byte manifest 和可中断幂等 rollback。GLM 不得先做 source report；必须按
+  `handoff/REVIEW-CODEX-033-glm-d12e265-transaction.md` 的固定 RED 顺序修正。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
@@ -258,6 +264,26 @@ Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未�
   并重跑 exact build、collision/clearance、reciprocal target/seam visibility、六层和
   post-render v2。详见
   `handoff/FEEDBACK-IMAGE2-035-batch30-spatial-landmarks.md`。
+
+## Batch 31 室内连通性素材（2026-07-25）
+
+- 新增 8 张已目视筛选的 image2 六视角设计输入，覆盖入口阈值、主室、厨房/服务间、
+  阁楼屋架、楼梯/平台、有顶连廊、架空层/地窖和水车机械房；私有候选位于
+  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch31/`。
+- 干净发布 tag 为 `synthetic-village-design-inputs-batch31-2026-07-25`，ZIP SHA-256
+  为 `a29c4032449367fe4efa376b2158b1fed807049fa2ac2bf535185153cdcf9805`；包只含
+  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
+- 这些输入只可指导 canonical room shell、portal graph、楼梯/连廊/屋架/架空层、
+  collision proxy、通风排水和可读的 reciprocal exit。它们仍为 `design-only`、
+  `interior_connectivity=authoring-guidance-not-measured`、
+  `training_use=forbidden-as-multiview`、`clearance_use=forbidden-as-evidence`、
+  `trust_effect=none`。
+- GLM 在 P7 parser/transaction/source-report/source-reality 全部通过 Codex review 后，
+  才可按入口阈值 → 主室/厨房 → 楼梯/连廊 → 阁楼/架空层 → 水车机械房的顺序消费。
+  每一步必须输出 stable room/portal id、双向 edge、transform/material/collision SHA，
+  再重跑 exact build、portal reachability、reciprocal clearance/visibility、六层、
+  seam/target visibility 和 post-render v2。详见
+  `handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md`。
 
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 

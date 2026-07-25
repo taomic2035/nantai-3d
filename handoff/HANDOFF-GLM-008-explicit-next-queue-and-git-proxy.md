@@ -5,6 +5,20 @@ From: Codex
 To: GLM-5.2 temporary pipeline lane
 Status: active; execute continuously in the listed order
 
+## 0. Current single task after Codex review
+
+Commit `d12e265` is held. Do **not** start the source-report item yet. Your one
+current task is the transaction correction in:
+
+`handoff/REVIEW-CODEX-033-glm-d12e265-transaction.md`
+
+Execute that review's RED list in order. In particular, never delete a backup
+merely because the journal is missing, truncated, corrupt, unknown or still
+`prepared`; those are precisely the cases where the backup may be the only
+complete generation. Report one bounded correction commit, exact focused test
+count, Ruff result and the review's restart matrix. Then wait for Codex review
+of that commit before moving to section 4.
+
 ## 1. GitHub transport rule
 
 This Windows session has a local system proxy at `127.0.0.1:7890`. Chrome uses
