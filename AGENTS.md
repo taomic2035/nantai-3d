@@ -234,6 +234,25 @@ Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未�
   RGB、六层与 post-render v2；不得把面板裁切成贴图后称为真实 PBR。详见
   `handoff/FEEDBACK-IMAGE2-034-batch29-material-macrovariation.md`。
 
+## Batch 30 高密度空间地标素材（2026-07-25）
+
+- 新增 8 张已目视筛选的 image2 六视角设计输入，覆盖住宅各面、院落/作坊、架空层/
+  垂直交通、桥—水车维护、路线/排水/挡墙、果园、林缘和公用设施/边界；私有候选位于
+  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch30/`。
+- 干净发布 tag 为 `synthetic-village-design-inputs-batch30-2026-07-25`，ZIP SHA-256
+  为 `e7c0417d5f61f6063388264677fbd635adfcfaf16e7e400cdeef9d58dbad20a1`；包只含
+  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
+- 这些输入只可指导 canonical part/prop family、稳定 semantic id、实例落位、碰撞代理和
+  路线外 landmark zone。它们仍为 `design-only`、
+  `spatial_landmark_positions=authoring-guidance-not-measured`、
+  `training_use=forbidden-as-multiview`、`clearance_use=forbidden-as-evidence`、
+  `trust_effect=none`。
+- GLM 在 P7 安全项闭环后，应按住宅/架空层 → 路线/排水 → 桥水车 → 果园/林缘 →
+  utility/perimeter 的顺序消费；每次用确定性 part/instance report 绑定几何和变换 SHA，
+  并重跑 exact build、collision/clearance、reciprocal target/seam visibility、六层和
+  post-render v2。详见
+  `handoff/FEEDBACK-IMAGE2-035-batch30-spatial-landmarks.md`。
+
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 
 「无限村庄任意坐标漫游」的**管线内核已完整并对抗性验证 CLEAN**（Opus lane）：
