@@ -25,6 +25,9 @@ Rules:
 
 - do not write a repository, global or system Git proxy setting;
 - do not put credentials in the URL or logs;
+- keep making small path-limited commits, but **do not push any current P7
+  commit while Codex still marks one of tasks 2–5 held**; because this is a
+  single shared `main`, pushing one commit would also push every held ancestor;
 - before pushing, require `origin/main...main = 0 N`; if the left count is not
   zero, stop the push and inspect the remote commits;
 - after pushing, require `ls-remote` SHA to equal local `git rev-parse HEAD`;
@@ -154,7 +157,8 @@ intact and must never run COLMAP.
 
 ## 4. Next task — materialize an auditable P7a source report
 
-Start only after task 3 is committed and pushed.
+Start immediately after task 3 is committed and its focused checks are green.
+Do not wait for a push; the held shared-main chain cannot be pushed safely yet.
 
 Commit `30d0e7a` started this item early and remains held with `0978ee7`. Its
 current filename digest is a logical payload digest, not the SHA-256 of the
@@ -187,7 +191,7 @@ name and is not equivalent to `argparse.parse_args(None)`.
 
 ## 5. Next task — fresh real P5b to P7 exact-copy rehearsal
 
-Start only after tasks 2–4 are committed and pushed.
+Start immediately after tasks 2–4 are committed, Codex-reviewed and green.
 
 Run the supported production caller against the existing real P5b recovered
 workspace. Required machine evidence:
@@ -241,9 +245,11 @@ For every task:
 2. implement one bounded task;
 3. run focused tests and lint;
 4. commit only owned paths;
-5. push immediately through the temporary proxy;
-6. write the evidence handoff;
-7. continue to the next listed task without waiting for a reminder.
+5. write the evidence handoff;
+6. continue to the next listed task without waiting for a reminder;
+7. after Codex explicitly clears every held P7 commit, fetch through the
+   per-command proxy, require `origin/main...main = 0 N`, push once through the
+   same temporary proxy, and verify `ls-remote` equals local `HEAD`.
 
 Real capture and paid cloud GPU remain external gates, but they are not a
 reason to stop the internal fail-closed and geometry work above.

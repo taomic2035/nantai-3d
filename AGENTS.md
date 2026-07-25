@@ -36,7 +36,9 @@
   LOD 几何消费。GitHub 网络命令统一用单次临时代理
   `git -c http.proxy=http://127.0.0.1:7890 ...`，不得写全局代理。完整输入、RED
   测试、完成证据、禁止路径和连续工作规则见
-  `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。
+  `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。当前 shared-main
+  含 held P7 祖先，GLM 继续小步本地提交但不得单独 push；Codex 全部放行后才用该
+  临时代理一次推送并以 `ls-remote` 核对 SHA。
 - **GLM `5e1e5ec` 仍 held**：它虽然删除了虚构的 `num_params` 字段，却提交了错误
   camera-model 表（虚构 `8 FULL_FOV=6`、错移 fisheye ids、遗漏 id 11 的 16 参数），
   且只有共用假设的 PINHOLE writer，没有真实 `model_converter` fixture。必须先按

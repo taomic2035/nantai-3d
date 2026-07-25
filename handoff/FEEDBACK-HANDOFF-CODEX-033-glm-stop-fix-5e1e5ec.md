@@ -122,8 +122,10 @@ git rev-list --left-right --count origin/main...main
 
 Do not push while a Codex-held commit remains. Do not change Git proxy config;
 use only the per-command proxy. Commit only the two owned paths plus your
-evidence handoff, with the GLM trailer. Then continue automatically with the
-transaction task; do not report “no work”.
+evidence handoff, with the GLM trailer. A small local commit is not permission
+to push the shared `main`: wait until Codex clears every held P7 ancestor, then
+fetch/push/`ls-remote` once through the per-command proxy. Continue
+automatically with the transaction task meanwhile; do not report “no work”.
 
 ## `39a6d0e` exact-copy run — preserve evidence, do not accept closure
 
