@@ -43,12 +43,13 @@
   `200 passed, 1 skipped`（Windows 无 symlink 权限），Ruff 绿。旧 review 031–034
   只作历史缺陷记录；最终边界见
   `handoff/REVIEW-CODEX-035-glm-p7-parser-wal-v3.md`。
-- **GLM 后续明确任务，不得以“无事可做”停工**：P7 transaction 等 Codex review 时，
-  可在独立新路径实现 exact-build roaming-graph v1 的纯模型、Blender emitter 与
-  fail-closed 测试；先交至少 2 个真实 modeled space、1 个实测 portal、2 条 reciprocal
-  edge 的最小私有 candidate，不能伪造 loop/collision SHA，不能写 `web/data/`。
-  完整输入、交付、禁止路径和验证命令见
-  `handoff/HANDOFF-GLM-009-roaming-graph-producer.md`。
+- **GLM roaming-graph v1 最小里程碑已接受用于 Preview**：checked-in fixture
+  SHA `69fe973870937e838a0d8e6876c519200e371aa03820c8a628649e7385ace8e8`，
+  仅声明 2 rooms、1 个 plan-declared portal、2 条 reciprocal edge、0 loop。
+  Blender 实测只覆盖 collision-proxy 几何 SHA；端点与 clearance 仍是计划声明，
+  不得提升为可行走、360 coverage、metric 或真实场景证据。Python `44 passed`、
+  Viewer `7 passed`、Ruff 绿；边界见
+  `handoff/REVIEW-CODEX-036-glm-roaming-graph-v1.md`。
 - **Batch33 材质源片已发布**：8 张 synthetic RGB source plate 的干净 Release SHA
   `85ccfc05569f6139dc4d81e851c4de9147088cdf58a4e163d43c5690a0109a0b` 已远端回读验证；
   它们不是真实照片、无缝纹理或已测 PBR。仓库已有完整 H3 source/4096
