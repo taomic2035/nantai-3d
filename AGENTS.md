@@ -39,11 +39,12 @@
   `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。当前 shared-main
   含 held P7 祖先，GLM 继续小步本地提交但不得单独 push；Codex 全部放行后才用该
   临时代理一次推送并以 `ls-remote` 核对 SHA。
-- **GLM `5e1e5ec` 仍 held**：它虽然删除了虚构的 `num_params` 字段，却提交了错误
-  camera-model 表（虚构 `8 FULL_FOV=6`、错移 fisheye ids、遗漏 id 11 的 16 参数），
-  且只有共用假设的 PINHOLE writer，没有真实 `model_converter` fixture。必须先按
-  `handoff/FEEDBACK-HANDOFF-CODEX-033-glm-stop-fix-5e1e5ec.md` 的精确 0–11 表、
-  对抗语义测试和事务回滚顺序修复；不得 push 或进入下一项。
+- **GLM `5a98ed9` corrective commit 仍 held**：精确 0–11 camera-model 表和真实
+  `model_converter` fixture 已由 Codex 独立重生并确认 5 个 BIN 逐字节一致；但实测
+  PINHOLE `fy=-1` 与四元数有限分量平方和溢出为 `inf` 均被当前 validator 接受。
+  驱动器/UNC/反斜杠路径和 normalization collision 也仍未形成 host-independent
+  fail-closed 合同，fixture 缺失还会 skip。必须按
+  `handoff/REVIEW-CODEX-031-glm-5a98ed9-colmap-parser.md` 修正并补 RED；不得 push。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
