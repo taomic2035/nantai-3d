@@ -5,23 +5,23 @@ README links here instead of repeating one download block per batch.
 
 ## Trust boundary
 
-All listed design batches are independent synthetic authoring references:
+All listed inputs are independent synthetic authoring references:
 
 ```text
 synthetic=true
-stage=design-only
-camera_calibration=unknown
-geometry_consistency=not-verified
 real_photo_texture=false
 training_use=forbidden-as-multiview
 coverage_use=forbidden
 trust_effect=none
 ```
 
-They may guide canonical Blender geometry, material families, route/portal
-graphs and camera placement. They are not calibrated photographs, real
-textures, SfM/NeRF/3DGS input, measured clearance, or proof of 360-degree
-coverage and arbitrary-coordinate reachability.
+Design boards use `stage=design-only`; Batch33 appearance plates use
+`stage=material-source-only`, `pbr_channels=not-derived` and
+`tileability=not-verified`. They may guide canonical Blender geometry,
+material families, route/portal graphs and camera placement. They are not
+calibrated photographs, real textures, SfM/NeRF/3DGS input, measured
+clearance, or proof of 360-degree coverage and arbitrary-coordinate
+reachability.
 
 ## Base visual pack
 
@@ -37,11 +37,11 @@ registered source records in place.
 
 ## Design batch catalog
 
-The 20 batches below contain 164 final design boards. Archive SHA values are
-the downloadable ZIP digests; per-image and prompt hashes are in each archive
-manifest and linked evidence.
+The 21 batches below contain 172 final replaceable design/material inputs.
+Archive SHA values are the downloadable ZIP digests; per-image and prompt
+hashes are in each archive manifest and linked evidence.
 
-| Batch | Images | Focus | Release | Archive SHA-256 | Evidence |
+| Batch | Inputs | Focus | Release | Archive SHA-256 | Evidence |
 |---:|---:|---|---|---|---|
 | 8 | 6 | reciprocal routes and near occlusion | [Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch8-2026-07-20) | `6bdafc92b9eb2df3a943c4e5df3466e9609c22db89844dc940db3dab6ca921eb` | [detail](../../handoff/FEEDBACK-IMAGE2-012-batch8-reciprocal-route-pack.md) |
 | 9 | 6 | lateral routes and hidden structure | [Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch9-2026-07-20) | `6f7cc48e40e3d323a98e5ca91633cb6a6a7f623d7544efe44317102b3e5648f8` | [detail](../../handoff/FEEDBACK-IMAGE2-013-batch9-lateral-route-pack.md) |
@@ -63,6 +63,7 @@ manifest and linked evidence.
 | 30 | 8 | spatial landmarks and occluded surfaces | [Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch30-2026-07-25) | `e7c0417d5f61f6063388264677fbd635adfcfaf16e7e400cdeef9d58dbad20a1` | [detail](../../handoff/FEEDBACK-IMAGE2-035-batch30-spatial-landmarks.md) |
 | 31 | 8 | interiors, portals and thresholds | [Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch31-2026-07-25) | `a29c4032449367fe4efa376b2158b1fed807049fa2ac2bf535185153cdcf9805` | [detail](../../handoff/FEEDBACK-IMAGE2-036-batch31-interior-continuity.md) |
 | 32 | 8 | multi-scale route and portal loops | [Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch32-2026-07-25) | `737d0dc502ad67eb586d7f4565427f34d94763f81c1385f9afbda2edf06905bd` | [detail](../../handoff/FEEDBACK-IMAGE2-037-batch32-route-loops.md) |
+| 33 | 8 | synthetic material source plates | [Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch33-2026-07-25) | `85ccfc05569f6139dc4d81e851c4de9147088cdf58a4e163d43c5690a0109a0b` | [detail](../../handoff/FEEDBACK-IMAGE2-038-batch33-material-source-plates.md) |
 
 ## Download and verify one batch
 

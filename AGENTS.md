@@ -62,6 +62,11 @@
   edge 的最小私有 candidate，不能伪造 loop/collision SHA，不能写 `web/data/`。
   完整输入、交付、禁止路径和验证命令见
   `handoff/HANDOFF-GLM-009-roaming-graph-producer.md`。
+- **Batch33 材质源片已发布**：8 张 synthetic RGB source plate 的干净 Release SHA
+  `85ccfc05569f6139dc4d81e851c4de9147088cdf58a4e163d43c5690a0109a0b` 已远端回读验证；
+  它们不是真实照片、无缝纹理或已测 PBR。GLM 的 seam/channel derivation、材质槽绑定、
+  2x2/8x8 重复探针与 exact-build 实渲任务见
+  `handoff/FEEDBACK-IMAGE2-038-batch33-material-source-plates.md`。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
