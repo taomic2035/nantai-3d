@@ -32,11 +32,16 @@
   007 仅可在独立新路径上并行，触及 renderer/runtime/journal 时必须先协调。
 - **2026-07-25 GLM 明确连续队列与 Git 网络规则**：先修 P7a-6 当前真实
   `cameras.bin` 格式偏差，再做 exact-file-set 原子替换、content-addressed source
-  report、fresh P5b→P7 exact-copy rehearsal，之后才进入 P6c/P7b 与 Batch27/28
+  report、fresh P5b→P7 exact-copy rehearsal，之后才进入 P6c/P7b 与 Batch27/28/29
   LOD 几何消费。GitHub 网络命令统一用单次临时代理
   `git -c http.proxy=http://127.0.0.1:7890 ...`，不得写全局代理。完整输入、RED
   测试、完成证据、禁止路径和连续工作规则见
   `handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`。
+- **GLM `5e1e5ec` 仍 held**：它虽然删除了虚构的 `num_params` 字段，却提交了错误
+  camera-model 表（虚构 `8 FULL_FOV=6`、错移 fisheye ids、遗漏 id 11 的 16 参数），
+  且只有共用假设的 PINHOLE writer，没有真实 `model_converter` fixture。必须先按
+  `handoff/FEEDBACK-HANDOFF-CODEX-033-glm-stop-fix-5e1e5ec.md` 的精确 0–11 表、
+  对抗语义测试和事务回滚顺序修复；不得 push 或进入下一项。
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
@@ -208,6 +213,24 @@ Batch 6 当前为 **`3/12`**，三张成功素材均在私有、可替换、未�
   topology、地面接触和特征轮廓，再以 content-addressed build、reciprocal cameras、
   seam visibility、六层与 post-render v2 实测。详见
   `handoff/FEEDBACK-IMAGE2-032-batch28-lod-continuity.md`。
+
+## Batch 29 材质宏观变化素材（2026-07-25）
+
+- 新增 8 张已目视筛选的 image2 四面板设计输入，覆盖灰泥、毛石、深色木构、灰瓦、
+  夯土路线、浅溪床、夯土/切坡和林地/果园地表；每张包含近表面、接触节点、中尺度与
+  远尺度表现，私有候选位于
+  `.nantai-studio/synthetic-village/hybrid-v4-candidates/batch29/`。
+- 干净发布 tag 为 `synthetic-village-design-inputs-batch29-2026-07-25`，ZIP SHA-256
+  为 `c3ff4cd08c7f2a2bf115f71e79d86afae2775d7f6c4a73efa00166d93f83469a`；包只含
+  8 PNG、8 prompt、manifest、USAGE 与 payload checksum。
+- 面板只可指导程序材质区域、UV 尺度层次、trim/decal、wet/dry mask 和承载材质变化
+  的几何。它们仍为 `design-only`、`real_photo_texture=false`、
+  `pbr_channel_alignment=not-provided`、`direct_projection_use=forbidden-as-measured-texture`、
+  `training_use=forbidden-as-multiview`、`trust_effect=none`。
+- GLM 在 P7 安全项闭环后，须从 canonical geometry 和独立可授权/程序 payload 实现
+  材质变化，绑定 payload SHA、UV/区域报告并重跑 exact build、UV audit、reciprocal
+  RGB、六层与 post-render v2；不得把面板裁切成贴图后称为真实 PBR。详见
+  `handoff/FEEDBACK-IMAGE2-034-batch29-material-macrovariation.md`。
 
 ## Render-on-demand 无限世界（2026-07-17，内核 + Studio/Viewer 集成就绪）
 
