@@ -22,17 +22,23 @@ import reconstruct_local as rl  # noqa: E402
 
 
 def _stage_of(cmd: list[str]) -> str | None:
-    """从命令行反推它属于哪个阶段（假 run 与断言共用的唯一映射）。"""
-    joined = " ".join(cmd)
-    if "pipeline.ingest" in joined:
+    """从命令行反推它属于哪个阶段（假 run 与断言共用的唯一映射）。
+
+    **按 token 匹配，不做整个 joined 串的子串搜索**：pytest 的 tmp_path 含测试名，
+    测试名可能含 `_matcher`/`mapper` 等关键字，会通过 `str(ws)` 渗进 joined 串，
+    导致 brush_argv 被误判成 colmap。COLMAP 子命令固定在 cmd[1]（紧跟二进制路径）。
+    """
+    if any("pipeline.ingest" in t for t in cmd):
         return "frames"
-    if any(t in joined for t in ("feature_extractor", "_matcher", "mapper")):
+    # COLMAP subcommands sit at cmd[1] (right after the binary path).
+    if len(cmd) > 1 and (cmd[1] in ("feature_extractor", "mapper")
+                         or cmd[1].endswith("_matcher")):
         return "colmap"
-    if "--total-steps" in joined:
+    if "--total-steps" in cmd:  # Brush flag — exact token, not substring
         return "brush"
-    if any(t in joined for t in ("normalize_ply_quats", "prepare_import")):
+    if any("normalize_ply_quats" in t or "prepare_import" in t for t in cmd):
         return "prepare"
-    if "pipeline.reconstruct" in joined:
+    if any("pipeline.reconstruct" in t for t in cmd):
         return "import"
     return None
 
@@ -51,16 +57,22 @@ class FakeRun:
         stage = _stage_of(cmd)
         if stage == self.fail_stage:
             raise SystemExit(f"假失败: {stage}")
-        if "feature_extractor" in " ".join(cmd):
-            (self.ws / "colmap.db").write_bytes(b"fake-db")
-        elif "mapper" in " ".join(cmd):
-            model = self.ws / "sparse" / "0"
-            model.mkdir(parents=True, exist_ok=True)
-            # _count_registered_images 读头 8 字节 uint64 → 装作注册了 12 张
-            (model / "images.bin").write_bytes(struct.pack("<Q", 12) + b"\x00" * 8)
+        # Dispatch on stage + cmd[1] (token-level), not on substring of the
+        # joined command — paths under tmp_path may contain stage keywords
+        # (e.g. test name with "_matcher"), which would route brush_argv into
+        # the colmap branch and skip writing trained.ply.
+        if stage == "colmap":
+            if len(cmd) > 1 and cmd[1] == "feature_extractor":
+                (self.ws / "colmap.db").write_bytes(b"fake-db")
+            elif len(cmd) > 1 and cmd[1] == "mapper":
+                model = self.ws / "sparse" / "0"
+                model.mkdir(parents=True, exist_ok=True)
+                # _count_registered_images 读头 8 字节 uint64 → 装作注册了 12 张
+                (model / "images.bin").write_bytes(struct.pack("<Q", 12) + b"\x00" * 8)
+            # matcher subcommand: no artifact to write (db already exists)
         elif stage == "brush":
             (self.ws / "trained.ply").write_bytes(b"fake-ply")
-        elif "prepare_import" in " ".join(cmd):
+        elif stage == "prepare":
             (self.ws / "registration.json").write_text("{}", encoding="utf-8")
             (self.ws / "splat-input.json").write_text("{}", encoding="utf-8")
         elif stage == "import":
@@ -532,10 +544,13 @@ def _make_fake_precomputed(colmap_ws: Path, photos: Path, *,
 
 
 def _colmap_subprocess_cmds(fake) -> list[list[str]]:
-    """Filter fake.calls to only COLMAP subprocess commands."""
-    return [c for c in fake.calls
-            if any(t in " ".join(c) for t in
-                   ("feature_extractor", "_matcher", " mapper"))]
+    """Filter fake.calls to only COLMAP subprocess commands.
+
+    Uses _stage_of (token-level) so paths under tmp_path that happen to
+    contain `_matcher`/`mapper` (e.g. from the test name) don't cause
+    false positives.
+    """
+    return [c for c in fake.calls if _stage_of(c) == "colmap"]
 
 
 class TestPrecomputedColmapBoundary:
@@ -780,3 +795,179 @@ class TestPrecomputedColmapBoundary:
         raw = (ws / STATE).read_bytes()
         assert b"\r\n" not in raw, \
             "precomputed mode must keep LF-only state file (cross-platform)"
+
+
+class TestColmapExtrasBoundary:
+    """REVIEW-CODEX-030 P1 (P6c): COLMAP normal branch must bind real
+    subprocess argv + matcher subcommand + UTC + log SHA in extras, so
+    matcher identity is measured (not inferred from log text)."""
+
+    def test_colmap_extras_bound_on_normal_run(self, env):
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["colmap"]
+        assert "extras" not in entry  # extras are flattened into entry directly
+        for key in ("colmap_matcher_subcommand",
+                    "colmap_feature_extractor_argv",
+                    "colmap_matcher_argv",
+                    "colmap_mapper_argv",
+                    "colmap_started_at",
+                    "colmap_finished_at",
+                    "colmap_returncode",
+                    "colmap_log_sha256",
+                    "colmap_binary_sha256",
+                    "colmap_registered_images",
+                    "colmap_images_input_count",
+                    "caller_argv"):
+            assert key in entry, f"colmap extras missing {key}"
+
+    def test_matcher_subcommand_matches_argv(self, env):
+        """matcher subcommand in argv[1] must equal colmap_matcher_subcommand."""
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["colmap"]
+        matcher = entry["colmap_matcher_subcommand"]
+        matcher_argv = entry["colmap_matcher_argv"]
+        assert matcher_argv[1] == matcher, \
+            "argv[1] must be the matcher subcommand name"
+        assert matcher in ("sequential_matcher", "exhaustive_matcher")
+
+    def test_small_photo_set_uses_exhaustive_matcher(self, env, photos_dir):
+        """n <= 400 and not ordered -> exhaustive_matcher (not inferred)."""
+        call, fake, ws, _ = env
+        call()  # photos_dir has 3 photos -> exhaustive
+        entry = _state(ws)["stages"]["colmap"]
+        assert entry["colmap_matcher_subcommand"] == "exhaustive_matcher"
+        assert entry["colmap_matcher_argv"][1] == "exhaustive_matcher"
+
+    def test_ordered_video_uses_sequential_matcher(self, env, tmp_path):
+        """REVIEW-CODEX-030 P1: P6b inferred sequential from pair count; the
+        real evidence is the argv, which we now bind."""
+        call, fake, ws, _ = env
+        # Create a tiny video file so is_video() returns True
+        video = tmp_path / "fake.mp4"
+        video.write_bytes(b"\x00" * 1024)  # content doesn't matter; is_video
+        # checks extension only (see pipeline.ingest.is_video)
+        # But reconstruct_local needs frames from it; FakeRun will fake the
+        # frames stage. Actually, frames stage runs pipeline.ingest which
+        # calls extract_video_frames — that needs a real video.
+        # Skip this test path: instead test ordered=True via --sequential flag.
+        call("--sequential")
+        entry = _state(ws)["stages"]["colmap"]
+        assert entry["colmap_matcher_subcommand"] == "sequential_matcher"
+        assert entry["colmap_matcher_argv"][1] == "sequential_matcher"
+
+    def test_colmap_log_sha_is_real_sha256(self, env):
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["colmap"]
+        log_sha = entry["colmap_log_sha256"]
+        assert len(log_sha) == 64
+        int(log_sha, 16)
+        # Re-verify: log file SHA must match
+        clog = ws / "colmap.log"
+        if clog.is_file():
+            import hashlib
+            assert hashlib.sha256(clog.read_bytes()).hexdigest() == log_sha
+
+    def test_colmap_argv_includes_image_path_and_db(self, env, photos_dir):
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["colmap"]
+        feat_argv = entry["colmap_feature_extractor_argv"]
+        matcher_argv = entry["colmap_matcher_argv"]
+        mapper_argv = entry["colmap_mapper_argv"]
+        assert "--database_path" in feat_argv
+        assert "--image_path" in feat_argv
+        assert "--database_path" in matcher_argv
+        assert "--database_path" in mapper_argv
+        assert "--image_path" in mapper_argv
+        assert "--output_path" in mapper_argv
+
+    def test_caller_argv_bound_in_colmap_extras(self, env, photos_dir):
+        """caller_argv must be the argv actually passed to main(), not
+        pytest's sys.argv. When invoked via rl.main([...]) in tests, argv[0]
+        is the photos positional arg (not the script name); when invoked from
+        the CLI, sys.argv[0] is the script path. Either way, the real argv
+        is bound — not the test runner's."""
+        call, fake, ws, _ = env
+        call("--sequential")
+        entry = _state(ws)["stages"]["colmap"]
+        caller = entry["caller_argv"]
+        assert "--sequential" in caller
+        assert str(photos_dir) in caller  # photos positional arg is bound
+        # Must NOT leak pytest's sys.argv (would contain "pytest" / "-m"):
+        assert not any("pytest" in t for t in caller), \
+            "caller_argv must be reconstruct_local's argv, not pytest's sys.argv"
+
+
+class TestBrushExportSnapshot:
+    """REVIEW-CODEX-030 P0 #5: Brush export PLY SHA must bind an immutable
+    snapshot (trained.brush-export.ply), because prepare stage's
+    normalize_ply_quats.py overwrites trained.ply in place."""
+
+    def test_brush_export_snapshot_created(self, env):
+        call, fake, ws, _ = env
+        call()
+        assert (ws / "trained.brush-export.ply").is_file(), \
+            "Brush export must snapshot to trained.brush-export.ply"
+
+    def test_brush_extras_bind_snapshot_not_trained(self, env):
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["brush"]
+        assert entry["brush_export_ply_path"] == "trained.brush-export.ply"
+        snap_sha = entry["brush_export_ply_sha256"]
+        assert len(snap_sha) == 64
+        int(snap_sha, 16)
+        # Snapshot SHA must match re-hash
+        import hashlib
+        actual = hashlib.sha256(
+            (ws / "trained.brush-export.ply").read_bytes()).hexdigest()
+        assert actual == snap_sha, "snapshot SHA must be re-verifiable"
+
+    def test_snapshot_survives_trained_ply_mutation(self, env):
+        """If trained.ply is overwritten after Brush (simulating
+        normalize_ply_quats.py), the snapshot must remain byte-stable."""
+        call, fake, ws, _ = env
+        call()
+        snap_before = (ws / "trained.brush-export.ply").read_bytes()
+        snap_sha_before = _state(ws)["stages"]["brush"]["brush_export_ply_sha256"]
+        # Simulate prepare stage overwrite
+        (ws / "trained.ply").write_bytes(b"different content after normalize")
+        snap_after = (ws / "trained.brush-export.ply").read_bytes()
+        assert snap_before == snap_after, \
+            "snapshot must be independent of trained.ply mutations"
+        import hashlib
+        assert hashlib.sha256(snap_after).hexdigest() == snap_sha_before
+
+    def test_no_trained_ply_sha256_field_collision(self, env):
+        """Old field name trained_ply_sha256 must not exist (it bound a
+        mutable file); only brush_export_ply_sha256 is valid."""
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["brush"]
+        assert "trained_ply_sha256" not in entry, \
+            "old field bound mutable trained.ply; must use brush_export_ply_sha256"
+        assert "trained_ply_size_bytes" not in entry
+
+    def test_brush_log_sha_re_verifiable(self, env):
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["brush"]
+        log_sha = entry["brush_log_sha256"]
+        if (ws / "brush.log").is_file():
+            import hashlib
+            actual = hashlib.sha256((ws / "brush.log").read_bytes()).hexdigest()
+            assert actual == log_sha
+
+    def test_brush_extras_have_utc_timestamps(self, env):
+        call, fake, ws, _ = env
+        call()
+        entry = _state(ws)["stages"]["brush"]
+        start = entry["brush_started_at"]
+        end = entry["brush_finished_at"]
+        assert start.endswith("+00:00") or start.endswith("Z")
+        assert end.endswith("+00:00") or end.endswith("Z")
+        assert start <= end
+

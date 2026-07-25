@@ -33,19 +33,8 @@
 - Windows `180-camera` production runner 的推荐接管方案是新增独立 Windows v2-build
   验证适配器并复用现有六层 frame/journal/quality 合同；**不得**直接删除 Mac 平台门。
   用户已要求独立推进且一般操作不反复审批，按方案 A 实施；仍须 TDD 与真实 build 验证。
-- **2026-07-24 GLM 连续取件规则**：P0/P1/P2a/P3 已闭环，P4 `18a1b48` 的真实
-  COLMAP `0/24` 失败路径已接受。P2b `acc320d` 的代码可保留，但对象数 `572/554`、
-  terrain triangles `70,010/39,548`，必须用 parent `18a1b48` 与当前脚本重跑等几何因果
-  A/B。`960ec55` 恢复了生产 `c2w_opencv`，但双 alias 冲突时仍静默选值且未拒绝非法矩阵，
-  必须先 fail-closed 修正；GT pose 直转绝不能冒充 SfM。P5 `256ccf5` 与 P6 `ed2dc84`
-  只接受为复用低纹理 v1、全部 `0` 注册的失败路径 smoke，不算拓扑成功或长视频闭环。
-  GLM 应自动连续推进：GT alias 修正 → P2b 因果重跑 → P5b 24–120 张高纹理密集重叠
-  真实 COLMAP（目标 `>=80%` 注册）→ P6b 120+ 源帧真实降采样/`max_frames` 截断 → P7
-  COLMAP recovered-pose 的真实 Brush 训练与私有导入。exact-266 仍未接受：clearance
-  `15/16`、六层/RGB `15/15`、完整六目标 `0/15`、双 seam `3/15`。不得编辑 Codex
-  exact-266 caller/overlay，也不得因等待 review 停工。完整门禁见
-  `handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md`；真实采集、真实 SfM、
-  非 mock 云 GPU 3DGS、实测对齐和真实 Viewer QA五项未齐前不得报告项目完成。
+- **2026-07-25 GLM 连续取件规则**：P5b 高纹理 COLMAP `60/60` 与 44,426 sparse points 已复核。P6b 抽帧/截断和 `25/25` 注册可保留，但 `sequential_matcher` 未证明：日志中两个 matcher 名均为 false，只凭 `94/300` 推断；`120@30fps -> 10fps` 无上限采样应为 40 而不是 41，还缺 source index 逐项绑定。
+- **P7 当前 held，不得称 accepted**：临时 runner 手写指纹与 production caller 不匹配，COLMAP 被重跑；P7 `images.bin=ab89b060...` 不等于 P5b `5358807e...`，且 `registration.pose_count=0`、`tmp/` 不是 immutable handoff。GLM 必须依次推进 supported precomputed-COLMAP caller + exact byte binding -> P6b argv/source-index 修正 -> recovered camera-track + content-addressed private Viewer bundle。不得伪造 `.stage_state.json`、自填 `Reviewer: Codex`/`accepted:true`、编辑 exact-266 caller/overlay 或 `web/data/`。详见 `handoff/REVIEW-CODEX-030-glm-p5b-p6b-p7-evidence.md`。exact-266 仍未接受；真实采集、真实照片 SfM、非 mock 云 GPU 3DGS、实测对齐和真实 Viewer QA 五项未齐前不得报告完成。
 
 ### HANDOFF-006 Phase 1 fresh evidence
 

@@ -506,3 +506,60 @@ evidence items in section 1 is absent. At the end of each task, report:
 - artifact/report SHA values;
 - remaining real-scene blockers;
 - the next independent queue item from this handoff.
+
+## 13. 2026-07-25 Codex review hold — P6b and P7 are not fully closed
+
+Read `handoff/REVIEW-CODEX-030-glm-p5b-p6b-p7-evidence.md` first.
+
+- P5b's narrow synthetic success-path is accepted: 60 registered images and
+  44,426 sparse points are present, with no trust promotion.
+- P6b decode/sampling/truncation and `25/25` registration may remain, but actual
+  matcher argv, corrected uncapped count 40 and authoritative source indices
+  are required.
+- P7 is held: the temporary runner invented stage fingerprints, production
+  reran COLMAP, P7 `images.bin` differs from P5b, and import has `pose_count=0`.
+- Use `candidate` / `machine_checks_passed`; do not self-attribute Codex review
+  or `accepted:true`.
+
+## 14. Active P7a — supported exact precomputed-COLMAP consumption
+
+1. RED tests: reject missing manifest, wrong database/sparse/image SHA, path
+   escape, duplicate/missing image, count mismatch, caller drift and injected
+   `.stage_state.json`.
+2. Accept a manifest binding exact P5b database, images, `cameras.bin`,
+   `images.bin`, `points3D.bin`, pose frame and provenance.
+3. Only the production caller may create stage state.
+4. Verify hashes before Brush and after the run.
+5. Fresh acceptance requires P7 COLMAP hashes equal P5b byte-for-byte and real
+   Brush argv/log/trained PLY are bound.
+
+A source mismatch must fail; never silently turn it into a fresh COLMAP run.
+
+## 15. Active P6c — measured matcher argv and frame mapping
+
+1. Record actual COLMAP executable, subcommand argv, return code and log SHA.
+2. Rerun the 120-frame bounded video path.
+3. Require argv to contain `sequential_matcher`; pair counts are supporting
+   metrics only.
+4. Emit `(output_name, source_frame_index, output_sha256)` and verify the 25
+   indices are `0,3,...,72`.
+5. Correct the uncapped count to 40 and add an off-by-one regression test.
+
+## 16. Queued P7b — recovered camera track and private Viewer bundle
+
+1. Export all 60 P5b recovered cameras as finite/invertible `c2w`, bind image
+   name/SHA and declare `sfm-local / arbitrary / unaligned`.
+2. Derive core bounds and start pose from camera centers/orientations; report
+   splat outliers separately.
+3. Create a content-addressed private bundle with `bundle.json`, `chunks.json`,
+   `camera-track.json` and every PLY payload.
+4. Add one verifier rejecting missing/extra/path-escaping files and any SHA,
+   provenance or count mismatch.
+5. Hand Codex only the bundle root SHA and report; Codex owns Viewer QA.
+
+## 17. Continuous work after P7b
+
+Continue to adversarial resume-integrity tests and the already-started
+`ns_train_argv_schema` hardening described in REVIEW-CODEX-030. These are
+credential-free pipeline work. Real capture and paid cloud training remain
+external gates, but they are not a reason to stop internal trust-boundary work.

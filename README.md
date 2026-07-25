@@ -16,7 +16,7 @@
 | 可拼接、可变清晰 | **verified** | 体素去重、区域替换、三级 LOD；度量型空间操作只允许在米制 frame 中执行 |
 | 3DGS 属性保真 | **verified** | DC、完整高阶 SH、opacity、anisotropic scale、rotation、normals 与额外标量 round-trip |
 | Web Gaussian Splat | **verified with runtime fallback** | Spark 2.1.0 渲染完整 3DGS；依赖不可用时降级并标注为 DC point preview |
-| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 102 张路线/包络/跨分块过渡/方向/模块板/构造与材质设计输入（Batch 8–14 各 6 张 + Batch 20–21 各 8 张 + Batch 22 12 张 + Batch 23–24 各 16 张），均有 SHA 与来源边界 |
+| 可替换素材 | **verified** | 11 个确定性 HANDOFF-001 程序素材；Release 另提供 68 个可替换 synthetic 视觉槽位和 116 张路线/包络/跨分块过渡/方向/模块板/构造与材质设计输入（Batch 8–14 各 6 张 + Batch 20–21 各 8 张 + Batch 22 12 张 + Batch 23–24 各 16 张 + Batch 25 8 张 + Batch 26 6 张），均有 SHA 与来源边界 |
 | 180 机位 synthetic 生产计划 | **verified plan / evidence pending** | 180 个有限且无重复 pose、两条 route loop；HUD 单独披露尚未交付的渲染/质量证据，不把机位数称为 360° 覆盖 |
 | Studio UX | **verified local snapshot** | 三栏工作台、六步状态、provenance、LOD/图层控制、覆盖审计与 production plan HUD；本地 adapter 只读，任务仍从 CLI 启动 |
 | 3DGS 训练（外部引擎） | **verified local small / cloud recommended** | 仓库不自研训练器；`scripts/reconstruct_local.py` 可驱动 `third/brush`，本机 Intel 集显已跑通中小场景；大场景/高质量走云 GPU |
@@ -554,6 +554,41 @@ coverage_use=forbidden / trust_effect=none`。
 也不是校准的 equirectangular HDRI。它们不能证明同一物理场景的 360° 一致性、任意坐标可达性、
 真实模型或真实纹理。完整 QA、逐图 SHA 和消费顺序见
 [Batch25 image2 回执](handoff/FEEDBACK-IMAGE2-029-batch25-environment-realism.md)。
+
+### Batch 26 360° 建模构造板
+
+[Batch 26 360 Modeling Boards Release](https://github.com/taomic2035/nantai-3d/releases/tag/synthetic-village-design-inputs-batch26-2026-07-25)
+补充 6 张面向 Blender 建模的通用构造板：地面/水体/挡墙过渡、植被/果园/森林边界、
+建筑后场与服务支撑、桥—水车—溪流连接、分层地形/天空/世界密度，以及材质接触过渡。
+它们用于把稀疏块体场景拆成可替换模块，不绑定某一个固定山村资产。
+
+```powershell
+$releaseDir = ".nantai-studio\release-inputs\batch26"
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+
+gh release download synthetic-village-design-inputs-batch26-2026-07-25 `
+  --repo taomic2035/nantai-3d `
+  --pattern "synthetic-village-360-modeling-boards-batch26-2026-07-25.zip" `
+  --dir $releaseDir
+
+$archive = Join-Path $releaseDir "synthetic-village-360-modeling-boards-batch26-2026-07-25.zip"
+$expected = "91f75d265357f9ff25785c466aafe5dd6a1e104b0608ffc0b40e0972a76dcb39"
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "Batch 26 design pack SHA-256 mismatch" }
+
+Expand-Archive $archive `
+  -DestinationPath ".nantai-studio\synthetic-village\hybrid-v4\design-inputs\batch26" -Force
+```
+
+压缩包严格只含 6 张最终 PNG、6 份精确 prompt、`USAGE.md`、`manifest.json` 和
+`PAYLOAD-SHA256SUMS.txt`；没有 queue、失败变体、contact sheet 或生成缓存。全部输入仍为
+`synthetic / design-only / camera_calibration=unknown / geometry_consistency=not-verified /
+metric_scale=unknown / real_photo_texture=false / training_use=forbidden-as-multiview /
+coverage_use=forbidden / trust_effect=none`。
+
+它们能指导通用几何、支撑、密度和材质接触建模，但不能证明同一物理场景的多视图一致性、
+360° 覆盖、任意坐标可达性、真实模型或真实照片纹理。逐图 SHA、消费优先级与限制见
+[Batch26 image2 回执](handoff/FEEDBACK-IMAGE2-030-batch26-360-modeling-boards.md)。
 
 ## 核心工作流
 

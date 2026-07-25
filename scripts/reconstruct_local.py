@@ -488,6 +488,10 @@ def main(argv: list[str] | None = None) -> int:
                           "缺必需文件 → 拒。本模式仍输出 preview-only (sfm-local)，"
                           "不提升任何信任。"))
     args = ap.parse_args(argv)
+    # REVIEW-CODEX-030 P1 (P6c)：caller_argv 必须绑定真实传入的 argv（测试/库调用
+    # 传 argv=… 时 sys.argv 是 pytest/IDE 的，不是 reconstruct_local 的），这样
+    # matcher 子命令等身份可从 extras 直接验证，无需从日志文本推断。
+    caller_argv: list[str] = list(argv) if argv is not None else list(sys.argv)
 
     if args.precomputed_colmap is not None and not args.precomputed_colmap.is_dir():
         raise SystemExit(
@@ -610,15 +614,21 @@ def main(argv: list[str] | None = None) -> int:
                        outputs_desc="缺 colmap.db / images/ / sparse/0 中的有效模型"):
             clog.write_text("", encoding="utf-8")
             print(f"    匹配器: {matcher} ({'时序连续' if ordered else '无序'}, {n} 图)")
-            run([colmap, "feature_extractor", "--database_path", str(db),
-                 "--image_path", str(args.photos), "--ImageReader.camera_model",
-                 "SIMPLE_RADIAL", f"--{grp}Extraction.use_gpu", gpu], log=clog, tee=True)
-            run([colmap, matcher, "--database_path", str(db),
-                 f"--{grp}Matching.use_gpu", gpu], log=clog, tee=True)
+            # REVIEW-CODEX-030 P1 (P6c)：绑定真实 COLMAP subprocess argv +
+            # matcher 子命令 + UTC + log SHA，不再靠日志文本推断 matcher 身份。
+            colmap_start = datetime.now(UTC)
+            feature_argv = [colmap, "feature_extractor", "--database_path", str(db),
+                            "--image_path", str(args.photos), "--ImageReader.camera_model",
+                            "SIMPLE_RADIAL", f"--{grp}Extraction.use_gpu", gpu]
+            run(feature_argv, log=clog, tee=True)
+            matcher_argv = [colmap, matcher, "--database_path", str(db),
+                            f"--{grp}Matching.use_gpu", gpu]
+            run(matcher_argv, log=clog, tee=True)
             sparse.mkdir(exist_ok=True)
-            run([colmap, "mapper", "--database_path", str(db),
-                 "--image_path", str(args.photos), "--output_path", str(sparse)],
-                log=clog, tee=True)
+            mapper_argv = [colmap, "mapper", "--database_path", str(db),
+                           "--image_path", str(args.photos), "--output_path", str(sparse)]
+            run(mapper_argv, log=clog, tee=True)
+            colmap_end = datetime.now(UTC)
             best_n, n_models = _select_best_colmap_model(sparse)
             frac = best_n / n if n else 0.0
             split = "" if n_models == 1 else f"，COLMAP 分裂成 {n_models} 个子模型(用最大的)"
@@ -640,9 +650,26 @@ def main(argv: list[str] | None = None) -> int:
             if images_dir.exists():
                 shutil.rmtree(images_dir)
             shutil.copytree(args.photos, images_dir)
-            state.record("colmap", parent)
+            colmap_extras = {
+                "caller_argv": caller_argv,
+                "colmap_started_at": colmap_start.isoformat(timespec="seconds"),
+                "colmap_finished_at": colmap_end.isoformat(timespec="seconds"),
+                "colmap_returncode": 0,  # run() 在非 0 时已 SystemExit
+                "colmap_log_sha256": (_sha256_file(clog)
+                                      if clog.is_file() else None),
+                "colmap_matcher_subcommand": matcher,
+                "colmap_feature_extractor_argv": feature_argv,
+                "colmap_matcher_argv": matcher_argv,
+                "colmap_mapper_argv": mapper_argv,
+                "colmap_registered_images": best_n,
+                "colmap_submodel_count": n_models,
+                "colmap_binary_sha256": _sha256_file(Path(colmap)),
+                "colmap_images_input_count": n,
+            }
+            state.record("colmap", parent, extras=colmap_extras)
         else:
-            print(f"    复用已有位姿: sparse/0 注册 {_count_registered_images(sparse / '0')}/{n} 张")
+            reuse_n = _count_registered_images(sparse / "0")
+            print(f"    复用已有位姿: sparse/0 注册 {reuse_n}/{n} 张")
 
     print(f"\n=== 2/4 Brush 训练 3DGS ({args.steps} 步, max-res {args.max_res}) ===")
     trained = ws / "trained.ply"
@@ -655,7 +682,9 @@ def main(argv: list[str] | None = None) -> int:
         "parent": parent, "steps": args.steps, "max_res": args.max_res,
         "binary": _file_fp(Path(brush))})
     if state.begin("brush", parent, unprovable=unprovable,
-                   outputs_ok=trained.is_file() or next(ws.glob("*.ply"), None) is not None,
+                   outputs_ok=trained.is_file() or any(
+                       p.name != "trained.brush-export.ply"
+                       for p in ws.glob("*.ply")),
                    outputs_desc="工作目录里没有 .ply"):
         # REVIEW-CODEX-030 P0 #5：post-run 绑定完整 argv + UTC 起止 + returncode
         # + log SHA + PLY SHA。run() 在 rc!=0 时抛 SystemExit，所以走到 record
@@ -664,18 +693,27 @@ def main(argv: list[str] | None = None) -> int:
         run(brush_argv, log=brush_log, tee=True)
         brush_end = datetime.now(UTC)
         export_now = trained if trained.is_file() else next(ws.glob("*.ply"), None)
+        # Brush 导出后立即快照：prepare 阶段 normalize_ply_quats.py 会 in-place
+        # 覆盖 trained.ply，所以 Brush extras 的 SHA 必须绑定不可变快照
+        # （trained.brush-export.ply），审计者才能重新算 SHA 验证。
+        brush_export_snapshot = ws / "trained.brush-export.ply"
+        if export_now and export_now.is_file():
+            shutil.copy2(export_now, brush_export_snapshot)
         brush_extras = {
             "brush_argv": brush_argv,
-            "caller_argv": list(sys.argv),
+            "caller_argv": caller_argv,
             "brush_started_at": brush_start.isoformat(timespec="seconds"),
             "brush_finished_at": brush_end.isoformat(timespec="seconds"),
             "brush_returncode": 0,  # run() 在非 0 时已 SystemExit
             "brush_log_sha256": (_sha256_file(brush_log)
                                  if brush_log.is_file() else None),
-            "trained_ply_sha256": (_sha256_file(export_now)
-                                   if export_now and export_now.is_file() else None),
-            "trained_ply_size_bytes": (export_now.stat().st_size
-                                       if export_now and export_now.is_file() else None),
+            "brush_export_ply_path": brush_export_snapshot.name,
+            "brush_export_ply_sha256": (_sha256_file(brush_export_snapshot)
+                                        if brush_export_snapshot.is_file() else None),
+            "brush_export_ply_size_bytes": (brush_export_snapshot.stat().st_size
+                                            if brush_export_snapshot.is_file() else None),
+            # 注：trained.ply 本身会被 prepare 阶段 normalize_ply_quats.py 覆盖；
+            # 它的 post-prepare SHA 由 prepare extras 绑定，这里只绑不可变快照。
         }
         state.record("brush", parent, extras=brush_extras)
     export = trained if trained.is_file() else next(ws.glob("*.ply"), None)
