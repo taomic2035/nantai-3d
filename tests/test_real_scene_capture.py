@@ -390,6 +390,54 @@ def test_sfm_accepts_only_matching_colmap_model_capture_and_poses(
     assert result.quality.training_allowed is True
 
 
+def test_sfm_quality_report_binds_exact_colmap_version(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source, workspace = _write_verified_source(tmp_path / "source")
+    run_root = tmp_path / "run"
+    prepared = prepare_real_capture(source, workspace, run_root)
+    image_names = tuple(
+        payload.logical_path for payload in prepared.capture.manifest.payloads
+    )
+
+    def fake_register(photos_dir, out_json, *, workspace, **kwargs):
+        del kwargs
+        registration = mock_register(photos_dir).model_copy(
+            update={
+                "engine": "colmap",
+                "pose_frame": CoordinateFrame(
+                    frame_id="sfm-local",
+                    handedness=Handedness.RIGHT,
+                    axes=AxisConvention.SFM_ARBITRARY,
+                    units=CoordinateUnits.ARBITRARY,
+                    metric_status=MetricStatus.ARBITRARY,
+                    geo_aligned=GeoAlignment.UNALIGNED,
+                    provenance=FrameProvenance.SFM,
+                    evidence=["colmap-joint-model"],
+                ),
+                "alignment_status": AlignmentStatus.UNALIGNED,
+            }
+        )
+        _write_sparse_model(Path(workspace), 0, image_names)
+        _write_registration(Path(out_json), registration)
+        return registration
+
+    monkeypatch.setattr(
+        "pipeline.real_scene_capture.register",
+        fake_register,
+    )
+    monkeypatch.setattr(
+        "pipeline.real_scene_capture.colmap_version",
+        lambda: "COLMAP 4.1.0",
+        raising=False,
+    )
+
+    result = run_real_sfm(prepared, run_root, _policy())
+
+    assert result.quality.engine_version == "COLMAP 4.1.0"
+
+
 def test_sfm_blocks_when_selected_sparse_model_differs_from_poses(
     tmp_path: Path,
     monkeypatch,

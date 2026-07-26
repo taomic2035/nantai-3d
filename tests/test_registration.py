@@ -545,6 +545,44 @@ class TestFindColmapBinary:
         assert reg._find_colmap_binary() is None
         assert reg.colmap_available() is False
 
+    def test_version_probe_binds_the_active_colmap_banner(self, monkeypatch):
+        import pipeline.registration as reg
+
+        monkeypatch.setattr(reg, "_find_colmap_binary", lambda: "/tools/colmap")
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout="",
+                stderr=(
+                    "COLMAP 4.1.0 "
+                    "(Commit fa8e3b3 on 2026-06-26 without CUDA)\n"
+                ),
+            ),
+        )
+        reg.colmap_version.cache_clear()
+
+        assert reg.colmap_version() == "COLMAP 4.1.0"
+
+    def test_version_probe_rejects_an_unidentified_binary(self, monkeypatch):
+        import pipeline.registration as reg
+
+        monkeypatch.setattr(reg, "_find_colmap_binary", lambda: "/tools/colmap")
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout="feature extractor help",
+                stderr="",
+            ),
+        )
+        reg.colmap_version.cache_clear()
+
+        with pytest.raises(RuntimeError, match="version"):
+            reg.colmap_version()
+
     def test_colmap_register_raises_clear_error_when_binary_missing(
         self, tmp_path, monkeypatch,
     ):

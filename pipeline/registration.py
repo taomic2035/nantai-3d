@@ -21,6 +21,7 @@ import argparse
 import functools
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -498,6 +499,30 @@ def _find_colmap_binary() -> str | None:
 
 def colmap_available() -> bool:
     return _find_colmap_binary() is not None
+
+
+@functools.lru_cache(maxsize=1)
+def colmap_version() -> str:
+    """Return the exact active COLMAP version or fail closed."""
+
+    binary = _find_colmap_binary()
+    if binary is None:
+        raise RuntimeError("COLMAP version probe cannot find the active binary")
+    try:
+        completed = subprocess.run(
+            [binary, "feature_extractor", "-h"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("COLMAP version probe could not run") from exc
+    text = (completed.stdout or "") + (completed.stderr or "")
+    match = re.search(r"\bCOLMAP\s+(\d+(?:\.\d+)+)\b", text)
+    if completed.returncode != 0 or match is None:
+        raise RuntimeError("COLMAP version probe did not prove an exact version")
+    return f"COLMAP {match.group(1)}"
 
 
 @functools.lru_cache(maxsize=1)
