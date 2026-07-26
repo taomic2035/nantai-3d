@@ -1,0 +1,72 @@
+{
+  "schema": "nantai.preview-release-input-lock.v1",
+  "version": "v1.0.0-preview.2",
+  "runtime_allowlist": [
+    "LICENSE",
+    "README.md",
+    "make.py",
+    "pyproject.toml",
+    "pipeline/**/*.py",
+    "scripts/**/*.py",
+    "web/studio/**",
+    "web/viewer/**",
+    "docs/releases/**",
+    "docs/manual/**"
+  ],
+  "runtime_exclusions": [
+    "**/*.test.mjs",
+    "**/__pycache__/**",
+    "web/data/**"
+  ],
+  "source_manifests": [
+    {
+      "path": "assets/registry.json",
+      "role": "asset-registry",
+      "sha256": "7b22f70368f07920a2a8423dd47d7e3e1c04b8f35fe1fc5ca3ab6aa5ce3c5299"
+    },
+    {
+      "path": "web/data/manifest.json",
+      "role": "world-manifest",
+      "sha256": "ba03b501c1f190aaa74d0e97db9e3d7856fc5c15d6495e58b46755e9142c529a"
+    },
+    {
+      "path": "web/data/recon/model-preview/manifest.json",
+      "role": "model-preview-manifest",
+      "sha256": "43fe16aa179b79cc26c1989b54afb725f32b554c26ddbacc220fc967e012b990"
+    },
+    {
+      "path": "web/data/recon/recon_manifest.json",
+      "role": "reconstruction-manifest",
+      "sha256": "c292fc762ace57050f7249ef2ed5c2b247f58893cb37c25b0249ff2e2ccbf650"
+    }
+  ],
+  "expected_counts": {
+    "baked_world_chunks": 25,
+    "gaussians": 67858,
+    "model_mesh_objects": 539,
+    "model_visual_materials": 24,
+    "registry_assets": 11
+  },
+  "protected_roots": [
+    "assets",
+    "web/data"
+  ],
+  "entrypoints": {
+    "studio": "/web/studio/",
+    "viewer": "/web/viewer/"
+  },
+  "excluded_prefixes": [
+    ".nantai-studio/",
+    "handoff/",
+    "tests/",
+    "web/data/recon/source-consistent-canary-v1/"
+  ],
+  "scene_trust": {
+    "synthetic": true,
+    "geometry_usability": "preview-only",
+    "units": "arbitrary",
+    "alignment_status": "unaligned",
+    "real_photo_textures": false,
+    "trust_effect": "none"
+  }
+}
