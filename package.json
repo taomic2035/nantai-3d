@@ -4,6 +4,7 @@
   "private": true,
   "description": "Pinned browser runtime for Nantai 3D Viewer acceptance",
   "scripts": {
+    "capture:viewer": "node scripts/capture_viewer_acceptance.mjs",
     "test:viewer": "node --test web/viewer/*.test.mjs"
   },
   "devDependencies": {

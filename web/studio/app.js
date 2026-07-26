@@ -564,6 +564,17 @@ function setupB1PrimaryAction() {
   });
 }
 
+function viewerFrameSource(frame) {
+  const source = new URL(frame.dataset.src, window.location.href);
+  const requested = new URLSearchParams(
+    window.location.search,
+  ).get('viewerPresentation');
+  if (requested === 'points') {
+    source.searchParams.set('presentation', 'points');
+  }
+  return source.href;
+}
+
 function setupViewerBridge() {
   const frame = byId('viewer-frame');
   const status = byId('viewer-status');
@@ -701,7 +712,7 @@ function setupViewerBridge() {
     },
   });
   bridge.start();
-  frame.src = frame.dataset.src;
+  frame.src = viewerFrameSource(frame);
 
   byId('reset-camera').addEventListener('click', () => {
     bridge.command('resetCamera').catch((error) => announce(error.message));

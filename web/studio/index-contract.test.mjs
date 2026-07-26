@@ -72,7 +72,21 @@ test('viewer iframe loads only after the bridge listener starts', () => {
     /id="viewer-frame"[^>]*data-src="\/web\/viewer\/index\.html\?embed=1"/s,
   );
   assert.doesNotMatch(html, /id="viewer-frame"[^>]*\ssrc=/s);
-  assert.match(app, /bridge\.start\(\);\s*frame\.src\s*=\s*frame\.dataset\.src;/);
+  assert.match(
+    app,
+    /bridge\.start\(\);\s*frame\.src\s*=\s*viewerFrameSource\(frame\);/,
+  );
+});
+
+test('acceptance launch can request points before heavy mesh loading', () => {
+  assert.match(
+    app,
+    /function viewerFrameSource\(frame\)[\s\S]*new URL\(frame\.dataset\.src,[\s\S]*viewerPresentation[\s\S]*requested\s*===\s*['"]points['"][\s\S]*searchParams\.set\(['"]presentation['"],\s*['"]points['"]\)/,
+  );
+  assert.doesNotMatch(
+    app,
+    /searchParams\.set\(['"]presentation['"],\s*requested\)/,
+  );
 });
 
 test('Studio quietly probes and loads the canonical coverage audit after Viewer readiness', () => {
