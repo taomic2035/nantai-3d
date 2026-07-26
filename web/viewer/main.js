@@ -119,6 +119,10 @@ import {
   createFrameIntervalSampler,
 } from './frame-performance.mjs';
 import {
+  classifyRenderedRepresentation,
+  createViewerAcceptanceProbe,
+} from './acceptance-probe.mjs';
+import {
   acceptStartupFallback,
   advanceStartup,
   completeStartup,
@@ -192,6 +196,22 @@ let atomicMeshRetryAt = 0;
 let meshProfileEvent = null;
 let meshProfileRuntimeEvidence = null;
 const frameIntervalSampler = createFrameIntervalSampler();
+const viewerAcceptanceProbe = createViewerAcceptanceProbe();
+let viewerAcceptanceActive = false;
+window.__NANTAI_VIEWER_ACCEPTANCE__ = Object.freeze({
+  version: 'nantai.viewer-acceptance-probe.v1',
+  beginPose: (payload) => {
+    const evidence = viewerAcceptanceProbe.beginPose(payload);
+    viewerAcceptanceActive = true;
+    return evidence;
+  },
+  markTimedOut: (payload) => {
+    const evidence = viewerAcceptanceProbe.markTimedOut(payload);
+    viewerAcceptanceActive = false;
+    return evidence;
+  },
+  snapshot: () => viewerAcceptanceProbe.snapshot(),
+});
 let viewerBridge = null;
 let splatLayer = null;
 let spatialSplatLayer = null;
@@ -3131,6 +3151,22 @@ function animate() {
   updateHUD();
   drawMinimap();
   renderer.render(scene, camera);
+  if (viewerAcceptanceActive) {
+    const evidence = viewerAcceptanceProbe.recordRenderedFrame({
+      nowMs: performance.now(),
+      representation: classifyRenderedRepresentation({
+        presentationMode,
+        reconstructionVisible: reconVisible,
+        rendererState: activeReconstructionState(),
+      }),
+    });
+    if (
+      evidence.completed
+      || evidence.state === 'representation-lost'
+    ) {
+      viewerAcceptanceActive = false;
+    }
+  }
 }
 
 main().catch(err => {
