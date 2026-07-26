@@ -218,6 +218,7 @@ class RealSceneImportReceipt(FrozenModel):
         if self.source_role == "production-acceptance":
             if (
                 self.training_quality_role != "production"
+                or self.gaussian_count < 100_000
                 or self.target_units != "meters"
                 or self.geometry_usability != "metric-aligned"
                 or self.chunk_units != "metres"
@@ -225,7 +226,8 @@ class RealSceneImportReceipt(FrozenModel):
                 or self.alignment_rms_m > 0.25
             ):
                 raise ValueError(
-                    "production import requires verified metric evidence"
+                    "production import requires production training, "
+                    "at least 100000 Gaussians, and verified metric evidence"
                 )
         elif (
             self.target_units != "arbitrary"

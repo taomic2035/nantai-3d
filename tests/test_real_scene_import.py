@@ -719,6 +719,12 @@ def test_production_import_is_metric_chunked_and_content_closed(
     assert receipt.chunk_units == "metres"
     assert receipt.geometry_usability == "metric-aligned"
     assert receipt.alignment_rms_m == pytest.approx(0.0, abs=1e-12)
+    with pytest.raises(ValueError, match="100000"):
+        RealSceneImportReceipt.model_validate(
+            receipt.model_copy(
+                update={"gaussian_count": 99_999}
+            ).model_dump(by_alias=True)
+        )
     assert transform["transform_id"].startswith("xf-")
     assert manifest["artifacts"]["chunks"]["total_points"] == 100_000
     assert validate_real_scene_import_receipt(
