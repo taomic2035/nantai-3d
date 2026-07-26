@@ -173,6 +173,38 @@ test('embedded viewer starts focused and keeps evidence one click away', () => {
   assert.match(main, /focused\s*\?\s*'显示信息'\s*:\s*'专注画面'/);
 });
 
+test('startup UI names stages and makes required-model failure recoverable', () => {
+  for (const id of [
+    'loading-heading',
+    'loading-text',
+    'loading-retry',
+    'loading-fallback',
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(html, /id="loading"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(html, /id="loading-retry"[^>]*>重试加载</);
+  assert.match(html, /id="loading-fallback"[^>]*>查看高斯\s*\/\s*点云后备</);
+  assert.match(main, /from ['"]\.\/startup-state\.mjs['"]/);
+  assert.match(main, /advanceStartup\(/);
+  assert.match(main, /failStartup\(/);
+  assert.match(main, /startupViewModel\(/);
+  assert.match(main, /window\.location\.reload\(\)/);
+  assert.match(main, /await\s+waitForStartupFallback\(\)/);
+  assert.match(main, /loadModelPreview\([^)]*\{[^}]*onStage/s);
+  assert.match(
+    main,
+    /startupState\.fallback_used\s*\?\s*['"]points['"]\s*:\s*selectInitialPresentationMode/,
+  );
+});
+
+test('presentation switch names the model and Gaussian point representations', () => {
+  assert.match(main, /查看高斯\s*\/\s*点云/);
+  assert.match(main, /查看整村模型/);
+  assert.match(main, /presentationMode\s*===\s*['"]model['"]/);
+  assert.match(main, /presentationMode\s*===\s*['"]points['"]/);
+});
+
 test('viewer loads coverage audit independently from reconstruction artifacts', () => {
   assert.match(main, /from ['"]\.\/coverage-audit\.mjs['"]/);
   assert.match(main, /kind\s*===\s*['"]coverage-audit['"]/);

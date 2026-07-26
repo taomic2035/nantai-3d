@@ -66,13 +66,41 @@
   }
   #loading {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    color: #fff; font-size: 18px; text-align: center; z-index: 100;
+    width: min(420px, calc(100vw - 32px)); padding: 24px;
+    color: #fff; text-align: center; z-index: 100;
+    background: rgba(17, 23, 29, 0.94);
+    border: 1px solid rgba(127,209,255,0.28); border-radius: 14px;
+    box-shadow: 0 22px 70px rgba(0,0,0,0.45); backdrop-filter: blur(12px);
   }
   #loading .spinner {
     width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.1);
     border-top: 3px solid #7fd1ff; border-radius: 50%;
     animation: spin 0.8s linear infinite; margin: 0 auto 12px;
   }
+  #loading.is-failed { border-color: rgba(255,171,163,0.55); }
+  #loading.is-failed .spinner { display: none; }
+  #loading-heading { color: #eaf6ff; font-size: 18px; font-weight: 650; }
+  #loading-text {
+    margin-top: 8px; color: #aebbc5; font-size: 13px; line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+  .loading-actions {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+    margin-top: 18px;
+  }
+  .loading-actions button {
+    min-height: 38px; padding: 8px 13px; color: #eaf6ff;
+    background: #27313b; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 7px; cursor: pointer;
+  }
+  #loading-fallback {
+    color: #07141c; background: #7fd1ff; border-color: #7fd1ff;
+    font-weight: 650;
+  }
+  .loading-actions button:focus-visible {
+    outline: 2px solid #7fd1ff; outline-offset: 2px;
+  }
+  .loading-actions button[hidden] { display: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
   #minimap-wrap {
     position: fixed; top: 12px; right: 12px; padding: 10px;
@@ -267,9 +295,14 @@
   旋转: 鼠标拖拽
 </div>
 
-<div id="loading">
-  <div class="spinner"></div>
-  <div id="loading-text">加载场景...</div>
+<div id="loading" role="status" aria-live="polite" aria-atomic="true">
+  <div class="spinner" aria-hidden="true"></div>
+  <h2 id="loading-heading">准备场景</h2>
+  <p id="loading-text">加载场景...</p>
+  <div class="loading-actions">
+    <button id="loading-retry" type="button" hidden>重试加载</button>
+    <button id="loading-fallback" type="button" hidden>查看高斯 / 点云后备</button>
+  </div>
 </div>
 
 <!-- 离线发行: 依赖已 vendored 到 ./vendor (three 0.180.0 + Spark 2.1.0, Spark 的 wasm/worker

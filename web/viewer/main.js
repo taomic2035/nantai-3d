@@ -118,6 +118,14 @@ import {
 import {
   createFrameIntervalSampler,
 } from './frame-performance.mjs';
+import {
+  acceptStartupFallback,
+  advanceStartup,
+  completeStartup,
+  createStartupState,
+  failStartup,
+  startupViewModel,
+} from './startup-state.mjs';
 
 // ============ 配置 ============
 const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
@@ -212,6 +220,58 @@ let skyDome = null;
 let teleportDialog = null;
 let teleportInput = null;
 let teleportError = null;
+let startupState = createStartupState();
+let startupFallbackResolve = null;
+
+function renderStartup() {
+  const loading = document.getElementById('loading');
+  const heading = document.getElementById('loading-heading');
+  const detail = document.getElementById('loading-text');
+  const retry = document.getElementById('loading-retry');
+  const fallback = document.getElementById('loading-fallback');
+  const view = startupViewModel(startupState);
+
+  loading.classList.toggle('is-failed', view.status === 'failed');
+  heading.textContent = view.heading;
+  detail.textContent = view.detail;
+  retry.hidden = !view.show_retry;
+  fallback.hidden = !view.show_fallback;
+  fallback.textContent = startupState.fallback_label ?? '查看高斯 / 点云后备';
+}
+
+function setStartupStage(stage, detail) {
+  startupState = advanceStartup(startupState, stage, detail);
+  renderStartup();
+}
+
+function showStartupFailure(stage, reason, fallbackAvailable = false) {
+  startupState = failStartup(startupState, {
+    stage,
+    reason,
+    fallbackAvailable,
+  });
+  renderStartup();
+}
+
+function waitForStartupFallback() {
+  return new Promise((resolve) => {
+    startupFallbackResolve = resolve;
+  });
+}
+
+function setupStartupControls() {
+  document.getElementById('loading-retry').addEventListener('click', () => {
+    window.location.reload();
+  });
+  document.getElementById('loading-fallback').addEventListener('click', () => {
+    if (!startupFallbackResolve) return;
+    startupState = acceptStartupFallback(startupState);
+    renderStartup();
+    const resolve = startupFallbackResolve;
+    startupFallbackResolve = null;
+    resolve();
+  });
+}
 
 // ============ PLY Loader ============
 function parsePly(buffer) {
@@ -1556,8 +1616,10 @@ function syncPresentationVisibility() {
       : presentationMode === 'mesh' && modelPreviewRoot
         ? '查看整村模型'
         : presentationMode === 'model'
-          ? '查看点云'
-          : '查看点云';
+          ? '查看高斯 / 点云'
+          : modelPreviewRoot
+            ? '查看整村模型'
+            : '查看高斯 / 点云';
     toggle.setAttribute('aria-pressed', String(presentationMode !== 'points'));
   }
   if (badge) {
@@ -1724,6 +1786,8 @@ function setupPresentationToggle() {
     try {
       if (presentationMode === 'points' && meshWorldAvailable(manifest)) {
         setPresentationMode('mesh');
+      } else if (presentationMode === 'points' && modelPreviewRoot) {
+        setPresentationMode('model');
       } else if (presentationMode === 'mesh' && modelPreviewRoot) {
         setPresentationMode('model');
       } else {
@@ -1735,14 +1799,25 @@ function setupPresentationToggle() {
   });
 }
 
-async function loadModelPreview(url = modelPreviewManifestUrl) {
+async function loadModelPreview(
+  url = modelPreviewManifestUrl,
+  { onStage = () => {} } = {},
+) {
+  let activeStage = 'model-manifest';
   try {
+    onStage(activeStage, '读取并验证合成模型清单');
     const absoluteManifestUrl = new URL(url, window.location.href);
     if (absoluteManifestUrl.origin !== window.location.origin) {
       throw new Error('Model preview manifest must be same-origin');
     }
     const manifestResponse = await fetch(absoluteManifestUrl.href);
-    if (manifestResponse.status === 404) return { status: 'absent' };
+    if (manifestResponse.status === 404) {
+      return {
+        status: 'absent',
+        stage: activeStage,
+        reason: '模型预览清单不存在 (HTTP 404)',
+      };
+    }
     if (!manifestResponse.ok) {
       throw new Error(`Model preview manifest load failed: ${manifestResponse.status}`);
     }
@@ -1752,6 +1827,8 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
       nextManifest,
       window.location.origin,
     );
+    activeStage = 'model-bytes';
+    onStage(activeStage, '下载模型数据并校验 SHA-256');
     const modelResponse = await fetch(modelUrl);
     if (!modelResponse.ok) {
       throw new Error(`Model preview GLB load failed: ${modelResponse.status}`);
@@ -1760,6 +1837,8 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
     const expectedSha256 = modelPreviewSha256(nextManifest);
     await verifyModelPreviewBytes(bytes, expectedSha256);
 
+    activeStage = 'model-parse';
+    onStage(activeStage, '解析已校验模型并检查可渲染边界');
     const loader = new GLTFLoader();
     const gltf = await loader.parseAsync(bytes, new URL('./', modelUrl).href);
     const root = gltf.scene;
@@ -1804,7 +1883,7 @@ async function loadModelPreview(url = modelPreviewManifestUrl) {
     presentationMode = 'points';
     syncPresentationVisibility();
     console.warn('合成模型预览已拒绝，保留点云视图:', error);
-    return { status: 'rejected', reason: error.message };
+    return { status: 'rejected', stage: activeStage, reason: error.message };
   }
 }
 
@@ -1890,6 +1969,7 @@ function applyFraming(frame, resetCamera = true) {
 
 // ============ 初始化 ============
 function init() {
+  setupStartupControls();
   setupDisplayMode();
   setupPresentationToggle();
   scene = new THREE.Scene();
@@ -2631,27 +2711,44 @@ async function main() {
   } catch (error) {
     console.warn('已拒绝不安全的模型预览入口，使用内置预览:', error);
   }
-  loadingText.textContent = '加载 manifest.json...';
+  setStartupStage('world-manifest', '读取并验证世界 manifest.json');
 
   const res = await fetch(worldManifestUrl);
   if (!res.ok) {
-    loadingText.textContent = `错误: 无法加载 manifest.json (${res.status})`;
+    showStartupFailure(
+      'world-manifest',
+      `无法加载世界 manifest.json (HTTP ${res.status})`,
+    );
     return;
   }
   manifest = await res.json();
   if (!manifest.chunks?.length) throw new Error('manifest.json 没有可显示的 chunks');
   chunkSizeM = manifest.chunk_size_m ?? 200;
   buildChunkIndex();
+  setStartupStage('reconstruction-manifest', '读取可选重建清单与可信度证据');
   await loadReconManifest();
   applyFraming(computeFraming(manifest, reconManifest));
+  setStartupStage('reconstruction', '初始化高斯渲染器与点云后备');
   await loadReconstructionLayer();
-  loadingText.textContent = '检查已校验的合成模型预览...';
-  const modelPreviewResult = await loadModelPreview();
-  const initialPresentation = selectInitialPresentationMode({
-    manifest,
-    modelAvailable: modelPreviewResult.status === 'loaded',
-    search: window.location.search,
-  });
+  const modelPreviewResult = await loadModelPreview(
+    modelPreviewManifestUrl,
+    { onStage: setStartupStage },
+  );
+  if (modelPreviewResult.status !== 'loaded') {
+    showStartupFailure(
+      modelPreviewResult.stage,
+      modelPreviewResult.reason ?? '模型预览不可用',
+      true,
+    );
+    await waitForStartupFallback();
+  }
+  const initialPresentation = startupState.fallback_used
+    ? 'points'
+    : selectInitialPresentationMode({
+      manifest,
+      modelAvailable: modelPreviewResult.status === 'loaded',
+      search: window.location.search,
+    });
   if (initialPresentation === 'mesh') {
     setPresentationMode('mesh', { resetCamera: false });
     applyMeshWorldFraming();
@@ -2717,6 +2814,13 @@ async function main() {
   });
   if (presentationMode === 'points') await waitInit();
 
+  startupState = completeStartup(
+    startupState,
+    startupState.fallback_used
+      ? '高斯 / 点云后备可交互；模型失败未改变场景可信度'
+      : '已校验模型场景可交互',
+  );
+  renderStartup();
   document.getElementById('loading').style.display = 'none';
   document.getElementById('hud').style.display = 'block';
   document.getElementById('controls').style.display = 'block';
@@ -3031,5 +3135,19 @@ function animate() {
 
 main().catch(err => {
   console.error(err);
-  document.getElementById('loading-text').textContent = `错误: ${err.message}`;
+  try {
+    showStartupFailure(
+      startupState.stage ?? 'world-manifest',
+      err.message,
+      false,
+    );
+  } catch {
+    const loading = document.getElementById('loading');
+    loading.style.display = 'block';
+    loading.classList.add('is-failed');
+    document.getElementById('loading-heading').textContent = '场景启动失败';
+    document.getElementById('loading-text').textContent = err.message;
+    document.getElementById('loading-retry').hidden = false;
+    document.getElementById('loading-fallback').hidden = true;
+  }
 });
