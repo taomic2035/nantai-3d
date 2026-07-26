@@ -148,6 +148,59 @@ def test_probe_failure_flags_cannot_pass(field, message):
     assert any(message in gate for gate in decision.failed_gates)
 
 
+def test_never_interactive_timeout_keeps_time_unknown_and_fails():
+    report = _report()
+    pose = report.poses[0].model_copy(
+        update={
+            "representation": "unavailable",
+            "interactive_ms": None,
+            "warmup_frame_ms": (),
+            "measured_frame_ms": (),
+            "timed_out": True,
+        }
+    )
+    timed_out = report.model_copy(
+        update={"poses": (pose, *report.poses[1:])}
+    )
+
+    decision = derive_viewer_decision(_policy(), timed_out)
+
+    assert decision.accepted is False
+    assert any(
+        "interactive time unavailable" in gate
+        for gate in decision.failed_gates
+    )
+    assert decision.maximum_observed_interactive_ms == 15_000.0
+
+
+def test_missing_interactive_time_without_timeout_is_invalid():
+    report = _report()
+    pose = report.poses[0].model_copy(update={"interactive_ms": None})
+    damaged = report.model_copy(
+        update={"poses": (pose, *report.poses[1:])}
+    )
+
+    with pytest.raises(ViewerAcceptanceError, match="invalid"):
+        derive_viewer_decision(_policy(), damaged)
+
+
+@pytest.mark.parametrize("renderer", ["unknown", "masked", "WebKit WebGL"])
+def test_unidentified_gpu_renderer_cannot_pass(renderer):
+    report = _report()
+    runtime = report.runtime.model_copy(update={"gpu_renderer": renderer})
+
+    decision = derive_viewer_decision(
+        _policy(),
+        report.model_copy(update={"runtime": runtime}),
+    )
+
+    assert decision.accepted is False
+    assert any(
+        "GPU renderer identity" in gate
+        for gate in decision.failed_gates
+    )
+
+
 @pytest.mark.parametrize(
     ("duration", "message"),
     [
@@ -227,3 +280,39 @@ def test_report_authored_acceptance_boolean_is_forbidden():
 
     with pytest.raises(ViewerAcceptanceError, match="authored"):
         derive_viewer_decision(_policy(), report)
+
+
+def test_cli_rederives_decision_and_returns_two_for_rejection(
+    tmp_path,
+    capsys,
+):
+    from pipeline.viewer_acceptance import main
+
+    policy_path = tmp_path / "policy.json"
+    report_path = tmp_path / "report.json"
+    decision_path = tmp_path / "decision.json"
+    policy_path.write_text(
+        _policy().model_dump_json(by_alias=True),
+        encoding="utf-8",
+    )
+    report_path.write_text(
+        _report(representation="dc-point-preview").model_dump_json(
+            by_alias=True
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--policy",
+            str(policy_path),
+            "--report",
+            str(report_path),
+            "--decision",
+            str(decision_path),
+        ]
+    )
+
+    assert exit_code == 2
+    assert '"accepted":false' in decision_path.read_text(encoding="utf-8")
+    assert "REJECTED" in capsys.readouterr().out

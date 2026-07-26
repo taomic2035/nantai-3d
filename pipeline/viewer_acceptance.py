@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
+from pathlib import Path
 from typing import Literal
 
 from pydantic import (
@@ -111,7 +114,8 @@ class ViewerPoseMeasurement(FrozenModel):
         "mesh-preview",
         "unavailable",
     ]
-    interactive_ms: float = Field(
+    interactive_ms: float | None = Field(
+        default=None,
         ge=0.0,
         allow_inf_nan=False,
     )
@@ -134,6 +138,16 @@ class ViewerPoseMeasurement(FrozenModel):
                 "viewer frame samples must be finite and positive"
             )
         return value
+
+    @model_validator(mode="after")
+    def _unknown_interactive_time_requires_timeout(
+        self,
+    ) -> ViewerPoseMeasurement:
+        if self.interactive_ms is None and not self.timed_out:
+            raise ValueError(
+                "unknown interactive time requires an explicit timeout"
+            )
+        return self
 
 
 class ViewerPerformanceReport(FrozenModel):
@@ -250,6 +264,18 @@ def derive_viewer_decision(
             f"{len(report.unhandled_rejections)}"
         )
     renderer = report.runtime.gpu_renderer.casefold()
+    generic_renderers = {
+        "masked",
+        "unknown",
+        "webkit webgl",
+        "webgl",
+    }
+    if (
+        renderer.strip() in generic_renderers
+        or report.runtime.gpu_vendor.casefold().strip()
+        in {"masked", "unknown"}
+    ):
+        failures.append("GPU renderer identity was not measurable")
     if any(
         marker in renderer
         for marker in ("swiftshader", "llvmpipe", "software")
@@ -284,8 +310,16 @@ def derive_viewer_decision(
             failures.append(f"{pose.pose_id}: loading timeout")
         if pose.sample_overflow:
             failures.append(f"{pose.pose_id}: sample buffer overflow")
-        interactive_values.append(pose.interactive_ms)
-        if pose.interactive_ms > policy.maximum_interactive_ms:
+        if pose.interactive_ms is None:
+            failures.append(
+                f"{pose.pose_id}: interactive time unavailable"
+            )
+        else:
+            interactive_values.append(pose.interactive_ms)
+        if (
+            pose.interactive_ms is not None
+            and pose.interactive_ms > policy.maximum_interactive_ms
+        ):
             failures.append(
                 f"{pose.pose_id}: interactive_ms "
                 f"{pose.interactive_ms:.6g} > "
@@ -332,3 +366,60 @@ def derive_viewer_decision(
             default=0.0,
         ),
     )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ) + "\n"
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Re-derive Viewer acceptance from raw browser evidence."
+        )
+    )
+    parser.add_argument("--policy", required=True)
+    parser.add_argument("--report", required=True)
+    parser.add_argument("--decision")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        policy = ViewerPerformancePolicy.model_validate_json(
+            Path(args.policy).read_bytes()
+        )
+        report = ViewerPerformanceReport.model_validate_json(
+            Path(args.report).read_bytes()
+        )
+        decision = derive_viewer_decision(policy, report)
+    except (OSError, ValueError, ViewerAcceptanceError) as exc:
+        print(f"INVALID: {exc}")
+        return 2
+
+    decision_json = _canonical_json(
+        decision.model_dump(mode="json", by_alias=True)
+    )
+    if args.decision:
+        Path(args.decision).write_text(
+            decision_json,
+            encoding="ascii",
+            newline="",
+        )
+    verdict = "ACCEPTED" if decision.accepted else "REJECTED"
+    print(
+        f"{verdict}: {len(decision.failed_gates)} failed gate(s)"
+    )
+    for failure in decision.failed_gates:
+        print(f"- {failure}")
+    return 0 if decision.accepted else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
