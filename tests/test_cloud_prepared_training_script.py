@@ -97,6 +97,23 @@ if [ "${1:-}" = "-m" ] && [ "${2:-}" = "cloud.prepare_real_scene_dataset" ]; the
 {"request_id":"canary","training_config":{"random_seed":42,"total_steps":12,"trainer_name":"nerfstudio-splatfacto","trainer_version":"1.1.5"}}
 JSON
   printf 'trainer: nerfstudio-splatfacto\n' > "$OUTPUT/evidence/operator-intent-config.yml"
+  printf '%s\n' '{"test_filenames":["images/eval.jpg"]}' > "$OUTPUT/transforms.json"
+  printf '%s\n' '{"schema":"nantai.held-out-split.v1"}' > "$OUTPUT/evidence/held-out-split.json"
+  exit 0
+fi
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "cloud.evaluate_real_scene" ]; then
+  shift 2
+  RUN_ROOT=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --run-root) RUN_ROOT="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf 'evaluate\n' >> "$STEP_LOG"
+  mkdir -p "$RUN_ROOT/result/render-evaluation"
+  printf '{"stub":"policy"}\n' > "$RUN_ROOT/result/render-evaluation/policy.json"
+  printf '{"stub":"report"}\n' > "$RUN_ROOT/result/render-evaluation/report.json"
   exit 0
 fi
 if [[ "${1:-}" == *"emit_training_provenance.py" ]]; then
@@ -121,6 +138,7 @@ exec "$REAL_PYTHON" "$@"
         bin_dir / "ns-train",
         r"""#!/bin/bash
 printf '%s\0' "$@" > "$NS_TRAIN_ARGV_FILE"
+printf 'train\n' >> "$STEP_LOG"
 mkdir -p outputs/canary
 printf 'trainer: splatfacto\n' > outputs/canary/config.yml
 printf '%s\n' '{"scale":1.0,"transform":[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}' \
@@ -132,6 +150,7 @@ exit 0
         bin_dir / "ns-export",
         r"""#!/bin/bash
 printf '%s\0' "$@" > "$NS_EXPORT_ARGV_FILE"
+printf 'export\n' >> "$STEP_LOG"
 OUTPUT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -147,6 +166,7 @@ printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
     bundle.write_bytes(b"stubbed-verified-bundle")
     argv_file = tmp_path / "ns-train.argv"
     export_argv_file = tmp_path / "ns-export.argv"
+    step_log = tmp_path / "steps.log"
     work = tmp_path / "work"
     env = os.environ.copy()
     env.update(
@@ -156,6 +176,7 @@ printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
             "REAL_PYTHON": sys.executable,
             "NS_TRAIN_ARGV_FILE": str(argv_file),
             "NS_EXPORT_ARGV_FILE": str(export_argv_file),
+            "STEP_LOG": str(step_log),
             "WORK": str(work),
         }
     )
@@ -185,6 +206,14 @@ printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
     assert (result_root / "operator-intent-config.yml").is_file()
     assert (result_root / "point_cloud.ply").is_file()
     assert (result_root / "dataparser_transforms.json").is_file()
+    assert (
+        result_root / "render-evaluation/report.json"
+    ).is_file()
+    assert step_log.read_text(encoding="ascii").splitlines() == [
+        "train",
+        "evaluate",
+        "export",
+    ]
     assert (
         result_root / "container-identity.txt"
     ).read_text(encoding="ascii").strip() == container

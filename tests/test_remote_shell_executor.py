@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import shutil
+import struct
 import subprocess
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,11 @@ from pydantic import ValidationError
 
 import pipeline.remote_shell_executor as remote_module
 from pipeline.real_dataset import canonical_model_bytes
+from pipeline.real_scene_training import (
+    HeldOutSplit,
+    TrainingImageIdentity,
+    held_out_split_canonical_bytes,
+)
 from pipeline.remote_shell_executor import (
     RemoteResultBundleError,
     RemoteResultBundleManifest,
@@ -25,6 +32,16 @@ from pipeline.remote_shell_executor import (
     canonical_remote_result_manifest_bytes,
     canonical_remote_status_bytes,
     verify_remote_result_bundle,
+)
+from pipeline.render_evaluation import (
+    RenderCameraRecord,
+    RenderEvaluationPolicy,
+    RenderEvaluationProtocol,
+    RenderEvaluationReport,
+    RenderFrameMetric,
+    canonical_render_evaluation_bytes,
+    render_artifact_stem,
+    render_evaluation_sha256,
 )
 from pipeline.training_provenance import (
     GpuEnvironment,
@@ -388,6 +405,276 @@ def test_result_bundle_builder_is_deterministic_and_verifiable(tmp_path):
             expected_container_identity=(
                 "registry.example/nantai@sha256:" + ("c" * 64)
             ),
+        )
+
+
+def _evaluation_png() -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        body = kind + payload
+        return (
+            struct.pack(">I", len(payload))
+            + body
+            + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+        )
+
+    width, height = 800, 600
+    rows = b"".join(
+        b"\x00" + bytes([row % 251]) * (width * 3)
+        for row in range(height)
+    )
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(
+            b"IHDR",
+            struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0),
+        )
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _write_evaluation_members(
+    result_root: Path,
+) -> tuple[dict[str, bytes], bytes, bytes]:
+    protocol = RenderEvaluationProtocol(
+        width=800,
+        height=600,
+        crop_mode="center-crop",
+        colour_space="srgb",
+        alpha_handling="reject",
+        mask_handling="none",
+        ssim_window_size=11,
+        ssim_sigma=1.5,
+        ssim_data_range=1.0,
+        lpips_backbone="alex",
+    )
+    container = "registry.example/nantai@sha256:" + "c" * 64
+    source = b"source"
+    identity = TrainingImageIdentity(
+        logical_path="eval.jpg",
+        sha256=_sha(source),
+    )
+    split = HeldOutSplit(
+        ratio=0.5,
+        total_count=2,
+        held_out=(identity,),
+        train=(
+            TrainingImageIdentity(
+                logical_path="train.jpg",
+                sha256="f" * 64,
+            ),
+        ),
+    )
+    split_bytes = held_out_split_canonical_bytes(split)
+    transforms = b'{"test_filenames":["images/eval.jpg"]}\n'
+    policy = RenderEvaluationPolicy(
+        held_out_split_sha256=_sha(split_bytes),
+        transforms_sha256=_sha(transforms),
+        evaluator_container_digest=container,
+        protocol=protocol,
+        minimum_mean_psnr=24.0,
+        minimum_mean_ssim=0.8,
+        maximum_mean_lpips=0.25,
+        minimum_worst_psnr=18.0,
+    )
+    stem = render_artifact_stem("eval.jpg")
+    render = _evaluation_png()
+    camera = canonical_render_evaluation_bytes(
+        RenderCameraRecord(
+            frame_id="eval.jpg",
+            source_path="prepared/images/eval.jpg",
+            source_sha256=_sha(source),
+            transforms_sha256=_sha(transforms),
+            camera_model="perspective",
+            source_width=1600,
+            source_height=1200,
+            fx=900.0,
+            fy=900.0,
+            cx=800.0,
+            cy=600.0,
+            camera_to_world=(
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+            ),
+        )
+    )
+    trainer_config = b"method_name: splatfacto\n"
+    frame = RenderFrameMetric(
+        frame_id="eval.jpg",
+        source_path="prepared/images/eval.jpg",
+        source_byte_length=len(source),
+        source_sha256=_sha(source),
+        render_path=f"result/render-evaluation/renders/{stem}.png",
+        render_byte_length=len(render),
+        render_sha256=_sha(render),
+        camera_path=f"result/render-evaluation/cameras/{stem}.json",
+        camera_byte_length=len(camera),
+        camera_sha256=_sha(camera),
+        psnr=25.0,
+        ssim=0.85,
+        lpips=0.2,
+    )
+    report = RenderEvaluationReport(
+        evaluation_id="eval-production",
+        policy_sha256=render_evaluation_sha256(policy),
+        held_out_split_sha256=policy.held_out_split_sha256,
+        evaluator_container_digest=container,
+        protocol=protocol,
+        frames=(frame,),
+        trainer_config_sha256=_sha(trainer_config),
+        mean_psnr=25.0,
+        mean_ssim=0.85,
+        mean_lpips=0.2,
+        worst_psnr=25.0,
+    )
+    members = {
+        "render-evaluation/policy.json":
+            canonical_render_evaluation_bytes(policy),
+        "render-evaluation/report.json":
+            canonical_render_evaluation_bytes(report),
+        "render-evaluation/trainer-config.yml": trainer_config,
+        "render-evaluation/transforms.json": transforms,
+        f"render-evaluation/renders/{stem}.png": render,
+        f"render-evaluation/cameras/{stem}.json": camera,
+    }
+    for name, payload in members.items():
+        path = result_root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    return members, split_bytes, source
+
+
+def test_result_bundle_binds_declared_evaluation_tree(tmp_path):
+    request_sha = request_canonical_sha256(_request())
+    result_root = tmp_path / "result"
+    result_root.mkdir()
+    core = {
+        "container-identity.txt": (
+            "registry.example/nantai@sha256:" + ("c" * 64) + "\n"
+        ).encode("ascii"),
+        "dataparser_transforms.json": (
+            b'{"scale":1.0,"transform":'
+            b'[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}\n'
+        ),
+        "operator-intent-config.yml": b"config\n",
+        "point_cloud.ply": b"ply\n",
+        "training-request.json": b"{}\n",
+        "training-result.json": b"{}\n",
+        "training.log": b"log\n",
+        "worker.stderr.log": b"",
+        "worker.stdout.log": b"container completed\n",
+    }
+    for name, payload in core.items():
+        (result_root / name).write_bytes(payload)
+    evaluation, _split_bytes, _source = _write_evaluation_members(
+        result_root
+    )
+
+    verified = build_remote_result_bundle(
+        result_root=result_root,
+        output_path=tmp_path / "result.zip",
+        job_id="job-expected",
+        attempt_id="attempt-expected",
+        request_sha256=request_sha,
+        training_bundle_sha256="d" * 64,
+        container_identity=(
+            "registry.example/nantai@sha256:" + ("c" * 64)
+        ),
+    )
+
+    assert verified.member_bytes == {**core, **evaluation}
+
+    (result_root / "render-evaluation/extra.txt").write_text(
+        "extra\n",
+        encoding="ascii",
+    )
+    with pytest.raises(RemoteResultBundleError, match="evaluation"):
+        build_remote_result_bundle(
+            result_root=result_root,
+            output_path=tmp_path / "extra.zip",
+            job_id="job-expected",
+            attempt_id="attempt-expected",
+            request_sha256=request_sha,
+            training_bundle_sha256="d" * 64,
+            container_identity=(
+                "registry.example/nantai@sha256:" + ("c" * 64)
+            ),
+        )
+
+
+def test_downloaded_evaluation_reopens_every_bound_byte(
+    tmp_path,
+    monkeypatch,
+):
+    request_sha = request_canonical_sha256(_request())
+    result_root = tmp_path / "result"
+    result_root.mkdir()
+    core = {
+        "container-identity.txt": (
+            "registry.example/nantai@sha256:" + ("c" * 64) + "\n"
+        ).encode("ascii"),
+        "dataparser_transforms.json": (
+            b'{"scale":1.0,"transform":'
+            b'[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}\n'
+        ),
+        "operator-intent-config.yml": b"config\n",
+        "point_cloud.ply": b"ply\n",
+        "training-request.json": b"{}\n",
+        "training-result.json": b"{}\n",
+        "training.log": b"log\n",
+        "worker.stderr.log": b"",
+        "worker.stdout.log": b"",
+    }
+    for name, payload in core.items():
+        (result_root / name).write_bytes(payload)
+    _evaluation, split_bytes, source = _write_evaluation_members(
+        result_root
+    )
+    verified = build_remote_result_bundle(
+        result_root=result_root,
+        output_path=tmp_path / "result.zip",
+        job_id="job-expected",
+        attempt_id="attempt-expected",
+        request_sha256=request_sha,
+        training_bundle_sha256="d" * 64,
+        container_identity=(
+            "registry.example/nantai@sha256:" + ("c" * 64)
+        ),
+    )
+    monkeypatch.setattr(
+        remote_module,
+        "_load_held_out_source_bytes",
+        lambda bundle, split: {"eval.jpg": source},
+    )
+
+    remote_module._validate_downloaded_evaluation(
+        verified,
+        SimpleNamespace(),
+        split_bytes,
+    )
+
+    tampered = dict(verified.member_bytes)
+    camera_name = next(
+        name
+        for name in tampered
+        if name.startswith("render-evaluation/cameras/")
+    )
+    tampered[camera_name] += b"tamper"
+    with pytest.raises(RemoteResultBundleError, match="evaluation"):
+        remote_module._validate_downloaded_evaluation(
+            SimpleNamespace(member_bytes=tampered),
+            SimpleNamespace(),
+            split_bytes,
         )
 
 

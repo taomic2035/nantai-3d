@@ -13,10 +13,12 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
 import subprocess
+import tempfile
 import uuid
 import zipfile
 from collections.abc import Callable
@@ -38,10 +40,19 @@ from cloud.validate_dataparser_transform import (
     validate_dataparser_transform,
 )
 from pipeline.real_scene_training import (
+    HeldOutSplit,
     RealSceneTrainingError,
     VerifiedTrainingJobBundle,
+    held_out_split_canonical_bytes,
     load_training_job_input_bytes,
     verify_production_training_job_bundle,
+)
+from pipeline.render_evaluation import (
+    RenderEvaluationError,
+    RenderEvaluationPolicy,
+    RenderEvaluationReport,
+    canonical_render_evaluation_bytes,
+    validate_render_evaluation,
 )
 from pipeline.training_executor import (
     ExecutorAttemptReceipt,
@@ -91,7 +102,7 @@ _DEFAULT_MAX_LOG_BYTES = 64 * 1024 * 1024
 _BOUND_LOG_MEMBERS = frozenset(
     {"training.log", "worker.stdout.log", "worker.stderr.log"}
 )
-_REQUIRED_RESULT_MEMBERS = frozenset(
+_BASE_RESULT_MEMBERS = frozenset(
     {
         "container-identity.txt",
         "dataparser_transforms.json",
@@ -103,6 +114,25 @@ _REQUIRED_RESULT_MEMBERS = frozenset(
         "worker.stderr.log",
         "worker.stdout.log",
     }
+)
+_EVALUATION_FIXED_MEMBERS = frozenset(
+    {
+        "render-evaluation/policy.json",
+        "render-evaluation/report.json",
+        "render-evaluation/trainer-config.yml",
+        "render-evaluation/transforms.json",
+    }
+)
+_EVALUATION_DIRECTORIES = frozenset(
+    {
+        "render-evaluation",
+        "render-evaluation/cameras",
+        "render-evaluation/renders",
+    }
+)
+_EVALUATION_PAYLOAD_PATTERN = re.compile(
+    r"^render-evaluation/(cameras|renders)/([0-9a-f]{64})"
+    r"\.(json|png)$"
 )
 
 
@@ -306,9 +336,37 @@ class RemoteResultBundleManifest(FrozenModel):
             raise ValueError("remote result members must be path sorted")
         if len(set(paths)) != len(paths):
             raise ValueError("remote result member paths must be unique")
-        if set(paths) != _REQUIRED_RESULT_MEMBERS:
+        path_set = set(paths)
+        if path_set == _BASE_RESULT_MEMBERS:
+            return self
+        if not (
+            _BASE_RESULT_MEMBERS <= path_set
+            and _EVALUATION_FIXED_MEMBERS <= path_set
+        ):
             raise ValueError(
                 "remote successful result member set is incomplete"
+            )
+        camera_stems: set[str] = set()
+        render_stems: set[str] = set()
+        for path in path_set - _BASE_RESULT_MEMBERS - _EVALUATION_FIXED_MEMBERS:
+            match = _EVALUATION_PAYLOAD_PATTERN.fullmatch(path)
+            if match is None:
+                raise ValueError(
+                    "remote evaluation member set contains an extra path"
+                )
+            kind, stem, extension = match.groups()
+            if (
+                (kind == "cameras" and extension != "json")
+                or (kind == "renders" and extension != "png")
+            ):
+                raise ValueError(
+                    "remote evaluation member extension is invalid"
+                )
+            target = camera_stems if kind == "cameras" else render_stems
+            target.add(stem)
+        if not camera_stems or camera_stems != render_stems:
+            raise ValueError(
+                "remote evaluation camera/render members differ"
             )
         return self
 
@@ -389,6 +447,238 @@ def _portable_member(value: str) -> PurePosixPath:
             "result archive member is not a portable relative path"
         )
     return parsed
+
+
+def _enumerate_result_tree(
+    root: Path,
+) -> tuple[tuple[Path, ...], frozenset[str]]:
+    files: list[Path] = []
+    directories: set[str] = set()
+    try:
+        for current, directory_names, file_names in os.walk(
+            root,
+            followlinks=False,
+        ):
+            parent = Path(current)
+            for name in directory_names:
+                candidate = parent / name
+                mode = candidate.lstat().st_mode
+                if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                    raise RemoteResultBundleError(
+                        "remote result tree contains a link-like directory"
+                    )
+                directories.add(
+                    candidate.relative_to(root).as_posix()
+                )
+            for name in file_names:
+                candidate = parent / name
+                mode = candidate.lstat().st_mode
+                if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                    raise RemoteResultBundleError(
+                        "remote result tree contains a non-regular member"
+                    )
+                files.append(candidate)
+    except RemoteResultBundleError:
+        raise
+    except OSError as exc:
+        raise RemoteResultBundleError(
+            "remote result root cannot be enumerated"
+        ) from exc
+    return (
+        tuple(
+            sorted(
+                files,
+                key=lambda path: path.relative_to(root).as_posix(),
+            )
+        ),
+        frozenset(directories),
+    )
+
+
+def _validate_evaluation_member_contract(
+    bindings: dict[str, RemoteResultBundleMember],
+    payloads: dict[str, bytes],
+    *,
+    container_identity: str,
+) -> None:
+    paths = set(bindings)
+    has_evaluation = bool(paths & _EVALUATION_FIXED_MEMBERS)
+    if not has_evaluation:
+        if paths != _BASE_RESULT_MEMBERS:
+            raise RemoteResultBundleError(
+                "remote result member set is incomplete"
+            )
+        return
+    try:
+        policy_bytes = payloads["render-evaluation/policy.json"]
+        report_bytes = payloads["render-evaluation/report.json"]
+        policy = RenderEvaluationPolicy.model_validate_json(policy_bytes)
+        report = RenderEvaluationReport.model_validate_json(report_bytes)
+    except (KeyError, ValueError) as exc:
+        raise RemoteResultBundleError(
+            "remote evaluation policy/report is invalid"
+        ) from exc
+    if (
+        policy_bytes != canonical_render_evaluation_bytes(policy)
+        or report_bytes != canonical_render_evaluation_bytes(report)
+    ):
+        raise RemoteResultBundleError(
+            "remote evaluation policy/report is not canonical"
+        )
+    if (
+        report.policy_sha256
+        != hashlib.sha256(policy_bytes).hexdigest()
+        or report.held_out_split_sha256
+        != policy.held_out_split_sha256
+        or report.evaluator_container_digest != container_identity
+        or policy.evaluator_container_digest != container_identity
+        or report.protocol != policy.protocol
+    ):
+        raise RemoteResultBundleError(
+            "remote evaluation identity differs from result bundle"
+        )
+    trainer = bindings.get(
+        "render-evaluation/trainer-config.yml"
+    )
+    transforms = bindings.get("render-evaluation/transforms.json")
+    if (
+        trainer is None
+        or transforms is None
+        or trainer.sha256 != report.trainer_config_sha256
+        or transforms.sha256 != policy.transforms_sha256
+    ):
+        raise RemoteResultBundleError(
+            "remote evaluation config/transforms binding mismatch"
+        )
+    expected = set(_BASE_RESULT_MEMBERS | _EVALUATION_FIXED_MEMBERS)
+    for frame in report.frames:
+        if not frame.render_path.startswith("result/"):
+            raise RemoteResultBundleError(
+                "remote evaluation render path is outside result root"
+            )
+        if not frame.camera_path.startswith("result/"):
+            raise RemoteResultBundleError(
+                "remote evaluation camera path is outside result root"
+            )
+        render_path = frame.render_path.removeprefix("result/")
+        camera_path = frame.camera_path.removeprefix("result/")
+        render = bindings.get(render_path)
+        camera = bindings.get(camera_path)
+        if (
+            render is None
+            or camera is None
+            or render.byte_length != frame.render_byte_length
+            or render.sha256 != frame.render_sha256
+            or camera.byte_length != frame.camera_byte_length
+            or camera.sha256 != frame.camera_sha256
+        ):
+            raise RemoteResultBundleError(
+                "remote evaluation frame binding mismatch"
+            )
+        expected.update((render_path, camera_path))
+    if paths != expected:
+        raise RemoteResultBundleError(
+            "remote evaluation member set differs from report"
+        )
+
+
+def _load_held_out_source_bytes(
+    bundle: VerifiedTrainingJobBundle,
+    split: HeldOutSplit,
+) -> dict[str, bytes]:
+    try:
+        with zipfile.ZipFile(bundle.path, "r") as archive:
+            payloads = {
+                identity.logical_path: archive.read(
+                    f"evaluation/payload/{identity.logical_path}"
+                )
+                for identity in split.held_out
+            }
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise RemoteResultBundleError(
+            "held-out source bytes cannot be reopened"
+        ) from exc
+    for identity in split.held_out:
+        payload = payloads[identity.logical_path]
+        if hashlib.sha256(payload).hexdigest() != identity.sha256:
+            raise RemoteResultBundleError(
+                "held-out source sha256 differs from split"
+            )
+    try:
+        rechecked = verify_production_training_job_bundle(bundle.path)
+    except RealSceneTrainingError as exc:
+        raise RemoteResultBundleError(
+            "training bundle changed during evaluation validation"
+        ) from exc
+    if rechecked.bundle_sha256 != bundle.bundle_sha256:
+        raise RemoteResultBundleError(
+            "training bundle identity changed during evaluation validation"
+        )
+    return payloads
+
+
+def _validate_downloaded_evaluation(
+    verified_result: VerifiedRemoteResultBundle,
+    verified_input: VerifiedTrainingJobBundle,
+    split_bytes: bytes,
+) -> None:
+    members = verified_result.member_bytes
+    if "render-evaluation/report.json" not in members:
+        return
+    try:
+        split = HeldOutSplit.model_validate_json(split_bytes)
+    except ValueError as exc:
+        raise RemoteResultBundleError(
+            "submitted held-out split is invalid"
+        ) from exc
+    if split_bytes != held_out_split_canonical_bytes(split):
+        raise RemoteResultBundleError(
+            "submitted held-out split is not canonical"
+        )
+    held_out_sources = _load_held_out_source_bytes(
+        verified_input,
+        split,
+    )
+    try:
+        policy = RenderEvaluationPolicy.model_validate_json(
+            members["render-evaluation/policy.json"]
+        )
+        report = RenderEvaluationReport.model_validate_json(
+            members["render-evaluation/report.json"]
+        )
+    except (KeyError, ValueError) as exc:
+        raise RemoteResultBundleError(
+            "downloaded render evaluation JSON is invalid"
+        ) from exc
+    with tempfile.TemporaryDirectory(
+        prefix="nantai-render-eval-",
+    ) as temporary:
+        root = Path(temporary) / "run"
+        (root / "prepared/evidence").mkdir(parents=True)
+        (root / "prepared/images").mkdir()
+        (root / "result/render-evaluation").mkdir(parents=True)
+        (root / "prepared/evidence/held-out-split.json").write_bytes(
+            split_bytes
+        )
+        (root / "prepared/transforms.json").write_bytes(
+            members["render-evaluation/transforms.json"]
+        )
+        for frame_id, payload in held_out_sources.items():
+            path = root / "prepared/images" / frame_id
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        for name, payload in members.items():
+            if not name.startswith("render-evaluation/"):
+                continue
+            path = root / "result" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        try:
+            validate_render_evaluation(policy, report, root)
+        except RenderEvaluationError as exc:
+            raise RemoteResultBundleError(
+                f"downloaded render evaluation is invalid: {exc}"
+            ) from exc
 
 
 def _stat_signature(
@@ -483,22 +773,22 @@ def build_remote_result_bundle(
         raise RemoteResultBundleError(
             "remote result bundle parent must be a real directory"
         )
-    try:
-        actual_names = {
-            path.relative_to(root).as_posix()
-            for path in root.iterdir()
-        }
-    except OSError as exc:
+    result_files, result_directories = _enumerate_result_tree(root)
+    actual_names = {
+        path.relative_to(root).as_posix() for path in result_files
+    }
+    has_evaluation = bool(actual_names & _EVALUATION_FIXED_MEMBERS)
+    expected_directories = (
+        _EVALUATION_DIRECTORIES if has_evaluation else frozenset()
+    )
+    if result_directories != expected_directories:
         raise RemoteResultBundleError(
-            "remote result root cannot be enumerated"
-        ) from exc
-    if actual_names != _REQUIRED_RESULT_MEMBERS:
-        raise RemoteResultBundleError(
-            "remote successful result member set is incomplete"
+            "remote evaluation directory set is incomplete or contains extras"
         )
     sources: dict[str, tuple[Path, int, str, tuple[int, int, int, int, int]]] = {}
     members: list[RemoteResultBundleMember] = []
-    for name in sorted(actual_names):
+    for source in result_files:
+        name = source.relative_to(root).as_posix()
         source = root / name
         limit = max_log_bytes if name == "training.log" else max_member_bytes
         allow_empty = name in _BOUND_LOG_MEMBERS
@@ -519,6 +809,31 @@ def build_remote_result_bundle(
                 sha256=digest,
             )
         )
+    binding_by_path = {member.path: member for member in members}
+    contract_payloads: dict[str, bytes] = {}
+    for name in _EVALUATION_FIXED_MEMBERS & actual_names:
+        source, expected_size, expected_sha, signature = sources[name]
+        try:
+            payload = source.read_bytes()
+            after = source.lstat()
+        except OSError as exc:
+            raise RemoteResultBundleError(
+                "remote evaluation contract cannot be read"
+            ) from exc
+        if (
+            _stat_signature(after) != signature
+            or len(payload) != expected_size
+            or hashlib.sha256(payload).hexdigest() != expected_sha
+        ):
+            raise RemoteResultBundleError(
+                "remote evaluation contract changed while being read"
+            )
+        contract_payloads[name] = payload
+    _validate_evaluation_member_contract(
+        binding_by_path,
+        contract_payloads,
+        container_identity=container_identity,
+    )
     expected_container = (container_identity + "\n").encode("ascii")
     try:
         container_bytes = (
@@ -754,6 +1069,11 @@ def verify_remote_result_bundle(
         raise RemoteResultBundleError(
             "result container identity bytes mismatch"
         )
+    _validate_evaluation_member_contract(
+        {member.path: member for member in manifest.members},
+        member_bytes,
+        container_identity=expected_container_identity,
+    )
     return VerifiedRemoteResultBundle(
         path=archive_path,
         bundle_sha256=archive_sha,
@@ -1266,6 +1586,11 @@ class RemoteShellExecutor:
             raise RemoteResultBundleError(
                 "remote successful result is not a completed training run"
             )
+        _validate_downloaded_evaluation(
+            verified_result,
+            verified_input,
+            input_bytes["training/held-out-split.json"],
+        )
 
     def fetch(
         self,
@@ -1347,6 +1672,7 @@ class RemoteShellExecutor:
                 )
             for name, payload in verified.member_bytes.items():
                 path = staging / name
+                path.parent.mkdir(parents=True, exist_ok=True)
                 descriptor = os.open(
                     path,
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL,

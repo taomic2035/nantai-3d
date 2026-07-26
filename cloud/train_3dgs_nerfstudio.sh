@@ -247,6 +247,41 @@ PYEOF
   fi
 
   if [ "$TRAIN_EXIT" -eq 0 ]; then
+    local HELD_OUT_SPLIT="$RUN_ROOT/prepared/evidence/held-out-split.json"
+    local HELD_OUT_SPLIT_SHA
+    HELD_OUT_SPLIT_SHA="$(
+      "$PYTHON_BIN" - "$HELD_OUT_SPLIT" <<'PYEOF'
+import hashlib
+import sys
+from pathlib import Path
+
+payload = Path(sys.argv[1]).read_bytes()
+if not payload:
+    raise SystemExit("held-out split is empty")
+print(hashlib.sha256(payload).hexdigest())
+PYEOF
+    )" || {
+      echo "!! 无法重算 held-out split SHA" | tee -a "$TRAIN_LOG"
+      TRAIN_EXIT=75
+    }
+  fi
+
+  if [ "$TRAIN_EXIT" -eq 0 ]; then
+    if ! (
+      cd "$REPO_ROOT"
+      "$PYTHON_BIN" -m cloud.evaluate_real_scene \
+        --load-config "$RUN_ROOT/$TRAIN_CONFIG" \
+        --run-root "$RUN_ROOT" \
+        --expected-split-sha256 "$HELD_OUT_SPLIT_SHA" \
+        --evaluator-container-digest "$CONTAINER_IDENTITY" \
+        --evaluation-id "eval-$REQUEST_ID"
+    ) 2>&1 | tee -a "$TRAIN_LOG"; then
+      echo "!! held-out 渲染评测失败" | tee -a "$TRAIN_LOG"
+      TRAIN_EXIT=76
+    fi
+  fi
+
+  if [ "$TRAIN_EXIT" -eq 0 ]; then
     mkdir export
     set +e
     ns-export gaussian-splat \
