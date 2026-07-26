@@ -604,6 +604,38 @@ class AcceptanceDirectoryReference(FrozenModel):
         )
 
 
+class RealSceneAcceptancePointer(FrozenModel):
+    """Mutable selector for one immutable aggregate report.
+
+    The pointer carries no authored decision. Consumers must reopen the bound
+    report bytes and derive acceptance with ``validate_real_scene_acceptance``.
+    """
+
+    schema_id: Literal["nantai.real-scene-acceptance-pointer.v1"] = Field(
+        default="nantai.real-scene-acceptance-pointer.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    report_path: str
+    report_sha256: str = Field(pattern=_SHA256_PATTERN)
+    report_byte_length: int = Field(ge=1, le=_MAX_ACCEPTANCE_DOCUMENT_BYTES)
+
+    @field_validator("report_path")
+    @classmethod
+    def _report_path_is_portable(cls, value: str) -> str:
+        return _portable_relative_path(
+            value,
+            label="acceptance pointer report path",
+        )
+
+    @model_validator(mode="after")
+    def _report_name_is_content_addressed(self) -> RealSceneAcceptancePointer:
+        expected = f"real-scene-acceptance-{self.report_sha256}.json"
+        if PurePosixPath(self.report_path).name != expected:
+            raise ValueError("acceptance pointer report filename differs from its SHA-256")
+        return self
+
+
 def _is_below(relative: str, directory: str) -> bool:
     return relative.startswith(f"{directory}/")
 
@@ -801,6 +833,12 @@ def canonical_real_scene_acceptance_bytes(
     return canonical_model_bytes(report)
 
 
+def canonical_real_scene_acceptance_pointer_bytes(
+    pointer: RealSceneAcceptancePointer,
+) -> bytes:
+    return canonical_model_bytes(pointer)
+
+
 def _relative_to_acceptance_root(
     root: Path,
     path: Path,
@@ -925,6 +963,106 @@ def publish_real_scene_acceptance(
             path.unlink(missing_ok=True)
             raise RealSceneAcceptanceError("acceptance report cannot be published") from exc
     return path, validate_real_scene_acceptance(path)
+
+
+def publish_real_scene_acceptance_pointer(
+    report_path: Path,
+    root: Path,
+) -> Path:
+    """Atomically select one content-addressed report below ``root``."""
+
+    boundary = Path(root).expanduser().absolute()
+    try:
+        mode = boundary.lstat().st_mode
+    except OSError as exc:
+        raise RealSceneAcceptanceError("acceptance pointer root is unavailable") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise RealSceneAcceptanceError("acceptance pointer root must be a real directory")
+    report = acceptance_evidence_reference(
+        boundary,
+        report_path,
+    )
+    pointer = RealSceneAcceptancePointer(
+        report_path=report.path,
+        report_sha256=report.sha256,
+        report_byte_length=report.byte_length,
+    )
+    payload = canonical_real_scene_acceptance_pointer_bytes(pointer)
+    destination = boundary / "latest-acceptance.json"
+    descriptor = -1
+    temporary = ""
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".latest-acceptance-",
+            suffix=".tmp",
+            dir=boundary,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        temporary = ""
+    except OSError as exc:
+        raise RealSceneAcceptanceError("acceptance pointer cannot be published") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary:
+            try:
+                Path(temporary).unlink()
+            except OSError:
+                pass
+    return destination
+
+
+def load_latest_real_scene_acceptance(root: Path) -> Path | None:
+    """Resolve and byte-verify the configured aggregate report, if present."""
+
+    boundary = Path(root).expanduser().absolute()
+    try:
+        root_mode = boundary.lstat().st_mode
+    except OSError as exc:
+        raise RealSceneAcceptanceError("acceptance pointer root is unavailable") from exc
+    if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+        raise RealSceneAcceptanceError("acceptance pointer root must be a real directory")
+    pointer_path = boundary / "latest-acceptance.json"
+    try:
+        before = pointer_path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RealSceneAcceptanceError("acceptance pointer cannot be inspected") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RealSceneAcceptanceError("acceptance pointer must be a regular file")
+    if before.st_size <= 0 or before.st_size > _MAX_ACCEPTANCE_DOCUMENT_BYTES:
+        raise RealSceneAcceptanceError("acceptance pointer length is invalid")
+    try:
+        payload = pointer_path.read_bytes()
+        after = pointer_path.lstat()
+        pointer = RealSceneAcceptancePointer.model_validate_json(payload)
+    except (OSError, ValidationError) as exc:
+        raise RealSceneAcceptanceError("acceptance pointer is invalid") from exc
+    if _stat_signature(before) != _stat_signature(after):
+        raise RealSceneAcceptanceError("acceptance pointer changed while read")
+    if payload != canonical_real_scene_acceptance_pointer_bytes(pointer):
+        raise RealSceneAcceptanceError("acceptance pointer is not canonical JSON")
+    reference = AcceptanceEvidenceReference(
+        path=pointer.report_path,
+        sha256=pointer.report_sha256,
+        byte_length=pointer.report_byte_length,
+    )
+    _hash_reference(
+        boundary,
+        reference,
+        retain_bytes=True,
+    )
+    return _member_path(
+        boundary,
+        pointer.report_path,
+        label="acceptance pointer report",
+    )
 
 
 def _acceptance_references(

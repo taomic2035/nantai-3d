@@ -70,6 +70,32 @@ test('synthetic output can never become measurable or verified', () => {
   assert.equal(model.derived.trust, 'proxy');
 });
 
+test('real-scene acceptance is normalized without upgrading geometry trust', () => {
+  const raw = baseSnapshot();
+  raw.coordinate = {};
+  raw.reconstruction.geometry_usability = 'preview-only';
+  raw.real_scene = {
+    schema_version: 1,
+    role: 'internal-canary',
+    decision: 'accepted-canary',
+    production_release_allowed: true,
+    stages: [
+      'dataset', 'capture', 'sfm', 'production-training', 'import-integrity',
+      'render-quality', 'viewer-performance', 'human-review', 'release-rights',
+      'metric-alignment',
+    ].map((id) => ({ id, state: 'succeeded' })),
+    reasons: [],
+    report_sha256: 'a'.repeat(64),
+  };
+
+  const model = normalizeSnapshot(raw);
+
+  assert.equal(model.real_scene.decision, 'invalid-evidence');
+  assert.equal(model.real_scene.production_release_allowed, false);
+  assert.equal(model.derived.geometryUsability, 'preview-only');
+  assert.equal(model.derived.trust, 'untrusted');
+});
+
 test('declared preview-only provenance cannot be promoted by metric coordinates', () => {
   const raw = baseSnapshot();
   raw.reconstruction.geometry_usability = 'preview-only';

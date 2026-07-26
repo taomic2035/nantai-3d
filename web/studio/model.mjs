@@ -1,3 +1,5 @@
+import { normalizeRealSceneEvidence } from './real-scene-evidence.mjs';
+
 const CORE_SPLAT_ATTRIBUTES = [
   'x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity',
   'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3',
@@ -199,6 +201,7 @@ export function normalizeSnapshot(raw = {}) {
     snapshot.adapter = { kind: 'unknown', connected: false };
     diagnostics.push('adapter state is missing');
   }
+  snapshot.real_scene = normalizeRealSceneEvidence(snapshot.real_scene);
   const renderFidelity = deriveRenderFidelity(snapshot.reconstruction, diagnostics);
   const geometryUsability = deriveGeometryUsability(snapshot, diagnostics);
   const trust = deriveTrust(snapshot, geometryUsability, renderFidelity, diagnostics);

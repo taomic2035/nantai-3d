@@ -23,6 +23,7 @@ import {
   loadProductionQualityEvidence,
   renderProductionQualityPanel,
 } from './production-quality-panel.mjs';
+import { renderRealSceneEvidence } from './real-scene-evidence.mjs';
 import { JobController } from './job-controller.mjs';
 import {
   ingestConfirmationModel,
@@ -261,6 +262,7 @@ function reviewInspector() {
   ])}
   <p class="eyebrow">诊断</p>
   ${derived.diagnostics.map((item) => `<div class="evidence-card"><p>${escapeHtml(item)}</p></div>`).join('') || '<div class="evidence-card"><p>无阻断诊断。</p></div>'}
+  ${renderRealSceneEvidence(snapshot.real_scene)}
   ${renderProductionQualityPanel(
     productionQualityEvidence,
     selectedQualityCameraId,

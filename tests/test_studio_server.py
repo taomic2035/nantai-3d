@@ -23,6 +23,12 @@ from PIL import Image
 import pipeline.synthetic_village.material_bundle_v2 as material_v2_module
 import pipeline.synthetic_village.mesh_asset_bundle_v3 as mesh_v3_module
 from pipeline.preview_release import build_receipt, canonical_json_bytes
+from pipeline.real_scene_acceptance import (
+    AcceptanceDecision,
+    AcceptanceGate,
+    RealSceneAcceptanceError,
+    publish_real_scene_acceptance_pointer,
+)
 from pipeline.studio_server import (
     PathAccessError,
     build_project_snapshot,
@@ -904,7 +910,183 @@ def _write_mesh_world_bundle_v3(
     )
 
 
+def _write_real_scene_acceptance_pointer(root: Path) -> tuple[Path, str]:
+    boundary = root / ".nantai-studio/real-scene"
+    boundary.mkdir(parents=True)
+    payload = b'{"schema":"fixture"}\n'
+    digest = hashlib.sha256(payload).hexdigest()
+    report = boundary / "run-a" / f"real-scene-acceptance-{digest}.json"
+    report.parent.mkdir()
+    report.write_bytes(payload)
+    publish_real_scene_acceptance_pointer(report, boundary)
+    return report, digest
+
+
+def _real_scene_decision(
+    digest: str,
+    *,
+    role: str,
+    accepted: bool = True,
+) -> AcceptanceDecision:
+    gates = []
+    for gate in (
+        "dataset",
+        "capture",
+        "sfm",
+        "production-training",
+        "import-integrity",
+        "render-quality",
+        "viewer-performance",
+        "human-review",
+        "release-rights",
+        "metric-alignment",
+    ):
+        if role == "internal-canary" and gate in {
+            "release-rights",
+            "metric-alignment",
+        }:
+            gates.append(
+                AcceptanceGate(
+                    gate=gate,
+                    state="not-applicable",
+                    reasons=("internal canary does not satisfy this production gate",),
+                )
+            )
+        elif not accepted and gate == "viewer-performance":
+            gates.append(
+                AcceptanceGate(
+                    gate=gate,
+                    state="rejected",
+                    reasons=("viewer p95 exceeded",),
+                )
+            )
+        else:
+            gates.append(AcceptanceGate(gate=gate, state="accepted"))
+    failed = tuple(gate.gate for gate in gates if gate.state == "rejected")
+    return AcceptanceDecision(
+        source_role=role,
+        technical_accepted=accepted,
+        canary_accepted=accepted and role == "internal-canary",
+        production_release_allowed=accepted and role == "production-acceptance",
+        gates=tuple(gates),
+        failed_gates=failed,
+        reasons=(() if accepted else ("viewer p95 exceeded",)),
+        report_sha256=digest,
+    )
+
+
 class TestProjectSnapshot:
+    def test_missing_real_scene_pointer_projects_not_started(self, tmp_path):
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["real_scene"]["decision"] == "not-started"
+        assert snapshot["real_scene"]["production_release_allowed"] is False
+        assert all(
+            stage["state"] == "not-started"
+            for stage in snapshot["real_scene"]["stages"]
+        )
+
+    @pytest.mark.parametrize(
+        ("role", "decision", "release_allowed"),
+        [
+            ("internal-canary", "accepted-canary", False),
+            ("production-acceptance", "accepted-production", True),
+        ],
+    )
+    def test_verified_real_scene_pointer_projects_only_derived_acceptance(
+        self,
+        tmp_path,
+        monkeypatch,
+        role,
+        decision,
+        release_allowed,
+    ):
+        _write_v2_project(tmp_path)
+        _report, digest = _write_real_scene_acceptance_pointer(tmp_path)
+        before = build_project_snapshot(tmp_path)
+        monkeypatch.setattr(
+            "pipeline.studio_server.validate_real_scene_acceptance",
+            lambda _path: _real_scene_decision(digest, role=role),
+        )
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["real_scene"]["role"] == role
+        assert snapshot["real_scene"]["decision"] == decision
+        assert snapshot["real_scene"]["production_release_allowed"] is release_allowed
+        assert snapshot["real_scene"]["report_sha256"] == digest
+        assert "report_path" not in snapshot["real_scene"]
+        assert snapshot["coordinate"] == before["coordinate"]
+        assert snapshot["reconstruction"] == before["reconstruction"]
+        assert snapshot["pipeline"] == before["pipeline"]
+
+    def test_rejected_real_scene_projects_failed_gate_without_trust_promotion(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _write_v2_project(tmp_path)
+        _report, digest = _write_real_scene_acceptance_pointer(tmp_path)
+        monkeypatch.setattr(
+            "pipeline.studio_server.validate_real_scene_acceptance",
+            lambda _path: _real_scene_decision(
+                digest,
+                role="production-acceptance",
+                accepted=False,
+            ),
+        )
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["real_scene"]["decision"] == "rejected"
+        assert snapshot["real_scene"]["production_release_allowed"] is False
+        states = {
+            stage["id"]: stage["state"]
+            for stage in snapshot["real_scene"]["stages"]
+        }
+        assert states["viewer-performance"] == "failed"
+        assert snapshot["pipeline"]["reconstruct"]["trust"] == "proxy"
+
+    @pytest.mark.parametrize("failure", ["malformed", "tampered", "symlink"])
+    def test_invalid_real_scene_pointer_or_report_fails_closed(
+        self,
+        tmp_path,
+        monkeypatch,
+        failure,
+    ):
+        _write_v2_project(tmp_path)
+        report, _digest = _write_real_scene_acceptance_pointer(tmp_path)
+        pointer = tmp_path / ".nantai-studio/real-scene/latest-acceptance.json"
+        if failure == "malformed":
+            pointer.write_bytes(b"{")
+        elif failure == "tampered":
+            report.write_bytes(b"tampered\n")
+        else:
+            target = tmp_path / "outside-pointer.json"
+            target.write_bytes(pointer.read_bytes())
+            pointer.unlink()
+            try:
+                pointer.symlink_to(target)
+            except OSError:
+                pytest.skip("symlink creation is unavailable")
+        monkeypatch.setattr(
+            "pipeline.studio_server.validate_real_scene_acceptance",
+            lambda _path: (_ for _ in ()).throw(
+                RealSceneAcceptanceError("tampered aggregate"),
+            ),
+        )
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["real_scene"]["decision"] == "invalid-evidence"
+        assert snapshot["real_scene"]["production_release_allowed"] is False
+        assert snapshot["real_scene"]["report_sha256"] is None
+        assert all(
+            stage["state"] == "unknown"
+            for stage in snapshot["real_scene"]["stages"]
+        )
+        assert snapshot["pipeline"]["reconstruct"]["trust"] == "proxy"
+
     def test_development_tree_reports_not_packaged(self, tmp_path):
         snapshot = build_project_snapshot(tmp_path)
 

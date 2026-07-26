@@ -41,6 +41,7 @@ from pipeline.real_scene_acceptance import (
     acceptance_evidence_reference,
     canonical_real_scene_acceptance_bytes,
     publish_real_scene_acceptance,
+    publish_real_scene_acceptance_pointer,
 )
 from pipeline.real_scene_capture import (
     PreparedRealCapture,
@@ -962,6 +963,10 @@ class RealScenePipelineOperations:
             external = self._acceptance_external_files(
                 workspace,
                 report,
+            )
+            publish_real_scene_acceptance_pointer(
+                published,
+                Path(self.options.workspace_base).expanduser().absolute(),
             )
             evidence = (*external,)
             artifacts = (source_path, published)

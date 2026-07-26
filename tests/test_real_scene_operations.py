@@ -392,6 +392,7 @@ def test_accept_stage_publishes_content_addressed_aggregate(
         ),
     )
     published = workspace / "accepted-report.json"
+    pointer_calls = []
 
     def fake_publish(report, root):
         assert root == workspace
@@ -410,6 +411,13 @@ def test_accept_stage_publishes_content_addressed_aggregate(
         fake_publish,
     )
     monkeypatch.setattr(
+        "pipeline.real_scene_operations.publish_real_scene_acceptance_pointer",
+        lambda report_path, root: (
+            pointer_calls.append((report_path, root))
+            or root / "latest-acceptance.json"
+        ),
+    )
+    monkeypatch.setattr(
         operations,
         "_acceptance_external_files",
         lambda *_args: tuple(external),
@@ -420,3 +428,9 @@ def test_accept_stage_publishes_content_addressed_aggregate(
 
     assert receipt.status == "completed"
     assert any(output.path.endswith("accepted-report.json") for output in receipt.outputs)
+    assert pointer_calls == [
+        (
+            published,
+            tmp_path / "real-scene",
+        )
+    ]

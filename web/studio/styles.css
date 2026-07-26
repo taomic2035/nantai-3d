@@ -197,6 +197,7 @@ select {
 .summary-card p, .evidence-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .summary-card.is-warning { border-color: rgba(255,204,85,.25); background: rgba(255,204,85,.045); }
 .summary-card.is-danger { border-color: rgba(255,119,119,.28); background: rgba(255,119,119,.045); }
+.summary-card.is-success { border-color: rgba(127,255,156,.24); background: rgba(127,255,156,.04); }
 .eyebrow { margin: 14px 0 7px; color: var(--dim); font-size: 9px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .fact-list { margin: 0; }
 .fact-row { display: grid; grid-template-columns: minmax(85px, .8fr) minmax(0, 1.2fr); gap: 8px; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.055); font-size: 11px; }
@@ -211,6 +212,42 @@ select {
 .contact-sheet { display: block; width: 100%; margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; }
 .inline-actions { display: flex; gap: 7px; margin-top: 10px; }
 .production-quality-panel { margin-top: 16px; }
+.real-scene-evidence { margin-top: 16px; }
+.real-scene-stages {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px;
+}
+.real-scene-stage {
+  min-width: 0; padding: 7px; border: 1px solid var(--border); border-radius: 6px;
+  background: rgba(255,255,255,.025);
+}
+.real-scene-stage b, .real-scene-stage span {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.real-scene-stage b { color: var(--dim); font-size: 8px; }
+.real-scene-stage span { margin-top: 4px; color: var(--text); font-size: 9px; }
+.real-scene-stage[data-state="succeeded"] { border-color: rgba(127,255,156,.2); }
+.real-scene-stage[data-state="succeeded"] span { color: var(--green); }
+.real-scene-stage[data-state="failed"] { border-color: rgba(255,119,119,.25); }
+.real-scene-stage[data-state="failed"] span { color: var(--red); }
+.real-scene-stage[data-state="unknown"],
+.real-scene-stage[data-state="not-started"] { border-color: rgba(255,204,85,.18); }
+.real-scene-stage[data-state="unknown"] span,
+.real-scene-stage[data-state="not-started"] span { color: var(--amber); }
+.real-scene-disclosure, .real-scene-trust-note {
+  margin: 8px 0; color: var(--amber); font-size: 9px; line-height: 1.5;
+}
+.real-scene-trust-note { color: var(--muted); }
+.real-scene-reasons {
+  margin: 9px 0; padding-left: 18px; color: var(--muted); font-size: 9px; line-height: 1.5;
+}
+.real-scene-reasons-empty { color: var(--dim); font-size: 9px; }
+.real-scene-contract { margin: 9px 0 0; font-size: 9px; }
+.real-scene-contract div {
+  display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 6px; padding: 4px 0;
+}
+.real-scene-contract dt { color: var(--dim); }
+.real-scene-contract dd { margin: 0; color: var(--muted); }
+.real-scene-report-sha { overflow-wrap: anywhere; }
 .quality-stages {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px;
 }

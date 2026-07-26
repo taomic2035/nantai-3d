@@ -52,6 +52,11 @@ from pipeline.preview_release import (
     ReleaseVerificationError,
     verify_release_tree,
 )
+from pipeline.real_scene_acceptance import (
+    RealSceneAcceptanceError,
+    load_latest_real_scene_acceptance,
+    validate_real_scene_acceptance,
+)
 from pipeline.render_chunk_to_ply import render_single_chunk
 from pipeline.studio_jobs import JobContractError, JobService, WriterBusyError
 from pipeline.studio_ledger import (
@@ -151,6 +156,18 @@ CORE_3DGS_PROPERTIES = frozenset({
     "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
     "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
 })
+REAL_SCENE_GATE_IDS = (
+    "dataset",
+    "capture",
+    "sfm",
+    "production-training",
+    "import-integrity",
+    "render-quality",
+    "viewer-performance",
+    "human-review",
+    "release-rights",
+    "metric-alignment",
+)
 
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
@@ -1880,6 +1897,113 @@ def _release_snapshot(root: Path) -> dict[str, Any]:
     }
 
 
+def _real_scene_snapshot(root: Path) -> dict[str, Any]:
+    """Project aggregate decisions without exposing private evidence paths."""
+
+    def envelope(
+        *,
+        decision: str,
+        state: str,
+        role: str = "unknown",
+        reasons: tuple[str, ...],
+        report_sha256: str | None = None,
+        production_release_allowed: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "role": role,
+            "decision": decision,
+            "production_release_allowed": production_release_allowed,
+            "stages": [
+                {"id": gate, "state": state}
+                for gate in REAL_SCENE_GATE_IDS
+            ],
+            "reasons": list(reasons),
+            "report_sha256": report_sha256,
+        }
+
+    boundary = root / ".nantai-studio/real-scene"
+    if not boundary.exists() and not boundary.is_symlink():
+        return envelope(
+            decision="not-started",
+            state="not-started",
+            reasons=("no configured real-scene acceptance report",),
+        )
+    invalid = envelope(
+        decision="invalid-evidence",
+        state="unknown",
+        reasons=("configured real-scene acceptance evidence could not be verified",),
+    )
+    try:
+        report_path = load_latest_real_scene_acceptance(boundary)
+        if report_path is None:
+            return envelope(
+                decision="not-started",
+                state="not-started",
+                reasons=("no configured real-scene acceptance report",),
+            )
+        derived = validate_real_scene_acceptance(report_path)
+        actual_sha256 = _sha256_file(report_path)
+        if (
+            derived.report_sha256 != actual_sha256
+            or (
+                derived.source_role == "internal-canary"
+                and (
+                    derived.production_release_allowed
+                    or (derived.canary_accepted != derived.technical_accepted)
+                )
+            )
+            or (
+                derived.source_role == "production-acceptance"
+                and derived.canary_accepted
+            )
+            or (
+                derived.production_release_allowed
+                and not derived.technical_accepted
+            )
+            or tuple(gate.gate for gate in derived.gates)
+            != REAL_SCENE_GATE_IDS
+        ):
+            return invalid
+    except (OSError, RealSceneAcceptanceError, ValueError):
+        return invalid
+
+    state_map = {
+        "accepted": "succeeded",
+        "rejected": "failed",
+        "not-applicable": "not-started",
+    }
+    stages = [
+        {
+            "id": gate.gate,
+            "state": state_map[gate.state],
+        }
+        for gate in derived.gates
+    ]
+    reasons = list(derived.reasons)
+    reasons.extend(
+        f"{gate.gate}: {reason}"
+        for gate in derived.gates
+        if gate.state == "not-applicable"
+        for reason in gate.reasons
+    )
+    if derived.production_release_allowed:
+        decision = "accepted-production"
+    elif derived.canary_accepted:
+        decision = "accepted-canary"
+    else:
+        decision = "rejected"
+    return {
+        "schema_version": 1,
+        "role": derived.source_role,
+        "decision": decision,
+        "production_release_allowed": derived.production_release_allowed,
+        "stages": stages,
+        "reasons": reasons,
+        "report_sha256": derived.report_sha256,
+    }
+
+
 def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
     """Build a Studio schema-v2 snapshot exclusively from on-disk evidence."""
 
@@ -1926,6 +2050,7 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         reconstruction["geometry_usability"] = "preview-only"
     assets = _asset_snapshot(root)
     release = _release_snapshot(root)
+    real_scene = _real_scene_snapshot(root)
     world_composition_available = _world_composition_available(root)
     runs = _load_runs(root)
 
@@ -1999,6 +2124,7 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         "stitch": stitch,
         "assets": assets,
         "release": release,
+        "real_scene": real_scene,
         "pipeline": pipeline,
         "active_run": (
             {

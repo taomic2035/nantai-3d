@@ -182,3 +182,14 @@ test('production quality evidence has compact stage and rule layouts', () => {
   assert.match(css, /\.quality-hashes[^}]*overflow-wrap:\s*anywhere/s);
   assert.match(css, /\[data-state="rejected"\][^{]*\{[^}]*var\(--red\)/s);
 });
+
+test('review inspector renders fail-closed real-scene acceptance evidence', () => {
+  assert.match(
+    app,
+    /import\s*\{[^}]*renderRealSceneEvidence[^}]*\}\s*from\s*['"]\.\/real-scene-evidence\.mjs['"]/s,
+  );
+  assert.match(app, /renderRealSceneEvidence\(\s*snapshot\.real_scene\s*\)/);
+  assert.match(css, /\.real-scene-stages\s*\{[^}]*grid-template-columns/s);
+  assert.match(css, /\.real-scene-stage\[data-state="failed"\]/);
+  assert.match(css, /\.real-scene-report-sha[^}]*overflow-wrap:\s*anywhere/s);
+});

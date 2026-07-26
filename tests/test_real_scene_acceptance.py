@@ -19,10 +19,14 @@ from pipeline.real_scene_acceptance import (
     HumanVisualReview,
     RealSceneAcceptance,
     RealSceneAcceptanceError,
+    RealSceneAcceptancePointer,
     canonical_human_review_bytes,
     canonical_human_review_policy_bytes,
     canonical_real_scene_acceptance_bytes,
+    canonical_real_scene_acceptance_pointer_bytes,
+    load_latest_real_scene_acceptance,
     publish_real_scene_acceptance,
+    publish_real_scene_acceptance_pointer,
     record_human_visual_review,
     validate_human_visual_review,
     validate_real_scene_acceptance,
@@ -497,6 +501,72 @@ def test_acceptance_publication_is_content_addressed_and_idempotent(
     assert first_decision == second_decision
     assert first_path.name == (f"real-scene-acceptance-{first_decision.report_sha256}.json")
     assert first_path.read_bytes() == canonical_real_scene_acceptance_bytes(report)
+
+
+def test_latest_acceptance_pointer_is_relative_content_bound_and_idempotent(
+    tmp_path,
+):
+    root = tmp_path / "real-scene"
+    payload = b'{"schema":"fixture"}\n'
+    report = root / "run-a" / (
+        f"real-scene-acceptance-{hashlib.sha256(payload).hexdigest()}.json"
+    )
+    report.parent.mkdir(parents=True)
+    report.write_bytes(payload)
+
+    first = publish_real_scene_acceptance_pointer(report, root)
+    second = publish_real_scene_acceptance_pointer(report, root)
+
+    assert first == second == root / "latest-acceptance.json"
+    pointer_model = RealSceneAcceptancePointer.model_validate_json(first.read_bytes())
+    assert first.read_bytes() == canonical_real_scene_acceptance_pointer_bytes(
+        pointer_model
+    )
+    assert load_latest_real_scene_acceptance(root) == report
+    pointer = json.loads(first.read_bytes())
+    assert pointer["report_path"] == f"run-a/{report.name}"
+    assert set(pointer) == {
+        "schema",
+        "report_path",
+        "report_sha256",
+        "report_byte_length",
+    }
+
+
+def test_latest_acceptance_pointer_rejects_report_tamper_and_unsafe_paths(
+    tmp_path,
+):
+    root = tmp_path / "real-scene"
+    root.mkdir()
+    payload = b'{"schema":"fixture"}\n'
+    report = root / (
+        f"real-scene-acceptance-{hashlib.sha256(payload).hexdigest()}.json"
+    )
+    report.write_bytes(payload)
+    pointer = publish_real_scene_acceptance_pointer(report, root)
+
+    report.write_bytes(b'{"schema":"tampered"}\n')
+    with pytest.raises(RealSceneAcceptanceError, match="SHA|byte"):
+        load_latest_real_scene_acceptance(root)
+
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside\n")
+    pointer.write_text(
+        json.dumps(
+            {
+                "schema": "nantai.real-scene-acceptance-pointer.v1",
+                "report_path": "../outside.json",
+                "report_sha256": hashlib.sha256(b"outside\n").hexdigest(),
+                "report_byte_length": len(b"outside\n"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RealSceneAcceptanceError, match="pointer"):
+        load_latest_real_scene_acceptance(root)
 
 
 def test_production_acceptance_requires_rights_metric_and_every_gate(
