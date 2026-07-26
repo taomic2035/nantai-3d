@@ -39,6 +39,10 @@ _CONFIG_BYTES = b"trainer: nerfstudio\nmax_resolution: 1024\nseed: 42\n"
 _CONFIG_SHA = hashlib.sha256(_CONFIG_BYTES).hexdigest()
 _LOG_BYTES = b"[10:00] training started\n[11:30] done\n"
 _LOG_SHA = hashlib.sha256(_LOG_BYTES).hexdigest()
+_DATAPARSER_TRANSFORM_BYTES = (
+    b'{"scale":1.0,"transform":[[1,0,0,0],[0,1,0,0],'
+    b'[0,0,1,0],[0,0,0,1]]}\n'
+)
 _T0 = datetime(2026, 7, 23, 10, 0, 0, tzinfo=UTC)
 _T1 = datetime(2026, 7, 23, 11, 30, 0, tzinfo=UTC)
 
@@ -111,6 +115,7 @@ def _make_honest(
     trainer_drift: TrainerDriftRecord | None = None,
     gaussian_count: int | None = 50000,
     sh_degree: int | None = 3,
+    dataparser_transform_bytes: bytes | None = None,
 ) -> tuple[TrainingResult, TrainingRequest, dict[str, bytes], bytes, bytes, bytes]:
     """Build an honest result via the builder and return all artifacts.
 
@@ -159,6 +164,7 @@ def _make_honest(
         exit_code=exit_code,
         gaussian_count=gaussian_count,
         sh_degree=sh_degree,
+        dataparser_transform_bytes=dataparser_transform_bytes,
         trainer_drift=trainer_drift,
     )
     # For failed/interrupted runs the builder empties the primary PLY, so the
@@ -171,6 +177,7 @@ def _validate(
     pack: tuple[TrainingResult, TrainingRequest, dict[str, bytes], bytes, bytes, bytes],
     *,
     policy: TrainingDriftPolicy | None = None,
+    dataparser_transform_bytes: bytes | None = None,
 ) -> None:
     result, request, input_bytes, ply, config, log = pack
     validate_training_provenance(
@@ -179,6 +186,7 @@ def _validate(
         actual_ply_bytes=ply,
         actual_config_bytes=config,
         actual_log_bytes=log,
+        actual_dataparser_transform_bytes=dataparser_transform_bytes,
         input_bytes_by_path=input_bytes,
         policy=policy,
     )
@@ -681,6 +689,42 @@ class TestConfigOutputBinding:
         tampered = result.model_copy(update={"output_bindings": tuple(outputs)})
         with pytest.raises(ValueError, match="training_config_yml binding sha"):
             _validate((tampered, request, input_bytes, ply, config, log))
+
+
+class TestDataparserTransformOutputBinding:
+    def test_builder_binds_and_validator_closes_transform_bytes(self):
+        pack = _make_honest(
+            dataparser_transform_bytes=_DATAPARSER_TRANSFORM_BYTES,
+        )
+        result = pack[0]
+
+        _validate(
+            pack,
+            dataparser_transform_bytes=_DATAPARSER_TRANSFORM_BYTES,
+        )
+
+        bindings = tuple(
+            binding
+            for binding in result.output_bindings
+            if binding.artifact_kind == "dataparser_transform_json"
+        )
+        assert len(bindings) == 1
+        assert bindings[0].artifact_sha256 == hashlib.sha256(
+            _DATAPARSER_TRANSFORM_BYTES,
+        ).hexdigest()
+
+    def test_bound_transform_requires_exact_authoritative_bytes(self):
+        pack = _make_honest(
+            dataparser_transform_bytes=_DATAPARSER_TRANSFORM_BYTES,
+        )
+
+        with pytest.raises(ValueError, match="dataparser transform"):
+            _validate(pack, dataparser_transform_bytes=b'{"scale":0.25}\n')
+
+    def test_historical_result_without_transform_remains_valid(self):
+        pack = _make_honest()
+
+        _validate(pack)
 
 
 # ============================================================

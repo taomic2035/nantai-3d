@@ -319,6 +319,21 @@ def _cmd_result(args: argparse.Namespace) -> int:
         raise SystemExit(f"log not found: {log_path}")
     log_bytes = log_path.read_bytes()
 
+    dataparser_transform_path: Path | None = None
+    dataparser_transform_bytes: bytes | None = None
+    if args.dataparser_transform is not None:
+        dataparser_transform_path = Path(args.dataparser_transform)
+        if not dataparser_transform_path.is_file():
+            raise SystemExit(
+                "dataparser transform not found: "
+                f"{dataparser_transform_path}"
+            )
+        dataparser_transform_bytes = (
+            dataparser_transform_path.read_bytes()
+        )
+        if not dataparser_transform_bytes:
+            raise SystemExit("dataparser transform is empty")
+
     # GPU environment.  If every field is supplied explicitly, use them;
     # otherwise auto-detect via nvidia-smi and apply any explicit overrides.
     gpu_all_explicit = all(v is not None for v in (
@@ -415,6 +430,12 @@ def _cmd_result(args: argparse.Namespace) -> int:
         error_message=error_message,
         gaussian_count=gaussian_count,
         sh_degree=sh_degree,
+        dataparser_transform_bytes=dataparser_transform_bytes,
+        dataparser_transform_path=(
+            str(dataparser_transform_path).replace("\\", "/")
+            if dataparser_transform_path is not None
+            else "dataparser_transforms.json"
+        ),
         trainer_drift=trainer_drift,
     )
     _write_json(Path(args.output), result)
@@ -463,6 +484,13 @@ def main(argv: list[str] | None = None) -> int:
                          "--exit-code != 0 (failed/interrupted run with no PLY)")
     rs.add_argument("--config-yml", required=True, help="nerfstudio config.yml")
     rs.add_argument("--log", required=True, help="training log file")
+    rs.add_argument(
+        "--dataparser-transform",
+        default=None,
+        help=(
+            "optional dataparser_transforms.json to bind into the result"
+        ),
+    )
     rs.add_argument("--trainer", required=True,
                     choices=["nerfstudio-splatfacto", "brush", "gsplat", "inria"])
     rs.add_argument("--trainer-version", required=True)

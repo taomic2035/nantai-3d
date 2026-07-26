@@ -96,6 +96,12 @@ class TestEmitTrainingProvenance:
     def test_request_result_roundtrip_validates(self, tmp_path):
         images, ply, config, log, n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
+        dataparser_transform = out / "dataparser_transforms.json"
+        dataparser_transform.write_text(
+            '{"scale":1.0,"transform":[[1,0,0,0],[0,1,0,0],'
+            '[0,0,1,0],[0,0,0,1]]}\n',
+            encoding="ascii",
+        )
 
         req_proc = _run(
             "request",
@@ -114,6 +120,7 @@ class TestEmitTrainingProvenance:
             "--ply", str(ply),
             "--config-yml", str(config),
             "--log", str(log),
+            "--dataparser-transform", str(dataparser_transform),
             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
             "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
             "--cuda-version", "11.8", "--driver-version", "525.60.13",
@@ -141,6 +148,9 @@ class TestEmitTrainingProvenance:
             actual_ply_bytes=ply_bytes,
             actual_config_bytes=config_bytes,
             actual_log_bytes=log_bytes,
+            actual_dataparser_transform_bytes=(
+                dataparser_transform.read_bytes()
+            ),
             input_bytes_by_path=input_bytes,
         )
 
@@ -149,6 +159,9 @@ class TestEmitTrainingProvenance:
             actual_ply_bytes=ply_bytes,
             actual_config_bytes=config_bytes,
             actual_log_bytes=log_bytes,
+            actual_dataparser_transform_bytes=(
+                dataparser_transform.read_bytes()
+            ),
             input_bytes_by_path=input_bytes,
             registration_quality_passed=False)
         assert trust.content_closed is True

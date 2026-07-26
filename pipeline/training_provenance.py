@@ -129,6 +129,7 @@ _OUTPUT_KINDS = Literal[
     "training_config_yml",
     "training_log",
     "ns_process_data_dir",
+    "dataparser_transform_json",
 ]
 
 
@@ -486,6 +487,41 @@ def _check_config_output(
         )
 
 
+def _check_dataparser_transform_output(
+    result: TrainingResult,
+    actual_dataparser_transform_bytes: bytes | None,
+) -> None:
+    bindings = [
+        binding
+        for binding in result.output_bindings
+        if binding.artifact_kind == "dataparser_transform_json"
+    ]
+    if not bindings:
+        if actual_dataparser_transform_bytes is not None:
+            raise ValueError(
+                "dataparser transform bytes were supplied without a binding"
+            )
+        return
+    if len(bindings) != 1:
+        raise ValueError(
+            "exactly one dataparser transform output binding is allowed"
+        )
+    if not actual_dataparser_transform_bytes:
+        raise ValueError(
+            "bound dataparser transform requires non-empty authoritative bytes"
+        )
+    binding = bindings[0]
+    if (
+        binding.artifact_sha256
+        != hashlib.sha256(actual_dataparser_transform_bytes).hexdigest()
+    ):
+        raise ValueError("dataparser transform binding sha mismatch")
+    if binding.artifact_size_bytes != len(
+        actual_dataparser_transform_bytes
+    ):
+        raise ValueError("dataparser transform binding size mismatch")
+
+
 def validate_training_provenance(
     result: TrainingResult,
     request: TrainingRequest,
@@ -493,6 +529,7 @@ def validate_training_provenance(
     actual_ply_bytes: bytes,
     actual_config_bytes: bytes,
     actual_log_bytes: bytes,
+    actual_dataparser_transform_bytes: bytes | None = None,
     input_bytes_by_path: dict[str, bytes],
     policy: TrainingDriftPolicy | None = None,
 ) -> None:
@@ -519,6 +556,8 @@ def validate_training_provenance(
        ``training_log_sha256``/``training_log_size_bytes``.
     7. Config output binding: exactly one ``training_config_yml`` output binding
        whose sha+size match the actual config bytes.
+    8. A present ``dataparser_transform_json`` binding is re-derived from
+       non-empty authoritative bytes. Historical results may omit both.
 
     Raises ``ValueError`` on any mismatch.  Timestamps (UTC, started<=finished)
     are enforced at schema level.
@@ -531,6 +570,10 @@ def validate_training_provenance(
     _check_status_and_ply(result, actual_ply_bytes)
     _check_log(result, actual_log_bytes)
     _check_config_output(result, actual_config_bytes)
+    _check_dataparser_transform_output(
+        result,
+        actual_dataparser_transform_bytes,
+    )
 
 
 # ============================================================
@@ -558,6 +601,8 @@ def build_training_result(
     gaussian_count: int | None = None,
     sh_degree: int | None = None,
     ns_process_data_dir_binding: TrainingOutputBinding | None = None,
+    dataparser_transform_bytes: bytes | None = None,
+    dataparser_transform_path: str = "dataparser_transforms.json",
     trainer_drift: TrainerDriftRecord | None = None,
 ) -> TrainingResult:
     """Construct a TrainingResult by deriving every field from real bytes.
@@ -621,6 +666,19 @@ def build_training_result(
     )
     if ns_process_data_dir_binding is not None:
         outputs.append(ns_process_data_dir_binding)
+    if dataparser_transform_bytes is not None:
+        if not dataparser_transform_bytes:
+            raise ValueError("dataparser transform bytes must be non-empty")
+        outputs.append(
+            TrainingOutputBinding(
+                artifact_kind="dataparser_transform_json",
+                artifact_sha256=hashlib.sha256(
+                    dataparser_transform_bytes,
+                ).hexdigest(),
+                artifact_path=dataparser_transform_path,
+                artifact_size_bytes=len(dataparser_transform_bytes),
+            )
+        )
 
     primary_ply_sha = ply_sha if state == "completed" else hashlib.sha256(b"").hexdigest()
     primary_ply_size = len(actual_ply_bytes) if state == "completed" else 0
@@ -690,6 +748,7 @@ def derive_training_trust(
     actual_ply_bytes: bytes,
     actual_config_bytes: bytes,
     actual_log_bytes: bytes,
+    actual_dataparser_transform_bytes: bytes | None = None,
     input_bytes_by_path: dict[str, bytes],
     registration_quality_passed: bool,
     policy: TrainingDriftPolicy | None = None,
@@ -715,6 +774,9 @@ def derive_training_trust(
             actual_ply_bytes=actual_ply_bytes,
             actual_config_bytes=actual_config_bytes,
             actual_log_bytes=actual_log_bytes,
+            actual_dataparser_transform_bytes=(
+                actual_dataparser_transform_bytes
+            ),
             input_bytes_by_path=input_bytes_by_path,
             policy=policy,
         )
