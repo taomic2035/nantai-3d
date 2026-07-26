@@ -516,6 +516,27 @@ def test_verify_release_tree_rejects_unexpected_runtime_file(tmp_path: Path) -> 
         verify_release_tree(tmp_path)
 
 
+def test_verify_release_tree_allows_only_declared_runtime_mutable_outputs(
+    tmp_path: Path,
+) -> None:
+    _write_exact_release(tmp_path)
+    generated = {
+        ".venv/lib/python3.13/site-packages/example.py": b"installed = True\n",
+        "pipeline/__pycache__/preview_release.cpython-313.pyc": b"bytecode",
+        "nantai_infinite_village.egg-info/PKG-INFO": b"Metadata-Version: 2.4\n",
+    }
+    for relative, payload in generated.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    assert verify_release_tree(tmp_path).valid is True
+
+    (tmp_path / "pipeline/injected.py").write_text("malicious = True\n", encoding="utf-8")
+    with pytest.raises(ReleaseVerificationError, match="unexpected release file"):
+        verify_release_tree(tmp_path)
+
+
 def test_builder_rejects_locked_manifest_drift(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

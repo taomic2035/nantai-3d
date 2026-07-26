@@ -9,7 +9,15 @@ import sys
 import zipfile
 from pathlib import Path
 
-from pipeline.preview_release import (
+# Direct execution sets sys.path[0] to scripts/, not the extracted runtime
+# root.  Bootstrap only this script's immutable parent so clean packages can
+# verify before pip/site-packages exist, and do not mutate the tree with pyc.
+RELEASE_ROOT = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True
+if str(RELEASE_ROOT) not in sys.path:
+    sys.path.insert(0, str(RELEASE_ROOT))
+
+from pipeline.preview_release import (  # noqa: E402
     ReleaseVerificationError,
     verify_release_archive,
     verify_release_tree,

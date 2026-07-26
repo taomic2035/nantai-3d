@@ -34,6 +34,10 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _VERSION_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$")
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_RUNTIME_MUTABLE_ROOTS = frozenset({
+    ".venv",
+    "nantai_infinite_village.egg-info",
+})
 _WINDOWS_RESERVED = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
@@ -316,6 +320,12 @@ def _all_release_files(root: Path) -> set[str]:
             if candidate.is_symlink():
                 relative = candidate.relative_to(root).as_posix()
                 raise ReleaseVerificationError(f"symlink release path is forbidden: {relative}")
+            relative = candidate.relative_to(root)
+            if (
+                directory == "__pycache__"
+                or relative.as_posix() in _RUNTIME_MUTABLE_ROOTS
+            ):
+                directories.remove(directory)
         for name in names:
             candidate = current_path / name
             relative = candidate.relative_to(root).as_posix()

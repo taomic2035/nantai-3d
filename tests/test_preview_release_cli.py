@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from pipeline.preview_release import (
@@ -11,6 +14,28 @@ from pipeline.preview_release import (
 from scripts import build_preview_release, verify_preview_release
 
 SOURCE_COMMIT = "a" * 40
+
+
+def test_verify_script_bootstraps_from_its_release_tree_without_site_packages(
+    tmp_path: Path,
+) -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts/verify_preview_release.py"
+    completed = subprocess.run(
+        [sys.executable, "-S", str(script), str(tmp_path / "missing")],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "Preview verification failed" in completed.stderr
+    assert "ModuleNotFoundError" not in completed.stderr
 
 
 def test_git_tracked_files_decodes_sorts_and_drops_empty(monkeypatch, tmp_path: Path) -> None:

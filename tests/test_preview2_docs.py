@@ -44,6 +44,12 @@ def test_preview2_guide_is_an_exact_clean_room_runbook() -> None:
     assert "http://127.0.0.1:8000/web/studio/" in guide
     assert "查看高斯 / 点云" in guide
     assert "查看整村模型" in guide
+    assert guide.index(r"python scripts\verify_preview_release.py .") < guide.index(
+        "python -m venv .venv"
+    )
+    assert guide.index("python3 scripts/verify_preview_release.py .") < guide.index(
+        "python3 -m venv .venv"
+    )
 
 
 def test_preview2_guide_keeps_package_integrity_separate_from_scene_trust() -> None:
