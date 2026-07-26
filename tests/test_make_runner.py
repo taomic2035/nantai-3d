@@ -85,24 +85,30 @@ class TestRealSceneDispatch:
             lambda command, **_kwargs: calls.append(command),
         )
 
-        assert make.main(
-            [
-                "make.py",
-                "real-canary",
-                "RUN_ID=canary-001",
-                "fetch",
-            ]
-        ) == 0
+        assert (
+            make.main(
+                [
+                    "make.py",
+                    "real-canary",
+                    "RUN_ID=canary-001",
+                    "fetch",
+                ]
+            )
+            == 0
+        )
 
-        assert calls == [[
-            make.PY,
-            "scripts/real_scene.py",
-            "fetch",
-            "--source",
-            "config/real-scene/nerfstudio-poster.json",
-            "--run-id",
-            "canary-001",
-        ]]
+        assert calls == [
+            [
+                make.PY,
+                "-m",
+                "scripts.real_scene",
+                "fetch",
+                "--source",
+                "config/real-scene/nerfstudio-poster.json",
+                "--run-id",
+                "canary-001",
+            ]
+        ]
 
     def test_real_scene_passes_cross_platform_key_value_options(
         self,
@@ -116,34 +122,34 @@ class TestRealSceneDispatch:
             lambda command, **_kwargs: calls.append(command),
         )
 
-        assert make.main(
-            [
-                "make.py",
-                "real-scene",
-                "SOURCE=private/source.json",
-                "MEDIA_ROOT=/private/capture",
-                "RIGHTS=.nantai-studio/private/rights.json",
-                "POLICY=.nantai-studio/private/policy.json",
-                "CONTROL_POINTS=.nantai-studio/private/points.json",
-                "GEO_ORIGIN=31.2,121.5,4.0",
-                "REMOTE_CONFIG=.nantai-studio/private/remote.json",
-                "CHUNK_SIZE=37.5",
-                "import",
-            ]
-        ) == 0
+        assert (
+            make.main(
+                [
+                    "make.py",
+                    "real-scene",
+                    "SOURCE=private/source.json",
+                    "MEDIA_ROOT=/private/capture",
+                    "RIGHTS=.nantai-studio/private/rights.json",
+                    "POLICY=.nantai-studio/private/policy.json",
+                    "CONTROL_POINTS=.nantai-studio/private/points.json",
+                    "GEO_ORIGIN=31.2,121.5,4.0",
+                    "REMOTE_CONFIG=.nantai-studio/private/remote.json",
+                    "CHUNK_SIZE=37.5",
+                    "import",
+                ]
+            )
+            == 0
+        )
 
         command = calls[0]
-        assert command[:3] == [
+        assert command[:4] == [
             make.PY,
-            "scripts/real_scene.py",
+            "-m",
+            "scripts.real_scene",
             "import",
         ]
-        assert command[command.index("--source") + 1] == (
-            "private/source.json"
-        )
-        assert command[command.index("--geo-origin") + 1] == (
-            "31.2,121.5,4.0"
-        )
+        assert command[command.index("--source") + 1] == ("private/source.json")
+        assert command[command.index("--geo-origin") + 1] == ("31.2,121.5,4.0")
         assert command[command.index("--chunk-size") + 1] == "37.5"
 
     @pytest.mark.parametrize(
@@ -189,13 +195,14 @@ class TestPreviewReleaseTargets:
 
         make.build_preview()
 
-        assert calls == [[
-            make.PY,
-            "scripts/build_preview_release.py",
-            "--output",
-            ".nantai-studio/releases/v1.0.0-preview.2/"
-            "nantai-3d-v1.0.0-preview.2-runtime.zip",
-        ]]
+        assert calls == [
+            [
+                make.PY,
+                "scripts/build_preview_release.py",
+                "--output",
+                ".nantai-studio/releases/v1.0.0-preview.2/nantai-3d-v1.0.0-preview.2-runtime.zip",
+            ]
+        ]
 
     def test_build_preview_honours_dist_or_archive(self, make, monkeypatch):
         calls = []
@@ -229,11 +236,13 @@ class TestPreviewReleaseTargets:
 
         make.verify_preview()
 
-        assert calls == [[
-            make.PY,
-            "scripts/verify_preview_release.py",
-            "candidate/runtime.zip",
-        ]]
+        assert calls == [
+            [
+                make.PY,
+                "scripts/verify_preview_release.py",
+                "candidate/runtime.zip",
+            ]
+        ]
 
 
 class TestClean:

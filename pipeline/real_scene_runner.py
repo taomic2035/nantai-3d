@@ -61,11 +61,7 @@ _MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 
 
 def _require_utc(value: datetime) -> datetime:
-    if (
-        value.tzinfo is None
-        or value.utcoffset() is None
-        or value.utcoffset() != timedelta(0)
-    ):
+    if value.tzinfo is None or value.utcoffset() is None or value.utcoffset() != timedelta(0):
         raise ValueError("timestamp must be timezone-aware UTC")
     return value
 
@@ -100,6 +96,10 @@ class RealSceneRunOptions:
     control_points_path: Path | None = None
     geo_origin: tuple[float, float, float] | None = None
     remote_config_path: Path | None = None
+    viewer_policy_path: Path | None = None
+    viewer_report_path: Path | None = None
+    human_review_policy_path: Path | None = None
+    human_visual_review_path: Path | None = None
     remote_poll_interval_seconds: float = 15.0
     remote_timeout_seconds: float = 21_600.0
     chunk_size: float = 50.0
@@ -107,10 +107,7 @@ class RealSceneRunOptions:
     def __post_init__(self) -> None:
         if re.fullmatch(_ID_PATTERN, self.run_id) is None:
             raise ValueError("run_id must be a safe portable identifier")
-        if (
-            self.remote_poll_interval_seconds <= 0
-            or self.remote_timeout_seconds <= 0
-        ):
+        if self.remote_poll_interval_seconds <= 0 or self.remote_timeout_seconds <= 0:
             raise ValueError("remote polling intervals must be positive")
         if (
             isinstance(self.chunk_size, bool)
@@ -172,18 +169,12 @@ class StageReceipt(FrozenModel):
             or len(evidence_paths) != len(set(evidence_paths))
             or set(evidence_paths) & set(paths)
         ):
-            raise ValueError(
-                "stage evidence paths must be sorted, unique, and not outputs"
-            )
+            raise ValueError("stage evidence paths must be sorted, unique, and not outputs")
         if self.status == "completed":
             if not self.outputs or self.reason is not None:
-                raise ValueError(
-                    "completed stage requires outputs and forbids reason"
-                )
+                raise ValueError("completed stage requires outputs and forbids reason")
         elif self.outputs or not self.reason:
-            raise ValueError(
-                "blocked/unknown stage requires reason and forbids outputs"
-            )
+            raise ValueError("blocked/unknown stage requires reason and forbids outputs")
         if self.stage != "import" and self.alignment_rms_m is not None:
             raise ValueError("alignment RMS is only valid for import")
         return self
@@ -239,15 +230,11 @@ def _hash_artifact(
     try:
         relative = path.absolute().relative_to(workspace).as_posix()
     except ValueError as exc:
-        raise DatasetEvidenceError(
-            "stage artifact escaped the real-scene workspace"
-        ) from exc
+        raise DatasetEvidenceError("stage artifact escaped the real-scene workspace") from exc
     try:
         before = path.lstat()
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise DatasetEvidenceError(
-                f"stage artifact is missing or link-like: {relative}"
-            )
+            raise DatasetEvidenceError(f"stage artifact is missing or link-like: {relative}")
         digest = hashlib.sha256()
         measured = 0
         with path.open("rb") as stream:
@@ -258,13 +245,9 @@ def _hash_artifact(
     except DatasetEvidenceError:
         raise
     except OSError as exc:
-        raise DatasetEvidenceError(
-            f"stage artifact cannot be read: {relative}"
-        ) from exc
+        raise DatasetEvidenceError(f"stage artifact cannot be read: {relative}") from exc
     if _stat_signature(before) != _stat_signature(after):
-        raise DatasetEvidenceError(
-            f"stage artifact changed while hashing: {relative}"
-        )
+        raise DatasetEvidenceError(f"stage artifact changed while hashing: {relative}")
     return StageArtifactBinding(
         path=relative,
         byte_length=measured,
@@ -276,13 +259,9 @@ def _read_receipt(path: Path) -> tuple[StageReceipt, str]:
     try:
         before = path.lstat()
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise DatasetEvidenceError(
-                "stage receipt is missing or link-like"
-            )
+            raise DatasetEvidenceError("stage receipt is missing or link-like")
         if before.st_size <= 0 or before.st_size > _MAX_RECEIPT_BYTES:
-            raise DatasetEvidenceError(
-                "stage receipt size is outside the allowed range"
-            )
+            raise DatasetEvidenceError("stage receipt size is outside the allowed range")
         raw = path.read_bytes()
         after = path.lstat()
     except DatasetEvidenceError:
@@ -290,24 +269,16 @@ def _read_receipt(path: Path) -> tuple[StageReceipt, str]:
     except OSError as exc:
         raise DatasetEvidenceError("stage receipt cannot be read") from exc
     if _stat_signature(before) != _stat_signature(after):
-        raise DatasetEvidenceError(
-            "stage receipt changed while being read"
-        )
+        raise DatasetEvidenceError("stage receipt changed while being read")
     digest = hashlib.sha256(raw).hexdigest()
     if path.name != f"{digest}.json":
-        raise DatasetEvidenceError(
-            "stage receipt filename differs from its sha256"
-        )
+        raise DatasetEvidenceError("stage receipt filename differs from its sha256")
     try:
         receipt = StageReceipt.model_validate_json(raw)
     except ValueError as exc:
-        raise DatasetEvidenceError(
-            "stage receipt validation failed"
-        ) from exc
+        raise DatasetEvidenceError("stage receipt validation failed") from exc
     if raw != canonical_stage_receipt_bytes(receipt):
-        raise DatasetEvidenceError(
-            "stage receipt is not canonical JSON"
-        )
+        raise DatasetEvidenceError("stage receipt is not canonical JSON")
     return receipt, digest
 
 
@@ -358,9 +329,7 @@ class RealSceneRunner:
 
     def _all_stages(self) -> tuple[StageName, ...]:
         training: StageName = (
-            "train-production"
-            if self.source.role == "production-acceptance"
-            else "train-preview"
+            "train-production" if self.source.role == "production-acceptance" else "train-preview"
         )
         return ("fetch", "sfm", training, "import", "accept", "serve")
 
@@ -371,9 +340,7 @@ class RealSceneRunner:
         try:
             paths = tuple(sorted(directory.glob("*.json")))
         except OSError as exc:
-            raise DatasetEvidenceError(
-                "stage receipt directory cannot be enumerated"
-            ) from exc
+            raise DatasetEvidenceError("stage receipt directory cannot be enumerated") from exc
         receipts = tuple(_read_receipt(path) for path in paths)
         matching = tuple(
             item
@@ -385,9 +352,7 @@ class RealSceneRunner:
             )
         )
         if len(matching) != len(receipts):
-            raise DatasetEvidenceError(
-                "stage receipt directory contains a foreign receipt"
-            )
+            raise DatasetEvidenceError("stage receipt directory contains a foreign receipt")
         if not matching:
             return None
         return max(
@@ -406,41 +371,30 @@ class RealSceneRunner:
     ) -> StageReceipt:
         if receipt.status != "completed":
             raise RealSceneBlockedError(
-                f"{receipt.stage} has {receipt.status} evidence; "
-                "explicit retry is required"
+                f"{receipt.stage} has {receipt.status} evidence; explicit retry is required"
             )
         if (
             receipt.stage == "import"
             and self.source.role == "production-acceptance"
-            and (
-                receipt.alignment_rms_m is None
-                or receipt.alignment_rms_m > 0.25
-            )
+            and (receipt.alignment_rms_m is None or receipt.alignment_rms_m > 0.25)
         ):
             raise RealSceneBlockedError(
                 "production import alignment RMS is missing or exceeds 0.25 m"
             )
         for prerequisite in receipt.prerequisites:
             if prerequisite.receipt_sha256 in seen:
-                raise DatasetEvidenceError(
-                    "stage receipt prerequisite cycle detected"
-                )
+                raise DatasetEvidenceError("stage receipt prerequisite cycle detected")
             prerequisite_path = (
-                self.receipt_root
-                / prerequisite.stage
-                / f"{prerequisite.receipt_sha256}.json"
+                self.receipt_root / prerequisite.stage / f"{prerequisite.receipt_sha256}.json"
             )
             prerequisite_receipt, digest = _read_receipt(prerequisite_path)
             if (
                 digest != prerequisite.receipt_sha256
                 or prerequisite_receipt.stage != prerequisite.stage
                 or prerequisite_receipt.dataset_id != self.source.dataset_id
-                or prerequisite_receipt.source_sha256
-                != self.source.source_sha256
+                or prerequisite_receipt.source_sha256 != self.source.source_sha256
             ):
-                raise DatasetEvidenceError(
-                    "stage prerequisite receipt identity mismatch"
-                )
+                raise DatasetEvidenceError("stage prerequisite receipt identity mismatch")
             self._verify_completed(
                 prerequisite_receipt,
                 seen=seen | {prerequisite.receipt_sha256},
@@ -458,13 +412,8 @@ class RealSceneRunner:
                 self.workspace / expected.path,
                 workspace=self.workspace,
             )
-            if (
-                actual.sha256 != expected.sha256
-                or actual.byte_length != expected.byte_length
-            ):
-                raise DatasetEvidenceError(
-                    f"stage artifact sha256/size mismatch: {expected.path}"
-                )
+            if actual.sha256 != expected.sha256 or actual.byte_length != expected.byte_length:
+                raise DatasetEvidenceError(f"stage artifact sha256/size mismatch: {expected.path}")
 
     def _write_receipt(self, receipt: StageReceipt) -> tuple[StageReceipt, str]:
         payload = canonical_stage_receipt_bytes(receipt)
@@ -483,49 +432,31 @@ class RealSceneRunner:
                 stream.flush()
                 os.fsync(stream.fileno())
         except OSError as exc:
-            raise DatasetEvidenceError(
-                "stage receipt cannot be published"
-            ) from exc
+            raise DatasetEvidenceError("stage receipt cannot be published") from exc
         return _read_receipt(path)
 
     def _preflight_control_points(self) -> None:
         if self.source.role != "production-acceptance":
             return
         if self.control_points_path is None:
-            raise RealSceneBlockedError(
-                "production import requires measured control points"
-            )
+            raise RealSceneBlockedError("production import requires measured control points")
         if self.geo_origin is None or not np.all(
             np.isfinite(np.asarray(self.geo_origin, dtype=np.float64))
         ):
-            raise RealSceneBlockedError(
-                "production import requires a finite ENU geo origin"
-            )
+            raise RealSceneBlockedError("production import requires a finite ENU geo origin")
         try:
             points = load_control_points_json(self.control_points_path)
         except (AlignmentError, OSError, ValueError) as exc:
-            raise RealSceneBlockedError(
-                f"production control points are invalid: {exc}"
-            ) from exc
+            raise RealSceneBlockedError(f"production control points are invalid: {exc}") from exc
         if len(points) < 4:
-            raise RealSceneBlockedError(
-                "production import requires at least four control points"
-            )
+            raise RealSceneBlockedError("production import requires at least four control points")
         if any(point.derived_from_alignment is not None for point in points):
-            raise RealSceneBlockedError(
-                "production import requires measured control points"
-            )
-        explicit = tuple(
-            point.source_xyz
-            for point in points
-            if point.source_xyz is not None
-        )
+            raise RealSceneBlockedError("production import requires measured control points")
+        explicit = tuple(point.source_xyz for point in points if point.source_xyz is not None)
         if len(explicit) == len(points):
             matrix = np.asarray(explicit, dtype=np.float64)
             if np.linalg.matrix_rank(matrix - matrix.mean(axis=0)) < 3:
-                raise RealSceneBlockedError(
-                    "production control points must be non-coplanar"
-                )
+                raise RealSceneBlockedError("production control points must be non-coplanar")
 
     def _run_stage(
         self,
@@ -546,9 +477,7 @@ class RealSceneRunner:
                     f"({receipt.reason}); explicit retry is required"
                 )
         elif resume:
-            raise RealSceneBlockedError(
-                f"{stage} has no receipt to resume"
-            )
+            raise RealSceneBlockedError(f"{stage} has no receipt to resume")
 
         dependency = self._dependency(stage)
         prerequisite_receipts: tuple[StageReceipt, ...] = ()
@@ -582,18 +511,12 @@ class RealSceneRunner:
             execution.state == "completed"
             and stage == "import"
             and self.source.role == "production-acceptance"
-            and (
-                execution.alignment_rms_m is None
-                or execution.alignment_rms_m > 0.25
-            )
+            and (execution.alignment_rms_m is None or execution.alignment_rms_m > 0.25)
         ):
             execution = StageExecution(
                 state="blocked",
                 artifacts=(),
-                reason=(
-                    "production import alignment RMS is missing "
-                    "or exceeds 0.25 m"
-                ),
+                reason=("production import alignment RMS is missing or exceeds 0.25 m"),
                 alignment_rms_m=execution.alignment_rms_m,
                 evidence_artifacts=(
                     *execution.evidence_artifacts,
@@ -628,9 +551,7 @@ class RealSceneRunner:
             reason = None
         else:
             outputs = ()
-            reason = execution.reason or (
-                f"{stage} returned {execution.state}"
-            )
+            reason = execution.reason or (f"{stage} returned {execution.state}")
         receipt = StageReceipt(
             dataset_id=self.source.dataset_id,
             source_sha256=self.source.source_sha256,
@@ -647,8 +568,7 @@ class RealSceneRunner:
         receipt, _digest = self._write_receipt(receipt)
         if receipt.status != "completed":
             raise RealSceneBlockedError(
-                f"{stage} {receipt.status}: {receipt.reason}; "
-                f"receipt: {self.receipt_root / stage}"
+                f"{stage} {receipt.status}: {receipt.reason}; receipt: {self.receipt_root / stage}"
             )
         return receipt
 
@@ -682,13 +602,8 @@ class RealSceneRunner:
             "accept",
             "serve",
         }:
-            raise RealSceneBlockedError(
-                f"unknown real-scene target: {target}"
-            )
-        if (
-            target in {"import", "accept", "serve"}
-            and self.source.role == "production-acceptance"
-        ):
+            raise RealSceneBlockedError(f"unknown real-scene target: {target}")
+        if target in {"import", "accept", "serve"} and self.source.role == "production-acceptance":
             self._preflight_control_points()
         return self._run_stage(
             target,  # type: ignore[arg-type]
@@ -709,9 +624,7 @@ def run_real_scene(
     """Run one source-bound real-scene stage through the durable journal."""
 
     source = load_real_dataset_source(Path(source_path))
-    source_sha256 = hashlib.sha256(
-        canonical_model_bytes(source)
-    ).hexdigest()
+    source_sha256 = hashlib.sha256(canonical_model_bytes(source)).hexdigest()
     if operations is None:
         from pipeline.real_scene_operations import (
             RealScenePipelineOperations,

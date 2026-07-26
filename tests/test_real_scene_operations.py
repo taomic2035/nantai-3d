@@ -10,6 +10,7 @@ from pipeline.real_scene_runner import (
     RealSceneRunner,
     RealSceneRunOptions,
     RealSceneSourceIdentity,
+    StageExecution,
 )
 from pipeline.training_executor import ExecutorJobRef, ExecutorObservation
 
@@ -51,9 +52,7 @@ def test_hf_fetch_receipt_binds_downloaded_payload_bytes(
     def fake_fetch(source, stage_root):
         del source
         (stage_root / "dataset/poster/images").mkdir(parents=True)
-        (stage_root / "dataset/poster/images/frame.png").write_bytes(
-            b"image"
-        )
+        (stage_root / "dataset/poster/images/frame.png").write_bytes(b"image")
         (stage_root / "dataset-lock.json").write_bytes(b"lock\n")
         (stage_root / "dataset-policy.json").write_bytes(b"policy\n")
         (stage_root / "dataset-receipt.json").write_bytes(b"receipt\n")
@@ -75,8 +74,7 @@ def test_hf_fetch_receipt_binds_downloaded_payload_bytes(
     receipt = runner.run("fetch")
 
     assert any(
-        output.path.endswith("dataset/poster/images/frame.png")
-        for output in receipt.outputs
+        output.path.endswith("dataset/poster/images/frame.png") for output in receipt.outputs
     )
 
 
@@ -142,9 +140,7 @@ def test_rejected_sfm_retains_quality_report_and_stops(
         raise AssertionError("rejected SfM did not block")
 
     receipt_path = next((runner.receipt_root / "sfm").glob("*.json"))
-    assert "registration-quality-report.json" in receipt_path.read_text(
-        encoding="ascii"
-    )
+    assert "registration-quality-report.json" in receipt_path.read_text(encoding="ascii")
 
 
 def test_preview_training_stage_uses_preview_only_executor(
@@ -179,12 +175,8 @@ def test_preview_training_stage_uses_preview_only_executor(
         def run(self, verified):
             assert verified.path == bundle
             self.config.execution_root.mkdir()
-            (self.config.execution_root / "trained.ply").write_bytes(
-                b"ply"
-            )
-            return SimpleNamespace(
-                receipt=SimpleNamespace(quality_role="preview-only")
-            )
+            (self.config.execution_root / "trained.ply").write_bytes(b"ply")
+            return SimpleNamespace(receipt=SimpleNamespace(quality_role="preview-only"))
 
     monkeypatch.setattr(
         "pipeline.real_scene_operations.LocalBrushExecutor",
@@ -215,9 +207,7 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
             remote_timeout_seconds=1,
         ),
     )
-    stage_root = (
-        tmp_path / "workspace/stages/train-production/attempt-one"
-    )
+    stage_root = tmp_path / "workspace/stages/train-production/attempt-one"
     stage_root.mkdir(parents=True)
     bundle = stage_root / "training-bundle.zip"
     bundle.write_bytes(b"bundle")
@@ -273,10 +263,7 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
 
     assert execution.state == "unknown"
     assert "no success was inferred" in execution.reason
-    assert any(
-        path.name == "remote-job.private.json"
-        for path in execution.evidence_artifacts
-    )
+    assert any(path.name == "remote-job.private.json" for path in execution.evidence_artifacts)
 
 
 def test_import_stage_invokes_content_closed_scene_adapter(
@@ -291,9 +278,7 @@ def test_import_stage_invokes_content_closed_scene_adapter(
         ),
     )
     workspace = tmp_path / "workspace"
-    training_root = (
-        workspace / "stages/train-preview/attempt-train"
-    )
+    training_root = workspace / "stages/train-preview/attempt-train"
     training_root.mkdir(parents=True)
     stage_root = workspace / "stages/import/attempt-import"
     calls = []
@@ -334,3 +319,104 @@ def test_import_stage_invokes_content_closed_scene_adapter(
             },
         )
     ]
+
+
+def test_accept_stage_publishes_content_addressed_aggregate(
+    tmp_path,
+    monkeypatch,
+):
+    class BootstrapOperations:
+        def execute(self, stage, stage_root, prerequisite_receipts):
+            del prerequisite_receipts
+            stage_root.mkdir(parents=True)
+            files = []
+            if stage == "fetch":
+                paths = (
+                    "dataset-lock.json",
+                    "dataset-receipt.json",
+                    "dataset/frame.jpg",
+                )
+            elif stage == "sfm":
+                paths = (
+                    "capture/bundle/manifest.json",
+                    "prepared-capture-evidence.json",
+                    "registration-quality-policy.json",
+                    "sfm/registration.json",
+                    "sfm/registration-quality-report.json",
+                )
+            elif stage == "train-production":
+                paths = (
+                    "training-bundle/training-job.zip",
+                    "remote-result/render-evaluation/policy.json",
+                    "remote-result/render-evaluation/report.json",
+                )
+            elif stage == "import":
+                paths = ("import-receipt.json",)
+            else:
+                raise AssertionError(stage)
+            for relative in paths:
+                path = stage_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"{stage}:{relative}\n".encode("ascii"))
+                files.append(path)
+            return StageExecution(
+                state="completed",
+                artifacts=tuple(files),
+                alignment_rms_m=(0.0 if stage == "import" else None),
+            )
+
+    bootstrap = _runner(tmp_path, BootstrapOperations())
+    bootstrap.run("fetch")
+    bootstrap.run("sfm")
+    bootstrap.run("train-production")
+    bootstrap.run("import")
+    workspace = bootstrap.workspace
+    evidence = workspace / "evidence"
+    evidence.mkdir()
+    external = []
+    for name in (
+        "viewer-performance-policy.json",
+        "viewer-performance-report.json",
+        "human-review-policy.json",
+        "human-visual-review.json",
+    ):
+        path = evidence / name
+        path.write_bytes(f"{name}\n".encode("ascii"))
+        external.append(path)
+
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+        ),
+    )
+    published = workspace / "accepted-report.json"
+
+    def fake_publish(report, root):
+        assert root == workspace
+        assert report.source_role == "internal-canary"
+        assert report.training_root.path.startswith("stages/train-production/")
+        assert report.render_root.path.endswith("/remote-result")
+        published.write_bytes(b"accepted\n")
+        return published, SimpleNamespace(
+            canary_accepted=True,
+            production_release_allowed=False,
+            reasons=(),
+        )
+
+    monkeypatch.setattr(
+        "pipeline.real_scene_operations.publish_real_scene_acceptance",
+        fake_publish,
+    )
+    monkeypatch.setattr(
+        operations,
+        "_acceptance_external_files",
+        lambda *_args: tuple(external),
+    )
+    bootstrap.operations = operations
+
+    receipt = bootstrap.run("accept")
+
+    assert receipt.status == "completed"
+    assert any(output.path.endswith("accepted-report.json") for output in receipt.outputs)

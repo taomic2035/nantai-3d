@@ -59,9 +59,9 @@ def _local_source(path: Path, rights_path: Path) -> None:
         dataset_id="courtyard",
         role="production-acceptance",
         source_kind="local-capture",
-        rights_receipt_sha256=__import__("hashlib").sha256(
-            canonical_model_bytes(rights)
-        ).hexdigest(),
+        rights_receipt_sha256=__import__("hashlib")
+        .sha256(canonical_model_bytes(rights))
+        .hexdigest(),
         redistribution_allowed=False,
         release_inclusion_allowed=False,
     )
@@ -87,21 +87,36 @@ def test_cli_builds_source_bound_options(tmp_path, monkeypatch, capsys):
         ),
     )
 
-    assert cli.main(
-        [
-            "fetch",
-            "--source",
-            str(source),
-            "--run-id",
-            "canary-001",
-            "--chunk-size",
-            "37.5",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "fetch",
+                "--source",
+                str(source),
+                "--run-id",
+                "canary-001",
+                "--chunk-size",
+                "37.5",
+                "--viewer-policy",
+                str(tmp_path / "viewer-policy.json"),
+                "--viewer-report",
+                str(tmp_path / "viewer-report.json"),
+                "--human-review-policy",
+                str(tmp_path / "human-policy.json"),
+                "--human-visual-review",
+                str(tmp_path / "human-review.json"),
+            ]
+        )
+        == 0
+    )
 
     assert calls[0][1] == "fetch"
     assert calls[0][2].run_id == "canary-001"
     assert calls[0][2].chunk_size == 37.5
+    assert calls[0][2].viewer_policy_path == (tmp_path / "viewer-policy.json")
+    assert calls[0][2].viewer_report_path == (tmp_path / "viewer-report.json")
+    assert calls[0][2].human_review_policy_path == (tmp_path / "human-policy.json")
+    assert calls[0][2].human_visual_review_path == (tmp_path / "human-review.json")
     assert '"status":"completed"' in capsys.readouterr().out
 
 
@@ -127,13 +142,16 @@ def test_cli_rejects_invalid_geo_origin(tmp_path, value, capsys):
     source = tmp_path / "source.json"
     _hf_source(source)
 
-    assert cli.main(
-        [
-            "import",
-            "--source",
-            str(source),
-            "--geo-origin",
-            value,
-        ]
-    ) == 2
+    assert (
+        cli.main(
+            [
+                "import",
+                "--source",
+                str(source),
+                "--geo-origin",
+                value,
+            ]
+        )
+        == 2
+    )
     assert "geo-origin" in capsys.readouterr().err

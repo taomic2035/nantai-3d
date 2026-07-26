@@ -38,15 +38,11 @@ def _geo_origin(value: str | None) -> tuple[float, float, float] | None:
         return None
     pieces = value.split(",")
     if len(pieces) != 3:
-        raise ValueError(
-            "--geo-origin requires LAT,LON,ALT with exactly three values"
-        )
+        raise ValueError("--geo-origin requires LAT,LON,ALT with exactly three values")
     try:
         coordinates = tuple(float(piece) for piece in pieces)
     except ValueError as exc:
-        raise ValueError(
-            "--geo-origin values must be finite numbers"
-        ) from exc
+        raise ValueError("--geo-origin values must be finite numbers") from exc
     if not all(math.isfinite(item) for item in coordinates):
         raise ValueError("--geo-origin values must be finite numbers")
     try:
@@ -62,9 +58,7 @@ def _geo_origin(value: str | None) -> tuple[float, float, float] | None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=(
-            "Resume-safe real image/video reconstruction orchestration"
-        )
+        description=("Resume-safe real image/video reconstruction orchestration")
     )
     parser.add_argument("target", choices=_TARGETS)
     parser.add_argument("--source", required=True, type=Path)
@@ -80,6 +74,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-points", type=Path)
     parser.add_argument("--geo-origin")
     parser.add_argument("--remote-config", type=Path)
+    parser.add_argument("--viewer-policy", type=Path)
+    parser.add_argument("--viewer-report", type=Path)
+    parser.add_argument("--human-review-policy", type=Path)
+    parser.add_argument("--human-visual-review", type=Path)
     parser.add_argument("--chunk-size", type=float, default=50.0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry", action="store_true")
@@ -91,25 +89,20 @@ def _validate_runtime_inputs(args, source) -> None:
         raise ValueError("--resume and --retry are mutually exclusive")
     if isinstance(source, LocalCaptureSource):
         if args.media_root is None or args.rights is None:
-            raise ValueError(
-                "local-capture requires --media-root and --rights"
-            )
+            raise ValueError("local-capture requires --media-root and --rights")
         if args.policy is None:
             raise ValueError("local-capture requires an explicit --policy")
         if args.target in {"import", "accept", "serve", "all"} and (
             args.control_points is None or args.geo_origin is None
         ):
             raise ValueError(
-                "production import/accept/serve requires --control-points "
-                "and --geo-origin"
+                "production import/accept/serve requires --control-points and --geo-origin"
             )
     needs_remote = args.target == "train-production" or (
         args.target == "all" and isinstance(source, LocalCaptureSource)
     )
     if needs_remote and args.remote_config is None:
-        raise ValueError(
-            "train-production requires --remote-config"
-        )
+        raise ValueError("train-production requires --remote-config")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
             control_points_path=args.control_points,
             geo_origin=geo_origin,
             remote_config_path=args.remote_config,
+            viewer_policy_path=args.viewer_policy,
+            viewer_report_path=args.viewer_report,
+            human_review_policy_path=args.human_review_policy,
+            human_visual_review_path=args.human_visual_review,
             chunk_size=args.chunk_size,
         )
         receipt = run_real_scene(

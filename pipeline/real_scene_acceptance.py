@@ -801,6 +801,132 @@ def canonical_real_scene_acceptance_bytes(
     return canonical_model_bytes(report)
 
 
+def _relative_to_acceptance_root(
+    root: Path,
+    path: Path,
+    *,
+    label: str,
+) -> str:
+    boundary = Path(root).expanduser().absolute()
+    candidate = Path(path).expanduser().absolute()
+    try:
+        relative = candidate.relative_to(boundary).as_posix()
+    except ValueError as exc:
+        raise RealSceneAcceptanceError(f"{label} must stay below the acceptance root") from exc
+    try:
+        return _portable_relative_path(relative, label=label)
+    except ValueError as exc:
+        raise RealSceneAcceptanceError(str(exc)) from exc
+
+
+def acceptance_directory_reference(
+    root: Path,
+    path: Path,
+) -> AcceptanceDirectoryReference:
+    reference = AcceptanceDirectoryReference(
+        path=_relative_to_acceptance_root(
+            root,
+            path,
+            label="acceptance directory",
+        )
+    )
+    _directory_member(Path(root).expanduser().absolute(), reference)
+    return reference
+
+
+def acceptance_evidence_reference(
+    root: Path,
+    path: Path,
+) -> AcceptanceEvidenceReference:
+    boundary = Path(root).expanduser().absolute()
+    relative = _relative_to_acceptance_root(
+        boundary,
+        path,
+        label="acceptance evidence",
+    )
+    member = _member_path(
+        boundary,
+        relative,
+        label=f"acceptance evidence {relative}",
+    )
+    digest = hashlib.sha256()
+    try:
+        before = member.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise RealSceneAcceptanceError(f"acceptance evidence {relative} is not a regular file")
+        if before.st_size <= 0 or before.st_size > _MAX_TRAINING_BUNDLE_BYTES:
+            raise RealSceneAcceptanceError(f"acceptance evidence {relative} length is invalid")
+        with member.open("rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        after = member.lstat()
+    except RealSceneAcceptanceError:
+        raise
+    except OSError as exc:
+        raise RealSceneAcceptanceError(f"acceptance evidence {relative} cannot be read") from exc
+    if _stat_signature(before) != _stat_signature(after):
+        raise RealSceneAcceptanceError(f"acceptance evidence {relative} changed while read")
+    return AcceptanceEvidenceReference(
+        path=relative,
+        sha256=digest.hexdigest(),
+        byte_length=before.st_size,
+    )
+
+
+def publish_real_scene_acceptance(
+    report: RealSceneAcceptance,
+    root: Path,
+) -> tuple[Path, AcceptanceDecision]:
+    """Publish one immutable content-addressed aggregate and revalidate it."""
+
+    boundary = Path(root).expanduser().absolute()
+    try:
+        mode = boundary.lstat().st_mode
+    except OSError as exc:
+        raise RealSceneAcceptanceError("acceptance root is unavailable") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise RealSceneAcceptanceError("acceptance root must be a real directory")
+    payload = canonical_real_scene_acceptance_bytes(report)
+    digest = hashlib.sha256(payload).hexdigest()
+    path = boundary / f"real-scene-acceptance-{digest}.json"
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError:
+        reference = AcceptanceEvidenceReference(
+            path=path.name,
+            sha256=digest,
+            byte_length=len(payload),
+        )
+        existing = _hash_reference(
+            boundary,
+            reference,
+            retain_bytes=True,
+        )
+        if existing != payload:
+            raise RealSceneAcceptanceError(
+                "content-addressed acceptance path contains different bytes"
+            ) from None
+    except OSError as exc:
+        raise RealSceneAcceptanceError("acceptance report cannot be published") from exc
+    else:
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as exc:
+            path.unlink(missing_ok=True)
+            raise RealSceneAcceptanceError("acceptance report cannot be published") from exc
+    return path, validate_real_scene_acceptance(path)
+
+
 def _acceptance_references(
     report: RealSceneAcceptance,
 ) -> tuple[AcceptanceEvidenceReference, ...]:

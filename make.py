@@ -24,6 +24,7 @@
 例外：doctor / check-capture / inspect-recon / verify-recon-artifacts 目前只有本脚本有，
 Makefile 尚未补。
 """
+
 from __future__ import annotations
 
 import glob
@@ -41,16 +42,18 @@ ASSET_DELIVERABLE = "handoff/deliverables/HANDOFF-002"
 PREVIEW_ARCHIVE_NAME = "nantai-3d-v1.0.0-preview.2-runtime.zip"
 PREVIEW_DIST = ".nantai-studio/releases/v1.0.0-preview.2"
 REAL_CANARY_SOURCE = "config/real-scene/nerfstudio-poster.json"
-REAL_SCENE_TARGETS = frozenset({
-    "fetch",
-    "sfm",
-    "train-preview",
-    "train-production",
-    "import",
-    "accept",
-    "serve",
-    "all",
-})
+REAL_SCENE_TARGETS = frozenset(
+    {
+        "fetch",
+        "sfm",
+        "train-preview",
+        "train-production",
+        "import",
+        "accept",
+        "serve",
+        "all",
+    }
+)
 REAL_OPTION_FLAGS = {
     "RUN_ID": "--run-id",
     "WORKSPACE": "--workspace",
@@ -60,6 +63,10 @@ REAL_OPTION_FLAGS = {
     "CONTROL_POINTS": "--control-points",
     "GEO_ORIGIN": "--geo-origin",
     "REMOTE_CONFIG": "--remote-config",
+    "VIEWER_POLICY": "--viewer-policy",
+    "VIEWER_REPORT": "--viewer-report",
+    "HUMAN_REVIEW_POLICY": "--human-review-policy",
+    "HUMAN_VISUAL_REVIEW": "--human-visual-review",
     "CHUNK_SIZE": "--chunk-size",
 }
 REAL_BOOLEAN_OPTIONS = frozenset({"RESUME", "RETRY"})
@@ -134,8 +141,19 @@ def world() -> None:
 
 def assets() -> None:
     run([PY, f"{ASSET_DELIVERABLE}/scripts/generate.py", "--output", ASSET_DELIVERABLE])
-    run([PY, "-m", "pipeline.validate_handoff", ASSET_DELIVERABLE,
-         "--feedback-dir", "handoff", "--register", "--assets-dir", "assets"])
+    run(
+        [
+            PY,
+            "-m",
+            "pipeline.validate_handoff",
+            ASSET_DELIVERABLE,
+            "--feedback-dir",
+            "handoff",
+            "--register",
+            "--assets-dir",
+            "assets",
+        ]
+    )
 
 
 def validate_handoff() -> None:
@@ -167,16 +185,16 @@ def verify() -> None:
     test()
     assets()
     world()
-    run([PY, "-m", "json.tool", "docs/contracts/studio-adapter-v2.schema.json"],
-        )
+    run(
+        [PY, "-m", "json.tool", "docs/contracts/studio-adapter-v2.schema.json"],
+    )
     run([PY, "-m", "json.tool", "web/data/manifest.json"])
     run([PY, "verification/verify_3dtiles_conversion.py"])
     run([PY, "verification/verify_glm_layout.py"])
 
 
 def clean() -> None:
-    for name in ("corpus", "layouts", "scenes", "recon", "web/data/recon",
-                 "verification/output"):
+    for name in ("corpus", "layouts", "scenes", "recon", "web/data/recon", "verification/output"):
         target = ROOT / name
         if target.exists():
             print(f"rm -rf {name}")
@@ -189,9 +207,7 @@ def _real_boolean(name: str, value: str) -> bool:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    raise ValueError(
-        f"{name} must be one of 1/0, true/false, yes/no, on/off"
-    )
+    raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, on/off")
 
 
 def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
@@ -215,9 +231,7 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
             raise ValueError(f"{mode} option {name} is empty or unsafe")
         options[name] = value
     if len(subtargets) != 1 or subtargets[0] not in REAL_SCENE_TARGETS:
-        raise ValueError(
-            f"{mode} requires exactly one known real-scene subtarget"
-        )
+        raise ValueError(f"{mode} requires exactly one known real-scene subtarget")
     if mode == "real-canary":
         forbidden = {
             "SOURCE",
@@ -229,23 +243,21 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
         }
         supplied = sorted(forbidden & options.keys())
         if supplied:
-            raise ValueError(
-                f"real-canary forbids overrides: {', '.join(supplied)}"
-            )
+            raise ValueError(f"real-canary forbids overrides: {', '.join(supplied)}")
         source = REAL_CANARY_SOURCE
     else:
         source = options.pop("SOURCE", None)
         if source is None:
             raise ValueError("real-scene requires exactly one SOURCE=")
-    if (
-        _real_boolean("RESUME", options.get("RESUME", "0"))
-        and _real_boolean("RETRY", options.get("RETRY", "0"))
+    if _real_boolean("RESUME", options.get("RESUME", "0")) and _real_boolean(
+        "RETRY", options.get("RETRY", "0")
     ):
         raise ValueError("real-scene RESUME and RETRY are mutually exclusive")
 
     command = [
         PY,
-        "scripts/real_scene.py",
+        "-m",
+        "scripts.real_scene",
         subtargets[0],
         "--source",
         source,
@@ -264,13 +276,21 @@ def real_scene(mode: str, tokens: list[str]) -> None:
 
 
 TARGETS = {
-    "setup": setup, "test": test, "lint": lint, "doctor": doctor,
-    "ingest": ingest, "check-capture": check_capture,
-    "reconstruct": reconstruct, "inspect-recon": inspect_recon,
+    "setup": setup,
+    "test": test,
+    "lint": lint,
+    "doctor": doctor,
+    "ingest": ingest,
+    "check-capture": check_capture,
+    "reconstruct": reconstruct,
+    "inspect-recon": inspect_recon,
     "verify-recon-artifacts": verify_recon_artifacts,
-    "world": world, "assets": assets,
-    "validate-handoff": validate_handoff, "serve": serve,
-    "build-preview": build_preview, "verify-preview": verify_preview,
+    "world": world,
+    "assets": assets,
+    "validate-handoff": validate_handoff,
+    "serve": serve,
+    "build-preview": build_preview,
+    "verify-preview": verify_preview,
     "verify": verify,
     "clean": clean,
 }

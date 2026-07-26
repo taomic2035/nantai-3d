@@ -22,6 +22,7 @@ from pipeline.real_scene_acceptance import (
     canonical_human_review_bytes,
     canonical_human_review_policy_bytes,
     canonical_real_scene_acceptance_bytes,
+    publish_real_scene_acceptance,
     record_human_visual_review,
     validate_human_visual_review,
     validate_real_scene_acceptance,
@@ -467,6 +468,35 @@ def test_internal_canary_acceptance_never_unblocks_release(
     assert decision.canary_accepted is True
     assert decision.production_release_allowed is False
     assert decision.technical_accepted is True
+
+
+def test_acceptance_publication_is_content_addressed_and_idempotent(
+    tmp_path,
+    monkeypatch,
+):
+    root, _path, report = _acceptance_report(
+        tmp_path,
+        role="internal-canary",
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_validate_acceptance_evidence",
+        lambda *_args, **_kwargs: _accepted_evidence(role="internal-canary"),
+    )
+
+    first_path, first_decision = publish_real_scene_acceptance(
+        report,
+        root,
+    )
+    second_path, second_decision = publish_real_scene_acceptance(
+        report,
+        root,
+    )
+
+    assert first_path == second_path
+    assert first_decision == second_decision
+    assert first_path.name == (f"real-scene-acceptance-{first_decision.report_sha256}.json")
+    assert first_path.read_bytes() == canonical_real_scene_acceptance_bytes(report)
 
 
 def test_production_acceptance_requires_rights_metric_and_every_gate(
