@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import uuid
 from collections.abc import Callable
@@ -23,7 +24,11 @@ from pydantic import (
 )
 
 from pipeline.alignment import AlignmentError, load_control_points_json
-from pipeline.real_dataset import DatasetEvidenceError
+from pipeline.real_dataset import (
+    DatasetEvidenceError,
+    canonical_model_bytes,
+    load_real_dataset_source,
+)
 
 
 class RealSceneBlockedError(ValueError):
@@ -83,6 +88,21 @@ class RealSceneSourceIdentity(FrozenModel):
     dataset_id: str = Field(pattern=_ID_PATTERN)
     role: SourceRole
     source_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+
+@dataclass(frozen=True)
+class RealSceneRunOptions:
+    workspace_base: Path = Path(".nantai-studio/real-scene")
+    run_id: str = "default"
+    media_root: Path | None = None
+    rights_path: Path | None = None
+    policy_path: Path | None = None
+    control_points_path: Path | None = None
+    geo_origin: tuple[float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(_ID_PATTERN, self.run_id) is None:
+            raise ValueError("run_id must be a safe portable identifier")
 
 
 class StageArtifactBinding(FrozenModel):
@@ -654,3 +674,41 @@ class RealSceneRunner:
             resume=resume,
             retry=retry,
         )
+
+
+def run_real_scene(
+    source_path: Path,
+    target: str,
+    options: RealSceneRunOptions,
+    *,
+    operations: RealSceneOperations | None = None,
+    resume: bool = False,
+    retry: bool = False,
+) -> StageReceipt:
+    """Run one source-bound real-scene stage through the durable journal."""
+
+    source = load_real_dataset_source(Path(source_path))
+    source_sha256 = hashlib.sha256(
+        canonical_model_bytes(source)
+    ).hexdigest()
+    if operations is None:
+        from pipeline.real_scene_operations import (
+            RealScenePipelineOperations,
+        )
+
+        operations = RealScenePipelineOperations(
+            source=source,
+            options=options,
+        )
+    runner = RealSceneRunner(
+        source=RealSceneSourceIdentity(
+            dataset_id=source.dataset_id,
+            role=source.role,
+            source_sha256=source_sha256,
+        ),
+        workspace_base=Path(options.workspace_base) / options.run_id,
+        operations=operations,
+        control_points_path=options.control_points_path,
+        geo_origin=options.geo_origin,
+    )
+    return runner.run(target, resume=resume, retry=retry)

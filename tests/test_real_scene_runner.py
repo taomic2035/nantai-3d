@@ -4,12 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.real_dataset import DatasetEvidenceError
+from pipeline.real_dataset import DatasetEvidenceError, HfDatasetSource, canonical_model_bytes
 from pipeline.real_scene_runner import (
     RealSceneBlockedError,
     RealSceneRunner,
+    RealSceneRunOptions,
     RealSceneSourceIdentity,
     StageExecution,
+    run_real_scene,
 )
 
 
@@ -255,3 +257,46 @@ def test_workspace_is_source_parameterized(tmp_path):
     assert runner.workspace == (
         tmp_path / "real-scene" / "poster" / ("a" * 16)
     )
+
+
+def test_run_real_scene_binds_canonical_source_and_run_id(tmp_path):
+    source = HfDatasetSource(
+        schema="nantai.real-dataset-source.v1",
+        dataset_id="poster",
+        role="internal-canary",
+        source_kind="hf-dataset",
+        repository="owner/repo",
+        repository_revision="4" * 40,
+        subtree="poster",
+        capture_subtree="poster/images",
+        declared_file_count=1,
+        declared_total_bytes=5,
+        license_status="not-declared",
+        redistribution_allowed=False,
+        release_inclusion_allowed=False,
+    )
+    source_path = tmp_path / "source.json"
+    source_path.write_bytes(canonical_model_bytes(source))
+    operations = _Operations()
+
+    receipt = run_real_scene(
+        source_path,
+        "fetch",
+        RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary-001",
+        ),
+        operations=operations,
+    )
+
+    source_sha = __import__("hashlib").sha256(
+        canonical_model_bytes(source)
+    ).hexdigest()
+    assert receipt.source_sha256 == source_sha
+    assert (
+        tmp_path
+        / "real-scene"
+        / "canary-001"
+        / "poster"
+        / source_sha[:16]
+    ).is_dir()
