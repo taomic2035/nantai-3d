@@ -68,6 +68,101 @@ class TestMainDispatch:
         out = capsys.readouterr().out
         for name in make.TARGETS:
             assert name in out
+        assert "real-canary" in out
+        assert "real-scene" in out
+
+
+class TestRealSceneDispatch:
+    def test_real_canary_binds_committed_source_and_subtarget(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        assert make.main(
+            [
+                "make.py",
+                "real-canary",
+                "RUN_ID=canary-001",
+                "fetch",
+            ]
+        ) == 0
+
+        assert calls == [[
+            make.PY,
+            "scripts/real_scene.py",
+            "fetch",
+            "--source",
+            "config/real-scene/nerfstudio-poster.json",
+            "--run-id",
+            "canary-001",
+        ]]
+
+    def test_real_scene_passes_cross_platform_key_value_options(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        assert make.main(
+            [
+                "make.py",
+                "real-scene",
+                "SOURCE=private/source.json",
+                "MEDIA_ROOT=/private/capture",
+                "RIGHTS=.nantai-studio/private/rights.json",
+                "POLICY=.nantai-studio/private/policy.json",
+                "CONTROL_POINTS=.nantai-studio/private/points.json",
+                "GEO_ORIGIN=31.2,121.5,4.0",
+                "REMOTE_CONFIG=.nantai-studio/private/remote.json",
+                "import",
+            ]
+        ) == 0
+
+        command = calls[0]
+        assert command[:3] == [
+            make.PY,
+            "scripts/real_scene.py",
+            "import",
+        ]
+        assert command[command.index("--source") + 1] == (
+            "private/source.json"
+        )
+        assert command[command.index("--geo-origin") + 1] == (
+            "31.2,121.5,4.0"
+        )
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["real-scene", "fetch"],
+            ["real-scene", "SOURCE=a", "SOURCE=b", "fetch"],
+            ["real-scene", "SOURCE=a", "fetch", "sfm"],
+            ["real-scene", "SOURCE=a", "UNKNOWN=x", "fetch"],
+            ["real-canary", "SOURCE=a", "fetch"],
+            ["real-canary", "RESUME=1", "RETRY=1", "fetch"],
+        ],
+    )
+    def test_real_target_rejects_ambiguous_or_unsafe_args(
+        self,
+        make,
+        capsys,
+        args,
+    ):
+        assert make.main(["make.py", *args]) == 2
+        assert "real-" in capsys.readouterr().err
 
 
 class TestEnv:

@@ -40,6 +40,28 @@ PY = sys.executable
 ASSET_DELIVERABLE = "handoff/deliverables/HANDOFF-002"
 PREVIEW_ARCHIVE_NAME = "nantai-3d-v1.0.0-preview.2-runtime.zip"
 PREVIEW_DIST = ".nantai-studio/releases/v1.0.0-preview.2"
+REAL_CANARY_SOURCE = "config/real-scene/nerfstudio-poster.json"
+REAL_SCENE_TARGETS = frozenset({
+    "fetch",
+    "sfm",
+    "train-preview",
+    "train-production",
+    "import",
+    "accept",
+    "serve",
+    "all",
+})
+REAL_OPTION_FLAGS = {
+    "RUN_ID": "--run-id",
+    "WORKSPACE": "--workspace",
+    "MEDIA_ROOT": "--media-root",
+    "RIGHTS": "--rights",
+    "POLICY": "--policy",
+    "CONTROL_POINTS": "--control-points",
+    "GEO_ORIGIN": "--geo-origin",
+    "REMOTE_CONFIG": "--remote-config",
+}
+REAL_BOOLEAN_OPTIONS = frozenset({"RESUME", "RETRY"})
 
 # UTF-8-safe environment for every child process.
 ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
@@ -160,6 +182,86 @@ def clean() -> None:
             shutil.rmtree(target, ignore_errors=True)
 
 
+def _real_boolean(name: str, value: str) -> bool:
+    normalized = value.casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be one of 1/0, true/false, yes/no, on/off"
+    )
+
+
+def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
+    options: dict[str, str] = {}
+    subtargets: list[str] = []
+    allowed = {
+        "SOURCE",
+        *REAL_OPTION_FLAGS,
+        *REAL_BOOLEAN_OPTIONS,
+    }
+    for token in tokens:
+        if "=" not in token:
+            subtargets.append(token)
+            continue
+        name, value = token.split("=", 1)
+        if name not in allowed:
+            raise ValueError(f"unknown {mode} option: {name}")
+        if name in options:
+            raise ValueError(f"duplicate {mode} option: {name}")
+        if not value or any(ord(character) < 32 for character in value):
+            raise ValueError(f"{mode} option {name} is empty or unsafe")
+        options[name] = value
+    if len(subtargets) != 1 or subtargets[0] not in REAL_SCENE_TARGETS:
+        raise ValueError(
+            f"{mode} requires exactly one known real-scene subtarget"
+        )
+    if mode == "real-canary":
+        forbidden = {
+            "SOURCE",
+            "MEDIA_ROOT",
+            "RIGHTS",
+            "POLICY",
+            "CONTROL_POINTS",
+            "GEO_ORIGIN",
+        }
+        supplied = sorted(forbidden & options.keys())
+        if supplied:
+            raise ValueError(
+                f"real-canary forbids overrides: {', '.join(supplied)}"
+            )
+        source = REAL_CANARY_SOURCE
+    else:
+        source = options.pop("SOURCE", None)
+        if source is None:
+            raise ValueError("real-scene requires exactly one SOURCE=")
+    if (
+        _real_boolean("RESUME", options.get("RESUME", "0"))
+        and _real_boolean("RETRY", options.get("RETRY", "0"))
+    ):
+        raise ValueError("real-scene RESUME and RETRY are mutually exclusive")
+
+    command = [
+        PY,
+        "scripts/real_scene.py",
+        subtargets[0],
+        "--source",
+        source,
+    ]
+    for name, flag in REAL_OPTION_FLAGS.items():
+        if name in options:
+            command.extend((flag, options[name]))
+    for name, flag in (("RESUME", "--resume"), ("RETRY", "--retry")):
+        if name in options and _real_boolean(name, options[name]):
+            command.append(flag)
+    return command
+
+
+def real_scene(mode: str, tokens: list[str]) -> None:
+    run(_real_scene_command(mode, tokens))
+
+
 TARGETS = {
     "setup": setup, "test": test, "lint": lint, "doctor": doctor,
     "ingest": ingest, "check-capture": check_capture,
@@ -178,6 +280,8 @@ def help_() -> None:
     print("targets:")
     for name in TARGETS:
         print(f"  {name}")
+    print("  real-canary <KEY=VALUE...> <subtarget>")
+    print("  real-scene SOURCE=<source.json> <KEY=VALUE...> <subtarget>")
 
 
 def main(argv: list[str]) -> int:
@@ -185,6 +289,19 @@ def main(argv: list[str]) -> int:
     if not args or args[0] in ("help", "-h", "--help"):
         help_()
         return 0
+    if args[0] in {"real-canary", "real-scene"}:
+        try:
+            real_scene(args[0], args[1:])
+        except ValueError as exc:
+            print(f"{args[0]}: {exc}", file=sys.stderr)
+            return 2
+        return 0
+    if any(name in {"real-canary", "real-scene"} for name in args):
+        print(
+            "real-scene targets cannot be mixed with ordinary targets",
+            file=sys.stderr,
+        )
+        return 2
     for name in args:
         fn = TARGETS.get(name)
         if fn is None:
