@@ -144,7 +144,11 @@ writes:
 
 The receipt is accepted only when all paths are safe children, the set is
 exact, every actual size and SHA matches, and no redirect changes the
-repository/revision identity. Revalidation occurs before every resumed stage.
+repository/revision identity. The initial response must identify the pinned
+repository commit. An HTTPS redirect is allowed only to the downloader's
+closed Hugging Face content-host policy, without forwarding credentials, and
+the downloaded length and SHA are still re-derived locally. Revalidation
+occurs before every resumed stage.
 
 ### 4.3 Existing evidence remains authoritative
 
@@ -443,7 +447,11 @@ fallback success does not change the failed production representation.
 - Release builders fail if a source record has
   `release_inclusion_allowed=false` or an unknown license.
 - Download and remote-execution paths reject traversal, symlinks escaping the
-  project, unsafe archive members and cross-origin redirects.
+  project, unsafe archive members and unapproved cross-origin redirects.
+  Hugging Face's pinned resolver may redirect to an approved HTTPS
+  `*.cdn.hf.co` content host only when the origin response identifies the exact
+  requested repository commit; credentials are not forwarded and the final
+  bytes must match the lock and receipt.
 - Cloud credentials are never accepted as job parameters, written to ledgers or
   included in support bundles.
 - Support bundles contain bounded diagnostics and hashes, not input images,
