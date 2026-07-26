@@ -102,6 +102,7 @@ class RealSceneRunOptions:
     remote_config_path: Path | None = None
     remote_poll_interval_seconds: float = 15.0
     remote_timeout_seconds: float = 21_600.0
+    chunk_size: float = 50.0
 
     def __post_init__(self) -> None:
         if re.fullmatch(_ID_PATTERN, self.run_id) is None:
@@ -111,6 +112,13 @@ class RealSceneRunOptions:
             or self.remote_timeout_seconds <= 0
         ):
             raise ValueError("remote polling intervals must be positive")
+        if (
+            isinstance(self.chunk_size, bool)
+            or not isinstance(self.chunk_size, (int, float))
+            or not np.isfinite(float(self.chunk_size))
+            or float(self.chunk_size) <= 0
+        ):
+            raise ValueError("chunk_size must be finite and positive")
 
 
 class StageArtifactBinding(FrozenModel):
@@ -334,11 +342,16 @@ class RealSceneRunner:
         if stage in {"train-preview", "train-production"}:
             return "sfm"
         if stage == "import":
-            return (
-                "train-production"
-                if self.source.role == "production-acceptance"
-                else "train-preview"
-            )
+            if self.source.role == "production-acceptance":
+                return "train-production"
+            # ``all`` intentionally takes the cheap local preview path.  An
+            # operator who explicitly completed or attempted production
+            # training must not then have ``import`` silently fall back to a
+            # different Brush artifact; even blocked/unknown production
+            # evidence remains the selected dependency until explicit retry.
+            if self._latest("train-production") is not None:
+                return "train-production"
+            return "train-preview"
         if stage == "accept":
             return "import"
         return "accept"

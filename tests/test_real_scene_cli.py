@@ -94,11 +94,14 @@ def test_cli_builds_source_bound_options(tmp_path, monkeypatch, capsys):
             str(source),
             "--run-id",
             "canary-001",
+            "--chunk-size",
+            "37.5",
         ]
     ) == 0
 
     assert calls[0][1] == "fetch"
     assert calls[0][2].run_id == "canary-001"
+    assert calls[0][2].chunk_size == 37.5
     assert '"status":"completed"' in capsys.readouterr().out
 
 

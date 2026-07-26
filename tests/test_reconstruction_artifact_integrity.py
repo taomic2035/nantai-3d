@@ -224,19 +224,28 @@ def _make_clean_manifest(
             per_chunk_points = 4
             total_points += per_chunk_points
             chunk_files = {}
+            payloads = {}
             for lod in ("0", "1", "2"):
                 fname = f"chunk_{cx}_{cy}_lod{lod}.ply"
-                _write_ply(
+                payload = _write_ply(
                     chunks_dir / fname, per_chunk_points, lod0_attrs
                 )
                 chunk_files[lod] = fname
+                payloads[lod] = {
+                    "file": fname,
+                    "sha256": _sha256_bytes(payload),
+                    "size_bytes": len(payload),
+                }
             chunks_list.append(
                 {
                     "id": f"{cx}_{cy}",
                     "x": cx,
                     "y": cy,
                     "ply_file": chunk_files["2"],
+                    "sha256": payloads["2"]["sha256"],
+                    "size_bytes": payloads["2"]["size_bytes"],
                     "lod": chunk_files,
+                    "payloads": payloads,
                     "point_count": per_chunk_points,
                     "aabb": {
                         "min": [float(cx), float(cy), -1.0],
@@ -248,6 +257,13 @@ def _make_clean_manifest(
             "schema_version": 1,
             "kind": "spatial-chunks",
             "chunk_size_m": 50.0,
+            "integrity": {
+                "schema_version": (
+                    "nantai.spatial-chunks.payload-integrity.v1"
+                ),
+                "algorithm": "sha256",
+                "per_chunk_sha_required": True,
+            },
             "chunks": chunks_list,
             "lod_fractions": {"0": 0.08, "1": 0.30, "2": 1.0},
             "total_chunks": len(chunks_list),
@@ -264,7 +280,14 @@ def _make_clean_manifest(
         }
         chunks_path = chunks_dir / "chunks.json"
         chunks_path.write_text(
-            json.dumps(chunks_manifest, indent=2, sort_keys=True), "utf-8"
+            json.dumps(
+                chunks_manifest,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            "utf-8",
         )
         manifest["artifacts"]["chunks"] = {
             "manifest": "chunks/chunks.json",
@@ -320,9 +343,24 @@ def test_clean_manifest_with_chunks_verifies_chunk_paths(tmp_path: Path) -> None
     assert report.chunks_report.missing_chunk_files == []
     assert report.chunks_report.duplicate_chunk_paths == []
     assert report.chunks_report.extra_unbound_chunk_files == []
+    assert report.chunks_report.per_chunk_sha_verified is True
     # 4 verified (full+3 LOD) + 6 chunk PLYs verified to exist
     assert len(report.verified) == 4
     assert report.chunks_report.verified_chunk_files == 6
+
+
+def test_tampered_chunk_payload_fails_per_chunk_sha(tmp_path: Path) -> None:
+    manifest_path, _ = _make_clean_manifest(
+        tmp_path / "recon",
+        with_chunks=True,
+    )
+    chunk = tmp_path / "recon/chunks/chunk_0_0_lod0.ply"
+    chunk.write_bytes(chunk.read_bytes() + b"tamper")
+
+    report = verify_recon_artifacts(manifest_path)
+
+    assert report.chunks_report is not None
+    assert report.chunks_report.per_chunk_sha_verified is False
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +752,25 @@ def test_cli_missing_chunk_exits_two(tmp_path: Path, capsys) -> None:
     assert code == 2
     out = capsys.readouterr().out
     assert "缺失的分块文件" in out
+
+
+def test_cli_tampered_chunk_payload_exits_two(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from scripts.verify_recon_artifacts import main
+
+    manifest_path, _ = _make_clean_manifest(
+        tmp_path / "recon",
+        with_chunks=True,
+    )
+    chunk = tmp_path / "recon/chunks/chunk_0_0_lod0.ply"
+    chunk.write_bytes(chunk.read_bytes() + b"tamper")
+
+    code = main([str(manifest_path)])
+
+    assert code == 2
+    assert "payload" in capsys.readouterr().out
 
 
 def test_cli_chunks_total_mismatch_exits_two(tmp_path: Path, capsys) -> None:

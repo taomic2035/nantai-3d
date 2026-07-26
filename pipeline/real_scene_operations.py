@@ -41,6 +41,7 @@ from pipeline.real_scene_capture import (
     prepare_real_capture,
     run_real_sfm,
 )
+from pipeline.real_scene_import import import_real_scene
 from pipeline.real_scene_runner import (
     RealSceneRunOptions,
     StageExecution,
@@ -762,6 +763,50 @@ class RealScenePipelineOperations:
                 )
             time.sleep(self.options.remote_poll_interval_seconds)
 
+    def _import(
+        self,
+        stage_root: Path,
+        prerequisites: tuple[StageReceipt, ...],
+    ) -> StageExecution:
+        allowed_training_stages = (
+            {"train-production"}
+            if isinstance(self.source, LocalCaptureSource)
+            else {"train-preview", "train-production"}
+        )
+        if (
+            len(prerequisites) != 1
+            or prerequisites[0].stage not in allowed_training_stages
+        ):
+            return StageExecution(
+                state="blocked",
+                artifacts=(),
+                reason="import requires one verified training receipt",
+            )
+        workspace = stage_root.parents[2]
+        training_root = _stage_root_for(workspace, prerequisites[0])
+        try:
+            receipt = import_real_scene(
+                training_root,
+                stage_root,
+                source_role=self.source.role,
+                control_points_path=self.options.control_points_path,
+                geo_origin=self.options.geo_origin,
+                chunk_size=self.options.chunk_size,
+            )
+            artifacts = _regular_files(stage_root)
+        except (OSError, ValueError) as exc:
+            return StageExecution(
+                state="blocked",
+                artifacts=(),
+                reason=f"real-scene import failed: {exc}",
+                evidence_artifacts=_regular_files(stage_root),
+            )
+        return StageExecution(
+            state="completed",
+            artifacts=artifacts,
+            alignment_rms_m=receipt.alignment_rms_m,
+        )
+
     def execute(
         self,
         stage: StageName,
@@ -782,6 +827,8 @@ class RealScenePipelineOperations:
                 stage_root,
                 prerequisite_receipts,
             )
+        if stage == "import":
+            return self._import(stage_root, prerequisite_receipts)
         return StageExecution(
             state="blocked",
             artifacts=(),

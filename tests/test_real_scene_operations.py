@@ -277,3 +277,60 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
         path.name == "remote-job.private.json"
         for path in execution.evidence_artifacts
     )
+
+
+def test_import_stage_invokes_content_closed_scene_adapter(
+    tmp_path,
+    monkeypatch,
+):
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+        ),
+    )
+    workspace = tmp_path / "workspace"
+    training_root = (
+        workspace / "stages/train-preview/attempt-train"
+    )
+    training_root.mkdir(parents=True)
+    stage_root = workspace / "stages/import/attempt-import"
+    calls = []
+
+    def fake_import(training, output, **kwargs):
+        calls.append((training, output, kwargs))
+        output.mkdir(parents=True)
+        (output / "import-receipt.json").write_bytes(b"receipt\n")
+        return SimpleNamespace(alignment_rms_m=None)
+
+    monkeypatch.setattr(
+        "pipeline.real_scene_operations.import_real_scene",
+        fake_import,
+    )
+    execution = operations.execute(
+        "import",
+        stage_root,
+        (
+            SimpleNamespace(
+                stage="train-preview",
+                attempt_id="attempt-train",
+            ),
+        ),
+    )
+
+    assert execution.state == "completed"
+    assert execution.alignment_rms_m is None
+    assert execution.artifacts == (stage_root / "import-receipt.json",)
+    assert calls == [
+        (
+            training_root,
+            stage_root,
+            {
+                "source_role": "internal-canary",
+                "control_points_path": None,
+                "geo_origin": None,
+                "chunk_size": 50.0,
+            },
+        )
+    ]

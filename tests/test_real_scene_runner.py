@@ -155,6 +155,16 @@ def test_internal_canary_all_uses_preview_not_production(tmp_path):
     assert "train-production" not in operations.calls
 
 
+def test_internal_canary_import_prefers_existing_production_training(tmp_path):
+    runner, operations = _runner(tmp_path)
+
+    runner.run("train-production")
+    runner.run("import")
+
+    assert operations.calls.count("train-production") == 1
+    assert "train-preview" not in operations.calls
+
+
 def test_production_import_requires_measured_control_points(tmp_path):
     runner, operations = _runner(
         tmp_path,
@@ -300,3 +310,9 @@ def test_run_real_scene_binds_canonical_source_and_run_id(tmp_path):
         / "poster"
         / source_sha[:16]
     ).is_dir()
+
+
+@pytest.mark.parametrize("chunk_size", [True, "50", float("nan"), 0, -1])
+def test_run_options_reject_invalid_chunk_size(chunk_size):
+    with pytest.raises(ValueError, match="chunk_size"):
+        RealSceneRunOptions(chunk_size=chunk_size)

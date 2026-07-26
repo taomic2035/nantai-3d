@@ -80,6 +80,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-points", type=Path)
     parser.add_argument("--geo-origin")
     parser.add_argument("--remote-config", type=Path)
+    parser.add_argument("--chunk-size", type=float, default=50.0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry", action="store_true")
     return parser
@@ -126,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             control_points_path=args.control_points,
             geo_origin=geo_origin,
             remote_config_path=args.remote_config,
+            chunk_size=args.chunk_size,
         )
         receipt = run_real_scene(
             args.source,

@@ -60,6 +60,7 @@ REAL_OPTION_FLAGS = {
     "CONTROL_POINTS": "--control-points",
     "GEO_ORIGIN": "--geo-origin",
     "REMOTE_CONFIG": "--remote-config",
+    "CHUNK_SIZE": "--chunk-size",
 }
 REAL_BOOLEAN_OPTIONS = frozenset({"RESUME", "RETRY"})
 

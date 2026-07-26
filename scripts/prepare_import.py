@@ -146,6 +146,69 @@ def prepare(
     return reg_path, splat_path
 
 
+def prepare_from_registration(
+    ply: Path,
+    out_dir: Path,
+    registration: RegistrationResult,
+    *,
+    session_id: str,
+    extra_evidence: tuple[str, ...] = (),
+) -> tuple[Path, Path]:
+    """Write import contracts without replacing an earned frame contract.
+
+    A trained scene represents the complete training capture rather than one
+    original photo/video session, so it receives one explicit aggregate
+    session.  Its PLY is still expressed in the SfM pose frame; an earned
+    ``pose_to_world`` transform is copied into ``SplatInput`` and is therefore
+    applied exactly once by ``pipeline.reconstruct``.
+    """
+
+    source = Path(ply).expanduser().absolute()
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("trained PLY must be a regular non-link file")
+    if not session_id or any(
+        session.session_id == session_id
+        for session in registration.sessions
+    ):
+        raise ValueError(
+            "aggregate import session_id must be non-empty and unique"
+        )
+    if any(not isinstance(item, str) or not item for item in extra_evidence):
+        raise ValueError("extra evidence entries must be non-empty strings")
+
+    pose_frame = registration.pose_frame.model_copy(
+        update={
+            "evidence": tuple(dict.fromkeys(
+                (*registration.pose_frame.evidence, *extra_evidence)
+            )),
+        }
+    )
+    aggregate = CaptureSession(
+        session_id=session_id,
+        kind="photo_batch",
+        source="verified-real-scene-training",
+        images=[],
+    )
+    prepared = registration.model_copy(
+        update={
+            "pose_frame": pose_frame,
+            "sessions": [*registration.sessions, aggregate],
+        }
+    )
+    splat = SplatInput(
+        session_id=session_id,
+        path=source.as_posix(),
+        source_frame=pose_frame,
+        transform=prepared.pose_to_world,
+    )
+    out_dir = Path(out_dir)
+    reg_path = out_dir / "registration.json"
+    splat_path = out_dir / "splat-input.json"
+    _write_lf(reg_path, prepared.model_dump_json(indent=2))
+    _write_lf(splat_path, splat.model_dump_json(indent=2))
+    return reg_path, splat_path
+
+
 # ============================================================
 # Content-addressing helpers (shared with emit_training_provenance)
 # ============================================================

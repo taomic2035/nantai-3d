@@ -23,12 +23,10 @@ Iron rules (the whole reason this module exists):
 
 Limitations (stated plainly):
 
-- chunks.json has no per-chunk SHA in its schema today (only the manifest-
-  level ``source.recon_manifest_sha256`` attests integrity).  This module
-  verifies that every chunk PLY exists, is not a symlink, is inside the
-  chunks dir, and that ``total_chunks`` / ``total_points`` / ``bounds`` are
-  internally consistent.  It cannot detect tampered chunk PLY bytes
-  without a per-chunk SHA; that gap is reported in ``ChunksReport``.
+- Current chunks manifests carry per-LOD SHA/size rows and those bytes are
+  revalidated.  Historical manifests without that additive integrity contract
+  remain readable but report ``per_chunk_sha_verified=None``; existence is not
+  misreported as byte verification.
 - The verifier reads manifest *claims* plus recomputed artifact bytes.  It
   does NOT recompute Sim3 residuals or re-run COLMAP; contradictions in
   metric evidence are flagged by parsing the same ``sim3.alignment.v1=``
@@ -45,6 +43,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from pipeline.spatial_chunk import verify_chunks_integrity
 
 # ---------------------------------------------------------------------------
 # Output schema (internal, safe to validate with pydantic)
@@ -118,11 +118,9 @@ class ChunksReport(BaseModel):
     missing_chunk_files: list[str] = Field(default_factory=list)
     duplicate_chunk_paths: list[str] = Field(default_factory=list)
     extra_unbound_chunk_files: list[str] = Field(default_factory=list)
-    # Note: chunks.json has no per-chunk SHA, so byte tampering on a chunk
-    # PLY cannot be detected from the manifest alone.  This field records
-    # the limitation explicitly so callers cannot mistake existence-checks
-    # for byte verification.
-    per_chunk_sha_verified: bool = False
+    # None is reserved for historical manifests that predate payload hashes.
+    per_chunk_sha_verified: bool | None = None
+    payload_integrity_mismatches: list[str] = Field(default_factory=list)
 
 
 class IntegrityReport(BaseModel):
@@ -462,6 +460,24 @@ def _verify_chunks(
         # AABBs exist but declared bounds are missing or malformed.
         bounds_consistent = False
 
+    try:
+        payload_report = verify_chunks_integrity(chunks_dir)
+        payload_sha_verified = payload_report[
+            "per_chunk_sha_verified"
+        ]
+        payload_mismatches = [
+            json.dumps(
+                mismatch,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            for mismatch in payload_report["mismatches"]
+        ]
+    except (OSError, ValueError) as exc:
+        payload_sha_verified = False
+        payload_mismatches = [f"chunk payload verification failed: {exc}"]
+
     return ChunksReport(
         chunks_manifest_path=str(chunks_path),
         total_chunks=len(chunks_list),
@@ -473,7 +489,8 @@ def _verify_chunks(
         missing_chunk_files=missing_chunk_files,
         duplicate_chunk_paths=duplicate_chunk_paths,
         extra_unbound_chunk_files=extra_unbound_chunk_files,
-        per_chunk_sha_verified=False,
+        per_chunk_sha_verified=payload_sha_verified,
+        payload_integrity_mismatches=payload_mismatches,
     )
 
 

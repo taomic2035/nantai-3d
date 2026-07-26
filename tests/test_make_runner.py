@@ -127,6 +127,7 @@ class TestRealSceneDispatch:
                 "CONTROL_POINTS=.nantai-studio/private/points.json",
                 "GEO_ORIGIN=31.2,121.5,4.0",
                 "REMOTE_CONFIG=.nantai-studio/private/remote.json",
+                "CHUNK_SIZE=37.5",
                 "import",
             ]
         ) == 0
@@ -143,6 +144,7 @@ class TestRealSceneDispatch:
         assert command[command.index("--geo-origin") + 1] == (
             "31.2,121.5,4.0"
         )
+        assert command[command.index("--chunk-size") + 1] == "37.5"
 
     @pytest.mark.parametrize(
         "args",

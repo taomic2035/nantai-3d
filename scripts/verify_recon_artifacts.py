@@ -16,10 +16,9 @@
   - **只读不写**。本脚本不修改 manifest, 不动任何产物。
 
 限制 (明说):
-  - ``chunks.json`` 当前 schema 没有 per-chunk SHA (只有 manifest 级
-    ``source.recon_manifest_sha256`` 证明整体)。所以本脚本对 chunk PLY 只能验证
-    "存在/不是符号链接/路径在 chunks 目录内/计数和 bounds 自洽", 不能验字节篡改;
-    该缺口在 ``ChunksReport.per_chunk_sha_verified=False`` 显式标出。
+  - 当前 ``chunks.json`` 会逐 LOD 绑定 SHA/字节数并由本脚本重算。历史清单若没有
+    这份 additive 合同仍可读取，但明确报告 ``per_chunk_sha_verified=None``，绝不把
+    “文件存在”冒充“字节已验证”。
   - 不重算 Sim3 残差, 不重跑 COLMAP。米制矛盾仅靠解析
     ``sim3.alignment.v1=<json>`` 证据串 (与 inspect_recon 同源规则)。
 
@@ -171,11 +170,17 @@ def _render_chunks(chunks: ChunksReport | None) -> list[str]:
         )
         for fname in chunks.extra_unbound_chunk_files:
             lines.append(f"      - {fname}")
-    # 铁律: 明示这个缺口, 不让"已验证存在"被误读成"字节已校验"
-    lines.append(
-        "  注意: chunks.json schema 无 per-chunk SHA; "
-        f"per_chunk_sha_verified={chunks.per_chunk_sha_verified}"
-    )
+    if chunks.per_chunk_sha_verified is True:
+        lines.append("  payload SHA/字节数逐项验证: True")
+    elif chunks.per_chunk_sha_verified is None:
+        lines.append(
+            "  注意: 历史 chunks.json 无 payload SHA; "
+            "per_chunk_sha_verified=None"
+        )
+    else:
+        lines.append("  ! payload SHA/字节数逐项验证: False")
+    for mismatch in chunks.payload_integrity_mismatches:
+        lines.append(f"      payload mismatch: {mismatch}")
     return lines
 
 
@@ -275,6 +280,8 @@ def _has_problems(report: IntegrityReport) -> bool:
         if chunks.duplicate_chunk_paths:
             return True
         if chunks.extra_unbound_chunk_files:
+            return True
+        if chunks.per_chunk_sha_verified is False:
             return True
     return False
 
