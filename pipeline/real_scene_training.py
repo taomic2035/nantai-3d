@@ -471,6 +471,7 @@ def _sparse_descriptor(
 def _training_request(
     *,
     capture_manifest_bytes: bytes,
+    split_bytes: bytes | None,
     registration_bytes: bytes,
     quality_bytes: bytes,
     sparse_descriptor_bytes: bytes,
@@ -481,48 +482,68 @@ def _training_request(
     created_at_utc: datetime,
     policy_bytes: bytes,
 ) -> TrainingRequest:
-    inputs = (
-        TrainingInputBinding(
-            artifact_kind="capture_manifest",
-            artifact_sha256=hashlib.sha256(
-                capture_manifest_bytes
-            ).hexdigest(),
-            artifact_path="capture/manifest.json",
-            artifact_size_bytes=len(capture_manifest_bytes),
-        ),
-        TrainingInputBinding(
-            artifact_kind="registration_json",
-            artifact_sha256=hashlib.sha256(registration_bytes).hexdigest(),
-            artifact_path="sfm/registration.json",
-            artifact_size_bytes=len(registration_bytes),
-        ),
-        TrainingInputBinding(
-            artifact_kind="registration_quality_report",
-            artifact_sha256=hashlib.sha256(quality_bytes).hexdigest(),
-            artifact_path="sfm/registration-quality-report.json",
-            artifact_size_bytes=len(quality_bytes),
-        ),
-        TrainingInputBinding(
-            artifact_kind="sparse_model_dir",
-            artifact_sha256=hashlib.sha256(
-                sparse_descriptor_bytes
-            ).hexdigest(),
-            artifact_path="sfm/sparse/0",
-            artifact_size_bytes=len(sparse_descriptor_bytes),
-        ),
+    capture_binding = TrainingInputBinding(
+        artifact_kind="capture_manifest",
+        artifact_sha256=hashlib.sha256(
+            capture_manifest_bytes
+        ).hexdigest(),
+        artifact_path="capture/manifest.json",
+        artifact_size_bytes=len(capture_manifest_bytes),
     )
+    registration_binding = TrainingInputBinding(
+        artifact_kind="registration_json",
+        artifact_sha256=hashlib.sha256(registration_bytes).hexdigest(),
+        artifact_path="sfm/registration.json",
+        artifact_size_bytes=len(registration_bytes),
+    )
+    quality_binding = TrainingInputBinding(
+        artifact_kind="registration_quality_report",
+        artifact_sha256=hashlib.sha256(quality_bytes).hexdigest(),
+        artifact_path="sfm/registration-quality-report.json",
+        artifact_size_bytes=len(quality_bytes),
+    )
+    sparse_binding = TrainingInputBinding(
+        artifact_kind="sparse_model_dir",
+        artifact_sha256=hashlib.sha256(
+            sparse_descriptor_bytes
+        ).hexdigest(),
+        artifact_path="sfm/sparse/0",
+        artifact_size_bytes=len(sparse_descriptor_bytes),
+    )
+    inputs = [
+        capture_binding,
+        registration_binding,
+        quality_binding,
+    ]
+    split_binding = None
+    if split_bytes is not None:
+        split_binding = TrainingInputBinding(
+            artifact_kind="held_out_split",
+            artifact_sha256=hashlib.sha256(split_bytes).hexdigest(),
+            artifact_path="training/held-out-split.json",
+            artifact_size_bytes=len(split_bytes),
+        )
+        inputs.append(split_binding)
+    inputs.append(sparse_binding)
+    request_identity_payload = {
+        "capture_manifest_sha256":
+            capture_binding.artifact_sha256,
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "dataset_receipt_sha256": dataset_receipt_sha256,
+        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        "quality_sha256": quality_binding.artifact_sha256,
+        "registration_sha256":
+            registration_binding.artifact_sha256,
+        "source_sha256": source_sha256,
+        "sparse_sha256": sparse_binding.artifact_sha256,
+    }
+    if split_binding is not None:
+        request_identity_payload["held_out_split_sha256"] = (
+            split_binding.artifact_sha256
+        )
     request_identity = (
         json.dumps(
-            {
-                "capture_manifest_sha256": inputs[0].artifact_sha256,
-                "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
-                "dataset_receipt_sha256": dataset_receipt_sha256,
-                "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
-                "quality_sha256": inputs[2].artifact_sha256,
-                "registration_sha256": inputs[1].artifact_sha256,
-                "source_sha256": source_sha256,
-                "sparse_sha256": inputs[3].artifact_sha256,
-            },
+            request_identity_payload,
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
@@ -534,7 +555,7 @@ def _training_request(
             "training-" + hashlib.sha256(request_identity).hexdigest()[:32]
         ),
         created_at_utc=created_at_utc,
-        input_bindings=inputs,
+        input_bindings=tuple(inputs),
         training_config=config,
         expected_output_format="inria-3dgs-ply",
         requested_config_sha256=hashlib.sha256(config_bytes).hexdigest(),
@@ -771,6 +792,17 @@ def build_training_job_bundle(
                 expected_sha256=payload.sha256,
             )
         )
+    for identity in split.held_out:
+        payload = payload_by_path[identity.logical_path]
+        add(
+            _file_source(
+                f"evaluation/payload/{identity.logical_path}",
+                capture.payload_root / PurePosixPath(identity.logical_path),
+                label=f"held-out evaluation payload {identity.logical_path}",
+                expected_bytes=payload.byte_length,
+                expected_sha256=payload.sha256,
+            )
+        )
 
     add(_bytes_source("sfm/registration.json", registration_bytes))
     policy_bytes = canonical_model_bytes(policy)
@@ -813,6 +845,7 @@ def build_training_job_bundle(
     )
     request = _training_request(
         capture_manifest_bytes=capture_bytes,
+        split_bytes=split_bytes,
         registration_bytes=registration_bytes,
         quality_bytes=quality_bytes,
         sparse_descriptor_bytes=sparse_descriptor_bytes,
@@ -1181,6 +1214,14 @@ def verify_training_job_bundle(path: Path) -> VerifiedTrainingJobBundle:
         )
     expected_request = _training_request(
         capture_manifest_bytes=structured["capture/manifest.json"],
+        split_bytes=(
+            structured["training/held-out-split.json"]
+            if any(
+                binding.artifact_kind == "held_out_split"
+                for binding in request.input_bindings
+            )
+            else None
+        ),
         registration_bytes=structured["sfm/registration.json"],
         quality_bytes=structured["sfm/registration-quality-report.json"],
         sparse_descriptor_bytes=sparse_descriptor_bytes,
@@ -1233,6 +1274,36 @@ def verify_training_job_bundle(path: Path) -> VerifiedTrainingJobBundle:
             raise RealSceneTrainingError(
                 f"capture payload evidence mismatch: {identity.logical_path}"
             )
+    expected_evaluation_members = {
+        f"evaluation/payload/{identity.logical_path}"
+        for identity in split.held_out
+    }
+    actual_evaluation_members = {
+        member.path
+        for member in manifest.members
+        if member.path.startswith("evaluation/payload/")
+    }
+    if (
+        actual_evaluation_members
+        and actual_evaluation_members != expected_evaluation_members
+    ):
+        raise RealSceneTrainingError(
+            "evaluation payload members do not exactly match held-out split"
+        )
+    if actual_evaluation_members:
+        for identity in split.held_out:
+            member = manifest_members[
+                f"evaluation/payload/{identity.logical_path}"
+            ]
+            payload = payloads[identity.logical_path]
+            if (
+                member.sha256 != payload.sha256
+                or member.byte_length != payload.byte_length
+            ):
+                raise RealSceneTrainingError(
+                    "held-out evaluation payload evidence mismatch: "
+                    f"{identity.logical_path}"
+                )
     if not {
         identity.logical_path for identity in split.held_out
     } <= {pose.image for pose in registration.poses}:
@@ -1318,6 +1389,9 @@ def load_training_job_input_bytes(
                 "sfm/sparse/0": _sparse_descriptor(
                     verified.manifest.members
                 ),
+                "training/held-out-split.json": archive.read(
+                    "training/held-out-split.json"
+                ),
             }
     except (OSError, KeyError, zipfile.BadZipFile) as exc:
         raise RealSceneTrainingError(
@@ -1327,10 +1401,14 @@ def load_training_job_input_bytes(
         binding.artifact_path
         for binding in verified.request.input_bindings
     }
-    if set(actual) != expected_paths:
+    if not expected_paths <= set(actual):
         raise RealSceneTrainingError(
             "training request input paths differ from loadable bundle inputs"
         )
+    actual = {
+        path: actual[path]
+        for path in expected_paths
+    }
     for binding in verified.request.input_bindings:
         payload = actual[binding.artifact_path]
         if (
@@ -1342,3 +1420,44 @@ def load_training_job_input_bytes(
                 f"training input binding mismatch: {binding.artifact_path}"
             )
     return actual
+
+
+def verify_production_training_job_bundle(
+    path: Path,
+) -> VerifiedTrainingJobBundle:
+    """Require split-bound train/evaluation pixels for the production lane.
+
+    Legacy bundles remain verifiable for historical/local preview replay, but
+    they cannot enter remote production training because their split choice or
+    held-out evaluation pixels are not content-closed.
+    """
+
+    verified = verify_training_job_bundle(path)
+    split_bindings = tuple(
+        binding
+        for binding in verified.request.input_bindings
+        if binding.artifact_kind == "held_out_split"
+    )
+    if (
+        len(split_bindings) != 1
+        or split_bindings[0].artifact_path
+        != "training/held-out-split.json"
+    ):
+        raise RealSceneTrainingError(
+            "production training bundle requires one held-out split binding"
+        )
+    expected_evaluation_members = {
+        f"evaluation/payload/{identity.logical_path}"
+        for identity in verified.split.held_out
+    }
+    actual_evaluation_members = {
+        member.path
+        for member in verified.manifest.members
+        if member.path.startswith("evaluation/payload/")
+    }
+    if actual_evaluation_members != expected_evaluation_members:
+        raise RealSceneTrainingError(
+            "production training bundle requires complete held-out "
+            "evaluation payloads"
+        )
+    return verified

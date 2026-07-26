@@ -53,6 +53,7 @@ def _require_utc(value: datetime) -> datetime:
 
 _INPUT_KINDS = Literal[
     "capture_manifest",
+    "held_out_split",
     "registration_json",
     "registration_quality_report",
     "sparse_model_dir",

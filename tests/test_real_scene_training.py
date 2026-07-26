@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import pipeline.real_scene_training as training_module
 from pipeline.ingest_manifest import IngestParams
 from pipeline.real_scene_capture import PreparedRealCapture, RealSfmResult
 from pipeline.real_scene_training import (
@@ -17,6 +18,7 @@ from pipeline.real_scene_training import (
     build_held_out_split,
     build_training_job_bundle,
     load_training_job_input_bytes,
+    verify_production_training_job_bundle,
     verify_training_job_bundle,
 )
 from pipeline.recon_schema import (
@@ -285,7 +287,7 @@ def test_split_rejects_duplicate_content_identity(tmp_path):
         build_held_out_split(corrupt_capture, ratio=0.5)
 
 
-def test_bundle_is_byte_identical_across_roots_and_excludes_held_out_pixels(
+def test_bundle_is_byte_identical_and_separates_held_out_evaluation_pixels(
     tmp_path,
 ):
     capture = _capture(tmp_path / "capture", count=10)
@@ -321,7 +323,24 @@ def test_bundle_is_byte_identical_across_roots_and_excludes_held_out_pixels(
         f"capture/payload/{identity.logical_path}" not in names
         for identity in verified.split.held_out
     )
+    assert all(
+        f"evaluation/payload/{identity.logical_path}" in names
+        for identity in verified.split.held_out
+    )
+    assert all(
+        f"evaluation/payload/{identity.logical_path}" not in names
+        for identity in verified.split.train
+    )
+    production = verify_production_training_job_bundle(one.path)
+    assert production.bundle_sha256 == verified.bundle_sha256
     input_bytes = load_training_job_input_bytes(verified)
+    split_bindings = tuple(
+        binding
+        for binding in verified.request.input_bindings
+        if binding.artifact_kind == "held_out_split"
+    )
+    assert len(split_bindings) == 1
+    assert split_bindings[0].artifact_path == "training/held-out-split.json"
     for binding in verified.request.input_bindings:
         actual = input_bytes[binding.artifact_path]
         assert len(actual) == binding.artifact_size_bytes
@@ -356,6 +375,55 @@ def test_bundle_rejects_mock_or_rejected_sfm(tmp_path):
             tmp_path / "rejected",
             policy=policy,
         )
+
+
+def test_production_verifier_rejects_legacy_split_or_evaluation_gaps(
+    tmp_path,
+    monkeypatch,
+):
+    capture = _capture(tmp_path / "capture", count=10)
+    sfm, policy = _sfm(capture, tmp_path / "run")
+    bundle = build_training_job_bundle(
+        capture,
+        sfm,
+        _training_config(),
+        tmp_path / "bundle",
+        policy=policy,
+    )
+    verified = verify_training_job_bundle(bundle.path)
+    legacy_request = verified.request.model_copy(
+        update={
+            "input_bindings": tuple(
+                binding
+                for binding in verified.request.input_bindings
+                if binding.artifact_kind != "held_out_split"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        training_module,
+        "verify_training_job_bundle",
+        lambda path: replace(verified, request=legacy_request),
+    )
+    with pytest.raises(RealSceneTrainingError, match="split binding"):
+        verify_production_training_job_bundle(bundle.path)
+
+    no_evaluation = verified.manifest.model_copy(
+        update={
+            "members": tuple(
+                member
+                for member in verified.manifest.members
+                if not member.path.startswith("evaluation/payload/")
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        training_module,
+        "verify_training_job_bundle",
+        lambda path: replace(verified, manifest=no_evaluation),
+    )
+    with pytest.raises(RealSceneTrainingError, match="evaluation payload"):
+        verify_production_training_job_bundle(bundle.path)
 
 
 def test_bundle_revalidates_capture_and_report_bytes(tmp_path):
