@@ -1,7 +1,7 @@
 # Nantai 3D v1.0.0-preview.2 Release Design
 
 Date: 2026-07-26
-Status: design direction approved; written specification awaiting user review
+Status: approved; implementation in progress
 Owner: Codex
 Target tag: `v1.0.0-preview.2`
 

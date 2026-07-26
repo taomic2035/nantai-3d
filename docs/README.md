@@ -2,10 +2,12 @@
 
 首次使用只需要下面四份文档：
 
-- [1.0 Preview 下载、校验与运行](releases/1.0-preview.md)
+- [Preview2 下载、独立校验与运行](releases/1.0-preview.2.md)
 - [真实重建端到端手册](manual/reconstruction-setup.md)
 - [真实数据与 Sim3/ENU 契约](real-data-workflow.md)
 - [Synthetic 设计素材 Releases](releases/synthetic-design-inputs.md)
+
+[Preview1 说明](releases/1.0-preview.md) 是历史版本记录，不是当前安装入口。
 
 机器可读合同位于 [`contracts/`](contracts/)。当前版本的发布说明见根目录
 [`CHANGELOG.md`](../CHANGELOG.md)。
