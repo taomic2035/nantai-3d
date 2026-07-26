@@ -71,7 +71,6 @@ tmp/
 
 # ============ Node (Web 前端备选) ============
 node_modules/
-package-lock.json
 yarn.lock
 
 # 第三方重建工具 (下载的二进制, 不入库; 见 third/README.md)

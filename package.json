@@ -1,0 +1,12 @@
+{
+  "name": "nantai-3d-viewer-acceptance",
+  "version": "1.0.0-rc.2",
+  "private": true,
+  "description": "Pinned browser runtime for Nantai 3D Viewer acceptance",
+  "scripts": {
+    "test:viewer": "node --test web/viewer/*.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.0"
+  }
+}
