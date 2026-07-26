@@ -2237,6 +2237,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--steps", type=int, default=3000,
                     help="Brush 训练步数 (越多越好越慢; 默认 3000)")
     ap.add_argument("--max-res", type=int, default=1024, help="训练最大分辨率")
+    ap.add_argument("--brush-seed", type=int, default=42,
+                    help="Brush 随机种子（显式传给 --seed；默认 42）")
     ap.add_argument("--fps", type=float, default=2.0, help="视频抽帧帧率 (仅视频输入)")
     ap.add_argument("--max-frames", type=int, default=300,
                     help="视频抽帧上限 (仅视频输入; COLMAP CPU 建议 ≤300)")
@@ -2508,11 +2510,13 @@ def main(argv: list[str] | None = None) -> int:
     brush_export_snapshot = ws / "trained.brush-export.ply"
     brush_argv = [brush, str(ws), "--total-steps", str(args.steps),
                   "--max-resolution", str(args.max_res),
+                  "--seed", str(args.brush_seed),
                   "--export-every", str(args.steps),
                   "--export-path", str(ws), "--export-name", "trained.ply"]
     brush_binary_sha256 = _sha256_file(Path(brush))
     parent, unprovable = _fingerprint("brush", {
         "parent": parent, "steps": args.steps, "max_res": args.max_res,
+        "seed": args.brush_seed,
         "binary": _file_fp(Path(brush))})
     brush_outputs_ok = trained.is_file() or any(
         p.name != brush_export_snapshot.name for p in ws.glob("*.ply")

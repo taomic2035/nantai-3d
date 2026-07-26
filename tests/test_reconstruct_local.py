@@ -1553,6 +1553,29 @@ class TestStopAfterBrushReceipt:
             "trained.ply",
         )
 
+    def test_stop_after_brush_binds_explicit_random_seed(
+        self,
+        env,
+        tmp_path,
+    ):
+        call, _, ws, _ = env
+        receipt_path = tmp_path / "brush-seed-receipt.json"
+
+        assert call(
+            "--brush-seed",
+            "17",
+            "--stop-after-brush",
+            "--receipt-out",
+            str(receipt_path),
+        ) == 0
+
+        receipt = verify_local_brush_execution_receipt(
+            receipt_path,
+            workspace=ws,
+        )
+        seed_index = receipt.brush_argv.index("--seed")
+        assert receipt.brush_argv[seed_index + 1] == "17"
+
     @pytest.mark.parametrize(
         "extra",
         [
