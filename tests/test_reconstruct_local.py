@@ -17,6 +17,12 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.local_brush_executor import (
+    LocalBrushExecutionError,
+    load_local_brush_execution_receipt,
+    verify_local_brush_execution_receipt,
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -52,6 +58,7 @@ class FakeRun:
         self.ws, self.web = ws, web
         self.calls: list[list[str]] = []
         self.fail_stage: str | None = None   # 该阶段被调用时抛 SystemExit（模拟 Brush 挂掉）
+        self.omit_brush_output = False
 
     def __call__(self, cmd, *, log=None, tee=False):
         cmd = [str(c) for c in cmd]
@@ -73,7 +80,10 @@ class FakeRun:
                 (model / "images.bin").write_bytes(struct.pack("<Q", 12) + b"\x00" * 8)
             # matcher subcommand: no artifact to write (db already exists)
         elif stage == "brush":
-            (self.ws / "trained.ply").write_bytes(b"fake-ply")
+            if log is not None:
+                Path(log).write_bytes(b"fake-brush-log\n")
+            if not self.omit_brush_output:
+                (self.ws / "trained.ply").write_bytes(b"fake-ply")
         elif stage == "prepare":
             (self.ws / "registration.json").write_text("{}", encoding="utf-8")
             (self.ws / "splat-input.json").write_text("{}", encoding="utf-8")
@@ -1511,6 +1521,133 @@ class TestBrushExportSnapshot:
         assert start.endswith("+00:00") or start.endswith("Z")
         assert end.endswith("+00:00") or end.endswith("Z")
         assert start <= end
+
+
+class TestStopAfterBrushReceipt:
+    def test_stop_after_brush_writes_verified_receipt_without_import(
+        self,
+        env,
+        tmp_path,
+    ):
+        call, fake, ws, _ = env
+        receipt_path = tmp_path / "brush-execution-receipt.json"
+
+        assert call(
+            "--stop-after-brush",
+            "--receipt-out",
+            str(receipt_path),
+        ) == 0
+
+        assert fake.stages == {"colmap", "brush"}
+        assert not (ws / "registration.json").exists()
+        assert not (ws / "out").exists()
+        receipt = verify_local_brush_execution_receipt(
+            receipt_path,
+            workspace=ws,
+        )
+        assert receipt.quality_role == "preview-only"
+        assert receipt.returncode == 0
+        assert receipt.brush_export_ply_path == "trained.brush-export.ply"
+        assert receipt.brush_argv[-2:] == (
+            "--export-name",
+            "trained.ply",
+        )
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ("--stop-after-brush",),
+            ("--receipt-out", "receipt.json"),
+        ],
+    )
+    def test_stop_and_receipt_flags_must_be_used_together(
+        self,
+        env,
+        extra,
+    ):
+        call, _, _, _ = env
+        with pytest.raises(SystemExit, match="receipt|stop"):
+            call(*extra)
+
+    def test_exit_zero_without_ply_does_not_write_success_receipt(
+        self,
+        env,
+        tmp_path,
+    ):
+        call, fake, _, _ = env
+        fake.omit_brush_output = True
+        receipt_path = tmp_path / "brush-execution-receipt.json"
+
+        with pytest.raises(SystemExit, match="Brush"):
+            call(
+                "--stop-after-brush",
+                "--receipt-out",
+                str(receipt_path),
+            )
+
+        assert not receipt_path.exists()
+
+    def test_receipt_revalidation_detects_ply_mutation(
+        self,
+        env,
+        tmp_path,
+    ):
+        call, _, ws, _ = env
+        receipt_path = tmp_path / "brush-execution-receipt.json"
+        call(
+            "--stop-after-brush",
+            "--receipt-out",
+            str(receipt_path),
+        )
+        receipt = load_local_brush_execution_receipt(receipt_path)
+        assert len(receipt.brush_export_ply_sha256) == 64
+        (ws / "trained.brush-export.ply").write_bytes(b"tampered")
+
+        with pytest.raises(LocalBrushExecutionError, match="PLY.*sha256"):
+            verify_local_brush_execution_receipt(
+                receipt_path,
+                workspace=ws,
+            )
+
+    def test_resume_reuses_only_exact_receipted_brush_artifacts(
+        self,
+        env,
+        tmp_path,
+    ):
+        call, fake, _, _ = env
+        receipt_path = tmp_path / "brush-execution-receipt.json"
+        call(
+            "--stop-after-brush",
+            "--receipt-out",
+            str(receipt_path),
+        )
+
+        assert call(
+            "--resume",
+            "--stop-after-brush",
+            "--receipt-out",
+            str(receipt_path),
+        ) == 0
+
+        assert fake.stages == set()
+
+    def test_nonzero_brush_exit_does_not_write_receipt(
+        self,
+        env,
+        tmp_path,
+    ):
+        call, fake, _, _ = env
+        fake.fail_stage = "brush"
+        receipt_path = tmp_path / "brush-execution-receipt.json"
+
+        with pytest.raises(SystemExit, match="brush"):
+            call(
+                "--stop-after-brush",
+                "--receipt-out",
+                str(receipt_path),
+            )
+
+        assert not receipt_path.exists()
 
 
 class TestSourceManifestMaterialization:

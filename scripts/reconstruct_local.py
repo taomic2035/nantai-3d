@@ -2263,7 +2263,29 @@ def main(argv: list[str] | None = None) -> int:
                           "fail-closed：源字节变化或拷贝失配 → 重拷（不重跑 COLMAP）；"
                           "缺必需文件 → 拒。本模式仍输出 preview-only (sfm-local)，"
                           "不提升任何信任。"))
+    ap.add_argument(
+        "--stop-after-brush",
+        action="store_true",
+        help=(
+            "Brush 导出并写出可验证 receipt 后停止；不运行 normalize/prepare/import。"
+            "必须与 --receipt-out 一起使用。"
+        ),
+    )
+    ap.add_argument(
+        "--receipt-out",
+        type=Path,
+        default=None,
+        metavar="JSON",
+        help=(
+            "写出 content-bound local Brush preview receipt；"
+            "必须与 --stop-after-brush 一起使用。"
+        ),
+    )
     args = ap.parse_args(argv)
+    if args.stop_after_brush != (args.receipt_out is not None):
+        raise SystemExit(
+            "--stop-after-brush and --receipt-out must be used together"
+        )
     # REVIEW-CODEX-030 P1 (P6c)：caller_argv 必须绑定真实传入的 argv（测试/库调用
     # 传 argv=… 时 sys.argv 是 pytest/IDE 的，不是 reconstruct_local 的），这样
     # matcher 子命令等身份可从 extras 直接验证，无需从日志文本推断。
@@ -2483,17 +2505,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n=== 2/4 Brush 训练 3DGS ({args.steps} 步, max-res {args.max_res}) ===")
     trained = ws / "trained.ply"
     brush_log = ws / "brush.log"
+    brush_export_snapshot = ws / "trained.brush-export.ply"
     brush_argv = [brush, str(ws), "--total-steps", str(args.steps),
                   "--max-resolution", str(args.max_res),
                   "--export-every", str(args.steps),
                   "--export-path", str(ws), "--export-name", "trained.ply"]
+    brush_binary_sha256 = _sha256_file(Path(brush))
     parent, unprovable = _fingerprint("brush", {
         "parent": parent, "steps": args.steps, "max_res": args.max_res,
         "binary": _file_fp(Path(brush))})
+    brush_outputs_ok = trained.is_file() or any(
+        p.name != brush_export_snapshot.name for p in ws.glob("*.ply")
+    )
+    if args.stop_after_brush and args.resume:
+        previous_brush = state.stages.get("brush", {})
+        brush_outputs_ok = (
+            brush_outputs_ok
+            and brush_export_snapshot.is_file()
+            and previous_brush.get("brush_binary_sha256")
+            == brush_binary_sha256
+            and previous_brush.get("brush_export_ply_sha256")
+            == _sha256_file(brush_export_snapshot)
+            and brush_log.is_file()
+            and previous_brush.get("brush_log_sha256")
+            == _sha256_file(brush_log)
+        )
     if state.begin("brush", parent, unprovable=unprovable,
-                   outputs_ok=trained.is_file() or any(
-                       p.name != "trained.brush-export.ply"
-                       for p in ws.glob("*.ply")),
+                   outputs_ok=brush_outputs_ok,
                    outputs_desc="工作目录里没有 .ply"):
         # REVIEW-CODEX-030 P0 #5：post-run 绑定完整 argv + UTC 起止 + returncode
         # + log SHA + PLY SHA。run() 在 rc!=0 时抛 SystemExit，所以走到 record
@@ -2505,12 +2543,12 @@ def main(argv: list[str] | None = None) -> int:
         # Brush 导出后立即快照：prepare 阶段 normalize_ply_quats.py 会 in-place
         # 覆盖 trained.ply，所以 Brush extras 的 SHA 必须绑定不可变快照
         # （trained.brush-export.ply），审计者才能重新算 SHA 验证。
-        brush_export_snapshot = ws / "trained.brush-export.ply"
         if export_now and export_now.is_file():
             shutil.copy2(export_now, brush_export_snapshot)
         brush_extras = {
             "brush_argv": brush_argv,
             "caller_argv": caller_argv,
+            "brush_binary_sha256": brush_binary_sha256,
             "brush_started_at": brush_start.isoformat(timespec="seconds"),
             "brush_finished_at": brush_end.isoformat(timespec="seconds"),
             "brush_returncode": 0,  # run() 在非 0 时已 SystemExit
@@ -2528,6 +2566,53 @@ def main(argv: list[str] | None = None) -> int:
     export = trained if trained.is_file() else next(ws.glob("*.ply"), None)
     if export is None:
         raise SystemExit("Brush 未导出 .ply：见 brush.log（可能显存不足，调小 --max-res）")
+
+    if args.stop_after_brush:
+        from pipeline.local_brush_executor import (
+            LocalBrushExecutionError,
+            build_local_brush_execution_receipt,
+            write_local_brush_execution_receipt,
+        )
+
+        brush_entry = state.stages.get("brush")
+        if not isinstance(brush_entry, dict):
+            raise SystemExit("Brush 阶段缺可验证状态，不能写 success receipt")
+        try:
+            receipt = build_local_brush_execution_receipt(
+                workspace=ws,
+                brush_binary=Path(brush),
+                brush_argv=brush_argv,
+                brush_stage_fingerprint=str(brush_entry["fingerprint"]),
+                brush_started_at_utc=datetime.fromisoformat(
+                    str(brush_entry["brush_started_at"])
+                ),
+                brush_finished_at_utc=datetime.fromisoformat(
+                    str(brush_entry["brush_finished_at"])
+                ),
+                returncode=int(brush_entry["brush_returncode"]),
+            )
+            expected_stage_evidence = {
+                "brush_binary_sha256": receipt.brush_binary_sha256,
+                "brush_log_sha256": receipt.brush_log_sha256,
+                "brush_export_ply_sha256": receipt.brush_export_ply_sha256,
+                "brush_export_ply_size_bytes":
+                    receipt.brush_export_ply_size_bytes,
+            }
+            if any(
+                brush_entry.get(key) != value
+                for key, value in expected_stage_evidence.items()
+            ):
+                raise LocalBrushExecutionError(
+                    "Brush stage state differs from measured receipt evidence"
+                )
+            write_local_brush_execution_receipt(args.receipt_out, receipt)
+        except (KeyError, TypeError, ValueError, LocalBrushExecutionError) as exc:
+            raise SystemExit(
+                f"Brush receipt 验证/写入失败: {exc}"
+            ) from exc
+        print(f"\n[OK] Brush preview receipt → {args.receipt_out}")
+        print("已按要求停在 Brush；未运行 normalize/prepare/import。")
+        return 0
 
     print("\n=== 3/4 归一化四元数 + 生成导入契约 ===")
     reg, splat = ws / "registration.json", ws / "splat-input.json"
