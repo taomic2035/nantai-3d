@@ -14,7 +14,9 @@ import pipeline.real_scene_training as training_module
 from pipeline.ingest_manifest import IngestParams
 from pipeline.real_scene_capture import PreparedRealCapture, RealSfmResult
 from pipeline.real_scene_training import (
+    HeldOutSplit,
     RealSceneTrainingError,
+    TrainingImageIdentity,
     build_held_out_split,
     build_training_job_bundle,
     load_training_job_input_bytes,
@@ -254,6 +256,24 @@ def test_split_uses_round_half_up(tmp_path):
 
     assert len(split.held_out) == 3
     assert len(split.train) == 2
+
+
+def test_split_model_rejects_partition_that_violates_selection_rule():
+    identities = tuple(
+        TrainingImageIdentity(
+            logical_path=f"frame-{index}.png",
+            sha256=f"{index:x}" * 64,
+        )
+        for index in range(4)
+    )
+
+    with pytest.raises(ValueError, match="selection rule"):
+        HeldOutSplit(
+            ratio=0.5,
+            total_count=4,
+            held_out=(identities[0], identities[2]),
+            train=(identities[1], identities[3]),
+        )
 
 
 @pytest.mark.parametrize("ratio", [0.0, 1.0, -0.1, 1.1])

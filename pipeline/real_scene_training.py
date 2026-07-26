@@ -132,6 +132,14 @@ class HeldOutSplit(FrozenModel):
         expected_held_out = _round_half_up(self.total_count, self.ratio)
         if len(self.held_out) != expected_held_out:
             raise ValueError("held_out count does not match ratio")
+        ordered = tuple(sorted(combined, key=_identity_key))
+        if (
+            self.held_out != ordered[:expected_held_out]
+            or self.train != ordered[expected_held_out:]
+        ):
+            raise ValueError(
+                "split partition violates the declared selection rule"
+            )
         return self
 
 
