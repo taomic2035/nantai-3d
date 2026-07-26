@@ -11,13 +11,16 @@ emit script read and feed them back through ``validate_training_provenance``.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+import scripts.emit_training_provenance as emit_module
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.training_provenance import (
     TrainingRequest,
@@ -93,6 +96,63 @@ def _gather_input_bytes(request: TrainingRequest) -> dict[str, bytes]:
 
 
 class TestEmitTrainingProvenance:
+    def test_prepared_bundle_supplies_exact_verified_request_inputs(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        request = TrainingRequest.model_validate_json(
+            json.dumps({
+                "request_id": "prepared-request",
+                "created_at_utc": "2026-07-26T00:00:00Z",
+                "input_bindings": [
+                    {
+                        "artifact_kind": "held_out_split",
+                        "artifact_sha256": "a" * 64,
+                        "artifact_path":
+                            "training/held-out-split.json",
+                        "artifact_size_bytes": 7,
+                    }
+                ],
+                "training_config": {
+                    "trainer_name": "nerfstudio-splatfacto",
+                    "trainer_version": "1.1.5",
+                    "max_resolution": 1600,
+                    "total_steps": 30000,
+                    "random_seed": 42,
+                },
+                "expected_output_format": "inria-3dgs-ply",
+                "requested_config_sha256": "b" * 64,
+            })
+        )
+        expected = {"training/held-out-split.json": b"split\n"}
+        bundle_path = tmp_path / "training-job.zip"
+        bundle_path.write_bytes(b"fixture")
+        monkeypatch.setattr(
+            emit_module,
+            "verify_production_training_job_bundle",
+            lambda path: SimpleNamespace(request=request),
+        )
+        monkeypatch.setattr(
+            emit_module,
+            "load_training_job_input_bytes",
+            lambda bundle: expected,
+        )
+
+        assert emit_module._load_result_input_bytes(
+            request,
+            bundle_path,
+        ) == expected
+
+        different = request.model_copy(
+            update={"request_id": "different-request"},
+        )
+        with pytest.raises(SystemExit, match="differs"):
+            emit_module._load_result_input_bytes(
+                different,
+                bundle_path,
+            )
+
     def test_request_result_roundtrip_validates(self, tmp_path):
         images, ply, config, log, n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"

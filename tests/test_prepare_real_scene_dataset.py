@@ -101,6 +101,9 @@ def _fixture_bundle(tmp_path: Path) -> VerifiedTrainingJobBundle:
         "sfm/sparse/0/points3D.bin": b"points-bin",
         "sfm/sparse/0/points3D.txt": b"points-text",
         "training/held-out-split.json": split_bytes,
+        "training/operator-intent-config.yml": (
+            b"trainer: nerfstudio-splatfacto\n"
+        ),
         "training/training-request.json": canonical_model_bytes(request),
     }
     members = tuple(
@@ -228,6 +231,15 @@ def test_prepare_materializes_explicit_train_val_test_without_rerunning_sfm(
     assert (
         output / "colmap" / "sparse" / "0" / "cameras.bin"
     ).read_bytes() == b"camera-bin"
+    assert (
+        output / "evidence" / "training-request.json"
+    ).read_bytes() == canonical_model_bytes(bundle.request)
+    assert (
+        output / "evidence" / "held-out-split.json"
+    ).read_bytes() == canonical_model_bytes(bundle.split)
+    assert (
+        output / "evidence" / "operator-intent-config.yml"
+    ).read_bytes() == b"trainer: nerfstudio-splatfacto\n"
     assert prepared.manifest.training_bundle_sha256 == bundle.bundle_sha256
     assert prepared.manifest.nerfstudio_version == "1.1.5"
 

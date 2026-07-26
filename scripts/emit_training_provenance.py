@@ -50,6 +50,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.real_scene_training import (  # noqa: E402
+    RealSceneTrainingError,
+    load_training_job_input_bytes,
+    verify_production_training_job_bundle,
+)
 from pipeline.training_provenance import (  # noqa: E402
     GpuEnvironment,
     TrainerDriftRecord,
@@ -120,6 +125,39 @@ def _input_bytes_for_validation(path: Path) -> bytes:
     if path.is_dir():
         return _dir_content_bytes(path)
     return path.read_bytes()
+
+
+def _load_result_input_bytes(
+    request: TrainingRequest,
+    prepared_bundle: Path | None,
+) -> dict[str, bytes]:
+    if prepared_bundle is not None:
+        try:
+            verified = verify_production_training_job_bundle(
+                prepared_bundle,
+            )
+            if verified.request != request:
+                raise SystemExit(
+                    "training request differs from prepared bundle"
+                )
+            return load_training_job_input_bytes(verified)
+        except RealSceneTrainingError as exc:
+            raise SystemExit(
+                f"prepared training bundle verification failed: {exc}"
+            ) from exc
+
+    input_bytes_by_path: dict[str, bytes] = {}
+    for binding in request.input_bindings:
+        path = Path(binding.artifact_path)
+        if not path.exists():
+            raise SystemExit(
+                "input artefact no longer exists at declared path: "
+                f"{path}"
+            )
+        input_bytes_by_path[binding.artifact_path] = (
+            _input_bytes_for_validation(path)
+        )
+    return input_bytes_by_path
 
 
 def _parse_ply_header(path: Path) -> tuple[int, int]:
@@ -381,13 +419,14 @@ def _cmd_result(args: argparse.Namespace) -> int:
         )
 
     # Re-read input artefact bytes for closure verification.
-    input_bytes_by_path: dict[str, bytes] = {}
-    for binding in request.input_bindings:
-        p = Path(binding.artifact_path)
-        if not p.exists():
-            raise SystemExit(
-                f"input artefact no longer exists at declared path: {p}")
-        input_bytes_by_path[binding.artifact_path] = _input_bytes_for_validation(p)
+    input_bytes_by_path = _load_result_input_bytes(
+        request,
+        (
+            Path(args.prepared_bundle)
+            if args.prepared_bundle is not None
+            else None
+        ),
+    )
 
     # Timestamps.
     started = _parse_iso_utc(args.started_at) if args.started_at else _utc_now()
@@ -479,6 +518,14 @@ def main(argv: list[str] | None = None) -> int:
 
     rs = sub.add_parser("result", help="emit training-result.json (post-training)")
     rs.add_argument("--request", required=True, help="path to training-request.json")
+    rs.add_argument(
+        "--prepared-bundle",
+        default=None,
+        help=(
+            "verified production training-job.zip supplying authoritative "
+            "request input bytes"
+        ),
+    )
     rs.add_argument("--ply", default=None,
                     help="trained point_cloud.ply; may be omitted when "
                          "--exit-code != 0 (failed/interrupted run with no PLY)")

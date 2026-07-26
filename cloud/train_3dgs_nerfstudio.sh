@@ -41,6 +41,286 @@
 #     --config-yml P    显式 config.yml 路径（否则用 nerfstudio 生成的）
 set -euo pipefail
 
+# BEGIN PRODUCTION PREPARED-BUNDLE MODE
+run_production_prepared_bundle_mode() {
+  local PREPARED_BUNDLE=""
+  local CONTAINER_IDENTITY=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --prepared-bundle)
+        [ "$#" -ge 2 ] || { echo "!! --prepared-bundle 缺少路径" >&2; return 2; }
+        PREPARED_BUNDLE="$2"
+        shift 2
+        ;;
+      --container-identity)
+        [ "$#" -ge 2 ] || { echo "!! --container-identity 缺少 digest" >&2; return 2; }
+        CONTAINER_IDENTITY="$2"
+        shift 2
+        ;;
+      *)
+        echo "!! prepared-bundle 模式未知参数: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  [ -n "$PREPARED_BUNDLE" ] || {
+    echo "!! prepared-bundle 模式必须提供 --prepared-bundle" >&2
+    return 2
+  }
+  [ -n "$CONTAINER_IDENTITY" ] || {
+    echo "!! prepared-bundle 模式必须提供 --container-identity digest" >&2
+    return 2
+  }
+  if [[ ! "$CONTAINER_IDENTITY" =~ ^[A-Za-z0-9._/:+-]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "!! container identity 必须是不可变 image@sha256:<64-hex> digest" >&2
+    return 2
+  fi
+  [ -f "$PREPARED_BUNDLE" ] || {
+    echo "!! prepared bundle 不存在: $PREPARED_BUNDLE" >&2
+    return 2
+  }
+  PREPARED_BUNDLE="$(
+    cd "$(dirname "$PREPARED_BUNDLE")"
+    printf '%s/%s\n' "$(pwd -P)" "$(basename "$PREPARED_BUNDLE")"
+  )"
+
+  local REPO_ROOT
+  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+  local PYTHON_BIN="${PYTHON_BIN:-python3}"
+  local BASE_WORK="${WORK:-$HOME/nantai_recon}"
+  local RUN_ROOT="$BASE_WORK/production-run"
+  if [ -e "$RUN_ROOT" ] || [ -L "$RUN_ROOT" ]; then
+    echo "!! production run boundary 必须不存在: $RUN_ROOT" >&2
+    return 2
+  fi
+  if [ -L "$BASE_WORK" ]; then
+    echo "!! WORK 不得是符号链接" >&2
+    return 2
+  fi
+  mkdir -p "$BASE_WORK"
+  mkdir "$RUN_ROOT"
+  mkdir "$RUN_ROOT/result"
+  printf '%s\n' "$CONTAINER_IDENTITY" \
+    > "$RUN_ROOT/result/container-identity.txt"
+
+  local NERFSTUDIO_VERSION
+  NERFSTUDIO_VERSION="$(
+    "$PYTHON_BIN" -c \
+      'import importlib.metadata; print(importlib.metadata.version("nerfstudio"))'
+  )" || {
+    echo "!! 当前镜像未安装可探测的 Nerfstudio" >&2
+    return 1
+  }
+  if [ "$NERFSTUDIO_VERSION" != "1.1.5" ]; then
+    echo "!! production 模式要求 Nerfstudio 精确为 1.1.5，实测: $NERFSTUDIO_VERSION" >&2
+    return 1
+  fi
+  command -v ns-train >/dev/null || {
+    echo "!! 镜像缺少 ns-train" >&2
+    return 1
+  }
+  command -v ns-export >/dev/null || {
+    echo "!! 镜像缺少 ns-export" >&2
+    return 1
+  }
+  command -v nvidia-smi >/dev/null || {
+    echo "!! production 模式未探测到 nvidia-smi" >&2
+    return 1
+  }
+  "$PYTHON_BIN" -c \
+    'import torch; assert torch.cuda.is_available(), "CUDA unavailable"' || {
+    echo "!! production 模式未探测到可用 CUDA torch 栈" >&2
+    return 1
+  }
+
+  (
+    cd "$REPO_ROOT"
+    "$PYTHON_BIN" -m cloud.prepare_real_scene_dataset \
+      --prepared-bundle "$PREPARED_BUNDLE" \
+      --output "$RUN_ROOT/prepared"
+  )
+
+  local REQUEST="$RUN_ROOT/prepared/evidence/training-request.json"
+  local INTENT_CONFIG="$RUN_ROOT/prepared/evidence/operator-intent-config.yml"
+  local REQUEST_FIELDS=()
+  while IFS= read -r REQUEST_FIELD; do
+    REQUEST_FIELDS+=("$REQUEST_FIELD")
+  done < <(
+    "$PYTHON_BIN" - "$REQUEST" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(Path(sys.argv[1]).read_text(encoding="ascii"))
+config = request["training_config"]
+values = (
+    config["trainer_name"],
+    config["trainer_version"],
+    config["total_steps"],
+    config["random_seed"],
+    request["request_id"],
+)
+if (
+    values[0] != "nerfstudio-splatfacto"
+    or values[1] != "1.1.5"
+    or isinstance(values[2], bool)
+    or not isinstance(values[2], int)
+    or values[2] <= 0
+    or isinstance(values[3], bool)
+    or not isinstance(values[3], int)
+    or not isinstance(values[4], str)
+    or not values[4]
+):
+    raise SystemExit("verified request has invalid production trainer intent")
+for value in values:
+    print(value)
+PYEOF
+  )
+  if [ "${#REQUEST_FIELDS[@]}" -ne 5 ]; then
+    echo "!! 无法读取 production training request" >&2
+    return 1
+  fi
+  local TOTAL_STEPS="${REQUEST_FIELDS[2]}"
+  local SEED="${REQUEST_FIELDS[3]}"
+  local REQUEST_ID="${REQUEST_FIELDS[4]}"
+
+  cd "$RUN_ROOT"
+  local TRAIN_LOG="training.log"
+  : > "$TRAIN_LOG"
+  local STARTED_AT
+  STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "[PRODUCTION] request=$REQUEST_ID container=$CONTAINER_IDENTITY" \
+    | tee -a "$TRAIN_LOG"
+
+  set +e
+  ns-train splatfacto \
+    --data prepared \
+    --output-dir outputs \
+    --max-num-iterations "$TOTAL_STEPS" \
+    --machine.seed "$SEED" \
+    --viewer.quit-on-train-completion True \
+    nerfstudio-data \
+    --orientation-method none \
+    --center-method none \
+    --auto-scale-poses False \
+    --scale-factor 1.0 \
+    2>&1 | tee -a "$TRAIN_LOG"
+  local TRAIN_EXIT=${PIPESTATUS[0]}
+  set -e
+
+  local TRAIN_CONFIG=""
+  local DATAPARSER_TRANSFORM=""
+  local PLY=""
+  if [ "$TRAIN_EXIT" -eq 0 ]; then
+    local CONFIG_CANDIDATES=()
+    while IFS= read -r CONFIG_CANDIDATE; do
+      CONFIG_CANDIDATES+=("$CONFIG_CANDIDATE")
+    done < <(
+      find outputs -type f -name config.yml -print | sort
+    )
+    if [ "${#CONFIG_CANDIDATES[@]}" -ne 1 ]; then
+      echo "!! 成功训练必须产出恰好一个 config.yml" | tee -a "$TRAIN_LOG"
+      TRAIN_EXIT=70
+    else
+      TRAIN_CONFIG="${CONFIG_CANDIDATES[0]}"
+    fi
+  fi
+  if [ "$TRAIN_EXIT" -eq 0 ]; then
+    local TRANSFORM_CANDIDATES=()
+    while IFS= read -r TRANSFORM_CANDIDATE; do
+      TRANSFORM_CANDIDATES+=("$TRANSFORM_CANDIDATE")
+    done < <(
+      find outputs -type f -name dataparser_transforms.json -print | sort
+    )
+    if [ "${#TRANSFORM_CANDIDATES[@]}" -ne 1 ]; then
+      echo "!! 成功训练必须产出恰好一个 dataparser_transforms.json" \
+        | tee -a "$TRAIN_LOG"
+      TRAIN_EXIT=71
+    else
+      DATAPARSER_TRANSFORM="${TRANSFORM_CANDIDATES[0]}"
+      if ! "$PYTHON_BIN" "$REPO_ROOT/cloud/validate_dataparser_transform.py" \
+          "$DATAPARSER_TRANSFORM" 2>&1 | tee -a "$TRAIN_LOG"; then
+        TRAIN_EXIT=72
+      fi
+    fi
+  fi
+
+  if [ "$TRAIN_EXIT" -eq 0 ]; then
+    mkdir export
+    set +e
+    ns-export gaussian-splat \
+      --load-config "$TRAIN_CONFIG" \
+      --output-dir export \
+      --output-filename point_cloud.ply \
+      2>&1 | tee -a "$TRAIN_LOG"
+    local EXPORT_EXIT=${PIPESTATUS[0]}
+    set -e
+    PLY="export/point_cloud.ply"
+    if [ "$EXPORT_EXIT" -ne 0 ] || [ ! -s "$PLY" ]; then
+      echo "!! ns-export 未产出非空 PLY" | tee -a "$TRAIN_LOG"
+      TRAIN_EXIT=73
+      PLY=""
+    fi
+  fi
+
+  local FINISHED_AT
+  FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local EMIT_ARGS=(
+    result
+    --request prepared/evidence/training-request.json
+    --prepared-bundle "$PREPARED_BUNDLE"
+    --config-yml prepared/evidence/operator-intent-config.yml
+    --log "$TRAIN_LOG"
+    --trainer nerfstudio-splatfacto
+    --trainer-version "$NERFSTUDIO_VERSION"
+    --exit-code "$TRAIN_EXIT"
+    --started-at "$STARTED_AT"
+    --finished-at "$FINISHED_AT"
+    --result-id "result-$REQUEST_ID"
+    --output result/training-result.json
+  )
+  if [ -n "$PLY" ]; then
+    EMIT_ARGS+=(--ply "$PLY")
+  else
+    EMIT_ARGS+=(--error-message "trainer/export failed (exit=$TRAIN_EXIT)")
+  fi
+  if [ -n "$DATAPARSER_TRANSFORM" ]; then
+    EMIT_ARGS+=(--dataparser-transform "$DATAPARSER_TRANSFORM")
+  fi
+  if ! "$PYTHON_BIN" "$REPO_ROOT/scripts/emit_training_provenance.py" \
+      "${EMIT_ARGS[@]}"; then
+    echo "!! production training-result.json 生成失败" >&2
+    return 74
+  fi
+
+  cp prepared/evidence/training-request.json \
+    result/training-request.json
+  cp prepared/evidence/operator-intent-config.yml \
+    result/operator-intent-config.yml
+  cp "$TRAIN_LOG" result/training.log
+  if [ -n "$PLY" ]; then
+    cp "$PLY" result/point_cloud.ply
+  fi
+  if [ -n "$DATAPARSER_TRANSFORM" ]; then
+    cp "$DATAPARSER_TRANSFORM" \
+      result/dataparser_transforms.json
+  fi
+
+  if [ "$TRAIN_EXIT" -ne 0 ]; then
+    echo "!! production Splatfacto 失败，诊断产物: $RUN_ROOT/result" >&2
+    return "$TRAIN_EXIT"
+  fi
+  echo "production Splatfacto 产物: $RUN_ROOT/result"
+  return 0
+}
+
+if [ "${1:-}" = "--prepared-bundle" ]; then
+  run_production_prepared_bundle_mode "$@"
+  exit "$?"
+fi
+# END PRODUCTION PREPARED-BUNDLE MODE
+
 INPUT="${1:?用法: bash train_3dgs_nerfstudio.sh <图片目录|视频文件> [选项]}"
 shift
 

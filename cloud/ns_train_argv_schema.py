@@ -132,6 +132,54 @@ NERFSTUDIO_CLI_SCHEMA: dict[str, FlagSpec] = {
         ),
         "notes": "Boolean must be passed as bareword True/False, not --flag.",
     },
+    "--orientation-method": {
+        "flag": "--orientation-method",
+        "cli": "ns-train",
+        "subcommand": "nerfstudio-data",
+        "value_type": "enum",
+        "doc_source": (
+            "Nerfstudio 1.1.5 source "
+            "nerfstudio/data/dataparsers/nerfstudio_dataparser.py; "
+            "NerfstudioDataParserConfig.orientation_method."
+        ),
+        "notes": "Production prepared data requires the literal value none.",
+    },
+    "--center-method": {
+        "flag": "--center-method",
+        "cli": "ns-train",
+        "subcommand": "nerfstudio-data",
+        "value_type": "enum",
+        "doc_source": (
+            "Nerfstudio 1.1.5 source "
+            "nerfstudio/data/dataparsers/nerfstudio_dataparser.py; "
+            "NerfstudioDataParserConfig.center_method."
+        ),
+        "notes": "Production prepared data requires the literal value none.",
+    },
+    "--auto-scale-poses": {
+        "flag": "--auto-scale-poses",
+        "cli": "ns-train",
+        "subcommand": "nerfstudio-data",
+        "value_type": "bool (True/False as bareword)",
+        "doc_source": (
+            "Nerfstudio 1.1.5 source "
+            "nerfstudio/data/dataparsers/nerfstudio_dataparser.py; "
+            "NerfstudioDataParserConfig.auto_scale_poses."
+        ),
+        "notes": "Production prepared data requires False.",
+    },
+    "--scale-factor": {
+        "flag": "--scale-factor",
+        "cli": "ns-train",
+        "subcommand": "nerfstudio-data",
+        "value_type": "float",
+        "doc_source": (
+            "Nerfstudio 1.1.5 source "
+            "nerfstudio/data/dataparsers/nerfstudio_dataparser.py; "
+            "NerfstudioDataParserConfig.scale_factor."
+        ),
+        "notes": "Production prepared data requires exactly 1.0.",
+    },
     # ---- ns-export gaussian-splat ----
     "--load-config": {
         "flag": "--load-config",
@@ -145,6 +193,20 @@ NERFSTUDIO_CLI_SCHEMA: dict[str, FlagSpec] = {
         ),
         "notes": "Path to the trainer-generated config.yml under outputs/.",
     },
+    "--output-filename": {
+        "flag": "--output-filename",
+        "cli": "ns-export",
+        "subcommand": "gaussian-splat",
+        "value_type": "str",
+        "doc_source": (
+            "Nerfstudio 1.1.5 source nerfstudio/scripts/exporter.py; "
+            "ExportGaussianSplat.output_filename."
+        ),
+        "notes": (
+            "The 1.1.5 default is splat.ply; production explicitly requests "
+            "point_cloud.ply."
+        ),
+    },
 }
 
 
@@ -153,7 +215,19 @@ NERFSTUDIO_CLI_SCHEMA: dict[str, FlagSpec] = {
 # CLI; dropping one fails TestCloudNerfstudioArgvSchema::test_required_flags_present.
 REQUIRED_FLAGS_PER_INVOCATION: dict[str, set[str]] = {
     "ns-process-data": {"--data", "--output-dir"},
-    "ns-train": {"--data", "--output-dir", "--max-num-iterations",
-                 "--machine.seed"},
-    "ns-export": {"--load-config", "--output-dir"},
+    "ns-train": {
+        "--data",
+        "--output-dir",
+        "--max-num-iterations",
+        "--machine.seed",
+        "--orientation-method",
+        "--center-method",
+        "--auto-scale-poses",
+        "--scale-factor",
+    },
+    "ns-export": {
+        "--load-config",
+        "--output-dir",
+        "--output-filename",
+    },
 }

@@ -383,6 +383,22 @@ def prepare_real_scene_dataset(
                     payload,
                 )
 
+            evidence_members = {
+                "training/held-out-split.json":
+                    "evidence/held-out-split.json",
+                "training/operator-intent-config.yml":
+                    "evidence/operator-intent-config.yml",
+                "training/training-request.json":
+                    "evidence/training-request.json",
+            }
+            for source, destination in evidence_members.items():
+                payload = _verified_member_bytes(
+                    archive,
+                    members,
+                    source,
+                )
+                _write_new_file(output / destination, payload)
+
             sparse_members = {
                 path.removeprefix(_SPARSE_PREFIX): path
                 for path in members
