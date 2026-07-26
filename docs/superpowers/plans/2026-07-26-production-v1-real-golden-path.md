@@ -684,7 +684,7 @@ then push.
 - The remote job consumes only a verified prepared bundle and returns
   `training-result.json`, PLY, the dataparser transform and bounded logs.
 
-- [ ] **Step 1: Write SSH argv, redaction and unknown-state tests**
+- [x] **Step 1: Write SSH argv, redaction and unknown-state tests**
 
 ```python
 def test_submit_uses_strict_host_key_and_no_shell(monkeypatch, config, bundle):
@@ -705,14 +705,14 @@ Also reject newline/control characters in aliases/remote roots, host-key
 fingerprint mismatch, changed job id, result traversal, over-size result and a
 result whose request SHA differs from the submitted bundle.
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 ```bash
 python -m pytest tests/test_remote_shell_executor.py \
   tests/test_prepare_real_scene_dataset.py -q
 ```
 
-- [ ] **Step 3: Implement prepared COLMAP conversion without rerunning SfM**
+- [x] **Step 3: Implement prepared COLMAP conversion without rerunning SfM**
 
 `cloud/prepare_real_scene_dataset.py` verifies the bundle, materializes
 `images/` and `colmap/sparse/0`, calls the pinned Nerfstudio 1.1.5
@@ -730,7 +730,7 @@ assert set(meta["train_filenames"]) | set(meta["test_filenames"]) == all_frames
 No held-out filename may enter the training split. The COLMAP sparse bytes are
 copied unchanged and hashed again.
 
-- [ ] **Step 4: Add a production prepared-bundle mode to the cloud script**
+- [x] **Step 4: Add a production prepared-bundle mode to the cloud script**
 
 The accepted path is:
 
@@ -762,14 +762,14 @@ Extend the existing training-provenance output-kind enum with
 additional output. Historical results remain valid for their old scope, but
 the real-scene import gate requires the new binding.
 
-- [ ] **Step 5: Implement submit/poll/fetch**
+- [x] **Step 5: Implement submit/poll/fetch**
 
 Use local `ssh`/`scp` binaries with argv arrays and an operator-owned
 known-hosts file. Submission uploads to an absent directory keyed by bundle
 SHA. Poll reads one bounded status JSON. Fetch downloads to an absent staging
 directory, validates every result member, then atomically publishes it locally.
 
-- [ ] **Step 6: Verify and commit Task 7**
+- [x] **Step 6: Verify and commit Task 7**
 
 ```bash
 python -m pytest tests/test_remote_shell_executor.py \
