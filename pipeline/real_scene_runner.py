@@ -180,6 +180,23 @@ class StageReceipt(FrozenModel):
         return self
 
 
+class StageRevalidationFailure(FrozenModel):
+    schema_id: Literal["nantai.stage-revalidation-failure.v1"] = Field(
+        default="nantai.stage-revalidation-failure.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    dataset_id: str = Field(pattern=_ID_PATTERN)
+    source_sha256: str = Field(pattern=_SHA256_PATTERN)
+    stage: StageName
+    previous_receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+    detected_at_utc: datetime
+    failure_kind: Literal["artifact-integrity"] = "artifact-integrity"
+    reason: str = Field(min_length=1, max_length=4096)
+
+    _utc = field_validator("detected_at_utc")(_require_utc)
+
+
 @dataclass(frozen=True)
 class StageExecution:
     state: StageState
@@ -435,6 +452,63 @@ class RealSceneRunner:
             raise DatasetEvidenceError("stage receipt cannot be published") from exc
         return _read_receipt(path)
 
+    def _record_completed_revalidation_failure(
+        self,
+        *,
+        stage: StageName,
+        previous_receipt_sha256: str,
+        error: DatasetEvidenceError,
+    ) -> None:
+        attempt_id = "attempt-" + uuid.uuid4().hex
+        stage_root = self.workspace / "stages" / stage / attempt_id
+        reason = f"{stage} completed receipt revalidation failed: {error}"
+        failure = StageRevalidationFailure(
+            dataset_id=self.source.dataset_id,
+            source_sha256=self.source.source_sha256,
+            stage=stage,
+            previous_receipt_sha256=previous_receipt_sha256,
+            detected_at_utc=self._now(),
+            reason=reason,
+        )
+        evidence_path = stage_root / "revalidation-failure.json"
+        try:
+            stage_root.mkdir(parents=True, exist_ok=False)
+            descriptor = os.open(
+                evidence_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(canonical_model_bytes(failure))
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as exc:
+            raise DatasetEvidenceError(
+                "stage revalidation evidence cannot be published"
+            ) from exc
+        evidence = (
+            _hash_artifact(
+                evidence_path,
+                workspace=self.workspace,
+            ),
+        )
+        receipt = StageReceipt(
+            dataset_id=self.source.dataset_id,
+            source_sha256=self.source.source_sha256,
+            stage=stage,
+            attempt_id=attempt_id,
+            created_at_utc=failure.detected_at_utc,
+            status="blocked",
+            prerequisites=(),
+            evidence=evidence,
+            outputs=(),
+            reason=reason,
+        )
+        self._write_receipt(receipt)
+        raise RealSceneBlockedError(
+            f"{reason}; receipt: {self.receipt_root / stage}"
+        ) from error
+
     def _preflight_control_points(self) -> None:
         if self.source.role != "production-acceptance":
             return
@@ -467,10 +541,17 @@ class RealSceneRunner:
     ) -> StageReceipt:
         latest = self._latest(stage)
         if latest is not None:
-            receipt, _digest = latest
-            self._verify_artifact_bindings(receipt.evidence)
+            receipt, digest = latest
             if receipt.status == "completed":
-                return self._verify_completed(receipt)
+                try:
+                    return self._verify_completed(receipt)
+                except DatasetEvidenceError as exc:
+                    self._record_completed_revalidation_failure(
+                        stage=stage,
+                        previous_receipt_sha256=digest,
+                        error=exc,
+                    )
+            self._verify_artifact_bindings(receipt.evidence)
             if not retry:
                 raise RealSceneBlockedError(
                     f"{stage} has {receipt.status} evidence "

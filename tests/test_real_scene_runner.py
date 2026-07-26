@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -124,14 +125,45 @@ def test_blocked_stage_evidence_is_revalidated_before_retry(tmp_path):
         runner.run("sfm", retry=True)
 
 
-def test_resume_revalidates_bytes_not_file_existence(tmp_path):
-    runner, _operations = _runner(tmp_path)
+def test_resume_byte_tamper_records_blocked_revalidation_receipt(tmp_path):
+    runner, operations = _runner(tmp_path)
     receipt = runner.run("fetch")
+    completed_path = next((runner.receipt_root / "fetch").glob("*.json"))
+    completed_bytes = completed_path.read_bytes()
     artifact = runner.workspace / receipt.outputs[0].path
     artifact.write_bytes(b"x")
 
-    with pytest.raises(DatasetEvidenceError, match="sha256"):
+    with pytest.raises(RealSceneBlockedError, match="revalidation failed"):
         runner.run("fetch", resume=True)
+
+    receipt_paths = tuple(sorted((runner.receipt_root / "fetch").glob("*.json")))
+    assert len(receipt_paths) == 2
+    assert completed_path.read_bytes() == completed_bytes
+    documents = tuple(json.loads(path.read_text(encoding="ascii")) for path in receipt_paths)
+    blocked = next(document for document in documents if document["status"] == "blocked")
+    assert blocked["outputs"] == []
+    assert len(blocked["evidence"]) == 1
+    assert "sha256/size mismatch" in blocked["reason"]
+    failure_path = runner.workspace / blocked["evidence"][0]["path"]
+    failure = json.loads(failure_path.read_text(encoding="ascii"))
+    assert failure == {
+        "dataset_id": "poster",
+        "detected_at_utc": failure["detected_at_utc"],
+        "failure_kind": "artifact-integrity",
+        "previous_receipt_sha256": completed_path.stem,
+        "reason": blocked["reason"],
+        "schema": "nantai.stage-revalidation-failure.v1",
+        "source_sha256": "a" * 64,
+        "stage": "fetch",
+    }
+
+    with pytest.raises(RealSceneBlockedError, match="explicit retry"):
+        runner.run("fetch")
+    recovered = runner.run("fetch", retry=True)
+
+    assert recovered.status == "completed"
+    assert len(tuple((runner.receipt_root / "fetch").glob("*.json"))) == 3
+    assert operations.calls.count("fetch") == 2
 
 
 def test_resume_revalidates_transitive_prerequisite_bytes(tmp_path):
@@ -141,8 +173,15 @@ def test_resume_revalidates_transitive_prerequisite_bytes(tmp_path):
     artifact = runner.workspace / fetch_receipt.outputs[0].path
     artifact.write_bytes(b"x")
 
-    with pytest.raises(DatasetEvidenceError, match="sha256"):
+    with pytest.raises(RealSceneBlockedError, match="revalidation failed"):
         runner.run("serve", resume=True)
+
+    receipts = tuple((runner.receipt_root / "serve").glob("*.json"))
+    assert len(receipts) == 2
+    assert any(
+        json.loads(path.read_text(encoding="ascii"))["status"] == "blocked"
+        for path in receipts
+    )
 
 
 def test_internal_canary_all_uses_preview_not_production(tmp_path):
