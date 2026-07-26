@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from pipeline.real_dataset import (
+    CaptureRightsReceipt,
     DatasetLock,
     DatasetLockEntry,
     DatasetReceipt,
     DatasetReceiptEntry,
     HfDatasetSource,
+    LocalCaptureSource,
     canonical_model_bytes,
 )
 from pipeline.real_scene_capture import (
     RealSceneCaptureError,
+    prepare_local_capture,
     prepare_real_capture,
     run_real_sfm,
 )
@@ -33,6 +37,33 @@ from pipeline.registration_quality import RegistrationQualityPolicy
 from pipeline.studio_revisions import canonical_manifest_bytes
 
 _REVISION = "4" * 40
+
+
+def _local_rights() -> CaptureRightsReceipt:
+    return CaptureRightsReceipt(
+        schema="nantai.capture-rights-receipt.v1",
+        dataset_id="private-courtyard",
+        operator="Nantai operator",
+        capture_scope="courtyard acceptance capture",
+        effective_date=date(2026, 7, 26),
+        processing_purposes=("3d-reconstruction",),
+        redistribution_allowed=False,
+        release_inclusion_allowed=False,
+    )
+
+
+def _local_source(rights: CaptureRightsReceipt) -> LocalCaptureSource:
+    return LocalCaptureSource(
+        schema="nantai.real-dataset-source.v1",
+        dataset_id=rights.dataset_id,
+        role="production-acceptance",
+        source_kind="local-capture",
+        rights_receipt_sha256=hashlib.sha256(
+            canonical_model_bytes(rights)
+        ).hexdigest(),
+        redistribution_allowed=False,
+        release_inclusion_allowed=False,
+    )
 
 
 def _write_verified_source(
@@ -185,6 +216,60 @@ def test_capture_requires_absent_output_boundary(tmp_path: Path) -> None:
     assert (occupied / "foreign.txt").read_text(encoding="utf-8") == (
         "do not overwrite"
     )
+
+
+def test_local_capture_binds_private_media_and_rights_without_paths(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "private-media"
+    (media / "session-a").mkdir(parents=True)
+    (media / "session-a" / "frame-a.png").write_bytes(b"image-a")
+    (media / "frame-b.jpg").write_bytes(b"image-b")
+    rights = _local_rights()
+    source = _local_source(rights)
+
+    prepared = prepare_local_capture(
+        source,
+        media,
+        rights,
+        tmp_path / "run",
+    )
+
+    assert prepared.selected_paths == (
+        "frame-b.jpg",
+        "session-a/frame-a.png",
+    )
+    assert prepared.capture.manifest.synthetic is False
+    assert prepared.source_sha256 == hashlib.sha256(
+        canonical_model_bytes(source)
+    ).hexdigest()
+    assert prepared.dataset_receipt_sha256 == (
+        prepared.capture.manifest.ingest_manifest_sha256
+    )
+    portable_evidence = (
+        prepared.capture.bundle / "manifest.json"
+    ).read_text(encoding="utf-8")
+    assert str(media) not in portable_evidence
+
+
+def test_local_capture_rejects_unbound_rights_before_ingest(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "private-media"
+    media.mkdir()
+    (media / "frame.png").write_bytes(b"image")
+    rights = _local_rights()
+    mismatched = rights.model_copy(update={"operator": "Other operator"})
+
+    with pytest.raises(RealSceneCaptureError, match="rights"):
+        prepare_local_capture(
+            _local_source(rights),
+            media,
+            mismatched,
+            tmp_path / "run",
+        )
+
+    assert not (tmp_path / "run" / "capture").exists()
 
 
 def _policy() -> RegistrationQualityPolicy:

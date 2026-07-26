@@ -282,6 +282,43 @@ def load_real_dataset_source(path: Path) -> HfDatasetSource | LocalCaptureSource
     return source
 
 
+def load_capture_rights_receipt(path: Path) -> CaptureRightsReceipt:
+    """Load an exact canonical private rights receipt.
+
+    The absolute path remains runtime-only.  The portable source record binds
+    the canonical receipt bytes by SHA-256.
+    """
+
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise DatasetEvidenceError(
+            f"cannot read capture rights receipt: {exc}"
+        ) from exc
+    try:
+        json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except DatasetEvidenceError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DatasetEvidenceError(
+            f"invalid capture rights receipt JSON: {exc}"
+        ) from exc
+    try:
+        receipt = CaptureRightsReceipt.model_validate_json(raw)
+    except ValidationError as exc:
+        raise DatasetEvidenceError(
+            f"invalid capture rights receipt: {exc}"
+        ) from exc
+    if raw != canonical_model_bytes(receipt):
+        raise DatasetEvidenceError(
+            "capture rights receipt JSON is not canonical"
+        )
+    return receipt
+
+
 def validate_capture_rights(
     source: HfDatasetSource | LocalCaptureSource,
     rights: CaptureRightsReceipt,

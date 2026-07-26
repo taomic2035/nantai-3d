@@ -14,11 +14,17 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from pipeline.ingest import ingest_all
-from pipeline.ingest_manifest import MANIFEST_FILENAME
+from pipeline.ingest_manifest import (
+    MANIFEST_FILENAME,
+    verify_ingest_artifact,
+)
 from pipeline.real_dataset import (
+    CaptureRightsReceipt,
+    DatasetEvidenceError,
     HfDatasetSource,
     LocalCaptureSource,
     canonical_model_bytes,
+    validate_capture_rights,
 )
 from pipeline.real_dataset_fetch import (
     DatasetDownloadError,
@@ -234,6 +240,105 @@ def prepare_real_capture(
         dataset_receipt_sha256=hashlib.sha256(
             canonical_model_bytes(receipt)
         ).hexdigest(),
+        selected_paths=selected_paths,
+        capture=capture,
+    )
+
+
+def prepare_local_capture(
+    source: LocalCaptureSource,
+    media_root: Path,
+    rights: CaptureRightsReceipt,
+    run_root: Path,
+) -> PreparedRealCapture:
+    """Create an immutable capture revision from private local media.
+
+    Runtime absolute paths are used only to copy and verify the selected input
+    bytes.  Portable evidence retains relative paths, source SHA, rights SHA
+    (through the source record), and the content-addressed ingest manifest.
+    """
+
+    try:
+        validate_capture_rights(source, rights)
+    except DatasetEvidenceError as exc:
+        raise RealSceneCaptureError(
+            f"capture rights validation failed: {exc}"
+        ) from exc
+
+    boundary = _require_absent_capture_boundary(run_root)
+    ingest_root = boundary / "ingest"
+    try:
+        ingest_all(media_root, ingest_root)
+        ingest = verify_ingest_artifact(
+            ingest_root,
+            input_dir=media_root,
+        )
+    except Exception as exc:
+        raise RealSceneCaptureError(
+            f"private media ingest failed: {exc}"
+        ) from exc
+
+    selected_root = boundary / "source"
+    try:
+        selected_root.mkdir()
+    except OSError as exc:
+        raise RealSceneCaptureError(
+            f"cannot create private source copy: {exc}"
+        ) from exc
+    selected_paths = tuple(
+        sorted(record.source_path for record in ingest.sources)
+    )
+    by_path = {record.source_path: record for record in ingest.sources}
+    for relative_path in selected_paths:
+        record = by_path[relative_path]
+        portable = PurePosixPath(relative_path)
+        _stable_copy(
+            Path(media_root).joinpath(*portable.parts),
+            selected_root.joinpath(*portable.parts),
+            expected_bytes=record.bytes,
+            expected_sha256=record.source_sha256,
+        )
+
+    try:
+        copied_ingest = verify_ingest_artifact(
+            ingest_root,
+            input_dir=selected_root,
+        )
+    except Exception as exc:
+        raise RealSceneCaptureError(
+            f"private source copy differs from ingest evidence: {exc}"
+        ) from exc
+    if copied_ingest != ingest:
+        raise RealSceneCaptureError(
+            "private source copy changed the ingest manifest identity"
+        )
+
+    try:
+        ingest_bytes = (ingest_root / MANIFEST_FILENAME).read_bytes()
+    except OSError as exc:
+        raise RealSceneCaptureError(
+            f"cannot read private ingest evidence: {exc}"
+        ) from exc
+    ingest_sha256 = hashlib.sha256(ingest_bytes).hexdigest()
+    revision_id = f"capture-{ingest_sha256[:32]}"
+    try:
+        capture = prepare_capture_bundle(
+            stage_dir=ingest_root,
+            input_dir=selected_root,
+            bundle_dir=boundary / "bundle",
+            revision_id=revision_id,
+            synthetic=False,
+            created_utc=datetime.now(UTC),
+        )
+    except Exception as exc:
+        raise RealSceneCaptureError(
+            f"private capture bundle preparation failed: {exc}"
+        ) from exc
+    return PreparedRealCapture(
+        source_sha256=hashlib.sha256(
+            canonical_model_bytes(source)
+        ).hexdigest(),
+        dataset_receipt_sha256=ingest_sha256,
         selected_paths=selected_paths,
         capture=capture,
     )

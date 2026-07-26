@@ -19,6 +19,7 @@ from pipeline.real_dataset import (
     HfDatasetSource,
     LocalCaptureSource,
     canonical_model_bytes,
+    load_capture_rights_receipt,
     load_real_dataset_source,
     validate_capture_rights,
     validate_dataset_receipt,
@@ -186,6 +187,30 @@ def test_load_source_accepts_canonical_hf_and_local_variants(
     local_path = tmp_path / "local.json"
     local_path.write_bytes(canonical_model_bytes(local))
     assert load_real_dataset_source(local_path) == local
+
+
+def test_load_capture_rights_requires_canonical_duplicate_free_bytes(
+    tmp_path: Path,
+) -> None:
+    rights = _rights()
+    path = tmp_path / "rights.json"
+    path.write_bytes(canonical_model_bytes(rights))
+    assert load_capture_rights_receipt(path) == rights
+
+    path.write_text(
+        json.dumps(rights.model_dump(mode="json", by_alias=True), indent=2),
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetEvidenceError, match="canonical"):
+        load_capture_rights_receipt(path)
+
+    path.write_text(
+        '{"schema":"nantai.capture-rights-receipt.v1",'
+        '"schema":"nantai.capture-rights-receipt.v1"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetEvidenceError, match="duplicate"):
+        load_capture_rights_receipt(path)
 
 
 @pytest.mark.parametrize(
