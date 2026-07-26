@@ -22,6 +22,7 @@ from PIL import Image
 
 import pipeline.synthetic_village.material_bundle_v2 as material_v2_module
 import pipeline.synthetic_village.mesh_asset_bundle_v3 as mesh_v3_module
+from pipeline.preview_release import build_receipt, canonical_json_bytes
 from pipeline.studio_server import (
     PathAccessError,
     build_project_snapshot,
@@ -330,8 +331,72 @@ def _write_v2_project(root: Path) -> None:
         ]
     }
     (root / "web/data/manifest.json").write_text(json.dumps(world_manifest), encoding="utf-8")
-
     assert full.is_file() and lod.is_file()
+
+
+def _write_preview_release_project(root: Path) -> dict:
+    _write_v2_project(root)
+    manifest_path = root / "web/data/recon/recon_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    synthetic_frame = {
+        "frame_id": "synthetic-local",
+        "handedness": "right",
+        "axes": "sfm-arbitrary",
+        "units": "arbitrary",
+        "metric_status": "arbitrary",
+        "geo_aligned": "unaligned",
+        "provenance": "synthetic",
+        "evidence": ["synthetic-source-declared"],
+    }
+    manifest["coordinate_contract"] = {
+        "pose_frame": synthetic_frame,
+        "target_frame": synthetic_frame,
+        "alignment_status": "unaligned",
+        "metric_evidence": ["synthetic-source-declared"],
+        "transform_chain": [],
+        "applied_transform_ids": [],
+        "ancestry": [
+            {
+                "kind": "import-splat",
+                "source_frame": synthetic_frame,
+            }
+        ],
+    }
+    manifest["provenance"].update(
+        synthetic=True,
+        geometry_usability="preview-only",
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    artifacts = []
+    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+        relative = path.relative_to(root).as_posix()
+        artifacts.append(
+            {
+                "path": relative,
+                "role": "fixture",
+                "bytes": path.stat().st_size,
+                "sha256": _sha256(path),
+            }
+        )
+    receipt = build_receipt(
+        version="v1.0.0-preview.2",
+        source_commit="a" * 40,
+        artifacts=artifacts,
+        protected_roots=["assets", "web"],
+        entrypoints={"studio": "/web/studio/", "viewer": "/web/viewer/"},
+        exclusions=[".nantai-studio/", "tests/"],
+        scene_trust={
+            "synthetic": True,
+            "geometry_usability": "preview-only",
+            "units": "arbitrary",
+            "alignment_status": "unaligned",
+            "real_photo_textures": False,
+            "trust_effect": "none",
+        },
+    )
+    (root / "RELEASE-MANIFEST.json").write_bytes(canonical_json_bytes(receipt))
+    return receipt
 
 
 @contextmanager
@@ -840,6 +905,59 @@ def _write_mesh_world_bundle_v3(
 
 
 class TestProjectSnapshot:
+    def test_development_tree_reports_not_packaged(self, tmp_path):
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["release"] == {
+            "version": None,
+            "package_status": "not-packaged",
+            "package_content_id": None,
+            "source_commit": None,
+            "artifact_count": 0,
+            "total_bytes": 0,
+            "scene_trust_effect": "none",
+            "reason": "RELEASE-MANIFEST.json is absent",
+        }
+
+    def test_verified_release_is_separate_from_scene_trust(self, tmp_path):
+        receipt = _write_preview_release_project(tmp_path)
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["release"] == {
+            "version": "v1.0.0-preview.2",
+            "package_status": "verified",
+            "package_content_id": receipt["package"]["content_id"],
+            "source_commit": "a" * 40,
+            "artifact_count": len(receipt["artifacts"]),
+            "total_bytes": sum(item["bytes"] for item in receipt["artifacts"]),
+            "scene_trust_effect": "none",
+            "reason": None,
+        }
+        assert snapshot["reconstruction"]["synthetic"] is True
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
+        assert snapshot["reconstruction"]["artifact"]["immutable"] is False
+        assert snapshot["coordinate"]["units"] == "arbitrary"
+
+    def test_corrupt_release_fails_closed_without_changing_scene_evidence(self, tmp_path):
+        _write_preview_release_project(tmp_path)
+        (tmp_path / "web/studio/index.html").write_text(
+            "<h1>corrupt</h1>",
+            encoding="utf-8",
+        )
+
+        snapshot = build_project_snapshot(tmp_path)
+
+        assert snapshot["release"]["package_status"] == "invalid"
+        assert snapshot["release"]["version"] is None
+        assert snapshot["release"]["package_content_id"] is None
+        assert snapshot["release"]["scene_trust_effect"] == "none"
+        assert "changed protected artifact" in snapshot["release"]["reason"]
+        assert snapshot["reconstruction"]["synthetic"] is True
+        assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
+        assert snapshot["reconstruction"]["artifact"]["immutable"] is False
+        assert "release-package:invalid" in snapshot["diagnostics"]
+
     def test_v2_snapshot_is_directly_consumable_by_studio_model(self, tmp_path):
         _write_v2_project(tmp_path)
 

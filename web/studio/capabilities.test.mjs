@@ -7,7 +7,7 @@ import {
   normalizeCapabilities,
 } from './capabilities.mjs';
 
-const reason = 'Job execution is not enabled in this Studio milestone.';
+const reason = 'Preview 只读模式 · 可浏览场景与证据，重建任务暂未开放';
 
 function document(mode = 'read-only') {
   return {

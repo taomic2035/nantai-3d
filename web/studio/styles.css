@@ -63,6 +63,8 @@ button:disabled, select:disabled { opacity: .42; cursor: not-allowed; }
 }
 .badge-mock { color: var(--amber); border-color: rgba(255,204,85,.3); background: rgba(255,204,85,.07); }
 .badge-local { color: var(--green); border-color: rgba(127,255,156,.24); background: rgba(127,255,156,.06); }
+.badge-release-verified { color: var(--green); border-color: rgba(127,255,156,.24); background: rgba(127,255,156,.06); }
+.badge-release-invalid { color: var(--red); border-color: rgba(255,119,119,.28); background: rgba(255,119,119,.06); }
 .scenario-control { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 11px; }
 select {
   min-height: 30px; padding: 3px 27px 3px 9px; color: var(--text); background: #20262d;
@@ -168,7 +170,11 @@ select {
 }
 .provenance-bar {
   display: flex; align-items: center; gap: 6px; min-width: 0; padding: 7px 10px;
-  overflow-x: auto; background: #11151a; border-top: 1px solid var(--border);
+  overflow: hidden; background: #11151a; border-top: 1px solid var(--border);
+}
+.provenance-bar .chip {
+  flex: 0 1 auto; min-width: 0; max-width: 180px; overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chip { min-height: 24px; background: rgba(255,255,255,.025); }
 .chip b { margin-right: 4px; color: var(--dim); font-weight: 500; }

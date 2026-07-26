@@ -30,6 +30,24 @@ test('primary write availability has a visible live reason', () => {
   assert.match(html, /Views\s*·\s*DAG/);
 });
 
+test('Preview package verification is separate from scene provenance', () => {
+  assert.match(html, /id="release-badge"/);
+  assert.match(html, /Preview\s*只读模式/);
+  assert.match(app, /snapshot\.release/);
+  assert.match(app, /package_status\s*===\s*['"]verified['"]/);
+  assert.match(app, /发布包\s*·\s*已校验/);
+  assert.match(app, /scene_trust_effect/);
+  assert.match(app, /chip\(['"]package['"]/);
+  assert.doesNotMatch(app, /package_status[\s\S]{0,120}(?:metric|aligned|real)/i);
+});
+
+test('provenance chips cannot create a horizontal Studio page overflow', () => {
+  const rule = css.match(/\.provenance-bar\s*\{[^}]+\}/s)?.[0] ?? '';
+  assert.match(rule, /overflow(?:-x)?:\s*hidden/);
+  assert.doesNotMatch(rule, /overflow-x:\s*auto/);
+  assert.match(css, /\.provenance-bar\s+\.chip\s*\{[^}]*min-width:\s*0/s);
+});
+
 test('app loads capabilities and executes primary navigation intent', () => {
   assert.match(app, /import\s*\{[^}]*primaryNavigation[^}]*\}\s*from\s*['"]\.\/job-actions\.mjs['"]/s);
   assert.match(app, /await\s+adapter\.loadCapabilities\(\)/);

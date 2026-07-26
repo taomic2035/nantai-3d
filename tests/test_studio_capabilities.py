@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pipeline.studio_server import build_project_snapshot, make_server
 
-READ_ONLY_REASON = "Job execution is not enabled in this Studio milestone."
+READ_ONLY_REASON = "Preview 只读模式 · 可浏览场景与证据，重建任务暂未开放"
 COMMAND_IDS = ("ingest", "reconstruct", "world", "validate-assets")
 
 

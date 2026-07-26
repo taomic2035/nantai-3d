@@ -47,6 +47,11 @@ from pydantic import ValidationError
 from pipeline.assets import AssetRegistry
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.mock_layout import DEFAULT_ASSETS
+from pipeline.preview_release import (
+    RELEASE_MANIFEST_NAME,
+    ReleaseVerificationError,
+    verify_release_tree,
+)
 from pipeline.render_chunk_to_ply import render_single_chunk
 from pipeline.studio_jobs import JobContractError, JobService, WriterBusyError
 from pipeline.studio_ledger import (
@@ -140,7 +145,7 @@ STATIC_ROOTS = {"assets", "handoff", "recon", "web"}
 EVIDENCE_ROOTS = {"recon", "web"}
 ALLOWED_RUN_STATUSES = {"queued", "running", "succeeded", "failed", "canceled"}
 STUDIO_COMMAND_IDS = ("ingest", "reconstruct", "world", "validate-assets")
-READ_ONLY_REASON = "Job execution is not enabled in this Studio milestone."
+READ_ONLY_REASON = "Preview 只读模式 · 可浏览场景与证据，重建任务暂未开放"
 XYZ_PROPERTIES = frozenset({"x", "y", "z"})
 CORE_3DGS_PROPERTIES = frozenset({
     "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
@@ -1841,6 +1846,40 @@ def _resolve_asset_payload(assets_root: Path, raw_path: Any) -> Path | None:
     return candidate
 
 
+def _release_snapshot(root: Path) -> dict[str, Any]:
+    manifest_path = root / RELEASE_MANIFEST_NAME
+    base = {
+        "version": None,
+        "package_status": "not-packaged",
+        "package_content_id": None,
+        "source_commit": None,
+        "artifact_count": 0,
+        "total_bytes": 0,
+        "scene_trust_effect": "none",
+        "reason": f"{RELEASE_MANIFEST_NAME} is absent",
+    }
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return base
+    try:
+        report = verify_release_tree(root)
+    except (OSError, ReleaseVerificationError) as exc:
+        return {
+            **base,
+            "package_status": "invalid",
+            "reason": f"release verification failed: {exc}",
+        }
+    return {
+        "version": report.version,
+        "package_status": "verified",
+        "package_content_id": report.package_content_id,
+        "source_commit": report.source_commit,
+        "artifact_count": report.artifact_count,
+        "total_bytes": report.total_bytes,
+        "scene_trust_effect": report.scene_trust_effect,
+        "reason": None,
+    }
+
+
 def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
     """Build a Studio schema-v2 snapshot exclusively from on-disk evidence."""
 
@@ -1886,6 +1925,7 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         ]
         reconstruction["geometry_usability"] = "preview-only"
     assets = _asset_snapshot(root)
+    release = _release_snapshot(root)
     world_composition_available = _world_composition_available(root)
     runs = _load_runs(root)
 
@@ -1958,6 +1998,7 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         "reconstruction": reconstruction,
         "stitch": stitch,
         "assets": assets,
+        "release": release,
         "pipeline": pipeline,
         "active_run": (
             {
@@ -1982,6 +2023,8 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         snapshot["diagnostics"].append("reconstruction-artifact:invalid-descriptor")
     elif reconstruction["evidence_status"] == "invalid-artifact-payload":
         snapshot["diagnostics"].append("reconstruction-artifact:invalid-ply")
+    if release["package_status"] == "invalid":
+        snapshot["diagnostics"].append("release-package:invalid")
     return snapshot
 
 

@@ -242,6 +242,7 @@ function assetsInspector() {
 
 function reviewInspector() {
   const derived = snapshot.derived;
+  const release = snapshot.release ?? {};
   const blocked = derived.geometryUsability !== 'measurable';
   return `${summaryCard(
     blocked ? '允许导出 Proxy，阻断米制发布' : '可进入可测量产物冻结',
@@ -253,6 +254,8 @@ function reviewInspector() {
   ${facts([
     ['Geometry', derived.geometryUsability], ['Trust', derived.trust],
     ['Render fidelity', derived.renderFidelity], ['Adapter', snapshot.adapter.kind],
+    ['Release package', release.package_status ?? 'not-packaged'],
+    ['Scene trust effect', release.scene_trust_effect ?? 'none'],
     ['Artifact immutable', String(snapshot.reconstruction?.artifact?.immutable ?? false)],
     ['可导出格式', blocked ? 'proxy-ply' : 'proxy-ply / 3dgs-ply'],
   ])}
@@ -303,13 +306,20 @@ function renderInspector() {
 function renderProvenance() {
   const reconstruction = snapshot.reconstruction ?? {};
   const coordinate = snapshot.coordinate ?? {};
+  const release = snapshot.release ?? {};
   const derived = snapshot.derived;
+  const packageStatus = release.package_status ?? 'not-packaged';
+  const packageLabel = packageStatus === 'verified'
+    ? 'verified' : packageStatus === 'invalid' ? 'invalid' : 'not packaged';
   const pieces = [
+    chip('package', packageLabel, packageStatus === 'verified' ? 'success'
+      : packageStatus === 'invalid' ? 'danger' : 'warning'),
     chip('actual', reconstruction.actual_engine, reconstruction.synthetic ? 'warning' : ''),
     chip('frame', coordinate.source_frame, coordinate.source_frame === 'sfm-local' ? 'warning' : ''),
     chip('units', coordinate.units, coordinate.units !== 'meters' ? 'danger' : ''),
     chip('geometry', derived.geometryUsability, derived.geometryUsability !== 'measurable' ? 'warning' : 'success'),
     chip('fidelity', derived.renderFidelity, derived.renderFidelity === 'dc-point-preview' ? 'warning' : 'success'),
+    chip('trust effect', release.scene_trust_effect ?? 'none', 'warning'),
   ];
   byId('provenance-bar').innerHTML = pieces.join('');
 }
@@ -331,6 +341,18 @@ function renderTopbar() {
   adapterBadge.classList.toggle('badge-local', snapshot.adapter.kind === 'local');
   adapterBadge.title = adapterFallbackReason ?? '已连接项目真值源';
   byId('freshness-badge').textContent = `产物 · ${snapshot.pipeline?.review?.freshness ?? 'unknown'}`;
+  const release = snapshot.release ?? {};
+  const releaseBadge = byId('release-badge');
+  const releaseVerified = release.package_status === 'verified';
+  const releaseInvalid = release.package_status === 'invalid';
+  releaseBadge.textContent = releaseVerified
+    ? '发布包 · 已校验'
+    : releaseInvalid ? '发布包 · 校验失败' : '开发工作树 · 未封装';
+  releaseBadge.classList.toggle('badge-release-verified', releaseVerified);
+  releaseBadge.classList.toggle('badge-release-invalid', releaseInvalid);
+  releaseBadge.title = releaseVerified
+    ? `package ${release.package_content_id} · scene trust effect ${release.scene_trust_effect}`
+    : release.reason ?? '当前目录没有 Release receipt';
   const modeLabel = serviceCapabilities.mode === 'read-write' ? '可写' : '只读';
   byId('capability-summary').textContent = `服务模式 · ${modeLabel} · ${serviceCapabilities.reason}`;
   byId('capability-summary').title = serviceCapabilities.reason;
