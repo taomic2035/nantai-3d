@@ -7,6 +7,49 @@
 
 > 命令示例用 `.venv/bin/python`（macOS/Linux）。Windows 用 `.venv\Scripts\python`。
 
+## 正式 source 与 runner
+
+内部 `real-canary` 只证明固定测试数据的执行机制。正式数据必须使用
+`role=production-acceptance` 的 `local-capture` source record；源记录通过 SHA-256
+引用一份私有 canonical rights receipt。rights receipt 至少授权
+`3d-reconstruction`，并明确处理、再发行和 Release inclusion 范围。它是授权证据，
+不是几何或米制证据。
+
+正式 source 的分阶段入口为：
+
+```bash
+.venv/bin/python make.py real-scene \
+  SOURCE=config/private/production-source.json \
+  MEDIA_ROOT=/absolute/private/capture \
+  RIGHTS=/absolute/private/rights-receipt.json \
+  POLICY=config/private/registration-policy.json \
+  RUN_ID=production-site-a fetch
+
+.venv/bin/python make.py real-scene \
+  SOURCE=config/private/production-source.json \
+  MEDIA_ROOT=/absolute/private/capture \
+  RIGHTS=/absolute/private/rights-receipt.json \
+  POLICY=config/private/registration-policy.json \
+  RUN_ID=production-site-a sfm
+
+.venv/bin/python make.py real-scene \
+  SOURCE=config/private/production-source.json \
+  MEDIA_ROOT=/absolute/private/capture \
+  RIGHTS=/absolute/private/rights-receipt.json \
+  POLICY=config/private/registration-policy.json \
+  REMOTE_CONFIG=/absolute/private/remote.json \
+  RUN_ID=production-site-a train-production
+```
+
+生产 `import/accept/serve` 还必须提供 `CONTROL_POINTS=` 和 `GEO_ORIGIN=`。runner
+要求至少四个非共面 measured 控制点，并以 RMS ≤ 0.25 m 作为 Production V1 门；
+GPS-only 的米级结果不能冒充该精度。所有私有媒体、EXIF/GPS、rights receipt、
+控制点、SSH 配置和训练产物都留在 ignored `.nantai-studio/` 或 operator 私有路径。
+
+当前内部真实 canary 的精确结果与未决 CUDA blocker 见
+[2026-07-26 real golden-path canary](verification/2026-07-26-real-golden-path-canary.md)。
+它仍是 `internal-only / arbitrary / unaligned / preview-only`，不会提升正式数据的信任。
+
 ## 判定模型（为什么会/不会是 metric-aligned）
 
 `geometry_usability` 只从坐标证据契约推导，与 engine 名无关（`pipeline/reconstruct.py::_derive_geometry_usability`）：

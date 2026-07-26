@@ -49,6 +49,18 @@ Linux/macOS 将虚拟环境路径替换为 `.venv/bin/python`。
 
 高质量 3DGS 训练需要外部 NVIDIA GPU。本机无可用 CUDA；Brush 仅适合受限小场景。
 
+### 正式版真实链路进度
+
+2026-07-26 内部真实图片 canary 已完成固定数据校验、fresh COLMAP 4.1.0
+配准（96/100）和本机 Brush 管线试跑；损坏恢复与远程状态未知演练也已留下不可变
+receipt。完整证据、SHA 和未完成项见
+[Production V1 真实黄金链路 canary 报告](docs/verification/2026-07-26-real-golden-path-canary.md)。
+
+这仍不是正式场景：数据是 `internal-only`，坐标是
+`sfm-local / arbitrary / unaligned`，Brush 是 `preview-only`。真实 CUDA
+Splatfacto、导入/画质/浏览器验收、商用权利素材和实测控制点尚未完成，因此
+`production_release_allowed=false`。
+
 ## 真实场景工作流
 
 ```text
@@ -81,6 +93,7 @@ git diff --check
 - [Preview2 下载、独立校验与运行](docs/releases/1.0-preview.2.md)
 - [真实重建端到端手册](docs/manual/reconstruction-setup.md)
 - [真实数据与 Sim3/ENU 契约（完整源码仓库）](https://github.com/taomic2035/nantai-3d/blob/v1.0.0-preview.2/docs/real-data-workflow.md)
+- [Production V1 真实黄金链路 canary 证据](docs/verification/2026-07-26-real-golden-path-canary.md)
 - [Synthetic 素材 Releases](docs/releases/synthetic-design-inputs.md)
 
 可信度只从机器字段、内容 SHA、transform history 和实测报告推导；未知或矛盾证据
