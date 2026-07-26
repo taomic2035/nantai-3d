@@ -2,7 +2,7 @@
 
 Date: 2026-07-26
 
-Status: approved direction; written specification awaiting user review
+Status: approved 2026-07-26; implementation plan prepared
 
 Program objective: turn the current Preview into a production product for
 image/video ingestion, explicit coordinate alignment, mixed reconstruction,
@@ -219,6 +219,15 @@ Credentials, private keys and private host addresses live outside the
 repository and outside release receipts. The executor records the non-secret
 pinned host-key fingerprint, trainer/container identity, command argv, exit
 code and output hashes without recording secret values or the private address.
+
+Nerfstudio's dataparser normally may orient, centre and scale camera poses.
+The accepted golden path must instead request `orientation_method=none`,
+`center_method=none`, `auto_scale_poses=false` and `scale_factor=1.0`, then
+bind and revalidate Nerfstudio's saved dataparser transform. It must be the
+identity transform with scale 1.0 before the exported PLY can claim the local
+COLMAP `sfm-local` frame. A missing or non-identity transform leaves training
+content closure intact but makes the result ineligible for import; it must not
+be repaired by guessing an inverse or by silently rotating high-order SH.
 
 An interrupted or unreachable remote job becomes `unknown`, not `failed` or
 `succeeded`. Resume requires the same request SHA, dataset receipt SHA, config
