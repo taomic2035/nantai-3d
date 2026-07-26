@@ -24,6 +24,21 @@ from pipeline.real_dataset_fetch import (
     DatasetDownloadError,
     verify_hf_dataset,
 )
+from pipeline.recon_schema import (
+    AxisConvention,
+    CoordinateUnits,
+    FrameProvenance,
+    RegistrationResult,
+)
+from pipeline.registration import register
+from pipeline.registration_quality import (
+    RegistrationQualityPolicy,
+    RegistrationQualityReport,
+    SparseModelEnumeration,
+    build_registration_quality_report,
+    enumerate_sparse_models,
+    validate_registration_quality,
+)
 from pipeline.studio_revisions import (
     PreparedCaptureBundle,
     prepare_capture_bundle,
@@ -48,6 +63,17 @@ class PreparedRealCapture:
     @property
     def payload_root(self) -> Path:
         return self.capture.bundle / "payload"
+
+
+@dataclass(frozen=True)
+class RealSfmResult:
+    registration: RegistrationResult
+    registration_path: Path
+    registration_sha256: str
+    sparse_enumeration: SparseModelEnumeration | None
+    quality: RegistrationQualityReport
+    quality_path: Path
+    quality_sha256: str
 
 
 def _sha256_file(path: Path) -> tuple[int, str]:
@@ -210,4 +236,131 @@ def prepare_real_capture(
         ).hexdigest(),
         selected_paths=selected_paths,
         capture=capture,
+    )
+
+
+def _write_model_json(path: Path, model) -> bytes:
+    payload = (model.model_dump_json(indent=2) + "\n").encode("utf-8")
+    try:
+        path.write_bytes(payload)
+    except OSError as exc:
+        raise RealSceneCaptureError(
+            f"cannot write {path.name}: {exc}"
+        ) from exc
+    return payload
+
+
+def run_real_sfm(
+    capture: PreparedRealCapture,
+    run_root: Path,
+    policy: RegistrationQualityPolicy,
+) -> RealSfmResult:
+    """Run COLMAP and derive its training gate from authoritative artifacts."""
+
+    sfm_root = run_root / "sfm"
+    if sfm_root.exists() or sfm_root.is_symlink():
+        raise RealSceneCaptureError("SfM output boundary must be absent")
+    try:
+        sfm_root.mkdir(parents=True)
+    except OSError as exc:
+        raise RealSceneCaptureError(f"cannot create SfM boundary: {exc}") from exc
+    registration_path = sfm_root / "registration.json"
+    colmap_root = sfm_root / "colmap"
+    try:
+        registration = register(
+            capture.payload_root,
+            out_json=registration_path,
+            engine="colmap",
+            workspace=colmap_root,
+        )
+    except Exception as exc:
+        raise RealSceneCaptureError(f"COLMAP registration failed: {exc}") from exc
+    try:
+        registration_bytes = registration_path.read_bytes()
+        reparsed = RegistrationResult.model_validate_json(registration_bytes)
+    except (OSError, ValueError) as exc:
+        raise RealSceneCaptureError(
+            f"registration evidence is unreadable: {exc}"
+        ) from exc
+    if reparsed != registration:
+        raise RealSceneCaptureError(
+            "registration object differs from registration.json bytes"
+        )
+
+    sparse_enumeration: SparseModelEnumeration | None = None
+    if registration.engine == "colmap":
+        try:
+            sparse_enumeration = enumerate_sparse_models(
+                colmap_root / "sparse",
+                capture.capture.manifest.output_count,
+            )
+        except ValueError as exc:
+            raise RealSceneCaptureError(
+                f"COLMAP sparse model enumeration failed: {exc}"
+            ) from exc
+        selected = next(
+            model
+            for model in sparse_enumeration.models
+            if model.model_index == sparse_enumeration.selected_model_index
+        )
+        pose_names = {pose.image for pose in registration.poses}
+        if set(selected.images) != pose_names:
+            raise RealSceneCaptureError(
+                "selected sparse model images differ from registration poses"
+            )
+        capture_names = {
+            payload.logical_path for payload in capture.capture.manifest.payloads
+        }
+        if not pose_names <= capture_names:
+            raise RealSceneCaptureError(
+                "registration poses contain images outside the capture manifest"
+            )
+        frame = registration.pose_frame
+        if (
+            frame.provenance != FrameProvenance.SFM
+            or frame.axes != AxisConvention.SFM_ARBITRARY
+            or frame.units != CoordinateUnits.ARBITRARY
+        ):
+            raise RealSceneCaptureError(
+                "COLMAP registration has contradictory coordinate provenance"
+            )
+    elif registration.engine != "mock":
+        raise RealSceneCaptureError(
+            f"unexpected registration engine: {registration.engine}"
+        )
+
+    capture_manifest_path = capture.capture.bundle / "manifest.json"
+    capture_manifest_bytes = capture_manifest_path.read_bytes()
+    try:
+        quality = build_registration_quality_report(
+            registration=registration,
+            registration_json_bytes=registration_bytes,
+            capture_manifest=capture.capture.manifest,
+            capture_manifest_bytes=capture_manifest_bytes,
+            policy=policy,
+            sparse_enumeration=sparse_enumeration,
+            invocation_succeeded=True,
+            engine_version=None,
+        )
+        validate_registration_quality(
+            report=quality,
+            policy=policy,
+            registration_json_bytes=registration_bytes,
+            capture_manifest_bytes=capture_manifest_bytes,
+            sparse_enumeration=sparse_enumeration,
+        )
+    except ValueError as exc:
+        raise RealSceneCaptureError(
+            f"registration quality evidence is inconsistent: {exc}"
+        ) from exc
+    quality_path = sfm_root / "registration-quality-report.json"
+    quality_bytes = _write_model_json(quality_path, quality)
+    return RealSfmResult(
+        registration=registration,
+        registration_path=registration_path,
+        registration_sha256=hashlib.sha256(registration_bytes).hexdigest(),
+        sparse_enumeration=sparse_enumeration,
+        quality=quality,
+        quality_path=quality_path,
+        quality_sha256=hashlib.sha256(quality_bytes).hexdigest(),
     )
