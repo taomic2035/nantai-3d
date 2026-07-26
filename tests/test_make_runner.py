@@ -83,6 +83,62 @@ class TestEnv:
             assert make.ENV.get("PATH") == os.environ["PATH"]
 
 
+class TestPreviewReleaseTargets:
+    def test_build_preview_uses_default_archive(self, make, monkeypatch):
+        calls = []
+        monkeypatch.delenv("DIST", raising=False)
+        monkeypatch.delenv("ARCHIVE", raising=False)
+        monkeypatch.setattr(make, "run", lambda command, **_kwargs: calls.append(command))
+
+        make.build_preview()
+
+        assert calls == [[
+            make.PY,
+            "scripts/build_preview_release.py",
+            "--output",
+            ".nantai-studio/releases/v1.0.0-preview.2/"
+            "nantai-3d-v1.0.0-preview.2-runtime.zip",
+        ]]
+
+    def test_build_preview_honours_dist_or_archive(self, make, monkeypatch):
+        calls = []
+        monkeypatch.setenv("DIST", "custom-dist")
+        monkeypatch.delenv("ARCHIVE", raising=False)
+        monkeypatch.setattr(make, "run", lambda command, **_kwargs: calls.append(command))
+
+        make.build_preview()
+        monkeypatch.setenv("ARCHIVE", "explicit/runtime.zip")
+        make.build_preview()
+
+        assert calls == [
+            [
+                make.PY,
+                "scripts/build_preview_release.py",
+                "--output",
+                "custom-dist/nantai-3d-v1.0.0-preview.2-runtime.zip",
+            ],
+            [
+                make.PY,
+                "scripts/build_preview_release.py",
+                "--output",
+                "explicit/runtime.zip",
+            ],
+        ]
+
+    def test_verify_preview_uses_selected_archive(self, make, monkeypatch):
+        calls = []
+        monkeypatch.setenv("ARCHIVE", "candidate/runtime.zip")
+        monkeypatch.setattr(make, "run", lambda command, **_kwargs: calls.append(command))
+
+        make.verify_preview()
+
+        assert calls == [[
+            make.PY,
+            "scripts/verify_preview_release.py",
+            "candidate/runtime.zip",
+        ]]
+
+
 class TestClean:
     def test_clean_removes_existing_dirs(self, make, monkeypatch, tmp_path):
         """clean() 删除 ROOT 下指定目录（存在的才删）。"""

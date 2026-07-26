@@ -17,6 +17,8 @@
     MANIFEST=<manifest 路径>  inspect-recon / verify-recon-artifacts
                             （默认 web/data/recon/recon_manifest.json）
     DELIV=<交付目录>         validate-handoff（默认 HANDOFF-002）
+    DIST=<发布目录>           build-preview 输出目录
+    ARCHIVE=<ZIP 路径>        build-preview / verify-preview 的精确归档路径
 
 与 Makefile 保持等价的 target 名称；Makefile 仍保留给有 make 的 POSIX 环境。
 例外：doctor / check-capture / inspect-recon / verify-recon-artifacts 目前只有本脚本有，
@@ -36,6 +38,8 @@ PY = sys.executable
 # HANDOFF-002 is the cross-platform-reproducible (quantized) asset baseline;
 # HANDOFF-001 stays as history (its bytes are not reproducible off macOS).
 ASSET_DELIVERABLE = "handoff/deliverables/HANDOFF-002"
+PREVIEW_ARCHIVE_NAME = "nantai-3d-v1.0.0-preview.2-runtime.zip"
+PREVIEW_DIST = ".nantai-studio/releases/v1.0.0-preview.2"
 
 # UTF-8-safe environment for every child process.
 ENV = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
@@ -120,6 +124,22 @@ def serve() -> None:
     run([PY, "-m", "pipeline.studio_server", "--host", "127.0.0.1", "--port", "8000"])
 
 
+def _preview_archive() -> str:
+    explicit = os.environ.get("ARCHIVE")
+    if explicit:
+        return Path(explicit).as_posix()
+    dist = os.environ.get("DIST", PREVIEW_DIST)
+    return (Path(dist) / PREVIEW_ARCHIVE_NAME).as_posix()
+
+
+def build_preview() -> None:
+    run([PY, "scripts/build_preview_release.py", "--output", _preview_archive()])
+
+
+def verify_preview() -> None:
+    run([PY, "scripts/verify_preview_release.py", _preview_archive()])
+
+
 def verify() -> None:
     test()
     assets()
@@ -146,7 +166,9 @@ TARGETS = {
     "reconstruct": reconstruct, "inspect-recon": inspect_recon,
     "verify-recon-artifacts": verify_recon_artifacts,
     "world": world, "assets": assets,
-    "validate-handoff": validate_handoff, "serve": serve, "verify": verify,
+    "validate-handoff": validate_handoff, "serve": serve,
+    "build-preview": build_preview, "verify-preview": verify_preview,
+    "verify": verify,
     "clean": clean,
 }
 
