@@ -99,10 +99,18 @@ class RealSceneRunOptions:
     policy_path: Path | None = None
     control_points_path: Path | None = None
     geo_origin: tuple[float, float, float] | None = None
+    remote_config_path: Path | None = None
+    remote_poll_interval_seconds: float = 15.0
+    remote_timeout_seconds: float = 21_600.0
 
     def __post_init__(self) -> None:
         if re.fullmatch(_ID_PATTERN, self.run_id) is None:
             raise ValueError("run_id must be a safe portable identifier")
+        if (
+            self.remote_poll_interval_seconds <= 0
+            or self.remote_timeout_seconds <= 0
+        ):
+            raise ValueError("remote polling intervals must be positive")
 
 
 class StageArtifactBinding(FrozenModel):

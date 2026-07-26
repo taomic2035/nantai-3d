@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from pipeline.real_scene_runner import (
     RealSceneRunOptions,
     RealSceneSourceIdentity,
 )
+from pipeline.training_executor import ExecutorJobRef, ExecutorObservation
 
 
 def _source() -> HfDatasetSource:
@@ -92,7 +94,11 @@ def test_rejected_sfm_retains_quality_report_and_stops(
         del source, source_root
         (stage_root / "capture").mkdir(parents=True)
         (stage_root / "capture/manifest.json").write_bytes(b"capture\n")
-        return SimpleNamespace()
+        return SimpleNamespace(
+            source_sha256="a" * 64,
+            dataset_receipt_sha256="b" * 64,
+            capture=SimpleNamespace(manifest_digest="c" * 64),
+        )
 
     def fake_sfm(capture, stage_root, policy):
         del capture, policy
@@ -138,4 +144,136 @@ def test_rejected_sfm_retains_quality_report_and_stops(
     receipt_path = next((runner.receipt_root / "sfm").glob("*.json"))
     assert "registration-quality-report.json" in receipt_path.read_text(
         encoding="ascii"
+    )
+
+
+def test_preview_training_stage_uses_preview_only_executor(
+    tmp_path,
+    monkeypatch,
+):
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+        ),
+    )
+    stage_root = tmp_path / "workspace/stages/train-preview/attempt-one"
+    stage_root.mkdir(parents=True)
+    bundle = stage_root / "training-bundle.zip"
+    bundle.write_bytes(b"bundle")
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(path=bundle),
+    )
+    monkeypatch.setattr(
+        "pipeline.real_scene_operations._local_brush_config",
+        lambda root: SimpleNamespace(execution_root=root / "local-brush"),
+    )
+
+    class FakeLocalExecutor:
+        def __init__(self, config):
+            self.config = config
+
+        def run(self, verified):
+            assert verified.path == bundle
+            self.config.execution_root.mkdir()
+            (self.config.execution_root / "trained.ply").write_bytes(
+                b"ply"
+            )
+            return SimpleNamespace(
+                receipt=SimpleNamespace(quality_role="preview-only")
+            )
+
+    monkeypatch.setattr(
+        "pipeline.real_scene_operations.LocalBrushExecutor",
+        FakeLocalExecutor,
+    )
+
+    execution = operations.execute(
+        "train-preview",
+        stage_root,
+        (),
+    )
+
+    assert execution.state == "completed"
+    assert any(path.name == "trained.ply" for path in execution.artifacts)
+
+
+def test_unreachable_remote_training_stays_unknown_with_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+            remote_config_path=tmp_path / "remote.json",
+            remote_poll_interval_seconds=0.001,
+            remote_timeout_seconds=1,
+        ),
+    )
+    stage_root = (
+        tmp_path / "workspace/stages/train-production/attempt-one"
+    )
+    stage_root.mkdir(parents=True)
+    bundle = stage_root / "training-bundle.zip"
+    bundle.write_bytes(b"bundle")
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(path=bundle),
+    )
+    monkeypatch.setattr(
+        operations,
+        "_remote_config",
+        lambda: SimpleNamespace(
+            container_identity="image@sha256:" + "a" * 64,
+            container_runtime="docker",
+            expected_host_key_fingerprint="SHA256:" + "A" * 43,
+        ),
+    )
+    job = ExecutorJobRef(
+        executor_kind="remote-shell-nerfstudio",
+        job_id="job-one",
+        attempt_id="attempt-one",
+        submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+    )
+
+    class FakeRemoteExecutor:
+        def __init__(self, config):
+            del config
+
+        def prepare(self, verified):
+            return verified
+
+        def submit(self, prepared):
+            assert prepared.path == bundle
+            return job
+
+        def poll(self, submitted):
+            assert submitted == job
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+            )
+
+    monkeypatch.setattr(
+        "pipeline.real_scene_operations.RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute(
+        "train-production",
+        stage_root,
+        (),
+    )
+
+    assert execution.state == "unknown"
+    assert "no success was inferred" in execution.reason
+    assert any(
+        path.name == "remote-job.private.json"
+        for path in execution.evidence_artifacts
     )
