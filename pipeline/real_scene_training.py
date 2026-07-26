@@ -439,7 +439,7 @@ def _operator_config_bytes(config: TrainingConfig) -> bytes:
 
 def _sparse_descriptor(
     members: tuple[TrainingBundleMember, ...],
-) -> tuple[bytes, int]:
+) -> bytes:
     prefix = "sfm/sparse/0/"
     sparse = tuple(
         {
@@ -465,7 +465,7 @@ def _sparse_descriptor(
         )
         + "\n"
     ).encode("ascii")
-    return payload, sum(int(item["byte_length"]) for item in sparse)
+    return payload
 
 
 def _training_request(
@@ -474,7 +474,6 @@ def _training_request(
     registration_bytes: bytes,
     quality_bytes: bytes,
     sparse_descriptor_bytes: bytes,
-    sparse_total_bytes: int,
     config: TrainingConfig,
     config_bytes: bytes,
     source_sha256: str,
@@ -509,7 +508,7 @@ def _training_request(
                 sparse_descriptor_bytes
             ).hexdigest(),
             artifact_path="sfm/sparse/0",
-            artifact_size_bytes=sparse_total_bytes,
+            artifact_size_bytes=len(sparse_descriptor_bytes),
         ),
     )
     request_identity = (
@@ -809,7 +808,7 @@ def build_training_job_bundle(
     sparse_members = tuple(
         sources[path].member for path in sorted(sources)
     )
-    sparse_descriptor_bytes, sparse_total_bytes = _sparse_descriptor(
+    sparse_descriptor_bytes = _sparse_descriptor(
         sparse_members
     )
     request = _training_request(
@@ -817,7 +816,6 @@ def build_training_job_bundle(
         registration_bytes=registration_bytes,
         quality_bytes=quality_bytes,
         sparse_descriptor_bytes=sparse_descriptor_bytes,
-        sparse_total_bytes=sparse_total_bytes,
         config=config,
         config_bytes=config_bytes,
         source_sha256=capture.source_sha256,
@@ -1168,7 +1166,7 @@ def verify_training_job_bundle(path: Path) -> VerifiedTrainingJobBundle:
             "bundled sparse images differ from registration poses"
         )
 
-    sparse_descriptor_bytes, sparse_total_bytes = _sparse_descriptor(
+    sparse_descriptor_bytes = _sparse_descriptor(
         manifest.members
     )
     canonical_config = _canonical_training_config(request.training_config)
@@ -1186,7 +1184,6 @@ def verify_training_job_bundle(path: Path) -> VerifiedTrainingJobBundle:
         registration_bytes=structured["sfm/registration.json"],
         quality_bytes=structured["sfm/registration-quality-report.json"],
         sparse_descriptor_bytes=sparse_descriptor_bytes,
-        sparse_total_bytes=sparse_total_bytes,
         config=canonical_config,
         config_bytes=config_bytes,
         source_sha256=manifest.source_sha256,
@@ -1288,3 +1285,60 @@ def verify_training_job_bundle(path: Path) -> VerifiedTrainingJobBundle:
         split=split,
         member_names=names,
     )
+
+
+def load_training_job_input_bytes(
+    bundle: VerifiedTrainingJobBundle,
+) -> dict[str, bytes]:
+    """Materialize the exact bytes named by every TrainingRequest binding.
+
+    File bindings return their canonical ZIP member bytes. The sparse-directory
+    binding returns the canonical member descriptor whose own SHA and length
+    are stored in the request; it never pretends a directory has one native
+    byte stream.
+    """
+
+    verified = verify_training_job_bundle(bundle.path)
+    if verified.bundle_sha256 != bundle.bundle_sha256:
+        raise RealSceneTrainingError(
+            "training bundle identity changed before loading inputs"
+        )
+    try:
+        with zipfile.ZipFile(verified.path, "r") as archive:
+            actual = {
+                "capture/manifest.json": archive.read(
+                    "capture/manifest.json"
+                ),
+                "sfm/registration.json": archive.read(
+                    "sfm/registration.json"
+                ),
+                "sfm/registration-quality-report.json": archive.read(
+                    "sfm/registration-quality-report.json"
+                ),
+                "sfm/sparse/0": _sparse_descriptor(
+                    verified.manifest.members
+                ),
+            }
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise RealSceneTrainingError(
+            f"training bundle inputs cannot be loaded: {exc}"
+        ) from exc
+    expected_paths = {
+        binding.artifact_path
+        for binding in verified.request.input_bindings
+    }
+    if set(actual) != expected_paths:
+        raise RealSceneTrainingError(
+            "training request input paths differ from loadable bundle inputs"
+        )
+    for binding in verified.request.input_bindings:
+        payload = actual[binding.artifact_path]
+        if (
+            len(payload) != binding.artifact_size_bytes
+            or hashlib.sha256(payload).hexdigest()
+            != binding.artifact_sha256
+        ):
+            raise RealSceneTrainingError(
+                f"training input binding mismatch: {binding.artifact_path}"
+            )
+    return actual

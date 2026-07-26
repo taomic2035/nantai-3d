@@ -16,6 +16,7 @@ from pipeline.real_scene_training import (
     RealSceneTrainingError,
     build_held_out_split,
     build_training_job_bundle,
+    load_training_job_input_bytes,
     verify_training_job_bundle,
 )
 from pipeline.recon_schema import (
@@ -320,6 +321,11 @@ def test_bundle_is_byte_identical_across_roots_and_excludes_held_out_pixels(
         f"capture/payload/{identity.logical_path}" not in names
         for identity in verified.split.held_out
     )
+    input_bytes = load_training_job_input_bytes(verified)
+    for binding in verified.request.input_bindings:
+        actual = input_bytes[binding.artifact_path]
+        assert len(actual) == binding.artifact_size_bytes
+        assert hashlib.sha256(actual).hexdigest() == binding.artifact_sha256
 
 
 def test_bundle_rejects_mock_or_rejected_sfm(tmp_path):
