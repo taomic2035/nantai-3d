@@ -45,6 +45,7 @@ from pipeline.recon_schema import (
     RegistrationResult,
     gps_to_enu,
 )
+from pipeline.registration_quality import enumerate_sparse_models
 
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 
@@ -586,15 +587,25 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
          f"--{grp}Matching.use_gpu", gpu_flag])
     run(["mapper", "--database_path", str(db),
          "--image_path", str(photos_dir), "--output_path", str(sparse)])
-    if not (sparse / "0").exists():
+    model_dirs = sorted(
+        (
+            candidate
+            for candidate in sparse.iterdir()
+            if candidate.is_dir() and candidate.name.isdecimal()
+        ),
+        key=lambda candidate: int(candidate.name),
+    )
+    if not model_dirs:
         raise RuntimeError(
-            f"COLMAP mapper 未产出模型 ({sparse}/0 不存在): "
+            f"COLMAP mapper 未产出模型 ({sparse} 下无数字模型目录): "
             f"图像间特征匹配不足, 无法联合配准。"
             f"建议: 增加视角重叠 / 提高抽帧率 / 或改用 --engine mock")
-    run(["model_converter", "--input_path", str(sparse / "0"),
-         "--output_path", str(sparse / "0"), "--output_type", "TXT"])
+    for candidate in model_dirs:
+        run(["model_converter", "--input_path", str(candidate),
+             "--output_path", str(candidate), "--output_type", "TXT"])
 
-    model_dir = sparse / "0"
+    sparse_enumeration = enumerate_sparse_models(sparse, n_images)
+    model_dir = sparse / str(sparse_enumeration.selected_model_index)
     images_txt = (model_dir / "images.txt").read_text(encoding="utf-8")
     cameras_txt = (model_dir / "cameras.txt").read_text(encoding="utf-8")
     image_records = parse_colmap_image_records(images_txt)
@@ -667,6 +678,23 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
         separators=(",", ":"),
         sort_keys=True,
     )
+    enumeration_payload = sparse_enumeration.model_dump(mode="json")
+    enumeration_bytes = json.dumps(
+        enumeration_payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    selection_evidence = "colmap.sparse-model-selection.v1=" + json.dumps(
+        {
+            "enumeration_sha256": hashlib.sha256(enumeration_bytes).hexdigest(),
+            "selected_model_index": sparse_enumeration.selected_model_index,
+            "selection_rule": sparse_enumeration.selection_rule,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     pose_frame = CoordinateFrame(
         frame_id="sfm-local",
         handedness=Handedness.RIGHT,
@@ -680,6 +708,7 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
             "colmap-intrinsics-source:cameras.txt",
             "no-sim3-alignment-evidence",
             coverage_evidence,
+            selection_evidence,
             *camera_evidence,
         ],
     )

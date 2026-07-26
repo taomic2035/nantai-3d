@@ -112,28 +112,29 @@ def _parse_colmap_images_txt(path: Path) -> tuple[str, ...]:
     if not path.exists():
         return tuple()
     raw_lines = path.read_text(encoding="utf-8").splitlines()
-    data_lines: list[str] = []
-    for line in raw_lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        data_lines.append(stripped)
-    if len(data_lines) % 2 != 0:
-        raise ValueError(
-            f"COLMAP images.txt {path} has {len(data_lines)} non-comment data lines; "
-            "expected an even count (two lines per image: header + POINTS2D)"
-        )
     images: list[str] = []
-    for i in range(0, len(data_lines), 2):
-        header = data_lines[i]
-        # data_lines[i + 1] is the POINTS2D row — skipped by pairing.
+    line_index = 0
+    while line_index < len(raw_lines):
+        header = raw_lines[line_index].strip()
+        line_index += 1
+        if not header or header.startswith("#"):
+            continue
         parts = header.split()
         if len(parts) < 10:
             raise ValueError(
-                f"COLMAP image header at line {i} has {len(parts)} tokens; expected "
+                f"COLMAP image header at line {line_index} has "
+                f"{len(parts)} tokens; expected "
                 "at least 10 (IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME)"
             )
         images.append(parts[9])
+        if line_index >= len(raw_lines):
+            raise ValueError(
+                f"COLMAP images.txt {path} is missing the POINTS2D line for "
+                f"image {parts[9]!r}; expected two lines per image"
+            )
+        # The next physical line is the POINTS2D row.  It is legitimately empty
+        # when COLMAP registered a camera with no surviving observations.
+        line_index += 1
     return tuple(images)
 
 

@@ -176,11 +176,14 @@ class TestColmapParser:
         assert np.allclose(v, [0, -1, 0], atol=1e-9)
 
 
-def _write_colmap_model(workspace, cameras: str, images: str):
-    model = workspace / "sparse" / "0"
+def _write_colmap_model(workspace, cameras: str, images: str, model_index: int = 0):
+    model = workspace / "sparse" / str(model_index)
     model.mkdir(parents=True)
     (model / "cameras.txt").write_text(cameras, encoding="utf-8")
+    if images.endswith("\n") and not images.endswith("\n\n"):
+        images += "\n"
     (model / "images.txt").write_text(images, encoding="utf-8")
+    (model / "points3D.txt").write_text("", encoding="utf-8")
 
 
 def _stub_colmap_commands(monkeypatch):
@@ -198,6 +201,68 @@ def _stub_colmap_commands(monkeypatch):
 
 
 class TestColmapRegistrationEvidence:
+    def test_largest_sparse_model_drives_registration_and_evidence(
+        self,
+        photos_dir,
+        tmp_path,
+        monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        cameras = "1 PINHOLE 1000 800 710 720 501 399\n"
+        _write_colmap_model(
+            workspace,
+            cameras=cameras,
+            images="1 1 0 0 0 0 0 0 1 IMG_000.jpg\n0 0 -1\n",
+            model_index=0,
+        )
+        _write_colmap_model(
+            workspace,
+            cameras=cameras,
+            images="\n".join([
+                "1 1 0 0 0 0 0 0 1 IMG_001.jpg",
+                "0 0 -1",
+                "2 1 0 0 0 1 2 3 1 vid_A/vid_A_frame_000000.jpg",
+                "0 0 -1",
+            ]),
+            model_index=1,
+        )
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            registration_module,
+            "_find_colmap_binary",
+            lambda: "colmap",
+        )
+        registration_module._colmap_sift_group.cache_clear()
+
+        def fake_run(args, **kwargs):
+            del kwargs
+            calls.append(args)
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
+
+        result = registration_module.colmap_register(photos_dir, workspace)
+
+        assert {pose.image for pose in result.poses} == {
+            "IMG_001.jpg",
+            "vid_A/vid_A_frame_000000.jpg",
+        }
+        converted = {
+            Path(call[call.index("--input_path") + 1]).name
+            for call in calls
+            if len(call) > 1 and call[1] == "model_converter"
+        }
+        assert converted == {"0", "1"}
+        selection = next(
+            item
+            for item in result.pose_frame.evidence
+            if item.startswith("colmap.sparse-model-selection.v1=")
+        )
+        payload = json.loads(selection.split("=", 1)[1])
+        assert payload["selected_model_index"] == 1
+        assert payload["selection_rule"] == "largest_image_count"
+        assert len(payload["enumeration_sha256"]) == 64
+
     def test_multi_camera_intrinsics_and_partial_coverage_are_auditable(
         self, photos_dir, tmp_path, monkeypatch,
     ):
