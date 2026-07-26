@@ -24,10 +24,17 @@ class _Operations:
         self.calls.append(stage)
         state, reason = self.states.get(stage, ("completed", None))
         if state != "completed":
+            stage_root.mkdir(parents=True, exist_ok=True)
+            evidence = stage_root / "failure-evidence.json"
+            evidence.write_text(
+                f'{{"stage":"{stage}","state":"{state}"}}\n',
+                encoding="ascii",
+            )
             return StageExecution(
                 state=state,
                 artifacts=(),
                 reason=reason or f"{stage} gate rejected",
+                evidence_artifacts=(evidence,),
             )
         stage_root.mkdir(parents=True, exist_ok=True)
         artifact = stage_root / "artifact.bin"
@@ -91,6 +98,28 @@ def test_all_stops_before_training_when_sfm_rejected(tmp_path):
         runner.run("all")
 
     assert operations.calls == ["fetch", "sfm"]
+    receipt_path = next(
+        (runner.receipt_root / "sfm").glob("*.json")
+    )
+    assert '"evidence":[' in receipt_path.read_text(encoding="ascii")
+
+
+def test_blocked_stage_evidence_is_revalidated_before_retry(tmp_path):
+    runner, operations = _runner(tmp_path)
+    operations.states["sfm"] = ("blocked", "quality rejected")
+    with pytest.raises(RealSceneBlockedError):
+        runner.run("sfm")
+    receipt_path = next(
+        (runner.receipt_root / "sfm").glob("*.json")
+    )
+    receipt = __import__("json").loads(
+        receipt_path.read_text(encoding="ascii")
+    )
+    evidence = runner.workspace / receipt["evidence"][0]["path"]
+    evidence.write_text("tampered\n", encoding="ascii")
+
+    with pytest.raises(DatasetEvidenceError, match="sha256"):
+        runner.run("sfm", retry=True)
 
 
 def test_resume_revalidates_bytes_not_file_existence(tmp_path):

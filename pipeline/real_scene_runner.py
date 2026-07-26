@@ -111,6 +111,7 @@ class StageReceipt(FrozenModel):
     created_at_utc: datetime
     status: StageState
     prerequisites: tuple[StagePrerequisiteBinding, ...]
+    evidence: tuple[StageArtifactBinding, ...] = ()
     outputs: tuple[StageArtifactBinding, ...]
     reason: str | None = None
     alignment_rms_m: float | None = Field(
@@ -129,6 +130,15 @@ class StageReceipt(FrozenModel):
         paths = tuple(item.path for item in self.outputs)
         if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
             raise ValueError("stage output paths must be sorted and unique")
+        evidence_paths = tuple(item.path for item in self.evidence)
+        if (
+            evidence_paths != tuple(sorted(evidence_paths))
+            or len(evidence_paths) != len(set(evidence_paths))
+            or set(evidence_paths) & set(paths)
+        ):
+            raise ValueError(
+                "stage evidence paths must be sorted, unique, and not outputs"
+            )
         if self.status == "completed":
             if not self.outputs or self.reason is not None:
                 raise ValueError(
@@ -149,6 +159,7 @@ class StageExecution:
     artifacts: tuple[Path, ...]
     reason: str | None = None
     alignment_rms_m: float | None = None
+    evidence_artifacts: tuple[Path, ...] = ()
 
 
 class RealSceneOperations(Protocol):
@@ -393,7 +404,15 @@ class RealSceneRunner:
                 prerequisite_receipt,
                 seen=seen | {prerequisite.receipt_sha256},
             )
-        for expected in receipt.outputs:
+        self._verify_artifact_bindings(receipt.evidence)
+        self._verify_artifact_bindings(receipt.outputs)
+        return receipt
+
+    def _verify_artifact_bindings(
+        self,
+        bindings: tuple[StageArtifactBinding, ...],
+    ) -> None:
+        for expected in bindings:
             actual = _hash_artifact(
                 self.workspace / expected.path,
                 workspace=self.workspace,
@@ -405,7 +424,6 @@ class RealSceneRunner:
                 raise DatasetEvidenceError(
                     f"stage artifact sha256/size mismatch: {expected.path}"
                 )
-        return receipt
 
     def _write_receipt(self, receipt: StageReceipt) -> tuple[StageReceipt, str]:
         payload = canonical_stage_receipt_bytes(receipt)
@@ -478,6 +496,7 @@ class RealSceneRunner:
         latest = self._latest(stage)
         if latest is not None:
             receipt, _digest = latest
+            self._verify_artifact_bindings(receipt.evidence)
             if receipt.status == "completed":
                 return self._verify_completed(receipt)
             if not retry:
@@ -535,7 +554,23 @@ class RealSceneRunner:
                     "or exceeds 0.25 m"
                 ),
                 alignment_rms_m=execution.alignment_rms_m,
+                evidence_artifacts=(
+                    *execution.evidence_artifacts,
+                    *execution.artifacts,
+                ),
             )
+        evidence = tuple(
+            sorted(
+                (
+                    _hash_artifact(
+                        Path(path),
+                        workspace=self.workspace,
+                    )
+                    for path in execution.evidence_artifacts
+                ),
+                key=lambda item: item.path,
+            )
+        )
         if execution.state == "completed":
             outputs = tuple(
                 sorted(
@@ -563,6 +598,7 @@ class RealSceneRunner:
             created_at_utc=self._now(),
             status=execution.state,
             prerequisites=prerequisite_bindings,
+            evidence=evidence,
             outputs=outputs,
             reason=reason,
             alignment_rms_m=execution.alignment_rms_m,
