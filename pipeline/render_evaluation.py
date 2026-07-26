@@ -78,6 +78,14 @@ class RenderEvaluationProtocol(FrozenModel):
     alpha_handling: Literal["reject", "composite-black", "composite-white"]
     mask_handling: Literal["none", "alpha", "external"]
     render_encoding: Literal["png-rgb8-lossless"] = "png-rgb8-lossless"
+    crop_rounding: Literal["floor-center"] = "floor-center"
+    resize_filter: Literal["bilinear-antialias"] = "bilinear-antialias"
+    psnr_epsilon: float = Field(
+        default=1e-10,
+        gt=0.0,
+        lt=1.0,
+        allow_inf_nan=False,
+    )
     ssim_window_size: int = Field(ge=3, le=31)
     ssim_sigma: float = Field(gt=0.0, allow_inf_nan=False)
     ssim_data_range: float = Field(gt=0.0, allow_inf_nan=False)
@@ -211,6 +219,10 @@ class RenderEvaluationReport(FrozenModel):
     )
     protocol: RenderEvaluationProtocol
     frames: tuple[RenderFrameMetric, ...] = Field(min_length=1)
+    trainer_config_path: Literal[
+        "result/render-evaluation/trainer-config.yml"
+    ] = "result/render-evaluation/trainer-config.yml"
+    trainer_config_sha256: str = Field(pattern=_SHA256_PATTERN)
     mean_psnr: float = Field(allow_inf_nan=False)
     mean_ssim: float = Field(
         ge=-1.0,
@@ -219,7 +231,6 @@ class RenderEvaluationReport(FrozenModel):
     )
     mean_lpips: float = Field(ge=0.0, allow_inf_nan=False)
     worst_psnr: float = Field(allow_inf_nan=False)
-    accepted: bool | None = None
 
     @model_validator(mode="after")
     def _frame_ids_are_unique(self) -> RenderEvaluationReport:
@@ -404,6 +415,10 @@ def validate_render_evaluation(
 ) -> RenderDecision:
     """Reopen evidence and derive the only trusted quality decision."""
 
+    if "accepted" in getattr(report, "__dict__", {}):
+        raise RenderEvaluationError(
+            "report-authored decision is forbidden"
+        )
     policy = _validated_model(
         policy,
         RenderEvaluationPolicy,
@@ -478,6 +493,17 @@ def validate_render_evaluation(
         raise RenderEvaluationError(
             "camera transforms sha256 mismatch"
         )
+    trainer_config_bytes = _read_stable(
+        boundary,
+        report.trainer_config_path,
+        label="trainer config",
+        max_bytes=16 * 1024 * 1024,
+    )
+    if (
+        hashlib.sha256(trainer_config_bytes).hexdigest()
+        != report.trainer_config_sha256
+    ):
+        raise RenderEvaluationError("trainer config sha256 mismatch")
 
     held_out = {
         identity.logical_path: identity
@@ -614,10 +640,6 @@ def validate_render_evaluation(
             f"{policy.minimum_worst_psnr:.6g}"
         )
     accepted = not failures
-    if report.accepted is not None and report.accepted is not accepted:
-        raise RenderEvaluationError(
-            "report-authored decision differs from verified thresholds"
-        )
     return RenderDecision(
         accepted=accepted,
         failed_thresholds=tuple(failures),

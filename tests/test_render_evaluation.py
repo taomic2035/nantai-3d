@@ -26,6 +26,7 @@ from pipeline.render_evaluation import (
     render_evaluation_sha256,
     validate_render_evaluation,
 )
+from scripts.validate_render_evaluation import main as validate_main
 
 
 def _png(width: int, height: int, *, colour_type: int = 2) -> bytes:
@@ -97,6 +98,11 @@ def _fixture(tmp_path):
     )
     transforms_bytes = b'{"test_filenames":["bound-by-camera-records"]}\n'
     _write(root / "prepared/transforms.json", transforms_bytes)
+    trainer_config_bytes = b"method_name: splatfacto\n"
+    _write(
+        root / "result/render-evaluation/trainer-config.yml",
+        trainer_config_bytes,
+    )
     for identity in (*split.held_out, *split.train):
         _write(
             root / "prepared/images" / identity.logical_path,
@@ -196,6 +202,9 @@ def _fixture(tmp_path):
         evaluator_container_digest=digest,
         protocol=protocol,
         frames=tuple(frames),
+        trainer_config_sha256=hashlib.sha256(
+            trainer_config_bytes
+        ).hexdigest(),
         mean_psnr=24.0,
         mean_ssim=0.80,
         mean_lpips=0.25,
@@ -408,9 +417,115 @@ def test_split_policy_sha_drift_is_rejected(tmp_path):
 
 
 def test_models_serialize_as_canonical_lf_json(tmp_path):
-    _root, _split, policy, _report = _fixture(tmp_path)
+    _root, _split, policy, report = _fixture(tmp_path)
 
     payload = canonical_render_evaluation_bytes(policy)
+    report_payload = canonical_render_evaluation_bytes(report)
 
     assert payload == canonical_model_bytes(policy)
     assert payload.endswith(b"\n")
+    assert b'"accepted"' not in report_payload
+
+
+def _write_cli_documents(root, policy, report):
+    policy_path = root / "policy.json"
+    report_path = root / "report.json"
+    _write(
+        policy_path,
+        canonical_render_evaluation_bytes(policy),
+    )
+    _write(
+        report_path,
+        canonical_render_evaluation_bytes(report),
+    )
+    return policy_path, report_path
+
+
+def test_validator_cli_accepts_and_prints_exact_document_shas(
+    tmp_path,
+    capsys,
+):
+    root, _split, policy, report = _fixture(tmp_path)
+    policy_path, report_path = _write_cli_documents(
+        root,
+        policy,
+        report,
+    )
+
+    exit_code = validate_main(
+        [
+            str(policy_path),
+            str(report_path),
+            "--root",
+            str(root),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"policy_sha256={render_evaluation_sha256(policy)}" in output
+    assert f"report_sha256={render_evaluation_sha256(report)}" in output
+    assert "accepted=True" in output
+
+
+def test_validator_cli_returns_two_and_lists_failed_thresholds(
+    tmp_path,
+    capsys,
+):
+    root, _split, policy, report = _fixture(tmp_path)
+    frames = tuple(
+        frame.model_copy(update={"psnr": 17.0})
+        for frame in report.frames
+    )
+    rejected = report.model_copy(
+        update={
+            "frames": frames,
+            "mean_psnr": 17.0,
+            "worst_psnr": 17.0,
+        }
+    )
+    policy_path, report_path = _write_cli_documents(
+        root,
+        policy,
+        rejected,
+    )
+
+    exit_code = validate_main(
+        [
+            str(policy_path),
+            str(report_path),
+            "--root",
+            str(root),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 2
+    assert "accepted=False" in output
+    assert "mean_psnr" in output
+    assert "worst_psnr" in output
+
+
+def test_validator_cli_returns_two_for_byte_tamper(tmp_path, capsys):
+    root, _split, policy, report = _fixture(tmp_path)
+    policy_path, report_path = _write_cli_documents(
+        root,
+        policy,
+        report,
+    )
+    (root / report.frames[0].render_path).write_bytes(b"tamper")
+
+    exit_code = validate_main(
+        [
+            str(policy_path),
+            str(report_path),
+            "--root",
+            str(root),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "render frame" in captured.err
+    assert "policy_sha256=" in captured.out
+    assert "report_sha256=" in captured.out
