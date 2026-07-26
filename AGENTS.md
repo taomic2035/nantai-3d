@@ -36,16 +36,18 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 
 ## 当前发布状态
 
-首个公开版本为 **Nantai 3D 1.0 Preview**：
+当前公开版本为 **Nantai 3D v1.0.0-preview.2**：
 
-- Git tag：`v1.0.0-preview.1`
-- Python version：`1.0.0rc1`
-- 交互数据：25 个围绕原点的 synthetic point-preview chunks，LOD 0/1/2；
-- 封面：独立 synthetic Blender audit render，不与 point-preview 冒充同一 scene；
+- Git tag：`v1.0.0-preview.2`
+- Python version：`1.0.0rc2`
+- 默认场景：539 个 mesh / 24 个视觉材质的 synthetic GLB；
+- 后备数据：67,858 个 synthetic Gaussian、LOD 0/1/2、25 个围绕原点的
+  world chunks 和 11/11 个 registry 素材；
+- 封面：从最终 runtime 包的默认 Viewer 首屏截取；
 - 信任：`synthetic / preview-only`，不可测量，也不证明任意坐标可达。
 
 发布与运行说明：
-[`docs/releases/1.0-preview.md`](docs/releases/1.0-preview.md)。
+[`docs/releases/1.0-preview.2.md`](docs/releases/1.0-preview.2.md)。
 
 ## 真实重建能力边界
 
