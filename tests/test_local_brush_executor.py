@@ -318,6 +318,9 @@ def test_local_brush_executor_produces_verified_preview_only_result(
     result = LocalBrushExecutor(config, run_command=runner).run(bundle)
 
     assert result.training_request.training_config.trainer_name == "brush"
+    assert result.training_request_path.read_bytes() == canonical_model_bytes(
+        result.training_request
+    )
     assert result.receipt.quality_role == "preview-only"
     assert result.receipt.state == "succeeded"
     assert result.training_result.training_status.state == "completed"

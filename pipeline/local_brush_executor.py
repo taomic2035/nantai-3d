@@ -426,12 +426,14 @@ class LocalBrushRunResult:
     precomputed_colmap_root: Path
     workspace: Path
     held_out_names_path: Path
+    training_request_path: Path
     training_result_path: Path
     attempt_receipt_path: Path
 
 
 _REQUIRED_SPARSE_BIN = ("cameras.bin", "images.bin", "points3D.bin")
 _LOCAL_CONFIG_NAME = "operator-intent-config.yml"
+_LOCAL_REQUEST_NAME = "training-request.json"
 _LOCAL_RESULT_NAME = "training-result.json"
 _LOCAL_ATTEMPT_NAME = "executor-attempt.json"
 
@@ -954,6 +956,8 @@ class LocalBrushExecutor:
                 f"local Brush result provenance validation failed: {exc}"
             ) from exc
 
+        request_path = execution_root / _LOCAL_REQUEST_NAME
+        _write_new_file(request_path, canonical_model_bytes(request))
         result_path = execution_root / _LOCAL_RESULT_NAME
         result_bytes = canonical_model_bytes(training_result)
         _write_new_file(result_path, result_bytes)
@@ -1009,6 +1013,7 @@ class LocalBrushExecutor:
             precomputed_colmap_root=precomputed_root,
             workspace=workspace,
             held_out_names_path=held_out_names,
+            training_request_path=request_path,
             training_result_path=result_path,
             attempt_receipt_path=attempt_path,
         )
