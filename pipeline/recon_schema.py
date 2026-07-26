@@ -179,6 +179,8 @@ class CameraPose(BaseModel):
         norm = float(np.linalg.norm(q))
         if norm < 1e-8:
             raise ValueError("quaternion cannot be zero")
+        if abs(norm - 1.0) <= 1e-12:
+            return q.tolist()
         return (q / norm).tolist()
 
     @field_validator("t_xyz")

@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 
 import pipeline.registration as registration_module
-from pipeline.recon_schema import GeoAnchor, RegistrationResult, gps_to_enu
+from pipeline.recon_schema import (
+    CameraIntrinsics,
+    CameraPose,
+    GeoAnchor,
+    RegistrationResult,
+    gps_to_enu,
+)
 from pipeline.registration import (
     group_sessions,
     mock_register,
@@ -35,6 +41,31 @@ class TestGroupSessions:
 
 
 class TestMockRegistration:
+    def test_camera_pose_quaternion_validation_is_exactly_idempotent(self):
+        pose = CameraPose(
+            image="frame_00088.png",
+            session_id="photos_batch_0",
+            quat_wxyz=[
+                0.5836519348461496,
+                0.023308089471694358,
+                -0.7520642199095301,
+                -0.30529749597301914,
+            ],
+            t_xyz=[1.0, 2.0, 3.0],
+            intrinsics=CameraIntrinsics(
+                width=640,
+                height=480,
+                fx=500.0,
+                fy=500.0,
+                cx=320.0,
+                cy=240.0,
+            ),
+        )
+
+        reparsed = CameraPose.model_validate_json(pose.model_dump_json())
+
+        assert reparsed == pose
+
     def test_all_images_get_poses(self, photos_dir):
         reg = mock_register(photos_dir)
         assert len(reg.poses) == 12
