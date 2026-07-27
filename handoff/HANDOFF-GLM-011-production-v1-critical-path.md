@@ -54,6 +54,45 @@ git diff --check
 - `cloud/remote_training_worker.py`
 - `tests/test_remote_training_worker.py`
 
+#### `c66a00a` Codex review：拒绝，必须返修
+
+`c66a00a` 的 `12 passed` 只能证明 mock 按当前实现返回成功，不能证明 NOW-4
+完成。提交仍有以下 P0/P1：
+
+1. **P0 image content 未绑定**：`docker inspect {{.Image}}` 只要是任意
+   `sha256:*` 就被接受；随后核对的 `.Config.Image` 只是配置时使用的 ref，不证明
+   实际 image content。先对 immutable `repo@sha256:...` 解析 expected image ID，
+   再要求 container `.Image` 与该 exact ID 相等；配置 ref 也必须精确相等；
+2. **P0 container ID 可被覆盖**：`container-id.txt` 仍通过 `os.replace` 写入。
+   预置文件、replay 或不同 container 都会被静默覆盖；必须使用 durable
+   no-replace publication，collision 一律 ambiguous/blocked；
+3. **P0 cleanup 早于已证明的耐久状态**：`_atomic_write` 只 fsync 文件后
+   `os.replace`，没有证明 parent directory 已同步；测试只断言 `rm > start`，没有
+   对 status/result durability 注入 fault。terminal publication 返回
+   “published but durability unknown”时禁止 remove；
+4. **P1 cleanup failure 被静默吞掉**：注释写“logged”，代码却只是 `pass`。必须生成
+   bounded、无 secret 的 cleanup observation；不得改写已发布训练结果；
+5. **P1 测试命名夸大**：现有“partial publication”只模拟结果文件缺失，
+   “reconnect replay”只测试第二次拿不到 lock。它们不能作为 durable publication
+   fault 或 reconnect 恢复证据。
+
+必须先增加并观察下列 RED：
+
+```text
+test_worker_rejects_wrong_resolved_image_id_when_config_ref_matches
+test_worker_rejects_preexisting_container_id_without_overwrite
+test_worker_does_not_remove_when_terminal_status_durability_is_unknown
+test_worker_does_not_remove_when_result_publication_durability_is_unknown
+test_worker_records_cleanup_failure_without_rewriting_terminal_result
+test_worker_duplicate_start_is_not_reported_as_reconnect_recovery
+```
+
+fault injection 必须打在实际 durable primitive / publication boundary，不能只让 fake
+少写几个文件。保留跨平台 fake runtime，但它必须分别建模 configured ref、resolved
+image ID、container image ID、namespace publication、directory sync 和 cleanup
+return code。返修提交不得再写 `Co-Authored-By: Codex...`；Codex review 通过前不能
+自称 Codex 共同作者或 accepted。
+
 当前草稿虽然把 `docker run --rm` 改成了 `create/start/rm`，但现有 golden-path
 测试在 Windows 被 skip，且仍断言旧 `run --rm`；因此新生命周期目前等于没有测试。
 先让平台无关单元测试能在 Windows/Linux 都运行，再做最小实现。
