@@ -145,11 +145,15 @@ export function showcaseCameraPose(bounds) {
   const centerEast = (bounds.min[0] + bounds.max[0]) / 2;
   const centerNorth = (bounds.min[1] + bounds.max[1]) / 2;
   const spanUp = bounds.max[2] - bounds.min[2];
-  const targetUp = bounds.min[2] + Math.min(Math.max(spanUp * 0.2, 2), 4);
-  const horizontalSpan = Math.min(
-    bounds.max[0] - bounds.min[0],
-    bounds.max[1] - bounds.min[1],
-  );
+  const spanEast = bounds.max[0] - bounds.min[0];
+  const spanNorth = bounds.max[1] - bounds.min[1];
+  const horizontalSpan = Math.min(spanEast, spanNorth);
+  const horizontalScale = Math.hypot(spanEast, spanNorth) / Math.SQRT2;
+  const baseTargetUp = bounds.min[2] + Math.min(Math.max(spanUp * 0.2, 2), 4);
+  const verticalCenter = (bounds.min[2] + bounds.max[2]) / 2;
+  const heightRatio = horizontalScale > 0 ? spanUp / horizontalScale : Infinity;
+  const centerBlend = clampRange((heightRatio - 0.10) / 0.15, 0, 1);
+  const targetUp = baseTargetUp + (verticalCenter - baseTargetUp) * centerBlend;
   const distance = Math.min(Math.max(horizontalSpan * 0.08, 30), 80);
 
   return {

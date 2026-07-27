@@ -191,3 +191,106 @@ test('showcaseCameraPose turns kilometre-scale bounds into a readable near view'
     max: [600, 600, 12],
   }, 'camera preset must not shrink or rewrite geometric truth');
 });
+
+test('showcaseCameraPose centers vertically when official bounds contain extreme height outliers', () => {
+  const { showcaseCameraPose } = subject();
+  const bounds = {
+    min: [-628.0916748046875, -602.8079223632812, -254.09498596191406],
+    max: [694.4818115234375, 504.8192443847656, 301.38818359375],
+  };
+
+  const pose = showcaseCameraPose(bounds);
+  const expectedTargetUp = (bounds.min[2] + bounds.max[2]) / 2;
+
+  assert.ok(
+    Math.abs(pose.look_at.up - expectedTargetUp) < 1e-12,
+    `official scene target height should be centered near 23.65, got ${pose.look_at.up}`,
+  );
+  assert.ok(
+    pose.position.up > pose.look_at.up,
+    'showcase camera must remain above its look-at height',
+  );
+  assert.ok(
+    [
+      ...Object.values(pose.position),
+      ...Object.values(pose.look_at),
+    ].every(Number.isFinite),
+    'official scene pose must contain only finite coordinates',
+  );
+});
+
+test('showcaseCameraPose blends continuously just below, at, and above the lower ratio boundary', () => {
+  const { showcaseCameraPose } = subject();
+  const spanUp = 25;
+  const targetForRatio = (ratio) => {
+    const horizontalSpan = spanUp / ratio;
+    return showcaseCameraPose({
+      min: [0, 0, 0],
+      max: [horizontalSpan, horizontalSpan, spanUp],
+    }).look_at.up;
+  };
+
+  const below = targetForRatio(0.099999);
+  const at = targetForRatio(0.10);
+  const above = targetForRatio(0.100001);
+
+  assert.equal(below, 4, 'ratios below 0.10 retain the legacy near-ground target');
+  assert.equal(at, 4, 'ratio 0.10 retains the legacy near-ground target');
+  assert.ok(above > at, 'the blend starts immediately above ratio 0.10');
+  assert.ok(above - at < 0.001, 'the lower transition must not introduce a camera jump');
+});
+
+test('showcaseCameraPose blends continuously just below, at, and above the upper ratio boundary', () => {
+  const { showcaseCameraPose } = subject();
+  const spanUp = 25;
+  const verticalCenter = spanUp / 2;
+  const targetForRatio = (ratio) => {
+    const horizontalSpan = spanUp / ratio;
+    return showcaseCameraPose({
+      min: [0, 0, 0],
+      max: [horizontalSpan, horizontalSpan, spanUp],
+    }).look_at.up;
+  };
+
+  const below = targetForRatio(0.249999);
+  const at = targetForRatio(0.25);
+  const above = targetForRatio(0.250001);
+
+  assert.ok(below < verticalCenter, 'the blend remains active just below ratio 0.25');
+  assert.ok(
+    verticalCenter - below < 0.001,
+    'the upper transition must approach the vertical center without a camera jump',
+  );
+  assert.equal(at, verticalCenter, 'ratio 0.25 reaches the vertical center');
+  assert.equal(above, verticalCenter, 'ratios above 0.25 remain vertically centered');
+});
+
+test('showcaseCameraPose uses two-axis horizontal scale for a long narrow scene', () => {
+  const { showcaseCameraPose } = subject();
+  const pose = showcaseCameraPose({
+    min: [0, 0, 0],
+    max: [1000, 10, 12],
+  });
+
+  assert.equal(
+    pose.look_at.up,
+    2.4000000000000004,
+    'one narrow horizontal edge must not promote an otherwise broad low scene to vertical-center framing',
+  );
+});
+
+test('showcaseCameraPose centers a scene with zero horizontal extent', () => {
+  const { showcaseCameraPose } = subject();
+  const pose = showcaseCameraPose({
+    min: [10, 20, -4],
+    max: [10, 20, 8],
+  });
+
+  assert.equal(pose.look_at.up, 2);
+  assert.ok(
+    [
+      ...Object.values(pose.position),
+      ...Object.values(pose.look_at),
+    ].every(Number.isFinite),
+  );
+});
