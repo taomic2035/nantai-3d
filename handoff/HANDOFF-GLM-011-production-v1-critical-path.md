@@ -82,6 +82,39 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 
 提交信息不得写 Codex co-author；回执按本文模板给出，然后不等回复，立即进入 B。
 
+#### `7febb81` A1 Codex review：拒绝，补齐后再提交
+
+`7febb81` 的 `20 passed, 1 skipped` 已修复 bare runtime argv 和静默截断，但仍未满足
+A1：
+
+1. `which()` 返回值没有强制为绝对路径；测试只让 fake `which` 返回绝对路径，没有
+   覆盖 relative resolved path；
+2. `_SUPPORTED_SCHEDULER_ADAPTERS={"docker","podman"}` 仍让 Podman 执行 Docker
+   私有 `{{json .Runtimes}}` argv。当前 Podman 必须在执行该 argv 前稳定 blocked；
+3. `test_checker_redacts_secrets_in_probe_output` 实际没有提供任何 secret，注释却声称
+   oversize-secret 已覆盖 redaction；oversize 路径在 redaction 前抛错，根本没有执行
+   redaction；
+4. 缺 `non-UTF8` observation RED；
+5. 缺解析后 PATH wrapper swap RED；当前测试只断言普通 golden calls 的 `argv[0]`
+   等于 fake absolute path；
+6. “unknown runtime adapter blocked”在当前 config 只允许 docker/podman 的条件下不可
+   达，不能作为 adapter 保护证据。
+
+最小返修只允许 A1 两条路径，并必须新增：
+
+```text
+test_checker_rejects_relative_resolved_runtime_path
+test_checker_rejects_path_wrapper_swap_after_resolution
+test_checker_rejects_non_utf8_observation
+test_checker_rejects_secret_bearing_observation_without_leaking_secret
+test_checker_podman_blocks_before_docker_runtime_probe
+```
+
+secret 测试必须在 observation 与 captured exception 中使用唯一 canary，断言错误
+文本、evidence 和捕获输出均不含 canary。Podman 测试必须断言没有调用
+`info --format {{json .Runtimes}}`。修复后重新报完整 passed/skipped；不要在同一
+提交混入 B1 worker。
+
 ### A — 修完并提交 host preflight
 
 只允许修改：
@@ -242,6 +275,53 @@ B 通过 Codex review 后，不等待真实云资源，连续完成：
 如果 A1 尚未提交，GLM 不得继续 C1；如果 B1 尚未通过 Codex review，GLM 可以准备
 C1 的 RED，但不得把 B1、C1 混为一个提交。Viewer v2、Studio UX、aggregate
 acceptance 与 release 文件属于 Codex，不得抢改。
+
+#### `b02f6ab` NOW-8 Codex review：拒绝，必须返修
+
+`b02f6ab` 已进入 `main`，但 `24 passed` 不能作为 NOW-8 完成证据。该提交删除了
+production prepared-bundle 的可执行 fake-tool golden path、非法 container
+identity 早拒绝和 `bash -n` 测试，改成大量源码 substring/regex 断言。这些断言只能
+证明文件中出现文本，不能证明运行时 argv、exit code、版本、发布顺序或日志安全。
+
+具体缺口：
+
+1. `NS_TRAIN_VERSION="$(ns-train --version ... || true)"` 与 `ns-export` 同型逻辑会
+   接受“命令退出非零但 stdout 含版本”的失败 probe；
+2. `*"$NERFSTUDIO_VERSION"*` 是 substring 匹配，可接受碰撞文本，不是严格版本
+   observation；
+3. `command -v` 后仍执行 bare `ns-train` / `ns-export`，解析后 PATH swap 可劫持；
+4. `pip install nerfstudio==1.1.5` 位于 legacy 非 production 分支，既不能证明
+   prepared-bundle 镜像身份，也没有锁定依赖闭包；
+5. `test_worker_exception_handler_does_not_log_secrets` 没有运行 worker 或放入 secret，
+   只搜索源码；新增 `_write_failure_status` 没改变日志行为，却提前改动 B1 owner
+   路径并与 lifecycle 返修混合；
+6. 被删除的 golden-path 测试原本验证 train → evaluate → export 顺序、结构化参数、
+   fixed coordinates、result 文件和 container identity；新测试均未覆盖。
+
+C1 返修必须恢复并保持下列行为测试：
+
+```text
+test_production_mode_never_installs_or_reruns_sfm
+test_production_mode_pins_runtime_and_coordinate_flags
+test_invalid_container_identity_fails_before_runtime_probe
+test_prepared_mode_runs_pinned_stubbed_golden_path
+test_cloud_script_is_valid_bash
+test_production_rejects_ns_train_version_output_from_nonzero_command
+test_production_rejects_ns_train_version_substring_collision
+test_production_rejects_ns_export_version_output_from_nonzero_command
+test_production_uses_resolved_cli_paths_after_version_probe
+test_worker_failure_log_does_not_contain_secret_fixture
+```
+
+实现要求：
+
+- CLI version probe 必须保留真实 return code，严格解析固定 observation，不能
+  `|| true` 或 substring 接受；
+- `command -v` 只解析一次绝对 regular-file path，后续 probe 与执行使用同一路径；
+- 可保留有价值的静态 lint 作为补充，但不得替代可执行 fake-tool 测试；
+- `_write_failure_status` 先从 C1 返修中移除；在 B1 lifecycle 中随 durable status
+  publication 一起评审；
+- 先完成 A1，再完成 B1；C1 独立路径限定提交，不得再次混入 worker。
 
 #### 当前 NOW-7 草稿 Codex 预审：禁止提交
 

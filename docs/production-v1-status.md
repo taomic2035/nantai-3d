@@ -57,11 +57,16 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 当前候选不能视为关闭：
 
+- `7febb81` 的 host preflight 尚未拒绝 relative resolved path，Podman 仍误用
+  Docker `.Runtimes`，并缺真实 secret/non-UTF8/wrapper-swap RED；
 - `c66a00a` 的 container lifecycle 仍允许任意 resolved image ID、覆盖
   `container-id.txt`，也未证明 terminal 状态耐久后才 cleanup；
 - `da86a81` 的 blocked report 要求用占位 host/digest/dataset SHA 表示缺失输入，
   并由报告自报 `rights-cleared`，已被 Codex review 拒绝；
-- 两项精确返修入口均在 `HANDOFF-GLM-011`，测试绿色不能替代返修。
+- `b02f6ab` 删除 production prepared-bundle 的可执行 golden-path 与 bash 语法
+  测试，改用源码 grep 证明 runtime 行为，并以 `|| true` / substring 接受 CLI
+  version observation，已被 Codex review 拒绝；
+- 三项精确返修入口均在 `HANDOFF-GLM-011`，测试绿色不能替代返修。
 
 ### P0 — 外部输入：正式素材与测量
 
