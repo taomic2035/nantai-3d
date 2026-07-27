@@ -207,7 +207,68 @@ class TestStandardTestTarget:
             ("node_test", "web/viewer/*.test.mjs"),
             ("node_test", "web/studio/*.test.mjs"),
             ("node_test", "scripts/capture_viewer_acceptance.test.mjs"),
+            ("node_test", "scripts/viewer_runtime_preflight.test.mjs"),
         ]
+
+    def test_makefile_runs_the_same_acceptance_and_runtime_contracts(self):
+        makefile = (
+            Path(__file__).resolve().parent.parent / "Makefile"
+        ).read_text(encoding="utf-8")
+        test_recipe = makefile.split("\ntest:\n", 1)[1].split("\n\n", 1)[0]
+        script_tests = [
+            line.strip()
+            for line in test_recipe.splitlines()
+            if line.strip().startswith("node --test scripts/")
+        ]
+
+        assert script_tests == [
+            "node --test scripts/capture_viewer_acceptance.test.mjs",
+            "node --test scripts/viewer_runtime_preflight.test.mjs",
+        ]
+
+
+class TestSetupTarget:
+    def test_npm_executable_is_platform_aware_without_shell(self, make):
+        expected = "npm.cmd" if os.name == "nt" else "npm"
+        source = (
+            Path(__file__).resolve().parent.parent / "make.py"
+        ).read_text(encoding="utf-8")
+
+        assert make.NPM == expected
+        assert 'NPM = "npm.cmd" if os.name == "nt" else "npm"' in source
+        assert "shell=True" not in source
+
+    def test_installs_python_then_locked_node_then_pinned_browser(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.setup()
+
+        assert calls == [
+            [make.PY, "-m", "pip", "install", "-e", ".[dev]"],
+            [make.NPM, "ci"],
+            [make.NPM, "run", "install:viewer-runtime"],
+        ]
+
+    def test_makefile_setup_is_equivalent_to_cross_platform_runner(self):
+        makefile = (
+            Path(__file__).resolve().parent.parent / "Makefile"
+        ).read_text(encoding="utf-8")
+        setup_recipe = makefile.split("\nsetup:\n", 1)[1].split("\n\n", 1)[0]
+
+        pip_index = setup_recipe.index('$(PY) -m pip install -e ".[dev]"')
+        npm_ci_index = setup_recipe.index("npm ci")
+        browser_index = setup_recipe.index("npm run install:viewer-runtime")
+
+        assert pip_index < npm_ci_index < browser_index
 
 
 class TestPreviewReleaseTargets:
