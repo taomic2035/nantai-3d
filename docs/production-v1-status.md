@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27，基线 `42f0e61`
+更新：2026-07-27，基线 `1688c6e`
 
 ## 一句话状态
 
@@ -81,6 +81,12 @@ import/runner/aggregate 的原始证据消费端已经就绪。下一项仓库�
 采集凭证：production acceptance 必须绑定 scene manifest、camera set、policy、
 采集脚本、Node/Playwright/browser executable 的内容身份与前后快照；可手写的
 Viewer v1 报告只保留 canary/兼容用途。
+
+现有 human-review v1 会重开并复验 PNG、policy 与 pose ID，但 PNG 本身尚未绑定
+可信 Viewer capture receipt 或 scene manifest。仅把任意 PNG 标成同一 pose ID
+不能构成 production 视觉证据。Viewer v2 必须产出内容寻址的截图集合，human
+review 只能消费该 receipt 绑定的精确截图 SHA；capture receipt、report 与截图任一
+漂移都必须 blocked。
 
 收到 remote caller 产生的 G5 verified result 后：
 

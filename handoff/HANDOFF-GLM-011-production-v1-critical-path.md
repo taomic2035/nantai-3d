@@ -58,7 +58,12 @@ test_checker_rejects_unknown_scheduler_adapter_observation
 2. `_run_bounded` 分别检查 stdout/stderr 原始 byte length，任一超限立即抛固定错误；
    不把截断前缀交给 JSON/version parser，错误、报告和日志不得包含原始输出；
 3. adapter 用封闭 dispatch：Docker 与 Podman 各自只有固定 argv 和固定 parser；
-   不支持或结构不符即 blocked，不能猜测 GPU scheduler 可用；
+   不支持或结构不符即 blocked，不能猜测 GPU scheduler 可用。Docker 可以解析其
+   固定 `.Runtimes` observation；Podman 官方 `info` 合同没有等价的 NVIDIA
+   scheduler 字段，NVIDIA 对 Podman 推荐 CDI。A1 又没有绑定 `nvidia-ctk` binary/
+   CDI spec，因此当前 Podman adapter 必须稳定返回 unsupported/blocked，且不得
+   执行 Docker 的 `.Runtimes` argv；后续若支持 CDI，需另行绑定 `nvidia-ctk`
+   executable 与 `cdi list` observation；
 4. 保持 `nantai.remote-readiness-evidence.v1` schema、canonical bytes 和 golden 字段
    不变；不要把 runtime binary SHA 塞进 v1 报告，也不要构造 G2 measurement；
 5. Windows 的 symlink 测试可 skip，但绝对路径执行、oversize、adapter 与 TOCTOU
