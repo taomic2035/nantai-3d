@@ -310,6 +310,78 @@ class RemoteShellStatus(FrozenModel):
         return self
 
 
+class RemoteShellPreflightReport(FrozenModel):
+    """Canonical machine report for credential-free remote-shell preflight.
+
+    Binds the remote target identity (container digest, host key fingerprint,
+    known_host, port, remote roots, container runtime) so a report cannot be
+    replayed for a different config. ``status`` is the only outcome Literal:
+    ``ready`` means every local and remote check passed; ``blocked-external-input``
+    means a required external input (config, credentials, binary) is missing;
+    ``failed`` means a checked item is misconfigured or broken. The report
+    never carries connection secrets, private key paths, config JSON contents
+    or unfiltered stderr.
+    """
+
+    schema_id: Literal["nantai.remote-shell-preflight.v1"] = Field(
+        default="nantai.remote-shell-preflight.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    status: Literal["ready", "blocked-external-input", "failed"]
+    checked_at_utc: datetime
+
+    # Identity binding — proves this report is for one specific remote target.
+    container_identity: str = Field(pattern=_CONTAINER_PATTERN)
+    expected_host_key_fingerprint: str = Field(pattern=_FINGERPRINT_PATTERN)
+    known_host: str = Field(min_length=1)
+    port: int = Field(ge=1, le=65535)
+    remote_root: str = Field(min_length=1)
+    remote_repo_root: str = Field(min_length=1)
+    container_runtime: Literal["docker", "podman"] = "docker"
+
+    # Local transport check results (no secrets, no private key paths).
+    ssh_binary_found: bool = False
+    scp_binary_found: bool = False
+    private_key_protection_verified: bool = False
+    known_hosts_verified: bool = False
+
+    # Remote read-only capability check results (None when not probed).
+    container_runtime_verified: bool | None = None
+    worker_binary_verified: bool | None = None
+
+    failure_reason: str | None = None
+
+    _utc = field_validator("checked_at_utc")(_require_utc)
+
+    @model_validator(mode="after")
+    def _status_evidence_is_consistent(self) -> RemoteShellPreflightReport:
+        if self.status == "ready":
+            if self.failure_reason is not None:
+                raise ValueError(
+                    "ready preflight report must not carry a failure_reason"
+                )
+            if not (
+                self.ssh_binary_found
+                and self.scp_binary_found
+                and self.private_key_protection_verified
+                and self.known_hosts_verified
+            ):
+                raise ValueError(
+                    "ready preflight report requires all local checks to pass"
+                )
+        else:
+            if (
+                self.failure_reason is None
+                or self.failure_reason.strip() == ""
+            ):
+                raise ValueError(
+                    f"{self.status} preflight report requires a"
+                    " non-empty failure_reason"
+                )
+        return self
+
+
 class RemoteResultBundleMember(FrozenModel):
     path: str = Field(min_length=1)
     byte_length: int = Field(ge=0)
@@ -422,6 +494,12 @@ def canonical_remote_result_manifest_bytes(
     manifest: RemoteResultBundleManifest,
 ) -> bytes:
     return _canonical_model_bytes(manifest)
+
+
+def canonical_remote_shell_preflight_bytes(
+    report: RemoteShellPreflightReport,
+) -> bytes:
+    return _canonical_model_bytes(report)
 
 
 def _reject_duplicate_pairs(pairs):
@@ -1933,3 +2011,289 @@ class RemoteShellExecutor:
             observation,
         )
         return context.receipt
+
+
+# ---------------------------------------------------------------------------
+# Credential-free preflight (P1-2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _LocalCheckOutcome:
+    verified: bool
+    blocked: bool
+    detail: str | None = None
+
+
+def _probe_local_regular_file(
+    path: Path,
+    *,
+    label: str,
+    executable: bool,
+) -> _LocalCheckOutcome:
+    """Check a local binary or config file without raising.
+
+    ``blocked=True`` means the file is missing (external input unavailable);
+    ``blocked=False`` with ``verified=False`` means the file exists but is
+    misconfigured (wrong type, empty, not executable).
+    """
+    if not path.exists():
+        return _LocalCheckOutcome(
+            verified=False,
+            blocked=True,
+            detail=f"{label} is missing",
+        )
+    try:
+        _validate_local_regular_file(
+            path,
+            label=label,
+            executable=executable,
+        )
+    except RemoteShellExecutionError as exc:
+        return _LocalCheckOutcome(
+            verified=False,
+            blocked=False,
+            detail=str(exc),
+        )
+    return _LocalCheckOutcome(verified=True, blocked=False)
+
+
+def _probe_private_key_protection(
+    path: Path,
+) -> _LocalCheckOutcome:
+    """Check private key protection without holding the handle."""
+    if not path.exists():
+        return _LocalCheckOutcome(
+            verified=False,
+            blocked=True,
+            detail="SSH private key is missing",
+        )
+    try:
+        handle = _assert_private_key_protected(path)
+    except RemoteShellExecutionError as exc:
+        detail = str(exc)
+        blocked = "cannot be inspected" in detail
+        return _LocalCheckOutcome(
+            verified=False,
+            blocked=blocked,
+            detail=detail,
+        )
+    if handle is not None:
+        handle.Close()
+    return _LocalCheckOutcome(verified=True, blocked=False)
+
+
+def _probe_known_hosts(
+    config: RemoteShellExecutorConfig,
+) -> _LocalCheckOutcome:
+    """Check known_hosts file and fingerprint without raising."""
+    if not config.known_hosts_path.exists():
+        return _LocalCheckOutcome(
+            verified=False,
+            blocked=True,
+            detail="known-hosts file is missing",
+        )
+    try:
+        _verify_known_host(config)
+    except RemoteShellExecutionError as exc:
+        return _LocalCheckOutcome(
+            verified=False,
+            blocked=False,
+            detail=str(exc),
+        )
+    return _LocalCheckOutcome(verified=True, blocked=False)
+
+
+@dataclass(frozen=True)
+class _RemoteProbeOutcome:
+    runtime_verified: bool | None
+    worker_verified: bool | None
+    blocked: bool
+    detail: str | None = None
+
+
+def _probe_remote_capabilities(
+    config: RemoteShellExecutorConfig,
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess] | None,
+    command_audit: list[tuple[str, ...]] | None = None,
+) -> _RemoteProbeOutcome:
+    """Run fixed-argv read-only remote probes.
+
+    Probes (neither creates a directory, uploads a bundle, nor starts a
+    container):
+
+    1. ``<container_runtime> --version`` — verifies the runtime is callable.
+    2. ``test -f <remote_repo_root>/cloud/remote_training_worker.py`` —
+       verifies the worker binary exists on the remote.
+
+    When ``command_audit`` is provided, the redacted argv tuples recorded by
+    the internal executor are appended so callers can verify secret/path
+    redaction without inspecting raw subprocess argv.
+    """
+    try:
+        executor = RemoteShellExecutor(config, run_command=run_command)
+    except RemoteShellExecutionError as exc:
+        return _RemoteProbeOutcome(
+            runtime_verified=None,
+            worker_verified=None,
+            blocked=False,
+            detail=f"local transport changed during remote probe: {exc}",
+        )
+    try:
+        worker_path = (
+            f"{config.remote_repo_root}/cloud/remote_training_worker.py"
+        )
+        runtime_completed = executor._ssh(
+            [config.container_runtime, "--version"],
+            phase="remote runtime probe",
+        )
+        runtime_verified = runtime_completed.returncode == 0
+
+        worker_completed = executor._ssh(
+            ["test", "-f", worker_path],
+            phase="remote worker probe",
+        )
+        worker_verified = worker_completed.returncode == 0
+
+        if runtime_verified and worker_verified:
+            return _RemoteProbeOutcome(
+                runtime_verified=True,
+                worker_verified=True,
+                blocked=False,
+                detail=None,
+            )
+        details: list[str] = []
+        if not runtime_verified:
+            details.append("container runtime did not respond")
+        if not worker_verified:
+            details.append("worker binary not found on remote")
+        return _RemoteProbeOutcome(
+            runtime_verified=runtime_verified,
+            worker_verified=worker_verified,
+            blocked=False,
+            detail="; ".join(details),
+        )
+    except RemoteShellExecutionError:
+        return _RemoteProbeOutcome(
+            runtime_verified=None,
+            worker_verified=None,
+            blocked=True,
+            detail="remote probe could not reach the target",
+        )
+    finally:
+        if command_audit is not None:
+            command_audit.extend(executor.command_audit)
+        executor.close()
+
+
+def run_remote_shell_preflight(
+    config: RemoteShellExecutorConfig,
+    *,
+    probe_remote: bool = False,
+    run_command: Callable[..., subprocess.CompletedProcess] | None = None,
+    now: Callable[[], datetime] | None = None,
+    command_audit: list[tuple[str, ...]] | None = None,
+) -> RemoteShellPreflightReport:
+    """Run credential-free preflight without submitting a job.
+
+    Local transport checks (ssh/scp binaries, private key protection,
+    known_hosts fingerprint) are captured without raising. When
+    ``probe_remote`` is true and local checks pass, two fixed-argv
+    read-only SSH commands probe the remote target; neither uploads a
+    bundle, creates a directory, nor starts a container.
+
+    The report never carries connection secrets, private key paths, or
+    config file contents. ``failure_reason`` is a sanitized summary
+    derived from the check labels, not from raw exception tracebacks.
+
+    When ``command_audit`` is provided, the redacted argv tuples recorded
+    during the remote probe are appended so callers can verify secret/path
+    redaction without inspecting raw subprocess argv.
+    """
+    now_fn = now or (lambda: datetime.now(UTC))
+
+    ssh_outcome = _probe_local_regular_file(
+        config.ssh_binary,
+        label="ssh binary",
+        executable=True,
+    )
+    scp_outcome = _probe_local_regular_file(
+        config.scp_binary,
+        label="scp binary",
+        executable=True,
+    )
+    key_outcome = _probe_private_key_protection(config.private_key_path)
+    hosts_outcome = _probe_known_hosts(config)
+
+    local_outcomes = [ssh_outcome, scp_outcome, key_outcome, hosts_outcome]
+    local_all_passed = all(o.verified for o in local_outcomes)
+
+    container_runtime_verified: bool | None = None
+    worker_binary_verified: bool | None = None
+    remote_outcome: _RemoteProbeOutcome | None = None
+
+    if local_all_passed and probe_remote:
+        remote_outcome = _probe_remote_capabilities(
+            config,
+            run_command=run_command,
+            command_audit=command_audit,
+        )
+        container_runtime_verified = remote_outcome.runtime_verified
+        worker_binary_verified = remote_outcome.worker_verified
+
+    status: Literal["ready", "blocked-external-input", "failed"]
+    failure_reason: str | None
+
+    if local_all_passed:
+        if not probe_remote:
+            status = "ready"
+            failure_reason = None
+        elif remote_outcome is None:
+            status = "failed"
+            failure_reason = "remote probe was requested but not executed"
+        elif remote_outcome.blocked:
+            status = "blocked-external-input"
+            failure_reason = remote_outcome.detail
+        elif remote_outcome.runtime_verified and remote_outcome.worker_verified:
+            status = "ready"
+            failure_reason = None
+        else:
+            status = "failed"
+            failure_reason = remote_outcome.detail
+    else:
+        blocked_details = [
+            o.detail
+            for o in local_outcomes
+            if not o.verified and o.blocked
+        ]
+        failed_details = [
+            o.detail
+            for o in local_outcomes
+            if not o.verified and not o.blocked
+        ]
+        if blocked_details:
+            status = "blocked-external-input"
+            failure_reason = "; ".join(blocked_details + failed_details)
+        else:
+            status = "failed"
+            failure_reason = "; ".join(failed_details)
+
+    return RemoteShellPreflightReport(
+        status=status,
+        checked_at_utc=now_fn(),
+        container_identity=config.container_identity,
+        expected_host_key_fingerprint=config.expected_host_key_fingerprint,
+        known_host=config.known_host,
+        port=config.port,
+        remote_root=config.remote_root,
+        remote_repo_root=config.remote_repo_root,
+        container_runtime=config.container_runtime,
+        ssh_binary_found=ssh_outcome.verified,
+        scp_binary_found=scp_outcome.verified,
+        private_key_protection_verified=key_outcome.verified,
+        known_hosts_verified=hosts_outcome.verified,
+        container_runtime_verified=container_runtime_verified,
+        worker_binary_verified=worker_binary_verified,
+        failure_reason=failure_reason,
+    )

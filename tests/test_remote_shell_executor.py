@@ -30,10 +30,13 @@ from pipeline.remote_shell_executor import (
     RemoteShellExecutionError,
     RemoteShellExecutor,
     RemoteShellExecutorConfig,
+    RemoteShellPreflightReport,
     RemoteShellStatus,
     build_remote_result_bundle,
     canonical_remote_result_manifest_bytes,
+    canonical_remote_shell_preflight_bytes,
     canonical_remote_status_bytes,
+    run_remote_shell_preflight,
     verify_remote_result_bundle,
 )
 from pipeline.render_evaluation import (
@@ -1181,3 +1184,349 @@ def test_private_key_windows_fail_closed_without_pywin32(
     finally:
         if original is not None:
             sys.modules["win32security"] = original
+
+
+# ---------------------------------------------------------------------------
+# P1-2: Credential-free remote-shell preflight
+# ---------------------------------------------------------------------------
+
+
+class TestRemoteShellPreflight:
+    def test_ready_without_remote_probe(self, tmp_path):
+        config = _config(tmp_path)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.status == "ready"
+        assert report.ssh_binary_found
+        assert report.scp_binary_found
+        assert report.private_key_protection_verified
+        assert report.known_hosts_verified
+        assert report.container_runtime_verified is None
+        assert report.worker_binary_verified is None
+        assert report.failure_reason is None
+
+    def test_canonical_bytes_round_trip(self, tmp_path):
+        config = _config(tmp_path)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        canonical = canonical_remote_shell_preflight_bytes(report)
+        revalidated = RemoteShellPreflightReport.model_validate_json(
+            canonical,
+        )
+        assert canonical == canonical_remote_shell_preflight_bytes(
+            revalidated,
+        )
+
+    def test_report_binds_target_identity(self, tmp_path):
+        config = _config(tmp_path)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.container_identity == config.container_identity
+        assert (
+            report.expected_host_key_fingerprint
+            == config.expected_host_key_fingerprint
+        )
+        assert report.known_host == config.known_host
+        assert report.port == config.port
+        assert report.remote_root == config.remote_root
+        assert report.remote_repo_root == config.remote_repo_root
+        assert report.container_runtime == config.container_runtime
+
+    def test_ssh_binary_missing_returns_blocked(self, tmp_path):
+        config = _config(tmp_path)
+        config.ssh_binary.unlink()
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.status == "blocked-external-input"
+        assert not report.ssh_binary_found
+        assert "ssh binary is missing" in report.failure_reason
+
+    def test_scp_binary_missing_returns_blocked(self, tmp_path):
+        config = _config(tmp_path)
+        config.scp_binary.unlink()
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.status == "blocked-external-input"
+        assert not report.scp_binary_found
+        assert "scp binary is missing" in report.failure_reason
+
+    def test_private_key_missing_returns_blocked(self, tmp_path):
+        config = _config(tmp_path)
+        config.private_key_path.unlink()
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.status == "blocked-external-input"
+        assert not report.private_key_protection_verified
+        assert "SSH private key is missing" in report.failure_reason
+
+    def test_known_hosts_missing_returns_blocked(self, tmp_path):
+        config = _config(tmp_path)
+        config.known_hosts_path.unlink()
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.status == "blocked-external-input"
+        assert not report.known_hosts_verified
+        assert "known-hosts file is missing" in report.failure_reason
+
+    def test_fingerprint_mismatch_returns_failed(self, tmp_path):
+        config = _config(tmp_path)
+        bad = config.model_copy(
+            update={
+                "expected_host_key_fingerprint": "SHA256:" + ("A" * 43),
+            },
+        )
+        report = run_remote_shell_preflight(
+            bad,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.status == "failed"
+        assert not report.known_hosts_verified
+        assert "fingerprint" in report.failure_reason
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode policy")
+    def test_private_key_wrong_permissions_returns_failed(self, tmp_path):
+        config = _config(tmp_path)
+        config.private_key_path.chmod(0o640)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        assert report.status == "failed"
+        assert not report.private_key_protection_verified
+        assert "too broad" in report.failure_reason
+
+    def test_probe_remote_success_returns_ready(self, tmp_path):
+        config = _config(tmp_path)
+        runner = _Runner()
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+        assert report.status == "ready"
+        assert report.container_runtime_verified is True
+        assert report.worker_binary_verified is True
+        assert report.failure_reason is None
+        assert len(runner.calls) == 2
+        runtime_argv = runner.calls[0][0]
+        worker_argv = runner.calls[1][0]
+        assert runtime_argv[-1] == "docker --version"
+        assert "test -f" in worker_argv[-1]
+        assert "remote_training_worker.py" in worker_argv[-1]
+
+    def test_probe_remote_unreachable_returns_blocked(self, tmp_path):
+        config = _config(tmp_path)
+
+        def fail_transport(*argv, **kwargs):
+            del argv, kwargs
+            raise subprocess.TimeoutExpired(["ssh"], timeout=1)
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=fail_transport,
+            now=lambda: _T0,
+        )
+        assert report.status == "blocked-external-input"
+        assert report.container_runtime_verified is None
+        assert report.worker_binary_verified is None
+        assert "could not reach the target" in report.failure_reason
+
+    def test_probe_remote_bad_return_code_returns_failed(self, tmp_path):
+        config = _config(tmp_path)
+        runner = _Runner()
+        runner.responses.append(
+            subprocess.CompletedProcess([], 1, b"", b"not found"),
+        )
+        runner.responses.append(
+            subprocess.CompletedProcess([], 1, b"", b"not found"),
+        )
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+        assert report.status == "failed"
+        assert report.container_runtime_verified is False
+        assert report.worker_binary_verified is False
+        assert "container runtime did not respond" in report.failure_reason
+        assert "worker binary not found on remote" in report.failure_reason
+
+    def test_probe_remote_skipped_when_local_checks_fail(self, tmp_path):
+        config = _config(tmp_path)
+        config.ssh_binary.unlink()
+        runner = _Runner()
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+        assert report.status == "blocked-external-input"
+        assert report.container_runtime_verified is None
+        assert report.worker_binary_verified is None
+        assert len(runner.calls) == 0
+
+    def test_report_does_not_leak_private_key_path_ready(self, tmp_path):
+        config = _config(tmp_path)
+        private_key_str = str(config.private_key_path)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        report_json = canonical_remote_shell_preflight_bytes(
+            report,
+        ).decode("ascii")
+        assert private_key_str not in report_json
+
+    def test_report_does_not_leak_private_key_path_blocked(self, tmp_path):
+        config = _config(tmp_path)
+        private_key_str = str(config.private_key_path)
+        config.private_key_path.unlink()
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        report_json = canonical_remote_shell_preflight_bytes(
+            report,
+        ).decode("ascii")
+        assert private_key_str not in report_json
+        assert "SSH private key is missing" in report.failure_reason
+
+    def test_report_does_not_leak_private_key_path_with_remote_probe(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        private_key_str = str(config.private_key_path)
+        runner = _Runner()
+        command_audit: list[tuple[str, ...]] = []
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+            command_audit=command_audit,
+        )
+        report_json = canonical_remote_shell_preflight_bytes(
+            report,
+        ).decode("ascii")
+        assert private_key_str not in report_json
+        assert command_audit, "remote probe must record redacted argv"
+        audit_text = "\n".join(" ".join(argv) for argv in command_audit)
+        assert private_key_str not in audit_text
+        assert "<redacted-private-key>" in audit_text
+
+    def test_report_rejects_extra_fields(self):
+        with pytest.raises(ValidationError):
+            RemoteShellPreflightReport.model_validate(
+                {
+                    "schema": "nantai.remote-shell-preflight.v1",
+                    "status": "ready",
+                    "checked_at_utc": _T0.isoformat(),
+                    "container_identity": (
+                        "registry.example/nantai@sha256:" + ("c" * 64)
+                    ),
+                    "expected_host_key_fingerprint": _fingerprint(b"key"),
+                    "known_host": "remote.example",
+                    "port": 2222,
+                    "remote_root": "/srv/nantai-jobs",
+                    "remote_repo_root": "/srv/nantai-3d",
+                    "container_runtime": "docker",
+                    "ssh_binary_found": True,
+                    "scp_binary_found": True,
+                    "private_key_protection_verified": True,
+                    "known_hosts_verified": True,
+                    "extra_secret_field": "should be rejected",
+                }
+            )
+
+    def test_ready_report_rejects_failure_reason(self):
+        with pytest.raises(ValidationError):
+            RemoteShellPreflightReport(
+                status="ready",
+                checked_at_utc=_T0,
+                container_identity=(
+                    "registry.example/nantai@sha256:" + ("c" * 64)
+                ),
+                expected_host_key_fingerprint=_fingerprint(b"key"),
+                known_host="remote.example",
+                port=2222,
+                remote_root="/srv/nantai-jobs",
+                remote_repo_root="/srv/nantai-3d",
+                container_runtime="docker",
+                ssh_binary_found=True,
+                scp_binary_found=True,
+                private_key_protection_verified=True,
+                known_hosts_verified=True,
+                failure_reason="should not be here",
+            )
+
+    def test_blocked_report_requires_failure_reason(self):
+        with pytest.raises(ValidationError):
+            RemoteShellPreflightReport(
+                status="blocked-external-input",
+                checked_at_utc=_T0,
+                container_identity=(
+                    "registry.example/nantai@sha256:" + ("c" * 64)
+                ),
+                expected_host_key_fingerprint=_fingerprint(b"key"),
+                known_host="remote.example",
+                port=2222,
+                remote_root="/srv/nantai-jobs",
+                remote_repo_root="/srv/nantai-3d",
+                container_runtime="docker",
+                ssh_binary_found=False,
+                scp_binary_found=True,
+                private_key_protection_verified=True,
+                known_hosts_verified=True,
+                failure_reason=None,
+            )
+
+    def test_ready_report_requires_all_local_checks_passed(self):
+        with pytest.raises(ValidationError):
+            RemoteShellPreflightReport(
+                status="ready",
+                checked_at_utc=_T0,
+                container_identity=(
+                    "registry.example/nantai@sha256:" + ("c" * 64)
+                ),
+                expected_host_key_fingerprint=_fingerprint(b"key"),
+                known_host="remote.example",
+                port=2222,
+                remote_root="/srv/nantai-jobs",
+                remote_repo_root="/srv/nantai-3d",
+                container_runtime="docker",
+                ssh_binary_found=True,
+                scp_binary_found=False,
+                private_key_protection_verified=True,
+                known_hosts_verified=True,
+                failure_reason=None,
+            )
