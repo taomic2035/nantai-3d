@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -133,6 +134,41 @@ def _output_path(root: Path, requested: str | None) -> Path:
     return output
 
 
+def _publish_review(output: Path, payload: bytes) -> None:
+    from pipeline.durable_io import (
+        DurableIOError,
+        flush_file,
+        publish_file_noreplace,
+    )
+
+    staging = output.parent / (
+        f".{output.name}.{uuid.uuid4().hex}.staging"
+    )
+    try:
+        with staging.open("xb") as stream:
+            stream.write(payload)
+        flush_file(staging)
+        publish_file_noreplace(staging, output)
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RealSceneAcceptanceError(
+            f"human review receipt cannot be published ({state})"
+        ) from exc
+    except OSError as exc:
+        raise RealSceneAcceptanceError(
+            "human review receipt cannot be published"
+        ) from exc
+    finally:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -158,8 +194,10 @@ def main(argv: list[str] | None = None) -> int:
             root,
         )
         output = _output_path(root, args.output)
-        with output.open("xb") as stream:
-            stream.write(canonical_human_review_bytes(review))
+        _publish_review(
+            output,
+            canonical_human_review_bytes(review),
+        )
     except (
         OSError,
         RealSceneAcceptanceError,

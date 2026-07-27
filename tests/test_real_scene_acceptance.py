@@ -292,6 +292,24 @@ def test_human_review_cli_writes_canonical_accepted_receipt(
     assert "ACCEPTED" in capsys.readouterr().out
 
 
+def test_human_review_cli_flush_failure_leaves_no_final_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    root, args = _cli_fixture(tmp_path)
+
+    def fail_flush(_path):
+        raise OSError("simulated flush failure")
+
+    monkeypatch.setattr("pipeline.durable_io.flush_file", fail_flush)
+
+    exit_code = record_review_main(args)
+
+    assert exit_code == 2
+    assert not (root / "evidence/human-visual-review.json").exists()
+    assert not tuple((root / "evidence").glob(".*.staging"))
+
+
 def test_human_review_cli_records_missing_category_as_unknown(
     tmp_path,
     capsys,
