@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
-from pathlib import Path
-from typing import Literal
+import os
+import stat
+import struct
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -32,6 +36,34 @@ class FrozenModel(BaseModel):
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _POSE_PATTERN = r"^pose-[0-9a-f]{64}$"
+_REPORT_ID_PATTERN = r"^viewer-capture-[0-9a-f]{64}$"
+_MAX_CAPTURE_ARTIFACT_BYTES = 100 * 1024 * 1024
+
+
+def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+
+
+def _portable_relative_path(value: str, *, label: str) -> str:
+    if not value or "\\" in value or "\x00" in value or len(value) > 240:
+        raise ValueError(f"{label} must be a portable relative path")
+    parsed = PurePosixPath(value)
+    if (
+        parsed.is_absolute()
+        or parsed.as_posix() != value
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+    ):
+        raise ValueError(f"{label} must be a portable relative path")
+    return value
 
 
 class ViewerPerformancePolicy(FrozenModel):
@@ -179,6 +211,173 @@ class ViewerPerformanceReport(FrozenModel):
         return self
 
 
+class ViewerCaptureArtifactBinding(FrozenModel):
+    path: str
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+    byte_length: int = Field(ge=1, le=_MAX_CAPTURE_ARTIFACT_BYTES)
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_portable(cls, value: str) -> str:
+        return _portable_relative_path(
+            value,
+            label="Viewer capture artifact path",
+        )
+
+
+class ViewerScreenshotBinding(ViewerCaptureArtifactBinding):
+    pose_id: str = Field(pattern=_POSE_PATTERN)
+
+
+class ViewerExecutableSnapshot(FrozenModel):
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+    byte_length: int = Field(ge=1, le=4 * 1024 * 1024 * 1024)
+    device_id: str = Field(pattern=r"^[0-9]+$")
+    file_id: str = Field(pattern=r"^[0-9]+$")
+    mtime_ns: str = Field(pattern=r"^[0-9]+$")
+    mode: int = Field(ge=0)
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _is_regular_executable(self) -> ViewerExecutableSnapshot:
+        if not stat.S_ISREG(self.mode):
+            raise ValueError(
+                "Viewer executable snapshot must describe a regular file"
+            )
+        return self
+
+
+class StableViewerExecutableObservation(FrozenModel):
+    role: Literal["node", "browser"]
+    before: ViewerExecutableSnapshot
+    after: ViewerExecutableSnapshot
+
+    @model_validator(mode="after")
+    def _identity_is_stable(self) -> StableViewerExecutableObservation:
+        if self.before != self.after:
+            raise ValueError(
+                f"{self.role} executable changed during Viewer capture"
+            )
+        return self
+
+
+def viewer_performance_report_content_sha256(
+    report: ViewerPerformanceReportV2,
+) -> str:
+    payload = report.model_dump(mode="json", by_alias=True)
+    payload.pop("report_id", None)
+    payload.pop("content_sha256", None)
+    return hashlib.sha256(
+        _canonical_json_bytes(_numeric_hash_projection(payload))
+    ).hexdigest()
+
+
+def _numeric_hash_projection(value):
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return {"$f64": struct.pack(">d", float(value)).hex()}
+    if isinstance(value, list):
+        return [_numeric_hash_projection(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _numeric_hash_projection(item)
+            for key, item in value.items()
+        }
+    raise TypeError(
+        f"unsupported Viewer report hash value: {type(value).__name__}"
+    )
+
+
+def viewer_camera_pose_id(pose: dict[str, Any]) -> str:
+    if (
+        not isinstance(pose, dict)
+        or set(pose) != {"schema", "position", "look_at"}
+        or pose["schema"] != "nantai.viewer-camera-pose.v1"
+    ):
+        raise ValueError("Viewer camera pose has an invalid field set or schema")
+    for label in ("position", "look_at"):
+        coordinates = pose[label]
+        if (
+            not isinstance(coordinates, dict)
+            or set(coordinates) != {"east", "north", "up"}
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in coordinates.values()
+            )
+        ):
+            raise ValueError(f"Viewer camera pose {label} is invalid")
+    return "pose-" + hashlib.sha256(
+        _canonical_json_bytes(_numeric_hash_projection(pose))[:-1]
+    ).hexdigest()
+
+
+class ViewerPerformanceReportV2(ViewerPerformanceReport):
+    schema_id: Literal["nantai.viewer-performance-report.v2"] = Field(
+        default="nantai.viewer-performance-report.v2",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    report_id: str = Field(pattern=_REPORT_ID_PATTERN)
+    content_sha256: str = Field(pattern=_SHA256_PATTERN)
+    scene_manifest: ViewerCaptureArtifactBinding
+    viewer_policy: ViewerCaptureArtifactBinding
+    camera_set: ViewerCaptureArtifactBinding
+    capture_script: ViewerCaptureArtifactBinding
+    probe_module: ViewerCaptureArtifactBinding
+    playwright_package: ViewerCaptureArtifactBinding
+    node_executable: StableViewerExecutableObservation
+    browser_executable: StableViewerExecutableObservation
+    screenshots: tuple[ViewerScreenshotBinding, ...] = Field(min_length=3)
+
+    @model_validator(mode="after")
+    def _capture_contract_is_closed(self) -> ViewerPerformanceReportV2:
+        if self.source_role != "production-acceptance":
+            raise ValueError(
+                "Viewer v2 capture report is reserved for production acceptance"
+            )
+        if self.scene_manifest_sha256 != self.scene_manifest.sha256:
+            raise ValueError(
+                "Viewer v2 scene manifest binding disagrees"
+            )
+        if self.node_executable.role != "node":
+            raise ValueError("Viewer v2 Node executable role disagrees")
+        if self.browser_executable.role != "browser":
+            raise ValueError("Viewer v2 browser executable role disagrees")
+        pose_ids = tuple(row.pose_id for row in self.poses)
+        screenshot_pose_ids = tuple(row.pose_id for row in self.screenshots)
+        if screenshot_pose_ids != pose_ids:
+            raise ValueError(
+                "Viewer v2 screenshot pose order differs from measurements"
+            )
+        paths = tuple(
+            binding.path
+            for binding in (
+                self.scene_manifest,
+                self.viewer_policy,
+                self.camera_set,
+                self.capture_script,
+                self.probe_module,
+                self.playwright_package,
+                *self.screenshots,
+            )
+        )
+        if len(paths) != len(set(paths)):
+            raise ValueError(
+                "Viewer v2 capture artifact paths must be unique"
+            )
+        expected = viewer_performance_report_content_sha256(self)
+        if self.content_sha256 != expected:
+            raise ValueError(
+                "Viewer v2 report content SHA-256 disagrees"
+            )
+        if self.report_id != f"viewer-capture-{expected}":
+            raise ValueError("Viewer v2 report id disagrees")
+        return self
+
+
 class ViewerPerformanceDecision(FrozenModel):
     schema_id: Literal["nantai.viewer-performance-decision.v1"] = Field(
         default="nantai.viewer-performance-decision.v1",
@@ -212,14 +411,19 @@ def _nearest_rank(
 
 
 def _validated_report(
-    report: ViewerPerformanceReport,
-) -> ViewerPerformanceReport:
+    report: ViewerPerformanceReport | ViewerPerformanceReportV2,
+) -> ViewerPerformanceReport | ViewerPerformanceReportV2:
     if "accepted" in getattr(report, "__dict__", {}):
         raise ViewerAcceptanceError(
             "report-authored acceptance decision is forbidden"
         )
     try:
-        return ViewerPerformanceReport.model_validate(
+        model_type = (
+            ViewerPerformanceReportV2
+            if isinstance(report, ViewerPerformanceReportV2)
+            else ViewerPerformanceReport
+        )
+        return model_type.model_validate(
             report.model_dump(by_alias=True)
         )
     except (AttributeError, ValueError) as exc:
@@ -230,7 +434,7 @@ def _validated_report(
 
 def derive_viewer_decision(
     policy: ViewerPerformancePolicy,
-    report: ViewerPerformanceReport,
+    report: ViewerPerformanceReport | ViewerPerformanceReportV2,
 ) -> ViewerPerformanceDecision:
     """Recompute every browser gate from raw bounded samples."""
 
@@ -368,6 +572,295 @@ def derive_viewer_decision(
     )
 
 
+def canonical_viewer_performance_policy_bytes(
+    policy: ViewerPerformancePolicy,
+) -> bytes:
+    validated = ViewerPerformancePolicy.model_validate(
+        policy.model_dump(by_alias=True)
+    )
+    return _canonical_json_bytes(
+        validated.model_dump(mode="json", by_alias=True)
+    )
+
+
+def canonical_viewer_performance_report_bytes(
+    report: ViewerPerformanceReport | ViewerPerformanceReportV2,
+) -> bytes:
+    validated = _validated_report(report)
+    return _canonical_json_bytes(
+        validated.model_dump(mode="json", by_alias=True)
+    )
+
+
+def build_viewer_performance_report_v2(
+    **fields: Any,
+) -> ViewerPerformanceReportV2:
+    zero = "0" * 64
+    draft = ViewerPerformanceReportV2.model_construct(
+        report_id=f"viewer-capture-{zero}",
+        content_sha256=zero,
+        **fields,
+    )
+    digest = viewer_performance_report_content_sha256(draft)
+    return ViewerPerformanceReportV2(
+        report_id=f"viewer-capture-{digest}",
+        content_sha256=digest,
+        **fields,
+    )
+
+
+def _reject_duplicate_pairs(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ViewerAcceptanceError(
+                f"duplicate JSON key in Viewer evidence: {key}"
+            )
+        result[key] = value
+    return result
+
+
+def load_viewer_performance_report_bytes(
+    payload: bytes,
+) -> ViewerPerformanceReport | ViewerPerformanceReportV2:
+    try:
+        decoded = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        if not isinstance(decoded, dict):
+            raise ValueError("Viewer report root must be an object")
+        if payload != _canonical_json_bytes(decoded):
+            raise ViewerAcceptanceError(
+                "Viewer performance report is not canonical JSON"
+            )
+        schema = decoded.get("schema")
+        if schema == "nantai.viewer-performance-report.v2":
+            model_type = ViewerPerformanceReportV2
+        elif schema == "nantai.viewer-performance-report.v1":
+            model_type = ViewerPerformanceReport
+        else:
+            raise ValueError("Viewer report schema is unsupported")
+        report = model_type.model_validate_json(
+            _canonical_json_bytes(decoded)
+        )
+    except ViewerAcceptanceError:
+        raise
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ViewerAcceptanceError(
+            f"Viewer performance report is invalid: {exc}"
+        ) from exc
+    return report
+
+
+def _viewer_camera_set_pose_ids(payload: bytes) -> tuple[str, ...]:
+    try:
+        decoded = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        if not isinstance(decoded, dict):
+            raise ValueError("camera set root must be an object")
+        if payload != _canonical_json_bytes(decoded):
+            raise ValueError("camera set must be canonical JSON")
+        if set(decoded) != {"schema", "poses"}:
+            raise ValueError("camera set has an unexpected field set")
+        if decoded["schema"] != "nantai.viewer-camera-set.v1":
+            raise ValueError("camera set schema is unsupported")
+        rows = decoded["poses"]
+        if not isinstance(rows, list) or len(rows) != 3:
+            raise ValueError("camera set must contain exactly three poses")
+        pose_ids: list[str] = []
+        for index, row in enumerate(rows):
+            if (
+                not isinstance(row, dict)
+                or set(row)
+                != {"pose_id", "schema", "position", "look_at"}
+            ):
+                raise ValueError(
+                    f"camera set pose {index} has an unexpected field set"
+                )
+            pose_payload = {
+                "schema": row["schema"],
+                "position": row["position"],
+                "look_at": row["look_at"],
+            }
+            expected_pose_id = viewer_camera_pose_id(pose_payload)
+            if row["pose_id"] != expected_pose_id:
+                raise ValueError(
+                    f"camera set pose {index} content hash disagrees"
+                )
+            pose_ids.append(row["pose_id"])
+        if len(pose_ids) != len(set(pose_ids)):
+            raise ValueError("camera set pose ids must be unique")
+        return tuple(pose_ids)
+    except ViewerAcceptanceError:
+        raise
+    except (UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise ViewerAcceptanceError(
+            f"Viewer camera set is invalid: {exc}"
+        ) from exc
+
+
+def _stable_bound_file(
+    root: Path,
+    binding: ViewerCaptureArtifactBinding | ViewerScreenshotBinding,
+    *,
+    label: str,
+) -> bytes:
+    try:
+        root = Path(root).resolve(strict=True)
+    except OSError as exc:
+        raise ViewerAcceptanceError(
+            "Viewer capture evidence root is unavailable"
+        ) from exc
+    candidate = root.joinpath(*PurePosixPath(binding.path).parts)
+    current = root
+    try:
+        if current.is_symlink() or not current.is_dir():
+            raise ViewerAcceptanceError(
+                "Viewer capture evidence root must be a real directory"
+            )
+        for part in PurePosixPath(binding.path).parts:
+            current = current / part
+            inspected = current.lstat()
+            if stat.S_ISLNK(inspected.st_mode):
+                raise ViewerAcceptanceError(
+                    f"{label} must not traverse a symlink"
+                )
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except ViewerAcceptanceError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ViewerAcceptanceError(
+            f"{label} is unavailable or escapes the evidence root"
+        ) from exc
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as exc:
+        raise ViewerAcceptanceError(
+            f"{label} cannot be opened"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size != binding.byte_length
+        ):
+            raise ViewerAcceptanceError(
+                f"{label} changed; byte length or file type disagrees"
+            )
+        chunks: list[bytes] = []
+        remaining = binding.byte_length + 1
+        while remaining:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, remaining),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise ViewerAcceptanceError(
+            f"{label} cannot be read"
+        ) from exc
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks)
+    try:
+        final = resolved.lstat()
+    except OSError as exc:
+        raise ViewerAcceptanceError(
+            f"{label} changed while being verified"
+        ) from exc
+
+    def identity(item):
+        return (
+            item.st_dev,
+            item.st_ino,
+            item.st_size,
+            item.st_mtime_ns,
+            item.st_mode,
+        )
+
+    if (
+        identity(before) != identity(after)
+        or identity(after) != identity(final)
+        or len(payload) != binding.byte_length
+        or hashlib.sha256(payload).hexdigest() != binding.sha256
+    ):
+        raise ViewerAcceptanceError(
+            f"{label} changed or its SHA-256 disagrees"
+        )
+    return payload
+
+
+def verify_viewer_capture_report(
+    policy: ViewerPerformancePolicy,
+    report: ViewerPerformanceReport | ViewerPerformanceReportV2,
+    root: Path,
+) -> None:
+    if not isinstance(report, ViewerPerformanceReportV2):
+        raise ViewerAcceptanceError(
+            "production Viewer capture requires a v2 report"
+        )
+    validated = _validated_report(report)
+    assert isinstance(validated, ViewerPerformanceReportV2)
+    policy_payload = canonical_viewer_performance_policy_bytes(policy)
+    if (
+        validated.viewer_policy.sha256
+        != hashlib.sha256(policy_payload).hexdigest()
+        or validated.viewer_policy.byte_length != len(policy_payload)
+    ):
+        raise ViewerAcceptanceError(
+            "Viewer capture policy binding disagrees"
+        )
+    for name in (
+        "scene_manifest",
+        "viewer_policy",
+        "camera_set",
+        "capture_script",
+        "probe_module",
+        "playwright_package",
+    ):
+        binding = getattr(validated, name)
+        payload = _stable_bound_file(
+            root,
+            binding,
+            label=f"Viewer capture {name.replace('_', ' ')}",
+        )
+        if name == "viewer_policy" and payload != policy_payload:
+            raise ViewerAcceptanceError(
+                "Viewer capture policy is not canonical or differs"
+            )
+        if name == "camera_set":
+            camera_pose_ids = _viewer_camera_set_pose_ids(payload)
+            report_pose_ids = tuple(
+                pose.pose_id for pose in validated.poses
+            )
+            if (
+                camera_pose_ids != report_pose_ids
+                or camera_pose_ids != policy.required_pose_ids
+            ):
+                raise ViewerAcceptanceError(
+                    "Viewer camera set pose order differs from report or policy"
+                )
+    for screenshot in validated.screenshots:
+        _stable_bound_file(
+            root,
+            screenshot,
+            label=f"Viewer screenshot {screenshot.pose_id}",
+        )
+    derive_viewer_decision(policy, validated)
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(
         value,
@@ -385,6 +878,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--policy", required=True)
     parser.add_argument("--report", required=True)
+    parser.add_argument("--evidence-root")
     parser.add_argument("--decision")
     return parser
 
@@ -395,9 +889,19 @@ def main(argv: list[str] | None = None) -> int:
         policy = ViewerPerformancePolicy.model_validate_json(
             Path(args.policy).read_bytes()
         )
-        report = ViewerPerformanceReport.model_validate_json(
+        report = load_viewer_performance_report_bytes(
             Path(args.report).read_bytes()
         )
+        if isinstance(report, ViewerPerformanceReportV2):
+            if not args.evidence_root:
+                raise ViewerAcceptanceError(
+                    "Viewer v2 report requires an evidence root"
+                )
+            verify_viewer_capture_report(
+                policy,
+                report,
+                Path(args.evidence_root),
+            )
         decision = derive_viewer_decision(policy, report)
     except (OSError, ValueError, ViewerAcceptanceError) as exc:
         print(f"INVALID: {exc}")

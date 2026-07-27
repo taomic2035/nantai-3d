@@ -1,19 +1,133 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import struct
+import zlib
 
 import pytest
 
 from pipeline.viewer_acceptance import (
+    StableViewerExecutableObservation,
     ViewerAcceptanceError,
+    ViewerCaptureArtifactBinding,
+    ViewerExecutableSnapshot,
     ViewerPerformancePolicy,
     ViewerPerformanceReport,
+    ViewerPerformanceReportV2,
     ViewerPoseMeasurement,
     ViewerRuntimeIdentity,
+    ViewerScreenshotBinding,
+    build_viewer_performance_report_v2,
+    canonical_viewer_performance_policy_bytes,
+    canonical_viewer_performance_report_bytes,
     derive_viewer_decision,
+    load_viewer_performance_report_bytes,
+    verify_viewer_capture_report,
+    viewer_camera_pose_id,
 )
 
-POSES = ("pose-" + "a" * 64, "pose-" + "b" * 64, "pose-" + "c" * 64)
+
+def _camera_set_bytes(offset: int = 0) -> tuple[bytes, tuple[str, ...]]:
+    def numeric_projection(value):
+        if (
+            isinstance(value, bool)
+            or value is None
+            or isinstance(value, str)
+        ):
+            return value
+        if isinstance(value, (int, float)):
+            return {"$f64": struct.pack(">d", float(value)).hex()}
+        if isinstance(value, list):
+            return [numeric_projection(item) for item in value]
+        return {
+            key: numeric_projection(item)
+            for key, item in value.items()
+        }
+
+    rows = []
+    for index in range(3):
+        payload = {
+            "schema": "nantai.viewer-camera-pose.v1",
+            "position": {
+                "east": offset + index * 2,
+                "north": index * 3,
+                "up": 2,
+            },
+            "look_at": {
+                "east": offset + index * 2 + 1,
+                "north": index * 3 + 1,
+                "up": 2,
+            },
+        }
+        canonical_pose = json.dumps(
+            numeric_projection(payload),
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        rows.append(
+            {
+                "pose_id": (
+                    "pose-" + hashlib.sha256(canonical_pose).hexdigest()
+                ),
+                **payload,
+            }
+        )
+    camera_set = {
+        "schema": "nantai.viewer-camera-set.v1",
+        "poses": rows,
+    }
+    payload = (
+        json.dumps(
+            camera_set,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    return payload, tuple(row["pose_id"] for row in rows)
+
+
+CAMERA_SET_BYTES, POSES = _camera_set_bytes()
+
+
+def test_camera_pose_id_matches_cross_language_numeric_golden():
+    pose = {
+        "schema": "nantai.viewer-camera-pose.v1",
+        "position": {"east": 1.0, "north": -2, "up": 1.5},
+        "look_at": {"east": 0, "north": 10.0, "up": 1},
+    }
+
+    assert viewer_camera_pose_id(pose) == (
+        "pose-6488fe6fd0d6111852489a7fa16ca9be"
+        "0554f46562c43dfc0a7edfde65f36a51"
+    )
+
+
+def _png(width: int = 4, height: int = 3) -> bytes:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    scanline = b"\x00" + b"\x20\x40\x60" * width
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(
+            b"IHDR",
+            struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0),
+        )
+        + chunk(b"IDAT", zlib.compress(scanline * height))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _policy() -> ViewerPerformancePolicy:
@@ -69,6 +183,192 @@ def _report(
         console_errors=(),
         unhandled_rejections=(),
     )
+
+
+def _capture_binding(root, relative: str, payload: bytes) -> ViewerCaptureArtifactBinding:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return ViewerCaptureArtifactBinding(
+        path=relative,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        byte_length=len(payload),
+    )
+
+
+def _stable_executable(role: str, label: str) -> StableViewerExecutableObservation:
+    payload = label.encode("ascii")
+    snapshot = ViewerExecutableSnapshot(
+        sha256=hashlib.sha256(payload).hexdigest(),
+        byte_length=len(payload),
+        device_id="1",
+        file_id="2",
+        mtime_ns="3",
+        mode=0o100755,
+        executable=True,
+    )
+    return StableViewerExecutableObservation(
+        role=role,
+        before=snapshot,
+        after=snapshot,
+    )
+
+
+def _report_v2(tmp_path) -> ViewerPerformanceReportV2:
+    policy = _policy()
+    report = _report()
+    artifacts = {
+        "scene_manifest": _capture_binding(
+            tmp_path,
+            "imported/manifest.json",
+            b'{"scene":"real"}\n',
+        ),
+        "viewer_policy": _capture_binding(
+            tmp_path,
+            "viewer/policy.json",
+            canonical_viewer_performance_policy_bytes(policy),
+        ),
+        "camera_set": _capture_binding(
+            tmp_path,
+            "viewer/cameras.json",
+            CAMERA_SET_BYTES,
+        ),
+        "capture_script": _capture_binding(
+            tmp_path,
+            "viewer/capture_viewer_acceptance.mjs",
+            b"export const capture = true;\n",
+        ),
+        "probe_module": _capture_binding(
+            tmp_path,
+            "viewer/acceptance-probe.mjs",
+            b"export const probe = true;\n",
+        ),
+        "playwright_package": _capture_binding(
+            tmp_path,
+            "viewer/playwright-package.json",
+            b'{"name":"playwright","version":"1.55.0"}\n',
+        ),
+    }
+    screenshots = []
+    for index, pose_id in enumerate(POSES):
+        payload = _png(width=4 + index, height=3)
+        relative = f"viewer/screenshots/{pose_id}.png"
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        screenshots.append(
+            ViewerScreenshotBinding(
+                pose_id=pose_id,
+                path=relative,
+                sha256=hashlib.sha256(payload).hexdigest(),
+                byte_length=len(payload),
+            )
+        )
+    return build_viewer_performance_report_v2(
+        source_role="production-acceptance",
+        scene_manifest_sha256=artifacts["scene_manifest"].sha256,
+        viewport_width=report.viewport_width,
+        viewport_height=report.viewport_height,
+        http_cache=report.http_cache,
+        runtime=report.runtime,
+        poses=report.poses,
+        console_errors=report.console_errors,
+        unhandled_rejections=report.unhandled_rejections,
+        scene_manifest=artifacts["scene_manifest"],
+        viewer_policy=artifacts["viewer_policy"],
+        camera_set=artifacts["camera_set"],
+        capture_script=artifacts["capture_script"],
+        probe_module=artifacts["probe_module"],
+        playwright_package=artifacts["playwright_package"],
+        node_executable=_stable_executable("node", "node"),
+        browser_executable=_stable_executable("browser", "chromium"),
+        screenshots=tuple(screenshots),
+    )
+
+
+def test_v2_capture_report_is_content_addressed_and_reopens_every_bound_file(
+    tmp_path,
+):
+    report = _report_v2(tmp_path)
+    payload = canonical_viewer_performance_report_bytes(report)
+
+    assert report.schema_id == "nantai.viewer-performance-report.v2"
+    assert report.report_id == f"viewer-capture-{report.content_sha256}"
+    assert load_viewer_performance_report_bytes(payload) == report
+    assert verify_viewer_capture_report(_policy(), report, tmp_path) is None
+
+
+def test_v2_capture_report_rejects_executable_toctou(tmp_path):
+    report = _report_v2(tmp_path)
+    changed = report.browser_executable.after.model_copy(
+        update={"file_id": "999"}
+    )
+
+    with pytest.raises(ValueError, match="browser.*changed"):
+        ViewerPerformanceReportV2.model_validate(
+            {
+                **report.model_dump(by_alias=True),
+                "browser_executable": {
+                    **report.browser_executable.model_dump(),
+                    "after": changed.model_dump(),
+                },
+            }
+        )
+
+
+def test_v2_capture_report_rejects_bound_screenshot_tamper(tmp_path):
+    report = _report_v2(tmp_path)
+    (tmp_path / report.screenshots[0].path).write_bytes(b"tampered")
+
+    with pytest.raises(ViewerAcceptanceError, match="screenshot.*SHA|changed"):
+        verify_viewer_capture_report(_policy(), report, tmp_path)
+
+
+def test_v2_capture_report_rejects_resigned_camera_set_pose_drift(tmp_path):
+    report = _report_v2(tmp_path)
+    changed_bytes, changed_pose_ids = _camera_set_bytes(offset=100)
+    assert changed_pose_ids != POSES
+    camera_set = _capture_binding(
+        tmp_path,
+        report.camera_set.path,
+        changed_bytes,
+    )
+    fields = {
+        field: getattr(report, field)
+        for field in ViewerPerformanceReportV2.model_fields
+        if field not in {"report_id", "content_sha256"}
+    }
+    fields["camera_set"] = camera_set
+    resigned = build_viewer_performance_report_v2(**fields)
+
+    with pytest.raises(
+        ViewerAcceptanceError,
+        match="camera set.*pose|pose.*camera set",
+    ):
+        verify_viewer_capture_report(_policy(), resigned, tmp_path)
+
+
+def test_production_v1_report_cannot_satisfy_v2_capture_verifier(tmp_path):
+    with pytest.raises(ViewerAcceptanceError, match="v2"):
+        verify_viewer_capture_report(_policy(), _report(), tmp_path)
+
+
+def test_v2_capture_loader_rejects_noncanonical_or_duplicate_json(tmp_path):
+    report = _report_v2(tmp_path)
+    payload = canonical_viewer_performance_report_bytes(report)
+    duplicate = payload.replace(
+        b'"schema":"nantai.viewer-performance-report.v2"',
+        (
+            b'"schema":"nantai.viewer-performance-report.v2",'
+            b'"schema":"nantai.viewer-performance-report.v2"'
+        ),
+        1,
+    )
+
+    with pytest.raises(ViewerAcceptanceError, match="duplicate"):
+        load_viewer_performance_report_bytes(duplicate)
+    with pytest.raises(ViewerAcceptanceError, match="canonical"):
+        load_viewer_performance_report_bytes(payload + b" ")
 
 
 def test_exact_viewer_thresholds_pass():
@@ -291,15 +591,13 @@ def test_cli_rederives_decision_and_returns_two_for_rejection(
     policy_path = tmp_path / "policy.json"
     report_path = tmp_path / "report.json"
     decision_path = tmp_path / "decision.json"
-    policy_path.write_text(
-        _policy().model_dump_json(by_alias=True),
-        encoding="utf-8",
+    policy_path.write_bytes(
+        canonical_viewer_performance_policy_bytes(_policy())
     )
-    report_path.write_text(
-        _report(representation="dc-point-preview").model_dump_json(
-            by_alias=True
-        ),
-        encoding="utf-8",
+    report_path.write_bytes(
+        canonical_viewer_performance_report_bytes(
+            _report(representation="dc-point-preview")
+        )
     )
 
     exit_code = main(
@@ -316,3 +614,45 @@ def test_cli_rederives_decision_and_returns_two_for_rejection(
     assert exit_code == 2
     assert '"accepted":false' in decision_path.read_text(encoding="utf-8")
     assert "REJECTED" in capsys.readouterr().out
+
+
+def test_cli_v2_requires_and_reopens_capture_evidence_root(
+    tmp_path,
+    capsys,
+):
+    from pipeline.viewer_acceptance import main
+
+    report = _report_v2(tmp_path)
+    policy_path = tmp_path / report.viewer_policy.path
+    report_path = tmp_path / "viewer/report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_bytes(
+        canonical_viewer_performance_report_bytes(report)
+    )
+
+    assert main(
+        [
+            "--policy",
+            str(policy_path),
+            "--report",
+            str(report_path),
+        ]
+    ) == 2
+    assert "evidence root" in capsys.readouterr().out
+
+    decision_path = tmp_path / "viewer/decision.json"
+    assert main(
+        [
+            "--policy",
+            str(policy_path),
+            "--report",
+            str(report_path),
+            "--evidence-root",
+            str(tmp_path),
+            "--decision",
+            str(decision_path),
+        ]
+    ) == 0
+    assert '"accepted":true' in decision_path.read_text(
+        encoding="ascii"
+    )

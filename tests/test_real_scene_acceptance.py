@@ -56,6 +56,15 @@ from tests.test_real_scene_import import (
     _patch_production_bundle,
     _write_production_training_stage,
 )
+from tests.test_viewer_acceptance import (
+    _policy as _viewer_policy,
+)
+from tests.test_viewer_acceptance import (
+    _report as _viewer_report_v1,
+)
+from tests.test_viewer_acceptance import (
+    _report_v2 as _viewer_report_v2,
+)
 
 POSES = (
     "pose-" + "a" * 64,
@@ -249,6 +258,104 @@ def test_screenshot_escape_is_rejected(tmp_path):
     )
     with pytest.raises(RealSceneAcceptanceError, match="relative"):
         validate_human_visual_review(_policy(), escaped, root)
+
+
+def _review_for_viewer_capture(tmp_path, viewer_report):
+    human_policy = _policy().model_copy(
+        update={
+            "required_pose_ids": tuple(
+                row.pose_id for row in viewer_report.poses
+            )
+        }
+    )
+    return record_human_visual_review(
+        policy=human_policy,
+        root=tmp_path,
+        reviewer="Reviewer One",
+        dispositions={
+            category: "accepted"
+            for category in REQUIRED_VISUAL_CATEGORIES
+        },
+        screenshots={
+            row.pose_id: row.path
+            for row in viewer_report.screenshots
+        },
+        reviewed_at=datetime(2026, 7, 26, 12, 0, tzinfo=UTC),
+    )
+
+
+def test_production_acceptance_reopens_v2_capture_and_binds_human_screenshots(
+    tmp_path,
+):
+    viewer_report = _viewer_report_v2(tmp_path)
+    human_review = _review_for_viewer_capture(tmp_path, viewer_report)
+
+    acceptance_module._validate_bound_viewer_capture(
+        source_role="production-acceptance",
+        viewer_policy=_viewer_policy(),
+        viewer_report=viewer_report,
+        human_review=human_review,
+        root=tmp_path,
+        expected_scene_manifest_path=viewer_report.scene_manifest.path,
+        expected_viewer_policy_path=viewer_report.viewer_policy.path,
+    )
+
+
+def test_production_acceptance_rejects_viewer_v1_without_capture_receipt(
+    tmp_path,
+):
+    with pytest.raises(RealSceneAcceptanceError, match="v2"):
+        acceptance_module._validate_bound_viewer_capture(
+            source_role="production-acceptance",
+            viewer_policy=_viewer_policy(),
+            viewer_report=_viewer_report_v1(),
+            human_review=None,
+            root=tmp_path,
+            expected_scene_manifest_path="imported/manifest.json",
+            expected_viewer_policy_path="viewer/policy.json",
+        )
+
+
+def test_production_acceptance_rejects_human_screenshot_not_from_capture(
+    tmp_path,
+):
+    viewer_report = _viewer_report_v2(tmp_path)
+    viewer_pose_ids = tuple(row.pose_id for row in viewer_report.poses)
+    human_policy = _policy().model_copy(
+        update={"required_pose_ids": viewer_pose_ids}
+    )
+    replacement_paths = {}
+    for index, pose_id in enumerate(viewer_pose_ids):
+        relative = f"review/other-{index}.png"
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_png())
+        replacement_paths[pose_id] = relative
+    human_review = record_human_visual_review(
+        policy=human_policy,
+        root=tmp_path,
+        reviewer="Reviewer One",
+        dispositions={
+            category: "accepted"
+            for category in REQUIRED_VISUAL_CATEGORIES
+        },
+        screenshots=replacement_paths,
+        reviewed_at=datetime(2026, 7, 26, 12, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(
+        RealSceneAcceptanceError,
+        match="human review screenshots.*capture",
+    ):
+        acceptance_module._validate_bound_viewer_capture(
+            source_role="production-acceptance",
+            viewer_policy=_viewer_policy(),
+            viewer_report=viewer_report,
+            human_review=human_review,
+            root=tmp_path,
+            expected_scene_manifest_path=viewer_report.scene_manifest.path,
+            expected_viewer_policy_path=viewer_report.viewer_policy.path,
+        )
 
 
 def test_review_authored_aggregate_boolean_is_forbidden(tmp_path):

@@ -244,6 +244,39 @@ request/result 只证明其声明并通过内容闭合检查的事实；stub 或
 
 打开 <http://127.0.0.1:8000/web/studio/>。
 
+### 6.1 生成 Production Viewer v2 证据
+
+正式验收不能手写 Viewer 报告。先在同一个私有 run root 内放好 canonical Viewer
+policy、三机位 camera set 和本次 import 的 scene manifest；三个输入都必须是
+root 内的真实 regular file。保持 Studio 正在运行，然后执行：
+
+```powershell
+$run = (Resolve-Path .nantai-studio\runs\production-site-a).Path
+node scripts\capture_viewer_acceptance.mjs `
+  --policy "$run\viewer\policy.json" `
+  --camera-set "$run\viewer\cameras.json" `
+  --studio-url http://127.0.0.1:8000/web/studio/ `
+  --scene-manifest "$run\imported\recon_manifest.json" `
+  --output "$run\viewer\performance-report.v2.json" `
+  --decision "$run\viewer\performance-decision.json" `
+  --source-role production-acceptance `
+  --evidence-root "$run" `
+  --headless
+```
+
+`output`、`decision` 和固定截图路径必须尚不存在；碰撞会拒绝，不会覆盖。采集器会把
+本次 capture script、Viewer probe 和 Playwright package 独占复制到证据根，记录
+Node/Chromium 可执行文件前后身份，按 camera set 顺序生成三张内容寻址截图。随后
+Python validator 使用同一个 `--evidence-root` 重开 policy、scene、camera set、代码、
+package 和截图，重算报告 ID 与所有性能门。Studio 实际返回的
+`recon_manifest.json` 和 `acceptance-probe.mjs` 响应字节也必须与 receipt 绑定一致；
+否则即使本地路径正确也会拒绝。
+
+人工 review 必须引用 v2 receipt 中完全相同的 pose ID、相对路径、SHA-256 和字节数。
+Viewer v1 报告只可用于 `internal-canary`，不能进入 production aggregate。即使 v2
+机器门通过，在同一 scene 的真实 CUDA 3DGS、米制对齐和人工观感验收完成前仍不得
+声明 Production V1。
+
 验收时至少确认：
 
 1. 注册覆盖率和输入来源；

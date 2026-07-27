@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27，基线 `a455208`
+更新：2026-07-27（状态以当前 `main` 与机器证据为准）
 
 ## 一句话状态
 
@@ -15,14 +15,14 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 真实数据 source/rights/receipt | caller 已实现，缺正式素材输入 |
 | fresh COLMAP 与注册质量门 | canary 已实跑，正式素材尚未运行 |
 | 本地 Brush preview | 已实跑，只能 preview-only |
-| 远程 submit/poll/fetch/reconnect | 固定 transport 演练已通过 |
-| 远程演练真实性边界 | 固定 11 cases，明确为 transport-fixture |
+| 远程 submit/poll/fetch/reconnect | lifecycle receipt 与恢复语义已关闭；固定演练 registry 仍有一个旧 pytest node 待刷新 |
+| 远程演练真实性边界 | transport-fixture 与 fresh-container evidence 已分层，不把 fixture 当真实 GPU |
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
 | production import、acceptance 与 runner 复验 | v3 receipt 绑定 G2/G5；import 与最终 acceptance 均重开原始 runtime、manifest、render、closure 字节 |
 | production runtime evidence | 六 probe/六 executable 合同已完成，待 fresh job-container 接入 |
 | production result closure | v2 manifest、closure 与 import 消费端已完成，待 remote caller 产出 |
-| Viewer/Studio 与 synthetic QA | 可用；Viewer v1 数值报告尚未绑定可信采集 runner，不能签署 production |
+| Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；尚未对真实重建运行，不能签署 production |
 
 ## 正式版关键路径
 
@@ -44,32 +44,18 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 按
 [`HANDOFF-GLM-012`](../handoff/HANDOFF-GLM-012-active-production-queue.md)
-连续执行 D1 → E1：
+连续执行，不等待新的口头分配：
 
-1. D1：交付无占位身份、无 secret 的 canonical `blocked-external-input`；
-2. E1：接入 fresh-container lifecycle receipt 与同容器 G2 clearance adapter。
+1. `P0-CI`：把固定演练的旧 pytest node 改绑到 authoritative-poll 语义；
+2. `F1`：在同一 lifecycle container 内运行六探针 clearance，身份或 TOCTOU 漂移
+   均 fail closed；
+3. `G1`：让 `train-production` producer 产出既有 import 合同要求的八个结果文件；
+4. `H1`：poll 不越过 deadline，所有终态与异常路径显式关闭 executor。
 
-当前候选与返修状态：
-
-- `7febb81` 的 host preflight 缺口已由 `a455208` 修复；Podman 在绑定
-  `nvidia-ctk`/CDI identity 前稳定 blocked，A1 已关闭；
-- B1 worker durability 已由 `9eebbc3` 和 Codex review 修补 `776fc25` 关闭：
-  resolved image/container identity、container-id no-replace、
-  `published=None|False|True`、post-start evidence preservation、terminal 后单次
-  cleanup 与 cleanup-observation failure 均有平台无关 fault-injection 回归；
-  fresh worker 专项 `22 passed`，durable I/O + worker + remote shell 联合回归
-  `100 passed, 3 skipped`；
-- C1 production shell 由 GLM `b02a271` 和 Codex review 修补 `5557ed1` 关闭：
-  Nerfstudio `1.1.5` package metadata 严格锁定，`ns-train`/`ns-export` 绝对
-  regular-file wrapper 使用官方支持的 Tyro `-h` probe，probe 输出不进入日志；
-  executable golden path、非零 probe、secret canary 与真实 PATH replacement
-  均为执行测试，fresh `13 passed, 0 skipped`；
-- `da86a81` 的 blocked report 要求用占位 host/digest/dataset SHA 表示缺失输入，
-  并由报告自报 `rights-cleared`，已被 Codex review 拒绝；
-- `b02f6ab` 删除 production prepared-bundle 的可执行 golden-path 与 bash 语法
-  测试，改用源码 grep 证明 runtime 行为，并以 `|| true` / substring 接受 CLI
-  version observation，已被 Codex review 拒绝；
-- 当前只执行 HANDOFF-GLM-012 的 D1，不再重做 A1/B1/C1。
+A1–E1 已关闭，不再重做。当前代码仍可直接观察到
+`pipeline/remote_training_drill.py` 引用已删除的
+`test_submit_advances_receipt_to_running`，因此 `P0-CI` 是首项，不是外部阻塞。
+GLM 每项独立提交并 push；Codex review 前保持 candidate。
 
 ### P0 — 外部输入：正式素材与测量
 
@@ -85,16 +71,23 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 ### P1 — Codex：真实产物消费与 Viewer 验收
 
-import/runner/aggregate 的原始证据消费端已经就绪。下一项仓库内 P0 是 Viewer v2
-采集凭证：production acceptance 必须绑定 scene manifest、camera set、policy、
-采集脚本、Node/Playwright/browser executable 的内容身份与前后快照；可手写的
-Viewer v1 报告只保留 canary/兼容用途。
+Viewer v2 代码门已经就绪：
 
-现有 human-review v1 会重开并复验 PNG、policy 与 pose ID，但 PNG 本身尚未绑定
-可信 Viewer capture receipt 或 scene manifest。仅把任意 PNG 标成同一 pose ID
-不能构成 production 视觉证据。Viewer v2 必须产出内容寻址的截图集合，human
-review 只能消费该 receipt 绑定的精确截图 SHA；capture receipt、report 与截图任一
-漂移都必须 blocked。
+- production CLI 必须显式提供 evidence root，并在派生决策前重开全部绑定文件；
+- report 内容绑定 scene manifest、camera set、policy、capture script、probe、
+  Playwright package、Node/browser executable 前后身份和三张截图；
+- camera pose ID 与 report content SHA 使用跨 Python/JavaScript 一致的 IEEE-754
+  数字投影，不再受 `1`/`1.0` 词法差异影响；
+- capture input、截图与复制出的代码采用 root-bounded、no-symlink、no-replace
+  路径；浏览器可执行文件流式哈希，不按文件大小整块分配内存；
+- 浏览器实际收到的 scene manifest 与 acceptance probe 响应字节必须分别匹配
+  receipt 绑定，不能用 scene A 采集却在报告里声明 scene B；
+- production aggregate 拒绝 Viewer v1；human review 只能消费 v2 receipt 中
+  pose/path/SHA/byte length 全部一致的截图。
+
+这只是“可信采集器与消费端完成”，不是“真实 Viewer QA 已完成”。还缺同一真实 scene
+identity 的 production import、fresh 浏览器采集和人工观感签署。Viewer v1 仅保留
+internal-canary/兼容用途。
 
 收到 remote caller 产生的 G5 verified result 后：
 

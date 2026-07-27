@@ -70,9 +70,13 @@ from pipeline.training_provenance import (
     result_canonical_sha256,
 )
 from pipeline.viewer_acceptance import (
+    ViewerAcceptanceError,
     ViewerPerformancePolicy,
     ViewerPerformanceReport,
+    ViewerPerformanceReportV2,
     derive_viewer_decision,
+    load_viewer_performance_report_bytes,
+    verify_viewer_capture_report,
 )
 
 
@@ -1400,6 +1404,70 @@ def _viewer_policy_failures(
     return tuple(failures)
 
 
+def _validate_bound_viewer_capture(
+    *,
+    source_role: Literal["internal-canary", "production-acceptance"],
+    viewer_policy: ViewerPerformancePolicy,
+    viewer_report: ViewerPerformanceReport | ViewerPerformanceReportV2,
+    human_review: HumanVisualReview | None,
+    root: Path,
+    expected_scene_manifest_path: str,
+    expected_viewer_policy_path: str,
+) -> None:
+    if source_role != "production-acceptance":
+        return
+    if not isinstance(viewer_report, ViewerPerformanceReportV2):
+        raise RealSceneAcceptanceError(
+            "production acceptance requires Viewer v2 capture evidence"
+        )
+    try:
+        verify_viewer_capture_report(
+            viewer_policy,
+            viewer_report,
+            root,
+        )
+    except ViewerAcceptanceError as exc:
+        raise RealSceneAcceptanceError(
+            f"Viewer v2 capture evidence is invalid: {exc}"
+        ) from exc
+    if (
+        viewer_report.scene_manifest.path
+        != expected_scene_manifest_path
+        or viewer_report.viewer_policy.path
+        != expected_viewer_policy_path
+    ):
+        raise RealSceneAcceptanceError(
+            "Viewer v2 capture paths differ from aggregate evidence"
+        )
+    if human_review is None:
+        raise RealSceneAcceptanceError(
+            "production Viewer v2 capture requires human review"
+        )
+    human_review = _validated_review(human_review)
+    captured = tuple(
+        (
+            row.pose_id,
+            row.path,
+            row.sha256,
+            row.byte_length,
+        )
+        for row in viewer_report.screenshots
+    )
+    reviewed = tuple(
+        (
+            row.pose_id,
+            row.path,
+            row.sha256,
+            row.byte_count,
+        )
+        for row in human_review.screenshots
+    )
+    if reviewed != captured:
+        raise RealSceneAcceptanceError(
+            "human review screenshots differ from Viewer capture receipt"
+        )
+
+
 def _read_acceptance_member(
     root: Path,
     relative: str,
@@ -1727,11 +1795,14 @@ def _validate_acceptance_evidence(
         ViewerPerformancePolicy,
         label="viewer performance policy",
     )
-    viewer_report = _viewer_model_from_bytes(
-        payloads[report.viewer_report.path],
-        ViewerPerformanceReport,
-        label="viewer performance report",
-    )
+    try:
+        viewer_report = load_viewer_performance_report_bytes(
+            payloads[report.viewer_report.path]
+        )
+    except ViewerAcceptanceError as exc:
+        raise RealSceneAcceptanceError(
+            f"viewer performance report is invalid: {exc}"
+        ) from exc
     scene_manifest_path = root / report.import_root.path / imported.manifest_path
     if (
         viewer_report.source_role != report.source_role
@@ -1763,6 +1834,17 @@ def _validate_acceptance_evidence(
         raise RealSceneAcceptanceError(
             "human review policy differs from viewer pose/source contract"
         )
+    _validate_bound_viewer_capture(
+        source_role=report.source_role,
+        viewer_policy=viewer_policy,
+        viewer_report=viewer_report,
+        human_review=human_review,
+        root=root,
+        expected_scene_manifest_path=(
+            f"{report.import_root.path}/{imported.manifest_path}"
+        ),
+        expected_viewer_policy_path=report.viewer_policy.path,
+    )
     human_decision = validate_human_visual_review(
         human_policy,
         human_review,
