@@ -23,29 +23,40 @@ runtime、`pipeline.durable_io`、canonical JSON。
 开始，随后连续执行 `G1 → H1 → I1`。完成一张就独立提交、用一次性代理 push，然后直接
 开始下一张，不等待 Codex 回执。
 
-### Codex 再派发（2026-07-27 22:20 +08:00）
+### Codex 当前派发（2026-07-27，基线 `4c08fca`）
 
-远端最新基线为 `31a7e25`；其中 `461e851` 已接通 receipt-bound Studio
-reconstruction mount，`31a7e25` 已补齐正式 Viewer 操作说明。截至该基线，远端没有
-任何 F1 candidate。GLM 当前回复“无待推进工作”是不正确的，立即执行：
+Codex 已重新 fetch 并核对 `origin/main`：没有 F1 candidate，GLM 也没有领先远端的
+提交。“无待推进工作”是不正确的。GLM 不要再做差距审计、plan 或静态 review，直接
+执行下面的代码任务：
 
 ```text
 git -c http.proxy=http://127.0.0.1:7890 fetch origin main
 git -c http.proxy=http://127.0.0.1:7890 pull --ff-only origin main
-F1 Step 1:
-  tests/test_remote_shell_executor.py
-  先建立本文件列出的 7 个 clearance 行为 RED
-F1 Step 2:
-  接入唯一 production_runtime_evidence，不新建平行 schema
-F1 Step 3:
-  专项测试 + Ruff + diff-check + 独立提交 + 临时代理 push
-随后直接开始 G1、H1、I1
+
+当前只做 F1：
+  1. 只修改 tests/test_remote_shell_executor.py；
+  2. 先写 Task F1 列出的 7 个同容器 clearance 测试；
+  3. 立即运行其中第一个测试，得到真实 RED；
+  4. 回执测试全名、失败断言和本地 git diff --stat；
+  5. 然后修改 pipeline/remote_shell_executor.py 接通 GREEN；
+  6. 接入既有 pipeline.production_runtime_evidence，禁止新建 schema；
+  7. 专项测试、Ruff、diff-check、独立提交、临时代理 push。
+
+F1 push 后无需等待：
+  G1 operations production result producer
+  → H1 deadline / executor close
+  → I1 bounded-memory import hashing
 ```
 
-第一轮回执必须包含第一个真实 RED 的测试名和失败原因；只给设计说明、静态 grep、
-“需要 Codex”或“没有真实 GPU”都不算开始。F1 使用 fake transport，不依赖 secret、
-正式素材或付费 GPU。不要修改 `pipeline/studio_server.py`、Viewer、Studio、release、
-acceptance aggregate 或本 handoff；这些路径由 Codex 保持。
+第一轮回执必须是一个真实 RED，不接受“计划已完成”“等待 Codex”“缺 GPU”或只给
+静态分析。F1 全程使用 fake transport，不需要 secret、正式素材、付费 GPU、Blender
+或 Codex 新接口。若第一个 RED 无法建立，必须报告具体代码符号和阻塞调用栈，不能回复
+“无事可做”。
+
+Codex 当前并行修改 `pipeline/human_review_inputs.py`、
+`scripts/record_real_scene_review.py` 及其测试；GLM 禁止碰这些文件，也不要修改
+`pipeline/studio_server.py`、Viewer、Studio、release、acceptance aggregate 或本
+handoff。
 
 | 顺序 | Ticket | 只允许主动修改 | 必须交付的结果 |
 |---|---|---|---|

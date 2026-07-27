@@ -7,7 +7,7 @@
 
 1. [GLM 当前四项连续工单](HANDOFF-GLM-012-active-production-queue.md) — 打开后先执行
    顶部“GLM 立即执行卡”；`P0-CI` 已关闭，当前从 `F1` 开始，随后自动进入
-   `G1 → H1`
+   `G1 → H1 → I1`
 2. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
 3. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
 4. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
