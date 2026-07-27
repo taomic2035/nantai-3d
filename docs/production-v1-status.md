@@ -84,6 +84,8 @@ Viewer v2 代码门已经就绪：
   receipt、仓库 demo 回落和启动后字节漂移均拒绝；
 - `pipeline.viewer_session` 在临时回环端口启动该挂载、调用既有 production capture
   与 validator，并在所有退出路径关闭服务器；正式采集不再依赖人工同步两个终端；
+- `pipeline.human_review_inputs` 从复验通过的 Viewer v2 report 确定性生成七类人审
+  policy；记录脚本用 `--viewer-report` 导入原始截图绑定，reviewer 仍须逐类明确判定；
 - capture input、截图与复制出的代码采用 root-bounded、no-symlink、no-replace
   路径；浏览器可执行文件流式哈希，不按文件大小整块分配内存；
 - 浏览器实际收到的 scene manifest 与 acceptance probe 响应字节必须分别匹配

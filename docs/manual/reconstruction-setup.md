@@ -305,6 +305,38 @@ Viewer v1 报告只可用于 `internal-canary`，不能进入 production aggrega
 机器门通过，在同一 scene 的真实 CUDA 3DGS、米制对齐和人工观感验收完成前仍不得
 声明 Production V1。
 
+Viewer v2 机器门完成后，从同一份报告生成不可手写 pose 的人审策略：
+
+```powershell
+python -m pipeline.human_review_inputs `
+  --evidence-root "$run" `
+  --viewer-policy "$run\viewer-inputs\policy.json" `
+  --viewer-report "$run\viewer\performance-report.v2.json" `
+  --output "$run\review\human-review-policy.json"
+```
+
+检查三张原始截图后，reviewer 必须逐项填写全部七类结论；截图路径直接从已验证的
+Viewer report 导入，不再重复填写 `--screenshot`：
+
+```powershell
+python scripts/record_real_scene_review.py `
+  --run-root "$run" `
+  --reviewer "实际审核人" `
+  --policy "$run\review\human-review-policy.json" `
+  --viewer-report "$run\viewer\performance-report.v2.json" `
+  --disposition scene-envelope=accepted `
+  --disposition floaters=accepted `
+  --disposition view-dependent-colour=accepted `
+  --disposition exposure-seams=accepted `
+  --disposition transparent-surfaces=accepted `
+  --disposition navigable-holes=accepted `
+  --disposition fidelity-label=accepted
+```
+
+命令中的 `accepted` 只是填写格式示例，必须按截图真实观感改成 `accepted`、
+`rejected` 或 `unknown`。脚本会重开 Viewer policy、camera set、scene、代码与截图，
+任一 SHA、字节数、pose 顺序或路径漂移都会拒绝写入；它不会替 reviewer 自动接受。
+
 验收时至少确认：
 
 1. 注册覆盖率和输入来源；
