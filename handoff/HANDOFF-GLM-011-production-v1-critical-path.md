@@ -324,6 +324,48 @@ npx playwright install chromium
 
 若新增 target，必须同步 `Makefile`、`make.py`、帮助文本与 CLI 测试。
 
+#### P1-2 实施顺序与 Codex review 门
+
+GLM 不要只交付一个 report model 后停下；按以下四个独立小提交连续推进：
+
+1. **P1-2A — schema 与安全状态机**
+   - `ready` 必须要求本地 transport、known_hosts、私钥保护、远端 container digest
+     和 worker binary 全部有实测 `true`；远端结果为 `None` 时不能 ready；
+   - 使用稳定、有限集合的 `failure_code`，不得把任意异常、stderr 或 config 原文
+     放进 `failure_reason`；
+   - report 必须绑定去密后的 config identity、known_hosts 内容 SHA、container digest、
+     worker identity 和检查器版本；只列这些安全 identity，不列私钥/config 路径；
+   - canonical report ID/content SHA 从除自身 ID 外的完整 payload 复算，跨 config、
+     host、container 或 worker 不能复用。
+2. **P1-2B — 本地 credential-free probe**
+   - 配置缺失、凭据缺失、`ssh` 缺失、`scp` 缺失分别得到稳定
+     `blocked-external-input` code；
+   - JSON duplicate key、shape 错误、known_hosts/fingerprint 不匹配、私钥保护不合格
+     得到 `failed`；
+   - config、known_hosts、key 在检查前后替换、变更或变成 link-like entry 必须失败；
+     不在 argv、stdout、异常或 report 中暴露路径/内容。
+3. **P1-2C — 固定只读远端 probe**
+   - 只有 P1-2B 全绿后才允许启动 transport；
+   - 命令和参数来自固定模板与严格验证的 immutable identifiers，禁止 shell 拼接、
+     bundle upload、`mkdir`、container create/run 或训练；
+   - 验证实际 runtime、immutable image digest 和 worker executable；超时、host-key
+     漂移、连接失败与 capability mismatch 使用不同稳定 code；
+   - probe 后再次验证所有本地输入快照，TOCTOU 漂移不得发布 ready。
+4. **P1-2D — CLI、canonical publication 与对抗回归**
+   - `real-scene preflight-remote` 只写 operator 私有、独占创建的 canonical report，
+     不创建训练目录或 job；
+   - 覆盖 success、三类 blocked、shape/fingerprint/ACL/tamper/timeout/remote mismatch、
+     output 已存在和中途写失败；
+   - 对 argv、stdout/stderr、异常文本、traceback 和 report 做 secret/path canary 搜索；
+   - Linux/Windows 测试门明确区分真实平台能力与 fixture，不用 fixture 字符串冒充
+     remote-ready 机器证据。
+
+当前 `RemoteShellPreflightReport` 草稿在进入 P1-2B 前必须先关闭三项：
+
+- `ready` 不能只检查四个本地 boolean；
+- 任意自由文本 `failure_reason` 不能成为机器状态或错误透传通道；
+- 缺少去密 config/input snapshot binding 时，report 仍可被其它配置重放。
+
 ### P1-3：恢复/失败演练
 
 对 submit、poll、fetch、checksum mismatch、远端 job 失败、网络中断与本地 journal
