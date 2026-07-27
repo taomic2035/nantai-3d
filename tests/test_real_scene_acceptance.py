@@ -209,17 +209,27 @@ def test_crc_valid_but_undecodable_png_is_rejected(tmp_path):
         )
 
 
-def test_screenshot_symlink_and_escape_are_rejected(tmp_path):
+def test_screenshot_symlink_is_rejected(tmp_path):
     root, review = _fixture(tmp_path)
     original = root / review.screenshots[0].path
     target = root / "target.png"
     target.write_bytes(original.read_bytes())
     original.unlink()
-    original.symlink_to(target)
+    try:
+        original.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip(
+                "Windows SeCreateSymbolicLinkPrivilege not held"
+            )
+        raise
 
     with pytest.raises(RealSceneAcceptanceError, match="symlink"):
         validate_human_visual_review(_policy(), review, root)
 
+
+def test_screenshot_escape_is_rejected(tmp_path):
+    root, review = _fixture(tmp_path)
     escaped_binding = review.screenshots[0].model_copy(update={"path": "../escape.png"})
     escaped = review.model_copy(
         update={

@@ -431,7 +431,14 @@ def test_verify_release_tree_rejects_symlinked_artifact(tmp_path: Path) -> None:
     target = tmp_path / "outside.ply"
     target.write_bytes(asset.read_bytes())
     asset.unlink()
-    asset.symlink_to(target)
+    try:
+        asset.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip(
+                "Windows SeCreateSymbolicLinkPrivilege not held"
+            )
+        raise
 
     with pytest.raises(ReleaseVerificationError, match="symlink"):
         verify_release_tree(tmp_path)
@@ -561,7 +568,14 @@ def test_builder_rejects_symlinked_runtime_input(tmp_path: Path) -> None:
     outside = tmp_path / "outside.py"
     outside.write_text("unsafe = True\n", encoding="utf-8")
     runtime.unlink()
-    runtime.symlink_to(outside)
+    try:
+        runtime.symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip(
+                "Windows SeCreateSymbolicLinkPrivilege not held"
+            )
+        raise
 
     with pytest.raises(ReleaseVerificationError, match="symlink"):
         build_release_archive(
