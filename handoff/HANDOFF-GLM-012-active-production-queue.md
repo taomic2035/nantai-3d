@@ -23,6 +23,30 @@ runtime、`pipeline.durable_io`、canonical JSON。
 开始，随后连续执行 `G1 → H1`。完成一张就独立提交、用一次性代理 push，然后直接
 开始下一张，不等待 Codex 回执。
 
+### Codex 再派发（2026-07-27 22:20 +08:00）
+
+远端最新基线为 `31a7e25`；其中 `461e851` 已接通 receipt-bound Studio
+reconstruction mount，`31a7e25` 已补齐正式 Viewer 操作说明。截至该基线，远端没有
+任何 F1 candidate。GLM 当前回复“无待推进工作”是不正确的，立即执行：
+
+```text
+git -c http.proxy=http://127.0.0.1:7890 fetch origin main
+git -c http.proxy=http://127.0.0.1:7890 pull --ff-only origin main
+F1 Step 1:
+  tests/test_remote_shell_executor.py
+  先建立本文件列出的 7 个 clearance 行为 RED
+F1 Step 2:
+  接入唯一 production_runtime_evidence，不新建平行 schema
+F1 Step 3:
+  专项测试 + Ruff + diff-check + 独立提交 + 临时代理 push
+随后直接开始 G1，再直接开始 H1
+```
+
+第一轮回执必须包含第一个真实 RED 的测试名和失败原因；只给设计说明、静态 grep、
+“需要 Codex”或“没有真实 GPU”都不算开始。F1 使用 fake transport，不依赖 secret、
+正式素材或付费 GPU。不要修改 `pipeline/studio_server.py`、Viewer、Studio、release、
+acceptance aggregate 或本 handoff；这些路径由 Codex 保持。
+
 | 顺序 | Ticket | 只允许主动修改 | 必须交付的结果 |
 |---|---|---|---|
 | 已关闭 | `P0-CI` | `pipeline/remote_training_drill.py`、`tests/test_remote_training_drill.py` | `70a965e` 已刷新 registry；专项 `12 passed`，远程固定演练 job 通过 |
