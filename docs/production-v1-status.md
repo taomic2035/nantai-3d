@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27，基线 `23a2ece`
+更新：2026-07-27，基线 `8693848`
 
 ## 一句话状态
 
@@ -19,7 +19,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 远程演练真实性边界 | 固定 11 cases，明确为 transport-fixture |
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
-| production import 复验 | 已从原始字节重算并绑定 receipt |
+| production import 与 runner 复验 | 原始字节重算；低 RMS 自报不能通过 |
 | Viewer/Studio 与 synthetic QA | 可用，但不能代替真实重建验收 |
 
 ## 正式版关键路径

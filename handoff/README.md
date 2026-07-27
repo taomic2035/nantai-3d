@@ -12,7 +12,8 @@
 
 Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cfb`
 关闭；P1-4A 由 `42df736` 关闭，P1-4B 的测量 / policy / decision 分层由
-`0ad9417` 关闭；P1-4C production import 字节复验由 `23a2ece` 关闭。GLM 当前只
+`0ad9417` 关闭；P1-4C production import 与 runner 字节复验由 `23a2ece`、
+`8693848` 关闭。GLM 当前只
 连续推进 P1-5：production runtime evidence、fixed read-only probe、remote caller、
 production result closure 与 runner 接入；具体边界见
 [HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md)。

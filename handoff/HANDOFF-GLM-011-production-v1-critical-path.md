@@ -26,10 +26,11 @@ acceptance。
 | P1-3D 固定 11-case 演练 | `4150cfb`，remote artifact accepted |
 | P1-4A 对应点与退化门 | `42df736` |
 | P1-4B 测量 / policy / decision | `0ad9417` |
-| P1-4C production import 复验 | `23a2ece`，469 passed / 5 skipped |
+| P1-4C production import / runner 复验 | `23a2ece`, `8693848` |
 
-`P1-3D` 的证据范围只是 `transport-fixture`，不等于云 GPU 训练；`P1-4C` 只证明
-caller 能验证真实证据，不代表已经取得真实测量。
+`P1-3D` 的证据范围只是 `transport-fixture`，不等于云 GPU 训练；`P1-4C` 已禁止
+runner 仅凭低 RMS 放行，但这只证明 caller 能验证真实证据，不代表已经取得真实
+测量。
 
 ## 共享工作树即时审计
 
