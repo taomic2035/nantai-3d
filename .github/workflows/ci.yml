@@ -11,6 +11,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Only the newest commit on one branch is authoritative. Superseded runs
+# consume scarce cross-platform runners and delay the exact-head result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # UTF-8 everywhere so CJK/emoji output never trips cp936/cp1252 on Windows.
 env:
   PYTHONUTF8: "1"
