@@ -195,6 +195,7 @@ def _config(tmp_path) -> RemoteShellExecutorConfig:
         ),
         expected_worker_sha256="d" * 64,
         expected_worker_version="1.0.0",
+        expected_checker_config_sha256="e" * 64,
     )
 
 
@@ -1218,6 +1219,345 @@ def test_private_key_windows_fail_closed_without_pywin32(
 
 
 # ---------------------------------------------------------------------------
+# P1-3B: checksum / content drift drills
+# ---------------------------------------------------------------------------
+
+
+_BASE_MEMBERS_BY_PATH = {
+    "container-identity.txt": (
+        "registry.example/nantai@sha256:" + ("c" * 64) + "\n"
+    ).encode("ascii"),
+    "dataparser_transforms.json": (
+        b'{"scale":1.0,"transform":'
+        b'[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}\n'
+    ),
+    "operator-intent-config.yml": b"config\n",
+    "point_cloud.ply": b"ply\n",
+    "training-request.json": b"{}\n",
+    "training-result.json": b"{}\n",
+    "training.log": b"log\n",
+    "worker.stderr.log": b"",
+    "worker.stdout.log": b"container completed\n",
+}
+
+
+def _build_tamper_archive(
+    path: Path,
+    *,
+    members_by_path: dict[str, bytes] | None = None,
+    job_id: str = "job-expected",
+    attempt_id: str = "attempt-expected",
+    request_sha256: str = "a" * 64,
+    training_bundle_sha256: str = "d" * 64,
+    container_identity: str = (
+        "registry.example/nantai@sha256:" + ("c" * 64)
+    ),
+    manifest_overrides: dict | None = None,
+) -> bytes:
+    """Build a result archive with optional member/manifest tampering.
+
+    Returns the archive bytes so callers can write additional mutations.
+    """
+    import zipfile
+
+    members_by_path = dict(members_by_path or _BASE_MEMBERS_BY_PATH)
+    members = tuple(
+        RemoteResultBundleMember(
+            path=name,
+            byte_length=len(payload),
+            sha256=_sha(payload),
+        )
+        for name, payload in sorted(members_by_path.items())
+    )
+    manifest_kwargs = {
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "request_sha256": request_sha256,
+        "training_bundle_sha256": training_bundle_sha256,
+        "container_identity": container_identity,
+        "members": members,
+    }
+    if manifest_overrides:
+        manifest_kwargs.update(manifest_overrides)
+    manifest = RemoteResultBundleManifest(**manifest_kwargs)
+
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "result-bundle-manifest.json",
+            canonical_remote_result_manifest_bytes(manifest),
+        )
+        for name, payload in sorted(members_by_path.items()):
+            archive.writestr(name, payload)
+    return path.read_bytes()
+
+
+def _verify_base_archive(path: Path, **overrides):
+    kwargs = {
+        "expected_job_id": "job-expected",
+        "expected_attempt_id": "attempt-expected",
+        "expected_request_sha256": "a" * 64,
+        "expected_training_bundle_sha256": "d" * 64,
+        "expected_container_identity": (
+            "registry.example/nantai@sha256:" + ("c" * 64)
+        ),
+    }
+    kwargs.update(overrides)
+    return verify_remote_result_bundle(path, **kwargs)
+
+
+def test_result_bundle_rejects_member_content_drift(tmp_path):
+    """Member bytes drift from manifest sha256 must fail closed.
+
+    Build a correct archive, then rebuild with the SAME manifest but
+    different ``training.log`` bytes so the manifest's sha256/size no
+    longer matches the actual member content.
+    """
+    import zipfile
+
+    base_path = tmp_path / "base.zip"
+    _build_tamper_archive(base_path)
+    good = _verify_base_archive(base_path)
+    assert good.member_bytes["training.log"] == b"log\n"
+
+    tampered_path = tmp_path / "tampered.zip"
+    tampered_members_by_path = {
+        **_BASE_MEMBERS_BY_PATH,
+        "training.log": b"tampered-log\n",
+    }
+    with zipfile.ZipFile(
+        tampered_path,
+        "w",
+        compression=zipfile.ZIP_STORED,
+    ) as archive:
+        with zipfile.ZipFile(base_path, "r") as original:
+            archive.writestr(
+                "result-bundle-manifest.json",
+                original.read("result-bundle-manifest.json"),
+            )
+        for name, payload in sorted(tampered_members_by_path.items()):
+            archive.writestr(name, payload)
+
+    with pytest.raises(RemoteResultBundleError, match="sha256/size mismatch"):
+        _verify_base_archive(tampered_path)
+
+
+def test_result_bundle_rejects_manifest_member_sha_drift(tmp_path):
+    """Manifest member sha256 lying about actual bytes must fail closed."""
+    import zipfile
+
+    path = tmp_path / "archive.zip"
+    _build_tamper_archive(path)
+
+    lying_members = (
+        RemoteResultBundleMember(
+            path="container-identity.txt",
+            byte_length=len(_BASE_MEMBERS_BY_PATH["container-identity.txt"]),
+            sha256="0" * 64,
+        ),
+    ) + tuple(
+        RemoteResultBundleMember(
+            path=name,
+            byte_length=len(payload),
+            sha256=_sha(payload),
+        )
+        for name, payload in sorted(_BASE_MEMBERS_BY_PATH.items())
+        if name != "container-identity.txt"
+    )
+    manifest = RemoteResultBundleManifest(
+        job_id="job-expected",
+        attempt_id="attempt-expected",
+        request_sha256="a" * 64,
+        training_bundle_sha256="d" * 64,
+        container_identity="registry.example/nantai@sha256:" + ("c" * 64),
+        members=lying_members,
+    )
+    path.write_bytes(b"")
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "result-bundle-manifest.json",
+            canonical_remote_result_manifest_bytes(manifest),
+        )
+        for name, payload in sorted(_BASE_MEMBERS_BY_PATH.items()):
+            archive.writestr(name, payload)
+    with pytest.raises(RemoteResultBundleError, match="sha256/size mismatch"):
+        _verify_base_archive(path)
+
+
+def test_result_bundle_rejects_container_identity_drift(tmp_path):
+    path = tmp_path / "archive.zip"
+    tampered_container = (
+        "registry.example/nantai@sha256:" + ("f" * 64)
+    )
+    _build_tamper_archive(
+        path,
+        container_identity=tampered_container,
+        members_by_path={
+            **_BASE_MEMBERS_BY_PATH,
+            "container-identity.txt": (
+                tampered_container + "\n"
+            ).encode("ascii"),
+        },
+    )
+    with pytest.raises(RemoteResultBundleError, match="container"):
+        _verify_base_archive(path)
+
+
+def test_result_bundle_rejects_container_member_bytes_drift(tmp_path):
+    path = tmp_path / "archive.zip"
+    _build_tamper_archive(path)
+
+    import zipfile
+
+    members_by_path = {
+        **_BASE_MEMBERS_BY_PATH,
+        "container-identity.txt": (
+            "registry.example/nantai@sha256:" + ("f" * 64) + "\n"
+        ).encode("ascii"),
+    }
+    members = tuple(
+        RemoteResultBundleMember(
+            path=name,
+            byte_length=len(payload),
+            sha256=_sha(payload),
+        )
+        for name, payload in sorted(members_by_path.items())
+    )
+    manifest = RemoteResultBundleManifest(
+        job_id="job-expected",
+        attempt_id="attempt-expected",
+        request_sha256="a" * 64,
+        training_bundle_sha256="d" * 64,
+        container_identity="registry.example/nantai@sha256:" + ("c" * 64),
+        members=members,
+    )
+    path.write_bytes(b"")
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "result-bundle-manifest.json",
+            canonical_remote_result_manifest_bytes(manifest),
+        )
+        for name, payload in sorted(members_by_path.items()):
+            archive.writestr(name, payload)
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="container identity bytes mismatch",
+    ):
+        _verify_base_archive(path)
+
+
+def test_result_bundle_rejects_job_id_drift(tmp_path):
+    path = tmp_path / "archive.zip"
+    _build_tamper_archive(path, job_id="job-tampered")
+    with pytest.raises(RemoteResultBundleError, match="job"):
+        _verify_base_archive(path)
+
+
+def test_result_bundle_rejects_attempt_id_drift(tmp_path):
+    path = tmp_path / "archive.zip"
+    _build_tamper_archive(path, attempt_id="attempt-tampered")
+    with pytest.raises(RemoteResultBundleError, match="attempt"):
+        _verify_base_archive(path)
+
+
+def test_result_bundle_rejects_training_bundle_sha_drift(tmp_path):
+    path = tmp_path / "archive.zip"
+    _build_tamper_archive(path, training_bundle_sha256="e" * 64)
+    with pytest.raises(RemoteResultBundleError, match="training bundle"):
+        _verify_base_archive(path)
+
+
+def test_poll_rejects_status_with_drifted_request_sha(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    drifted = RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256="0" * 64,
+        training_bundle_sha256=job.training_bundle_sha256,
+        state="running",
+        updated_at_utc=_T0,
+    )
+    runner.responses.append(_status_response(drifted))
+    with pytest.raises(RemoteShellExecutionError, match="identity"):
+        executor.poll(job)
+
+
+def test_poll_rejects_status_with_drifted_training_bundle_sha(
+    tmp_path,
+    monkeypatch,
+):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    drifted = RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256="0" * 64,
+        state="running",
+        updated_at_utc=_T0,
+    )
+    runner.responses.append(_status_response(drifted))
+    with pytest.raises(RemoteShellExecutionError, match="identity"):
+        executor.poll(job)
+
+
+def test_poll_rejects_status_with_drifted_job_id(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    drifted = RemoteShellStatus(
+        job_id="job-tampered",
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        state="running",
+        updated_at_utc=_T0,
+    )
+    runner.responses.append(_status_response(drifted))
+    with pytest.raises(RemoteShellExecutionError, match="identity"):
+        executor.poll(job)
+
+
+def test_poll_rejects_non_canonical_status_json(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    non_canonical = (
+        canonical_remote_status_bytes(
+            _running_status(job),
+        )
+        .replace(b",", b", ", 1)
+    )
+    runner.responses.append(
+        subprocess.CompletedProcess([], 0, non_canonical, b""),
+    )
+    with pytest.raises(RemoteShellExecutionError, match="canonical"):
+        executor.poll(job)
+
+
+def test_poll_rejects_status_with_duplicate_json_keys(
+    tmp_path,
+    monkeypatch,
+):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    raw = canonical_remote_status_bytes(_running_status(job)).decode("ascii")
+    duplicate = raw.replace(
+        '"job_id":',
+        '"job_id":"job-expected","job_id":',
+        1,
+    ).encode("ascii")
+    runner.responses.append(
+        subprocess.CompletedProcess([], 0, duplicate, b""),
+    )
+    with pytest.raises(RemoteShellExecutionError, match="invalid"):
+        executor.poll(job)
+
+
+# ---------------------------------------------------------------------------
 # P1-3A: submit/poll/fetch state drills
 # ---------------------------------------------------------------------------
 
@@ -1295,7 +1635,7 @@ def test_poll_nonzero_exit_returns_unknown(tmp_path, monkeypatch):
     assert observation.result_bundle_sha256 is None
 
 
-def test_poll_timeout_is_fail_closed(tmp_path, monkeypatch):
+def test_poll_timeout_returns_unknown(tmp_path, monkeypatch):
     executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
     job = executor.submit(prepared)
 
@@ -1304,8 +1644,11 @@ def test_poll_timeout_is_fail_closed(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(["ssh"], timeout=1)
 
     executor._run_command = timeout
-    with pytest.raises(RemoteShellExecutionError, match="transport"):
-        executor.poll(job)
+    observation = executor.poll(job)
+
+    assert observation.state == "unknown"
+    assert observation.exit_code is None
+    assert observation.result_bundle_sha256 is None
 
 
 def test_poll_disconnect_after_running_returns_unknown(
@@ -1435,6 +1778,64 @@ def test_fetch_interrupted_cleans_staging(tmp_path, monkeypatch):
 
 
 class TestRemoteShellPreflight:
+    def test_strict_remote_config_loader_rejects_duplicate_keys(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        path = tmp_path / "remote-config.json"
+        canonical = remote_module._canonical_model_bytes(config)
+        path.write_bytes(canonical)
+
+        assert (
+            remote_module.load_remote_shell_executor_config(path)
+            == config
+        )
+
+        duplicate = canonical.replace(
+            b"{",
+            b'{"port":2222,',
+            1,
+        )
+        path.write_bytes(duplicate)
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="duplicate|canonical",
+        ):
+            remote_module.load_remote_shell_executor_config(path)
+
+    def test_preflight_publication_flush_failure_leaves_no_final(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        report = run_remote_shell_preflight(
+            _config(tmp_path),
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        output = tmp_path / "private" / "preflight.json"
+
+        def fail_flush(_path):
+            raise OSError("simulated flush failure")
+
+        monkeypatch.setattr(
+            "pipeline.durable_io.flush_file",
+            fail_flush,
+        )
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="cannot be published",
+        ):
+            remote_module.publish_remote_shell_preflight(
+                report,
+                output,
+            )
+
+        assert not output.exists()
+        assert not tuple(output.parent.glob(".*.staging"))
+
     def test_remote_probe_is_required_for_ready(self, tmp_path):
         config = _config(tmp_path)
         report = run_remote_shell_preflight(
