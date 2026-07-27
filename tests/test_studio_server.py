@@ -443,10 +443,11 @@ def _stub_verified_real_scene_import(
     source_role: str = "production-acceptance",
     geometry_usability: str = "metric-aligned",
     target_units: str = "meters",
+    recon_payload: bytes = b"ply\nverified-production\n",
 ) -> tuple[dict[str, bytes], list[tuple[Path, Path]]]:
     payloads = {
         "web/recon_manifest.json": b'{"scene":"verified-production"}\n',
-        "web/recon_full.ply": b"ply\nverified-production\n",
+        "web/recon_full.ply": recon_payload,
         "web/chunks/chunks.json": b'{"chunks":[]}\n',
     }
     for relative, payload in payloads.items():
@@ -3345,6 +3346,44 @@ class TestHttpContract:
         assert json.loads(payload)["error"]["code"] == (
             "mounted_reconstruction_changed"
         )
+
+    def test_real_scene_mount_streams_large_ply_without_path_read_bytes(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _write_v2_project(tmp_path)
+        import_root = tmp_path / "private-import"
+        recon_payload = b"ply\n" + (b"x" * (2 * 1024 * 1024 + 17))
+        _stub_verified_real_scene_import(
+            monkeypatch,
+            import_root,
+            recon_payload=recon_payload,
+        )
+
+        with _running_server(
+            tmp_path,
+            real_scene_import_root=import_root,
+        ) as server:
+            original_read_bytes = Path.read_bytes
+
+            def _reject_whole_file_read(path: Path):
+                if path == import_root / "web/recon_full.ply":
+                    raise AssertionError(
+                        "mounted PLY must not be allocated as one bytes object"
+                    )
+                return original_read_bytes(path)
+
+            monkeypatch.setattr(Path, "read_bytes", _reject_whole_file_read)
+            status, headers, payload = _request(
+                server,
+                "GET",
+                "/web/data/recon/recon_full.ply",
+            )
+
+        assert status == 200
+        assert int(headers["content-length"]) == len(recon_payload)
+        assert payload == recon_payload
 
     def test_path_traversal_and_symlink_escape_are_blocked(self, tmp_path):
         _write_v2_project(tmp_path)

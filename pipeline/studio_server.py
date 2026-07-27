@@ -31,6 +31,7 @@ import hmac
 import ipaddress
 import json
 import mimetypes
+import os
 import re
 import secrets
 import stat
@@ -43,7 +44,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import unquote, urlsplit
 
 from plyfile import PlyData, PlyParseError
@@ -159,6 +160,7 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 STATIC_ROOTS = {"assets", "handoff", "recon", "web"}
 EVIDENCE_ROOTS = {"recon", "web"}
 MOUNTED_RECONSTRUCTION_PREFIX = "/web/data/recon/"
+MOUNTED_RECONSTRUCTION_IO_CHUNK_BYTES = 1024 * 1024
 ALLOWED_RUN_STATUSES = {"queued", "running", "succeeded", "failed", "canceled"}
 STUDIO_COMMAND_IDS = ("ingest", "reconstruct", "world", "validate-assets")
 READ_ONLY_REASON = "Preview 只读模式 · 可浏览场景与证据，重建任务暂未开放"
@@ -2175,56 +2177,81 @@ def _is_linklike(path: Path) -> bool:
     )
 
 
-def _stable_regular_file_bytes(
+def _stat_signature(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def _open_verified_regular_file(
     root: Path,
     binding: ImportArtifactBinding,
-) -> bytes:
+) -> BinaryIO:
     path = root / binding.path
+    stream: BinaryIO | None = None
     try:
-        before = path.lstat()
-        resolved = path.resolve(strict=True)
+        path_before = path.lstat()
+        resolved_before = path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise MountedReconstructionError(
             f"mounted reconstruction artifact is unavailable: {binding.path}"
         ) from exc
     if (
         _is_linklike(path)
-        or not stat.S_ISREG(before.st_mode)
-        or resolved != path
-        or not _is_below(root, resolved)
+        or not stat.S_ISREG(path_before.st_mode)
+        or resolved_before != path
+        or not _is_below(root, resolved_before)
     ):
         raise MountedReconstructionError(
             f"mounted reconstruction artifact is unsafe: {binding.path}"
         )
     try:
-        payload = path.read_bytes()
-        after = path.lstat()
-    except OSError as exc:
+        stream = path.open("rb")
+        descriptor_before = os.fstat(stream.fileno())
+        digest = hashlib.sha256()
+        byte_length = 0
+        while chunk := stream.read(
+            MOUNTED_RECONSTRUCTION_IO_CHUNK_BYTES
+        ):
+            digest.update(chunk)
+            byte_length += len(chunk)
+        descriptor_after = os.fstat(stream.fileno())
+        path_after = path.lstat()
+        resolved_after = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        if stream is not None:
+            stream.close()
         raise MountedReconstructionError(
             f"mounted reconstruction artifact cannot be read: {binding.path}"
         ) from exc
-    before_signature = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mtime_ns,
-    )
-    after_signature = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-    )
     if (
-        before_signature != after_signature
+        _stat_signature(path_before)
+        != _stat_signature(descriptor_before)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _stat_signature(descriptor_after)
+        != _stat_signature(path_after)
         or _is_linklike(path)
-        or len(payload) != binding.byte_length
-        or hashlib.sha256(payload).hexdigest() != binding.sha256
+        or resolved_after != path
+        or not _is_below(root, resolved_after)
+        or byte_length != binding.byte_length
+        or digest.hexdigest() != binding.sha256
     ):
+        stream.close()
         raise MountedReconstructionError(
             f"mounted reconstruction artifact changed: {binding.path}"
         )
-    return payload
+    try:
+        stream.seek(0)
+    except OSError as exc:
+        stream.close()
+        raise MountedReconstructionError(
+            f"mounted reconstruction artifact cannot be rewound: {binding.path}"
+        ) from exc
+    return stream
 
 
 @dataclass(frozen=True)
@@ -2256,8 +2283,8 @@ class VerifiedReconstructionMount:
             return None
         return self.bindings.get(f"web/{relative}")
 
-    def read(self, binding: ImportArtifactBinding) -> bytes:
-        return _stable_regular_file_bytes(self.root, binding)
+    def open(self, binding: ImportArtifactBinding) -> BinaryIO:
+        return _open_verified_regular_file(self.root, binding)
 
 
 def _load_verified_reconstruction_mount(
@@ -2759,6 +2786,39 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(payload)
+
+    def _send_stream(
+        self,
+        status: int,
+        stream: BinaryIO,
+        *,
+        byte_length: int,
+        content_type: str,
+        cache_control: str,
+        head_only: bool = False,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(byte_length))
+        self.send_header("Cache-Control", cache_control)
+        self._security_headers()
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        if head_only:
+            return
+        remaining = byte_length
+        while remaining:
+            chunk = stream.read(
+                min(MOUNTED_RECONSTRUCTION_IO_CHUNK_BYTES, remaining)
+            )
+            if not chunk:
+                raise ConnectionError(
+                    "verified mounted reconstruction truncated during response"
+                )
+            self.wfile.write(chunk)
+            remaining -= len(chunk)
 
     def _send_json(self, status: int, value: Any, *, head_only: bool = False) -> None:
         payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -4019,7 +4079,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                payload = reconstruction_mount.read(binding)
+                stream = reconstruction_mount.open(binding)
             except MountedReconstructionError:
                 self._error(
                     HTTPStatus.CONFLICT,
@@ -4028,32 +4088,34 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
                 return
-            etag = f'"sha256:{binding.sha256}"'
-            cache_control = "public, max-age=0, must-revalidate"
-            request_etags = {
-                candidate.strip()
-                for candidate in self.headers.get(
-                    "If-None-Match",
-                    "",
-                ).split(",")
-                if candidate.strip()
-            }
-            if "*" in request_etags or etag in request_etags:
-                self._send_not_modified(
-                    etag,
+            with stream:
+                etag = f'"sha256:{binding.sha256}"'
+                cache_control = "public, max-age=0, must-revalidate"
+                request_etags = {
+                    candidate.strip()
+                    for candidate in self.headers.get(
+                        "If-None-Match",
+                        "",
+                    ).split(",")
+                    if candidate.strip()
+                }
+                if "*" in request_etags or etag in request_etags:
+                    self._send_not_modified(
+                        etag,
+                        cache_control=cache_control,
+                    )
+                    return
+                self._send_stream(
+                    HTTPStatus.OK,
+                    stream,
+                    byte_length=binding.byte_length,
+                    content_type=_content_type(
+                        reconstruction_mount.root / binding.path
+                    ),
                     cache_control=cache_control,
+                    head_only=head_only,
+                    extra_headers={"ETag": etag},
                 )
-                return
-            self._send_bytes(
-                HTTPStatus.OK,
-                payload,
-                content_type=_content_type(
-                    reconstruction_mount.root / binding.path
-                ),
-                cache_control=cache_control,
-                head_only=head_only,
-                extra_headers={"ETag": etag},
-            )
             return
         try:
             target = resolve_static_path(self.project_root, request_path)
