@@ -191,7 +191,7 @@ def _load_config(
 
 
 def _redact_secrets(data: bytes) -> bytes:
-    """Mask private keys and credential-like patterns from probe output."""
+    """Return a masked copy used only to detect secret-like observations."""
     redacted = data
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub(b"<redacted>", redacted)
@@ -232,7 +232,14 @@ def _run_bounded(
         raise RemoteReadinessCheckError(
             "readiness probe stderr exceeded byte cap"
         )
-    return _redact_secrets(stdout)
+    if (
+        _redact_secrets(stdout) != stdout
+        or _redact_secrets(stderr) != stderr
+    ):
+        raise RemoteReadinessCheckError(
+            "readiness probe output contains secret-like material"
+        )
+    return stdout
 
 
 def _safe_text(payload: bytes, *, label: str) -> str:
@@ -254,9 +261,6 @@ def _safe_text(payload: bytes, *, label: str) -> str:
     return value
 
 
-_SUPPORTED_SCHEDULER_ADAPTERS = frozenset({"docker", "podman"})
-
-
 def _probe_gpu_scheduler(
     *,
     runtime_name: str,
@@ -270,11 +274,16 @@ def _probe_gpu_scheduler(
     runtime. It does NOT measure the GPU itself — host GPU identity
     belongs in the fresh job container (G2), not in host preflight.
 
-    Only the docker/podman ``info --format {{json .Runtimes}}`` adapter
-    is supported; any other runtime name must fail closed rather than
-    be treated as compatible with docker's private output format.
+    Only Docker's fixed ``info --format {{json .Runtimes}}`` adapter is
+    supported here. Podman uses CDI for NVIDIA devices; until this
+    checker binds the ``nvidia-ctk`` executable and CDI observation,
+    Podman must remain blocked instead of parsing Docker's private field.
     """
-    if runtime_name not in _SUPPORTED_SCHEDULER_ADAPTERS:
+    if runtime_name == "podman":
+        raise RemoteReadinessCheckError(
+            "Podman GPU scheduler preflight requires a bound CDI adapter"
+        )
+    if runtime_name != "docker":
         raise RemoteReadinessCheckError(
             "GPU scheduler adapter is not supported for runtime"
         )
@@ -319,8 +328,14 @@ def collect_remote_readiness(
         raise RemoteReadinessCheckError(
             "container runtime binary not found"
         )
+    runtime_path = Path(runtime_resolved)
+    if not runtime_path.is_absolute():
+        raise RemoteReadinessCheckError(
+            "container runtime resolved path must be absolute"
+        )
+    runtime_resolved = str(runtime_path)
     runtime_bytes, runtime_signature = _stable_bytes(
-        Path(runtime_resolved),
+        runtime_path,
         label="container runtime binary",
         maximum_bytes=_MAX_RUNTIME_BYTES,
     )
@@ -400,7 +415,7 @@ def collect_remote_readiness(
         )
 
     runtime_after, runtime_after_sig = _stable_bytes(
-        Path(runtime_resolved),
+        runtime_path,
         label="container runtime binary",
         maximum_bytes=_MAX_RUNTIME_BYTES,
     )

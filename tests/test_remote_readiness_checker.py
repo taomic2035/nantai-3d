@@ -45,16 +45,20 @@ def test_remote_worker_exposes_stable_version():
     assert result.stdout.strip() == "1.0.0"
 
 
-def _write_config(tmp_path: Path) -> tuple[Path, Path, bytes, Path]:
+def _write_config(
+    tmp_path: Path,
+    *,
+    runtime: str = "docker",
+) -> tuple[Path, Path, bytes, Path]:
     worker = tmp_path / "remote_training_worker.py"
     worker.write_bytes(b"remote-worker-v1\n")
-    runtime_bin = tmp_path / "docker"
-    runtime_bin.write_bytes(b"fake-docker-binary-v1\n")
+    runtime_bin = tmp_path / runtime
+    runtime_bin.write_bytes(f"fake-{runtime}-binary-v1\n".encode("ascii"))
     payload = (
         json.dumps(
             {
                 "schema": "nantai.remote-readiness-config.v1",
-                "container_runtime": "docker",
+                "container_runtime": runtime,
                 "container_identity": CONTAINER_IDENTITY,
                 "worker_path": str(worker),
                 "worker_python": sys.executable,
@@ -70,9 +74,13 @@ def _write_config(tmp_path: Path) -> tuple[Path, Path, bytes, Path]:
     return config, worker, payload, runtime_bin
 
 
-def _which_factory(runtime_bin: Path):
+def _which_factory(
+    runtime_bin: Path,
+    *,
+    runtime: str = "docker",
+):
     def _which(name: str) -> str | None:
-        if name == "docker":
+        if name == runtime:
             return str(runtime_bin)
         return None
     return _which
@@ -721,3 +729,168 @@ def test_checker_runtime_probes_use_resolved_path_not_config_name(
             f"runtime probe must use resolved path {runtime_bin}, "
             f"got {call[0]}"
         )
+
+
+def test_checker_rejects_relative_resolved_runtime_path(tmp_path):
+    config, _worker, _config_bytes, runtime_bin = _write_config(tmp_path)
+    invoked = False
+
+    def run(argv, **kwargs):
+        nonlocal invoked
+        del argv, kwargs
+        invoked = True
+        return subprocess.CompletedProcess([], 0, b"", b"")
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="resolved path must be absolute",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+            which=lambda _name: runtime_bin.name,
+        )
+    assert invoked is False
+
+
+def test_checker_rejects_path_wrapper_swap_after_resolution(tmp_path):
+    config, worker, _config_bytes, runtime_bin = _write_config(tmp_path)
+    wrapper = tmp_path / "docker-wrapper"
+    wrapper.write_bytes(b"untrusted-wrapper\n")
+    which_calls = 0
+    runtime_calls: list[tuple[str, ...]] = []
+
+    def changing_which(name: str) -> str | None:
+        nonlocal which_calls
+        assert name == "docker"
+        which_calls += 1
+        return str(runtime_bin if which_calls == 1 else wrapper)
+
+    def run(argv, **kwargs):
+        del kwargs
+        runtime_calls.append(tuple(str(item) for item in argv))
+        return _golden_run(
+            argv,
+            runtime_bin=runtime_bin,
+            worker=worker,
+        )
+
+    evidence = checker.collect_remote_readiness(
+        config,
+        run_command=run,
+        which=changing_which,
+    )
+
+    assert evidence["container_runtime"] == "docker"
+    assert which_calls == 1
+    assert runtime_calls
+    assert all(
+        call[0] == sys.executable
+        or Path(call[0]) == runtime_bin
+        for call in runtime_calls
+    )
+    assert all(Path(call[0]) != wrapper for call in runtime_calls)
+
+
+def test_checker_rejects_non_utf8_observation(tmp_path):
+    config, worker, _config_bytes, runtime_bin = _write_config(tmp_path)
+
+    def run(argv, **kwargs):
+        del kwargs
+        if _is_runtime(argv, runtime_bin) and argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, b"\xff\xfe\n", b"")
+        return _golden_run(
+            argv,
+            runtime_bin=runtime_bin,
+            worker=worker,
+        )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="not safe ASCII",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+            which=_which_factory(runtime_bin),
+        )
+
+
+def test_checker_rejects_secret_bearing_observation_without_leaking_secret(
+    tmp_path,
+    capsys,
+):
+    config, worker, _config_bytes, runtime_bin = _write_config(tmp_path)
+    canary = b"NANTAI_SECRET_CANARY_7f4d6c"
+
+    def run(argv, **kwargs):
+        del kwargs
+        if _is_runtime(argv, runtime_bin) and argv[-1] == "--version":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                b"token=" + canary + b"\n",
+                b"",
+            )
+        return _golden_run(
+            argv,
+            runtime_bin=runtime_bin,
+            worker=worker,
+        )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="secret-like material",
+    ) as captured:
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+            which=_which_factory(runtime_bin),
+        )
+
+    output = capsys.readouterr()
+    rendered = str(captured.value) + output.out + output.err
+    assert canary.decode("ascii") not in rendered
+
+
+def test_checker_podman_blocks_before_docker_runtime_probe(tmp_path):
+    config, _worker, _config_bytes, runtime_bin = _write_config(
+        tmp_path,
+        runtime="podman",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv, **kwargs):
+        del kwargs
+        calls.append(tuple(str(item) for item in argv))
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                b"podman version 5.1.0\n",
+                b"",
+            )
+        if "image" in argv and "inspect" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps([CONTAINER_IDENTITY]).encode("ascii") + b"\n",
+                b"",
+            )
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="Podman GPU scheduler preflight requires a bound CDI adapter",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+            which=_which_factory(runtime_bin, runtime="podman"),
+        )
+
+    assert not any(
+        "info" in call
+        and "{{json .Runtimes}}" in call
+        for call in calls
+    )
