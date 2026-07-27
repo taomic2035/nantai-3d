@@ -191,6 +191,158 @@ class TestFitGates:
         with pytest.raises(AlignmentError, match="exceeds max_rms"):
             fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0)
 
+    # --- P1-4A: 控制点输入预检的补充门 ---------------------------------
+
+    def test_duplicate_target_points_fail_closed(self):
+        """同一目标位置重复采样不增加约束, 只会把点数撑大; fail-closed。
+
+        实测过的 fail-open: 5 个位置各重复 6 次 -> 证据报 n_control_points=30、
+        rms=7.5e-15、ACCEPTED。30 行只是 5 个约束。
+        """
+        # 5 个唯一非共面源点
+        rng = np.random.default_rng(42)
+        src_unique = rng.normal(size=(5, 3)) * 4.0
+        rotation = _rotation_z(np.radians(15.0))
+        dst_unique = 1.5 * (src_unique @ rotation.T) + np.array([1.0, 2.0, 3.0])
+        # 每个源点配同一个目标点 6 次 -> 30 行, 但只有 5 个不同目标位置
+        src = np.repeat(src_unique, 6, axis=0)
+        dst = np.repeat(dst_unique, 6, axis=0)
+        with pytest.raises(AlignmentError, match="互不相同"):
+            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
+
+    def test_duplicate_source_points_fail_closed(self):
+        """同一 SfM 点重复出现不能靠多行重复权重冒充独立约束。"""
+
+        src = np.array([
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, 0.0, 10.0],
+            [0.0, 0.0, 10.0],
+        ])
+        dst = 1.5 * src + np.array([1.0, 2.0, 3.0])
+        dst[-1] += np.array([0.01, 0.0, 0.0])
+
+        with pytest.raises(AlignmentError, match="源位置|source"):
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=100.0,
+            )
+
+    def test_non_finite_control_points_fail_closed(self):
+        """NaN/Inf 坐标的控制点必须 fail-closed, 不能被静默放行。"""
+        src = np.array([
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 1.0],
+            [3.0, 4.0, 8.0],
+        ])
+        dst = np.array([
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 1.0],
+            [np.nan, 4.0, 8.0],  # NaN in target
+        ])
+        with pytest.raises(AlignmentError, match="non-finite"):
+            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
+
+    def test_non_positive_scale_fails_closed(self):
+        """源点重合 (var_src=0) 会让 scale 不可辨识; fail-closed。"""
+        # 所有源点完全相同 -> var_src=0 -> scale undefined
+        src = np.array([[1.0, 2.0, 3.0]] * 5)
+        dst = np.array([
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [0.0, 10.0, 1.0],
+            [3.0, 4.0, 8.0],
+            [5.0, 5.0, 5.0],
+        ])
+        # 源点重合 -> source span 退化 -> degenerate 守卫先拒绝
+        with pytest.raises(AlignmentError, match="degenerate|coincident"):
+            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
+
+    def test_default_span_ratio_separates_near_coplanar_from_3d(self):
+        """冻结默认阈值必须拒绝近共面，同时接受有真实纵深的同尺度构型。"""
+
+        near = np.array([
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 1e-8],
+            [0.0, 10.0, 1e-8],
+            [3.0, 4.0, 1e-8],
+        ])
+        rotation = _rotation_z(np.radians(10.0))
+        near_dst = (
+            1.5 * (near @ rotation.T)
+            + np.array([1.0, 2.0, 3.0])
+        )
+        with pytest.raises(AlignmentError, match="degenerate"):
+            fit_sfm_to_enu(_resolved(near, near_dst), _ORIGIN)
+
+        volumetric = near.copy()
+        volumetric[-1, 2] = 1.0
+        volumetric_dst = (
+            1.5 * (volumetric @ rotation.T)
+            + np.array([1.0, 2.0, 3.0])
+        )
+        sim3, evidence = fit_sfm_to_enu(
+            _resolved(volumetric, volumetric_dst),
+            _ORIGIN,
+        )
+        assert sim3.scale == pytest.approx(1.5)
+        assert evidence.passed is True
+
+    def test_evidence_records_all_required_fields(self):
+        """P1-4B: Sim3 证据必须记录 scale、rotation、translation、每点 residual、
+        RMSE/max residual, 以便下游审计可复算。"""
+        src, dst = self._consistent_points(n=6)
+        sim3, evidence = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0)
+
+        # Sim3 本身记录 scale、rotation、translation
+        assert np.isfinite(evidence.scale)
+        assert evidence.scale > 0
+        rotation = sim3.rotation_matrix()
+        assert rotation.shape == (3, 3)
+        assert np.isclose(float(np.linalg.det(rotation)), 1.0, atol=1e-9)
+        assert len(sim3.t_xyz) == 3
+
+        # 证据记录每点 residual、RMSE/max residual
+        assert len(evidence.per_point_residual_m) == 6
+        assert all(r >= 0 for r in evidence.per_point_residual_m)
+        assert evidence.rms_residual_m >= 0
+        assert evidence.max_residual_m >= 0
+        assert evidence.max_residual_m == max(evidence.per_point_residual_m)
+        # RMS 与 per-point 一致
+        expected_rms = float(np.sqrt(
+            sum(r ** 2 for r in evidence.per_point_residual_m) / len(evidence.per_point_residual_m)
+        ))
+        assert np.isclose(evidence.rms_residual_m, expected_rms, atol=1e-9)
+
+        # 证据记录退化守卫的输入
+        assert len(evidence.source_singular_values) == 3
+        assert evidence.min_span_ratio > 0
+        assert evidence.max_rms_threshold_m > 0
+
+        # 证据记录点身份与 geo origin
+        assert len(evidence.control_point_labels) == 6
+        assert evidence.geo_origin["lat"] == _ORIGIN.lat
+        assert evidence.geo_origin["lon"] == _ORIGIN.lon
+        assert evidence.geo_origin["alt"] == _ORIGIN.alt
+
+    def test_evidence_is_canonical_and_round_trips(self):
+        """P1-4B: Sim3 证据的序列化必须 canonical 且可往返解析。"""
+        src, dst = self._consistent_points(n=5)
+        sim3, evidence = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0)
+
+        evidence_str = evidence.to_evidence()
+        assert evidence_str.startswith("sim3.alignment.v1=")
+
+        restored = Sim3AlignmentEvidence.parse(evidence_str)
+        assert restored == evidence
+
+        # canonical: 同一对象序列化两次结果相同
+        assert evidence.to_evidence() == evidence_str
+
 
 class TestAlignRegistration:
     def _non_collinear_centres(self):

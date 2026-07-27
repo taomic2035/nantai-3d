@@ -691,15 +691,35 @@ def fit_sfm_to_enu(
             f"singular values {singular_values.tolist()} below floor {span_floor:g}"
         )
 
+    n_distinct_source = len(np.unique(src, axis=0))
+    if n_distinct_source != len(control_points):
+        raise AlignmentError(
+            f"{len(control_points)} 个控制点只落在 {n_distinct_source} 个互不相同的"
+            "源位置上: 重复 source position 不增加独立约束; fail-closed"
+        )
+    if n_distinct_source < _MIN_CONTROL_POINTS:
+        raise AlignmentError(
+            f"只有 {n_distinct_source} 个互不相同的源位置 "
+            f"(<{_MIN_CONTROL_POINTS}): fail-closed"
+        )
+
     # 精确重复的靶标: 不需要编任何半径就能认出来, 故【所有模式】都挡。真实触发是
     # --from-gps 的一次连拍复用同一个 EXIF GPS 定位读数 -> dst 逐簇精确重合。
+    # 重复采样同一位置不增加约束, 只会把点数撑大, 而近零的 RMS 恰恰是
+    # 'RMS 与对齐正确性脱钩'本身 (实测 5 个位置各重复 6 次 -> 证据报
+    # n_control_points=30、rms=7.5e-15、ACCEPTED, 30 行只是 5 个约束)。
     n_distinct = len(np.unique(dst, axis=0))
-    if n_distinct < _MIN_CONTROL_POINTS:
+    if n_distinct != len(control_points):
         raise AlignmentError(
             f"{len(control_points)} 个控制点只落在 {n_distinct} 个【互不相同】的靶标"
-            f"位置上 (<{_MIN_CONTROL_POINTS}): 重复采样同一位置不增加约束, 只会把点数"
-            "撑大, 而近零的 RMS 恰恰是'RMS 与对齐正确性脱钩'本身。常见成因: 一次连拍"
-            "内 EXIF GPS 复用了同一个定位读数; fail-closed"
+            f"位置上: 重复采样同一位置不增加约束, 只会把点数撑大, 而近零的 RMS 恰恰是"
+            "'RMS 与对齐正确性脱钩'本身。常见成因: 一次连拍内 EXIF GPS 复用了同一个定位"
+            "读数; fail-closed"
+        )
+    if n_distinct < _MIN_CONTROL_POINTS:
+        raise AlignmentError(
+            f"只有 {n_distinct} 个互不相同的靶标位置 (<{_MIN_CONTROL_POINTS}): "
+            "fail-closed"
         )
 
     n_effective: int | None = None
@@ -1189,6 +1209,12 @@ def merge_for_preview(
             "拒绝。缝合带必须【非共面】且足够密"
         )
 
+    n_distinct_source = len(np.unique(src, axis=0))
+    if n_distinct_source != len(labels):
+        raise AlignmentError(
+            f"{len(labels)} 张共享影像只落在 {n_distinct_source} 个互不相同的源中心上: "
+            "重复 source centre 不增加独立约束; fail-closed"
+        )
     singular = _source_span(src)
     span_floor = max(min_span_ratio * float(singular[0]), _ABS_SPAN_FLOOR_SOURCE_UNITS)
     if singular[0] <= 0 or float(singular[2]) < span_floor:
@@ -1197,10 +1223,16 @@ def merge_for_preview(
             f"singular values {singular.tolist()} below floor {span_floor:g}"
         )
     n_distinct = len(np.unique(dst, axis=0))
+    if n_distinct != len(labels):
+        raise AlignmentError(
+            f"{len(labels)} 张共享影像只落在 {n_distinct} 个【互不相同】的中心上: "
+            "重复位置不增加约束, 只会把点数撑大, 而近零的 RMS 恰恰是'RMS 与对齐正确性"
+            "脱钩'本身; fail-closed"
+        )
     if n_distinct < _MIN_CONTROL_POINTS:
         raise AlignmentError(
-            f"{len(labels)} 张共享影像只落在 {n_distinct} 个【互不相同】的中心上 "
-            f"(<{_MIN_CONTROL_POINTS}): 重复位置不增加约束; fail-closed"
+            f"只有 {n_distinct} 个互不相同的中心 (<{_MIN_CONTROL_POINTS}): "
+            "fail-closed"
         )
 
     # 靶标跨度: 归一化的分母。它与 rms 同在 A 的 gauge 里, 故商无量纲。

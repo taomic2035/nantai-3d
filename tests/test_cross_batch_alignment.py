@@ -1629,6 +1629,39 @@ class TestPreviewOnlyMerge:
         with pytest.raises(AlignmentError, match="degenerate|共线|退化"):
             merge_for_preview(reg_a, _reg_b(world), max_relative_rms=1e-3)
 
+    def test_preview_rejects_duplicate_source_centres(self):
+        world = _world_centres(n=12)
+        ref = _aligned_reference(world)
+        reg_b = _reg_b(world)
+        poses = list(reg_b.poses)
+        poses[-1] = poses[-1].model_copy(
+            update={"t_xyz": poses[-2].t_xyz},
+        )
+        duplicated = reg_b.model_copy(update={"poses": poses})
+
+        with pytest.raises(AlignmentError, match="源中心|source"):
+            merge_for_preview(
+                ref,
+                duplicated,
+                max_relative_rms=100.0,
+            )
+
+    def test_preview_rejects_duplicate_target_centres(self):
+        world = _world_centres(n=12)
+        ref = _aligned_reference(world)
+        poses = list(ref.poses)
+        poses[-1] = poses[-1].model_copy(
+            update={"t_xyz": poses[-2].t_xyz},
+        )
+        duplicated = ref.model_copy(update={"poses": poses})
+
+        with pytest.raises(AlignmentError, match="互不相同|重复位置"):
+            merge_for_preview(
+                duplicated,
+                _reg_b(world),
+                max_relative_rms=100.0,
+            )
+
     def test_preview_rejects_a_fit_worse_than_the_declared_relative_budget(self):
         """判据是【调用方按物理声明】的, 本模块编不出一个 relative_rms 阈值就不编。"""
         world = _world_centres(n=12)
