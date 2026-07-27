@@ -83,7 +83,8 @@ Viewer v2 代码门已经就绪：
   receipt-bound `web/` 重建白名单只读映射到 Viewer 固定 URL；未绑定文件、preview
   receipt、仓库 demo 回落和启动后字节漂移均拒绝；
 - `pipeline.viewer_session` 在临时回环端口启动该挂载、调用既有 production capture
-  与 validator，并在所有退出路径关闭服务器；正式采集不再依赖人工同步两个终端；
+  与 validator，并在所有退出路径关闭服务器；机器门成功后可直接生成绑定同一 report
+  的人审策略，正式采集不再依赖人工同步两个终端或第二条策略命令；
 - `pipeline.human_review_inputs` 从复验通过的 Viewer v2 report 确定性生成七类人审
   policy；记录脚本用 `--viewer-report` 导入原始截图绑定，reviewer 仍须逐类明确判定；
 - capture input、截图与复制出的代码采用 root-bounded、no-symlink、no-replace

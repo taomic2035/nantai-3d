@@ -271,13 +271,15 @@ python -m pipeline.viewer_session `
   --camera-set "$run\viewer-inputs\cameras.json" `
   --output "$run\viewer\performance-report.v2.json" `
   --decision "$run\viewer\performance-decision.json" `
+  --human-review-policy-output "$run\review\human-review-policy.json" `
   --evidence-root "$run"
 ```
 
 runner 会先完整复验 import，在临时回环端口启动 receipt-bound Studio，把精确 URL、
 scene manifest、policy、camera set 和 evidence root 传给现有 Node 采集器，并在成功、
 拒绝或进程异常后关闭服务器。默认打开可见 Chromium，便于观察实际效果；CI 或无人值守
-运行时才加 `--headless`。
+运行时才加 `--headless`。只有 Viewer v2 机器门通过后，它才调用
+`pipeline.human_review_inputs` 生成绑定同一 report 的人审策略。
 
 服务器只接受 `production-acceptance / metric-aligned / meters`。浏览器只能访问
 receipt 白名单中 `web/` 下的 manifest、PLY 和 chunks；训练输入、控制点、日志及其它
@@ -305,17 +307,8 @@ Viewer v1 报告只可用于 `internal-canary`，不能进入 production aggrega
 机器门通过，在同一 scene 的真实 CUDA 3DGS、米制对齐和人工观感验收完成前仍不得
 声明 Production V1。
 
-Viewer v2 机器门完成后，从同一份报告生成不可手写 pose 的人审策略：
-
-```powershell
-python -m pipeline.human_review_inputs `
-  --evidence-root "$run" `
-  --viewer-policy "$run\viewer-inputs\policy.json" `
-  --viewer-report "$run\viewer\performance-report.v2.json" `
-  --output "$run\review\human-review-policy.json"
-```
-
-检查三张原始截图后，reviewer 必须逐项填写全部七类结论；截图路径直接从已验证的
+如已有独立 capture，也可单独运行 `python -m pipeline.human_review_inputs` 恢复生成
+策略。检查三张原始截图后，reviewer 必须逐项填写全部七类结论；截图路径直接从已验证的
 Viewer report 导入，不再重复填写 `--screenshot`：
 
 ```powershell
