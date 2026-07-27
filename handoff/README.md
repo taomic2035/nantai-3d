@@ -15,9 +15,11 @@ Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cf
 关闭；P1-4A 由 `42df736` 关闭，P1-4B 的测量 / policy / decision 分层由
 `0ad9417` 关闭；P1-4C production import 与 runner 字节复验由 `23a2ece`、
 `8693848` 关闭。production runtime evidence 合同由 `cba2a19` 关闭，production
-result bundle v2 与最终身份 closure 由 `5a0ca09` 关闭。GLM 当前从 B1 worker
-durability 的四个真实 RED 开始，随后连续推进 production shell 行为门、blocked
-report 和 caller clearance receipt；active paths、命令与停止条件只看
+result bundle v2 与最终身份 closure 由 `5a0ca09` 关闭。B1/C1/D1/E1 已关闭，
+E1 candidate `b71e5de` 与 Codex closure `ab0c7dc` 已推送。GLM 当前先修
+`remote-training-drill` 的旧 pytest registry，再连续推进 F1 同容器六探针、G1
+operations producer 和 H1 deadline/executor-close 硬化；active paths、命令与停止
+条件只看
 [HANDOFF-GLM-012](HANDOFF-GLM-012-active-production-queue.md)。HANDOFF-GLM-011
 仅保留近期 review 背景，不再作为开工单。
 

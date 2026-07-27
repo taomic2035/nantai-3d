@@ -17,10 +17,9 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ---
 
-## 当前 active ticket：F1 同容器六探针 clearance adapter
+## 当前 active ticket：P0-CI 固定演练 registry 刷新
 
-E1 fresh-container lifecycle 已完成实现与两轮独立 review，当前等待 Codex 提交并
-push。关闭证据：
+E1 fresh-container lifecycle 已完成实现、两轮独立 review、提交并 push。关闭证据：
 
 - worker 在 container ID durable、immutable digest 复核后且 start 前发布唯一
   canonical lifecycle receipt；
@@ -32,19 +31,22 @@ push。关闭证据：
   status timestamp 回退、malformed receipt 与 descriptor/symlink swap 均有真实 RED；
 - fresh E1 联合门 `177 passed, 5 skipped`，全仓 Ruff、四组 Node 测试与
   `git diff --check` 通过；规格和代码质量 review 均 APPROVED。
+- GLM candidate `b71e5de` 与 Codex closure `ab0c7dc` 已在 `origin/main`。
 
-GLM 现在先阅读 `pipeline/production_runtime_evidence.py` 与对应测试，按下方 Task F1
-建立六探针 RED；不得重做 E1，也不得回复“无待推进工作”。F1 必须保持同一
-attempt/container/lifecycle 绑定，所有 accepted decision 仍只由既有 G2 权威模型
-派生。
+当前 `main` 的 GitHub Actions `remote-training-drill` 只失败一项：
+`P1-3A-submit-running` registry 仍引用已删除的旧节点
+`test_submit_advances_receipt_to_running`，pytest 因 node not found 退出 4。E1 已把
+权威语义改为：submit 保持 `not-started`，直到 lifecycle/status 的权威 poll。
 
-## Codex 即时指令（2026-07-27 18:51）
+## Codex 即时指令（2026-07-27 20:35）
 
-D1 与 E1 已关闭。GLM 现在直接开始 F1，不再返工已关闭任务，也不等待口头确认：
+GLM 现在按以下顺序连续执行，不再返工已关闭任务，也不等待口头确认：
 
 ```text
-F1 同容器六探针 clearance adapter
+P0-CI 固定演练 registry 刷新
+  → F1 同容器六探针 clearance adapter
   → G1 operations caller 接入与结果 producer 闭环
+  → H1 deadline / executor-close 硬化
 ```
 
 D1 关闭证据：
@@ -63,8 +65,9 @@ Codex 口头确认。每个 ticket 独立提交并 push，随后立即开始下�
 
 ## 执行规则
 
-这是 GLM 当前唯一执行入口。B1/C1/D1/E1 已关闭，当前 active ticket 是 F1；随后按
-F1 → G1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有需要
+这是 GLM 当前唯一执行入口。B1/C1/D1/E1 已关闭，当前 active ticket 是 P0-CI；
+随后按 P0-CI → F1 → G1 → H1 连续推进。一项提交并 push 后立即开始下一项，不等待
+口头确认。只有需要
 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
 Viewer/Studio/release/schema 路径时才暂停。
 
@@ -359,7 +362,37 @@ git commit --only cloud/remote_training_worker.py pipeline/remote_shell_executor
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-E1 完成后立即开始 F1。
+E1 已关闭；现在先关闭 P0-CI，再立即开始 F1。
+
+### Task P0-CI: 固定演练 registry 刷新（现在先做）
+
+**Files:**
+
+- Modify: `pipeline/remote_training_drill.py`
+- Modify: `tests/test_remote_training_drill.py`
+
+只修 registry 漂移，不回退 E1 的 fail-closed 语义：
+
+1. `P1-3A-submit-running` case ID 保持稳定，避免破坏既有报告消费者；
+2. `pytest_node_id` 改为
+   `tests/test_remote_shell_executor.py::test_submit_keeps_receipt_not_started_until_authoritative_poll`；
+3. `expected_semantics` 改为 “submit remains not-started until authoritative
+   lifecycle/status poll”；
+4. registry 单元测试必须锁定新 node ID 与新语义，防止再次只锁 case ID；
+5. 不修改 `remote_shell_executor.py`，不重新引入 submit 自报 `running`。
+
+验证与提交：
+
+```powershell
+python -m pytest -q tests/test_remote_training_drill.py tests/test_remote_shell_executor.py::test_submit_keeps_receipt_not_started_until_authoritative_poll
+python -m ruff check pipeline/remote_training_drill.py tests/test_remote_training_drill.py
+git diff --check -- pipeline/remote_training_drill.py tests/test_remote_training_drill.py
+git add -- pipeline/remote_training_drill.py tests/test_remote_training_drill.py
+git commit --only pipeline/remote_training_drill.py tests/test_remote_training_drill.py -m "fix: refresh remote drill lifecycle case"
+git -c http.proxy=http://127.0.0.1:7890 push origin main
+```
+
+push 后立即查看新 CI；无论其它长测试是否仍在运行，都先开始 F1，不得回复“无事可做”。
 
 ### Task F1: 同容器六探针 clearance adapter
 
@@ -453,8 +486,36 @@ python -m ruff check pipeline/real_scene_operations.py pipeline/remote_shell_exe
 git diff --check -- pipeline/real_scene_operations.py pipeline/remote_shell_executor.py tests/test_real_scene_operations.py tests/test_remote_shell_executor.py
 ```
 
-G1 完成后才停在 Codex review 边界，回执调用图、测试数字、真实外部输入缺口与下一个
-最小 producer 缺口；不要声称 Production V1 已完成。
+G1 完成后先回执调用图、测试数字、真实外部输入缺口与下一个最小 producer 缺口，
+随后继续 H1；不要声称 Production V1 已完成。
+
+### Task H1: deadline 与 executor close 硬化
+
+G1 push 后继续做这两个已知 P2，不等待新指令：
+
+- `train-production` 的 poll sleep 必须取
+  `min(poll_interval, remaining_deadline)`，不得越过 deadline 一个完整轮询周期；
+- `RemoteShellExecutor` 在 success、failed、exception 三条路径均显式 `close()`，
+  不能依赖 `__del__` 释放 Windows private-key guard。
+
+**Files:**
+
+- Modify: `pipeline/real_scene_operations.py`
+- Modify: `tests/test_real_scene_operations.py`
+
+先建立：
+
+```text
+test_remote_poll_sleep_never_overshoots_deadline
+test_train_production_closes_remote_executor_on_success
+test_train_production_closes_remote_executor_on_failure
+test_train_production_closes_remote_executor_on_exception
+```
+
+专项测试、Ruff、`git diff --check` 通过后独立提交
+`fix: bound remote polling and close executor`，使用一次性代理 push。H1 后回执 Codex
+review；若仍没有真实 endpoint/secret/GPU，只报告精确 external gate，不能声明正式版
+已完成。
 
 ## Codex review 门
 
