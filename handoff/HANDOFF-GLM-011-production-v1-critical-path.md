@@ -14,6 +14,69 @@ Reviewer：Codex
 Codex review；下面任务均不依赖真实 endpoint、secret、付费 GPU 或 Codex 新接口。
 按 A → B → C 连续执行，完成一个就路径限定提交和 push，然后自动开始下一个。
 
+### 当前唯一 active ticket：A1（现在就做）
+
+当前工作树不是空闲状态。下面四条路径已有 GLM 草稿：
+
+```text
+cloud/remote_readiness_checker.py
+tests/test_remote_readiness_checker.py
+cloud/train_3dgs_nerfstudio.sh
+tests/test_cloud_prepared_training_script.py
+```
+
+先冻结后两条 NOW-8 路径，不删除、不提交，也不要继续扩写。A1 只修改并提交前两条
+readiness 路径。当前 `17 passed, 1 skipped` 不是完成信号，因为测试把错误行为写成了
+GREEN：
+
+- `test_checker_truncates_oversize_stdout` 接受“截断后继续解析”，必须改成超限立即
+  blocked；
+- `runtime_resolved` 只被读取和哈希，实际 `--version`、image inspect、scheduler
+  probe 仍执行配置名 `docker`，PATH wrapper 可在解析后劫持；
+- config 允许 `docker|podman`，scheduler probe 却对两者都使用 Docker 私有
+  `{{json .Runtimes}}` 格式；
+- 当前没有 stderr oversize、非 UTF-8、解析后 PATH 劫持和 Podman adapter RED。
+
+A1 必须先增加并观察这些精确 RED：
+
+```text
+test_checker_executes_only_resolved_runtime_path
+test_checker_rejects_path_wrapper_swap_after_resolution
+test_checker_rejects_oversize_stdout_without_parsing_prefix
+test_checker_rejects_oversize_stderr_without_leaking_content
+test_checker_rejects_secret_bearing_oversize_output_without_leaking_secret
+test_checker_rejects_non_utf8_observation
+test_checker_uses_docker_scheduler_adapter_only_for_docker
+test_checker_uses_podman_scheduler_adapter_only_for_podman
+test_checker_rejects_unknown_scheduler_adapter_observation
+```
+
+实现边界：
+
+1. 解析后所有 container runtime argv 的 `argv[0]` 只能是同一个绝对 regular-file
+   path；前后内容 SHA/size/metadata 任一变化即 blocked；
+2. `_run_bounded` 分别检查 stdout/stderr 原始 byte length，任一超限立即抛固定错误；
+   不把截断前缀交给 JSON/version parser，错误、报告和日志不得包含原始输出；
+3. adapter 用封闭 dispatch：Docker 与 Podman 各自只有固定 argv 和固定 parser；
+   不支持或结构不符即 blocked，不能猜测 GPU scheduler 可用；
+4. 保持 `nantai.remote-readiness-evidence.v1` schema、canonical bytes 和 golden 字段
+   不变；不要把 runtime binary SHA 塞进 v1 报告，也不要构造 G2 measurement；
+5. Windows 的 symlink 测试可 skip，但绝对路径执行、oversize、adapter 与 TOCTOU
+   测试不得 skip。
+
+A1 完成门：
+
+```powershell
+python -m pytest -q tests/test_remote_readiness_checker.py
+python -m ruff check cloud/remote_readiness_checker.py tests/test_remote_readiness_checker.py
+git diff --check -- cloud/remote_readiness_checker.py tests/test_remote_readiness_checker.py
+git add -- cloud/remote_readiness_checker.py tests/test_remote_readiness_checker.py
+git commit --only cloud/remote_readiness_checker.py tests/test_remote_readiness_checker.py
+git -c http.proxy=http://127.0.0.1:7890 push origin main
+```
+
+提交信息不得写 Codex co-author；回执按本文模板给出，然后不等回复，立即进入 B。
+
 ### A — 修完并提交 host preflight
 
 只允许修改：
@@ -142,6 +205,38 @@ B 通过 Codex review 后，不等待真实云资源，连续完成：
 只有碰到以下边界才停：需要用户提供 secret、需要付费资源、需要访问真实私有数据，
 或必须修改 Codex-owned schema。普通代码设计、测试失败、Windows skip、网络 push
 重试都不是停工理由。
+
+### A1 之后的连续任务卡（GLM 不得再报空闲）
+
+下列任务严格串行，每项都是独立小提交：
+
+1. **B1 / NOW-4 返修**：只改
+   `cloud/remote_training_worker.py`、`tests/test_remote_training_worker.py`，完成本文
+   六个指定 lifecycle RED，精确绑定 resolved image ID，container ID durable
+   no-replace，证明 terminal/result directory sync 后才允许 cleanup；
+2. **C1 / NOW-8 行为审计**：只改
+   `cloud/train_3dgs_nerfstudio.sh`、`tests/test_cloud_prepared_training_script.py`。
+   恢复被当前草稿删除的 production golden-path 行为测试；静态 grep 只能辅助，
+   不能用“脚本包含某个字符串”证明 CLI pin、结构化 argv、真实 exit code、发布顺序
+   或无 secret。每个缺陷必须由可执行 fake-tool 测试复现；
+3. **D1 / NOW-7 返修**：只改
+   `pipeline/production_external_inputs.py`、`tests/test_production_external_inputs.py`，
+   删除占位 host/digest/dataset/rights-cleared，完成本文七个精确 RED 和无 secret、
+   no-replace CLI；
+4. **E1 / NOW-5 caller receipt**：只改
+   `pipeline/remote_shell_executor.py`、`tests/test_remote_shell_executor.py`，交付
+   attempt/container/durable transition receipt；不得复制 G2/G5 schema，不得让
+   caller 自报 GPU pass；
+5. **F1 / NOW-6 adapter contract**：仍只改 E1 两条路径，用固定 fake transport
+   证明同一 container 的六 probe、accepted 后才可训练，以及 container/executable/
+   GPU UUID drift 全部 fail closed；不需要真实 endpoint；
+6. **G1 / producer integration audit**：F1 通过 review 后，先只提交一份对现有 G4
+   producer 到 `pipeline.production_runtime_evidence`、result bundle v2、closure
+   import 的调用图和缺口清单到本文；未经 Codex review 不新建平行 schema。
+
+如果 A1 尚未提交，GLM 不得继续 C1；如果 B1 尚未通过 Codex review，GLM 可以准备
+C1 的 RED，但不得把 B1、C1 混为一个提交。Viewer v2、Studio UX、aggregate
+acceptance 与 release 文件属于 Codex，不得抢改。
 
 #### 当前 NOW-7 草稿 Codex 预审：禁止提交
 
