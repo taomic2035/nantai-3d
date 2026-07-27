@@ -54,6 +54,19 @@ GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
   文档门也已复核：Python `60 passed,
   6 skipped`、Studio Node `38/38`、ruff 通过。GLM 不需要重做这些 Codex
   路径，继续优先关闭 P1-2/P1-3。
+- Codex 在 `04aa0ca` 修复了 `scripts/real_scene.py` 与 `scripts/doctor.py`
+  的隔离直接执行入口；`python -I scripts/real_scene.py --help` 已通过，
+  doctor 不再因 `No module named 'pipeline'` 误报 registry 损坏。当前 Windows
+  实测为 COLMAP 4.1.0、Brush 0.3.0、素材 SHA `11/11`、磁盘充足、无 NVIDIA
+  CUDA。`python scripts/real_scene.py preflight-remote --help` 仍明确失败为
+  `invalid choice: preflight-remote`，因此 P1-2 FIX-D 尚未实现，GLM 不得把
+  现有 `train-production` 参数误报成 credential-free readiness CLI。
+- Codex 在 `964bd6c` 继续修复了 Production V1 计划明确要求直接运行的
+  `fetch_real_dataset.py`、`validate_render_evaluation.py` 和
+  `record_real_scene_review.py`；三者的隔离 `python -I ... --help` 契约已覆盖，
+  下载/评估/审核业务回归 `71 passed, 2 skipped`，ruff 通过。GLM 新增
+  `preflight-remote` 时必须同步加入同类隔离直接执行测试，不能只在 pytest
+  已注入仓库根的环境里验证。
 
 ### `58dfc5e` 必须关闭的问题
 
