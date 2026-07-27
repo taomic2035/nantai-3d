@@ -95,5 +95,9 @@ def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
     assert "REAL_SCENE_IMPORT_ROOT" in manual
     assert "--real-scene-import-root" in manual
     assert "receipt 白名单" in manual
+    assert "python -m pipeline.viewer_session" in manual
+    assert "临时回环端口" in manual
+    assert "默认打开可见 Chromium" in manual
     assert "camera-set v2" in status
     assert "receipt-bound" in status
+    assert "viewer_session" in status

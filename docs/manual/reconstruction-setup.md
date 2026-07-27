@@ -261,42 +261,33 @@ registration 以 `registered-camera-maximin-v1` 确定性选出三个空间分�
 `nantai.viewer-camera-set.v2` 同时内容锁定 import receipt、aligned registration 和
 scene manifest；policy 精确绑定三个 pose ID。输出目录必须不存在，不会覆盖旧证据。
 
-在另一个 PowerShell 终端启动 Studio，并显式只读挂载同一份 import：
+正式采集使用一个 session runner，不再手工协调两个终端和固定端口：
 
 ```powershell
-$env:REAL_SCENE_IMPORT_ROOT = "$run\imported"
-python make.py serve
-```
-
-等价的底层命令是：
-
-```powershell
-python -m pipeline.studio_server `
-  --root . `
-  --host 127.0.0.1 `
-  --port 8000 `
-  --real-scene-import-root "$run\imported"
-```
-
-服务器启动前会重新验证 `import-receipt.json` 和全部绑定产物，只接受
-`production-acceptance / metric-aligned / meters`。浏览器只能访问 receipt 白名单中
-`web/` 下的重建 manifest、PLY 和 chunks；训练输入、控制点、日志及其它私有文件不会
-被映射。挂载字节在启动后发生变化时请求会 fail closed，不能回落到仓库 demo。
-
-保持该 Studio 进程运行，然后执行：
-
-```powershell
-node scripts\capture_viewer_acceptance.mjs `
+python -m pipeline.viewer_session `
+  --project-root . `
+  --import-root "$run\imported" `
   --policy "$run\viewer-inputs\policy.json" `
   --camera-set "$run\viewer-inputs\cameras.json" `
-  --studio-url http://127.0.0.1:8000/web/studio/ `
-  --scene-manifest "$run\imported\web\recon_manifest.json" `
   --output "$run\viewer\performance-report.v2.json" `
   --decision "$run\viewer\performance-decision.json" `
-  --source-role production-acceptance `
-  --evidence-root "$run" `
-  --headless
+  --evidence-root "$run"
 ```
+
+runner 会先完整复验 import，在临时回环端口启动 receipt-bound Studio，把精确 URL、
+scene manifest、policy、camera set 和 evidence root 传给现有 Node 采集器，并在成功、
+拒绝或进程异常后关闭服务器。默认打开可见 Chromium，便于观察实际效果；CI 或无人值守
+运行时才加 `--headless`。
+
+服务器只接受 `production-acceptance / metric-aligned / meters`。浏览器只能访问
+receipt 白名单中 `web/` 下的 manifest、PLY 和 chunks；训练输入、控制点、日志及其它
+私有文件不会被映射。挂载字节在启动后变化时资源与 Studio 状态都会 fail closed，也
+不会回落到仓库 demo。
+
+只做人工浏览、不生成验收证据时，仍可设置
+`REAL_SCENE_IMPORT_ROOT="$run\imported"` 后运行 `python make.py serve`；其底层参数是
+`pipeline.studio_server --real-scene-import-root "$run\imported"`。正式证据必须使用
+上面的 `pipeline.viewer_session`，避免操作者拼接错 scene 或端口。
 
 `output`、`decision` 和固定截图路径必须尚不存在；碰撞会拒绝，不会覆盖。采集器在
 启动浏览器前复核 camera-set v2 的 scene manifest SHA，并把
