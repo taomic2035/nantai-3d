@@ -1,4 +1,4 @@
-.PHONY: help setup test lint ingest reconstruct world assets verify verify-vendor vendor validate-handoff serve env clean
+.PHONY: help check-node setup test lint ingest reconstruct world assets verify verify-vendor vendor validate-handoff serve env clean
 
 PY ?= python
 PROJECT_ROOT := $(shell pwd)
@@ -7,6 +7,7 @@ ASSET_DELIVERABLE := handoff/deliverables/HANDOFF-002
 help:
 	@echo "无限村庄世界生成系统 - 命令清单"
 	@echo ""
+	@echo "  make check-node        校验 package.json 锁定的精确 Node 运行时"
 	@echo "  make setup             安装本机依赖"
 	@echo "  make test              运行 Python + Viewer + Studio 测试"
 	@echo "  make lint              ruff 检查 pipeline/tests/cloud/scripts/make.py"
@@ -22,7 +23,11 @@ help:
 	@echo "  make env               创建云端GPU任务环境(在AutoDL上执行)"
 	@echo "  make clean             清理生成产物 (不动 assets/ 素材注册表)"
 
+check-node:
+	$(PY) make.py check-node
+
 setup:
+	$(PY) make.py check-node
 	$(PY) -m pip install -e ".[dev]"
 	npm ci
 	npm run install:viewer-runtime

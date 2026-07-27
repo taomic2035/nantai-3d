@@ -7,6 +7,7 @@ make.py 是 Windows 上替代 GNU make 的主入口（README 推荐用法）。
 
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -229,16 +230,49 @@ class TestStandardTestTarget:
 
 class TestSetupTarget:
     def test_npm_executable_is_platform_aware_without_shell(self, make):
-        expected = "npm.cmd" if os.name == "nt" else "npm"
+        npm_expected = "npm.cmd" if os.name == "nt" else "npm"
+        node_expected = "node.exe" if os.name == "nt" else "node"
         source = (
             Path(__file__).resolve().parent.parent / "make.py"
         ).read_text(encoding="utf-8")
 
-        assert make.NPM == expected
+        assert make.NPM == npm_expected
+        assert make.NODE == node_expected
         assert 'NPM = "npm.cmd" if os.name == "nt" else "npm"' in source
+        assert 'NODE = "node.exe" if os.name == "nt" else "node"' in source
         assert "shell=True" not in source
 
-    def test_installs_python_then_locked_node_then_pinned_browser(
+    def test_node_mismatch_fails_before_any_setup_side_effect(
+        self,
+        make,
+        monkeypatch,
+        capsys,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+        monkeypatch.setattr(
+            make.subprocess,
+            "run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                [make.NODE, "--version"],
+                0,
+                stdout="v21.13.0\n",
+                stderr="",
+            ),
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            make.setup()
+
+        assert exc_info.value.code == 2
+        assert calls == []
+        assert "expected 22.14.0, got 21.13.0" in capsys.readouterr().err
+
+    def test_exact_node_then_installs_in_locked_order(
         self,
         make,
         monkeypatch,
@@ -249,6 +283,16 @@ class TestSetupTarget:
             "run",
             lambda command, **_kwargs: calls.append(command),
         )
+        monkeypatch.setattr(
+            make.subprocess,
+            "run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                [make.NODE, "--version"],
+                0,
+                stdout="v22.14.0\n",
+                stderr="",
+            ),
+        )
 
         make.setup()
 
@@ -258,17 +302,98 @@ class TestSetupTarget:
             [make.NPM, "run", "install:viewer-runtime"],
         ]
 
+    def test_missing_node_fails_closed_without_traceback(
+        self,
+        make,
+        monkeypatch,
+        capsys,
+    ):
+        def missing_node(*_args, **_kwargs):
+            raise FileNotFoundError("node missing")
+
+        monkeypatch.setattr(make.subprocess, "run", missing_node)
+
+        with pytest.raises(SystemExit) as exc_info:
+            make.check_node()
+
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "Node runtime unavailable" in err
+        assert "Traceback" not in err
+
+    @pytest.mark.parametrize(
+        ("returncode", "stdout", "message"),
+        [
+            (9, "", "Node version probe failed"),
+            (0, "twenty-two\n", "malformed Node version"),
+        ],
+    )
+    def test_failed_or_malformed_node_probe_fails_closed(
+        self,
+        make,
+        monkeypatch,
+        capsys,
+        returncode,
+        stdout,
+        message,
+    ):
+        monkeypatch.setattr(
+            make.subprocess,
+            "run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                [make.NODE, "--version"],
+                returncode,
+                stdout=stdout,
+                stderr="probe error",
+            ),
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            make.check_node()
+
+        assert exc_info.value.code == 2
+        assert message in capsys.readouterr().err
+
+    def test_non_exact_package_engine_fails_before_node_probe(
+        self,
+        make,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ):
+        (tmp_path / "package.json").write_text(
+            '{"engines":{"node":">=22"}}',
+            encoding="utf-8",
+        )
+        probed = []
+        monkeypatch.setattr(make, "ROOT", tmp_path)
+        monkeypatch.setattr(
+            make.subprocess,
+            "run",
+            lambda *_args, **_kwargs: probed.append(True),
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            make.check_node()
+
+        assert exc_info.value.code == 2
+        assert probed == []
+        assert "package.json engines.node must be an exact semver" in (
+            capsys.readouterr().err
+        )
+
     def test_makefile_setup_is_equivalent_to_cross_platform_runner(self):
         makefile = (
             Path(__file__).resolve().parent.parent / "Makefile"
         ).read_text(encoding="utf-8")
         setup_recipe = makefile.split("\nsetup:\n", 1)[1].split("\n\n", 1)[0]
 
+        check_index = setup_recipe.index("$(PY) make.py check-node")
         pip_index = setup_recipe.index('$(PY) -m pip install -e ".[dev]"')
         npm_ci_index = setup_recipe.index("npm ci")
         browser_index = setup_recipe.index("npm run install:viewer-runtime")
 
-        assert pip_index < npm_ci_index < browser_index
+        assert check_index < pip_index < npm_ci_index < browser_index
 
 
 class TestLintTarget:

@@ -28,7 +28,9 @@ Makefile 尚未补。
 from __future__ import annotations
 
 import glob
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +39,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 PY = sys.executable
 NPM = "npm.cmd" if os.name == "nt" else "npm"
+NODE = "node.exe" if os.name == "nt" else "node"
+EXACT_SEMVER = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 # HANDOFF-002 is the cross-platform-reproducible (quantized) asset baseline;
 # HANDOFF-001 stays as history (its bytes are not reproducible off macOS).
 ASSET_DELIVERABLE = "handoff/deliverables/HANDOFF-002"
@@ -91,8 +95,52 @@ def node_test(pattern: str) -> None:
     run(["node", "--test", *files])
 
 
+def _node_failure(message: str) -> None:
+    print(f"check-node: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def check_node() -> None:
+    package_path = ROOT / "package.json"
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except OSError:
+        _node_failure("cannot read package.json")
+    except json.JSONDecodeError:
+        _node_failure("invalid package.json")
+
+    engines = package.get("engines") if isinstance(package, dict) else None
+    expected = engines.get("node") if isinstance(engines, dict) else None
+    if not isinstance(expected, str) or EXACT_SEMVER.fullmatch(expected) is None:
+        _node_failure("package.json engines.node must be an exact semver")
+
+    try:
+        result = subprocess.run(
+            [NODE, "--version"],
+            cwd=str(ROOT),
+            env=ENV,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        _node_failure("Node runtime unavailable")
+    if result.returncode != 0:
+        _node_failure(f"Node version probe failed (exit {result.returncode})")
+
+    measured = result.stdout.strip()
+    if measured.startswith("v"):
+        measured = measured[1:]
+    if EXACT_SEMVER.fullmatch(measured) is None:
+        _node_failure("malformed Node version")
+    if measured != expected:
+        _node_failure(f"expected {expected}, got {measured}")
+
+    print(f"Node runtime ready: {measured}")
+
+
 # ============ targets ============
 def setup() -> None:
+    check_node()
     run([PY, "-m", "pip", "install", "-e", ".[dev]"])
     run([NPM, "ci"])
     run([NPM, "run", "install:viewer-runtime"])
@@ -281,6 +329,7 @@ def real_scene(mode: str, tokens: list[str]) -> None:
 
 
 TARGETS = {
+    "check-node": check_node,
     "setup": setup,
     "test": test,
     "lint": lint,
