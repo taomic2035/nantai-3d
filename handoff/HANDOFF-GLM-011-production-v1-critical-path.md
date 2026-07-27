@@ -5,7 +5,7 @@
 Owner：GLM lane
 
 Reviewer：Codex
-基线：`main@348422fa65176163129c9b44b7cd22ad14d8b35c`
+基线：`main@2d3402143aded798d1dc7231797e0bb1a4c8753b`
 
 本文件是 GLM 当前唯一的首要执行入口。旧的 GLM-007/008 只用于历史追溯；
 GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
@@ -13,19 +13,59 @@ GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
 ## 当前事实
 
 - `v1.0.0-preview.2` 标签及其 CI 是绿色的，已发布的 Preview2 不受本次回归影响。
-- 最新 `main` 的
+- 旧的
   [CI run 30208773810](https://github.com/taomic2035/nantai-3d/actions/runs/30208773810)
-  四个 test matrix job 全部失败；两个 reproducibility job 和比较 job 通过。
-- Linux 的确定性失败位于真实 SfM 的 COLMAP 版本证据边界。
-- Windows 还暴露了 durable write、SSH key 权限/null device、换行、PATH
-  分隔符及 Bash fixture 的跨平台问题。
+  是冻结的失败基线，不再代表当前 `main`。
+- P0-2 已由 `2351805` / `76c5bad` 关闭：COLMAP 版本证据绑定实际执行的
+  resolved binary。
+- P0-3 已由 `84cce65` / `34ea9b6` 关闭：ZIP、journal 与 remote result 使用统一
+  durable publication，并显式区分 `published-unconfirmed`。
+- P0-4 已由 `1d07d54` / `fe75ea6` 关闭：Windows 私钥 ACL 与单 handle 生命周期、
+  host key、null device 和 secret-redaction 保持 fail closed。
+- P0-5 已由 `2d34021` 关闭：Windows canonical bytes、PATH、Git Bash 结构检查和
+  ZIP 原始反斜杠成员拒绝专项门为 `81 passed, 7 skipped`。
+- 当前唯一 P0 断点是 P0-6：必须取得 `2d34021` 或后续修复 exact HEAD 的本地全门
+  与 Ubuntu/Windows × Python 3.11/3.13 远端全绿；不能引用旧 run 或局部测试代替。
 - 当前 canary 只有真实照片 COLMAP 与本机 Brush `preview-only` 证据。尚无
   非 mock CUDA 3DGS、实测米制对齐、真实 Viewer/human acceptance，因此不能
   报告“真实 3D 场景完成”或“production accepted”。
 
+## GLM 立即领取清单
+
+不要等待 Codex 逐项提醒。按下表从上到下连续领取；每完成一行就提交、push、回报
+SHA 与机器结果，然后立刻进入下一行。`blocked-external-input` 只阻塞真实远端调用，
+不阻塞 schema、preflight、恢复测试、CLI 和 CI 集成。
+
+| ID | 任务 | 完成定义 |
+|---|---|---|
+| P0-6A | 运行 exact-HEAD 本地全门 | `make.py test`、全范围 ruff、`git diff --check` 有完整结果 |
+| P0-6B | 修复全门剩余失败 | 每个失败先有最小 RED；禁止删除、xfail 或放宽安全门 |
+| P0-6C | 关闭远端矩阵 | 记录 exact commit 与 Actions URL，4 个 test + 3 个 repro job 全绿 |
+| P1-1A | Viewer acceptance 单测入标准门 | `make.py test` 明确运行 `scripts/capture_viewer_acceptance.test.mjs` |
+| P1-1B | Chromium 能力预检 | 缺 package、browser binary 或 launch 能力时输出明确机器状态 |
+| P1-1C | CI 安装锁定 Node/browser | `npm ci` 使用 lockfile；Ubuntu/Windows 都验证同一 pinned runtime |
+| P1-2A | remote preflight schema | canonical report 只允许 `ready` / `blocked-external-input` / `failed` |
+| P1-2B | 本地 transport 预检 | 检查 ssh/scp、配置 shape、私钥权限、known_hosts/fingerprint，不提交 job |
+| P1-2C | 远端只读能力预检 | 检查 runtime、immutable image digest 与 worker binary；不得创建训练目录 |
+| P1-2D | secret-redaction 回归 | argv、报告、异常、traceback 都不含 key 路径、token 或私有 config 原文 |
+| P1-3A | submit/poll/fetch 状态演练 | success、remote failed、timeout、断网、unknown 均有 monotonic 状态断言 |
+| P1-3B | checksum/内容漂移演练 | result、journal、dataset/config/container SHA 任一漂移均 fail closed |
+| P1-3C | crash/resume/retry 演练 | published-unconfirmed、重启恢复、显式 retry 不得把失败提升为 succeeded |
+| P1-3D | canonical drill report | 发布机器可读演练报告，绑定测试版本、输入 SHA 与 exact commit |
+| P1-4A | 控制点输入预检 | 至少 4 个非共面点、单位/坐标系/对应关系可证；不满足保持 unaligned |
+| P1-4B | 米制对齐证据门 | Sim3 残差、尺度、FrameTransform 与 transform history 内容绑定 |
+| P1-5A | 云 GPU runtime readiness | 校验 CUDA、Nerfstudio 版本与 digest image；无端点时诚实 blocked |
+| P1-5B | production result closure | 非 mock result 必须绑定 bundle/config/container/result/evaluation SHA |
+| P1-6A | fresh Windows canary | fetch → COLMAP → bundle → Brush → import/chunk → acceptance aggregation |
+| P1-6B | canary 信任审计 | 预期仍为 preview-only / arbitrary / unaligned，不得人工提升 |
+| P1-7A | 给 Codex 的 Viewer 输入包 | 只交 verified import/chunks、scene identity、政策与 checksum |
+
+P1-7A 后由 Codex 执行真实浏览器 cold-load、交互帧、关键视角与人工视觉审查；GLM
+继续处理机器报告或 review 修复，不得因为等待 Codex 视觉结论而宣称队列为空。
+
 ## 执行规则
 
-1. 严格按 P0-1 → P0-6 → P1-1 → P1-4 顺序连续推进；一个任务完成后直接进入
+1. 严格按 P0-1 → P0-6 → P1-1 → P1-7 顺序连续推进；一个任务完成后直接进入
    下一个，不因“测试已绿”而停下。
 2. 先写能复现缺陷的 RED 测试，再做最小修复。不得删除/跳过测试、降低阈值、
    把 unknown 变成 accepted，或用 fixture 字符串冒充机器证据。
@@ -215,6 +255,26 @@ Owner：GLM 负责 build/CI 集成；Codex 负责浏览器语义与 UI review。
 - 浏览器 binary 缺失必须由显式 preflight 报告，不能晚到 capture 阶段才模糊失败；
 - 本项不改 `web/` UI 或 acceptance 阈值。
 
+拆分提交：
+
+1. P1-1A 只改 `make.py` / `Makefile` 与对应 runner 测试，把
+   `scripts/capture_viewer_acceptance.test.mjs` 加入 `test`；
+2. P1-1B 在 `scripts/` 新增窄职责 runtime preflight，机器报告绑定 Node、
+   Playwright、Chromium executable/launch 结果，缺能力不得返回 ready；
+3. P1-1C 更新 workflow：`npm ci` 后安装 pinned Chromium，并在 Ubuntu/Windows
+   都运行 preflight；不得使用 floating global package；
+4. P1-1D 把 Python lint 范围扩到 `cloud/`、`scripts/`、`make.py`，仅修本项暴露的
+   lint，不做无关格式化。
+
+验收：
+
+```powershell
+.\.venv\Scripts\python.exe make.py test
+node --test scripts/capture_viewer_acceptance.test.mjs
+npm ci
+npx playwright install chromium
+```
+
 ### P1-2：真实 remote-shell credential-free preflight
 
 目标：在不提交训练 job、不读取/打印秘密的前提下，验证 remote config shape、
@@ -224,15 +284,100 @@ Owner：GLM 负责 build/CI 集成；Codex 负责浏览器语义与 UI review。
 `ready`、`blocked-external-input` 或 `failed`。没有真实凭据时交付
 `blocked-external-input` 是正确结果，不得生成假 ready receipt。
 
+允许路径：
+
+- `pipeline/remote_shell_executor.py`
+- `pipeline/real_scene_operations.py`
+- `pipeline/real_scene_runner.py`
+- `scripts/real_scene.py`
+- `make.py`
+- `tests/test_remote_shell_executor.py`
+- `tests/test_real_scene_operations.py`
+- `tests/test_real_scene_runner.py`
+- `tests/test_real_scene_cli.py`
+
+必须覆盖：
+
+- 无配置、无凭据、ssh/scp 缺失分别得到稳定错误码和
+  `blocked-external-input`，不是异常 traceback；
+- config JSON、私钥、known_hosts 在检查期间被替换或改变时失败；
+- host fingerprint、container identity 必须是 immutable digest；
+- 可选的远端探针只能执行固定 argv 的只读命令，禁止 shell 拼接、上传 bundle、
+  mkdir 或启动容器；
+- report 不包含用户名之外的连接秘密，不包含私钥路径、config 原文或 stderr
+  未过滤内容；canonical bytes 与内容 SHA 可复算；
+- 同一 report 不能被其它 config/container/host 复用。
+
+建议 CLI：
+
+```powershell
+.\.venv\Scripts\python.exe make.py real-scene preflight-remote `
+  SOURCE=<source.json> REMOTE_CONFIG=<private-config.json>
+```
+
+若新增 target，必须同步 `Makefile`、`make.py`、帮助文本与 CLI 测试。
+
 ### P1-3：恢复/失败演练
 
 对 submit、poll、fetch、checksum mismatch、远端 job 失败、网络中断与本地 journal
 恢复做 fresh 演练。产物必须绑定 dataset/training config/container/result SHA；
 失败 job 不得被 resume 为 succeeded。
 
-### P1-4：fresh Windows canary
+按四个独立提交交付：
 
-在 P0/P1-1/2/3 完成后，使用现有 rights-cleared canary 配置重跑：
+1. P1-3A：fake transport 覆盖 submit-before-ack、ack-after-disconnect、
+   poll timeout、remote failed、fetch interrupted；
+2. P1-3B：对 bundle、result、evaluation、container identity、journal 的每个 SHA
+   做单点 tamper；
+3. P1-3C：重启后只从 durable journal 恢复，`unknown` 仍为 unknown，显式 retry
+   产生新 attempt identity；
+4. P1-3D：生成 `nantai.remote-training-drill.v1` canonical report，绑定 exact
+   commit、场景/数据/config/container SHA、用例结果和工具版本。
+
+优先路径：
+
+- `pipeline/training_executor.py`
+- `pipeline/remote_shell_executor.py`
+- `pipeline/real_scene_operations.py`
+- 对应三组 tests；如新增脚本只放 `scripts/`，报告样例只放 test 临时目录。
+
+### P1-4：实测控制点与米制对齐门
+
+目标：在真实训练结果到来前完成输入和证据合同；没有合格控制点时明确保持
+`arbitrary / unaligned`。
+
+必须覆盖：
+
+- 至少 4 个唯一、非共面的 3D 对应点，拒绝重复、共线、近共面和 rank-deficient；
+- 声明源/目标 frame、轴、handedness、单位和点身份；
+- Sim3 必须报告 scale、rotation、translation、每点 residual、RMSE/max residual；
+- policy 与决定分离；阈值变化改变 policy SHA，不能改写 measured residual；
+- alignment 绑定 registration、control-points、policy 与 transform history SHA；
+- 未通过时禁止写 `metric`、`aligned` 或 ENU frame。
+
+优先路径：`pipeline/alignment.py`、`pipeline/real_scene_runner.py`、
+`pipeline/real_scene_acceptance.py` 及对应 tests。
+
+### P1-5：云 GPU runtime readiness 与 production result closure
+
+目标：把“能连接服务器”和“真实训练已接受”分开。无 CUDA/端点/凭据时可交付
+`blocked-external-input`，但 schema、CLI、探针和 fixture 必须完成。
+
+必须覆盖：
+
+- 远端 CUDA device、driver/runtime、Nerfstudio `1.1.5`、训练 CLI 实际 schema；
+- container 必须用 digest，探针结果绑定实际执行 binary/image；
+- 禁止在 readiness probe 安装依赖、改 PATH、运行 SfM 或启动训练；
+- production result 必须有非 mock training log、export PLY、dataparser transform、
+  held-out evaluation、container identity 与 content SHA；
+- stub/fake/local Brush 结果永远不能满足 production closure。
+
+优先路径：`cloud/`、`pipeline/remote_shell_executor.py`、
+`pipeline/training_executor.py`、`pipeline/training_provenance.py` 及对应 tests。
+
+### P1-6：fresh Windows canary
+
+在 P0/P1-1/2/3/4/5 完成后，使用现有 rights-cleared canary 配置重跑：
 
 ```text
 fetch/verify → fresh COLMAP → split/bundle → local Brush preview
@@ -242,6 +387,22 @@ fetch/verify → fresh COLMAP → split/bundle → local Brush preview
 只提交机器报告、内容 SHA 和精简说明。预期仍是
 `internal-only / preview-only / arbitrary / unaligned`；不得把本机 Brush 提升为
 production 3DGS。
+
+每一段必须使用 fresh 输出目录；报告绑定 `main` exact commit。失败阶段保留机器状态
+和最小日志摘要，不提交媒体、缓存、私有配置、绝对用户目录或完整中间输出。
+
+### P1-7：交给 Codex 的真实 Viewer 输入包
+
+只有真实非 mock 云结果到达后执行。GLM 交付：
+
+- verified import receipt 与 scene identity；
+- chunks manifest、LOD、坐标/transform history；
+- render/viewer policy；
+- 全部内容 SHA 与生成工具 exact commit；
+- 明确仍缺失的 meter alignment 或人工验收门。
+
+Codex 消费这些输入做真实浏览器 QA；GLM 在等待期间继续 P2 的 review 修复，不能把
+“等待人工视觉结论”报告为整个 lane 无任务。
 
 ## P2 — 不阻塞真实主线的后续工作
 
