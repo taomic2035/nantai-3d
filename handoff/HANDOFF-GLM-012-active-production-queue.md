@@ -17,10 +17,46 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ---
 
+## Codex 即时指令（2026-07-27 18:40）
+
+GLM 当前不是“无事可做”。工作树里的 D1 草稿 fresh 结果为
+`45 passed, 10 failed`，尚不可提交。按下面顺序连续执行：
+
+```text
+D1.1 修复 canonical report 与 CLI 10 个失败
+  → D1.2 跑专项门并小步提交/push
+  → E1 fresh-container lifecycle receipt
+  → F1 同容器六探针 clearance adapter
+  → G1 operations caller 接入与结果 producer 闭环
+```
+
+除非需要 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
+closure/import/Viewer/release schema，否则不得回复“无待推进工作”，也不得等待
+Codex 口头确认。每个 ticket 独立提交并 push，随后立即开始下一项；Codex 在提交后
+异步 review。
+
+### D1.1 当前精确返修单
+
+1. 保留合法的顶层 `report_sha256`。修正
+   `test_missing_dataset_never_requires_or_emits_placeholder_sha`，只解析并检查
+   `production-dataset` requirement 的 identity/receipt 字段，不得用全文
+   64-hex 正则误杀报告自身内容 SHA。
+2. duplicate-key-safe JSON 解析后，显式把封闭字符串映射为
+   `RequirementId` / `RequirementState` / `ReasonCode`，再交给 strict Pydantic
+   model。未知枚举值必须拒绝，但 canonical JSON round-trip 必须可读。
+3. CLI 参数错误必须经过 `argparse` 的 `type=` 或 `parser.error(...)`，对直接调用
+   `main([...])` 产生有界 `SystemExit(2)`；不得把 `ArgumentTypeError` / `ValueError`
+   traceback 泄漏给调用者，也不得回显 secret-bearing 原值。
+4. requirement ID 固定为 `production-dataset`，不能命名成
+   `rights-cleared-dataset` 并自证 rights。rights 只有 source content SHA 与
+   receipt SHA 同时绑定时才是 `present-unverified`，仍不能推导 release allowed。
+5. 先只修上述根因，不删测试、不降 strict、不放宽 canonical/no-replace 门。完成后
+   预期本文件全部 `55 passed`，再跑 ruff 与 `git diff --check`。
+
 ## 执行规则
 
 这是 GLM 当前唯一执行入口。B1/C1 已关闭，当前 active ticket 是 D1；随后按
-D1 → E1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有需要
+D1 → E1 → F1 → G1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有需要
 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
 Viewer/Studio/release/schema 路径时才暂停。
 
@@ -234,7 +270,7 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 
 提交成功后自动开始 E1。
 
-### Task E1: 接通 caller lifecycle receipt 与同容器 clearance adapter
+### Task E1: fresh-container lifecycle receipt
 
 **Files:**
 
@@ -248,17 +284,17 @@ namespace 已发布但 sync unknown、reconnect 恢复不同 container。receipt
 job/attempt/workspace、immutable image digest、完整 container ID 与 durable
 transition，不得让 caller 自报 GPU/CUDA/Nerfstudio pass。
 
-- [ ] **Step 2: 为同容器六探针建立 RED**
+- [ ] **Step 2: 实现并验证 lifecycle**
 
-固定 adapter 在同一 container ID 内收集六个 executable 的 raw observations，再交给
-既有 `pipeline.production_runtime_evidence` 推导 measurement/policy/decision。
-decision 非 accepted 时 training argv 必须不可达；container ID、executable identity
-或 GPU UUID 任一 drift 都 blocked。不得创建平行 G2/G5 schema。
+receipt 只能记录 job/attempt/workspace、immutable image digest、完整 container ID 与
+durable transition。`prepare → submit → restore → poll → fetch` 的每一步都必须复核
+同一 attempt/container；reconnect 只能恢复原实例。不得把 host preflight 或 caller
+自报值写成 GPU/CUDA/Nerfstudio 通过。
 
 - [ ] **Step 3: 联合回归**
 
 ```powershell
-python -m pytest -q tests/test_remote_shell_executor.py tests/test_remote_training_worker.py tests/test_production_runtime_evidence.py tests/test_production_training_closure.py
+python -m pytest -q tests/test_remote_shell_executor.py tests/test_remote_training_worker.py
 python -m ruff check pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
 git diff --check -- pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
 ```
@@ -267,12 +303,106 @@ git diff --check -- pipeline/remote_shell_executor.py tests/test_remote_shell_ex
 
 ```powershell
 git add -- pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
-git commit --only pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py -m "feat: bind remote lifecycle clearance receipt"
+git commit --only pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py -m "feat: bind remote lifecycle receipt"
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-E1 完成后停在 review 边界，把调用图、测试数字和未接通的 producer 缺口交给 Codex；
-不要自行修改 production closure/import、Viewer 或 release schema。
+E1 完成后立即开始 F1。
+
+### Task F1: 同容器六探针 clearance adapter
+
+**Files:**
+
+- Modify: `pipeline/remote_shell_executor.py`
+- Modify: `tests/test_remote_shell_executor.py`
+
+- [ ] **Step 1: 建立行为 RED**
+
+fake transport 必须真实记录 argv 与执行顺序，至少覆盖：
+
+```text
+test_clearance_runs_fixed_probes_in_lifecycle_container
+test_training_is_unreachable_when_runtime_decision_is_not_accepted
+test_clearance_rejects_container_swap
+test_clearance_rejects_executable_identity_drift
+test_clearance_rejects_gpu_uuid_drift
+test_clearance_rejects_probe_toctou
+test_restore_revalidates_same_clearance_attempt
+```
+
+- [ ] **Step 2: 接入唯一权威 G2**
+
+只收集同一 container ID 内六个 executable 的 raw observations，交给既有
+`pipeline.production_runtime_evidence` 构造并重新验证
+measurement/policy/decision。不得复制模型、建立 `RemoteReadinessEvidence.v2` 或让
+caller 直接构造 accepted。decision 非 accepted 时 training argv 必须不可达。
+
+- [ ] **Step 3: 验证、提交并继续**
+
+```powershell
+python -m pytest -q tests/test_remote_shell_executor.py tests/test_production_runtime_evidence.py
+python -m ruff check pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
+git diff --check -- pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
+git add -- pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
+git commit --only pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py -m "feat: gate training on container clearance"
+git -c http.proxy=http://127.0.0.1:7890 push origin main
+```
+
+F1 完成后立即开始 G1。
+
+### Task G1: operations caller 与 production result producer
+
+**Files:**
+
+- Modify: `pipeline/real_scene_operations.py`
+- Modify: `tests/test_real_scene_operations.py`
+- 如确有必要可继续修改：
+  `pipeline/remote_shell_executor.py`、`tests/test_remote_shell_executor.py`
+
+- [ ] **Step 1: 建立端到端 fake transport RED**
+
+从 `train-production` stage 出发，证明：
+
+1. 缺外部输入时输出 D1 canonical report，只列精确 unresolved IDs；
+2. 外部输入 `present-unverified` 不能绕过 host preflight 或 F1 clearance；
+3. accepted clearance 后同一 attempt/container 才能训练；
+4. 下载后先运行 archive v2 raw verifier、training provenance、identity dataparser
+   与 render raw validator；
+5. manifest/runtime/render evidence no-replace 落盘后，才允许调用既有
+   `derive_production_training_closure`；
+6. closure durable publication 完成后，executor receipt 才能变成 succeeded；
+7. collision、sync unknown、result swap、attempt/container drift 全部保持
+   blocked/unknown，不能出现 completed。
+
+- [ ] **Step 2: 只接 producer，不改消费端 schema**
+
+精确交付 import 已要求的八个文件：
+
+```text
+remote-result/result-bundle-manifest.json
+remote-result/production-runtime/measurement.json
+remote-result/production-runtime/policy.json
+remote-result/production-runtime/decision.json
+remote-result/render-evaluation/policy.json
+remote-result/render-evaluation/report.json
+remote-result/render-evaluation/decision.json
+remote-result/production-training-closure.json
+```
+
+不得修改 `pipeline/production_training_closure.py`、
+`pipeline/real_scene_import.py`、Viewer 或 release schema；不得把 closure 放回其所
+绑定的 archive manifest 形成循环 SHA。
+
+- [ ] **Step 3: 联合回归与独立提交**
+
+```powershell
+python -m pytest -q tests/test_real_scene_operations.py tests/test_remote_shell_executor.py tests/test_remote_training_worker.py tests/test_production_runtime_evidence.py tests/test_production_training_closure.py tests/test_real_scene_import.py
+python -m ruff check pipeline/real_scene_operations.py pipeline/remote_shell_executor.py tests/test_real_scene_operations.py tests/test_remote_shell_executor.py
+git diff --check -- pipeline/real_scene_operations.py pipeline/remote_shell_executor.py tests/test_real_scene_operations.py tests/test_remote_shell_executor.py
+```
+
+G1 完成后才停在 Codex review 边界，回执调用图、测试数字、真实外部输入缺口与下一个
+最小 producer 缺口；不要声称 Production V1 已完成。
 
 ## Codex review 门
 
