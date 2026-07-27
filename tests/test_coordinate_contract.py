@@ -215,8 +215,16 @@ class TestRegistrationFrameClaims:
         photos.mkdir()
         workspace = tmp_path / "colmap"
         session = _session(anchor=GeoAnchor(lat=26.0, lon=119.0, alt=50.0))
+        binary = tmp_path / "colmap.exe"
+        binary.write_bytes(b"coordinate-contract-colmap")
 
         def fake_run(args, capture_output, text, timeout=None, **kwargs):
+            if args[1:] == ["feature_extractor", "-h"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr="COLMAP 4.1.0\n",
+                    stdout="",
+                )
             command = args[1]
             if command == "mapper":
                 (workspace / "sparse" / "0").mkdir(parents=True)
@@ -231,7 +239,7 @@ class TestRegistrationFrameClaims:
 
         monkeypatch.setattr(
             "pipeline.registration._find_colmap_binary",
-            lambda: "colmap",
+            lambda: str(binary),
         )
         monkeypatch.setattr("pipeline.registration.subprocess.run", fake_run)
         result = colmap_register(photos, workspace, sessions=[session])

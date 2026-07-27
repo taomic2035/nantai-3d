@@ -58,7 +58,7 @@ def test_nonidentity_or_incomplete_transform_is_rejected(tmp_path, payload):
         validate_dataparser_transform(path)
 
 
-def test_duplicate_keys_and_symlinks_are_rejected(tmp_path):
+def test_duplicate_keys_are_rejected(tmp_path):
     path = tmp_path / "dataparser_transforms.json"
     path.write_text(
         '{"scale":1.0,"scale":1.0,"transform":'
@@ -68,13 +68,22 @@ def test_duplicate_keys_and_symlinks_are_rejected(tmp_path):
     with pytest.raises(DataparserTransformError, match="invalid"):
         validate_dataparser_transform(path)
 
-    path.unlink()
+
+def test_symlinks_are_rejected(tmp_path):
+    path = tmp_path / "dataparser_transforms.json"
     target = tmp_path / "target.json"
     target.write_text(
         '{"scale":1.0,"transform":'
         '[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}',
         encoding="ascii",
     )
-    path.symlink_to(target)
+    try:
+        path.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip(
+                "Windows SeCreateSymbolicLinkPrivilege not held"
+            )
+        raise
     with pytest.raises(DataparserTransformError, match="link-like"):
         validate_dataparser_transform(path)
