@@ -87,6 +87,7 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 
 - [`handoff/README.md`](handoff/README.md) — 当前 handoff 索引
 - [`handoff/HANDOFF-GLM-011-production-v1-critical-path.md`](handoff/HANDOFF-GLM-011-production-v1-critical-path.md)
+- [`handoff/HANDOFF-GLM-012-active-production-queue.md`](handoff/HANDOFF-GLM-012-active-production-queue.md)
 - [`handoff/HANDOFF-GLM-009-roaming-graph-producer.md`](handoff/HANDOFF-GLM-009-roaming-graph-producer.md)
 - [`handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`](handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md)
 - [`handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`](handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md)
