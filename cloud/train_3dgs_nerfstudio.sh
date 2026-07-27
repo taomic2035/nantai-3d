@@ -137,32 +137,26 @@ run_production_prepared_bundle_mode() {
          cd "$(dirname "$NS_EXPORT_PATH")" && pwd -P
        )/$(basename "$NS_EXPORT_PATH")" ;;
   esac
-  [ -f "$NS_TRAIN_PATH" ] || {
-    echo "!! ns-train resolved path is not a regular file" >&2
+  [ -f "$NS_TRAIN_PATH" ] && [ ! -L "$NS_TRAIN_PATH" ] \
+    && [ -x "$NS_TRAIN_PATH" ] || {
+    echo "!! ns-train resolved path is not an executable regular file" >&2
     return 1
   }
-  [ -f "$NS_EXPORT_PATH" ] || {
-    echo "!! ns-export resolved path is not a regular file" >&2
+  [ -f "$NS_EXPORT_PATH" ] && [ ! -L "$NS_EXPORT_PATH" ] \
+    && [ -x "$NS_EXPORT_PATH" ] || {
+    echo "!! ns-export resolved path is not an executable regular file" >&2
     return 1
   }
-  # Version probe: preserve real exit code; strict equality
-  # (not substring match — "1.1.5-dev" must NOT pass).
-  local NS_TRAIN_VERSION
-  NS_TRAIN_VERSION="$("$NS_TRAIN_PATH" --version 2>&1)" || {
-    echo "!! ns-train --version 退出非零" >&2
-    return 1
-  }
-  if [ "$NS_TRAIN_VERSION" != "$NERFSTUDIO_VERSION" ]; then
-    echo "!! ns-train --version 与 nerfstudio 不一致: $NS_TRAIN_VERSION" >&2
+  # Nerfstudio v1.1.5 exposes Tyro help for these entrypoints, not a
+  # supported --version flag. Package version is pinned above; these
+  # side-effect-free probes prove both resolved wrappers can load.
+  # Discard untrusted help output so it cannot leak into worker logs.
+  if ! "$NS_TRAIN_PATH" -h >/dev/null 2>&1; then
+    echo "!! ns-train CLI probe 失败" >&2
     return 1
   fi
-  local NS_EXPORT_VERSION
-  NS_EXPORT_VERSION="$("$NS_EXPORT_PATH" --version 2>&1)" || {
-    echo "!! ns-export --version 退出非零" >&2
-    return 1
-  }
-  if [ "$NS_EXPORT_VERSION" != "$NERFSTUDIO_VERSION" ]; then
-    echo "!! ns-export --version 与 nerfstudio 不一致: $NS_EXPORT_VERSION" >&2
+  if ! "$NS_EXPORT_PATH" -h >/dev/null 2>&1; then
+    echo "!! ns-export CLI probe 失败" >&2
     return 1
   fi
   command -v nvidia-smi >/dev/null || {

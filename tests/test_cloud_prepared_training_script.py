@@ -1,10 +1,10 @@
 """Behavior tests for cloud/train_3dgs_nerfstudio.sh production mode (NOW-8 C1).
 
 Restores the executable fake-tool golden-path tests deleted by b02f6ab and
-adds RED tests for the six Codex-specified defects: CLI version probe
-swallowing non-zero exit, substring version match, PATH swap after
-resolution, and ns-export parity.  Static source checks remain as
-supplementary lint; they do NOT replace executable evidence.
+adds RED tests for the Codex-specified defects: unsupported CLI probes
+swallowing non-zero exit, package-version collision, PATH swap after
+resolution, and ns-export parity. Static source checks remain supplementary;
+they do NOT replace executable evidence.
 """
 
 from __future__ import annotations
@@ -148,28 +148,27 @@ def test_production_resolves_cli_to_absolute_paths():
     assert "command -v ns-export" in production
     assert "NS_TRAIN_PATH" in production
     assert "NS_EXPORT_PATH" in production
-    # Resolved path must be used for version probe and execution
-    assert '"$NS_TRAIN_PATH" --version' in production
-    assert '"$NS_EXPORT_PATH" --version' in production
+    # Resolved path must be used for supported help probes and execution.
+    assert '"$NS_TRAIN_PATH" -h' in production
+    assert '"$NS_EXPORT_PATH" -h' in production
     assert '"$NS_TRAIN_PATH" splatfacto' in production
     assert '"$NS_EXPORT_PATH" gaussian-splat' in production
 
 
-def test_production_version_probe_has_no_or_true():
-    """Version probe must NOT swallow non-zero exit with || true."""
+def test_production_cli_probe_has_no_or_true():
+    """CLI probes must NOT swallow non-zero exit with `or true`."""
     production = _production_function()
     assert "|| true" not in production
 
 
-def test_production_version_probe_uses_strict_equality():
-    """Version match must use strict equality, not substring case match."""
+def test_production_uses_supported_help_probe_and_strict_package_version():
+    """Nerfstudio v1.1.5 exposes Tyro help, not a CLI version flag."""
     production = _production_function()
-    assert '"$NERFSTUDIO_VERSION"' in production
-    assert "!= " in production
-    # Must NOT use substring case match
-    assert "case" not in production.split(
-        "ns-train --version"
-    )[1].split("ns-export")[0] if "ns-train --version" in production else True
+    assert 'NERFSTUDIO_VERSION" != "1.1.5"' in production
+    assert '"$NS_TRAIN_PATH" -h' in production
+    assert '"$NS_EXPORT_PATH" -h' in production
+    assert '"$NS_TRAIN_PATH" --version' not in production
+    assert '"$NS_EXPORT_PATH" --version' not in production
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +276,11 @@ exec "$REAL_PYTHON" "$@"
         bin_dir / "ns-train",
         r"""#!/bin/bash
 if [ "${1:-}" = "--version" ]; then
-  printf '1.1.5\n'
+  printf 'unsupported --version\n' >&2
+  exit 64
+fi
+if [ "${1:-}" = "-h" ]; then
+  printf 'usage: ns-train\n'
   exit 0
 fi
 printf '%s\0' "$@" > "$NS_TRAIN_ARGV_FILE"
@@ -292,7 +295,11 @@ exit 0
         bin_dir / "ns-export",
         r"""#!/bin/bash
 if [ "${1:-}" = "--version" ]; then
-  printf '1.1.5\n'
+  printf 'unsupported --version\n' >&2
+  exit 64
+fi
+if [ "${1:-}" = "-h" ]; then
+  printf 'usage: ns-export\n'
   exit 0
 fi
 printf '%s\0' "$@" > "$NS_EXPORT_ARGV_FILE"
@@ -436,15 +443,19 @@ def _run_with_stubs(
 
 
 @_BASH
-def test_production_rejects_ns_train_version_output_from_nonzero_command(
+def test_production_rejects_ns_train_help_probe_nonzero(
     tmp_path,
 ):
-    """ns-train --version exiting non-zero must fail closed."""
+    """Official ns-train `-h` exiting non-zero must fail closed."""
     result = _run_with_stubs(
         tmp_path,
         ns_train_stub=(
             "#!/bin/bash\n"
             'if [ "${1:-}" = "--version" ]; then\n'
+            "  printf '1.1.5\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            'if [ "${1:-}" = "-h" ]; then\n'
             '  echo "error" >&2\n'
             "  exit 1\n"
             "fi\n"
@@ -456,29 +467,11 @@ def test_production_rejects_ns_train_version_output_from_nonzero_command(
 
 
 @_BASH
-def test_production_rejects_ns_train_version_substring_collision(
+def test_production_never_logs_ns_train_probe_output(
     tmp_path,
 ):
-    """Version output containing '1.1.5' as substring must NOT pass."""
-    result = _run_with_stubs(
-        tmp_path,
-        ns_train_stub=(
-            "#!/bin/bash\n"
-            'if [ "${1:-}" = "--version" ]; then\n'
-            "  printf '1.1.5-dev\\n'\n"
-            "  exit 0\n"
-            "fi\n"
-            "exit 0\n"
-        ),
-    )
-    assert result.returncode != 0
-
-
-@_BASH
-def test_production_rejects_ns_export_version_output_from_nonzero_command(
-    tmp_path,
-):
-    """ns-export --version exiting non-zero must fail closed."""
+    """Untrusted help output must not be copied into worker logs."""
+    canary = "NANTAI_NS_TRAIN_PROBE_SECRET"
     result = _run_with_stubs(
         tmp_path,
         ns_train_stub=(
@@ -487,11 +480,42 @@ def test_production_rejects_ns_export_version_output_from_nonzero_command(
             "  printf '1.1.5\\n'\n"
             "  exit 0\n"
             "fi\n"
+            'if [ "${1:-}" = "-h" ]; then\n'
+            f"  printf '{canary}\\n' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n"
+        ),
+    )
+    assert result.returncode != 0
+    assert canary not in (result.stdout + result.stderr)
+
+
+@_BASH
+def test_production_rejects_ns_export_help_probe_nonzero(
+    tmp_path,
+):
+    """Official ns-export `-h` exiting non-zero must fail closed."""
+    result = _run_with_stubs(
+        tmp_path,
+        ns_train_stub=(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--version" ]; then\n'
+            "  printf '1.1.5\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            'if [ "${1:-}" = "-h" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
             "exit 0\n"
         ),
         ns_export_stub=(
             "#!/bin/bash\n"
             'if [ "${1:-}" = "--version" ]; then\n'
+            "  printf '1.1.5\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            'if [ "${1:-}" = "-h" ]; then\n'
             '  echo "error" >&2\n'
             "  exit 1\n"
             "fi\n"
@@ -503,18 +527,34 @@ def test_production_rejects_ns_export_version_output_from_nonzero_command(
 
 
 @_BASH
-def test_production_uses_resolved_cli_paths_after_version_probe(
+def test_production_uses_resolved_cli_paths_after_help_probe(
     tmp_path,
 ):
-    """The resolved absolute path must be used for both probe and execution.
-
-    A PATH swap after version probe must NOT hijack the training call.
-    The stub records its own path in the argv file; we verify the path
-    used for training matches the resolved stub path.
-    """
+    """Removing the probed CLI must not fall through to a PATH replacement."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _make_golden_path_stubs(bin_dir)
+    fallback_dir = tmp_path / "fallback-bin"
+    fallback_dir.mkdir()
+    hijack_file = tmp_path / "hijacked"
+    _write_executable(
+        bin_dir / "ns-train",
+        r"""#!/bin/bash
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--version" ]; then
+  printf 'usage: ns-train\n'
+  rm -- "$0"
+  exit 0
+fi
+exit 0
+""",
+    )
+    _write_executable(
+        fallback_dir / "ns-train",
+        r"""#!/bin/bash
+printf 'hijacked\n' > "$NS_TRAIN_HIJACK_FILE"
+exit 0
+""",
+    )
     bundle = tmp_path / "training-job.zip"
     bundle.write_bytes(b"stubbed-verified-bundle")
     argv_file = tmp_path / "ns-train.argv"
@@ -523,11 +563,14 @@ def test_production_uses_resolved_cli_paths_after_version_probe(
     env = os.environ.copy()
     env.update(
         {
-            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "PATH": (
+                f"{bin_dir}:{fallback_dir}:{env.get('PATH', '')}"
+            ),
             "PYTHON_BIN": str(bin_dir / "python3"),
             "REAL_PYTHON": sys.executable,
             "NS_TRAIN_ARGV_FILE": str(argv_file),
             "NS_EXPORT_ARGV_FILE": str(export_argv_file),
+            "NS_TRAIN_HIJACK_FILE": str(hijack_file),
             "WORK": str(work),
         }
     )
@@ -551,23 +594,16 @@ def test_production_uses_resolved_cli_paths_after_version_probe(
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    # The argv file should exist and contain the training argv
-    assert argv_file.exists()
-    # Verify the stub was called (argv captured)
-    tokens = [
-        token.decode("utf-8").rstrip("\r")
-        for token in argv_file.read_bytes().split(b"\0")
-        if token
-    ]
-    assert "splatfacto" in tokens
+    assert result.returncode != 0
+    assert not hijack_file.exists()
 
 
 @_BASH
-def test_production_rejects_ns_export_version_substring_collision(
+def test_production_never_logs_ns_export_probe_output(
     tmp_path,
 ):
-    """ns-export version containing '1.1.5' as substring must NOT pass."""
+    """Untrusted ns-export help output must not enter worker logs."""
+    canary = "NANTAI_NS_EXPORT_PROBE_SECRET"
     result = _run_with_stubs(
         tmp_path,
         ns_train_stub=(
@@ -576,15 +612,23 @@ def test_production_rejects_ns_export_version_substring_collision(
             "  printf '1.1.5\\n'\n"
             "  exit 0\n"
             "fi\n"
+            'if [ "${1:-}" = "-h" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
             "exit 0\n"
         ),
         ns_export_stub=(
             "#!/bin/bash\n"
             'if [ "${1:-}" = "--version" ]; then\n'
-            "  printf '1.1.5-rc2\\n'\n"
+            "  printf '1.1.5\\n'\n"
             "  exit 0\n"
+            "fi\n"
+            'if [ "${1:-}" = "-h" ]; then\n'
+            f"  printf '{canary}\\n' >&2\n"
+            "  exit 1\n"
             "fi\n"
             "exit 0\n"
         ),
     )
     assert result.returncode != 0
+    assert canary not in (result.stdout + result.stderr)
