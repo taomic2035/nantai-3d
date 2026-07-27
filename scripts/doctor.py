@@ -511,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = diagnose(probes=_default_probes(), verify_assets=args.verify_assets)
     if args.json:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print(json.dumps(report, ensure_ascii=True, indent=2))
     else:
         print(_render(report))
     return 0

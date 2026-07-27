@@ -395,6 +395,27 @@ class TestCli:
         assert registry["status"] == "ok"
         assert registry["count"] > 0
 
+    def test_isolated_json_cli_survives_ascii_only_stdout(self):
+        script = str(ROOT / "scripts/doctor.py")
+        wrapper = (
+            "import runpy,sys;"
+            "sys.stdout.reconfigure(encoding='ascii',errors='strict');"
+            f"sys.argv=[{script!r},'--json'];"
+            f"runpy.run_path({script!r},run_name='__main__')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", wrapper],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["checks"]["assets_registry"]["status"] == "ok"
+        assert result.stdout.isascii()
+
     def test_json_mode_emits_parsable_report(self, capsys):
         code = doctor.main(["--json"])
         assert code == 0
