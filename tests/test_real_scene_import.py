@@ -11,6 +11,10 @@ import pytest
 from plyfile import PlyData, PlyElement
 
 import pipeline.real_scene_import as import_module
+from pipeline.metric_alignment_evidence import (
+    MetricAlignmentPolicy,
+    canonical_metric_alignment_policy_bytes,
+)
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_import import (
     RealSceneImportError,
@@ -714,11 +718,25 @@ def test_production_import_is_metric_chunked_and_content_closed(
     )
     transform = manifest["coordinate_contract"]["transform_chain"][0]
     assert receipt.training_quality_role == "production"
+    assert receipt.schema_id == "nantai.real-scene-import-receipt.v2"
     assert receipt.gaussian_count == 100_000
     assert receipt.target_units == "meters"
     assert receipt.chunk_units == "metres"
     assert receipt.geometry_usability == "metric-aligned"
     assert receipt.alignment_rms_m == pytest.approx(0.0, abs=1e-12)
+    assert receipt.alignment_measurement_path is not None
+    assert receipt.alignment_policy_path is not None
+    assert receipt.alignment_decision_path is not None
+    decision = json.loads(
+        (output_root / receipt.alignment_decision_path).read_bytes()
+    )
+    assert decision["status"] == "accepted"
+    assert (
+        decision["measurement_sha256"]
+        == receipt.alignment_measurement_sha256
+    )
+    assert decision["policy_sha256"] == receipt.alignment_policy_sha256
+    assert decision["content_sha256"] == receipt.alignment_decision_sha256
     with pytest.raises(ValueError, match="100000"):
         RealSceneImportReceipt.model_validate(
             receipt.model_copy(
@@ -731,6 +749,51 @@ def test_production_import_is_metric_chunked_and_content_closed(
         output_root / "import-receipt.json",
         output_root,
     ) == receipt
+
+    replacement_policy = MetricAlignmentPolicy.create(
+        max_rms_m=0.2,
+        max_residual_m=0.2,
+        min_span_ratio=1e-3,
+    )
+    policy_bytes = canonical_metric_alignment_policy_bytes(
+        replacement_policy
+    )
+    policy_path = output_root / receipt.alignment_policy_path
+    policy_path.write_bytes(policy_bytes)
+    replacement_binding = next(
+        binding
+        for binding in receipt.artifacts
+        if binding.path == receipt.alignment_policy_path
+    ).model_copy(
+        update={
+            "byte_length": len(policy_bytes),
+            "sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        }
+    )
+    drifted_receipt = RealSceneImportReceipt.model_validate(
+        receipt.model_copy(
+            update={
+                "alignment_policy_sha256": replacement_policy.content_sha256,
+                "artifacts": tuple(
+                    replacement_binding
+                    if binding.path == receipt.alignment_policy_path
+                    else binding
+                    for binding in receipt.artifacts
+                ),
+            }
+        )
+    )
+    (output_root / "import-receipt.json").write_bytes(
+        canonical_model_bytes(drifted_receipt)
+    )
+    with pytest.raises(
+        RealSceneImportError,
+        match="decision disagrees",
+    ):
+        validate_real_scene_import_receipt(
+            output_root / "import-receipt.json",
+            output_root,
+        )
 
 
 def test_import_receipt_rejects_chunk_payload_tamper(

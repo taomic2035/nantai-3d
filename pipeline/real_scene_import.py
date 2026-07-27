@@ -39,6 +39,23 @@ from pipeline.alignment import (
     load_control_points_json,
 )
 from pipeline.gaussian_scene import GaussianScene
+from pipeline.metric_alignment_evidence import (
+    MetricAlignmentDecision,
+    MetricAlignmentEvidenceError,
+    MetricAlignmentMeasurement,
+    MetricAlignmentPolicy,
+    canonical_control_points_bytes,
+    canonical_metric_alignment_decision_bytes,
+    canonical_metric_alignment_measurement_bytes,
+    canonical_metric_alignment_policy_bytes,
+    decide_metric_alignment,
+    load_canonical_control_points_bytes,
+    load_metric_alignment_decision_bytes,
+    load_metric_alignment_measurement_bytes,
+    load_metric_alignment_policy_bytes,
+    measure_metric_alignment,
+    verify_metric_alignment_decision,
+)
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_training import (
     RealSceneTrainingError,
@@ -53,7 +70,6 @@ from pipeline.recon_schema import (
     GeoAnchor,
     MetricStatus,
     RegistrationResult,
-    Sim3AlignmentEvidence,
     SplatInput,
 )
 from pipeline.reconstruct import reconstruct
@@ -151,8 +167,8 @@ class RealSceneImportIntegrity(FrozenModel):
 
 
 class RealSceneImportReceipt(FrozenModel):
-    schema_id: Literal["nantai.real-scene-import-receipt.v1"] = Field(
-        default="nantai.real-scene-import-receipt.v1",
+    schema_id: Literal["nantai.real-scene-import-receipt.v2"] = Field(
+        default="nantai.real-scene-import-receipt.v2",
         alias="schema",
         serialization_alias="schema",
     )
@@ -173,6 +189,34 @@ class RealSceneImportReceipt(FrozenModel):
         default=None,
         ge=0.0,
         allow_inf_nan=False,
+    )
+    alignment_source_registration_path: (
+        Literal["alignment/source-registration.json"] | None
+    ) = None
+    alignment_control_points_path: (
+        Literal["alignment/control-points.json"] | None
+    ) = None
+    alignment_observed_registration_path: (
+        Literal["alignment/observed-registration.json"] | None
+    ) = None
+    alignment_measurement_path: (
+        Literal["alignment/measurement.json"] | None
+    ) = None
+    alignment_policy_path: Literal["alignment/policy.json"] | None = None
+    alignment_decision_path: (
+        Literal["alignment/decision.json"] | None
+    ) = None
+    alignment_measurement_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    alignment_policy_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    alignment_decision_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
     )
     source_ply_path: Literal["inputs/source.ply"] = "inputs/source.ply"
     normalized_ply_path: Literal["inputs/normalized.ply"] = (
@@ -211,6 +255,19 @@ class RealSceneImportReceipt(FrozenModel):
             self.chunks_manifest_path,
             self.integrity_report_path,
         }
+        alignment_paths = (
+            self.alignment_source_registration_path,
+            self.alignment_control_points_path,
+            self.alignment_observed_registration_path,
+            self.alignment_measurement_path,
+            self.alignment_policy_path,
+            self.alignment_decision_path,
+        )
+        alignment_shas = (
+            self.alignment_measurement_sha256,
+            self.alignment_policy_sha256,
+            self.alignment_decision_sha256,
+        )
         if not required <= set(paths):
             raise ValueError(
                 "import receipt is missing a required artifact binding"
@@ -224,16 +281,24 @@ class RealSceneImportReceipt(FrozenModel):
                 or self.chunk_units != "metres"
                 or self.alignment_rms_m is None
                 or self.alignment_rms_m > 0.25
+                or any(value is None for value in alignment_paths)
+                or any(value is None for value in alignment_shas)
             ):
                 raise ValueError(
                     "production import requires production training, "
                     "at least 100000 Gaussians, and verified metric evidence"
+                )
+            if not set(alignment_paths) <= set(paths):
+                raise ValueError(
+                    "production import is missing bound alignment evidence"
                 )
         elif (
             self.target_units != "arbitrary"
             or self.geometry_usability != "preview-only"
             or self.chunk_units != "source-units"
             or self.alignment_rms_m is not None
+            or any(value is not None for value in alignment_paths)
+            or any(value is not None for value in alignment_shas)
         ):
             raise ValueError(
                 "internal canary must remain arbitrary and preview-only"
@@ -660,32 +725,6 @@ def _load_training_material(
     )
 
 
-def _alignment_rms(registration: RegistrationResult) -> float:
-    if registration.pose_to_world is None:
-        raise RealSceneImportError(
-            "production registration has no pose-to-world transform"
-        )
-    matches: list[Sim3AlignmentEvidence] = []
-    for item in registration.pose_to_world.evidence:
-        if not item.startswith("sim3.alignment.v1="):
-            continue
-        try:
-            matches.append(Sim3AlignmentEvidence.parse(item))
-        except ValueError as exc:
-            raise RealSceneImportError(
-                "production alignment evidence cannot be parsed"
-            ) from exc
-    if len(matches) != 1 or not matches[0].passed:
-        raise RealSceneImportError(
-            "production alignment requires one passed Sim3 evidence record"
-        )
-    if matches[0].rms_residual_m > 0.25:
-        raise RealSceneImportError(
-            "production alignment RMS exceeds 0.25 m"
-        )
-    return matches[0].rms_residual_m
-
-
 def _recon_integrity_is_closed(report: IntegrityReport) -> bool:
     chunks = report.chunks_report
     return (
@@ -909,6 +948,112 @@ def _validate_manifest_claims(
         )
 
 
+def _validate_metric_alignment_claims(
+    root: Path,
+    receipt: RealSceneImportReceipt,
+) -> None:
+    if receipt.source_role != "production-acceptance":
+        return
+    alignment_paths = (
+        receipt.alignment_source_registration_path,
+        receipt.alignment_control_points_path,
+        receipt.alignment_observed_registration_path,
+        receipt.alignment_measurement_path,
+        receipt.alignment_policy_path,
+        receipt.alignment_decision_path,
+    )
+    if any(value is None for value in alignment_paths):
+        raise RealSceneImportError(
+            "production import alignment evidence paths are incomplete"
+        )
+    (
+        source_path,
+        control_points_path,
+        observed_path,
+        measurement_path,
+        policy_path,
+        decision_path,
+    ) = alignment_paths
+    assert source_path is not None
+    assert control_points_path is not None
+    assert observed_path is not None
+    assert measurement_path is not None
+    assert policy_path is not None
+    assert decision_path is not None
+    source, _source_bytes = _load_canonical_model(
+        root / source_path,
+        RegistrationResult,
+        label="source alignment registration",
+    )
+    observed, _observed_bytes = _load_canonical_model(
+        root / observed_path,
+        RegistrationResult,
+        label="observed aligned registration",
+    )
+    prepared_bytes = _read_regular_bytes(
+        root / receipt.registration_path,
+        label="prepared import registration",
+    )
+    try:
+        prepared = RegistrationResult.model_validate_json(prepared_bytes)
+    except ValueError as exc:
+        raise RealSceneImportError(
+            "prepared import registration is invalid"
+        ) from exc
+    try:
+        control_points = load_canonical_control_points_bytes(
+            _read_regular_bytes(
+                root / control_points_path,
+                label="metric alignment control points",
+            )
+        )
+        measurement = load_metric_alignment_measurement_bytes(
+            _read_regular_bytes(
+                root / measurement_path,
+                label="metric alignment measurement",
+            )
+        )
+        policy = load_metric_alignment_policy_bytes(
+            _read_regular_bytes(
+                root / policy_path,
+                label="metric alignment policy",
+            )
+        )
+        decision = load_metric_alignment_decision_bytes(
+            _read_regular_bytes(
+                root / decision_path,
+                label="metric alignment decision",
+            )
+        )
+        verify_metric_alignment_decision(
+            source_registration=source,
+            control_points=control_points,
+            aligned_registration=observed,
+            measurement=measurement,
+            policy=policy,
+            decision=decision,
+        )
+    except MetricAlignmentEvidenceError as exc:
+        raise RealSceneImportError(
+            f"metric alignment evidence is invalid: {exc}"
+        ) from exc
+    if (
+        decision.status != "accepted"
+        or receipt.alignment_measurement_sha256
+        != measurement.content_sha256
+        or receipt.alignment_policy_sha256 != policy.content_sha256
+        or receipt.alignment_decision_sha256 != decision.content_sha256
+        or receipt.target_frame_id != observed.target_frame.frame_id
+        or prepared.target_frame != observed.target_frame
+        or prepared.world_frame != observed.world_frame
+        or prepared.pose_to_world != observed.pose_to_world
+        or receipt.alignment_rms_m != measurement.rms_residual_m
+    ):
+        raise RealSceneImportError(
+            "production import metric decision differs from receipt output"
+        )
+
+
 def validate_real_scene_import_receipt(
     receipt_path: Path,
     output_root: Path,
@@ -943,6 +1088,7 @@ def validate_real_scene_import_receipt(
             raise RealSceneImportError(
                 f"import artifact sha256/size mismatch: {binding.path}"
             )
+    _validate_metric_alignment_claims(root, receipt)
     _validate_manifest_claims(root, receipt)
     recon_report = verify_recon_artifacts(root / receipt.manifest_path)
     if not _recon_integrity_is_closed(recon_report):
@@ -1064,8 +1210,12 @@ def import_real_scene(
                 "normalized PLY changed semantic content"
             )
 
-        registration = material.registration
+        source_registration = material.registration
+        registration = source_registration
         alignment_rms_m: float | None = None
+        alignment_measurement: MetricAlignmentMeasurement | None = None
+        alignment_policy: MetricAlignmentPolicy | None = None
+        alignment_decision: MetricAlignmentDecision | None = None
         if source_role == "production-acceptance":
             if control_points_path is None or geo_origin is None:
                 raise RealSceneImportError(
@@ -1087,8 +1237,13 @@ def import_real_scene(
                         "production import requires at least four measured "
                         "control points"
                     )
+                alignment_policy = MetricAlignmentPolicy.create(
+                    max_rms_m=0.25,
+                    max_residual_m=0.25,
+                    min_span_ratio=1e-3,
+                )
                 registration = align_registration(
-                    registration,
+                    source_registration,
                     control_points,
                     geo_origin=GeoAnchor(
                         lat=float(geo_origin[0]),
@@ -1096,12 +1251,71 @@ def import_real_scene(
                         alt=float(geo_origin[2]),
                     ),
                     world_frame_id="project-enu",
-                    max_rms_m=0.25,
+                    max_rms_m=alignment_policy.max_rms_m,
+                    min_span_ratio=alignment_policy.min_span_ratio,
                 )
-                alignment_rms_m = _alignment_rms(registration)
+                alignment_measurement = measure_metric_alignment(
+                    source_registration,
+                    registration,
+                    control_points,
+                )
+                alignment_decision = decide_metric_alignment(
+                    alignment_measurement,
+                    alignment_policy,
+                    aligned_registration=registration,
+                )
+                verify_metric_alignment_decision(
+                    source_registration=source_registration,
+                    control_points=control_points,
+                    aligned_registration=registration,
+                    measurement=alignment_measurement,
+                    policy=alignment_policy,
+                    decision=alignment_decision,
+                )
+                if alignment_decision.status != "accepted":
+                    raise RealSceneImportError(
+                        "production metric alignment policy rejected output: "
+                        + ",".join(alignment_decision.failure_codes)
+                    )
+                alignment_rms_m = alignment_measurement.rms_residual_m
+                _write_new(
+                    root / "alignment/source-registration.json",
+                    canonical_model_bytes(source_registration),
+                )
+                _write_new(
+                    root / "alignment/control-points.json",
+                    canonical_control_points_bytes(control_points),
+                )
+                _write_new(
+                    root / "alignment/observed-registration.json",
+                    canonical_model_bytes(registration),
+                )
+                _write_new(
+                    root / "alignment/measurement.json",
+                    canonical_metric_alignment_measurement_bytes(
+                        alignment_measurement
+                    ),
+                )
+                _write_new(
+                    root / "alignment/policy.json",
+                    canonical_metric_alignment_policy_bytes(
+                        alignment_policy
+                    ),
+                )
+                _write_new(
+                    root / "alignment/decision.json",
+                    canonical_metric_alignment_decision_bytes(
+                        alignment_decision
+                    ),
+                )
             except RealSceneImportError:
                 raise
-            except (AlignmentError, OSError, ValueError) as exc:
+            except (
+                AlignmentError,
+                MetricAlignmentEvidenceError,
+                OSError,
+                ValueError,
+            ) as exc:
                 raise RealSceneImportError(
                     f"production alignment failed: {exc}"
                 ) from exc
@@ -1211,6 +1425,51 @@ def import_real_scene(
                 else "source-units"
             ),
             alignment_rms_m=alignment_rms_m,
+            alignment_source_registration_path=(
+                "alignment/source-registration.json"
+                if alignment_measurement is not None
+                else None
+            ),
+            alignment_control_points_path=(
+                "alignment/control-points.json"
+                if alignment_measurement is not None
+                else None
+            ),
+            alignment_observed_registration_path=(
+                "alignment/observed-registration.json"
+                if alignment_measurement is not None
+                else None
+            ),
+            alignment_measurement_path=(
+                "alignment/measurement.json"
+                if alignment_measurement is not None
+                else None
+            ),
+            alignment_policy_path=(
+                "alignment/policy.json"
+                if alignment_policy is not None
+                else None
+            ),
+            alignment_decision_path=(
+                "alignment/decision.json"
+                if alignment_decision is not None
+                else None
+            ),
+            alignment_measurement_sha256=(
+                alignment_measurement.content_sha256
+                if alignment_measurement is not None
+                else None
+            ),
+            alignment_policy_sha256=(
+                alignment_policy.content_sha256
+                if alignment_policy is not None
+                else None
+            ),
+            alignment_decision_sha256=(
+                alignment_decision.content_sha256
+                if alignment_decision is not None
+                else None
+            ),
             artifacts=_artifact_bindings(root),
         )
         _write_new(

@@ -44,6 +44,22 @@ class FrozenModel(BaseModel):
     )
 
 
+class _ControlPointSet(FrozenModel):
+    schema_id: Literal["nantai.metric-alignment-control-points.v1"] = Field(
+        default="nantai.metric-alignment-control-points.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    control_points: tuple[ControlPoint, ...]
+
+    @model_validator(mode="after")
+    def _labels_are_unique(self) -> _ControlPointSet:
+        labels = tuple(point.label for point in self.control_points)
+        if len(set(labels)) != len(labels):
+            raise ValueError("metric alignment control points have duplicate labels")
+        return self
+
+
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _MEASUREMENT_ID_PATTERN = r"^metric-alignment-measurement-[0-9a-f]{64}$"
 _POLICY_ID_PATTERN = r"^metric-alignment-policy-[0-9a-f]{64}$"
@@ -98,18 +114,11 @@ def _content_sha(model: BaseModel) -> str:
 def canonical_control_points_bytes(
     control_points: list[ControlPoint],
 ) -> bytes:
-    labels = tuple(point.label for point in control_points)
-    if len(set(labels)) != len(labels):
-        raise MetricAlignmentEvidenceError(
-            "metric alignment control points have duplicate labels"
-        )
+    model = _ControlPointSet(
+        control_points=tuple(control_points),
+    )
     return _canonical_json_bytes(
-        {
-            "control_points": [
-                point.model_dump(mode="json") for point in control_points
-            ],
-            "schema": "nantai.metric-alignment-control-points.v1",
-        }
+        model.model_dump(mode="json", by_alias=True)
     )
 
 
@@ -346,6 +355,84 @@ def canonical_metric_alignment_decision_bytes(
 ) -> bytes:
     return _canonical_json_bytes(
         decision.model_dump(mode="json", by_alias=True)
+    )
+
+
+def _reject_duplicate_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise MetricAlignmentEvidenceError(
+                "metric alignment evidence has duplicate keys"
+            )
+        result[key] = value
+    return result
+
+
+def _parse_canonical_model(
+    payload: bytes,
+    model_type,
+    canonicalizer,
+):
+    try:
+        json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        model = model_type.model_validate_json(payload)
+    except MetricAlignmentEvidenceError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise MetricAlignmentEvidenceError(
+            "metric alignment evidence is invalid"
+        ) from exc
+    if payload != canonicalizer(model):
+        raise MetricAlignmentEvidenceError(
+            "metric alignment evidence is not canonical"
+        )
+    return model
+
+
+def load_canonical_control_points_bytes(
+    payload: bytes,
+) -> list[ControlPoint]:
+    model = _parse_canonical_model(
+        payload,
+        _ControlPointSet,
+        lambda value: _canonical_json_bytes(
+            value.model_dump(mode="json", by_alias=True)
+        ),
+    )
+    return list(model.control_points)
+
+
+def load_metric_alignment_measurement_bytes(
+    payload: bytes,
+) -> MetricAlignmentMeasurement:
+    return _parse_canonical_model(
+        payload,
+        MetricAlignmentMeasurement,
+        canonical_metric_alignment_measurement_bytes,
+    )
+
+
+def load_metric_alignment_policy_bytes(
+    payload: bytes,
+) -> MetricAlignmentPolicy:
+    return _parse_canonical_model(
+        payload,
+        MetricAlignmentPolicy,
+        canonical_metric_alignment_policy_bytes,
+    )
+
+
+def load_metric_alignment_decision_bytes(
+    payload: bytes,
+) -> MetricAlignmentDecision:
+    return _parse_canonical_model(
+        payload,
+        MetricAlignmentDecision,
+        canonical_metric_alignment_decision_bytes,
     )
 
 
