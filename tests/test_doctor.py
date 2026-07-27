@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from scripts import doctor
+
+ROOT = Path(__file__).resolve().parent.parent
 
 VALID = {"ok", "missing", "degraded", "unknown"}
 
@@ -372,6 +375,26 @@ class TestSummary:
 
 
 class TestCli:
+    def test_isolated_direct_cli_can_parse_repository_registry(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(ROOT / "scripts/doctor.py"),
+                "--json",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        registry = report["checks"]["assets_registry"]
+        assert registry["status"] == "ok"
+        assert registry["count"] > 0
+
     def test_json_mode_emits_parsable_report(self, capsys):
         code = doctor.main(["--json"])
         assert code == 0

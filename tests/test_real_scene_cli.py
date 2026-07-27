@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,13 +16,33 @@ from pipeline.real_dataset import (
     canonical_model_bytes,
 )
 
+ROOT = Path(__file__).resolve().parent.parent
+
 
 def _load_cli():
-    path = Path(__file__).resolve().parent.parent / "scripts/real_scene.py"
+    path = ROOT / "scripts/real_scene.py"
     spec = importlib.util.spec_from_file_location("real_scene_cli", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_direct_cli_help_works_in_isolated_python():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(ROOT / "scripts/real_scene.py"),
+            "--help",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "train-production" in result.stdout
 
 
 def _hf_source(path: Path) -> None:

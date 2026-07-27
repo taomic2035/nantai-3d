@@ -9,17 +9,21 @@ import math
 import sys
 from pathlib import Path
 
-from pipeline.real_dataset import (
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.real_dataset import (  # noqa: E402
     DatasetEvidenceError,
     LocalCaptureSource,
     load_real_dataset_source,
 )
-from pipeline.real_scene_runner import (
+from pipeline.real_scene_runner import (  # noqa: E402
     RealSceneBlockedError,
     RealSceneRunOptions,
     run_real_scene,
 )
-from pipeline.recon_schema import GeoAnchor
+from pipeline.recon_schema import GeoAnchor  # noqa: E402
 
 _TARGETS = (
     "fetch",
