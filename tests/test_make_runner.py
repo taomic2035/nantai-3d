@@ -271,6 +271,41 @@ class TestSetupTarget:
         assert pip_index < npm_ci_index < browser_index
 
 
+class TestLintTarget:
+    def test_lint_covers_pipeline_tests_cloud_scripts_and_make_py(self, make, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.lint()
+
+        assert calls == [
+            [
+                make.PY,
+                "-m",
+                "ruff",
+                "check",
+                "pipeline",
+                "tests",
+                "cloud",
+                "scripts",
+                "make.py",
+            ]
+        ]
+
+    def test_makefile_lint_is_equivalent_to_cross_platform_runner(self):
+        makefile = (
+            Path(__file__).resolve().parent.parent / "Makefile"
+        ).read_text(encoding="utf-8")
+        lint_recipe = makefile.split("\nlint:\n", 1)[1].split("\n\n", 1)[0]
+
+        for path in ("pipeline", "tests", "cloud", "scripts", "make.py"):
+            assert path in lint_recipe
+
+
 class TestPreviewReleaseTargets:
     def test_build_preview_uses_default_archive(self, make, monkeypatch):
         calls = []

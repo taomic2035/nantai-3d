@@ -1,4 +1,4 @@
-.PHONY: help setup test ingest reconstruct world assets verify verify-vendor vendor validate-handoff serve env clean
+.PHONY: help setup test lint ingest reconstruct world assets verify verify-vendor vendor validate-handoff serve env clean
 
 PY ?= python
 PROJECT_ROOT := $(shell pwd)
@@ -9,6 +9,7 @@ help:
 	@echo ""
 	@echo "  make setup             安装本机依赖"
 	@echo "  make test              运行 Python + Viewer + Studio 测试"
+	@echo "  make lint              ruff 检查 pipeline/tests/cloud/scripts/make.py"
 	@echo "  make ingest            L0 输入处理 (input/ 照片+视频 → photos/)"
 	@echo "  make reconstruct       端到端重建 (照片+视频 → 统一坐标系 → 3DGS → LOD)"
 	@echo "  make world             生成 5x5 无限世界 (布局 → ply)"
@@ -32,6 +33,9 @@ test:
 	node --test web/studio/*.test.mjs
 	node --test scripts/capture_viewer_acceptance.test.mjs
 	node --test scripts/viewer_runtime_preflight.test.mjs
+
+lint:
+	$(PY) -m ruff check pipeline tests cloud scripts make.py
 
 ingest:
 	$(PY) -m pipeline.ingest --input input --output photos

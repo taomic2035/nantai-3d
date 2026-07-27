@@ -107,7 +107,7 @@ def test() -> None:
 
 
 def lint() -> None:
-    run([PY, "-m", "ruff", "check", "pipeline", "tests"])
+    run([PY, "-m", "ruff", "check", "pipeline", "tests", "cloud", "scripts", "make.py"])
 
 
 def doctor() -> None:
