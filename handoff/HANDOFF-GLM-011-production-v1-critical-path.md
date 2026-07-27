@@ -27,6 +27,7 @@ acceptance。
 | P1-4A 对应点与退化门 | `42df736` |
 | P1-4B 测量 / policy / decision | `0ad9417` |
 | P1-4C production import / runner 复验 | `23a2ece`, `8693848` |
+| G2 production runtime evidence 合同 | `cba2a19` |
 
 `P1-3D` 的证据范围只是 `transport-fixture`，不等于云 GPU 训练；`P1-4C` 已禁止
 runner 仅凭低 RMS 放行，但这只证明 caller 能验证真实证据，不代表已经取得真实
@@ -78,14 +79,14 @@ GLM 当前未提交草稿涉及：
 拒绝条件：修改旧 v1 golden bytes、保留 caller `outcome="pass"`、一个提交混入后续
 GPU 逻辑。
 
-### G2 — Production runtime evidence schema
+### G2 — Production runtime evidence schema（已由 Codex 关闭）
 
-建议新增窄职责模块：
+已交付：
 
 - `pipeline/production_runtime_evidence.py`
 - `tests/test_production_runtime_evidence.py`
 
-完成定义：
+`cba2a19` 已实现：
 
 - 独立 canonical schema 绑定 remote host key、job/workspace identity、immutable
   container digest、GPU UUID/name/memory、driver、CUDA runtime、Python、
@@ -97,8 +98,9 @@ GPU 逻辑。
   全部拒绝；
 - `ready` 必须由模型重算，不能由 caller 提供。
 
-测试必须至少覆盖 honest round trip、每字段 tamper、duplicate key、GPU UUID
-缺失、mutable image tag、错误 Nerfstudio 版本、错误 CLI schema。
+GLM 不要再在 `remote_shell_executor.py` 或 checker 内定义平行的
+`RemoteReadinessEvidence.v2` 信任模型。G3 必须把 fixed raw probe observations
+适配为上述 measurement，再由该模块的 policy/decision 唯一派生 acceptance。
 
 ### G3 — Fixed read-only production probes
 
@@ -110,6 +112,7 @@ GPU 逻辑。
 完成定义：
 
 - probe registry 固定且内容寻址，caller 不能传任意命令；
+- 只连接已运行、全 ID 固定且镜像 digest 匹配的 container；不得启动新容器；
 - 实测 `nvidia-smi` 的 GPU UUID/name/memory/driver；
 - 实测 CUDA runtime，而不是从 driver 字符串推断；
 - 在绑定的 production environment 内实测 Python、Nerfstudio `1.1.5` 和
@@ -117,9 +120,17 @@ GPU 逻辑。
 - readiness 不安装包、不改 PATH、不启动新容器、不跑 SfM/训练；
 - 每个 executable 和 environment identity 做前后快照；变化即 TOCTOU blocked；
 - stdout/stderr 有大小上限和 secret redaction，非 UTF-8/截断/timeout 稳定 blocked。
+- 每个 raw probe 绑定 `execution_environment_sha256`，并构造
+  `ProductionRuntimeMeasurement.create(...)`；checker 不输出 caller 可填的
+  `ready=true`。
 
 无 GPU 时测试 fixture 仍要证明 parser 与状态机，但 `ready` 只能来自真实 probe
 observations。
+
+当前 1747 行草稿不能直接提交：它仍运行宿主任意 `nerfstudio_python`、没有真实
+CUDA runtime 和 `ns-train splatfacto` CLI schema，并在 remote shell 内重复定义
+G2 schema。先把 `training_executor.py` 中被 `4150cfb` 替代的 drill 草稿从 diff
+移除；再只提交 checker + G2 adapter + 对应测试。`docs/manual` 等代码闭环后另交。
 
 ### G4 — Remote caller 端到端接入
 
