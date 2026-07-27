@@ -143,6 +143,44 @@ B 通过 Codex review 后，不等待真实云资源，连续完成：
 或必须修改 Codex-owned schema。普通代码设计、测试失败、Windows skip、网络 push
 重试都不是停工理由。
 
+#### 当前 NOW-7 草稿 Codex 预审：禁止提交
+
+当前未提交的 `production_external_inputs.py` / 测试虽然为绿，但模型要求 blocked
+report 必须填写看似真实的 host、host key、image digest、dataset SHA，并强制
+`rights_clearance="rights-cleared"`。测试为此发明 `gpu-host`、重复字符 SHA 和
+虚构镜像。这违反 provenance fail closed：缺失值不能用格式正确的占位符代替，
+也不能由 blocked report 自报 rights-cleared。
+
+重写前先加入以下 RED：
+
+```text
+test_missing_endpoint_never_requires_or_emits_placeholder_host
+test_missing_image_never_requires_or_emits_placeholder_digest
+test_missing_dataset_never_requires_or_emits_placeholder_sha
+test_rights_cannot_be_claimed_without_bound_source_and_receipt_sha
+test_partial_inputs_report_only_exact_unresolved_requirement_ids
+test_report_has_no_free_text_or_secret_bearing_value_fields
+test_cli_emits_blocked_report_without_any_external_values
+```
+
+完成合同：
+
+1. 顶层固定 `state="blocked-external-input"`，包含排序唯一的 requirement entries；
+2. 每项使用封闭 `requirement_id` 与 `state=missing|unknown|present-unverified`，
+   reason 使用封闭 `reason_code`，不要自由文本；
+3. `missing` 时身份字段必须为 `None` 且 canonical JSON 中不出现伪 host/digest/SHA；
+4. `present-unverified` 只能绑定 operator input 的内容 SHA，不得声明
+   rights-cleared、GPU 可用、metric 或 Viewer accepted；
+5. rights 只记录“需要 source/rights receipt”或其两份内容 SHA；是否允许发布仍由
+   `validate_capture_rights` 推导，blocked report 无权推导；
+6. 实现 NOW-7 要求的无 secret CLI，默认在没有任何外部值时也能成功输出准确 blocked
+   report；输出 no-replace、canonical、duplicate-key-safe；
+7. 不接受 `gpu-host`、`aaaa...`、`cccc...` 之类占位身份作为生产 fixture 成功路径。
+
+当前 readiness 草稿也仍执行未解析的 `[runtime, ...]` 并静默截断超限输出，尚未满足
+A；不要把 NOW-2/3 与 NOW-7 混成一个提交。先完成 A 的两路径小提交，再返修 B，
+最后才提交 NOW-7。
+
 ## 当前结论
 
 Production V1 仍未完成。仓库已经闭合本地 caller、真实照片 COLMAP canary、受限
