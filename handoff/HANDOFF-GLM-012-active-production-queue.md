@@ -19,9 +19,10 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ## 执行规则
 
-这是 GLM 当前唯一执行入口。按 B1 → C1 → D1 → E1 连续推进；一项提交并 push 后立即
-开始下一项，不等待口头确认。只有需要 secret、真实私有数据、付费 GPU，或必须修改
-Codex-owned Viewer/Studio/release/schema 路径时才暂停。
+这是 GLM 当前唯一执行入口。B1 已关闭，当前 active ticket 是 C1；随后按
+C1 → D1 → E1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有
+需要 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
+Viewer/Studio/release/schema 路径时才暂停。
 
 - 共享单一 `main` / worktree；只能路径限定 `git add` 和 `git commit --only`。
 - 不使用 `git add -A`、`commit -a`，不改 Viewer、Studio、release 或 acceptance
@@ -36,10 +37,14 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 每项回执只需给出：commit SHA、修改路径、RED 名称与失败原因、GREEN 数量与 skipped、
 ruff、`git diff --check`、剩余风险、已经开始的下一项。
 
-### Task B1: 关闭 worker durability 的四个真实 RED
+### Task B1: worker durability（已关闭）
 
-**当前事实：** 共享工作树已有未提交草稿。2026-07-27 fresh run 为
-`4 failed, 16 passed`。失败测试如下：
+**关闭证据：** GLM `9eebbc3` 关闭原四个 lifecycle RED；Codex `776fc25` 又用两个
+真实 fault-injection RED 修复 staging cleanup 覆盖原始
+`DurableIOError.published=False|True` 的漏洞。fresh worker 专项为 `22 passed`，
+联合 durable I/O + worker + remote shell 为 `100 passed, 3 skipped`。
+
+原失败测试如下，保留作回归索引：
 
 ```text
 test_worker_rejects_partial_publication
@@ -113,9 +118,9 @@ git commit --only cloud/remote_training_worker.py tests/test_remote_training_wor
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-提交成功后自动开始 C1。
+本项不得重做；直接执行 C1。
 
-### Task C1: 恢复 production shell 的可执行安全门
+### Task C1: 恢复 production shell 的可执行安全门（当前 active）
 
 **Files:**
 

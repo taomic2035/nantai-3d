@@ -43,34 +43,29 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 ### P0 — GLM：云 GPU 信任链
 
 按
-[`HANDOFF-GLM-011`](../handoff/HANDOFF-GLM-011-production-v1-critical-path.md)
-连续执行 NOW-1–NOW-8：
+[`HANDOFF-GLM-012`](../handoff/HANDOFF-GLM-012-active-production-queue.md)
+连续执行 C1 → D1 → E1：
 
-1. 冻结旧 readiness v1，删除被替代的 caller 自报 pass 草稿；
-2. 收窄 fixed read-only host preflight；
-3. 加固 executable identity、输出上限与 TOCTOU；
-4. 实现 fresh container 生命周期与耐久发布；
-5. 在同一 container 内接入 G2 clearance；
-6. 只允许 G5 verified closure 进入 runner/import；
-7. 无端点时交付 canonical `blocked-external-input`；
-8. 把 worker / shell 静态安全发现转成可重复 RED 测试。
+1. C1：恢复 production shell 可执行 golden path，严格绑定 CLI identity/version；
+2. D1：交付无占位身份、无 secret 的 canonical `blocked-external-input`；
+3. E1：接入 fresh-container lifecycle receipt 与同容器 G2 clearance adapter。
 
 当前候选与返修状态：
 
 - `7febb81` 的 host preflight 缺口已由 `a455208` 修复；Podman 在绑定
   `nvidia-ctk`/CDI identity 前稳定 blocked，A1 已关闭；
-- `23f7cf5` 自建 durability primitive 并在 Windows 静默 no-op；fault tests 没有
-  模拟 namespace 已发布但 sync 未确认，unknown publication 还可能倒写 terminal
-  status，已被 Codex review 拒绝；`6495729` 已提供机器可读的 result-bundle
-  `published=None|False|True`，待 worker B1 直接消费；
-- `c66a00a` 的 container lifecycle 仍允许任意 resolved image ID、覆盖
-  `container-id.txt`，也未证明 terminal 状态耐久后才 cleanup；
+- B1 worker durability 已由 `9eebbc3` 和 Codex review 修补 `776fc25` 关闭：
+  resolved image/container identity、container-id no-replace、
+  `published=None|False|True`、post-start evidence preservation、terminal 后单次
+  cleanup 与 cleanup-observation failure 均有平台无关 fault-injection 回归；
+  fresh worker 专项 `22 passed`，durable I/O + worker + remote shell 联合回归
+  `100 passed, 3 skipped`；
 - `da86a81` 的 blocked report 要求用占位 host/digest/dataset SHA 表示缺失输入，
   并由报告自报 `rights-cleared`，已被 Codex review 拒绝；
 - `b02f6ab` 删除 production prepared-bundle 的可执行 golden-path 与 bash 语法
   测试，改用源码 grep 证明 runtime 行为，并以 `|| true` / substring 接受 CLI
   version observation，已被 Codex review 拒绝；
-- 三项精确返修入口均在 `HANDOFF-GLM-011`，测试绿色不能替代返修。
+- 当前只执行 HANDOFF-GLM-012 的 C1，不再重做 A1/B1。
 
 ### P0 — 外部输入：正式素材与测量
 
