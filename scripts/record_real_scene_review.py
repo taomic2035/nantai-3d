@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from pipeline.real_scene_acceptance import (
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.real_scene_acceptance import (  # noqa: E402
     HumanReviewPolicy,
     RealSceneAcceptanceError,
     canonical_human_review_bytes,

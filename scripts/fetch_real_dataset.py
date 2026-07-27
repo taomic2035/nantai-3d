@@ -5,15 +5,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import sys
 from pathlib import Path
 
-from pipeline.real_dataset import (
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.real_dataset import (  # noqa: E402
     DatasetEvidenceError,
     HfDatasetSource,
     canonical_model_bytes,
     load_real_dataset_source,
 )
-from pipeline.real_dataset_fetch import (
+from pipeline.real_dataset_fetch import (  # noqa: E402
     DatasetDownloadError,
     fetch_hf_dataset,
     verify_hf_dataset,

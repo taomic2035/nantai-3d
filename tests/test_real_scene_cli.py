@@ -45,6 +45,35 @@ def test_direct_cli_help_works_in_isolated_python():
     assert "train-production" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("script_name", "expected_help"),
+    (
+        ("fetch_real_dataset.py", "verify-only"),
+        ("validate_render_evaluation.py", "--root"),
+        ("record_real_scene_review.py", "reviewer"),
+    ),
+)
+def test_direct_golden_path_cli_help_works_in_isolated_python(
+    script_name,
+    expected_help,
+):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(ROOT / "scripts" / script_name),
+            "--help",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert expected_help in result.stdout
+
+
 def _hf_source(path: Path) -> None:
     source = HfDatasetSource(
         schema="nantai.real-dataset-source.v1",

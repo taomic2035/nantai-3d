@@ -11,7 +11,11 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from pipeline.render_evaluation import (
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.render_evaluation import (  # noqa: E402
     RenderEvaluationError,
     RenderEvaluationPolicy,
     RenderEvaluationReport,
