@@ -70,3 +70,14 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 - 旧的真实差距矩阵、P1 caller/transaction/WAL 逐轮 review、GLM-005/007/008、
   P7 Viewer handoff、Batch33/34 image2 说明与跨平台 HANDOFF-002 已在
   `65dae27` 之后清理；关键边界已并入本页与当前队列，原文仍可从 Git 历史读取。
+
+## 2026-07-28：远程 runtime clearance 与当前硬化队列
+
+- remote target、durable job ref、worker/entrypoint/runtime source SHA 已进入固定
+  worker spec；同一 lifecycle container 只有在六探针 measurement/policy/decision
+  重算为 accepted 后才可 `exec` 训练。
+- 旧 GLM-012 中 B1–G1 的逐步过程已从活动入口移除；完整内容保留在 Git 历史。
+- 当前 GLM 队列只保留四项：poll deadline/executor close、大型 import artifact
+  流式摘要、result-bundle 流式校验/提取、production v2 fetch 端到端矩阵。
+- 这些仍是 repo-local 代码门；没有 fresh 云 GPU、正式素材、实测控制点和真实
+  Viewer QA 时，状态继续保持 Preview / modeled-unverified。
