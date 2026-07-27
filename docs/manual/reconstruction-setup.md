@@ -246,17 +246,29 @@ request/result 只证明其声明并通过内容闭合检查的事实；stub 或
 
 ### 6.1 生成 Production Viewer v2 证据
 
-正式验收不能手写 Viewer 报告。先在同一个私有 run root 内放好 canonical Viewer
-policy、三机位 camera set 和本次 import 的 scene manifest；三个输入都必须是
-root 内的真实 regular file。保持 Studio 正在运行，然后执行：
+正式验收不能手写 Viewer 报告，也不能手写或任意挑选三机位。先从已经完整复验的
+`production-acceptance` import 生成 provenance-bound Viewer 输入：
 
 ```powershell
 $run = (Resolve-Path .nantai-studio\runs\production-site-a).Path
+python -m pipeline.viewer_inputs `
+  --import-root "$run\imported" `
+  --output-dir "$run\viewer-inputs"
+```
+
+producer 只接受 metric-aligned production import，并从 accepted aligned COLMAP
+registration 以 `registered-camera-maximin-v1` 确定性选出三个空间分离机位。生成的
+`nantai.viewer-camera-set.v2` 同时内容锁定 import receipt、aligned registration 和
+scene manifest；policy 精确绑定三个 pose ID。输出目录必须不存在，不会覆盖旧证据。
+
+保持 Studio 正在运行，然后执行：
+
+```powershell
 node scripts\capture_viewer_acceptance.mjs `
-  --policy "$run\viewer\policy.json" `
-  --camera-set "$run\viewer\cameras.json" `
+  --policy "$run\viewer-inputs\policy.json" `
+  --camera-set "$run\viewer-inputs\cameras.json" `
   --studio-url http://127.0.0.1:8000/web/studio/ `
-  --scene-manifest "$run\imported\recon_manifest.json" `
+  --scene-manifest "$run\imported\web\recon_manifest.json" `
   --output "$run\viewer\performance-report.v2.json" `
   --decision "$run\viewer\performance-decision.json" `
   --source-role production-acceptance `
@@ -264,7 +276,8 @@ node scripts\capture_viewer_acceptance.mjs `
   --headless
 ```
 
-`output`、`decision` 和固定截图路径必须尚不存在；碰撞会拒绝，不会覆盖。采集器会把
+`output`、`decision` 和固定截图路径必须尚不存在；碰撞会拒绝，不会覆盖。采集器在
+启动浏览器前复核 camera-set v2 的 scene manifest SHA，并把
 本次 capture script、Viewer probe 和 Playwright package 独占复制到证据根，记录
 Node/Chromium 可执行文件前后身份，按 camera set 顺序生成三张内容寻址截图。随后
 Python validator 使用同一个 `--evidence-root` 重开 policy、scene、camera set、代码、
@@ -272,7 +285,9 @@ package 和截图，重算报告 ID 与所有性能门。Studio 实际返回的
 `recon_manifest.json` 和 `acceptance-probe.mjs` 响应字节也必须与 receipt 绑定一致；
 否则即使本地路径正确也会拒绝。
 
-人工 review 必须引用 v2 receipt 中完全相同的 pose ID、相对路径、SHA-256 和字节数。
+最终 aggregate 还会把 camera-set v2 的 import receipt 和 aligned registration SHA
+与 accepted import 重新交叉核对。人工 review 必须引用 v2 receipt 中完全相同的
+pose ID、相对路径、SHA-256 和字节数。
 Viewer v1 报告只可用于 `internal-canary`，不能进入 production aggregate。即使 v2
 机器门通过，在同一 scene 的真实 CUDA 3DGS、米制对齐和人工观感验收完成前仍不得
 声明 Production V1。

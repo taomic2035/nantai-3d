@@ -80,3 +80,16 @@ def test_real_canary_docs_do_not_promote_internal_evidence() -> None:
     assert "train-production" in manual
     assert "production-acceptance" in workflow
     assert "rights receipt" in workflow
+
+
+def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
+    manual = _read("docs/manual/reconstruction-setup.md")
+    status = _read("docs/production-v1-status.md")
+
+    assert "python -m pipeline.viewer_inputs" in manual
+    assert "--import-root" in manual
+    assert "--output-dir" in manual
+    assert "nantai.viewer-camera-set.v2" in manual
+    assert "registered-camera-maximin-v1" in manual
+    assert "不能手写或任意挑选三机位" in manual
+    assert "camera-set v2" in status

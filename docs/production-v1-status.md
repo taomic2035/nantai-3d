@@ -76,6 +76,9 @@ Viewer v2 代码门已经就绪：
   Playwright package、Node/browser executable 前后身份和三张截图；
 - camera pose ID 与 report content SHA 使用跨 Python/JavaScript 一致的 IEEE-754
   数字投影，不再受 `1`/`1.0` 词法差异影响；
+- production camera-set v2 producer 从复验通过的 metric-aligned COLMAP registration
+  确定性选取三个空间分离机位，并绑定 import receipt、aligned registration 与 scene
+  manifest；v1 或任一来源 SHA 漂移均 fail closed；
 - capture input、截图与复制出的代码采用 root-bounded、no-symlink、no-replace
   路径；浏览器可执行文件流式哈希，不按文件大小整块分配内存；
 - 浏览器实际收到的 scene manifest 与 acceptance probe 响应字节必须分别匹配
