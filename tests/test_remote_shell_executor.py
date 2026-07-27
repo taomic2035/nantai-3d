@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import shutil
 import struct
 import subprocess
+import traceback
 import zlib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -107,6 +109,59 @@ def _executable(path: Path) -> Path:
     return path
 
 
+def _protect_private_key(
+    path: Path,
+    *,
+    extra_allowed_sid: str | None = None,
+    null_dacl: bool = False,
+) -> None:
+    if os.name != "nt":
+        path.chmod(0o600)
+        return
+    import win32api
+    import win32con
+    import win32security
+
+    dacl = None
+    if not null_dacl:
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(),
+            win32con.TOKEN_QUERY,
+        )
+        current_sid = win32security.GetTokenInformation(
+            token,
+            win32security.TokenUser,
+        )[0]
+        allowed = [
+            current_sid,
+            win32security.ConvertStringSidToSid("S-1-5-18"),
+            win32security.ConvertStringSidToSid("S-1-5-32-544"),
+        ]
+        if extra_allowed_sid is not None:
+            allowed.append(
+                win32security.ConvertStringSidToSid(extra_allowed_sid)
+            )
+        dacl = win32security.ACL()
+        for sid in allowed:
+            dacl.AddAccessAllowedAce(
+                win32security.ACL_REVISION,
+                win32con.GENERIC_ALL,
+                sid,
+            )
+    win32security.SetNamedSecurityInfo(
+        str(path),
+        win32security.SE_FILE_OBJECT,
+        (
+            win32security.DACL_SECURITY_INFORMATION
+            | win32security.PROTECTED_DACL_SECURITY_INFORMATION
+        ),
+        None,
+        None,
+        dacl,
+        None,
+    )
+
+
 def _config(tmp_path) -> RemoteShellExecutorConfig:
     key_blob = b"operator-owned-test-host-key"
     known_hosts = tmp_path / "known_hosts"
@@ -118,7 +173,7 @@ def _config(tmp_path) -> RemoteShellExecutorConfig:
     )
     private_key = tmp_path / "id_ed25519"
     private_key.write_bytes(b"private-key")
-    private_key.chmod(0o600)
+    _protect_private_key(private_key)
     return RemoteShellExecutorConfig(
         ssh_binary=_executable(tmp_path / "ssh"),
         scp_binary=_executable(tmp_path / "scp"),
@@ -187,13 +242,84 @@ def test_submit_uses_strict_host_key_no_shell_and_redacts_key(
     assert len(runner.calls) == 3
     for argv, kwargs in runner.calls:
         assert kwargs["shell"] is False
+        assert argv[argv.index("-F") + 1] == os.devnull
         assert "StrictHostKeyChecking=yes" in argv
+        assert f"GlobalKnownHostsFile={os.devnull}" in argv
         assert "UserKnownHostsFile=" + str(
             executor.config.known_hosts_path
         ) in argv
     audit = "\n".join(" ".join(argv) for argv in executor.command_audit)
     assert str(executor.config.private_key_path) not in audit
     assert "<redacted-private-key>" in audit
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL policy")
+@pytest.mark.parametrize(
+    "sid",
+    [
+        "S-1-1-0",
+        "S-1-5-11",
+        "S-1-5-32-545",
+        "S-1-5-21-111-222-333-9999",
+    ],
+)
+def test_windows_private_key_rejects_unapproved_allow_ace(tmp_path, sid):
+    config = _config(tmp_path)
+    _protect_private_key(
+        config.private_key_path,
+        extra_allowed_sid=sid,
+    )
+
+    with pytest.raises(RemoteShellExecutionError, match="non-owner|ACL"):
+        RemoteShellExecutor(config)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL policy")
+def test_windows_private_key_rejects_null_dacl(tmp_path):
+    config = _config(tmp_path)
+    _protect_private_key(config.private_key_path, null_dacl=True)
+
+    with pytest.raises(RemoteShellExecutionError, match="no DACL"):
+        RemoteShellExecutor(config)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode policy")
+def test_posix_private_key_rejects_group_readable_mode(tmp_path):
+    config = _config(tmp_path)
+    config.private_key_path.chmod(0o640)
+
+    with pytest.raises(RemoteShellExecutionError, match="too broad"):
+        RemoteShellExecutor(config)
+
+
+def test_transport_exception_chain_does_not_leak_private_key(
+    tmp_path,
+):
+    config = _config(tmp_path)
+
+    def fail(argv, **kwargs):
+        del kwargs
+        raise subprocess.TimeoutExpired(argv, timeout=1)
+
+    executor = RemoteShellExecutor(config, run_command=fail)
+    argv = [
+        str(config.ssh_binary),
+        *executor._common_options(scp=False),
+        "--",
+        config.ssh_target,
+        "true",
+    ]
+
+    with pytest.raises(RemoteShellExecutionError) as caught:
+        executor._invoke(argv, phase="probe")
+
+    rendered = "".join(
+        traceback.format_exception(caught.value)
+    )
+    assert str(config.private_key_path) not in rendered
+    assert "<redacted-private-key>" in " ".join(
+        executor.command_audit[-1]
+    )
 
 
 def test_unreachable_poll_returns_unknown(tmp_path, monkeypatch):
@@ -956,3 +1082,61 @@ def test_fetch_only_succeeds_after_local_provenance_closure(
     assert (
         destination / "dataparser_transforms.json"
     ).read_bytes() == transform_bytes
+
+
+def test_ssh_options_use_platform_null_device(tmp_path, monkeypatch):
+    import os
+
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    executor.submit(prepared)
+
+    for argv, _kwargs in runner.calls:
+        assert os.devnull in argv
+        assert f"GlobalKnownHostsFile={os.devnull}" in argv
+        if os.name == "nt":
+            assert "/dev/null" not in argv
+
+
+@pytest.mark.skipif(
+    __import__("os").name == "nt",
+    reason="POSIX mode bits are not meaningful on Windows",
+)
+def test_private_key_accepts_owner_only_posix_permissions(tmp_path):
+    from pipeline.remote_shell_executor import _assert_private_key_protected
+
+    private_key = tmp_path / "id_strict"
+    private_key.write_bytes(b"private-key")
+    private_key.chmod(0o600)
+
+    _assert_private_key_protected(private_key)
+
+
+@pytest.mark.skipif(
+    __import__("os").name != "nt",
+    reason="ACL check is Windows-only",
+)
+def test_private_key_windows_fail_closed_without_pywin32(
+    tmp_path,
+    monkeypatch,
+):
+    import sys
+
+    private_key = tmp_path / "id_no_pywin32"
+    private_key.write_bytes(b"private-key")
+
+    original = sys.modules.get("win32security")
+    monkeypatch.setitem(sys.modules, "win32security", None)
+
+    try:
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="fail-closed",
+        ):
+            from pipeline.remote_shell_executor import (
+                _assert_private_key_protected,
+            )
+
+            _assert_private_key_protected(private_key)
+    finally:
+        if original is not None:
+            sys.modules["win32security"] = original

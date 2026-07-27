@@ -683,13 +683,14 @@ def _validate_downloaded_evaluation(
 
 def _stat_signature(
     result: os.stat_result,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         result.st_dev,
         result.st_ino,
         result.st_mode,
         result.st_size,
         result.st_mtime_ns,
+        result.st_ctime_ns,
     )
 
 
@@ -785,7 +786,10 @@ def build_remote_result_bundle(
         raise RemoteResultBundleError(
             "remote evaluation directory set is incomplete or contains extras"
         )
-    sources: dict[str, tuple[Path, int, str, tuple[int, int, int, int, int]]] = {}
+    sources: dict[
+        str,
+        tuple[Path, int, str, tuple[int, int, int, int, int, int]],
+    ] = {}
     members: list[RemoteResultBundleMember] = []
     for source in result_files:
         name = source.relative_to(root).as_posix()
@@ -1136,32 +1140,18 @@ def _validate_local_regular_file(
         raise RemoteShellExecutionError(f"{label} is not executable")
 
 
-# SIDs that grant access to more than the owner. Any allow-ACE for one
-# of these on a private key file means the key is too broadly readable.
-_BROAD_READ_SIDS = (
-    "S-1-1-0",        # Everyone
-    "S-1-5-11",       # Authenticated Users
-    "S-1-5-32-545",   # BUILTIN\Users
-)
-# Access mask bits that would let a principal read the key bytes.
-_READ_ACCESS_MASK = (
-    0x0001            # FILE_READ_DATA
-    | 0x0002          # FILE_READ_EA
-    | 0x0004          # FILE_READ_ATTRIBUTES
-    | 0x0008          # FILE_EXECUTE (list for dirs, not relevant here)
-    | 0x00020000      # READ_CONTROL
-    | 0x80000000      # GENERIC_READ
-)
+_WINDOWS_SYSTEM_SID = "S-1-5-18"
+_WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544"
 
 
 def _assert_private_key_protected(path: Path) -> None:
     """Reject private keys that are readable by group/other.
 
     POSIX keeps the existing ``st_mode & 0o077`` check. Windows cannot
-    rely on the synthesized POSIX bits (always 0o666), so the DACL is
-    inspected via ``pywin32``; if a broad SID (Everyone / Authenticated
-    Users / Users) holds a read allow-ACE, the key is rejected. If the
-    DACL cannot be inspected, the check fails closed.
+    rely on the synthesized POSIX bits (often 0o666), so the owner and
+    protected DACL are inspected via ``pywin32``. Only the current user,
+    LocalSystem and BUILTIN\\Administrators may receive allow ACEs.
+    Unknown or unsupported ACL evidence fails closed.
     """
 
     if os.name != "nt":
@@ -1178,6 +1168,9 @@ def _assert_private_key_protected(path: Path) -> None:
         return
 
     try:
+        import pywintypes
+        import win32api
+        import win32con
         import win32security
     except ImportError as exc:
         raise RemoteShellExecutionError(
@@ -1185,42 +1178,96 @@ def _assert_private_key_protected(path: Path) -> None:
             "cannot prove key is protected (fail-closed)"
         ) from exc
     try:
+        before = path.lstat()
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(),
+            win32con.TOKEN_QUERY,
+        )
+        try:
+            current_sid = win32security.GetTokenInformation(
+                token,
+                win32security.TokenUser,
+            )[0]
+        finally:
+            token.Close()
+        current_sid_string = win32security.ConvertSidToStringSid(
+            current_sid
+        )
         sd = win32security.GetNamedSecurityInfo(
             str(path),
             win32security.SE_FILE_OBJECT,
-            win32security.DACL_SECURITY_INFORMATION,
+            (
+                win32security.OWNER_SECURITY_INFORMATION
+                | win32security.DACL_SECURITY_INFORMATION
+            ),
         )
-    except OSError as exc:
+        owner = sd.GetSecurityDescriptorOwner()
+        owner_sid_string = win32security.ConvertSidToStringSid(owner)
+        control, _revision = sd.GetSecurityDescriptorControl()
+        dacl = sd.GetSecurityDescriptorDacl()
+    except (OSError, pywintypes.error) as exc:
         raise RemoteShellExecutionError(
             "SSH private key ACL cannot be inspected"
         ) from exc
-    dacl = sd.GetSecurityDescriptorDacl()
     if dacl is None:
         raise RemoteShellExecutionError(
             "SSH private key has no DACL (everyone can read)"
         )
-    broad_sid_objects = []
-    for sid_string in _BROAD_READ_SIDS:
-        try:
-            broad_sid_objects.append(
-                win32security.ConvertStringSidToSid(sid_string)
-            )
-        except OSError:
-            pass
+    if not control & win32security.SE_DACL_PROTECTED:
+        raise RemoteShellExecutionError(
+            "SSH private key DACL must be protected from inheritance"
+        )
+    allowed_sids = {
+        current_sid_string,
+        _WINDOWS_SYSTEM_SID,
+        _WINDOWS_ADMINISTRATORS_SID,
+    }
+    if owner_sid_string not in allowed_sids:
+        raise RemoteShellExecutionError(
+            "SSH private key owner is not approved"
+        )
     for ace_index in range(dacl.GetAceCount()):
-        ace = dacl.GetAce(ace_index)
-        ace_type = ace[0]
-        ace_mask = ace[2]
-        ace_sid = ace[3]
-        if ace_type != win32security.ACCESS_ALLOWED_ACE_TYPE:
+        try:
+            ace = dacl.GetAce(ace_index)
+            ace_header = ace[0]
+            ace_type = ace_header[0]
+        except (IndexError, TypeError, pywintypes.error) as exc:
+            raise RemoteShellExecutionError(
+                "SSH private key ACL entry is malformed"
+            ) from exc
+        if ace_type == win32security.ACCESS_DENIED_ACE_TYPE:
             continue
-        if not (ace_mask & _READ_ACCESS_MASK):
-            continue
-        for broad_sid in broad_sid_objects:
-            if win32security.EqualSid(ace_sid, broad_sid):
+        if ace_type != win32security.ACCESS_ALLOWED_ACE_TYPE or len(ace) != 3:
+            raise RemoteShellExecutionError(
+                "SSH private key ACL contains an unsupported allow entry"
+            )
+        try:
+            sid_string = win32security.ConvertSidToStringSid(ace[2])
+        except (OSError, pywintypes.error) as exc:
+            raise RemoteShellExecutionError(
+                "SSH private key ACL principal cannot be inspected"
+            ) from exc
+        if sid_string not in allowed_sids:
+            raise RemoteShellExecutionError(
+                "SSH private key ACL grants an unapproved principal"
+            )
+    try:
+        with path.open("rb") as stream:
+            if not stream.read(1):
                 raise RemoteShellExecutionError(
-                    "SSH private key is readable by non-owner"
+                    "SSH private key must be readable and non-empty"
                 )
+        after = path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "SSH private key readability cannot be proven"
+        ) from exc
+    if _stat_signature(before) != _stat_signature(after):
+        raise RemoteShellExecutionError(
+            "SSH private key changed during ACL inspection"
+        )
 
 
 def _host_key_fingerprint(key_blob: bytes) -> str:
@@ -1345,10 +1392,10 @@ class RemoteShellExecutor:
                 capture_output=True,
                 timeout=self.config.command_timeout_seconds,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError):
             raise RemoteShellExecutionError(
                 f"{phase} transport could not be executed"
-            ) from exc
+            ) from None
         stdout = completed.stdout or b""
         stderr = completed.stderr or b""
         if isinstance(stdout, str):
