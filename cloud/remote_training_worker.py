@@ -30,10 +30,15 @@ from pipeline.durable_io import (  # noqa: E402
     publish_file_noreplace,
 )
 from pipeline.remote_shell_executor import (  # noqa: E402
+    RemoteContainerLifecycleReceipt,
     RemoteResultBundleError,
     RemoteShellStatus,
     build_remote_result_bundle,
+    canonical_container_lifecycle_bytes,
     canonical_remote_status_bytes,
+    compute_container_lifecycle_sha256,
+    compute_workspace_identity_sha256,
+    load_container_lifecycle_receipt,
 )
 
 REMOTE_WORKER_VERSION = "1.0.0"
@@ -182,7 +187,8 @@ def _read_stable(path: Path, *, max_bytes: int, label: str) -> bytes:
             raise RemoteWorkerError(f"{label} is missing or link-like")
         if before.st_size <= 0 or before.st_size > max_bytes:
             raise RemoteWorkerError(f"{label} size is outside allowed range")
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(max_bytes + 1)
         after = path.lstat()
     except RemoteWorkerError:
         raise
@@ -190,6 +196,8 @@ def _read_stable(path: Path, *, max_bytes: int, label: str) -> bytes:
         raise RemoteWorkerError(f"{label} cannot be read") from exc
     if _stat_signature(before) != _stat_signature(after):
         raise RemoteWorkerError(f"{label} changed while being read")
+    if len(raw) > max_bytes:
+        raise RemoteWorkerError(f"{label} size is outside allowed range")
     return raw
 
 
@@ -306,6 +314,147 @@ def read_status(job_dir: Path, *, max_bytes: int) -> bytes:
     if raw != canonical_remote_status_bytes(status):
         raise RemoteWorkerError("remote status is not canonical JSON")
     return raw
+
+
+_MAX_LIFECYCLE_BYTES = 64 * 1024
+
+
+def build_container_lifecycle_receipt(
+    *,
+    job_id: str,
+    attempt_id: str,
+    request_sha256: str,
+    training_bundle_sha256: str,
+    workspace_path: str,
+    container_identity: str,
+    container_id: str,
+) -> RemoteContainerLifecycleReceipt:
+    """Construct a lifecycle receipt with a recomputed ``receipt_sha256``.
+
+    The caller cannot self-report the SHA; it is derived from the signing
+    bytes (all fields except ``receipt_sha256``).  A round-trip check
+    ensures the computed SHA survives canonical serialisation.
+    """
+    workspace_identity_sha256 = compute_workspace_identity_sha256(
+        job_id=job_id,
+        attempt_id=attempt_id,
+        workspace_path=workspace_path,
+    )
+    provisional = RemoteContainerLifecycleReceipt.model_construct(
+        job_id=job_id,
+        attempt_id=attempt_id,
+        request_sha256=request_sha256,
+        training_bundle_sha256=training_bundle_sha256,
+        workspace_identity_sha256=workspace_identity_sha256,
+        container_identity=container_identity,
+        container_id=container_id,
+        transition="container-created-identity-verified",
+        receipt_sha256="0" * 64,
+    )
+    digest = compute_container_lifecycle_sha256(provisional)
+    receipt = RemoteContainerLifecycleReceipt(
+        job_id=job_id,
+        attempt_id=attempt_id,
+        request_sha256=request_sha256,
+        training_bundle_sha256=training_bundle_sha256,
+        workspace_identity_sha256=workspace_identity_sha256,
+        container_identity=container_identity,
+        container_id=container_id,
+        transition="container-created-identity-verified",
+        receipt_sha256=digest,
+    )
+    if compute_container_lifecycle_sha256(receipt) != digest:
+        raise RemoteWorkerError(
+            "container lifecycle receipt sha256 round-trip failed"
+        )
+    return receipt
+
+
+def _publish_container_lifecycle(
+    job_dir: Path,
+    receipt: RemoteContainerLifecycleReceipt,
+) -> None:
+    """Durably publish one immutable lifecycle receipt without replacement.
+
+    A pre-existing ``container-lifecycle.json`` indicates replay, attempt
+    swap or container swap; overwriting it would silently erase the audit
+    trail.  ``DurableIOError`` is propagated so callers can distinguish
+    "not published" from "published but durability unconfirmed" — the
+    latter must not be treated as "file readable therefore durable".
+    """
+    payload = canonical_container_lifecycle_bytes(receipt)
+    temporary = (
+        job_dir
+        / f".container-lifecycle.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+        flush_file(temporary)
+        publish_file_noreplace(temporary, job_dir / "container-lifecycle.json")
+    except DurableIOError:
+        raise
+    except FileExistsError as exc:
+        raise RemoteWorkerError(
+            "container-lifecycle.json already exists; replay or collision blocked"
+        ) from exc
+    except OSError as exc:
+        raise RemoteWorkerError(
+            "container-lifecycle.json publication cannot be opened"
+        ) from exc
+    finally:
+        _best_effort_unlink(temporary)
+
+
+def read_lifecycle(job_dir: Path, *, max_bytes: int) -> bytes:
+    """Bounded, stable, canonical read of ``container-lifecycle.json``.
+
+    Uses the same stat-snapshot stability check as :func:`read_status`:
+    symlink-like files are rejected, the file must be a regular file
+    within the allowed size range, and the stat signature must not change
+    while being read.  The loaded bytes must survive canonical JSON
+    strict equality.
+    """
+    raw = _read_stable(
+        Path(job_dir).absolute() / "container-lifecycle.json",
+        max_bytes=max_bytes,
+        label="container lifecycle receipt",
+    )
+    try:
+        receipt = load_container_lifecycle_receipt(raw)
+    except ValueError as exc:
+        raise RemoteWorkerError(
+            "container lifecycle validation or canonical check failed"
+        ) from exc
+    if raw != canonical_container_lifecycle_bytes(receipt):
+        raise RemoteWorkerError(
+            "container lifecycle is not canonical JSON"
+        )
+    return raw
+
+
+def _require_lifecycle_absent(job_dir: Path) -> None:
+    lifecycle = job_dir / "container-lifecycle.json"
+    try:
+        existing = lifecycle.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RemoteWorkerError(
+            "container lifecycle namespace cannot be checked"
+        ) from exc
+    if stat.S_ISLNK(existing.st_mode):
+        raise RemoteWorkerError(
+            "container lifecycle namespace is link-like"
+        )
+    raise RemoteWorkerError(
+        "container-lifecycle.json already exists; collision blocked"
+    )
 
 
 _CONTAINER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -600,6 +749,10 @@ def run_job(
         )
     if container_runtime not in {"docker", "podman"}:
         raise RemoteWorkerError("unsupported container runtime")
+    try:
+        _require_lifecycle_absent(job_dir)
+    except RemoteWorkerError:
+        return 75
     spec = _load_spec(job_dir)
     bundle_path = job_dir / "training-job.zip"
     _, bundle_sha = _hash_stable(
@@ -646,6 +799,16 @@ def run_job(
             expected_image_id=expected_image_id,
             expected_identity=container_identity,
         )
+        lifecycle_receipt = build_container_lifecycle_receipt(
+            job_id=spec.job_id,
+            attempt_id=spec.attempt_id,
+            request_sha256=spec.request_sha256,
+            training_bundle_sha256=spec.training_bundle_sha256,
+            workspace_path=str(job_dir),
+            container_identity=container_identity,
+            container_id=container_id,
+        )
+        _publish_container_lifecycle(job_dir, lifecycle_receipt)
         exit_code = _start_container(
             runtime=container_runtime,
             container_id=container_id,
@@ -940,6 +1103,9 @@ def main(argv: list[str] | None = None) -> int:
     status = subparsers.add_parser("status")
     status.add_argument("--job-dir", type=Path, required=True)
     status.add_argument("--max-bytes", type=int, required=True)
+    lifecycle = subparsers.add_parser("lifecycle")
+    lifecycle.add_argument("--job-dir", type=Path, required=True)
+    lifecycle.add_argument("--max-bytes", type=int, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
@@ -960,6 +1126,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise RemoteWorkerError("status byte limit is invalid")
             sys.stdout.buffer.write(
                 read_status(args.job_dir, max_bytes=args.max_bytes)
+            )
+            return 0
+        if args.command == "lifecycle":
+            if args.max_bytes <= 0 or args.max_bytes > 1024 * 1024:
+                raise RemoteWorkerError("lifecycle byte limit is invalid")
+            sys.stdout.buffer.write(
+                read_lifecycle(args.job_dir, max_bytes=args.max_bytes)
             )
             return 0
         if args.command == "start":

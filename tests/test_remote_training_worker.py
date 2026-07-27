@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -208,6 +210,530 @@ def _patch_worker(monkeypatch, fake: FakeDocker) -> None:
 
 def _subcommands(fake: FakeDocker) -> list[str]:
     return [call[1] for call in fake.calls if len(call) > 1]
+
+
+# ---------------------------------------------------------------------------
+# E1: durable container lifecycle receipt
+# ---------------------------------------------------------------------------
+
+
+def _expected_workspace_identity_sha256(
+    *,
+    job_id: str,
+    attempt_id: str,
+    workspace: Path,
+) -> str:
+    payload = (
+        json.dumps(
+            {
+                "attempt_id": attempt_id,
+                "job_id": job_id,
+                "workspace": str(workspace.absolute()),
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def test_worker_publishes_closed_lifecycle_after_digest_before_start(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    original_run = fake.run
+    lifecycle_seen_at_start: list[bytes] = []
+
+    def observe_start(argv, **kwargs):
+        if len(argv) > 1 and argv[1] == "start":
+            lifecycle_seen_at_start.append(
+                (job_dir / "container-lifecycle.json").read_bytes()
+            )
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.subprocess.run",
+        observe_start,
+    )
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 0
+    )
+
+    assert len(lifecycle_seen_at_start) == 1
+    raw = lifecycle_seen_at_start[0]
+    receipt = json.loads(raw, object_pairs_hook=dict)
+    assert set(receipt) == {
+        "schema",
+        "job_id",
+        "attempt_id",
+        "request_sha256",
+        "training_bundle_sha256",
+        "workspace_identity_sha256",
+        "container_identity",
+        "container_id",
+        "transition",
+        "receipt_sha256",
+    }
+    assert receipt["schema"] == "nantai.remote-container-lifecycle.v1"
+    assert receipt["job_id"] == "job-1"
+    assert receipt["attempt_id"] == "attempt-1"
+    assert receipt["request_sha256"] == "a" * 64
+    assert receipt["training_bundle_sha256"] == _sha(
+        b"verified-training-bundle"
+    )
+    assert receipt["workspace_identity_sha256"] == (
+        _expected_workspace_identity_sha256(
+            job_id="job-1",
+            attempt_id="attempt-1",
+            workspace=job_dir,
+        )
+    )
+    assert receipt["container_identity"] == _CONTAINER_IDENTITY
+    assert receipt["container_id"] == _DEFAULT_CONTAINER_ID
+    assert receipt["transition"] == (
+        "container-created-identity-verified"
+    )
+    unhashed = dict(receipt)
+    receipt_sha256 = unhashed.pop("receipt_sha256")
+    canonical_unhashed = (
+        json.dumps(
+            unhashed,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    assert receipt_sha256 == hashlib.sha256(
+        canonical_unhashed
+    ).hexdigest()
+    assert raw == (
+        json.dumps(
+            receipt,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    for forbidden in (
+        "timestamp",
+        "history",
+        "evidence",
+        "config_identity",
+        "gpu",
+        "cuda",
+        "python",
+        "nerfstudio",
+        "readiness",
+        "accepted",
+    ):
+        assert forbidden not in receipt
+
+
+def test_lifecycle_reader_is_bounded_regular_canonical_and_duplicate_safe(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    lifecycle = job_dir / "container-lifecycle.json"
+    lifecycle.write_bytes(b'{"schema":"duplicate","schema":"value"}\n')
+
+    with pytest.raises(RemoteWorkerError, match="validation|duplicate"):
+        worker.read_lifecycle(job_dir, max_bytes=1024)
+
+    lifecycle.write_bytes(b"x" * 1025)
+    with pytest.raises(RemoteWorkerError, match="size"):
+        worker.read_lifecycle(job_dir, max_bytes=1024)
+
+    lifecycle.unlink()
+    target = job_dir / "real-lifecycle.json"
+    target.write_bytes(b"{}\n")
+    try:
+        lifecycle.symlink_to(target)
+    except (OSError, NotImplementedError):
+        original_lstat = Path.lstat
+
+        def link_like_lstat(path):
+            if path == lifecycle:
+                return SimpleNamespace(st_mode=0o120777)
+            return original_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", link_like_lstat)
+    with pytest.raises(RemoteWorkerError, match="link-like"):
+        worker.read_lifecycle(job_dir, max_bytes=1024)
+
+
+def test_stable_reader_rejects_growth_beyond_bound_before_allocation(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "bounded.json"
+    path.write_bytes(b"x")
+    original_open = Path.open
+
+    def growing_open(target, mode="r", *args, **kwargs):
+        if target == path and mode == "rb":
+            return io.BytesIO(b"x" * 1025)
+        return original_open(target, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", growing_open)
+
+    with pytest.raises(RemoteWorkerError, match="size"):
+        worker._read_stable(path, max_bytes=1024, label="bounded test")
+
+
+def test_stable_reader_rejects_file_mutation_during_read(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "mutating.json"
+    path.write_bytes(b"{}\n")
+    original_lstat = Path.lstat
+    calls = 0
+
+    def mutating_lstat(target):
+        nonlocal calls
+        measured = original_lstat(target)
+        if target != path:
+            return measured
+        calls += 1
+        if calls == 1:
+            return measured
+        values = list(measured)
+        values[8] += 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", mutating_lstat)
+
+    with pytest.raises(RemoteWorkerError, match="changed"):
+        worker._read_stable(path, max_bytes=1024, label="mutation test")
+
+
+def _lifecycle_fixture(job_dir: Path):
+    return worker.build_container_lifecycle_receipt(
+        job_id="job-1",
+        attempt_id="attempt-1",
+        request_sha256="a" * 64,
+        training_bundle_sha256=_sha(b"verified-training-bundle"),
+        workspace_path=str(job_dir.absolute()),
+        container_identity=_CONTAINER_IDENTITY,
+        container_id="b" * 64,
+    )
+
+
+def test_lifecycle_reader_returns_only_valid_canonical_bytes(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    receipt = _lifecycle_fixture(job_dir)
+    canonical = worker.canonical_container_lifecycle_bytes(receipt)
+    lifecycle = job_dir / "container-lifecycle.json"
+    lifecycle.write_bytes(canonical)
+
+    assert worker.read_lifecycle(job_dir, max_bytes=1024) == canonical
+
+    lifecycle.write_bytes(canonical.replace(b",", b", ", 1))
+    with pytest.raises(RemoteWorkerError, match="canonical"):
+        worker.read_lifecycle(job_dir, max_bytes=1024)
+
+
+def test_lifecycle_cli_outputs_only_canonical_bytes(
+    tmp_path,
+    capsysbinary,
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    receipt = _lifecycle_fixture(job_dir)
+    canonical = worker.canonical_container_lifecycle_bytes(receipt)
+    (job_dir / "container-lifecycle.json").write_bytes(canonical)
+
+    assert worker.main(
+        [
+            "lifecycle",
+            "--job-dir",
+            str(job_dir),
+            "--max-bytes",
+            "1024",
+        ]
+    ) == 0
+    captured = capsysbinary.readouterr()
+    assert captured.out == canonical
+    assert captured.err == b""
+
+
+def test_worker_lifecycle_no_replace_collision_preserves_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    original = _lifecycle_fixture(job_dir)
+    lifecycle_path = job_dir / "container-lifecycle.json"
+    original_bytes = worker.canonical_container_lifecycle_bytes(original)
+    lifecycle_path.write_bytes(original_bytes)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 75
+    )
+
+    assert lifecycle_path.read_bytes() == original_bytes
+    assert "start" not in _subcommands(fake)
+    assert "create" not in _subcommands(fake)
+    assert "rm" not in _subcommands(fake)
+    assert not (job_dir / "container-id.txt").exists()
+    assert not (job_dir / "status.json").exists()
+
+
+def test_worker_rejects_lifecycle_symlink_before_container_creation(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    target = tmp_path / "existing-lifecycle.json"
+    target.write_bytes(
+        worker.canonical_container_lifecycle_bytes(
+            _lifecycle_fixture(job_dir)
+        )
+    )
+    lifecycle = job_dir / "container-lifecycle.json"
+    try:
+        lifecycle.symlink_to(target)
+    except (OSError, NotImplementedError):
+        original_lstat = Path.lstat
+
+        def link_like_lstat(path):
+            if path == lifecycle:
+                return SimpleNamespace(st_mode=0o120777)
+            return original_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", link_like_lstat)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 75
+    )
+
+    assert fake.calls == []
+    assert not (job_dir / "container-id.txt").exists()
+    assert not (job_dir / "status.json").exists()
+
+
+def test_worker_lifecycle_sync_unknown_preserves_published_container(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+    real_publish = worker.publish_file_noreplace
+
+    def publish_then_fail(source, destination):
+        if Path(destination).name != "container-lifecycle.json":
+            return real_publish(source, destination)
+        os.link(source, destination)
+        raise DurableIOError(
+            "lifecycle namespace published but sync failed",
+            published=True,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "publish_file_noreplace",
+        publish_then_fail,
+    )
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 75
+    )
+
+    lifecycle_path = job_dir / "container-lifecycle.json"
+    assert lifecycle_path.is_file()
+    assert worker.read_lifecycle(
+        job_dir,
+        max_bytes=64 * 1024,
+    ) == lifecycle_path.read_bytes()
+    assert (
+        job_dir / "container-id.txt"
+    ).read_text(encoding="ascii").strip() == _DEFAULT_CONTAINER_ID
+    assert "start" not in _subcommands(fake)
+    assert "rm" not in _subcommands(fake)
+
+
+def test_lifecycle_staging_cleanup_preserves_published_durable_error(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    receipt = worker.build_container_lifecycle_receipt(
+        job_id="job-1",
+        attempt_id="attempt-1",
+        request_sha256="a" * 64,
+        training_bundle_sha256="b" * 64,
+        workspace_path=str(job_dir.absolute()),
+        container_identity=_CONTAINER_IDENTITY,
+        container_id=_DEFAULT_CONTAINER_ID,
+    )
+    original_unlink = Path.unlink
+
+    def publish_then_fail(source, destination):
+        os.link(source, destination)
+        raise DurableIOError(
+            "lifecycle namespace published but sync failed",
+            published=True,
+        )
+
+    def reject_staging_cleanup(path, *, missing_ok=False):
+        if path.name.startswith(".container-lifecycle."):
+            raise OSError("staging cleanup failed")
+        return original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(
+        worker,
+        "publish_file_noreplace",
+        publish_then_fail,
+    )
+    monkeypatch.setattr(Path, "unlink", reject_staging_cleanup)
+
+    with pytest.raises(DurableIOError) as exc_info:
+        worker._publish_container_lifecycle(job_dir, receipt)
+
+    assert exc_info.value.published is True
+    assert (job_dir / "container-lifecycle.json").read_bytes() == (
+        worker.canonical_container_lifecycle_bytes(receipt)
+    )
+
+
+def test_lifecycle_staging_cleanup_preserves_unpublished_durable_error(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    receipt = _lifecycle_fixture(job_dir)
+    original_unlink = Path.unlink
+
+    def reject_publish(_source, _destination):
+        raise DurableIOError(
+            "lifecycle namespace was not published",
+            published=False,
+        )
+
+    def reject_staging_cleanup(path, *, missing_ok=False):
+        if path.name.startswith(".container-lifecycle."):
+            raise OSError("staging cleanup failed")
+        return original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(
+        worker,
+        "publish_file_noreplace",
+        reject_publish,
+    )
+    monkeypatch.setattr(Path, "unlink", reject_staging_cleanup)
+
+    with pytest.raises(DurableIOError) as exc_info:
+        worker._publish_container_lifecycle(job_dir, receipt)
+
+    assert exc_info.value.published is False
+    assert not (job_dir / "container-lifecycle.json").exists()
+
+
+def test_worker_lifecycle_order_brackets_digest_and_start(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    original_run = fake.run
+    original_publish = worker._publish_container_lifecycle
+    observed: list[str] = []
+
+    def observe_runtime(argv, **kwargs):
+        subcommand = argv[1] if len(argv) > 1 else ""
+        if subcommand in {"image", "inspect"}:
+            assert not (job_dir / "container-lifecycle.json").exists()
+            observed.append("digest-inspect")
+        if subcommand == "start":
+            assert (job_dir / "container-lifecycle.json").is_file()
+            observed.append("start")
+        return original_run(argv, **kwargs)
+
+    def observe_lifecycle_publish(job_path, receipt):
+        assert (job_path / "container-id.txt").read_text(
+            encoding="ascii"
+        ).strip() == _DEFAULT_CONTAINER_ID
+        assert observed.count("digest-inspect") == 3
+        observed.append("lifecycle")
+        return original_publish(job_path, receipt)
+
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.subprocess.run",
+        observe_runtime,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_publish_container_lifecycle",
+        observe_lifecycle_publish,
+    )
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 0
+    )
+    assert observed == [
+        "digest-inspect",
+        "digest-inspect",
+        "digest-inspect",
+        "lifecycle",
+        "start",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +1079,7 @@ def test_worker_rejects_inspect_failure(tmp_path, monkeypatch):
     assert "inspect" in subs
     assert "start" not in subs
     assert "rm" in subs
+    assert not (job_dir / "container-lifecycle.json").exists()
 
 
 # ---------------------------------------------------------------------------

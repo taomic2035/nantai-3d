@@ -25,6 +25,7 @@ from pipeline.real_scene_training import (
     held_out_split_canonical_bytes,
 )
 from pipeline.remote_shell_executor import (
+    RemoteContainerLifecycleReceipt,
     RemoteResultBundleError,
     RemoteResultBundleManifest,
     RemoteResultBundleMember,
@@ -35,9 +36,13 @@ from pipeline.remote_shell_executor import (
     RemoteShellPreflightReport,
     RemoteShellStatus,
     build_remote_result_bundle,
+    canonical_container_lifecycle_bytes,
     canonical_remote_result_manifest_bytes,
     canonical_remote_shell_preflight_bytes,
     canonical_remote_status_bytes,
+    compute_container_lifecycle_sha256,
+    compute_workspace_identity_sha256,
+    load_container_lifecycle_receipt,
     run_remote_shell_preflight,
     verify_remote_result_bundle,
 )
@@ -1160,6 +1165,9 @@ def test_fetch_only_succeeds_after_local_provenance_closure(
     )
 
     assert executor.poll(job).state == "unknown"
+    runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
+    )
     destination = tmp_path / "published-result"
     receipt = executor.fetch(job, destination)
 
@@ -1608,6 +1616,57 @@ def _status_response(status: RemoteShellStatus):
     )
 
 
+_DEFAULT_CONTAINER_ID = "a" * 64
+
+
+def _lifecycle_receipt(
+    job: RemoteShellJobRef,
+    *,
+    container_id: str = _DEFAULT_CONTAINER_ID,
+    container_identity: str | None = None,
+):
+    workspace_sha = compute_workspace_identity_sha256(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        workspace_path=job.remote_job_path,
+    )
+    identity = container_identity or (
+        "registry.example/nantai@sha256:" + "c" * 64
+    )
+    provisional = RemoteContainerLifecycleReceipt.model_construct(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        workspace_identity_sha256=workspace_sha,
+        container_identity=identity,
+        container_id=container_id,
+        transition="container-created-identity-verified",
+        receipt_sha256="0" * 64,
+    )
+    digest = compute_container_lifecycle_sha256(provisional)
+    return RemoteContainerLifecycleReceipt(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        workspace_identity_sha256=workspace_sha,
+        container_identity=identity,
+        container_id=container_id,
+        transition="container-created-identity-verified",
+        receipt_sha256=digest,
+    )
+
+
+def _lifecycle_response(receipt: RemoteContainerLifecycleReceipt):
+    return subprocess.CompletedProcess(
+        [],
+        0,
+        canonical_container_lifecycle_bytes(receipt),
+        b"",
+    )
+
+
 def test_submit_advances_receipt_to_running(tmp_path, monkeypatch):
     executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
     job = executor.submit(prepared)
@@ -1635,16 +1694,22 @@ def test_restore_attaches_existing_job_without_transport(
         now=lambda: _T0,
     )
 
+    resumed_runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
+    )
     restored = resumed.restore(prepared, job)
 
     assert restored == job
-    assert resumed_runner.calls == []
+    assert len(resumed_runner.calls) == 1
     resumed_runner.responses.append(
         _status_response(_running_status(job)),
     )
+    resumed_runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
+    )
     observation = resumed.poll(job)
     assert observation.state == "running"
-    assert len(resumed_runner.calls) == 1
+    assert len(resumed_runner.calls) == 3
 
 
 def test_restore_rejects_job_replay_under_different_config(
@@ -1744,6 +1809,9 @@ def test_poll_running_returns_running_observation(tmp_path, monkeypatch):
     runner.responses.append(
         _status_response(_running_status(job)),
     )
+    runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
+    )
     observation = executor.poll(job)
 
     assert observation.state == "running"
@@ -1790,6 +1858,9 @@ def test_poll_disconnect_after_running_returns_unknown(
 
     runner.responses.append(
         _status_response(_running_status(job)),
+    )
+    runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
     )
     first = executor.poll(job)
     assert first.state == "running"
@@ -1860,6 +1931,9 @@ def test_fetch_without_succeeded_status_raises(tmp_path, monkeypatch):
     runner.responses.append(
         _status_response(_running_status(job)),
     )
+    runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
+    )
     executor.poll(job)
 
     destination = tmp_path / "result"
@@ -1890,6 +1964,9 @@ def test_fetch_interrupted_cleans_staging(tmp_path, monkeypatch):
     runner.responses.append(_status_response(succeeded))
     executor.poll(job)
 
+    runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
+    )
     runner.responses.append(
         subprocess.CompletedProcess([], 1, b"", b"download interrupted"),
     )
@@ -2474,3 +2551,237 @@ class TestRemoteShellPreflight:
                 known_hosts_verified=True,
                 failure_reason=None,
             )
+
+
+# ---------------------------------------------------------------------------
+# E1: fresh-container lifecycle receipt caller binding
+# ---------------------------------------------------------------------------
+
+
+def test_poll_does_not_report_running_before_lifecycle_is_bound(
+    tmp_path,
+    monkeypatch,
+):
+    """Poll must return unknown when lifecycle receipt cannot be reached."""
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(
+        _status_response(_running_status(job)),
+    )
+    runner.responses.append(
+        subprocess.CompletedProcess([], 255, b"", b"lifecycle unreachable"),
+    )
+    observation = executor.poll(job)
+
+    assert observation.state == "unknown"
+    assert observation.exit_code is None
+    context = executor._context(job)
+    assert context.bound_container_id is None
+
+
+def test_poll_binds_lifecycle_on_first_running_observation(tmp_path, monkeypatch):
+    """First running poll must fetch and bind the lifecycle container_id."""
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(
+        _status_response(_running_status(job)),
+    )
+    receipt = _lifecycle_receipt(job)
+    runner.responses.append(_lifecycle_response(receipt))
+    observation = executor.poll(job)
+
+    assert observation.state == "running"
+    context = executor._context(job)
+    assert context.bound_container_id == receipt.container_id
+
+
+def test_poll_revalidates_same_container_on_subsequent_poll(
+    tmp_path,
+    monkeypatch,
+):
+    """Subsequent running polls must re-fetch and confirm same container_id."""
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(_status_response(_running_status(job)))
+    runner.responses.append(_lifecycle_response(_lifecycle_receipt(job)))
+    first = executor.poll(job)
+    assert first.state == "running"
+
+    runner.responses.append(_status_response(_running_status(job)))
+    runner.responses.append(_lifecycle_response(_lifecycle_receipt(job)))
+    second = executor.poll(job)
+    assert second.state == "running"
+
+
+def test_poll_rejects_lifecycle_with_wrong_attempt(tmp_path, monkeypatch):
+    """Lifecycle receipt with mismatched attempt_id must be rejected."""
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(_status_response(_running_status(job)))
+    base = _lifecycle_receipt(job)
+    wrong_attempt = RemoteContainerLifecycleReceipt(
+        job_id=base.job_id,
+        attempt_id="attempt-other",
+        request_sha256=base.request_sha256,
+        training_bundle_sha256=base.training_bundle_sha256,
+        workspace_identity_sha256=base.workspace_identity_sha256,
+        container_identity=base.container_identity,
+        container_id=base.container_id,
+        transition="container-created-identity-verified",
+        receipt_sha256=compute_container_lifecycle_sha256(
+            base.model_copy(update={"attempt_id": "attempt-other"})
+        ),
+    )
+    runner.responses.append(_lifecycle_response(wrong_attempt))
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="lifecycle identity differs",
+    ):
+        executor.poll(job)
+
+
+def test_poll_rejects_lifecycle_container_swap(tmp_path, monkeypatch):
+    """After binding, a container_id change must be rejected."""
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(_status_response(_running_status(job)))
+    runner.responses.append(_lifecycle_response(_lifecycle_receipt(job)))
+    executor.poll(job)
+
+    runner.responses.append(_status_response(_running_status(job)))
+    swapped = _lifecycle_receipt(job, container_id="b" * 64)
+    runner.responses.append(_lifecycle_response(swapped))
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="container swap",
+    ):
+        executor.poll(job)
+
+
+def test_restore_requires_durable_lifecycle_receipt(tmp_path, monkeypatch):
+    """Restore must fail when lifecycle receipt is unreachable."""
+    executor, _runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+    resumed_runner = _Runner()
+    resumed = RemoteShellExecutor(
+        executor.config,
+        run_command=resumed_runner,
+        now=lambda: _T0,
+    )
+
+    resumed_runner.responses.append(
+        subprocess.CompletedProcess([], 255, b"", b"unreachable"),
+    )
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="durable lifecycle receipt",
+    ):
+        resumed.restore(prepared, job)
+
+
+def test_restore_rejects_lifecycle_identity_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    """Restore must reject lifecycle with wrong container identity."""
+    executor, _runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+    resumed_runner = _Runner()
+    resumed = RemoteShellExecutor(
+        executor.config,
+        run_command=resumed_runner,
+        now=lambda: _T0,
+    )
+
+    wrong_identity = _lifecycle_receipt(
+        job,
+        container_identity="registry.example/other@sha256:" + "d" * 64,
+    )
+    resumed_runner.responses.append(
+        _lifecycle_response(wrong_identity),
+    )
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="lifecycle identity differs",
+    ):
+        resumed.restore(prepared, job)
+
+
+def test_restore_binds_lifecycle_container_id(tmp_path, monkeypatch):
+    """Restore must bind the lifecycle container_id after verification."""
+    executor, _runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+    resumed_runner = _Runner()
+    resumed = RemoteShellExecutor(
+        executor.config,
+        run_command=resumed_runner,
+        now=lambda: _T0,
+    )
+
+    receipt = _lifecycle_receipt(job)
+    resumed_runner.responses.append(_lifecycle_response(receipt))
+    resumed.restore(prepared, job)
+
+    key = (job.job_id, job.attempt_id)
+    assert resumed._jobs[key].bound_container_id == receipt.container_id
+
+
+def test_fetch_rejects_lifecycle_container_swap(tmp_path, monkeypatch):
+    """Fetch must reject when lifecycle container_id changes after binding."""
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(_status_response(_running_status(job)))
+    runner.responses.append(_lifecycle_response(_lifecycle_receipt(job)))
+    executor.poll(job)
+
+    empty_sha = _sha(b"")
+    succeeded = RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        state="succeeded",
+        updated_at_utc=_T0,
+        exit_code=0,
+        stdout_sha256=empty_sha,
+        stderr_sha256=empty_sha,
+        result_bundle_sha256=("a" * 64),
+        result_bundle_size_bytes=1,
+    )
+    runner.responses.append(_status_response(succeeded))
+    executor.poll(job)
+
+    swapped = _lifecycle_receipt(job, container_id="b" * 64)
+    runner.responses.append(_lifecycle_response(swapped))
+    destination = tmp_path / "result"
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="container swap",
+    ):
+        executor.fetch(job, destination)
+
+
+def test_lifecycle_receipt_is_content_addressed_and_round_trips():
+    """Receipt SHA must be content-addressed and survive canonical round-trip."""
+    job = RemoteShellJobRef(
+        job_id="job-1",
+        attempt_id="attempt-1",
+        submitted_at_utc=_T0,
+        request_sha256="a" * 64,
+        training_bundle_sha256="b" * 64,
+        config_identity_sha256="e" * 64,
+        remote_job_path="/srv/nantai-jobs/job-1/attempt-1",
+    )
+    receipt = _lifecycle_receipt(job)
+    raw = canonical_container_lifecycle_bytes(receipt)
+    loaded = load_container_lifecycle_receipt(raw)
+    assert loaded == receipt
+    assert loaded.receipt_sha256 == compute_container_lifecycle_sha256(
+        receipt
+    )

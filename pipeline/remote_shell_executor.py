@@ -182,6 +182,7 @@ _PREFLIGHT_FAILURE_REASONS: dict[PreflightFailureCode, str] = {
     ),
 }
 _MAX_STATUS_BYTES = 64 * 1024
+_MAX_LIFECYCLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024
 _DEFAULT_MAX_MEMBER_BYTES = 12 * 1024 * 1024 * 1024
 _DEFAULT_MAX_LOG_BYTES = 64 * 1024 * 1024
@@ -681,6 +682,48 @@ class RemoteShellJobRef(ExecutorJobRef):
         return _safe_remote_root(value, label="remote_job_path")
 
 
+class RemoteContainerLifecycleReceipt(FrozenModel):
+    """Canonical, content-addressed receipt of fresh-container creation.
+
+    Published by the worker after ``container-id.txt`` is durably written
+    AND the runtime image inspect confirms the container ``.Image`` equals
+    the resolved image ID and ``.Config.Image`` equals the immutable
+    ``repo@sha256:...`` identity.  The receipt binds job/attempt/workspace
+    identity SHA, immutable image digest and full container ID to a single
+    durable transition; it never carries caller-reported GPU/CUDA/
+    Nerfstudio pass observations — those belong to F1/G2
+    ``production_runtime_evidence`` measured inside the container.
+    ``receipt_sha256`` is the content-address of the full canonical bytes
+    and must be recomputed by the loader; callers cannot self-report it.
+    """
+
+    schema_id: Literal["nantai.remote-container-lifecycle.v1"] = Field(
+        default="nantai.remote-container-lifecycle.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    job_id: str = Field(pattern=_ID_PATTERN)
+    attempt_id: str = Field(pattern=_ID_PATTERN)
+    request_sha256: str = Field(pattern=_SHA256_PATTERN)
+    training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
+    workspace_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
+    container_identity: str = Field(pattern=_CONTAINER_PATTERN)
+    container_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    transition: Literal["container-created-identity-verified"]
+    receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _receipt_sha_is_content_addressed(
+        self,
+    ) -> RemoteContainerLifecycleReceipt:
+        expected = compute_container_lifecycle_sha256(self)
+        if self.receipt_sha256 != expected:
+            raise ValueError(
+                "container lifecycle receipt_sha256 is not content-addressed"
+            )
+        return self
+
+
 @dataclass(frozen=True)
 class VerifiedRemoteResultBundle:
     path: Path
@@ -696,6 +739,7 @@ class _JobContext:
     bundle: VerifiedTrainingJobBundle
     receipt: ExecutorAttemptReceipt
     last_status: RemoteShellStatus | None = None
+    bound_container_id: str | None = None
 
 
 def _canonical_model_bytes(model: BaseModel) -> bytes:
@@ -730,6 +774,133 @@ def canonical_remote_shell_job_ref_bytes(
     job: RemoteShellJobRef,
 ) -> bytes:
     return _canonical_model_bytes(job)
+
+
+def compute_workspace_identity_sha256(
+    *,
+    job_id: str,
+    attempt_id: str,
+    workspace_path: str,
+) -> str:
+    """Compute the workspace identity SHA-256.
+
+    Both caller and worker independently recompute this from the absolute
+    POSIX workspace path.  The SHA binds the workspace path without
+    exposing the private remote path in receipts or logs.
+    """
+    payload = (
+        json.dumps(
+            {
+                "attempt_id": attempt_id,
+                "job_id": job_id,
+                "workspace": workspace_path,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_container_lifecycle_bytes(
+    receipt: RemoteContainerLifecycleReceipt,
+) -> bytes:
+    return _canonical_model_bytes(receipt)
+
+
+def container_lifecycle_signing_bytes(
+    receipt: RemoteContainerLifecycleReceipt,
+) -> bytes:
+    """Canonical bytes used to compute ``receipt_sha256`` (excludes the sha)."""
+    payload = receipt.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude={"receipt_sha256"},
+    )
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("ascii")
+
+
+def compute_container_lifecycle_sha256(
+    receipt: RemoteContainerLifecycleReceipt,
+) -> str:
+    """Content-addressed SHA-256 of the receipt's signing bytes."""
+    return hashlib.sha256(
+        container_lifecycle_signing_bytes(receipt)
+    ).hexdigest()
+
+
+def load_container_lifecycle_receipt(
+    raw: bytes | bytearray | str,
+) -> RemoteContainerLifecycleReceipt:
+    """Load and validate a lifecycle receipt from raw canonical bytes.
+
+    Performs fail-closed checks: ASCII-only, no duplicate keys, Pydantic
+    schema validation, canonical bytes strict equality, and SHA-256
+    round-trip.  The caller cannot self-report the SHA; it is derived from
+    the signing bytes and verified against the receipt's field.
+    """
+    if isinstance(raw, str):
+        try:
+            raw_bytes = raw.encode("ascii")
+        except UnicodeError as exc:
+            raise RemoteShellExecutionError(
+                "container lifecycle receipt must be ASCII"
+            ) from exc
+    elif isinstance(raw, (bytes, bytearray)):
+        raw_bytes = bytes(raw)
+    else:
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt must be bytes or str"
+        )
+    try:
+        text = raw_bytes.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt must be ASCII"
+        ) from exc
+    try:
+        parsed = json.loads(text, object_pairs_hook=_reject_duplicate_pairs)
+    except json.JSONDecodeError as exc:
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt is not valid JSON"
+        ) from exc
+    except ValueError as exc:
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt has duplicate keys"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt must be a JSON object"
+        )
+    try:
+        receipt = RemoteContainerLifecycleReceipt.model_validate_json(
+            raw_bytes
+        )
+    except ValueError as exc:
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt validation failed"
+        ) from exc
+    expected_sha = compute_container_lifecycle_sha256(receipt)
+    if receipt.receipt_sha256 != expected_sha:
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt sha256 does not match signing bytes"
+        )
+    if raw_bytes != canonical_container_lifecycle_bytes(receipt):
+        raise RemoteShellExecutionError(
+            "container lifecycle receipt is not canonical JSON"
+        )
+    return receipt
 
 
 def remote_shell_executor_config_sha256(
@@ -2285,6 +2456,13 @@ class RemoteShellExecutor:
             raise RemoteShellExecutionError(
                 "remote job is already attached"
             )
+        try:
+            lifecycle_receipt = self._fetch_lifecycle(job)
+        except RemoteShellTransportError as exc:
+            raise RemoteShellExecutionError(
+                "restore requires a durable lifecycle receipt"
+            ) from exc
+        self._verify_lifecycle_identity(lifecycle_receipt, job)
         receipt = new_attempt(
             bundle.input_identity,
             attempt_id=job.attempt_id,
@@ -2302,6 +2480,7 @@ class RemoteShellExecutor:
             job=job,
             bundle=verified.bundle,
             receipt=receipt,
+            bound_container_id=lifecycle_receipt.container_id,
         )
         return job
 
@@ -2312,6 +2491,80 @@ class RemoteShellExecutor:
                 "remote job reference identity is unknown or changed"
             )
         return context
+
+    def _fetch_lifecycle(
+        self,
+        job: RemoteShellJobRef,
+    ) -> RemoteContainerLifecycleReceipt:
+        """Fetch and validate the durable lifecycle receipt from the worker.
+
+        Returns the loaded, canonical, content-addressed receipt.  Transport
+        failures raise :class:`RemoteShellTransportError` so callers can
+        distinguish "unreachable" (return unknown) from "received but invalid"
+        (raise fail-closed).  The caller never self-reports the receipt SHA;
+        it is recomputed by :func:`load_container_lifecycle_receipt`.
+        """
+        worker = (
+            f"{self.config.remote_repo_root}/"
+            "cloud/remote_training_worker.py"
+        )
+        completed = self._ssh(
+            [
+                "python3",
+                worker,
+                "lifecycle",
+                "--job-dir",
+                job.remote_job_path,
+                "--max-bytes",
+                str(_MAX_LIFECYCLE_BYTES),
+            ],
+            phase="remote lifecycle poll",
+        )
+        if completed.returncode != 0:
+            raise RemoteShellTransportError(
+                "remote lifecycle poll returned nonzero exit"
+            )
+        stdout = completed.stdout or b""
+        if isinstance(stdout, str):
+            stdout = stdout.encode("utf-8", errors="replace")
+        if not stdout or len(stdout) > _MAX_LIFECYCLE_BYTES:
+            raise RemoteShellExecutionError(
+                "remote lifecycle output is empty or oversized"
+            )
+        return load_container_lifecycle_receipt(stdout)
+
+    def _verify_lifecycle_identity(
+        self,
+        receipt: RemoteContainerLifecycleReceipt,
+        job: RemoteShellJobRef,
+    ) -> None:
+        """Fail-closed identity check binding receipt to submitted job.
+
+        Ensures the receipt's job/attempt/request/training-bundle identity
+        matches the submitted job, the workspace identity SHA matches the
+        recomputed remote path, and the container identity matches the
+        executor config.  Container ID binding is checked separately by
+        callers to distinguish first-bind from revalidation.
+        """
+        expected_workspace_sha = compute_workspace_identity_sha256(
+            job_id=job.job_id,
+            attempt_id=job.attempt_id,
+            workspace_path=job.remote_job_path,
+        )
+        if (
+            receipt.job_id != job.job_id
+            or receipt.attempt_id != job.attempt_id
+            or receipt.request_sha256 != job.request_sha256
+            or receipt.training_bundle_sha256
+            != job.training_bundle_sha256
+            or receipt.workspace_identity_sha256
+            != expected_workspace_sha
+            or receipt.container_identity
+            != self.config.container_identity
+        ):
+            raise RemoteShellExecutionError(
+                "remote lifecycle identity differs from submitted job"
+            )
 
     def poll(self, job: ExecutorJobRef) -> ExecutorObservation:
         context = self._context(job)
@@ -2383,6 +2636,31 @@ class RemoteShellExecutor:
             )
         context.last_status = status
         if status.state == "running":
+            if context.bound_container_id is None:
+                try:
+                    receipt = self._fetch_lifecycle(context.job)
+                except RemoteShellTransportError:
+                    return normalize_poll_result(
+                        exit_code=None,
+                        reachable=False,
+                        observed_at_utc=self._now(),
+                    )
+                self._verify_lifecycle_identity(receipt, context.job)
+                context.bound_container_id = receipt.container_id
+            else:
+                try:
+                    receipt = self._fetch_lifecycle(context.job)
+                except RemoteShellTransportError:
+                    return normalize_poll_result(
+                        exit_code=None,
+                        reachable=False,
+                        observed_at_utc=self._now(),
+                    )
+                self._verify_lifecycle_identity(receipt, context.job)
+                if receipt.container_id != context.bound_container_id:
+                    raise RemoteShellExecutionError(
+                        "remote lifecycle container swap detected"
+                    )
             return ExecutorObservation(
                 state="running",
                 observed_at_utc=status.updated_at_utc,
@@ -2486,6 +2764,27 @@ class RemoteShellExecutor:
             raise RemoteShellExecutionError(
                 "fetch requires a succeeded remote status observation"
             )
+        if context.bound_container_id is None:
+            try:
+                receipt = self._fetch_lifecycle(context.job)
+            except RemoteShellTransportError as exc:
+                raise RemoteShellExecutionError(
+                    "fetch requires a durable lifecycle receipt"
+                ) from exc
+            self._verify_lifecycle_identity(receipt, context.job)
+            context.bound_container_id = receipt.container_id
+        else:
+            try:
+                receipt = self._fetch_lifecycle(context.job)
+            except RemoteShellTransportError as exc:
+                raise RemoteShellExecutionError(
+                    "fetch cannot verify lifecycle container"
+                ) from exc
+            self._verify_lifecycle_identity(receipt, context.job)
+            if receipt.container_id != context.bound_container_id:
+                raise RemoteShellExecutionError(
+                    "fetch detected lifecycle container swap"
+                )
         destination = Path(destination).expanduser().absolute()
         if destination.exists() or destination.is_symlink():
             raise RemoteShellExecutionError(
