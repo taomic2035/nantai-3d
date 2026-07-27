@@ -646,7 +646,10 @@ def test_result_bundle_sync_failure_never_exposes_final(
 
     monkeypatch.setattr("pipeline.durable_io.flush_file", fail_flush)
 
-    with pytest.raises(RemoteResultBundleError, match="cannot be written"):
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="cannot be written",
+    ) as captured:
         build_remote_result_bundle(
             result_root=result_root,
             output_path=output,
@@ -659,6 +662,7 @@ def test_result_bundle_sync_failure_never_exposes_final(
             ),
         )
 
+    assert captured.value.published is None
     assert flushed
     assert not output.exists()
     assert tuple(tmp_path.glob(".result.zip.*.staging")) == ()
@@ -695,14 +699,20 @@ def test_result_bundle_publish_failure_does_not_promote_stale_staging(
 
     def fail_publish(source, destination):
         del source, destination
-        raise OSError("simulated publish failure")
+        raise DurableIOError(
+            "simulated pre-publication failure",
+            published=False,
+        )
 
     monkeypatch.setattr(
         "pipeline.durable_io.publish_file_noreplace",
         fail_publish,
     )
 
-    with pytest.raises(RemoteResultBundleError, match="cannot be written"):
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="cannot be written",
+    ) as captured:
         build_remote_result_bundle(
             result_root=result_root,
             output_path=output,
@@ -715,6 +725,7 @@ def test_result_bundle_publish_failure_does_not_promote_stale_staging(
             ),
         )
 
+    assert captured.value.published is False
     assert not output.exists()
     assert stale.read_bytes() == b"untrusted"
     assert tuple(tmp_path.glob(".result.zip.*.staging")) == (stale,)
@@ -762,7 +773,7 @@ def test_result_bundle_reports_published_when_sync_is_unconfirmed(
     with pytest.raises(
         RemoteResultBundleError,
         match="published but durability is unconfirmed",
-    ):
+    ) as captured:
         build_remote_result_bundle(
             result_root=result_root,
             output_path=output,
@@ -775,6 +786,7 @@ def test_result_bundle_reports_published_when_sync_is_unconfirmed(
             ),
         )
 
+    assert captured.value.published is True
     verify_remote_result_bundle(
         output,
         expected_job_id="job-expected",

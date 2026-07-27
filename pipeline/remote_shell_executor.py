@@ -81,7 +81,22 @@ class RemoteShellTransportError(RemoteShellExecutionError):
 
 
 class RemoteResultBundleError(ValueError):
-    """A downloaded result archive failed content or semantic closure."""
+    """A result archive failed closure or durable publication.
+
+    ``published`` is ``None`` for validation/read failures, ``False`` when a
+    durable writer proves the destination was not published, and ``True``
+    when the namespace change happened but durability could not be confirmed.
+    Callers must not infer this state from the human-readable message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        published: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.published = published
 
 
 class FrozenModel(BaseModel):
@@ -1473,7 +1488,8 @@ def build_remote_result_bundle(
             else "not published"
         )
         raise RemoteResultBundleError(
-            f"remote result bundle cannot be written ({state})"
+            f"remote result bundle cannot be written ({state})",
+            published=exc.published,
         ) from exc
     except OSError as exc:
         raise RemoteResultBundleError(
