@@ -120,6 +120,8 @@ registration 阈值没有默认值；示例值必须按本次采集和正式验�
 - `docker` 或 `podman`；
 - 带 digest 的不可变 CUDA container identity；
 - 远端 readiness config SHA、worker 文件 SHA 和稳定 worker version。
+- 一份 canonical `production-runtime-policy.v1` 的绝对私有路径及其
+  `content_sha256`。
 
 配置、私钥和私有主机地址不得提交到仓库。具备这些输入后才运行：
 
@@ -161,6 +163,23 @@ key 排序、末尾换行的 canonical JSON，且只含以下字段：
 只有 canonical report 的 `status=ready` 才允许进入 production submit。超时、连接
 失败、镜像/worker 不匹配、输入在检查期间被替换都会 fail closed。报告采用独占创建，
 不会覆盖旧证据；请为每次 fresh 检查使用新文件名，并把报告留在 operator 私有目录。
+
+remote config 还必须包含：
+
+```json
+{"expected_runtime_policy_sha256":"<policy content_sha256>","runtime_policy_path":"C:/absolute/private/production-runtime-policy.json"}
+```
+
+这里的 policy 必须显式绑定 exact commit、远端目标身份 SHA、固定 probe-set SHA、
+不可变 container identity、预期 GPU UUID/显存、CUDA/Python/Nerfstudio 版本、
+`ns-train` CLI schema 及六个 executable SHA。没有来自获批镜像与目标 GPU 的真实值时
+不得填写重复字符占位值。executor 会在任何 SSH 副作用前重新打开并验证 canonical
+policy；worker 会在创建容器前再次验证同一 `content_sha256`，并把它写入 job spec、
+status 和 lifecycle v2。policy 缺失、被替换或与 container/worker identity 不一致时
+训练不可达。
+
+上述 schema 已升级为 worker spec/status/lifecycle v2；旧 attempt 不能补写新绑定，
+必须由 operator 创建 fresh attempt 重新取得机器证据。
 
 连接丢失或远端状态无法验证时结果必须是 `unknown`；`RESUME=1` 只重连原 job，
 不会上传、初始化、启动或重复提交；operator 明确使用 `RETRY=1` 才创建新 attempt。

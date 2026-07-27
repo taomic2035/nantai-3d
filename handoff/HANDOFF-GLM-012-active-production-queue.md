@@ -80,6 +80,19 @@ H1 SHA / I1 SHA / changed paths / RED failure / GREEN counts + skipped
 
 不要回复“无事可做”，也不要在这两项之间等待 review。
 
+### Codex 并行边界
+
+Codex 已在 `1e3e1f2` 关闭 F1a runtime-policy job binding，主动修改范围为：
+
+- `pipeline/remote_shell_executor.py`
+- `cloud/remote_training_worker.py`
+- 对应 remote executor / worker 测试
+- 本手册与本 handoff
+
+GLM 的 H1/I1 路径不与上述文件重叠，继续执行即可。GLM 不要修改
+`remote_shell_executor.py` 或 `remote_training_worker.py`；下一张
+gate/clearance 精确工单仍由 Codex 给出。
+
 ---
 
 ## 旧开工顺序（2026-07-27，已由上方即时派单覆盖）
