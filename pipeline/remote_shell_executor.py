@@ -1123,11 +1123,15 @@ def _validate_local_regular_file(
     *,
     label: str,
     executable: bool,
+    sensitive: bool = False,
 ) -> None:
     try:
         result = path.lstat()
     except OSError as exc:
-        raise RemoteShellExecutionError(f"{label} is unavailable") from exc
+        error = RemoteShellExecutionError(f"{label} is unavailable")
+        if sensitive:
+            raise error from None
+        raise error from exc
     if (
         stat.S_ISLNK(result.st_mode)
         or not stat.S_ISREG(result.st_mode)
@@ -1144,7 +1148,7 @@ _WINDOWS_SYSTEM_SID = "S-1-5-18"
 _WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544"
 
 
-def _assert_private_key_protected(path: Path) -> None:
+def _assert_private_key_protected(path: Path):
     """Reject private keys that are readable by group/other.
 
     POSIX keeps the existing ``st_mode & 0o077`` check. Windows cannot
@@ -1157,10 +1161,10 @@ def _assert_private_key_protected(path: Path) -> None:
     if os.name != "nt":
         try:
             mode = stat.S_IMODE(path.lstat().st_mode)
-        except OSError as exc:
+        except OSError:
             raise RemoteShellExecutionError(
                 "SSH private key cannot be inspected"
-            ) from exc
+            ) from None
         if mode & 0o077:
             raise RemoteShellExecutionError(
                 "SSH private key permissions are too broad"
@@ -1171,14 +1175,39 @@ def _assert_private_key_protected(path: Path) -> None:
         import pywintypes
         import win32api
         import win32con
+        import win32file
         import win32security
-    except ImportError as exc:
+    except ImportError:
         raise RemoteShellExecutionError(
             "Windows private key ACL check requires pywin32; "
             "cannot prove key is protected (fail-closed)"
-        ) from exc
+        ) from None
+    handle = None
     try:
-        before = path.lstat()
+        handle = win32file.CreateFile(
+            str(path),
+            win32con.GENERIC_READ | win32con.READ_CONTROL,
+            win32file.FILE_SHARE_READ,
+            None,
+            win32file.OPEN_EXISTING,
+            (
+                win32file.FILE_ATTRIBUTE_NORMAL
+                | win32file.FILE_FLAG_OPEN_REPARSE_POINT
+            ),
+            None,
+        )
+        file_info = win32file.GetFileInformationByHandle(handle)
+        if file_info[0] & (
+            win32file.FILE_ATTRIBUTE_DIRECTORY
+            | win32con.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise RemoteShellExecutionError(
+                "SSH private key handle is redirected or not a file"
+            )
+        if file_info[5] == 0 and file_info[6] == 0:
+            raise RemoteShellExecutionError(
+                "SSH private key must be non-empty"
+            )
         token = win32security.OpenProcessToken(
             win32api.GetCurrentProcess(),
             win32con.TOKEN_QUERY,
@@ -1193,8 +1222,8 @@ def _assert_private_key_protected(path: Path) -> None:
         current_sid_string = win32security.ConvertSidToStringSid(
             current_sid
         )
-        sd = win32security.GetNamedSecurityInfo(
-            str(path),
+        sd = win32security.GetSecurityInfo(
+            handle,
             win32security.SE_FILE_OBJECT,
             (
                 win32security.OWNER_SECURITY_INFORMATION
@@ -1205,15 +1234,23 @@ def _assert_private_key_protected(path: Path) -> None:
         owner_sid_string = win32security.ConvertSidToStringSid(owner)
         control, _revision = sd.GetSecurityDescriptorControl()
         dacl = sd.GetSecurityDescriptorDacl()
-    except (OSError, pywintypes.error) as exc:
+    except RemoteShellExecutionError:
+        if handle is not None:
+            handle.Close()
+        raise
+    except (OSError, pywintypes.error):
+        if handle is not None:
+            handle.Close()
         raise RemoteShellExecutionError(
             "SSH private key ACL cannot be inspected"
-        ) from exc
+        ) from None
     if dacl is None:
+        handle.Close()
         raise RemoteShellExecutionError(
             "SSH private key has no DACL (everyone can read)"
         )
     if not control & win32security.SE_DACL_PROTECTED:
+        handle.Close()
         raise RemoteShellExecutionError(
             "SSH private key DACL must be protected from inheritance"
         )
@@ -1223,51 +1260,59 @@ def _assert_private_key_protected(path: Path) -> None:
         _WINDOWS_ADMINISTRATORS_SID,
     }
     if owner_sid_string not in allowed_sids:
+        handle.Close()
         raise RemoteShellExecutionError(
             "SSH private key owner is not approved"
         )
-    for ace_index in range(dacl.GetAceCount()):
+    try:
+        ace_count = dacl.GetAceCount()
+    except pywintypes.error:
+        handle.Close()
+        raise RemoteShellExecutionError(
+            "SSH private key ACL entry count cannot be inspected"
+        ) from None
+    for ace_index in range(ace_count):
         try:
             ace = dacl.GetAce(ace_index)
             ace_header = ace[0]
             ace_type = ace_header[0]
-        except (IndexError, TypeError, pywintypes.error) as exc:
+        except (IndexError, TypeError, pywintypes.error):
+            handle.Close()
             raise RemoteShellExecutionError(
                 "SSH private key ACL entry is malformed"
-            ) from exc
+            ) from None
         if ace_type == win32security.ACCESS_DENIED_ACE_TYPE:
             continue
         if ace_type != win32security.ACCESS_ALLOWED_ACE_TYPE or len(ace) != 3:
+            handle.Close()
             raise RemoteShellExecutionError(
                 "SSH private key ACL contains an unsupported allow entry"
             )
         try:
             sid_string = win32security.ConvertSidToStringSid(ace[2])
-        except (OSError, pywintypes.error) as exc:
+        except (OSError, pywintypes.error):
+            handle.Close()
             raise RemoteShellExecutionError(
                 "SSH private key ACL principal cannot be inspected"
-            ) from exc
+            ) from None
         if sid_string not in allowed_sids:
+            handle.Close()
             raise RemoteShellExecutionError(
                 "SSH private key ACL grants an unapproved principal"
             )
     try:
-        with path.open("rb") as stream:
-            if not stream.read(1):
-                raise RemoteShellExecutionError(
-                    "SSH private key must be readable and non-empty"
-                )
-        after = path.lstat()
-    except RemoteShellExecutionError:
-        raise
-    except OSError as exc:
+        _status, first_byte = win32file.ReadFile(handle, 1, None)
+    except pywintypes.error:
+        handle.Close()
         raise RemoteShellExecutionError(
             "SSH private key readability cannot be proven"
-        ) from exc
-    if _stat_signature(before) != _stat_signature(after):
+        ) from None
+    if not first_byte:
+        handle.Close()
         raise RemoteShellExecutionError(
-            "SSH private key changed during ACL inspection"
+            "SSH private key must be readable and non-empty"
         )
+    return handle
 
 
 def _host_key_fingerprint(key_blob: bytes) -> str:
@@ -1327,6 +1372,8 @@ class RemoteShellExecutor:
         self._now = now or (lambda: datetime.now(UTC))
         self.command_audit: list[tuple[str, ...]] = []
         self._jobs: dict[tuple[str, str], _JobContext] = {}
+        self._private_key_guard = None
+        self._closed = False
         _validate_local_regular_file(
             config.ssh_binary,
             label="ssh binary",
@@ -1341,9 +1388,31 @@ class RemoteShellExecutor:
             config.private_key_path,
             label="SSH private key",
             executable=False,
+            sensitive=True,
         )
-        _assert_private_key_protected(config.private_key_path)
-        _verify_known_host(config)
+        key_guard = _assert_private_key_protected(config.private_key_path)
+        try:
+            _verify_known_host(config)
+        except BaseException:
+            if key_guard is not None:
+                key_guard.Close()
+            raise
+        self._private_key_guard = key_guard
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        guard = self._private_key_guard
+        if guard is not None:
+            guard.Close()
+            self._private_key_guard = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _common_options(self, *, scp: bool) -> list[str]:
         port_flag = "-P" if scp else "-p"
@@ -1376,6 +1445,10 @@ class RemoteShellExecutor:
         *,
         phase: str,
     ) -> subprocess.CompletedProcess:
+        if self._closed:
+            raise RemoteShellExecutionError(
+                "remote shell executor is closed"
+            )
         redacted = tuple(
             (
                 "<redacted-private-key>"

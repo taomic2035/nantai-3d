@@ -322,6 +322,47 @@ def test_transport_exception_chain_does_not_leak_private_key(
     )
 
 
+def test_private_key_constructor_failure_does_not_leak_path(tmp_path):
+    config = _config(tmp_path)
+    config.private_key_path.unlink()
+
+    with pytest.raises(RemoteShellExecutionError) as caught:
+        RemoteShellExecutor(config)
+
+    rendered = "".join(
+        traceback.format_exception(caught.value)
+    )
+    assert str(config.private_key_path) not in rendered
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle sharing")
+def test_windows_private_key_guard_blocks_replace_until_close(tmp_path):
+    config = _config(tmp_path)
+    executor = RemoteShellExecutor(config)
+    replacement = tmp_path / "replacement-key"
+    replacement.write_bytes(b"replacement")
+    _protect_private_key(replacement)
+
+    try:
+        with pytest.raises(PermissionError):
+            replacement.replace(config.private_key_path)
+    finally:
+        executor.close()
+
+    replacement.replace(config.private_key_path)
+    assert config.private_key_path.read_bytes() == b"replacement"
+
+
+def test_closed_executor_cannot_invoke_transport(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    executor.close()
+
+    with pytest.raises(RemoteShellExecutionError, match="closed"):
+        executor.submit(prepared)
+
+    assert runner.calls == []
+
+
 def test_unreachable_poll_returns_unknown(tmp_path, monkeypatch):
     executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
     job = executor.submit(prepared)
