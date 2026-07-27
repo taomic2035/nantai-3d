@@ -19,6 +19,7 @@ from pipeline.production_runtime_evidence import (
     canonical_production_runtime_decision_bytes,
     canonical_production_runtime_measurement_bytes,
     canonical_production_runtime_policy_bytes,
+    load_production_runtime_measurement_bytes,
 )
 from pipeline.production_training_closure import (
     ProductionResultBundleManifestV2,
@@ -63,6 +64,12 @@ from pipeline.recon_schema import (
     Sim3,
     SplatInput,
     TransformMethod,
+)
+from pipeline.remote_shell_executor import (
+    RemoteResultBundleError,
+    build_production_remote_result_bundle,
+    inspect_remote_result_bundle_schema,
+    verify_production_remote_result_bundle,
 )
 from pipeline.render_evaluation import (
     RenderCameraRecord,
@@ -897,6 +904,119 @@ def _write_production_closure_evidence(
     ).write_bytes(
         canonical_production_training_closure_bytes(closure)
     )
+
+
+def test_production_result_bundle_v2_builder_closes_runtime_and_render(
+    tmp_path,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+        include_production_closure=False,
+    )
+    _write_production_closure_evidence(training_root, fixture)
+    result_root = training_root / "remote-result"
+    measurement = load_production_runtime_measurement_bytes(
+        (
+            result_root
+            / "production-runtime"
+            / "measurement.json"
+        ).read_bytes()
+    )
+    for relative in (
+        "result-bundle-manifest.json",
+        "result-bundle.zip",
+        "render-evaluation/decision.json",
+        "production-training-closure.json",
+    ):
+        (result_root / relative).unlink()
+    archive = training_root / "result-bundle.zip"
+
+    built = build_production_remote_result_bundle(
+        result_root=result_root,
+        output_path=archive,
+        job_id=fixture.attempt.job_id,
+        attempt_id=fixture.attempt.attempt_id,
+        request_sha256=request_canonical_sha256(fixture.request),
+        training_bundle_sha256=fixture.verified_bundle.bundle_sha256,
+        container_instance_id=(
+            measurement.environment.container_instance_id
+        ),
+        container_identity=(
+            measurement.environment.observed_container_identity
+        ),
+        remote_target_sha256=measurement.remote_target_sha256,
+        durable_job_ref_sha256=measurement.durable_job_ref_sha256,
+        workspace_identity_sha256=(
+            measurement.workspace_identity_sha256
+        ),
+    )
+    verified = verify_production_remote_result_bundle(
+        archive,
+        expected_job_id=fixture.attempt.job_id,
+        expected_attempt_id=fixture.attempt.attempt_id,
+        expected_request_sha256=request_canonical_sha256(
+            fixture.request
+        ),
+        expected_training_bundle_sha256=(
+            fixture.verified_bundle.bundle_sha256
+        ),
+        expected_container_instance_id=(
+            measurement.environment.container_instance_id
+        ),
+        expected_container_identity=(
+            measurement.environment.observed_container_identity
+        ),
+        expected_remote_target_sha256=measurement.remote_target_sha256,
+        expected_durable_job_ref_sha256=(
+            measurement.durable_job_ref_sha256
+        ),
+        expected_workspace_identity_sha256=(
+            measurement.workspace_identity_sha256
+        ),
+    )
+
+    assert built.bundle_sha256 == verified.bundle_sha256
+    assert inspect_remote_result_bundle_schema(archive) == (
+        "nantai.remote-result-bundle.v2"
+    )
+    assert verified.manifest.schema_id == (
+        "nantai.remote-result-bundle.v2"
+    )
+    assert verified.member_bytes[
+        "production-runtime/decision.json"
+    ] == (
+        result_root / "production-runtime/decision.json"
+    ).read_bytes()
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="runtime evidence",
+    ):
+        verify_production_remote_result_bundle(
+            archive,
+            expected_job_id=fixture.attempt.job_id,
+            expected_attempt_id=fixture.attempt.attempt_id,
+            expected_request_sha256=request_canonical_sha256(
+                fixture.request
+            ),
+            expected_training_bundle_sha256=(
+                fixture.verified_bundle.bundle_sha256
+            ),
+            expected_container_instance_id=(
+                measurement.environment.container_instance_id
+            ),
+            expected_container_identity=(
+                measurement.environment.observed_container_identity
+            ),
+            expected_remote_target_sha256=(
+                measurement.remote_target_sha256
+            ),
+            expected_durable_job_ref_sha256="9" * 64,
+            expected_workspace_identity_sha256=(
+                measurement.workspace_identity_sha256
+            ),
+        )
 
 
 def test_canary_preview_import_stays_arbitrary_and_closes_all_outputs(

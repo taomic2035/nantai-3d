@@ -24,6 +24,9 @@ from pipeline.production_training_closure import (
     verify_production_training_closure,
 )
 from pipeline.real_dataset import canonical_model_bytes
+from pipeline.remote_shell_executor import (
+    derive_production_remote_result_artifacts,
+)
 from pipeline.render_evaluation import (
     RenderDecision,
     RenderEvaluationPolicy,
@@ -353,6 +356,36 @@ def test_production_closure_binds_runtime_training_and_render_decisions():
         render_report=fixture["render_report"],
         render_decision=fixture["render_decision"],
     )
+
+
+def test_remote_result_artifacts_add_decision_and_closure_after_archive():
+    fixture = _fixture()
+
+    artifacts = derive_production_remote_result_artifacts(
+        manifest=fixture["manifest"],
+        attempt=fixture["attempt"],
+        request=fixture["request"],
+        result=fixture["result"],
+        runtime_measurement=fixture["runtime"],
+        runtime_policy=fixture["runtime_policy"],
+        runtime_decision=fixture["runtime_decision"],
+        render_policy=fixture["render_policy"],
+        render_report=fixture["render_report"],
+        render_decision=fixture["render_decision"],
+        training_bundle_sha256=fixture["training_bundle_sha"],
+        result_bundle_archive_sha256=fixture["archive_sha"],
+    )
+
+    assert set(artifacts) == {
+        "render-evaluation/decision.json",
+        "production-training-closure.json",
+    }
+    assert artifacts["render-evaluation/decision.json"] == (
+        canonical_model_bytes(fixture["render_decision"])
+    )
+    assert load_production_training_closure_bytes(
+        artifacts["production-training-closure.json"]
+    ) == _derive(fixture)
 
 
 def test_result_manifest_loader_requires_canonical_duplicate_free_json():

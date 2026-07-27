@@ -40,9 +40,26 @@ from cloud.validate_dataparser_transform import (
     validate_dataparser_transform,
 )
 from pipeline.production_runtime_evidence import (
+    ProductionRuntimeDecision,
     ProductionRuntimeEvidenceError,
+    ProductionRuntimeMeasurement,
     ProductionRuntimePolicy,
+    canonical_production_runtime_decision_bytes,
+    canonical_production_runtime_measurement_bytes,
+    canonical_production_runtime_policy_bytes,
+    load_production_runtime_decision_bytes,
+    load_production_runtime_measurement_bytes,
     load_production_runtime_policy_bytes,
+    verify_production_runtime_decision,
+)
+from pipeline.production_training_closure import (
+    ProductionResultBundleManifestV2,
+    ProductionResultMember,
+    ProductionTrainingClosureError,
+    canonical_production_result_manifest_bytes,
+    canonical_production_training_closure_bytes,
+    derive_production_training_closure,
+    load_production_result_manifest_bytes,
 )
 from pipeline.real_scene_training import (
     HeldOutSplit,
@@ -53,6 +70,7 @@ from pipeline.real_scene_training import (
     verify_production_training_job_bundle,
 )
 from pipeline.render_evaluation import (
+    RenderDecision,
     RenderEvaluationError,
     RenderEvaluationPolicy,
     RenderEvaluationReport,
@@ -743,8 +761,63 @@ class VerifiedRemoteResultBundle:
     path: Path
     bundle_sha256: str
     byte_length: int
-    manifest: RemoteResultBundleManifest
+    manifest: (
+        RemoteResultBundleManifest | ProductionResultBundleManifestV2
+    )
     member_bytes: dict[str, bytes]
+
+
+@dataclass(frozen=True)
+class _ProductionClosureInputs:
+    manifest: ProductionResultBundleManifestV2
+    request: TrainingRequest
+    result: TrainingResult
+    runtime_measurement: ProductionRuntimeMeasurement
+    runtime_policy: ProductionRuntimePolicy
+    runtime_decision: ProductionRuntimeDecision
+    render_policy: RenderEvaluationPolicy
+    render_report: RenderEvaluationReport
+    render_decision: RenderDecision
+
+
+def derive_production_remote_result_artifacts(
+    *,
+    manifest: ProductionResultBundleManifestV2,
+    attempt: ExecutorAttemptReceipt,
+    request: TrainingRequest,
+    result: TrainingResult,
+    runtime_measurement: ProductionRuntimeMeasurement,
+    runtime_policy: ProductionRuntimePolicy,
+    runtime_decision: ProductionRuntimeDecision,
+    render_policy: RenderEvaluationPolicy,
+    render_report: RenderEvaluationReport,
+    render_decision: RenderDecision,
+    training_bundle_sha256: str,
+    result_bundle_archive_sha256: str,
+) -> dict[str, bytes]:
+    """Derive the two post-archive artifacts without creating a SHA cycle."""
+    closure = derive_production_training_closure(
+        training_bundle_sha256=training_bundle_sha256,
+        result_bundle_archive_sha256=result_bundle_archive_sha256,
+        manifest=manifest,
+        attempt=attempt,
+        request=request,
+        result=result,
+        runtime_measurement=runtime_measurement,
+        runtime_policy=runtime_policy,
+        runtime_decision=runtime_decision,
+        render_policy=render_policy,
+        render_report=render_report,
+        render_decision=render_decision,
+    )
+    return {
+        "render-evaluation/decision.json": _canonical_model_bytes(
+            render_decision
+        ),
+        "production-training-closure.json": (
+            canonical_production_training_closure_bytes(closure)
+        ),
+    }
 
 
 @dataclass
@@ -1348,10 +1421,14 @@ def _enumerate_result_tree(
 
 
 def _validate_evaluation_member_contract(
-    bindings: dict[str, RemoteResultBundleMember],
+    bindings: dict[
+        str,
+        RemoteResultBundleMember | ProductionResultMember,
+    ],
     payloads: dict[str, bytes],
     *,
     container_identity: str,
+    additional_fixed_members: frozenset[str] = frozenset(),
 ) -> None:
     paths = set(bindings)
     has_evaluation = bool(paths & _EVALUATION_FIXED_MEMBERS)
@@ -1402,7 +1479,11 @@ def _validate_evaluation_member_contract(
         raise RemoteResultBundleError(
             "remote evaluation config/transforms binding mismatch"
         )
-    expected = set(_BASE_RESULT_MEMBERS | _EVALUATION_FIXED_MEMBERS)
+    expected = set(
+        _BASE_RESULT_MEMBERS
+        | _EVALUATION_FIXED_MEMBERS
+        | additional_fixed_members
+    )
     for frame in report.frames:
         if not frame.render_path.startswith("result/"):
             raise RemoteResultBundleError(
@@ -1473,10 +1554,10 @@ def _validate_downloaded_evaluation(
     verified_result: VerifiedRemoteResultBundle,
     verified_input: VerifiedTrainingJobBundle,
     split_bytes: bytes,
-) -> None:
+) -> RenderDecision | None:
     members = verified_result.member_bytes
     if "render-evaluation/report.json" not in members:
-        return
+        return None
     try:
         split = HeldOutSplit.model_validate_json(split_bytes)
     except ValueError as exc:
@@ -1526,7 +1607,7 @@ def _validate_downloaded_evaluation(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)
         try:
-            validate_render_evaluation(policy, report, root)
+            return validate_render_evaluation(policy, report, root)
         except RenderEvaluationError as exc:
             raise RemoteResultBundleError(
                 f"downloaded render evaluation is invalid: {exc}"
@@ -1804,6 +1885,569 @@ def build_remote_result_bundle(
         max_member_bytes=max_member_bytes,
         max_log_bytes=max_log_bytes,
     )
+
+
+def _read_bound_result_contract(
+    sources: dict[
+        str,
+        tuple[Path, int, str, tuple[int, int, int, int, int, int]],
+    ],
+    name: str,
+) -> bytes:
+    try:
+        source, expected_size, expected_sha, signature = sources[name]
+        payload = source.read_bytes()
+        after = source.lstat()
+    except (KeyError, OSError) as exc:
+        raise RemoteResultBundleError(
+            f"production result contract is unavailable: {name}"
+        ) from exc
+    if (
+        len(payload) > 1024 * 1024
+        or _stat_signature(after) != signature
+        or len(payload) != expected_size
+        or hashlib.sha256(payload).hexdigest() != expected_sha
+    ):
+        raise RemoteResultBundleError(
+            f"production result contract changed while read: {name}"
+        )
+    return payload
+
+
+def _verify_production_runtime_members(
+    member_bytes: dict[str, bytes],
+    *,
+    expected_container_instance_id: str,
+    expected_container_identity: str,
+    expected_remote_target_sha256: str,
+    expected_durable_job_ref_sha256: str,
+    expected_workspace_identity_sha256: str,
+) -> ProductionRuntimeMeasurement:
+    try:
+        measurement_bytes = member_bytes[
+            "production-runtime/measurement.json"
+        ]
+        policy_bytes = member_bytes["production-runtime/policy.json"]
+        decision_bytes = member_bytes[
+            "production-runtime/decision.json"
+        ]
+        measurement = load_production_runtime_measurement_bytes(
+            measurement_bytes
+        )
+        policy = load_production_runtime_policy_bytes(policy_bytes)
+        decision = load_production_runtime_decision_bytes(
+            decision_bytes
+        )
+        verify_production_runtime_decision(
+            measurement=measurement,
+            policy=policy,
+            decision=decision,
+        )
+    except (KeyError, ValueError) as exc:
+        raise RemoteResultBundleError(
+            "production runtime evidence is invalid"
+        ) from exc
+    if (
+        decision.status != "accepted"
+        or measurement.environment.kind != "fresh-job-container"
+        or measurement.environment.container_instance_id
+        != expected_container_instance_id
+        or measurement.environment.configured_container_identity
+        != expected_container_identity
+        or measurement.environment.observed_container_identity
+        != expected_container_identity
+        or measurement.remote_target_sha256
+        != expected_remote_target_sha256
+        or measurement.durable_job_ref_sha256
+        != expected_durable_job_ref_sha256
+        or measurement.workspace_identity_sha256
+        != expected_workspace_identity_sha256
+        or policy.expected_container_identity
+        != expected_container_identity
+        or measurement_bytes
+        != canonical_production_runtime_measurement_bytes(measurement)
+        or policy_bytes
+        != canonical_production_runtime_policy_bytes(policy)
+        or decision_bytes
+        != canonical_production_runtime_decision_bytes(decision)
+    ):
+        raise RemoteResultBundleError(
+            "production runtime evidence differs from result identity"
+        )
+    return measurement
+
+
+def build_production_remote_result_bundle(
+    *,
+    result_root: Path,
+    output_path: Path,
+    job_id: str,
+    attempt_id: str,
+    request_sha256: str,
+    training_bundle_sha256: str,
+    container_instance_id: str,
+    container_identity: str,
+    remote_target_sha256: str,
+    durable_job_ref_sha256: str,
+    workspace_identity_sha256: str,
+    max_member_bytes: int = _DEFAULT_MAX_MEMBER_BYTES,
+    max_log_bytes: int = _DEFAULT_MAX_LOG_BYTES,
+) -> VerifiedRemoteResultBundle:
+    """Build the strict Production V1 result-bundle v2 archive."""
+    root = Path(result_root).expanduser().absolute()
+    output = Path(output_path).expanduser().absolute()
+    if output.exists() or output.is_symlink():
+        raise RemoteResultBundleError(
+            "production result bundle output must be absent"
+        )
+    try:
+        root_stat = root.lstat()
+        parent_stat = output.parent.lstat()
+    except OSError as exc:
+        raise RemoteResultBundleError(
+            "production result bundle boundary is unavailable"
+        ) from exc
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or not stat.S_ISDIR(root_stat.st_mode)
+        or stat.S_ISLNK(parent_stat.st_mode)
+        or not stat.S_ISDIR(parent_stat.st_mode)
+    ):
+        raise RemoteResultBundleError(
+            "production result bundle boundary must be real directories"
+        )
+    result_files, result_directories = _enumerate_result_tree(root)
+    expected_directories = frozenset(
+        {
+            "production-runtime",
+            "render-evaluation",
+            "render-evaluation/cameras",
+            "render-evaluation/renders",
+        }
+    )
+    if result_directories != expected_directories:
+        raise RemoteResultBundleError(
+            "production result directory set is incomplete or contains extras"
+        )
+    sources: dict[
+        str,
+        tuple[Path, int, str, tuple[int, int, int, int, int, int]],
+    ] = {}
+    members: list[ProductionResultMember] = []
+    for enumerated in result_files:
+        name = enumerated.relative_to(root).as_posix()
+        source = root / name
+        allow_empty = name in _BOUND_LOG_MEMBERS
+        limit = max_log_bytes if allow_empty else max_member_bytes
+        size, digest = _stable_file_sha(
+            source,
+            label=f"production result member {name}",
+            max_bytes=limit,
+            allow_empty=allow_empty,
+        )
+        signature = _stat_signature(source.lstat())
+        sources[name] = (source, size, digest, signature)
+        members.append(
+            ProductionResultMember(
+                path=name,
+                byte_length=size,
+                sha256=digest,
+            )
+        )
+    contract_names = {
+        "production-runtime/measurement.json",
+        "production-runtime/policy.json",
+        "production-runtime/decision.json",
+        *_EVALUATION_FIXED_MEMBERS,
+    }
+    contract_payloads = {
+        name: _read_bound_result_contract(sources, name)
+        for name in contract_names
+    }
+    measurement = _verify_production_runtime_members(
+        contract_payloads,
+        expected_container_instance_id=container_instance_id,
+        expected_container_identity=container_identity,
+        expected_remote_target_sha256=remote_target_sha256,
+        expected_durable_job_ref_sha256=durable_job_ref_sha256,
+        expected_workspace_identity_sha256=workspace_identity_sha256,
+    )
+    if (
+        measurement.environment.container_instance_id
+        != container_instance_id
+    ):
+        raise RemoteResultBundleError(
+            "production measurement container instance differs"
+        )
+    binding_by_path = {member.path: member for member in members}
+    _validate_evaluation_member_contract(
+        binding_by_path,
+        contract_payloads,
+        container_identity=container_identity,
+        additional_fixed_members=frozenset(
+            {
+                "container-id.txt",
+                "production-runtime/decision.json",
+                "production-runtime/measurement.json",
+                "production-runtime/policy.json",
+            }
+        ),
+    )
+    try:
+        expected_container_id_bytes = (
+            container_instance_id + "\n"
+        ).encode("ascii")
+        expected_container_identity_bytes = (
+            container_identity + "\n"
+        ).encode("ascii")
+    except UnicodeError as exc:
+        raise RemoteResultBundleError(
+            "production container identity is not ASCII"
+        ) from exc
+    if (
+        _read_bound_result_contract(sources, "container-id.txt")
+        != expected_container_id_bytes
+        or _read_bound_result_contract(
+            sources,
+            "container-identity.txt",
+        )
+        != expected_container_identity_bytes
+    ):
+        raise RemoteResultBundleError(
+            "production result container identity bytes mismatch"
+        )
+    manifest = ProductionResultBundleManifestV2(
+        job_id=job_id,
+        attempt_id=attempt_id,
+        request_sha256=request_sha256,
+        training_bundle_sha256=training_bundle_sha256,
+        container_instance_id=container_instance_id,
+        container_identity=container_identity,
+        runtime_measurement_artifact_sha256=binding_by_path[
+            "production-runtime/measurement.json"
+        ].sha256,
+        runtime_policy_artifact_sha256=binding_by_path[
+            "production-runtime/policy.json"
+        ].sha256,
+        runtime_decision_artifact_sha256=binding_by_path[
+            "production-runtime/decision.json"
+        ].sha256,
+        members=tuple(members),
+    )
+    from pipeline.durable_io import (
+        DurableIOError,
+        flush_file,
+        publish_file_noreplace,
+    )
+
+    staging = output.parent / (
+        f".{output.name}.{uuid.uuid4().hex}.staging"
+    )
+    try:
+        with zipfile.ZipFile(
+            staging,
+            "x",
+            compression=zipfile.ZIP_STORED,
+            allowZip64=True,
+        ) as archive:
+            archive.writestr(
+                _zip_info("result-bundle-manifest.json"),
+                canonical_production_result_manifest_bytes(manifest),
+            )
+            for name in sorted(sources):
+                source, expected_size, expected_sha, signature = (
+                    sources[name]
+                )
+                if _stat_signature(source.lstat()) != signature:
+                    raise RemoteResultBundleError(
+                        f"production result member changed before pack: {name}"
+                    )
+                measured = 0
+                digest = hashlib.sha256()
+                with source.open("rb") as input_stream, archive.open(
+                    _zip_info(name),
+                    "w",
+                    force_zip64=True,
+                ) as output_stream:
+                    for chunk in iter(
+                        lambda: input_stream.read(1024 * 1024),
+                        b"",
+                    ):
+                        measured += len(chunk)
+                        digest.update(chunk)
+                        output_stream.write(chunk)
+                if (
+                    _stat_signature(source.lstat()) != signature
+                    or measured != expected_size
+                    or digest.hexdigest() != expected_sha
+                ):
+                    raise RemoteResultBundleError(
+                        f"production result member changed during pack: {name}"
+                    )
+        flush_file(staging)
+        verify_production_remote_result_bundle(
+            staging,
+            expected_job_id=job_id,
+            expected_attempt_id=attempt_id,
+            expected_request_sha256=request_sha256,
+            expected_training_bundle_sha256=training_bundle_sha256,
+            expected_container_instance_id=container_instance_id,
+            expected_container_identity=container_identity,
+            expected_remote_target_sha256=remote_target_sha256,
+            expected_durable_job_ref_sha256=durable_job_ref_sha256,
+            expected_workspace_identity_sha256=(
+                workspace_identity_sha256
+            ),
+            max_member_bytes=max_member_bytes,
+            max_log_bytes=max_log_bytes,
+        )
+        publish_file_noreplace(staging, output)
+    except RemoteResultBundleError:
+        raise
+    except DurableIOError as exc:
+        raise RemoteResultBundleError(
+            "production result bundle publication is ambiguous",
+            published=exc.published,
+        ) from exc
+    except OSError as exc:
+        raise RemoteResultBundleError(
+            "production result bundle cannot be written"
+        ) from exc
+    finally:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return verify_production_remote_result_bundle(
+        output,
+        expected_job_id=job_id,
+        expected_attempt_id=attempt_id,
+        expected_request_sha256=request_sha256,
+        expected_training_bundle_sha256=training_bundle_sha256,
+        expected_container_instance_id=container_instance_id,
+        expected_container_identity=container_identity,
+        expected_remote_target_sha256=remote_target_sha256,
+        expected_durable_job_ref_sha256=durable_job_ref_sha256,
+        expected_workspace_identity_sha256=workspace_identity_sha256,
+        max_member_bytes=max_member_bytes,
+        max_log_bytes=max_log_bytes,
+    )
+
+
+def verify_production_remote_result_bundle(
+    path: Path,
+    *,
+    expected_job_id: str,
+    expected_attempt_id: str,
+    expected_request_sha256: str,
+    expected_training_bundle_sha256: str,
+    expected_container_instance_id: str,
+    expected_container_identity: str,
+    expected_remote_target_sha256: str,
+    expected_durable_job_ref_sha256: str,
+    expected_workspace_identity_sha256: str,
+    max_archive_bytes: int = _DEFAULT_MAX_ARCHIVE_BYTES,
+    max_member_bytes: int = _DEFAULT_MAX_MEMBER_BYTES,
+    max_log_bytes: int = _DEFAULT_MAX_LOG_BYTES,
+) -> VerifiedRemoteResultBundle:
+    """Verify a result-bundle v2 archive without trusting its manifest."""
+    archive_path = Path(path).expanduser().absolute()
+    archive_size, archive_sha = _stable_file_sha(
+        archive_path,
+        label="production result bundle",
+        max_bytes=max_archive_bytes,
+    )
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            infos = archive.infolist()
+            names = tuple(info.filename for info in infos)
+            if len(names) != len(set(names)):
+                raise RemoteResultBundleError(
+                    "production archive contains duplicate members"
+                )
+            for info in infos:
+                _portable_member(info.filename)
+                mode = info.external_attr >> 16
+                if (
+                    info.is_dir()
+                    or stat.S_ISLNK(mode)
+                    or info.flag_bits & 0x1
+                    or info.compress_type != zipfile.ZIP_STORED
+                ):
+                    raise RemoteResultBundleError(
+                        "production archive member type is not allowed"
+                    )
+                limit = (
+                    max_log_bytes
+                    if info.filename in _BOUND_LOG_MEMBERS
+                    else max_member_bytes
+                )
+                if (
+                    (
+                        info.file_size == 0
+                        and info.filename not in _BOUND_LOG_MEMBERS
+                    )
+                    or info.file_size < 0
+                    or info.file_size > limit
+                ):
+                    raise RemoteResultBundleError(
+                        "production archive member size is outside limits"
+                    )
+            if sum(info.file_size for info in infos) > max_archive_bytes:
+                raise RemoteResultBundleError(
+                    "production archive expanded size exceeds limit"
+                )
+            try:
+                manifest_raw = archive.read(
+                    "result-bundle-manifest.json"
+                )
+                manifest = load_production_result_manifest_bytes(
+                    manifest_raw
+                )
+            except (KeyError, ProductionTrainingClosureError) as exc:
+                raise RemoteResultBundleError(
+                    "production archive manifest is missing or invalid"
+                ) from exc
+            expected_names = {
+                "result-bundle-manifest.json",
+                *(member.path for member in manifest.members),
+            }
+            if set(names) != expected_names:
+                raise RemoteResultBundleError(
+                    "production archive members differ from manifest"
+                )
+            identity = (
+                manifest.job_id,
+                manifest.attempt_id,
+                manifest.request_sha256,
+                manifest.training_bundle_sha256,
+                manifest.container_instance_id,
+                manifest.container_identity,
+            )
+            expected_identity = (
+                expected_job_id,
+                expected_attempt_id,
+                expected_request_sha256,
+                expected_training_bundle_sha256,
+                expected_container_instance_id,
+                expected_container_identity,
+            )
+            if identity != expected_identity:
+                raise RemoteResultBundleError(
+                    "production archive identity mismatch"
+                )
+            member_bytes: dict[str, bytes] = {}
+            for member in manifest.members:
+                payload = archive.read(member.path)
+                if (
+                    len(payload) != member.byte_length
+                    or hashlib.sha256(payload).hexdigest()
+                    != member.sha256
+                ):
+                    raise RemoteResultBundleError(
+                        "production member sha256/size mismatch: "
+                        f"{member.path}"
+                    )
+                member_bytes[member.path] = payload
+    except RemoteResultBundleError:
+        raise
+    except (OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+        raise RemoteResultBundleError(
+            "production result bundle validation failed"
+        ) from exc
+    if (
+        member_bytes["container-id.txt"]
+        != (expected_container_instance_id + "\n").encode("ascii")
+        or member_bytes["container-identity.txt"]
+        != (expected_container_identity + "\n").encode("ascii")
+    ):
+        raise RemoteResultBundleError(
+            "production result container identity bytes mismatch"
+        )
+    _verify_production_runtime_members(
+        member_bytes,
+        expected_container_instance_id=expected_container_instance_id,
+        expected_container_identity=expected_container_identity,
+        expected_remote_target_sha256=expected_remote_target_sha256,
+        expected_durable_job_ref_sha256=(
+            expected_durable_job_ref_sha256
+        ),
+        expected_workspace_identity_sha256=(
+            expected_workspace_identity_sha256
+        ),
+    )
+    _validate_evaluation_member_contract(
+        {member.path: member for member in manifest.members},
+        member_bytes,
+        container_identity=expected_container_identity,
+        additional_fixed_members=frozenset(
+            {
+                "container-id.txt",
+                "production-runtime/decision.json",
+                "production-runtime/measurement.json",
+                "production-runtime/policy.json",
+            }
+        ),
+    )
+    return VerifiedRemoteResultBundle(
+        path=archive_path,
+        bundle_sha256=archive_sha,
+        byte_length=archive_size,
+        manifest=manifest,
+        member_bytes=member_bytes,
+    )
+
+
+def inspect_remote_result_bundle_schema(
+    path: Path,
+    *,
+    max_archive_bytes: int = _DEFAULT_MAX_ARCHIVE_BYTES,
+) -> Literal[
+    "nantai.remote-result-bundle.v1",
+    "nantai.remote-result-bundle.v2",
+]:
+    """Read only the bounded stored manifest to select the strict verifier."""
+    archive_path = Path(path).expanduser().absolute()
+    _stable_file_sha(
+        archive_path,
+        label="remote result bundle schema probe",
+        max_bytes=max_archive_bytes,
+    )
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            info = archive.getinfo("result-bundle-manifest.json")
+            mode = info.external_attr >> 16
+            if (
+                info.is_dir()
+                or stat.S_ISLNK(mode)
+                or info.flag_bits & 0x1
+                or info.compress_type != zipfile.ZIP_STORED
+                or info.file_size <= 0
+                or info.file_size > 1024 * 1024
+            ):
+                raise RemoteResultBundleError(
+                    "result manifest type or size is invalid"
+                )
+            payload = archive.read(info)
+        parsed = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+    except RemoteResultBundleError:
+        raise
+    except (OSError, KeyError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+        raise RemoteResultBundleError(
+            "result bundle schema cannot be determined"
+        ) from exc
+    schema = parsed.get("schema") if isinstance(parsed, dict) else None
+    if schema not in {
+        "nantai.remote-result-bundle.v1",
+        "nantai.remote-result-bundle.v2",
+    }:
+        raise RemoteResultBundleError(
+            "result bundle schema is unsupported"
+        )
+    return schema
 
 
 def verify_remote_result_bundle(
@@ -2963,7 +3607,7 @@ class RemoteShellExecutor:
         self,
         verified_result: VerifiedRemoteResultBundle,
         context: _JobContext,
-    ) -> None:
+    ) -> _ProductionClosureInputs | None:
         members = verified_result.member_bytes
         try:
             request = TrainingRequest.model_validate_json(
@@ -3024,10 +3668,52 @@ class RemoteShellExecutor:
             raise RemoteResultBundleError(
                 "remote successful result is not a completed training run"
             )
-        _validate_downloaded_evaluation(
+        render_decision = _validate_downloaded_evaluation(
             verified_result,
             verified_input,
             input_bytes["training/held-out-split.json"],
+        )
+        if not isinstance(
+            verified_result.manifest,
+            ProductionResultBundleManifestV2,
+        ):
+            return None
+        if render_decision is None:
+            raise RemoteResultBundleError(
+                "production result is missing render evaluation"
+            )
+        try:
+            runtime_measurement = (
+                load_production_runtime_measurement_bytes(
+                    members["production-runtime/measurement.json"]
+                )
+            )
+            runtime_policy = load_production_runtime_policy_bytes(
+                members["production-runtime/policy.json"]
+            )
+            runtime_decision = load_production_runtime_decision_bytes(
+                members["production-runtime/decision.json"]
+            )
+            render_policy = RenderEvaluationPolicy.model_validate_json(
+                members["render-evaluation/policy.json"]
+            )
+            render_report = RenderEvaluationReport.model_validate_json(
+                members["render-evaluation/report.json"]
+            )
+        except (KeyError, ValueError) as exc:
+            raise RemoteResultBundleError(
+                "production closure inputs are invalid"
+            ) from exc
+        return _ProductionClosureInputs(
+            manifest=verified_result.manifest,
+            request=request,
+            result=result,
+            runtime_measurement=runtime_measurement,
+            runtime_policy=runtime_policy,
+            runtime_decision=runtime_decision,
+            render_policy=render_policy,
+            render_report=render_report,
+            render_decision=render_decision,
         )
 
     def fetch(
@@ -3086,21 +3772,64 @@ class RemoteShellExecutor:
                 completed,
                 phase="result bundle download",
             )
-            verified = verify_remote_result_bundle(
+            result_schema = inspect_remote_result_bundle_schema(
                 archive_path,
-                expected_job_id=context.job.job_id,
-                expected_attempt_id=context.job.attempt_id,
-                expected_request_sha256=context.job.request_sha256,
-                expected_training_bundle_sha256=(
-                    context.job.training_bundle_sha256
-                ),
-                expected_container_identity=(
-                    self.config.container_identity
-                ),
                 max_archive_bytes=self.config.max_result_bundle_bytes,
-                max_member_bytes=self.config.max_result_member_bytes,
-                max_log_bytes=self.config.max_log_bytes,
             )
+            if result_schema == "nantai.remote-result-bundle.v2":
+                verified = verify_production_remote_result_bundle(
+                    archive_path,
+                    expected_job_id=context.job.job_id,
+                    expected_attempt_id=context.job.attempt_id,
+                    expected_request_sha256=context.job.request_sha256,
+                    expected_training_bundle_sha256=(
+                        context.job.training_bundle_sha256
+                    ),
+                    expected_container_instance_id=(
+                        lifecycle_receipt.container_id
+                    ),
+                    expected_container_identity=(
+                        self.config.container_identity
+                    ),
+                    expected_remote_target_sha256=(
+                        self.config.remote_target_sha256
+                    ),
+                    expected_durable_job_ref_sha256=hashlib.sha256(
+                        canonical_remote_shell_job_ref_bytes(
+                            context.job
+                        )
+                    ).hexdigest(),
+                    expected_workspace_identity_sha256=(
+                        lifecycle_receipt.workspace_identity_sha256
+                    ),
+                    max_archive_bytes=(
+                        self.config.max_result_bundle_bytes
+                    ),
+                    max_member_bytes=(
+                        self.config.max_result_member_bytes
+                    ),
+                    max_log_bytes=self.config.max_log_bytes,
+                )
+            else:
+                verified = verify_remote_result_bundle(
+                    archive_path,
+                    expected_job_id=context.job.job_id,
+                    expected_attempt_id=context.job.attempt_id,
+                    expected_request_sha256=context.job.request_sha256,
+                    expected_training_bundle_sha256=(
+                        context.job.training_bundle_sha256
+                    ),
+                    expected_container_identity=(
+                        self.config.container_identity
+                    ),
+                    max_archive_bytes=(
+                        self.config.max_result_bundle_bytes
+                    ),
+                    max_member_bytes=(
+                        self.config.max_result_member_bytes
+                    ),
+                    max_log_bytes=self.config.max_log_bytes,
+                )
             if (
                 verified.bundle_sha256
                 != status.result_bundle_sha256
@@ -3135,7 +3864,87 @@ class RemoteShellExecutor:
                     stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
-            self._verify_result_semantics(verified, context)
+            if isinstance(
+                verified.manifest,
+                ProductionResultBundleManifestV2,
+            ):
+                manifest_path = (
+                    staging / "result-bundle-manifest.json"
+                )
+                descriptor = os.open(
+                    manifest_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(
+                        canonical_production_result_manifest_bytes(
+                            verified.manifest
+                        )
+                    )
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            closure_inputs = self._verify_result_semantics(
+                verified,
+                context,
+            )
+            observation = ExecutorObservation(
+                state="succeeded",
+                observed_at_utc=self._now(),
+                exit_code=0,
+                stdout_sha256=status.stdout_sha256,
+                stderr_sha256=status.stderr_sha256,
+                result_bundle_sha256=status.result_bundle_sha256,
+            )
+            prospective_receipt = advance_attempt(
+                context.receipt,
+                observation,
+            )
+            if closure_inputs is not None:
+                try:
+                    closure_artifacts = (
+                        derive_production_remote_result_artifacts(
+                            manifest=closure_inputs.manifest,
+                            attempt=prospective_receipt,
+                            request=closure_inputs.request,
+                            result=closure_inputs.result,
+                            runtime_measurement=(
+                                closure_inputs.runtime_measurement
+                            ),
+                            runtime_policy=(
+                                closure_inputs.runtime_policy
+                            ),
+                            runtime_decision=(
+                                closure_inputs.runtime_decision
+                            ),
+                            render_policy=closure_inputs.render_policy,
+                            render_report=closure_inputs.render_report,
+                            render_decision=(
+                                closure_inputs.render_decision
+                            ),
+                            training_bundle_sha256=(
+                                context.job.training_bundle_sha256
+                            ),
+                            result_bundle_archive_sha256=(
+                                verified.bundle_sha256
+                            ),
+                        )
+                    )
+                except ProductionTrainingClosureError as exc:
+                    raise RemoteResultBundleError(
+                        "production result closure cannot be derived"
+                    ) from exc
+                for relative, payload in closure_artifacts.items():
+                    closure_path = staging / relative
+                    descriptor = os.open(
+                        closure_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                    with os.fdopen(descriptor, "wb") as stream:
+                        stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
             os.replace(staging, destination)
         except (
             OSError,
@@ -3144,18 +3953,7 @@ class RemoteShellExecutor:
         ):
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        observation = ExecutorObservation(
-            state="succeeded",
-            observed_at_utc=self._now(),
-            exit_code=0,
-            stdout_sha256=status.stdout_sha256,
-            stderr_sha256=status.stderr_sha256,
-            result_bundle_sha256=status.result_bundle_sha256,
-        )
-        context.receipt = advance_attempt(
-            context.receipt,
-            observation,
-        )
+        context.receipt = prospective_receipt
         return context.receipt
 
 

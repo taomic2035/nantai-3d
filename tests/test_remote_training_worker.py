@@ -132,6 +132,8 @@ class FakeDocker:
     inspect_fails: bool = False
     image_inspect_fails: bool = False
     rm_fails: bool = False
+    production_runtime_marker: bool = False
+    result_container_id_marker: bytes | None = None
     calls: list[list[str]] = field(default_factory=list)
     _job_dir: Path | None = None
     _container_identity: str = _CONTAINER_IDENTITY
@@ -217,6 +219,23 @@ class FakeDocker:
                     / "result"
                 )
                 result_root.mkdir(parents=True, exist_ok=True)
+                if self.production_runtime_marker:
+                    runtime_root = (
+                        self._job_dir / "production-runtime"
+                    )
+                    runtime_root.mkdir()
+                    for name in (
+                        "measurement.json",
+                        "policy.json",
+                        "decision.json",
+                    ):
+                        (runtime_root / name).write_bytes(
+                            f"{name}\n".encode("ascii")
+                        )
+                if self.result_container_id_marker is not None:
+                    (result_root / "container-id.txt").write_bytes(
+                        self.result_container_id_marker
+                    )
                 # write_bytes to avoid Windows newline translation
                 (result_root / "container-identity.txt").write_bytes(
                     (self._container_identity + "\n").encode("ascii")
@@ -447,6 +466,138 @@ def test_worker_rejects_unbound_clearance_entrypoint_before_create(
     )
     assert "create" not in _subcommands(fake)
     assert "start" not in _subcommands(fake)
+
+
+def test_worker_uses_v2_builder_for_accepted_runtime_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker(production_runtime_marker=True)
+    _patch_worker(monkeypatch, fake)
+    calls = []
+
+    def build_v2(**kwargs):
+        calls.append(kwargs)
+        assert (
+            kwargs["result_root"] / "container-id.txt"
+        ).read_bytes() == (_DEFAULT_CONTAINER_ID + "\n").encode("ascii")
+        assert {
+            path.name
+            for path in (
+                kwargs["result_root"] / "production-runtime"
+            ).iterdir()
+        } == {"measurement.json", "policy.json", "decision.json"}
+        return SimpleNamespace(
+            bundle_sha256="f" * 64,
+            byte_length=123,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "build_production_remote_result_bundle",
+        build_v2,
+    )
+    monkeypatch.setattr(
+        worker,
+        "build_remote_result_bundle",
+        lambda **_kwargs: pytest.fail("v1 builder must be unreachable"),
+    )
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 0
+    )
+    assert len(calls) == 1
+    assert calls[0]["container_instance_id"] == _DEFAULT_CONTAINER_ID
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024)
+    )
+    assert status.result_bundle_sha256 == "f" * 64
+
+
+def test_worker_never_overwrites_result_container_id_collision(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    original = b"attacker-controlled-container-id\n"
+    fake = FakeDocker(
+        production_runtime_marker=True,
+        result_container_id_marker=original,
+    )
+    _patch_worker(monkeypatch, fake)
+    build_calls = []
+
+    def build_v2(**kwargs):
+        build_calls.append(kwargs)
+        return SimpleNamespace(
+            bundle_sha256="f" * 64,
+            byte_length=123,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "build_production_remote_result_bundle",
+        build_v2,
+    )
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        != 0
+    )
+    assert build_calls == []
+    assert (
+        job_dir
+        / "runtime"
+        / "production-run"
+        / "result"
+        / "container-id.txt"
+    ).read_bytes() == original
+
+
+def test_runtime_evidence_materialization_rejects_extra_source_member(
+    tmp_path,
+):
+    job_dir = tmp_path / "job"
+    result_root = tmp_path / "result"
+    source_root = job_dir / "production-runtime"
+    source_root.mkdir(parents=True)
+    result_root.mkdir()
+    for name in (
+        "measurement.json",
+        "policy.json",
+        "decision.json",
+        "unbound.json",
+    ):
+        (source_root / name).write_bytes(f"{name}\n".encode("ascii"))
+
+    with pytest.raises(
+        RemoteWorkerError,
+        match="file set is incomplete",
+    ):
+        worker._materialize_runtime_evidence(
+            job_dir=job_dir,
+            result_root=result_root,
+            container_id=_DEFAULT_CONTAINER_ID,
+        )
+
+    assert not (result_root / "production-runtime").exists()
+    assert not (result_root / "container-id.txt").exists()
 
 
 # ---------------------------------------------------------------------------

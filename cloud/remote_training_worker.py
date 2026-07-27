@@ -37,6 +37,7 @@ from pipeline.remote_shell_executor import (  # noqa: E402
     RemoteContainerLifecycleReceipt,
     RemoteResultBundleError,
     RemoteShellStatus,
+    build_production_remote_result_bundle,
     build_remote_result_bundle,
     canonical_container_lifecycle_bytes,
     canonical_remote_status_bytes,
@@ -789,6 +790,91 @@ def _remove_container(
     return completed.returncode
 
 
+def _materialize_runtime_evidence(
+    *,
+    job_dir: Path,
+    result_root: Path,
+    container_id: str,
+) -> None:
+    source_root = job_dir / "production-runtime"
+    target_root = result_root / "production-runtime"
+    expected_names = {
+        "measurement.json",
+        "policy.json",
+        "decision.json",
+    }
+    try:
+        source_before = source_root.lstat()
+        if (
+            stat.S_ISLNK(source_before.st_mode)
+            or not stat.S_ISDIR(source_before.st_mode)
+        ):
+            raise RemoteWorkerError(
+                "production runtime evidence root is link-like"
+            )
+        children = tuple(source_root.iterdir())
+        if {child.name for child in children} != expected_names:
+            raise RemoteWorkerError(
+                "production runtime evidence file set is incomplete"
+            )
+        payloads = {
+            child.name: _read_stable(
+                child,
+                max_bytes=1024 * 1024,
+                label=f"production runtime evidence {child.name}",
+            )
+            for child in children
+        }
+        source_after = source_root.lstat()
+        if _stat_signature(source_before) != _stat_signature(
+            source_after
+        ):
+            raise RemoteWorkerError(
+                "production runtime evidence root changed while read"
+            )
+        target_root.mkdir()
+        for name in sorted(payloads):
+            _write_result_member_noreplace(
+                target_root / name,
+                payloads[name],
+                label=f"production runtime evidence {name}",
+            )
+        _write_result_member_noreplace(
+            result_root / "container-id.txt",
+            (container_id + "\n").encode("ascii"),
+            label="production result container identity",
+        )
+    except RemoteWorkerError:
+        raise
+    except OSError as exc:
+        raise RemoteWorkerError(
+            "production runtime evidence cannot be materialized"
+        ) from exc
+
+
+def _write_result_member_noreplace(
+    path: Path,
+    payload: bytes,
+    *,
+    label: str,
+) -> None:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        flush_file(path)
+    except OSError as exc:
+        raise RemoteWorkerError(
+            f"{label} cannot be materialized without replacement"
+        ) from exc
+
+
 def run_job(
     *,
     job_dir: Path,
@@ -985,15 +1071,52 @@ def run_job(
         # do NOT write a failure status (it may overwrite a succeeded
         # status already on disk), and do NOT remove the container.
         try:
-            verified = build_remote_result_bundle(
-                result_root=result_root,
-                output_path=job_dir / "result-bundle.zip",
-                job_id=spec.job_id,
-                attempt_id=spec.attempt_id,
-                request_sha256=spec.request_sha256,
-                training_bundle_sha256=spec.training_bundle_sha256,
-                container_identity=container_identity,
-            )
+            try:
+                (job_dir / "production-runtime").lstat()
+                has_runtime_evidence = True
+            except FileNotFoundError:
+                has_runtime_evidence = False
+            except OSError as exc:
+                raise RemoteWorkerError(
+                    "production runtime evidence namespace is ambiguous"
+                ) from exc
+            if has_runtime_evidence:
+                _materialize_runtime_evidence(
+                    job_dir=job_dir,
+                    result_root=result_root,
+                    container_id=container_id,
+                )
+                verified = build_production_remote_result_bundle(
+                    result_root=result_root,
+                    output_path=job_dir / "result-bundle.zip",
+                    job_id=spec.job_id,
+                    attempt_id=spec.attempt_id,
+                    request_sha256=spec.request_sha256,
+                    training_bundle_sha256=(
+                        spec.training_bundle_sha256
+                    ),
+                    container_instance_id=container_id,
+                    container_identity=container_identity,
+                    remote_target_sha256=spec.remote_target_sha256,
+                    durable_job_ref_sha256=(
+                        spec.durable_job_ref_sha256
+                    ),
+                    workspace_identity_sha256=(
+                        lifecycle_receipt.workspace_identity_sha256
+                    ),
+                )
+            else:
+                verified = build_remote_result_bundle(
+                    result_root=result_root,
+                    output_path=job_dir / "result-bundle.zip",
+                    job_id=spec.job_id,
+                    attempt_id=spec.attempt_id,
+                    request_sha256=spec.request_sha256,
+                    training_bundle_sha256=(
+                        spec.training_bundle_sha256
+                    ),
+                    container_identity=container_identity,
+                )
             _write_status(
                 job_dir,
                 RemoteShellStatus(
