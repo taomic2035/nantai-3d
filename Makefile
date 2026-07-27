@@ -28,6 +28,7 @@ test:
 	$(PY) -m pytest tests/ -q
 	node --test web/viewer/*.test.mjs
 	node --test web/studio/*.test.mjs
+	node --test scripts/capture_viewer_acceptance.test.mjs
 
 ingest:
 	$(PY) -m pipeline.ingest --input input --output photos

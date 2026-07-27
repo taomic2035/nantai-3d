@@ -99,6 +99,7 @@ def test() -> None:
     run([PY, "-m", "pytest", "tests/", "-q"])
     node_test("web/viewer/*.test.mjs")
     node_test("web/studio/*.test.mjs")
+    node_test("scripts/capture_viewer_acceptance.test.mjs")
 
 
 def lint() -> None:

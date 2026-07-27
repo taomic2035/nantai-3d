@@ -186,6 +186,30 @@ class TestEnv:
             assert make.ENV.get("PATH") == os.environ["PATH"]
 
 
+class TestStandardTestTarget:
+    def test_runs_viewer_acceptance_after_existing_suites(self, make, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(("run", command)),
+        )
+        monkeypatch.setattr(
+            make,
+            "node_test",
+            lambda pattern: calls.append(("node_test", pattern)),
+        )
+
+        make.test()
+
+        assert calls == [
+            ("run", [make.PY, "-m", "pytest", "tests/", "-q"]),
+            ("node_test", "web/viewer/*.test.mjs"),
+            ("node_test", "web/studio/*.test.mjs"),
+            ("node_test", "scripts/capture_viewer_acceptance.test.mjs"),
+        ]
+
+
 class TestPreviewReleaseTargets:
     def test_build_preview_uses_default_archive(self, make, monkeypatch):
         calls = []
