@@ -59,6 +59,9 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 - `7febb81` 的 host preflight 尚未拒绝 relative resolved path，Podman 仍误用
   Docker `.Runtimes`，并缺真实 secret/non-UTF8/wrapper-swap RED；
+- `23f7cf5` 自建 durability primitive 并在 Windows 静默 no-op；fault tests 没有
+  模拟 namespace 已发布但 sync 未确认，unknown publication 还可能倒写 terminal
+  status，已被 Codex review 拒绝；
 - `c66a00a` 的 container lifecycle 仍允许任意 resolved image ID、覆盖
   `container-id.txt`，也未证明 terminal 状态耐久后才 cleanup；
 - `da86a81` 的 blocked report 要求用占位 host/digest/dataset SHA 表示缺失输入，

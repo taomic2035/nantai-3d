@@ -194,6 +194,29 @@ image ID、container image ID、namespace publication、directory sync 和 clean
 return code。返修提交不得再写 `Co-Authored-By: Codex...`；Codex review 通过前不能
 自称 Codex 共同作者或 accepted。
 
+#### `23f7cf5` B1 Codex review：拒绝，durability 语义未闭合
+
+该提交虽有 `18 passed`，但以下即时 review 均未解决：
+
+1. 不得新建 `_fsync_directory` 并在 Windows 静默 no-op；复用
+   `pipeline.durable_io.flush_file`、`atomic_replace`、`publish_file_noreplace`。
+   这些 primitive 已区分 `DurableIOError.published=False|True`，Windows 缺
+   pywin32/FlushFileBuffers 时也会 fail closed；
+2. terminal-status RED 必须让 namespace replace 已发生、随后抛
+   `DurableIOError(published=True)`，不能在 `_atomic_write` 入口直接抛错冒充
+   “published but durability unknown”；
+3. result-bundle RED 不得整体 monkeypatch `build_remote_result_bundle`。现有
+   `tests/test_remote_shell_executor.py::
+   test_result_bundle_reports_published_when_sync_is_unconfirmed` 已在真实
+   `publish_file_noreplace` 边界注入 fault；worker 测试应使用同型 fault，并通过
+   `RemoteResultBundleError.__cause__` 读取 `DurableIOError.published`；
+4. `published=True` 时不得写 failure status，因为磁盘上可能已有 succeeded status；
+   只能保持 ambiguous/blocked、禁止 cleanup，并保留原文件供恢复审计；
+5. cleanup observation 自身 publication 失败不得再次进入 outer handler、倒写
+   terminal result 或第二次执行 `rm`。为 observation failure 增加独立 RED；
+6. container-id namespace 已发布但 durability unknown 时同样禁止 cleanup，不得
+   把“文件可读”当成“目录 entry 已耐久”。
+
 当前草稿虽然把 `docker run --rm` 改成了 `create/start/rm`，但现有 golden-path
 测试在 Windows 被 skip，且仍断言旧 `run --rm`；因此新生命周期目前等于没有测试。
 先让平台无关单元测试能在 Windows/Linux 都运行，再做最小实现。
