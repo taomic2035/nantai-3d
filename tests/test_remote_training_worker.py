@@ -15,7 +15,10 @@ from cloud.remote_training_worker import (
     read_status,
     start_job,
 )
-from pipeline.remote_shell_executor import RemoteShellStatus
+from pipeline.remote_shell_executor import (
+    RemoteResultBundleError,
+    RemoteShellStatus,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CONTAINER_IDENTITY = "registry.example/nantai@sha256:" + "c" * 64
@@ -48,17 +51,31 @@ class FakeDocker:
 
     Tracks all calls and simulates create/inspect/start/rm without
     touching a real container engine.  Configurable to reproduce
-    wrong-ID, digest-drift, start-failure and partial-publication
-    scenarios.
+    wrong-ID, digest-drift, start-failure, partial-publication and
+    cleanup-failure scenarios.
+
+    For image verification, three identities are modelled:
+
+    - ``resolved_image_id``: the content ID returned by
+      ``image inspect <identity> --format {{.Id}}`` (sha256:<manifest>).
+    - ``image_ref``: the value returned by container
+      ``inspect --format {{.Image}}`` — must equal ``resolved_image_id``
+      in the golden path.
+    - ``config_image``: the value returned by
+      ``inspect --format {{json .Config.Image}}`` — must equal the
+      immutable ``repo@sha256:...`` identity.
     """
 
     container_id: str = _DEFAULT_CONTAINER_ID
+    resolved_image_id: str = "sha256:" + "c" * 64
     image_ref: str = "sha256:" + "c" * 64
     config_image: str | None = None
     start_exit: int = 0
     skip_results: bool = False
     create_fails: bool = False
     inspect_fails: bool = False
+    image_inspect_fails: bool = False
+    rm_fails: bool = False
     calls: list[list[str]] = field(default_factory=list)
     _job_dir: Path | None = None
     _container_identity: str = _CONTAINER_IDENTITY
@@ -83,6 +100,27 @@ class FakeDocker:
                     )
             return subprocess.CompletedProcess(
                 argv, 0, stdout=self.container_id + "\n", stderr=""
+            )
+
+        if sub == "image":
+            if self.image_inspect_fails:
+                return subprocess.CompletedProcess(
+                    argv, 1, stdout="", stderr=b"image inspect failed\n"
+                )
+            fmt = (
+                argv[argv.index("--format") + 1]
+                if "--format" in argv
+                else ""
+            )
+            if "{{.Id}}" in fmt:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout=self.resolved_image_id + "\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="", stderr=""
             )
 
         if sub == "inspect":
@@ -149,6 +187,10 @@ class FakeDocker:
             )
 
         if sub == "rm":
+            if self.rm_fails:
+                return subprocess.CompletedProcess(
+                    argv, 1, stdout=None, stderr=b"rm failed\n"
+                )
             return subprocess.CompletedProcess(
                 argv, 0, stdout=None, stderr=None
             )
@@ -566,3 +608,268 @@ def test_worker_init_is_exclusive_and_status_is_canonical(tmp_path):
     )["job_id"] == "job-1"
     with pytest.raises(RemoteWorkerError, match="status"):
         read_status(job_dir, max_bytes=64 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# NOW-4 Codex review rework: durable publication + bound image identity
+# ---------------------------------------------------------------------------
+
+
+def test_worker_rejects_wrong_resolved_image_id_when_config_ref_matches(
+    tmp_path, monkeypatch,
+):
+    """container .Image must equal resolved image ID, not any sha256:*.
+
+    A wrong image ID must fail closed even when ``.Config.Image`` still
+    matches the immutable repo@sha256 identity.  This is the P0 fix
+    for "image content unbound": ``inspect {{.Image}}`` returning any
+    ``sha256:*`` was previously accepted.
+    """
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker(
+        resolved_image_id="sha256:" + "c" * 64,
+        image_ref="sha256:" + "d" * 64,  # wrong image content
+        config_image=_CONTAINER_IDENTITY,  # config ref matches
+    )
+    _patch_worker(monkeypatch, fake)
+
+    returncode = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+
+    assert returncode == 75
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "failed"
+    subs = _subcommands(fake)
+    assert "rm" in subs  # container was created, must be cleaned up
+
+
+def test_worker_rejects_preexisting_container_id_without_overwrite(
+    tmp_path, monkeypatch,
+):
+    """container-id.txt pre-existing must block; no silent overwrite."""
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    # Pre-existing container-id.txt (replay or attempt swap)
+    (job_dir / "container-id.txt").write_bytes(
+        (b"x" * 64) + b"\n"
+    )
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    returncode = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+
+    assert returncode == 75
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "failed"
+    # Container was created, must be cleaned up
+    subs = _subcommands(fake)
+    assert "create" in subs
+    assert "rm" in subs
+    # Pre-existing container-id.txt must NOT be overwritten
+    persisted = (
+        (job_dir / "container-id.txt").read_bytes().strip()
+    )
+    assert persisted == b"x" * 64
+
+
+def test_worker_records_cleanup_failure_without_rewriting_terminal_result(
+    tmp_path, monkeypatch,
+):
+    """rm failure must be recorded but NOT rewrite the terminal status.
+
+    A failed cleanup is captured in cleanup-observation.json; the
+    terminal status.json must remain unchanged.  This addresses the
+    P1 "cleanup failure silently swallowed" rejection.
+    """
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker(rm_fails=True)
+    _patch_worker(monkeypatch, fake)
+
+    returncode = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+
+    # Succeeded training, but cleanup failed — exit code reflects training
+    assert returncode == 0
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "succeeded"
+    # Cleanup observation must be recorded
+    cleanup_obs = job_dir / "cleanup-observation.json"
+    assert cleanup_obs.is_file()
+    obs = json.loads(cleanup_obs.read_text(encoding="ascii"))
+    assert obs["schema"] == "nantai.remote-cleanup-observation.v1"
+    assert obs["rm_exit_code"] == 1
+    assert obs["container_id_prefix"] == _DEFAULT_CONTAINER_ID[:12]
+    # No secret / no full container_id / no identity
+    assert _DEFAULT_CONTAINER_ID not in cleanup_obs.read_text(
+        encoding="ascii"
+    )
+    assert _CONTAINER_IDENTITY not in cleanup_obs.read_text(
+        encoding="ascii"
+    )
+
+
+def test_worker_duplicate_start_is_not_reported_as_reconnect_recovery(
+    tmp_path, monkeypatch,
+):
+    """Second start_job must fail as ambiguous, not reconnect recovery.
+
+    The previous "reconnect replay" test only verified the second call
+    could not obtain the lock.  This RED asserts the failure message
+    explicitly states ambiguity (not recovery), so a caller cannot
+    mistake blocked second-start for a recovery path.
+    """
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    first = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+    assert first == 0
+
+    with pytest.raises(RemoteWorkerError) as exc_info:
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+    # Must explicitly state ambiguity, NOT "recovery" or "reconnect"
+    msg = str(exc_info.value).lower()
+    assert "ambiguous" in msg or "already started" in msg
+    assert "recover" not in msg
+    assert "reconnect" not in msg
+
+
+def test_worker_does_not_remove_when_terminal_status_durability_is_unknown(
+    tmp_path, monkeypatch,
+):
+    """If terminal status fsync is unknown, cleanup must NOT proceed.
+
+    Fault injection: status.json write fails after start succeeded.
+    The container must be preserved so audit can recover the terminal
+    state.  This addresses the P0 "cleanup before durable publication".
+    """
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    # Inject a fault: _atomic_write fails when writing the succeeded
+    # status.json (the second _write_status call with state="succeeded")
+    from cloud import remote_training_worker as worker
+
+    original_atomic_write = worker._atomic_write
+    call_count = {"n": 0}
+
+    def faulted_atomic_write(path, payload):
+        call_count["n"] += 1
+        # Block the succeeded-status publication (the call that contains
+        # state=succeeded). The first call is the running status; the
+        # second is succeeded; later writes (cleanup obs) are permitted.
+        if (
+            path.name == "status.json"
+            and b'"state":"succeeded"' in payload
+        ):
+            raise RemoteWorkerError(
+                "publication durability unknown (injected fault)"
+            )
+        return original_atomic_write(path, payload)
+
+    monkeypatch.setattr(
+        "cloud.remote_training_worker._atomic_write", faulted_atomic_write
+    )
+
+    returncode = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+
+    assert returncode == 75
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "failed"
+    # Container must NOT have been removed: durability of terminal
+    # succeeded status was never proven, so cleanup must wait.
+    subs = _subcommands(fake)
+    assert "rm" not in subs
+
+
+def test_worker_does_not_remove_when_result_publication_durability_is_unknown(
+    tmp_path, monkeypatch,
+):
+    """If result bundle publication fails, cleanup must NOT proceed.
+
+    Fault injection: build_remote_result_bundle raises
+    RemoteResultBundleError.  The container must be preserved so the
+    result can be re-extracted; cleanup must not destroy evidence.
+    """
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    def raise_bundle_error(*args, **kwargs):
+        raise RemoteResultBundleError("publication durability unknown")
+
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.build_remote_result_bundle",
+        raise_bundle_error,
+    )
+
+    returncode = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+
+    assert returncode == 75
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "failed"
+    # Container was created but result publication failed → no rm.
+    # Result bundle must not exist.
+    assert not (job_dir / "result-bundle.zip").exists()
+    subs = _subcommands(fake)
+    # Wait — we actually DO call _remove_container in the except
+    # branch.  Codex requires result publication durability unknown
+    # to block cleanup.  This RED must observe the new behaviour:
+    # cleanup must NOT proceed when terminal result publication fails.
+    assert "rm" not in subs

@@ -99,6 +99,35 @@ def _real_directory(path: Path, *, label: str) -> None:
         raise RemoteWorkerError(f"{label} must be a real directory")
 
 
+def _fsync_directory(path: Path) -> None:
+    """fsync parent directory so the published entry is durable.
+
+    A bare file fsync does not prove the directory entry has reached
+    stable storage; terminal publication must fsync the parent dir
+    before cleanup is permitted.
+
+    On Windows the directory fsync is a no-op because the platform does
+    not support fsync on directory file descriptors; Linux/macOS must
+    successfully fsync or fail closed.
+    """
+    if sys.platform == "win32":
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError as exc:
+        raise RemoteWorkerError(
+            "cannot fsync publication directory"
+        ) from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise RemoteWorkerError(
+            "publication directory fsync failed"
+        ) from exc
+    finally:
+        os.close(fd)
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
@@ -112,12 +141,47 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     except OSError as exc:
         raise RemoteWorkerError(
             f"cannot publish remote worker file: {path.name}"
         ) from exc
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _publish_container_id_no_replace(path: Path, container_id: str) -> None:
+    """Publish container-id.txt with no-replace; collision is blocked.
+
+    A pre-existing file indicates replay, attempt swap or container
+    swap; overwriting it would silently erase the audit trail.  Use
+    O_CREAT|O_EXCL so collision raises fail-closed instead.
+    """
+    payload = (container_id + "\n").encode("ascii")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise RemoteWorkerError(
+            "container-id.txt already exists; replay or collision blocked"
+        ) from exc
+    except OSError as exc:
+        raise RemoteWorkerError(
+            "container-id.txt publication cannot be opened"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        raise RemoteWorkerError(
+            "container-id.txt publication failed"
+        ) from exc
 
 
 def _read_stable(path: Path, *, max_bytes: int, label: str) -> bytes:
@@ -339,13 +403,52 @@ def _create_fresh_container(
     return container_id
 
 
+def _resolve_image_id(
+    *,
+    runtime: str,
+    identity: str,
+) -> str:
+    """Resolve immutable repo@sha256:<manifest> to its content image ID.
+
+    ``docker image inspect <identity> --format {{.Id}}`` returns the
+    image's content sha256:64-hex; container .Image must equal this
+    exact ID.  Without this resolution, ``inspect {{.Image}}`` would
+    accept any sha256:* and a wrong image could pass.
+    """
+    completed = _run_container_command(
+        [runtime, "image", "inspect", "--format", "{{.Id}}", identity],
+        capture_stdout=True,
+    )
+    if completed.returncode != 0:
+        raise RemoteWorkerError(
+            "image identity could not be resolved"
+        )
+    image_id = (completed.stdout or "").strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise RemoteWorkerError(
+            "resolved image identity is not a sha256:64-hex digest"
+        )
+    return image_id
+
+
 def _verify_container_digest(
     *,
     runtime: str,
     container_id: str,
+    expected_image_id: str,
     expected_identity: str,
 ) -> None:
-    """docker inspect must confirm the container uses the immutable digest."""
+    """docker inspect must confirm container .Image == resolved image ID.
+
+    Two equalities are required:
+
+    1. ``.Image`` (the content the container actually runs) must equal
+       the image ID resolved from the immutable repo@sha256 digest;
+       accepting any ``sha256:*`` here would let a wrong image pass.
+    2. ``.Config.Image`` (the configured ref) must equal the immutable
+       repo@sha256 identity, so the container was created from the
+       intended reference.
+    """
     completed = _run_container_command(
         [runtime, "inspect", "--format", "{{.Image}}", container_id],
         capture_stdout=True,
@@ -355,13 +458,10 @@ def _verify_container_digest(
             "container identity could not be inspected"
         )
     image_ref = (completed.stdout or "").strip()
-    if image_ref != expected_identity and not image_ref.startswith(
-        "sha256:"
-    ):
+    if image_ref != expected_image_id:
         raise RemoteWorkerError(
             "container inspect digest does not match"
         )
-    # Also verify the full RepoDigest matches
     completed_digests = _run_container_command(
         [
             runtime,
@@ -405,19 +505,47 @@ def _start_container(
     return completed.returncode
 
 
+def _record_cleanup_observation(
+    job_dir: Path,
+    *,
+    runtime: str,
+    container_id: str,
+    rm_exit_code: int,
+) -> None:
+    """Write a bounded, secret-free cleanup observation.
+
+    Cleanup failure does NOT rewrite the terminal status or result
+    bundle; it is recorded separately so audit trails reflect the
+    real terminal publication plus the cleanup outcome.
+    """
+    payload = (
+        json.dumps(
+            {
+                "schema": "nantai.remote-cleanup-observation.v1",
+                "container_runtime": runtime,
+                "container_id_prefix": container_id[:12],
+                "rm_exit_code": rm_exit_code,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    _atomic_write(job_dir / "cleanup-observation.json", payload)
+
+
 def _remove_container(
     *,
     runtime: str,
     container_id: str,
-) -> None:
-    """docker rm only after durable publication."""
+) -> int:
+    """docker rm only after durable publication; return rm exit code."""
     completed = _run_container_command(
         [runtime, "rm", "-f", container_id],
         capture_stdout=False,
     )
-    if completed.returncode != 0:
-        # removal failure is logged but does not undo durable publication
-        pass
+    return completed.returncode
 
 
 def run_job(
@@ -462,19 +590,24 @@ def run_job(
     stderr_path = job_dir / "worker.stderr.log"
     container_id: str | None = None
     try:
+        expected_image_id = _resolve_image_id(
+            runtime=container_runtime,
+            identity=container_identity,
+        )
         container_id = _create_fresh_container(
             runtime=container_runtime,
             repo_root=repo_root,
             job_dir=job_dir,
             container_identity=container_identity,
         )
-        _atomic_write(
+        _publish_container_id_no_replace(
             job_dir / "container-id.txt",
-            (container_id + "\n").encode("ascii"),
+            container_id,
         )
         _verify_container_digest(
             runtime=container_runtime,
             container_id=container_id,
+            expected_image_id=expected_image_id,
             expected_identity=container_identity,
         )
         exit_code = _start_container(
@@ -500,9 +633,15 @@ def run_job(
                 stderr_sha=stderr_sha,
             )
             if container_id is not None:
-                _remove_container(
+                rm_exit = _remove_container(
                     runtime=container_runtime,
                     container_id=container_id,
+                )
+                _record_cleanup_observation(
+                    job_dir,
+                    runtime=container_runtime,
+                    container_id=container_id,
+                    rm_exit_code=rm_exit,
                 )
             return exit_code
         result_root = (
@@ -516,35 +655,67 @@ def run_job(
             stderr_path,
             result_root / "worker.stderr.log",
         )
-        verified = build_remote_result_bundle(
-            result_root=result_root,
-            output_path=job_dir / "result-bundle.zip",
-            job_id=spec.job_id,
-            attempt_id=spec.attempt_id,
-            request_sha256=spec.request_sha256,
-            training_bundle_sha256=spec.training_bundle_sha256,
-            container_identity=container_identity,
-        )
-        _write_status(
-            job_dir,
-            RemoteShellStatus(
+        # Terminal publication: result bundle first, then succeeded status.
+        # If EITHER fails, cleanup must NOT proceed — the container is
+        # preserved so audit can recover terminal evidence.  Only when
+        # both have proven durable (fsync of file + parent dir) do we
+        # invoke _remove_container.
+        try:
+            verified = build_remote_result_bundle(
+                result_root=result_root,
+                output_path=job_dir / "result-bundle.zip",
                 job_id=spec.job_id,
                 attempt_id=spec.attempt_id,
                 request_sha256=spec.request_sha256,
                 training_bundle_sha256=spec.training_bundle_sha256,
-                state="succeeded",
-                updated_at_utc=datetime.now(UTC),
-                exit_code=0,
-                stdout_sha256=stdout_sha,
-                stderr_sha256=stderr_sha,
-                result_bundle_sha256=verified.bundle_sha256,
-                result_bundle_size_bytes=verified.byte_length,
-            ),
-        )
-        if container_id is not None:
-            _remove_container(
+                container_identity=container_identity,
+            )
+            _write_status(
+                job_dir,
+                RemoteShellStatus(
+                    job_id=spec.job_id,
+                    attempt_id=spec.attempt_id,
+                    request_sha256=spec.request_sha256,
+                    training_bundle_sha256=(
+                        spec.training_bundle_sha256
+                    ),
+                    state="succeeded",
+                    updated_at_utc=datetime.now(UTC),
+                    exit_code=0,
+                    stdout_sha256=stdout_sha,
+                    stderr_sha256=stderr_sha,
+                    result_bundle_sha256=verified.bundle_sha256,
+                    result_bundle_size_bytes=verified.byte_length,
+                ),
+            )
+        except (OSError, RemoteResultBundleError, RemoteWorkerError):
+            # Terminal publication failed — do NOT remove the container.
+            # Record a no-rm cleanup observation and surface failure.
+            _write_failure_status(
+                job_dir,
+                spec,
+                exit_code=75,
+                stdout_sha=stdout_sha,
+                stderr_sha=stderr_sha,
+            )
+            _record_cleanup_observation(
+                job_dir,
                 runtime=container_runtime,
                 container_id=container_id,
+                rm_exit_code=-1,
+            )
+            return 75
+        # Terminal publication proven durable — cleanup permitted.
+        if container_id is not None:
+            rm_exit = _remove_container(
+                runtime=container_runtime,
+                container_id=container_id,
+            )
+            _record_cleanup_observation(
+                job_dir,
+                runtime=container_runtime,
+                container_id=container_id,
+                rm_exit_code=rm_exit,
             )
         return 0
     except (OSError, RemoteResultBundleError, RemoteWorkerError) as exc:
@@ -572,9 +743,15 @@ def run_job(
             stderr_sha=stderr_sha,
         )
         if container_id is not None:
-            _remove_container(
+            rm_exit = _remove_container(
                 runtime=container_runtime,
                 container_id=container_id,
+            )
+            _record_cleanup_observation(
+                job_dir,
+                runtime=container_runtime,
+                container_id=container_id,
+                rm_exit_code=rm_exit,
             )
         return 75
 
