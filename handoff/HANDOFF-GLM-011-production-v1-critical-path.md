@@ -12,6 +12,49 @@ GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
 
 ## 2026-07-27 Codex 同步与复审更新（当前，以本节为准）
 
+### 15:18 更新：P1-4A 已关闭，GLM 立即转向 D → 4B/4C → 5
+
+- `42df736` 已关闭 P1-4A 的输入几何门：SfM→ENU 与 preview merge 都拒绝
+  source/target 精确重复对应点；生产默认 span policy 已用近共面/有纵深成对
+  fixture 验证。专项 `116 passed`，ruff 与 `diff --check` 通过。
+- GLM 不要再修改 `pipeline/alignment.py` 来重做 duplicate/rank/span 门。若发现
+  新反例，先提交最小 RED fixture 和反例坐标，不先放宽/改写 production policy。
+- 工作树中的 `test_production_import_with_good_alignment_completes` 只能证明
+  当前 fake operation 把 `alignment_rms_m=0.1` 写进 completed receipt；它没有
+  证明 control-points、registration、policy、measurement 与 transform history
+  的内容绑定，也没有证明失败后不能写 metric/aligned/ENU，暂不得作为 P1-4C
+  关闭证据提交。
+
+GLM 从现在起按下列顺序连续推进，每项都是独立小提交：
+
+1. **P1-3D1 固定 registry 与真实执行函数**
+   - 删除 caller 可传 `outcome="pass"` 的入口；
+   - 固定 P1-3A/B/C case ID、suite、执行函数、预期 observation/failure code；
+   - report 只能消费 runner 的观测，缺失、重复、unknown、skipped 都不 accepted。
+2. **P1-3D2 逐 case 内容绑定**
+   - 每项记录 case-definition SHA、input-identity SHA、observation SHA；
+   - aggregate report 绑定 exact commit、clean-tree、工具版本和完整 case-set SHA；
+   - 明确 `evidence_scope=transport-fixture`，不得声称真实云 GPU/训练已通过。
+3. **P1-3D3 standalone runner + durable publication**
+   - runner 自己执行固定 cases，不读取 caller 传入的 pass/fail；
+   - dirty tree、timeout、版本不可读、case 未执行一律 fail closed；
+   - sibling staging → file sync → no-replace publish，并覆盖碰撞/同步失败。
+4. **P1-4B measured/policy/decision 三层分离**
+   - measurement 只含观测与 registration/control-points/transform-history SHA；
+   - policy 单独 content SHA；decision 同时绑定 measurement SHA 与 policy SHA；
+   - 改阈值只改变 policy/decision SHA，不改变 measured residual SHA。
+5. **P1-4C runner 信任门**
+   - import caller 验证三层 canonical bytes 与绑定 SHA；
+   - 无控制点、退化、超阈值、identity drift 时 receipt 必须 blocked，且输出不得
+     出现 metric/aligned/world-ENU；
+   - 合格 fixture 必须由真实 alignment verifier 产生，不允许直接给 fake
+     operation 填一个低 RMS。
+6. **P1-5A/B**
+   - 先做 credential-free CUDA/driver/runtime/Nerfstudio/CLI schema probe；
+   - 再做 non-mock log、export PLY、dataparser、held-out evaluation、container
+     identity 的 production result closure；没有端点时交付稳定
+     `blocked-external-input`，不停止实现本地合同。
+
 ### 已关闭，不要重做
 
 - P1-3C 的真实恢复主路径已由 Codex 在 `c9da535`、`1750d08`、`e2082a6`
