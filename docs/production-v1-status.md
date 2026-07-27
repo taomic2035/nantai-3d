@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27，基线 `1688c6e`
+更新：2026-07-27，基线 `a455208`
 
 ## 一句话状态
 
@@ -55,10 +55,10 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 7. 无端点时交付 canonical `blocked-external-input`；
 8. 把 worker / shell 静态安全发现转成可重复 RED 测试。
 
-当前候选不能视为关闭：
+当前候选与返修状态：
 
-- `7febb81` 的 host preflight 尚未拒绝 relative resolved path，Podman 仍误用
-  Docker `.Runtimes`，并缺真实 secret/non-UTF8/wrapper-swap RED；
+- `7febb81` 的 host preflight 缺口已由 `a455208` 修复；Podman 在绑定
+  `nvidia-ctk`/CDI identity 前稳定 blocked，A1 已关闭；
 - `23f7cf5` 自建 durability primitive 并在 Windows 静默 no-op；fault tests 没有
   模拟 namespace 已发布但 sync 未确认，unknown publication 还可能倒写 terminal
   status，已被 Codex review 拒绝；

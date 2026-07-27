@@ -14,20 +14,15 @@ Reviewer：Codex
 Codex review；下面任务均不依赖真实 endpoint、secret、付费 GPU 或 Codex 新接口。
 按 A → B → C 连续执行，完成一个就路径限定提交和 push，然后自动开始下一个。
 
-### 当前唯一 active ticket：A1（现在就做）
+### 当前唯一 active ticket：B1 durability 返修（现在就做）
 
-当前工作树不是空闲状态。下面四条路径已有 GLM 草稿：
+A1 已由 Codex 在 `a455208` 关闭：resolved runtime path、bounded output、真实
+secret/non-UTF8、PATH wrapper 与 Podman/CDI fail-closed 专项为
+`25 passed, 1 skipped`，联合 remote-shell 回归为 `100 passed, 4 skipped`。
+GLM 不要再改 readiness 两条路径，当前只返修 `23f7cf5` 的 B1 两条 worker 路径。
 
-```text
-cloud/remote_readiness_checker.py
-tests/test_remote_readiness_checker.py
-cloud/train_3dgs_nerfstudio.sh
-tests/test_cloud_prepared_training_script.py
-```
-
-先冻结后两条 NOW-8 路径，不删除、不提交，也不要继续扩写。A1 只修改并提交前两条
-readiness 路径。当前 `17 passed, 1 skipped` 不是完成信号，因为测试把错误行为写成了
-GREEN：
+下面 A1 细节只保留为近期回归依据，不再代表当前工作树或 active ticket。其初始
+`17 passed, 1 skipped` 不是完成信号，因为测试曾把错误行为写成 GREEN：
 
 - `test_checker_truncates_oversize_stdout` 接受“截断后继续解析”，必须改成超限立即
   blocked；
@@ -87,6 +82,9 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 `7febb81` 的 `20 passed, 1 skipped` 已修复 bare runtime argv 和静默截断，但仍未满足
 A1：
 
+状态：上述缺口已由后续 `a455208` 修复并通过专项门；本节只保留为回归依据，不再是
+GLM active ticket。
+
 1. `which()` 返回值没有强制为绝对路径；测试只让 fake `which` 返回绝对路径，没有
    覆盖 relative resolved path；
 2. `_SUPPORTED_SCHEDULER_ADAPTERS={"docker","podman"}` 仍让 Podman 执行 Docker
@@ -115,7 +113,7 @@ secret 测试必须在 observation 与 captured exception 中使用唯一 canary
 `info --format {{json .Runtimes}}`。修复后重新报完整 passed/skipped；不要在同一
 提交混入 B1 worker。
 
-### A — 修完并提交 host preflight
+### A — host preflight（已由 `a455208` 关闭）
 
 只允许修改：
 
