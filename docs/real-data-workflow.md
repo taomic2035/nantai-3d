@@ -15,27 +15,48 @@
 `3d-reconstruction`，并明确处理、再发行和 Release inclusion 范围。它是授权证据，
 不是几何或米制证据。
 
+不要手写 `rights_receipt_sha256`。先由 operator 明确填写权利事实，再让 producer
+原子生成 canonical rights/source 对：
+
+```bash
+mkdir -p .nantai-studio/private
+.venv/bin/python -m pipeline.production_capture_inputs \
+  --output-dir .nantai-studio/private/production-site-a \
+  --dataset-id production-site-a \
+  --operator "实际采集与权利负责人" \
+  --capture-scope "南台村照片与视频采集" \
+  --effective-date 2026-07-27 \
+  --processing-purpose 3d-reconstruction \
+  --processing-purpose internal-evaluation
+```
+
+默认不声明 redistribution 或 raw capture 的 Release inclusion。只有权利文件明确授权时
+才可分别添加 `--redistribution-allowed`、`--release-inclusion-allowed`；producer 只会
+如实复制该选择，不会推断授权。输出目录必须不存在，最终只含
+`capture-rights-receipt.json` 与 `production-source.json`。两者 canonical、内容寻址且
+共同 durable 发布，失败不会留下可误用的半套输入。
+
 正式 source 的分阶段入口为：
 
 ```bash
 .venv/bin/python make.py real-scene \
-  SOURCE=config/private/production-source.json \
+  SOURCE=.nantai-studio/private/production-site-a/production-source.json \
   MEDIA_ROOT=/absolute/private/capture \
-  RIGHTS=/absolute/private/rights-receipt.json \
+  RIGHTS=.nantai-studio/private/production-site-a/capture-rights-receipt.json \
   POLICY=config/private/registration-policy.json \
   RUN_ID=production-site-a fetch
 
 .venv/bin/python make.py real-scene \
-  SOURCE=config/private/production-source.json \
+  SOURCE=.nantai-studio/private/production-site-a/production-source.json \
   MEDIA_ROOT=/absolute/private/capture \
-  RIGHTS=/absolute/private/rights-receipt.json \
+  RIGHTS=.nantai-studio/private/production-site-a/capture-rights-receipt.json \
   POLICY=config/private/registration-policy.json \
   RUN_ID=production-site-a sfm
 
 .venv/bin/python make.py real-scene \
-  SOURCE=config/private/production-source.json \
+  SOURCE=.nantai-studio/private/production-site-a/production-source.json \
   MEDIA_ROOT=/absolute/private/capture \
-  RIGHTS=/absolute/private/rights-receipt.json \
+  RIGHTS=.nantai-studio/private/production-site-a/capture-rights-receipt.json \
   POLICY=config/private/registration-policy.json \
   REMOTE_CONFIG=/absolute/private/remote.json \
   RUN_ID=production-site-a train-production

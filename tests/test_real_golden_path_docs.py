@@ -80,6 +80,12 @@ def test_real_canary_docs_do_not_promote_internal_evidence() -> None:
     assert "train-production" in manual
     assert "production-acceptance" in workflow
     assert "rights receipt" in workflow
+    assert "python -m pipeline.production_capture_inputs" in workflow
+    assert "python -m pipeline.production_capture_inputs" in manual
+    assert "capture-rights-receipt.json" in workflow
+    assert "production-source.json" in workflow
+    assert "不要手写 `rights_receipt_sha256`" in workflow
+    assert "失败不会留下可误用的半套输入" in workflow
 
 
 def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:

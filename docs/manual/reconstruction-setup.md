@@ -88,6 +88,23 @@ job/bundle/config 证据并继续 poll/fetch，同一 attempt 内不会再次 su
 `preview-only / arbitrary / unaligned`。实测结果和完整 SHA 见
 [2026-07-26 canary 报告](../verification/2026-07-26-real-golden-path-canary.md)。
 
+正式采集先生成私有 rights/source 对，不要手写 SHA：
+
+```powershell
+New-Item -ItemType Directory -Force .nantai-studio\private | Out-Null
+python -m pipeline.production_capture_inputs `
+  --output-dir .nantai-studio\private\production-site-a `
+  --dataset-id production-site-a `
+  --operator "实际采集与权利负责人" `
+  --capture-scope "南台村照片与视频采集" `
+  --effective-date 2026-07-27 `
+  --processing-purpose 3d-reconstruction `
+  --processing-purpose internal-evaluation
+```
+
+只有权利文件明确授权时才添加 redistribution/Release inclusion 参数。producer 不判断
+权利，只把 operator 的明确事实写成 canonical、内容绑定且不可覆盖的两份输入。
+
 正式生产训练需要 operator-owned remote config。它至少绑定：
 
 - 安全的 SSH alias、绝对私钥路径；
@@ -250,7 +267,8 @@ request/result 只证明其声明并通过内容闭合检查的事实；stub 或
 `production-acceptance` import 生成 provenance-bound Viewer 输入：
 
 ```powershell
-$source = (Resolve-Path .nantai-studio\private\production-source.json).Path
+$source = (Resolve-Path .nantai-studio\private\production-site-a\production-source.json).Path
+$rights = (Resolve-Path .nantai-studio\private\production-site-a\capture-rights-receipt.json).Path
 $workspace = (Resolve-Path .nantai-studio\real-scene).Path
 $runId = "production-site-a"
 $paths = python -m pipeline.real_scene_paths `
@@ -353,7 +371,7 @@ python -m scripts.real_scene accept `
   --workspace "$workspace" `
   --run-id "$runId" `
   --media-root "C:\private\capture" `
-  --rights "C:\private\capture-rights.json" `
+  --rights "$rights" `
   --policy "C:\private\registration-policy.json" `
   --control-points "C:\private\control-points.json" `
   --geo-origin "26.0801,119.2967,12.5" `
