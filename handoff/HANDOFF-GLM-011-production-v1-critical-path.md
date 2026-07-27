@@ -206,8 +206,9 @@ return code。返修提交不得再写 `Co-Authored-By: Codex...`；Codex review
 3. result-bundle RED 不得整体 monkeypatch `build_remote_result_bundle`。现有
    `tests/test_remote_shell_executor.py::
    test_result_bundle_reports_published_when_sync_is_unconfirmed` 已在真实
-   `publish_file_noreplace` 边界注入 fault；worker 测试应使用同型 fault，并通过
-   `RemoteResultBundleError.__cause__` 读取 `DurableIOError.published`；
+   `publish_file_noreplace` 边界注入 fault；`6495729` 已让
+   `RemoteResultBundleError.published` 机器传播 `None|False|True`，worker 必须直接
+   消费该字段，禁止解析错误字符串；
 4. `published=True` 时不得写 failure status，因为磁盘上可能已有 succeeded status；
    只能保持 ambiguous/blocked、禁止 cleanup，并保留原文件供恢复审计；
 5. cleanup observation 自身 publication 失败不得再次进入 outer handler、倒写

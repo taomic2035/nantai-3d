@@ -61,7 +61,8 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
   `nvidia-ctk`/CDI identity 前稳定 blocked，A1 已关闭；
 - `23f7cf5` 自建 durability primitive 并在 Windows 静默 no-op；fault tests 没有
   模拟 namespace 已发布但 sync 未确认，unknown publication 还可能倒写 terminal
-  status，已被 Codex review 拒绝；
+  status，已被 Codex review 拒绝；`6495729` 已提供机器可读的 result-bundle
+  `published=None|False|True`，待 worker B1 直接消费；
 - `c66a00a` 的 container lifecycle 仍允许任意 resolved image ID、覆盖
   `container-id.txt`，也未证明 terminal 状态耐久后才 cleanup；
 - `da86a81` 的 blocked report 要求用占位 host/digest/dataset SHA 表示缺失输入，
