@@ -39,7 +39,14 @@ _CLOUD_SCRIPT = _ROOT / "cloud" / "train_3dgs_nerfstudio.sh"
 # Tokens the script uses to invoke each nerfstudio CLI tool.
 # We detect invocations by looking for these names as the first token of
 # a command (after a line start, pipe, or `&&`).
-_CLI_INVOCATIONS = ("ns-process-data", "ns-train", "ns-export", "ns-viewer")
+_CLI_COMMAND_TOKENS = {
+    "ns-process-data": "ns-process-data",
+    "ns-train": "ns-train",
+    '"$NS_TRAIN_PATH"': "ns-train",
+    "ns-export": "ns-export",
+    '"$NS_EXPORT_PATH"': "ns-export",
+    "ns-viewer": "ns-viewer",
+}
 
 
 def _extract_cli_invocations(script_text: str) -> list[tuple[str, list[str]]]:
@@ -61,8 +68,10 @@ def _extract_cli_invocations(script_text: str) -> list[tuple[str, list[str]]]:
         if not stripped or stripped.startswith("#"):
             continue
         # Find the cli invocation at the start of the stripped line.
-        for cli in _CLI_INVOCATIONS:
-            if stripped == cli or stripped.startswith(cli + " "):
+        for command_token, cli in _CLI_COMMAND_TOKENS.items():
+            if stripped == command_token or stripped.startswith(
+                command_token + " "
+            ):
                 # shlex split would be ideal but the cloud script uses bash
                 # parameter expansion ($VAR); we only need flag names, which
                 # start with --. Keep this simple and explicit.
