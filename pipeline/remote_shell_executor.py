@@ -657,6 +657,7 @@ class RemoteShellJobRef(ExecutorJobRef):
     )
     request_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
+    config_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
     remote_job_path: str
 
     @field_validator("remote_job_path")
@@ -708,6 +709,18 @@ def canonical_remote_shell_preflight_bytes(
     report: RemoteShellPreflightReport,
 ) -> bytes:
     return _canonical_model_bytes(report)
+
+
+def canonical_remote_shell_job_ref_bytes(
+    job: RemoteShellJobRef,
+) -> bytes:
+    return _canonical_model_bytes(job)
+
+
+def remote_shell_executor_config_sha256(
+    config: RemoteShellExecutorConfig,
+) -> str:
+    return hashlib.sha256(_canonical_model_bytes(config)).hexdigest()
 
 
 def remote_shell_preflight_content_sha256(
@@ -884,6 +897,58 @@ def load_remote_shell_executor_config(
             "remote executor config is not canonical"
         )
     return config
+
+
+def load_remote_shell_job_ref(
+    path: str | Path,
+) -> RemoteShellJobRef:
+    job_path = Path(path)
+    if not job_path.is_absolute():
+        raise RemoteShellExecutionError(
+            "remote job reference path must be absolute"
+        )
+    try:
+        before = job_path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
+            before.st_mode
+        ):
+            raise RemoteShellExecutionError(
+                "remote job reference must be a regular file"
+            )
+        if before.st_size <= 0 or before.st_size > _MAX_STATUS_BYTES:
+            raise RemoteShellExecutionError(
+                "remote job reference size is invalid"
+            )
+        payload = job_path.read_bytes()
+        after = job_path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote job reference cannot be read"
+        ) from exc
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise RemoteShellExecutionError(
+            "remote job reference changed while read"
+        )
+    try:
+        json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        job = RemoteShellJobRef.model_validate_json(payload)
+    except (UnicodeError, ValueError) as exc:
+        raise RemoteShellExecutionError(
+            "remote job reference is invalid or has duplicate keys"
+        ) from exc
+    if payload != canonical_remote_shell_job_ref_bytes(job):
+        raise RemoteShellExecutionError(
+            "remote job reference is not canonical"
+        )
+    return job
 
 
 def _portable_member(value: str) -> PurePosixPath:
@@ -2101,6 +2166,9 @@ class RemoteShellExecutor:
             submitted_at_utc=submitted_at,
             request_sha256=bundle.input_identity.request_sha256,
             training_bundle_sha256=bundle.bundle.bundle_sha256,
+            config_identity_sha256=(
+                remote_shell_executor_config_sha256(self.config)
+            ),
             remote_job_path=remote_job_path,
         )
         receipt = new_attempt(
@@ -2119,6 +2187,79 @@ class RemoteShellExecutor:
         self._jobs[(job.job_id, job.attempt_id)] = _JobContext(
             job=job,
             bundle=bundle.bundle,
+            receipt=receipt,
+        )
+        return job
+
+    def restore(
+        self,
+        bundle: ExecutorJobBundle,
+        job: RemoteShellJobRef,
+    ) -> RemoteShellJobRef:
+        """Attach one verified submitted job without remote side effects."""
+
+        if self._closed:
+            raise RemoteShellExecutionError(
+                "remote shell executor is closed"
+            )
+        verified = self.prepare(bundle.bundle)
+        if (
+            verified.input_identity != bundle.input_identity
+            or verified.bundle.bundle_sha256
+            != bundle.bundle.bundle_sha256
+            or verified.bundle.request != bundle.bundle.request
+        ):
+            raise RemoteShellExecutionError(
+                "restore bundle identity changed during verification"
+            )
+        expected_config = remote_shell_executor_config_sha256(
+            self.config
+        )
+        if job.config_identity_sha256 != expected_config:
+            raise RemoteShellExecutionError(
+                "remote job config identity differs"
+            )
+        expected_path = (
+            f"{self.config.remote_root}/{job.job_id}/"
+            f"{job.attempt_id}"
+        )
+        expected_identity = (
+            bundle.input_identity.job_id,
+            bundle.input_identity.request_sha256,
+            bundle.bundle.bundle_sha256,
+            expected_path,
+        )
+        measured_identity = (
+            job.job_id,
+            job.request_sha256,
+            job.training_bundle_sha256,
+            job.remote_job_path,
+        )
+        if measured_identity != expected_identity:
+            raise RemoteShellExecutionError(
+                "remote job identity differs from prepared bundle"
+            )
+        key = (job.job_id, job.attempt_id)
+        if key in self._jobs:
+            raise RemoteShellExecutionError(
+                "remote job is already attached"
+            )
+        receipt = new_attempt(
+            bundle.input_identity,
+            attempt_id=job.attempt_id,
+            created_at_utc=job.submitted_at_utc,
+            quality_role="production",
+        )
+        receipt = advance_attempt(
+            receipt,
+            ExecutorObservation(
+                state="running",
+                observed_at_utc=job.submitted_at_utc,
+            ),
+        )
+        self._jobs[key] = _JobContext(
+            job=job,
+            bundle=verified.bundle,
             receipt=receipt,
         )
         return job

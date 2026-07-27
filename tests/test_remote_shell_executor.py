@@ -1607,6 +1607,93 @@ def test_submit_advances_receipt_to_running(tmp_path, monkeypatch):
     assert len(runner.calls) == 3
 
 
+def test_restore_attaches_existing_job_without_transport(
+    tmp_path,
+    monkeypatch,
+):
+    executor, _runner, prepared = _prepared_executor(
+        tmp_path,
+        monkeypatch,
+    )
+    job = executor.submit(prepared)
+    resumed_runner = _Runner()
+    resumed = RemoteShellExecutor(
+        executor.config,
+        run_command=resumed_runner,
+        now=lambda: _T0,
+    )
+
+    restored = resumed.restore(prepared, job)
+
+    assert restored == job
+    assert resumed_runner.calls == []
+    resumed_runner.responses.append(
+        _status_response(_running_status(job)),
+    )
+    observation = resumed.poll(job)
+    assert observation.state == "running"
+    assert len(resumed_runner.calls) == 1
+
+
+def test_restore_rejects_job_replay_under_different_config(
+    tmp_path,
+    monkeypatch,
+):
+    executor, _runner, prepared = _prepared_executor(
+        tmp_path,
+        monkeypatch,
+    )
+    job = executor.submit(prepared)
+    changed_config = executor.config.model_copy(
+        update={"expected_worker_version": "1.0.1"},
+    )
+    resumed_runner = _Runner()
+    resumed = RemoteShellExecutor(
+        changed_config,
+        run_command=resumed_runner,
+        now=lambda: _T0,
+    )
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="config identity",
+    ):
+        resumed.restore(prepared, job)
+
+    assert resumed_runner.calls == []
+
+
+def test_remote_job_ref_loader_is_canonical_and_duplicate_safe(
+    tmp_path,
+    monkeypatch,
+):
+    executor, _runner, prepared = _prepared_executor(
+        tmp_path,
+        monkeypatch,
+    )
+    job = executor.submit(prepared)
+    path = tmp_path / "remote-job.private.json"
+    canonical = remote_module.canonical_remote_shell_job_ref_bytes(
+        job,
+    )
+    path.write_bytes(canonical)
+
+    assert remote_module.load_remote_shell_job_ref(path) == job
+
+    path.write_bytes(
+        canonical.replace(
+            b"{",
+            b'{"job_id":"duplicate",',
+            1,
+        )
+    )
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="duplicate|canonical",
+    ):
+        remote_module.load_remote_shell_job_ref(path)
+
+
 def test_poll_running_returns_running_observation(tmp_path, monkeypatch):
     executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
     job = executor.submit(prepared)
