@@ -404,7 +404,7 @@ def test_atomic_replace_failure_preserves_previous_journal(
         raise OSError("simulated replace failure")
 
     monkeypatch.setattr(
-        "pipeline.training_executor.os.replace",
+        "pipeline.durable_io.atomic_replace",
         fail_replace,
     )
     with pytest.raises(TrainingExecutorError, match="atomic write"):

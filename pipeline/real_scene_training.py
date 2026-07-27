@@ -12,7 +12,9 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import stat
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -641,12 +643,6 @@ def _require_absent_output(output_dir: Path) -> Path:
         raise RealSceneTrainingError(
             "training bundle output parent must be a real directory"
         )
-    try:
-        output.mkdir()
-    except OSError as exc:
-        raise RealSceneTrainingError(
-            "cannot create training bundle output boundary"
-        ) from exc
     return output
 
 
@@ -893,12 +889,19 @@ def build_training_job_bundle(
         canonical_model_bytes(manifest),
     )
 
+    from pipeline.durable_io import (
+        flush_directory,
+        flush_file,
+        publish_directory_noreplace,
+    )
+
     output = _require_absent_output(Path(output_dir))
-    partial = output / "training-job.zip.part"
-    final = output / "training-job.zip"
+    staging = output.parent / f".{output.name}.{uuid.uuid4().hex}.staging"
+    final = staging / "training-job.zip"
     try:
+        staging.mkdir()
         with zipfile.ZipFile(
-            partial,
+            final,
             mode="w",
             compression=zipfile.ZIP_STORED,
             allowZip64=True,
@@ -908,15 +911,21 @@ def build_training_job_bundle(
                 *(sources[path] for path in sorted(sources)),
             ):
                 _write_member(archive, source)
-        with partial.open("rb") as stream:
-            os.fsync(stream.fileno())
-        os.replace(partial, final)
+        flush_file(final)
+        verify_training_job_bundle(final)
+        flush_directory(staging)
+        publish_directory_noreplace(staging, output)
+    except RealSceneTrainingError:
+        raise
     except (OSError, zipfile.BadZipFile) as exc:
         raise RealSceneTrainingError(
             f"cannot create deterministic training ZIP: {exc}"
         ) from exc
+    finally:
+        if staging.exists() and not staging.is_symlink():
+            shutil.rmtree(staging, ignore_errors=True)
 
-    verified = verify_training_job_bundle(final)
+    verified = verify_training_job_bundle(output / "training-job.zip")
     return TrainingJobBundle(
         path=verified.path,
         bundle_sha256=verified.bundle_sha256,

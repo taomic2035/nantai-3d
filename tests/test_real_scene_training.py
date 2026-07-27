@@ -375,6 +375,35 @@ def test_bundle_is_byte_identical_and_separates_held_out_evaluation_pixels(
         assert hashlib.sha256(actual).hexdigest() == binding.artifact_sha256
 
 
+def test_bundle_sync_failure_never_publishes_output(
+    tmp_path,
+    monkeypatch,
+):
+    capture = _capture(tmp_path / "capture", count=10)
+    sfm, policy = _sfm(capture, tmp_path / "run")
+    output = tmp_path / "bundle"
+    flushed: list[Path] = []
+
+    def fail_flush(path):
+        flushed.append(Path(path))
+        raise OSError("simulated durable flush failure")
+
+    monkeypatch.setattr("pipeline.durable_io.flush_file", fail_flush)
+
+    with pytest.raises(RealSceneTrainingError, match="deterministic training ZIP"):
+        build_training_job_bundle(
+            capture,
+            sfm,
+            _training_config(),
+            output,
+            policy=policy,
+        )
+
+    assert flushed
+    assert not output.exists()
+    assert tuple(tmp_path.glob(".bundle.*.staging")) == ()
+
+
 def test_bundle_rejects_mock_or_rejected_sfm(tmp_path):
     capture = _capture(tmp_path / "capture", count=10)
     sfm, policy = _sfm(capture, tmp_path / "run")

@@ -576,20 +576,9 @@ def load_real_scene_journal(path: Path) -> RealSceneJournal:
     return journal
 
 
-def _flush_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-    )
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _atomic_write_journal(path: Path, payload: bytes) -> None:
+    from pipeline.durable_io import atomic_replace
+
     parent = path.parent
     try:
         parent_stat = parent.lstat()
@@ -614,10 +603,7 @@ def _atomic_write_journal(path: Path, payload: bytes) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        with path.open("rb") as stream:
-            os.fsync(stream.fileno())
-        _flush_directory(parent)
+        atomic_replace(temporary, path)
     except OSError as exc:
         raise TrainingExecutorError(
             "real-scene journal atomic write failed"

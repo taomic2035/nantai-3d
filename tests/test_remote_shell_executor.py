@@ -408,6 +408,59 @@ def test_result_bundle_builder_is_deterministic_and_verifiable(tmp_path):
         )
 
 
+def test_result_bundle_sync_failure_never_exposes_final(
+    tmp_path,
+    monkeypatch,
+):
+    request_sha = request_canonical_sha256(_request())
+    result_root = tmp_path / "result"
+    result_root.mkdir()
+    members = {
+        "container-identity.txt": (
+            "registry.example/nantai@sha256:" + ("c" * 64) + "\n"
+        ).encode("ascii"),
+        "dataparser_transforms.json": (
+            b'{"scale":1.0,"transform":'
+            b'[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}\n'
+        ),
+        "operator-intent-config.yml": b"config\n",
+        "point_cloud.ply": b"ply\n",
+        "training-request.json": b"{}\n",
+        "training-result.json": b"{}\n",
+        "training.log": b"log\n",
+        "worker.stderr.log": b"",
+        "worker.stdout.log": b"container completed\n",
+    }
+    for name, payload in members.items():
+        (result_root / name).write_bytes(payload)
+    output = tmp_path / "result.zip"
+    flushed: list[Path] = []
+
+    def fail_flush(path):
+        flushed.append(Path(path))
+        assert Path(path) != output
+        raise OSError("simulated durable flush failure")
+
+    monkeypatch.setattr("pipeline.durable_io.flush_file", fail_flush)
+
+    with pytest.raises(RemoteResultBundleError, match="cannot be written"):
+        build_remote_result_bundle(
+            result_root=result_root,
+            output_path=output,
+            job_id="job-expected",
+            attempt_id="attempt-expected",
+            request_sha256=request_sha,
+            training_bundle_sha256="d" * 64,
+            container_identity=(
+                "registry.example/nantai@sha256:" + ("c" * 64)
+            ),
+        )
+
+    assert flushed
+    assert not output.exists()
+    assert tuple(tmp_path.glob(".result.zip.*.staging")) == ()
+
+
 def _evaluation_png() -> bytes:
     def chunk(kind: bytes, payload: bytes) -> bytes:
         body = kind + payload

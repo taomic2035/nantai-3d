@@ -855,9 +855,14 @@ def build_remote_result_bundle(
         container_identity=container_identity,
         members=tuple(members),
     )
+    from pipeline.durable_io import flush_file, publish_file_noreplace
+
+    staging = output.parent / (
+        f".{output.name}.{uuid.uuid4().hex}.staging"
+    )
     try:
         with zipfile.ZipFile(
-            output,
+            staging,
             "x",
             compression=zipfile.ZIP_STORED,
             allowZip64=True,
@@ -896,16 +901,29 @@ def build_remote_result_bundle(
                     raise RemoteResultBundleError(
                         f"remote result member changed during pack: {name}"
                     )
-        with output.open("rb") as stream:
-            os.fsync(stream.fileno())
+        flush_file(staging)
+        verify_remote_result_bundle(
+            staging,
+            expected_job_id=job_id,
+            expected_attempt_id=attempt_id,
+            expected_request_sha256=request_sha256,
+            expected_training_bundle_sha256=training_bundle_sha256,
+            expected_container_identity=container_identity,
+            max_member_bytes=max_member_bytes,
+            max_log_bytes=max_log_bytes,
+        )
+        publish_file_noreplace(staging, output)
     except RemoteResultBundleError:
-        output.unlink(missing_ok=True)
         raise
     except OSError as exc:
-        output.unlink(missing_ok=True)
         raise RemoteResultBundleError(
             "remote result bundle cannot be written"
         ) from exc
+    finally:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
     return verify_remote_result_bundle(
         output,
         expected_job_id=job_id,
