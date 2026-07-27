@@ -15,13 +15,78 @@ container identity 和 runtime observation 都 fail closed。Codex 负责逐提�
 **Tech Stack:** Python 3.11、pytest、Pydantic、POSIX shell、Docker/Podman fake
 runtime、`pipeline.durable_io`、canonical JSON。
 
+## GLM 即时派单（2026-07-28，覆盖下方旧开工顺序）
+
+基线固定为 `e791958`。不要再从 F1 开工；Codex 已核对当前调用图：
+`remote_training_worker.py` 创建容器后直接 `docker start -a`，而容器命令立即执行
+`train_3dgs_nerfstudio.sh`。因此仅修改 `remote_shell_executor.py` 无法诚实实现
+“同一容器先 clearance、accepted 后训练”。在入口合同修正前，不得用平行 schema、
+caller 自报 accepted 或测试专用后门伪造 F1。
+
+现在连续执行：
+
+```text
+H1 deadline / executor-close
+  → I1 bounded-memory import hashing
+  → 回报 F1 真实缺口（只列调用符号和最小所需路径，不写新 plan）
+```
+
+### 立即做 H1
+
+只允许主动修改：
+
+- `pipeline/real_scene_operations.py`
+- `tests/test_real_scene_operations.py`
+
+先写并单跑四个 RED：
+
+```text
+test_remote_poll_sleep_never_overshoots_deadline
+test_train_production_closes_remote_executor_on_success
+test_train_production_closes_remote_executor_on_failure
+test_train_production_closes_remote_executor_on_exception
+```
+
+验收语义：
+
+1. 两个 poll sleep 分支都只能 sleep
+   `min(remote_poll_interval_seconds, max(0, deadline - monotonic()))`；
+2. remaining deadline 已为零时不得再 sleep；
+3. executor 一旦构造成功，prepare/submit/restore/poll/fetch 的 completed、blocked、
+   unknown、exception 路径都必须恰好显式 `close()` 一次；
+4. 测试使用 fake monotonic、fake sleep 和带 `close_calls` 的 fake executor，不能
+   grep 源码，也不能依赖 `__del__`；
+5. 不修改 remote schema、Viewer、Studio、release、import 或本 handoff。
+
+执行：
+
+```powershell
+python -m pytest -q tests/test_real_scene_operations.py -k "deadline or closes_remote_executor"
+python -m pytest -q tests/test_real_scene_operations.py
+python -m ruff check pipeline/real_scene_operations.py tests/test_real_scene_operations.py
+git diff --check -- pipeline/real_scene_operations.py tests/test_real_scene_operations.py
+git add -- pipeline/real_scene_operations.py tests/test_real_scene_operations.py
+git commit --only pipeline/real_scene_operations.py tests/test_real_scene_operations.py -m "fix: bound remote polling and close executor"
+git -c http.proxy=http://127.0.0.1:7890 push origin main
+```
+
+H1 push 后不等待 Codex，立即执行下方 Task I1。I1 也 push 后，只回：
+
+```text
+H1 SHA / I1 SHA / changed paths / RED failure / GREEN counts + skipped
+/ ruff / diff-check / CI status
+/ F1 seam: _create_container_argv → _start_container → train script
+```
+
+不要回复“无事可做”，也不要在这两项之间等待 review。
+
 ---
 
-## GLM 立即执行卡（2026-07-27，当前有效）
+## 旧开工顺序（2026-07-27，已由上方即时派单覆盖）
 
-不要再回复“无事可做”。`P0-CI` 已由 Codex 在 `70a965e` 关闭；现在从 `F1`
-开始，随后连续执行 `G1 → H1 → I1`。完成一张就独立提交、用一次性代理 push，然后直接
-开始下一张，不等待 Codex 回执。
+以下保留 F1/G1 的验收背景，不是当前开工入口。当前必须先按上方即时派单执行
+`H1 → I1`；完成一张就独立提交、用一次性代理 push，然后直接开始下一张，不等待
+Codex 回执。
 
 ### Codex 当前派发（2026-07-27，基线 `c8b7701`）
 
