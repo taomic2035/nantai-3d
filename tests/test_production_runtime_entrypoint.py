@@ -246,12 +246,11 @@ def test_accepted_clearance_publishes_closed_evidence_before_training(
         )
     ]
     evidence_root = (
-        fixture["job_dir"]
-        / "runtime"
-        / "production-run"
-        / "result"
-        / "production-runtime"
+        fixture["job_dir"] / "production-runtime"
     )
+    assert not (
+        fixture["job_dir"] / "runtime" / "production-run"
+    ).exists()
     measurement = load_production_runtime_measurement_bytes(
         (evidence_root / "measurement.json").read_bytes()
     )
@@ -282,12 +281,7 @@ def test_rejected_gpu_identity_never_reaches_training(tmp_path):
     assert result == 78
     assert exec_calls == []
     decision_path = (
-        fixture["job_dir"]
-        / "runtime"
-        / "production-run"
-        / "result"
-        / "production-runtime"
-        / "decision.json"
+        fixture["job_dir"] / "production-runtime" / "decision.json"
     )
     decision = load_production_runtime_decision_bytes(
         decision_path.read_bytes()
@@ -341,11 +335,7 @@ def test_existing_runtime_evidence_namespace_never_reaches_training(
     fixture = _fixture(tmp_path)
     exec_calls = []
     evidence_root = (
-        fixture["job_dir"]
-        / "runtime"
-        / "production-run"
-        / "result"
-        / "production-runtime"
+        fixture["job_dir"] / "production-runtime"
     )
     evidence_root.mkdir(parents=True)
     (evidence_root / "policy.json").write_bytes(b"other-writer\n")

@@ -746,13 +746,7 @@ def run_clearance_and_train(
             "runtime measurement cannot be closed"
         ) from exc
 
-    evidence_root = (
-        job_dir
-        / "runtime"
-        / "production-run"
-        / "result"
-        / "production-runtime"
-    )
+    evidence_root = job_dir / "production-runtime"
     _ensure_real_directory(evidence_root)
     _publish_noreplace(
         evidence_root / "policy.json",
