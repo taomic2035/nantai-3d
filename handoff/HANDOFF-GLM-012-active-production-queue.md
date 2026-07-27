@@ -4,10 +4,38 @@
 > 可复现的 RED，再做最小实现；专项测试、Ruff、diff-check 全绿后独立提交并立即用
 > 临时代理 push。不要等待 Codex 口头确认，也不要回复“无事可做”。
 
+## 立即执行令（2026-07-28）
+
+**当前没有 Codex 阻塞。** Codex 已将 Linux CI / symlink evidence 修复以
+`c650aa8` 推到 `origin/main`，`pipeline/real_scene_operations.py` 已释放。GLM 现在
+必须按以下动作开始，不再做新的 gap audit，也不再询问是否有任务：
+
+```powershell
+git -c http.proxy=http://127.0.0.1:7890 fetch origin main
+git status --short --branch
+git log -1 --oneline
+python -m pytest -q tests/test_real_scene_operations.py
+```
+
+确认工作树没有其它 agent 在 H1 两个路径上的在途修改后，**立即领取 H1**，先新增
+四个明确列出的 RED 行为测试。若发现路径冲突，只允许跳到 I1；不得停工或回复
+“等待 Codex”。H1 push 后连续做 I1、J1、K1，每张工单一个小提交并立即 push。
+
+GLM 第一次回执只需报告：
+
+```text
+started H1 / baseline c650aa8 or newer
+/ exact two claimed paths
+/ first RED test name and actual failure
+```
+
+不要先写长篇状态总结；没有 RED 证据不算已经开工。
+
 **目标：** 在没有真实 GPU、secret 和正式素材时，继续关闭 Production V1 远程训练与
 大型产物链路中可由 repo-local fake transport / 文件系统证明的工程缺口。
 
-**当前基线：** 至少 `92b76b5`。Codex 已 push G1，J1/K1 的 executor path 已解锁。
+**当前基线：** 至少 `c650aa8`。Codex 已 push G1 和 Linux CI evidence 修复，
+H1 的 operations path 已释放，J1/K1 的 executor path 也已解锁。
 共享 worktree 仍不得 reset、checkout、stash、rebase 或清理其它 agent 的修改。
 
 ## 连续顺序
