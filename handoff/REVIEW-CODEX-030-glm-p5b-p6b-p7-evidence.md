@@ -243,7 +243,8 @@ P7a-2 materialized source report = not accepted
 ```
 
 Follow the exact correction and Git proxy queue in
-`HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`.
+该阶段的后续队列已归档；关键结论见 [HISTORY.md](HISTORY.md)，原始逐轮说明可从
+本文件对应提交的 Git 历史读取。
 
 ## Live P7a-2 review — `30d0e7a` held
 

@@ -67,3 +67,6 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 - 当前未关闭的是 P1-3D 固定演练 runner、P1-4B/C 米制证据/runner 信任门、
   P1-5 云 CUDA readiness 与 production result closure；连续执行队列见
   [HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md)。
+- 旧的真实差距矩阵、P1 caller/transaction/WAL 逐轮 review、GLM-005/007/008、
+  P7 Viewer handoff、Batch33/34 image2 说明与跨平台 HANDOFF-002 已在
+  `65dae27` 之后清理；关键边界已并入本页与当前队列，原文仍可从 Git 历史读取。

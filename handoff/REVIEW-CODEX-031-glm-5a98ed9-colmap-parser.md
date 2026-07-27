@@ -144,7 +144,7 @@ above, make one bounded corrective commit, run:
 python -m pytest tests/test_reconstruct_local.py -q
 python -m ruff check scripts/reconstruct_local.py tests/test_reconstruct_local.py
 git diff --check -- scripts/reconstruct_local.py tests/test_reconstruct_local.py `
-  tests/fixtures/colmap handoff/FEEDBACK-HANDOFF-GLM-008-*.md
+  tests/fixtures/colmap
 ```
 
 Then continue the already-started transaction-journal task without waiting,
