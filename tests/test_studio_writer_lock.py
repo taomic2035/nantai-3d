@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -16,8 +17,13 @@ HELPER = Path(__file__).parent / "helpers/studio_lock_fixture.py"
 
 
 def _locked_child(path: Path) -> subprocess.Popen:
+    python = (
+        getattr(sys, "_base_executable", sys.executable)
+        if os.name == "nt"
+        else sys.executable
+    )
     child = subprocess.Popen(
-        [sys.executable, str(HELPER), str(path), "writer"],
+        [python, str(HELPER), str(path), "writer"],
         cwd=Path(__file__).parents[1],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

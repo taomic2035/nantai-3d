@@ -20,7 +20,7 @@ PREFLIGHT = ROOT / "scripts" / "blender" / "preflight_production_cameras.py"
 TEXTURED_RUNTIME_BLEND = (
     ROOT
     / ".nantai-studio/synthetic-village/hybrid-v3/work/canary"
-    / "4f38ecf49ff8182e02c426df314dab90b91502673164330d3b704f234d02f1dc"
+    / "29e2bdfb339216b32fc1c536426866d4f7c2132db0a6fbf3df728084688bcf39"
     / "village-canary.blend"
 )
 MATERIAL_BUNDLE_ROOT = (

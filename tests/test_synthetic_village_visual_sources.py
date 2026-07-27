@@ -600,6 +600,8 @@ def test_import_rejects_real_windows_junction_ancestor(tmp_path):
         ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
         capture_output=True,
         text=True,
+        encoding="oem",
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:
@@ -643,6 +645,8 @@ def test_manifest_loader_rejects_real_windows_objects_junction(tmp_path):
         ["cmd", "/c", "mklink", "/J", str(objects_junction), str(external_objects)],
         capture_output=True,
         text=True,
+        encoding="oem",
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:

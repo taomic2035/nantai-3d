@@ -441,6 +441,8 @@ def test_loader_rejects_redirected_parent_on_windows(tmp_path):
         check=False,
         capture_output=True,
         text=True,
+        encoding="oem",
+        errors="replace",
     )
     if result.returncode != 0:
         pytest.skip("Windows junction creation is unavailable")
