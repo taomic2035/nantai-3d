@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import shutil
 import struct
@@ -30,6 +31,7 @@ from pipeline.remote_shell_executor import (
     RemoteShellExecutionError,
     RemoteShellExecutor,
     RemoteShellExecutorConfig,
+    RemoteShellJobRef,
     RemoteShellPreflightReport,
     RemoteShellStatus,
     build_remote_result_bundle,
@@ -191,6 +193,8 @@ def _config(tmp_path) -> RemoteShellExecutorConfig:
         container_identity=(
             "registry.example/nantai@sha256:" + ("c" * 64)
         ),
+        expected_worker_sha256="d" * 64,
+        expected_worker_version="1.0.0",
     )
 
 
@@ -214,6 +218,33 @@ class _Runner:
         if self.responses:
             return self.responses.pop(0)
         return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+def _readiness_response(
+    config: RemoteShellExecutorConfig,
+    **updates,
+) -> subprocess.CompletedProcess:
+    payload = {
+        "schema": "nantai.remote-readiness-evidence.v1",
+        "checker_version": "nantai.remote-readiness-checker.v1",
+        "checker_config_sha256": "e" * 64,
+        "container_runtime": config.container_runtime,
+        "container_runtime_version": "Docker version 28.0.0",
+        "container_identity": config.container_identity,
+        "worker_sha256": config.expected_worker_sha256,
+        "worker_version": config.expected_worker_version,
+        **updates,
+    }
+    canonical = (
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    return subprocess.CompletedProcess([], 0, canonical, b"")
 
 
 def _prepared_executor(tmp_path, monkeypatch):
@@ -1187,26 +1218,238 @@ def test_private_key_windows_fail_closed_without_pywin32(
 
 
 # ---------------------------------------------------------------------------
+# P1-3A: submit/poll/fetch state drills
+# ---------------------------------------------------------------------------
+
+
+def _running_status(job: RemoteShellJobRef, *, updated_at: datetime = _T0):
+    return RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        state="running",
+        updated_at_utc=updated_at,
+    )
+
+
+def _failed_status(job: RemoteShellJobRef, *, updated_at: datetime = _T0):
+    return RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        state="failed",
+        updated_at_utc=updated_at,
+        exit_code=1,
+        stdout_sha256=_sha(b"remote-stdout"),
+        stderr_sha256=_sha(b"remote-stderr"),
+    )
+
+
+def _status_response(status: RemoteShellStatus):
+    return subprocess.CompletedProcess(
+        [],
+        0,
+        canonical_remote_status_bytes(status),
+        b"",
+    )
+
+
+def test_submit_advances_receipt_to_running(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    context = executor._context(job)
+    assert context.receipt.state == "running"
+    assert context.receipt.observations[0].state == "not-started"
+    assert context.receipt.observations[-1].state == "running"
+    assert len(runner.calls) == 3
+
+
+def test_poll_running_returns_running_observation(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(
+        _status_response(_running_status(job)),
+    )
+    observation = executor.poll(job)
+
+    assert observation.state == "running"
+    assert observation.exit_code is None
+    assert observation.result_bundle_sha256 is None
+
+
+def test_poll_nonzero_exit_returns_unknown(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(
+        subprocess.CompletedProcess([], 255, b"", b"network unreachable"),
+    )
+    observation = executor.poll(job)
+
+    assert observation.state == "unknown"
+    assert observation.exit_code is None
+    assert observation.result_bundle_sha256 is None
+
+
+def test_poll_timeout_is_fail_closed(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    def timeout(argv, **kwargs):
+        del argv, kwargs
+        raise subprocess.TimeoutExpired(["ssh"], timeout=1)
+
+    executor._run_command = timeout
+    with pytest.raises(RemoteShellExecutionError, match="transport"):
+        executor.poll(job)
+
+
+def test_poll_disconnect_after_running_returns_unknown(
+    tmp_path,
+    monkeypatch,
+):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(
+        _status_response(_running_status(job)),
+    )
+    first = executor.poll(job)
+    assert first.state == "running"
+
+    runner.responses.append(
+        subprocess.CompletedProcess([], 255, b"", b"connection lost"),
+    )
+    second = executor.poll(job)
+    assert second.state == "unknown"
+
+    from pipeline.training_executor import _ALLOWED_TRANSITIONS
+
+    assert "unknown" in _ALLOWED_TRANSITIONS["running"]
+
+
+def test_poll_remote_failed_returns_failed_observation(
+    tmp_path,
+    monkeypatch,
+):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    failed = _failed_status(job)
+    runner.responses.append(_status_response(failed))
+    observation = executor.poll(job)
+
+    assert observation.state == "failed"
+    assert observation.exit_code == 1
+    assert observation.stdout_sha256 == _sha(b"remote-stdout")
+    assert observation.stderr_sha256 == _sha(b"remote-stderr")
+    assert observation.result_bundle_sha256 is None
+
+
+def test_poll_succeeded_returns_unknown_until_verified(
+    tmp_path,
+    monkeypatch,
+):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    empty_sha = _sha(b"")
+    succeeded = RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        state="succeeded",
+        updated_at_utc=_T0,
+        exit_code=0,
+        stdout_sha256=empty_sha,
+        stderr_sha256=empty_sha,
+        result_bundle_sha256=("a" * 64),
+        result_bundle_size_bytes=1,
+    )
+    runner.responses.append(_status_response(succeeded))
+    observation = executor.poll(job)
+
+    assert observation.state == "unknown"
+    assert observation.exit_code == 0
+    assert observation.stdout_sha256 == empty_sha
+    assert observation.stderr_sha256 == empty_sha
+
+
+def test_fetch_without_succeeded_status_raises(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    runner.responses.append(
+        _status_response(_running_status(job)),
+    )
+    executor.poll(job)
+
+    destination = tmp_path / "result"
+    with pytest.raises(RemoteShellExecutionError, match="succeeded"):
+        executor.fetch(job, destination)
+
+    assert not destination.exists()
+
+
+def test_fetch_interrupted_cleans_staging(tmp_path, monkeypatch):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    empty_sha = _sha(b"")
+    succeeded = RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        state="succeeded",
+        updated_at_utc=_T0,
+        exit_code=0,
+        stdout_sha256=empty_sha,
+        stderr_sha256=empty_sha,
+        result_bundle_sha256=("a" * 64),
+        result_bundle_size_bytes=1,
+    )
+    runner.responses.append(_status_response(succeeded))
+    executor.poll(job)
+
+    runner.responses.append(
+        subprocess.CompletedProcess([], 1, b"", b"download interrupted"),
+    )
+    destination = tmp_path / "published-result"
+    with pytest.raises(RemoteShellExecutionError, match="download"):
+        executor.fetch(job, destination)
+
+    assert not destination.exists()
+    staging = list(destination.parent.glob(".published-result.*.staging"))
+    assert staging == []
+
+
+# ---------------------------------------------------------------------------
 # P1-2: Credential-free remote-shell preflight
 # ---------------------------------------------------------------------------
 
 
 class TestRemoteShellPreflight:
-    def test_ready_without_remote_probe(self, tmp_path):
+    def test_remote_probe_is_required_for_ready(self, tmp_path):
         config = _config(tmp_path)
         report = run_remote_shell_preflight(
             config,
             probe_remote=False,
             now=lambda: _T0,
         )
-        assert report.status == "ready"
+        assert report.status == "failed"
         assert report.ssh_binary_found
         assert report.scp_binary_found
         assert report.private_key_protection_verified
         assert report.known_hosts_verified
         assert report.container_runtime_verified is None
         assert report.worker_binary_verified is None
-        assert report.failure_reason is None
+        assert report.failure_reason == "remote probe is required for readiness"
 
     def test_canonical_bytes_round_trip(self, tmp_path):
         config = _config(tmp_path)
@@ -1222,6 +1465,37 @@ class TestRemoteShellPreflight:
         assert canonical == canonical_remote_shell_preflight_bytes(
             revalidated,
         )
+
+    def test_report_identity_binds_config_and_local_input_bytes(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        payload = report.model_dump(by_alias=True)
+
+        assert payload["config_identity_sha256"] == _sha(
+            remote_module._canonical_model_bytes(config),
+        )
+        for field in (
+            "ssh_binary_sha256",
+            "scp_binary_sha256",
+            "private_key_sha256",
+            "known_hosts_sha256",
+        ):
+            assert payload[field] is not None
+            assert len(payload[field]) == 64
+        assert payload["report_id"] == (
+            "remote-preflight-" + payload["content_sha256"]
+        )
+
+        payload["known_host"] = "replayed.example"
+        with pytest.raises(ValidationError, match="content|report"):
+            RemoteShellPreflightReport.model_validate(payload)
 
     def test_report_binds_target_identity(self, tmp_path):
         config = _config(tmp_path)
@@ -1252,6 +1526,34 @@ class TestRemoteShellPreflight:
         assert report.status == "blocked-external-input"
         assert not report.ssh_binary_found
         assert "ssh binary is missing" in report.failure_reason
+        assert (
+            report.model_dump().get("failure_code")
+            == "ssh-binary-missing"
+        )
+
+    def test_failed_local_check_is_not_downgraded_by_missing_input(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        config.ssh_binary.unlink()
+        bad = config.model_copy(
+            update={
+                "expected_host_key_fingerprint": "SHA256:" + ("A" * 43),
+            },
+        )
+
+        report = run_remote_shell_preflight(
+            bad,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert (
+            report.model_dump().get("failure_code")
+            == "known-hosts-invalid"
+        )
 
     def test_scp_binary_missing_returns_blocked(self, tmp_path):
         config = _config(tmp_path)
@@ -1321,6 +1623,7 @@ class TestRemoteShellPreflight:
     def test_probe_remote_success_returns_ready(self, tmp_path):
         config = _config(tmp_path)
         runner = _Runner()
+        runner.responses.append(_readiness_response(config))
         report = run_remote_shell_preflight(
             config,
             probe_remote=True,
@@ -1329,14 +1632,37 @@ class TestRemoteShellPreflight:
         )
         assert report.status == "ready"
         assert report.container_runtime_verified is True
+        assert report.container_image_verified is True
         assert report.worker_binary_verified is True
+        assert report.checker_config_sha256 == "e" * 64
+        assert report.measured_container_identity == config.container_identity
+        assert report.worker_binary_sha256 == "d" * 64
+        assert report.worker_version == "1.0.0"
         assert report.failure_reason is None
-        assert len(runner.calls) == 2
-        runtime_argv = runner.calls[0][0]
-        worker_argv = runner.calls[1][0]
-        assert runtime_argv[-1] == "docker --version"
-        assert "test -f" in worker_argv[-1]
-        assert "remote_training_worker.py" in worker_argv[-1]
+        assert len(runner.calls) == 1
+        assert runner.calls[0][0][-1] == (
+            "nantai-remote-readiness-checker"
+        )
+
+    def test_remote_probe_rejects_local_input_drift(self, tmp_path):
+        config = _config(tmp_path)
+
+        def mutate_known_hosts(argv, **kwargs):
+            del argv, kwargs
+            config.known_hosts_path.write_bytes(
+                config.known_hosts_path.read_bytes() + b"# drift\n"
+            )
+            return _readiness_response(config)
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=mutate_known_hosts,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert report.failure_code == "local-transport-drift"
 
     def test_probe_remote_unreachable_returns_blocked(self, tmp_path):
         config = _config(tmp_path)
@@ -1362,9 +1688,6 @@ class TestRemoteShellPreflight:
         runner.responses.append(
             subprocess.CompletedProcess([], 1, b"", b"not found"),
         )
-        runner.responses.append(
-            subprocess.CompletedProcess([], 1, b"", b"not found"),
-        )
         report = run_remote_shell_preflight(
             config,
             probe_remote=True,
@@ -1373,9 +1696,37 @@ class TestRemoteShellPreflight:
         )
         assert report.status == "failed"
         assert report.container_runtime_verified is False
+        assert report.container_image_verified is False
         assert report.worker_binary_verified is False
-        assert "container runtime did not respond" in report.failure_reason
-        assert "worker binary not found on remote" in report.failure_reason
+        assert report.failure_code == "remote-checker-invalid"
+        assert report.failure_reason == (
+            "remote readiness checker response is invalid"
+        )
+        assert len(runner.calls) == 1
+
+    def test_probe_remote_rejects_checker_control_characters(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        runner = _Runner()
+        runner.responses.append(
+            _readiness_response(
+                config,
+                container_runtime_version="Docker\ninjected",
+            )
+        )
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert report.failure_code == "remote-checker-invalid"
+        assert report.container_runtime_version is None
 
     def test_probe_remote_skipped_when_local_checks_fail(self, tmp_path):
         config = _config(tmp_path)
@@ -1442,7 +1793,14 @@ class TestRemoteShellPreflight:
         assert command_audit, "remote probe must record redacted argv"
         audit_text = "\n".join(" ".join(argv) for argv in command_audit)
         assert private_key_str not in audit_text
+        assert str(config.known_hosts_path) not in audit_text
+        assert str(config.ssh_binary) not in audit_text
+        assert str(config.scp_binary) not in audit_text
+        assert config.ssh_target not in audit_text
+        assert config.known_host not in audit_text
         assert "<redacted-private-key>" in audit_text
+        assert "<redacted-known-hosts>" in audit_text
+        assert "<redacted-ssh-target>" in audit_text
 
     def test_report_rejects_extra_fields(self):
         with pytest.raises(ValidationError):
