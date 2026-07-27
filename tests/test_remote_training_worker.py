@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,10 +16,8 @@ from cloud.remote_training_worker import (
     read_status,
     start_job,
 )
-from pipeline.remote_shell_executor import (
-    RemoteResultBundleError,
-    RemoteShellStatus,
-)
+from pipeline.durable_io import DurableIOError
+from pipeline.remote_shell_executor import RemoteShellStatus
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CONTAINER_IDENTITY = "registry.example/nantai@sha256:" + "c" * 64
@@ -415,8 +414,7 @@ def test_worker_rejects_partial_publication(tmp_path, monkeypatch):
     )
     assert status.state == "failed"
     subs = _subcommands(fake)
-    assert "rm" in subs
-    assert subs.index("rm") > subs.index("start")
+    assert "rm" not in subs
     assert not (job_dir / "result-bundle.zip").exists()
 
 
@@ -785,29 +783,23 @@ def test_worker_does_not_remove_when_terminal_status_durability_is_unknown(
     fake = FakeDocker()
     _patch_worker(monkeypatch, fake)
 
-    # Inject a fault: _atomic_write fails when writing the succeeded
-    # status.json (the second _write_status call with state="succeeded")
-    from cloud import remote_training_worker as worker
-
-    original_atomic_write = worker._atomic_write
-    call_count = {"n": 0}
-
-    def faulted_atomic_write(path, payload):
-        call_count["n"] += 1
-        # Block the succeeded-status publication (the call that contains
-        # state=succeeded). The first call is the running status; the
-        # second is succeeded; later writes (cleanup obs) are permitted.
+    def publish_then_fail(source, destination):
+        source = Path(source)
+        destination = Path(destination)
+        payload = source.read_bytes()
+        source.replace(destination)
         if (
-            path.name == "status.json"
+            destination.name == "status.json"
             and b'"state":"succeeded"' in payload
         ):
-            raise RemoteWorkerError(
-                "publication durability unknown (injected fault)"
+            raise DurableIOError(
+                "status namespace published but sync failed",
+                published=True,
             )
-        return original_atomic_write(path, payload)
 
     monkeypatch.setattr(
-        "cloud.remote_training_worker._atomic_write", faulted_atomic_write
+        "cloud.remote_training_worker.atomic_replace",
+        publish_then_fail,
     )
 
     returncode = start_job(
@@ -822,11 +814,10 @@ def test_worker_does_not_remove_when_terminal_status_durability_is_unknown(
     status = RemoteShellStatus.model_validate_json(
         read_status(job_dir, max_bytes=64 * 1024),
     )
-    assert status.state == "failed"
-    # Container must NOT have been removed: durability of terminal
-    # succeeded status was never proven, so cleanup must wait.
+    assert status.state == "succeeded"
     subs = _subcommands(fake)
     assert "rm" not in subs
+    assert not (job_dir / "cleanup-observation.json").exists()
 
 
 def test_worker_does_not_remove_when_result_publication_durability_is_unknown(
@@ -834,21 +825,26 @@ def test_worker_does_not_remove_when_result_publication_durability_is_unknown(
 ):
     """If result bundle publication fails, cleanup must NOT proceed.
 
-    Fault injection: build_remote_result_bundle raises
-    RemoteResultBundleError.  The container must be preserved so the
-    result can be re-extracted; cleanup must not destroy evidence.
+    Fault injection occurs at the real durable publication primitive after
+    the result namespace is visible but before durability is confirmed.
     """
     job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
     _init_job(job_dir)
     fake = FakeDocker()
     _patch_worker(monkeypatch, fake)
 
-    def raise_bundle_error(*args, **kwargs):
-        raise RemoteResultBundleError("publication durability unknown")
+    def publish_then_fail(source, destination):
+        source = Path(source)
+        destination = Path(destination)
+        source.replace(destination)
+        raise DurableIOError(
+            "result namespace published but sync failed",
+            published=True,
+        )
 
     monkeypatch.setattr(
-        "cloud.remote_training_worker.build_remote_result_bundle",
-        raise_bundle_error,
+        "pipeline.durable_io.publish_file_noreplace",
+        publish_then_fail,
     )
 
     returncode = start_job(
@@ -863,13 +859,104 @@ def test_worker_does_not_remove_when_result_publication_durability_is_unknown(
     status = RemoteShellStatus.model_validate_json(
         read_status(job_dir, max_bytes=64 * 1024),
     )
-    assert status.state == "failed"
-    # Container was created but result publication failed → no rm.
-    # Result bundle must not exist.
-    assert not (job_dir / "result-bundle.zip").exists()
+    assert status.state == "running"
+    assert (job_dir / "result-bundle.zip").exists()
     subs = _subcommands(fake)
-    # Wait — we actually DO call _remove_container in the except
-    # branch.  Codex requires result publication durability unknown
-    # to block cleanup.  This RED must observe the new behaviour:
-    # cleanup must NOT proceed when terminal result publication fails.
     assert "rm" not in subs
+    assert not (job_dir / "cleanup-observation.json").exists()
+
+
+def test_worker_does_not_remove_when_container_id_durability_is_unknown(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    def publish_then_fail(source, destination):
+        source = Path(source)
+        destination = Path(destination)
+        source.replace(destination)
+        raise DurableIOError(
+            "container id published but sync failed",
+            published=True,
+        )
+
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.publish_file_noreplace",
+        publish_then_fail,
+    )
+
+    returncode = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+
+    assert returncode == 75
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "running"
+    assert (
+        job_dir / "container-id.txt"
+    ).read_text(encoding="ascii").strip() == _DEFAULT_CONTAINER_ID
+    assert "rm" not in _subcommands(fake)
+
+
+def test_worker_cleanup_observation_failure_never_rewrites_terminal_status(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+    rm_calls = 0
+    original_run = fake.run
+
+    def counting_run(argv, **kwargs):
+        nonlocal rm_calls
+        if len(argv) > 1 and argv[1] == "rm":
+            rm_calls += 1
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.subprocess.run",
+        counting_run,
+    )
+
+    def replace_unless_cleanup(source, destination):
+        source = Path(source)
+        destination = Path(destination)
+        if destination.name == "cleanup-observation.json":
+            raise DurableIOError(
+                "cleanup observation was not published",
+                published=False,
+            )
+        os.replace(source, destination)
+
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.atomic_replace",
+        replace_unless_cleanup,
+    )
+
+    returncode = start_job(
+        job_dir=job_dir,
+        repo_root=_ROOT,
+        container_identity=_CONTAINER_IDENTITY,
+        container_runtime="docker",
+        detach=False,
+    )
+
+    assert returncode == 75
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "succeeded"
+    assert rm_calls == 1
+    assert not (job_dir / "cleanup-observation.json").exists()

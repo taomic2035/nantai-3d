@@ -23,6 +23,12 @@ if str(ROOT) not in sys.path:
 
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
+from pipeline.durable_io import (  # noqa: E402
+    DurableIOError,
+    atomic_replace,
+    flush_file,
+    publish_file_noreplace,
+)
 from pipeline.remote_shell_executor import (  # noqa: E402
     RemoteResultBundleError,
     RemoteShellStatus,
@@ -99,36 +105,13 @@ def _real_directory(path: Path, *, label: str) -> None:
         raise RemoteWorkerError(f"{label} must be a real directory")
 
 
-def _fsync_directory(path: Path) -> None:
-    """fsync parent directory so the published entry is durable.
-
-    A bare file fsync does not prove the directory entry has reached
-    stable storage; terminal publication must fsync the parent dir
-    before cleanup is permitted.
-
-    On Windows the directory fsync is a no-op because the platform does
-    not support fsync on directory file descriptors; Linux/macOS must
-    successfully fsync or fail closed.
-    """
-    if sys.platform == "win32":
-        return
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError as exc:
-        raise RemoteWorkerError(
-            "cannot fsync publication directory"
-        ) from exc
-    try:
-        os.fsync(fd)
-    except OSError as exc:
-        raise RemoteWorkerError(
-            "publication directory fsync failed"
-        ) from exc
-    finally:
-        os.close(fd)
-
-
 def _atomic_write(path: Path, payload: bytes) -> None:
+    """Write payload via temp + fsync + atomic_replace.
+
+    Propagates :class:`DurableIOError` so callers can distinguish
+    "not published" (safe to write a failure status) from "published but
+    durability unconfirmed" (ambiguous — must not overwrite or cleanup).
+    """
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         descriptor = os.open(
@@ -138,10 +121,10 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         )
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
+        flush_file(temporary)
+        atomic_replace(temporary, path)
+    except DurableIOError:
+        raise
     except OSError as exc:
         raise RemoteWorkerError(
             f"cannot publish remote worker file: {path.name}"
@@ -150,20 +133,29 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _publish_container_id_no_replace(path: Path, container_id: str) -> None:
-    """Publish container-id.txt with no-replace; collision is blocked.
+def _publish_container_id(path: Path, container_id: str) -> None:
+    """Publish container-id.txt with no-replace via durable primitive.
 
     A pre-existing file indicates replay, attempt swap or container
-    swap; overwriting it would silently erase the audit trail.  Use
-    O_CREAT|O_EXCL so collision raises fail-closed instead.
+    swap; overwriting it would silently erase the audit trail.
+    :class:`DurableIOError` is propagated so callers can distinguish
+    "not published" from "published but durability unconfirmed" — the
+    latter must not be treated as "file readable therefore durable".
     """
     payload = (container_id + "\n").encode("ascii")
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         descriptor = os.open(
-            path,
+            temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             0o600,
         )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+        flush_file(temporary)
+        publish_file_noreplace(temporary, path)
+    except DurableIOError:
+        raise
     except FileExistsError as exc:
         raise RemoteWorkerError(
             "container-id.txt already exists; replay or collision blocked"
@@ -172,16 +164,8 @@ def _publish_container_id_no_replace(path: Path, container_id: str) -> None:
         raise RemoteWorkerError(
             "container-id.txt publication cannot be opened"
         ) from exc
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _fsync_directory(path.parent)
-    except OSError as exc:
-        raise RemoteWorkerError(
-            "container-id.txt publication failed"
-        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_stable(path: Path, *, max_bytes: int, label: str) -> bytes:
@@ -535,6 +519,50 @@ def _record_cleanup_observation(
     _atomic_write(job_dir / "cleanup-observation.json", payload)
 
 
+def _publication_published(exc: BaseException) -> bool:
+    """True if *exc* proves a namespace change whose durability is
+    unconfirmed.
+
+    Such a state is ambiguous: the file may already be on disk, so the
+    caller must NOT write a failure status (it could overwrite a
+    succeeded status) and must NOT remove the container (audit must be
+    able to recover the terminal evidence).
+    """
+    if isinstance(exc, RemoteResultBundleError):
+        return exc.published is True
+    if isinstance(exc, DurableIOError):
+        return exc.published is True
+    return False
+
+
+def _safe_record_cleanup_observation(
+    job_dir: Path,
+    *,
+    runtime: str,
+    container_id: str | None,
+    rm_exit_code: int,
+) -> bool:
+    """Record cleanup observation without propagating publication faults.
+
+    A failure here must NOT re-enter the outer handler, rewrite the
+    terminal result, or trigger a second ``rm``.  Swallow the error so
+    the terminal state remains intact for audit recovery.  Returns
+    ``True`` if the observation was published, ``False`` if it failed.
+    """
+    if container_id is None:
+        return True
+    try:
+        _record_cleanup_observation(
+            job_dir,
+            runtime=runtime,
+            container_id=container_id,
+            rm_exit_code=rm_exit_code,
+        )
+        return True
+    except (DurableIOError, OSError, RemoteWorkerError):
+        return False
+
+
 def _remove_container(
     *,
     runtime: str,
@@ -589,6 +617,7 @@ def run_job(
     stdout_path = job_dir / "worker.stdout.log"
     stderr_path = job_dir / "worker.stderr.log"
     container_id: str | None = None
+    container_started = False
     try:
         expected_image_id = _resolve_image_id(
             runtime=container_runtime,
@@ -600,7 +629,7 @@ def run_job(
             job_dir=job_dir,
             container_identity=container_identity,
         )
-        _publish_container_id_no_replace(
+        _publish_container_id(
             job_dir / "container-id.txt",
             container_id,
         )
@@ -616,6 +645,7 @@ def run_job(
             stdout_path=stdout_path,
             stderr_path=stderr_path,
         )
+        container_started = True
         _, stdout_sha = _hash_stable(
             stdout_path,
             label="worker stdout log",
@@ -625,24 +655,38 @@ def run_job(
             label="worker stderr log",
         )
         if exit_code != 0:
-            _write_failure_status(
-                job_dir,
-                spec,
-                exit_code=exit_code,
-                stdout_sha=stdout_sha,
-                stderr_sha=stderr_sha,
-            )
+            # Training failed; write failure status then cleanup.
+            # If failure-status publication is ambiguous (published=True),
+            # do NOT cleanup or record an observation — preserve container
+            # and terminal evidence for audit recovery.
+            try:
+                _write_failure_status(
+                    job_dir,
+                    spec,
+                    exit_code=exit_code,
+                    stdout_sha=stdout_sha,
+                    stderr_sha=stderr_sha,
+                )
+            except DurableIOError as status_exc:
+                if _publication_published(status_exc):
+                    return 75
+                # Not published — status could not be proven; preserve
+                # the container and return without cleanup observation.
+                return 75
+            rm_exit = -1
             if container_id is not None:
                 rm_exit = _remove_container(
                     runtime=container_runtime,
                     container_id=container_id,
                 )
-                _record_cleanup_observation(
-                    job_dir,
-                    runtime=container_runtime,
-                    container_id=container_id,
-                    rm_exit_code=rm_exit,
-                )
+            observation_published = _safe_record_cleanup_observation(
+                job_dir,
+                runtime=container_runtime,
+                container_id=container_id,
+                rm_exit_code=rm_exit,
+            )
+            if not observation_published:
+                return 75
             return exit_code
         result_root = (
             job_dir / "runtime" / "production-run" / "result"
@@ -656,10 +700,9 @@ def run_job(
             result_root / "worker.stderr.log",
         )
         # Terminal publication: result bundle first, then succeeded status.
-        # If EITHER fails, cleanup must NOT proceed — the container is
-        # preserved so audit can recover terminal evidence.  Only when
-        # both have proven durable (fsync of file + parent dir) do we
-        # invoke _remove_container.
+        # If EITHER fails with published=True, the state is ambiguous:
+        # do NOT write a failure status (it may overwrite a succeeded
+        # status already on disk), and do NOT remove the container.
         try:
             verified = build_remote_result_bundle(
                 result_root=result_root,
@@ -688,9 +731,20 @@ def run_job(
                     result_bundle_size_bytes=verified.byte_length,
                 ),
             )
-        except (OSError, RemoteResultBundleError, RemoteWorkerError):
-            # Terminal publication failed — do NOT remove the container.
-            # Record a no-rm cleanup observation and surface failure.
+        except (RemoteResultBundleError, DurableIOError) as exc:
+            if _publication_published(exc):
+                # Ambiguous: a namespace change happened but durability
+                # is unconfirmed.  Do NOT write a failure status (it may
+                # overwrite a succeeded status already on disk), do NOT
+                # remove the container, and do NOT record a cleanup
+                # observation — touching nothing preserves the terminal
+                # evidence for audit recovery.
+                return 75
+            # Not published — safe to write a failure status.  The
+            # container exited zero but results could not be proven, so
+            # preserve it for audit (docker cp / inspect) rather than
+            # removing; no cleanup observation is emitted because no
+            # removal was attempted.
             _write_failure_status(
                 job_dir,
                 spec,
@@ -698,27 +752,39 @@ def run_job(
                 stdout_sha=stdout_sha,
                 stderr_sha=stderr_sha,
             )
-            _record_cleanup_observation(
-                job_dir,
-                runtime=container_runtime,
-                container_id=container_id,
-                rm_exit_code=-1,
-            )
             return 75
         # Terminal publication proven durable — cleanup permitted.
+        rm_exit = -1
         if container_id is not None:
             rm_exit = _remove_container(
                 runtime=container_runtime,
                 container_id=container_id,
             )
-            _record_cleanup_observation(
-                job_dir,
-                runtime=container_runtime,
-                container_id=container_id,
-                rm_exit_code=rm_exit,
-            )
+        observation_published = _safe_record_cleanup_observation(
+            job_dir,
+            runtime=container_runtime,
+            container_id=container_id,
+            rm_exit_code=rm_exit,
+        )
+        # Terminal status/result remain succeeded; a cleanup-observation
+        # publication failure must not rewrite them or trigger a second
+        # rm, but it must surface as non-zero so the audit gap is visible.
+        if not observation_published:
+            return 75
         return 0
-    except (OSError, RemoteResultBundleError, RemoteWorkerError) as exc:
+    except (
+        OSError,
+        RemoteResultBundleError,
+        DurableIOError,
+        RemoteWorkerError,
+    ) as exc:
+        if _publication_published(exc):
+            # Ambiguous pre-terminal publication (e.g. container-id
+            # namespace published but durability unconfirmed).  Do NOT
+            # write a failure status, do NOT remove the container, and
+            # do NOT record a cleanup observation — touching nothing
+            # preserves the terminal evidence for audit recovery.
+            return 75
         stdout_path.touch(exist_ok=True)
         stderr_path.touch(exist_ok=True)
         with stderr_path.open("ab") as stream:
@@ -735,24 +801,42 @@ def run_job(
             stderr_path,
             label="worker stderr log",
         )
-        _write_failure_status(
-            job_dir,
-            spec,
-            exit_code=75,
-            stdout_sha=stdout_sha,
-            stderr_sha=stderr_sha,
-        )
+        try:
+            _write_failure_status(
+                job_dir,
+                spec,
+                exit_code=75,
+                stdout_sha=stdout_sha,
+                stderr_sha=stderr_sha,
+            )
+        except DurableIOError as status_exc:
+            if _publication_published(status_exc):
+                # Ambiguous: status namespace may be on disk; preserve
+                # everything for audit recovery.
+                return 75
+            # Not published — preserve the container and return without
+            # cleanup observation.
+            return 75
+        # If the container has already started, preserve it for audit
+        # (docker cp / inspect can recover post-start evidence).  Only
+        # remove containers that were created but never started, where
+        # there is no runtime evidence to preserve.
+        if container_started:
+            return 75
+        rm_exit = -1
         if container_id is not None:
             rm_exit = _remove_container(
                 runtime=container_runtime,
                 container_id=container_id,
             )
-            _record_cleanup_observation(
-                job_dir,
-                runtime=container_runtime,
-                container_id=container_id,
-                rm_exit_code=rm_exit,
-            )
+        observation_published = _safe_record_cleanup_observation(
+            job_dir,
+            runtime=container_runtime,
+            container_id=container_id,
+            rm_exit_code=rm_exit,
+        )
+        if not observation_published:
+            return 75
         return 75
 
 
