@@ -88,7 +88,7 @@ job/bundle/config 证据并继续 poll/fetch，同一 attempt 内不会再次 su
 `preview-only / arbitrary / unaligned`。实测结果和完整 SHA 见
 [2026-07-26 canary 报告](../verification/2026-07-26-real-golden-path-canary.md)。
 
-正式采集先生成私有 rights/source 对，不要手写 SHA：
+正式采集先生成私有 rights/source/policy 输入包，不要手写 SHA 或 policy：
 
 ```powershell
 New-Item -ItemType Directory -Force .nantai-studio\private | Out-Null
@@ -99,11 +99,18 @@ python -m pipeline.production_capture_inputs `
   --capture-scope "南台村照片与视频采集" `
   --effective-date 2026-07-27 `
   --processing-purpose 3d-reconstruction `
-  --processing-purpose internal-evaluation
+  --processing-purpose internal-evaluation `
+  --min-registered-count 90 `
+  --min-registered-ratio 0.9 `
+  --min-session-coverage-ratio 0.9 `
+  --max-unregistered-consecutive-run 5 `
+  --min-largest-connected-model-share 0.95
 ```
 
 只有权利文件明确授权时才添加 redistribution/Release inclusion 参数。producer 不判断
-权利，只把 operator 的明确事实写成 canonical、内容绑定且不可覆盖的两份输入。
+权利，只把 operator 的明确事实写成 canonical、内容绑定且不可覆盖的三份输入。五个
+registration 阈值没有默认值；示例值必须按本次采集和正式验收目标确认，不得为过门
+而降低。
 
 正式生产训练需要 operator-owned remote config。它至少绑定：
 
@@ -269,6 +276,7 @@ request/result 只证明其声明并通过内容闭合检查的事实；stub 或
 ```powershell
 $source = (Resolve-Path .nantai-studio\private\production-site-a\production-source.json).Path
 $rights = (Resolve-Path .nantai-studio\private\production-site-a\capture-rights-receipt.json).Path
+$registrationPolicy = (Resolve-Path .nantai-studio\private\production-site-a\registration-policy.json).Path
 $workspace = (Resolve-Path .nantai-studio\real-scene).Path
 $runId = "production-site-a"
 $paths = python -m pipeline.real_scene_paths `
@@ -372,7 +380,7 @@ python -m scripts.real_scene accept `
   --run-id "$runId" `
   --media-root "C:\private\capture" `
   --rights "$rights" `
-  --policy "C:\private\registration-policy.json" `
+  --policy "$registrationPolicy" `
   --control-points "C:\private\control-points.json" `
   --geo-origin "26.0801,119.2967,12.5" `
   --viewer-policy "$run\viewer-inputs\policy.json" `

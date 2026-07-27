@@ -15,8 +15,8 @@
 `3d-reconstruction`，并明确处理、再发行和 Release inclusion 范围。它是授权证据，
 不是几何或米制证据。
 
-不要手写 `rights_receipt_sha256`。先由 operator 明确填写权利事实，再让 producer
-原子生成 canonical rights/source 对：
+不要手写 `rights_receipt_sha256` 或 registration policy。先由 operator 明确填写权利
+事实与五个 registration 门，再让 producer 原子生成 canonical 输入包：
 
 ```bash
 mkdir -p .nantai-studio/private
@@ -27,14 +27,21 @@ mkdir -p .nantai-studio/private
   --capture-scope "南台村照片与视频采集" \
   --effective-date 2026-07-27 \
   --processing-purpose 3d-reconstruction \
-  --processing-purpose internal-evaluation
+  --processing-purpose internal-evaluation \
+  --min-registered-count 90 \
+  --min-registered-ratio 0.9 \
+  --min-session-coverage-ratio 0.9 \
+  --max-unregistered-consecutive-run 5 \
+  --min-largest-connected-model-share 0.95
 ```
 
 默认不声明 redistribution 或 raw capture 的 Release inclusion。只有权利文件明确授权时
 才可分别添加 `--redistribution-allowed`、`--release-inclusion-allowed`；producer 只会
-如实复制该选择，不会推断授权。输出目录必须不存在，最终只含
-`capture-rights-receipt.json` 与 `production-source.json`。两者 canonical、内容寻址且
-共同 durable 发布，失败不会留下可误用的半套输入。
+如实复制该选择，不会推断授权。五个 registration 阈值也没有默认值：示例值必须由
+operator 按采集规模与正式验收目标确认，不能为了让失败数据过门而降低。输出目录必须
+不存在，最终只含 `capture-rights-receipt.json`、`production-source.json` 与
+`registration-policy.json`。三者 canonical、内容寻址且共同 durable 发布。
+失败不会留下可误用的半套输入。
 
 正式 source 的分阶段入口为：
 
@@ -43,21 +50,21 @@ mkdir -p .nantai-studio/private
   SOURCE=.nantai-studio/private/production-site-a/production-source.json \
   MEDIA_ROOT=/absolute/private/capture \
   RIGHTS=.nantai-studio/private/production-site-a/capture-rights-receipt.json \
-  POLICY=config/private/registration-policy.json \
+  POLICY=.nantai-studio/private/production-site-a/registration-policy.json \
   RUN_ID=production-site-a fetch
 
 .venv/bin/python make.py real-scene \
   SOURCE=.nantai-studio/private/production-site-a/production-source.json \
   MEDIA_ROOT=/absolute/private/capture \
   RIGHTS=.nantai-studio/private/production-site-a/capture-rights-receipt.json \
-  POLICY=config/private/registration-policy.json \
+  POLICY=.nantai-studio/private/production-site-a/registration-policy.json \
   RUN_ID=production-site-a sfm
 
 .venv/bin/python make.py real-scene \
   SOURCE=.nantai-studio/private/production-site-a/production-source.json \
   MEDIA_ROOT=/absolute/private/capture \
   RIGHTS=.nantai-studio/private/production-site-a/capture-rights-receipt.json \
-  POLICY=config/private/registration-policy.json \
+  POLICY=.nantai-studio/private/production-site-a/registration-policy.json \
   REMOTE_CONFIG=/absolute/private/remote.json \
   RUN_ID=production-site-a train-production
 ```
@@ -122,7 +129,7 @@ COLMAP 配准后必须额外产出一份从 sparse 字节派生的 quality repor
   --registration-json recon/registration.json \
   --sparse-dir recon/colmap_ws/sparse \
   --capture-manifest ingest/manifest.json \
-  --policy policy.json \
+  --policy .nantai-studio/private/production-site-a/registration-policy.json \
   --output rq/quality-report.json
 ```
 
@@ -132,15 +139,8 @@ COLMAP 配准后必须额外产出一份从 sparse 字节派生的 quality repor
   trusted prefix 必需——它把照片源 provenance 绑到 quality report）。
 - `--policy` 是一份 `RegistrationQualityPolicy` JSON（5 个阈值：min_registered_count、
   min_registered_ratio、min_session_coverage_ratio、max_unregistered_consecutive_run、
-  min_largest_connected_model_share）。用 Python one-liner 生成：
-
-  ```bash
-  .venv/bin/python -c "from pipeline.registration_quality import \
-    RegistrationQualityPolicy as P; print(P(min_registered_count=10, \
-    min_registered_ratio=0.7, min_session_coverage_ratio=0.6, \
-    max_unregistered_consecutive_run=5, \
-    min_largest_connected_model_share=0.6).model_dump_json(indent=2))" > policy.json
-  ```
+  min_largest_connected_model_share）。正式数据直接使用前面 producer 与 rights/source
+  同批 durable 发布的 `registration-policy.json`，不要另行手写或生成一份漂移副本。
 
 报告里的 `training_allowed=True` 只证明配准满足 operator 覆盖策略 + non-mock engine +
 有 capture manifest——**不证明**照片真实、几何对 3DGS 充分或尺度米制。详见

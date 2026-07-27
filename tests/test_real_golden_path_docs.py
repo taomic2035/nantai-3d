@@ -84,6 +84,11 @@ def test_real_canary_docs_do_not_promote_internal_evidence() -> None:
     assert "python -m pipeline.production_capture_inputs" in manual
     assert "capture-rights-receipt.json" in workflow
     assert "production-source.json" in workflow
+    assert "registration-policy.json" in workflow
+    assert "--min-registered-count" in workflow
+    assert "--min-registered-ratio" in manual
+    assert "五个 registration 阈值也没有默认值" in workflow
+    assert "registration 阈值没有默认值" in manual
     assert "不要手写 `rights_receipt_sha256`" in workflow
     assert "失败不会留下可误用的半套输入" in workflow
 

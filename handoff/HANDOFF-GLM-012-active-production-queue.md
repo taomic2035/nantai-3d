@@ -23,24 +23,27 @@ runtime、`pipeline.durable_io`、canonical JSON。
 开始，随后连续执行 `G1 → H1 → I1`。完成一张就独立提交、用一次性代理 push，然后直接
 开始下一张，不等待 Codex 回执。
 
-### Codex 当前派发（2026-07-27，基线 `4c08fca`）
+### Codex 当前派发（2026-07-27，基线 `c8b7701`）
 
-Codex 已重新 fetch 并核对 `origin/main`：没有 F1 candidate，GLM 也没有领先远端的
-提交。“无待推进工作”是不正确的。GLM 不要再做差距审计、plan 或静态 review，直接
-执行下面的代码任务：
+Codex 已用一次性代理重新 fetch 并核对 `origin/main`：远端仍停在 `c8b7701`，没有
+F1 candidate，GLM 也没有领先远端的提交。“无待推进工作”是不正确的。下面四项都是
+repo-local fake transport/文件系统任务，不依赖 GPU、secret、正式素材、Blender 或
+Codex 新接口。GLM 不要再做差距审计、plan 或静态 review，直接执行：
 
 ```text
 git -c http.proxy=http://127.0.0.1:7890 fetch origin main
 git -c http.proxy=http://127.0.0.1:7890 pull --ff-only origin main
 
 当前只做 F1：
-  1. 只修改 tests/test_remote_shell_executor.py；
-  2. 先写 Task F1 列出的 7 个同容器 clearance 测试；
-  3. 立即运行其中第一个测试，得到真实 RED；
-  4. 回执测试全名、失败断言和本地 git diff --stat；
+  1. 先只修改 tests/test_remote_shell_executor.py；
+  2. 先写 test_clearance_runs_fixed_probes_in_lifecycle_container；
+  3. 立即单跑：
+     python -m pytest -q tests/test_remote_shell_executor.py::test_clearance_runs_fixed_probes_in_lifecycle_container
+  4. 第一轮只回执测试全名、真实失败断言和 git diff --stat；
   5. 然后修改 pipeline/remote_shell_executor.py 接通 GREEN；
-  6. 接入既有 pipeline.production_runtime_evidence，禁止新建 schema；
-  7. 专项测试、Ruff、diff-check、独立提交、临时代理 push。
+  6. 再补齐 Task F1 余下 6 个行为门；
+  7. 接入既有 pipeline.production_runtime_evidence，禁止新建 schema；
+  8. 专项测试、Ruff、diff-check、独立提交、临时代理 push。
 
 F1 push 后无需等待：
   G1 operations production result producer
@@ -53,10 +56,10 @@ F1 push 后无需等待：
 或 Codex 新接口。若第一个 RED 无法建立，必须报告具体代码符号和阻塞调用栈，不能回复
 “无事可做”。
 
-Codex 当前并行修改 `pipeline/human_review_inputs.py`、
-`scripts/record_real_scene_review.py` 及其测试；GLM 禁止碰这些文件，也不要修改
-`pipeline/studio_server.py`、Viewer、Studio、release、acceptance aggregate 或本
-handoff。
+Codex 当前并行修改 `pipeline/production_capture_inputs.py`、
+`tests/test_production_capture_inputs.py` 和真实数据用户文档；GLM 禁止碰这些文件，
+也不要修改 `pipeline/studio_server.py`、Viewer、Studio、release、acceptance
+aggregate 或本 handoff。
 
 | 顺序 | Ticket | 只允许主动修改 | 必须交付的结果 |
 |---|---|---|---|

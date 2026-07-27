@@ -64,9 +64,10 @@ A1–E1 与 P0-CI 已关闭，不再重做。GLM 现在从 F1 开始，完成后
 - 至少四个非共面实测控制点，建议增加独立 check points；
 - 允许使用的云 GPU host、固定 host key 和 immutable container digest。
 
-`pipeline.production_capture_inputs` 已负责把 operator 明确填写的权利事实原子生成
-canonical rights receipt 与内容绑定的 production source，不再要求手算
-`rights_receipt_sha256`；它不替 operator 判断或扩大授权范围。
+`pipeline.production_capture_inputs` 已负责把 operator 明确填写的权利事实与五个
+registration 阈值原子生成 canonical rights receipt、内容绑定的 production source 和
+registration policy，不再要求手算 `rights_receipt_sha256`。阈值没有默认值；producer
+既不替 operator 判断或扩大授权范围，也不会为通过质量门而自动放宽 policy。
 
 这些输入不得提交仓库或进入公开 Release，统一放入忽略的
 `.nantai-studio/` 工作区。
