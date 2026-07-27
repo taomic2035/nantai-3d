@@ -232,6 +232,40 @@ class TestEnv:
             assert make.ENV.get("PATH") == os.environ["PATH"]
 
 
+class TestServeTarget:
+    def test_mounts_explicit_real_scene_import_without_copying_it(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setenv(
+            "REAL_SCENE_IMPORT_ROOT",
+            "D:/private/run/imported",
+        )
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.serve()
+
+        assert calls == [
+            [
+                make.PY,
+                "-m",
+                "pipeline.studio_server",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--real-scene-import-root",
+                "D:/private/run/imported",
+            ],
+        ]
+
+
 class TestStandardTestTarget:
     def test_runs_viewer_acceptance_after_existing_suites(self, make, monkeypatch):
         calls = []

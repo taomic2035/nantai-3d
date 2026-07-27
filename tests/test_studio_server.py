@@ -16,10 +16,12 @@ import threading
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
+import pipeline.studio_server as studio_server_module
 import pipeline.synthetic_village.material_bundle_v2 as material_v2_module
 import pipeline.synthetic_village.mesh_asset_bundle_v3 as mesh_v3_module
 from pipeline.preview_release import build_receipt, canonical_json_bytes
@@ -406,8 +408,8 @@ def _write_preview_release_project(root: Path) -> dict:
 
 
 @contextmanager
-def _running_server(root: Path):
-    server = make_server(root, host="127.0.0.1", port=0)
+def _running_server(root: Path, **kwargs):
+    server = make_server(root, host="127.0.0.1", port=0, **kwargs)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -432,6 +434,52 @@ def _request(
     headers = {name.lower(): value for name, value in response.getheaders()}
     connection.close()
     return response.status, headers, payload
+
+
+def _stub_verified_real_scene_import(
+    monkeypatch: pytest.MonkeyPatch,
+    import_root: Path,
+    *,
+    source_role: str = "production-acceptance",
+    geometry_usability: str = "metric-aligned",
+    target_units: str = "meters",
+) -> tuple[dict[str, bytes], list[tuple[Path, Path]]]:
+    payloads = {
+        "web/recon_manifest.json": b'{"scene":"verified-production"}\n',
+        "web/recon_full.ply": b"ply\nverified-production\n",
+        "web/chunks/chunks.json": b'{"chunks":[]}\n',
+    }
+    for relative, payload in payloads.items():
+        path = import_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    (import_root / "import-receipt.json").write_bytes(b'{"receipt":"stub"}\n')
+    receipt = SimpleNamespace(
+        source_role=source_role,
+        geometry_usability=geometry_usability,
+        target_units=target_units,
+        manifest_path="web/recon_manifest.json",
+        artifacts=tuple(
+            SimpleNamespace(
+                path=relative,
+                byte_length=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+            for relative, payload in sorted(payloads.items())
+        ),
+    )
+    calls: list[tuple[Path, Path]] = []
+
+    def _validate(receipt_path: Path, output_root: Path):
+        calls.append((receipt_path, output_root))
+        return receipt
+
+    monkeypatch.setattr(
+        studio_server_module,
+        "validate_real_scene_import_receipt",
+        _validate,
+    )
+    return payloads, calls
 
 
 def _write_local_textured_preview(
@@ -3177,6 +3225,126 @@ class TestHttpContract:
         assert headers["cache-control"] == "no-cache"
         assert payload == b"export const ok = true;"
         assert directory_status == 404
+
+    def test_verified_real_scene_mount_shadows_only_bound_reconstruction_files(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _write_v2_project(tmp_path)
+        repository_manifest = tmp_path / "web/data/recon/recon_manifest.json"
+        repository_manifest.write_bytes(b'{"scene":"repository-preview"}\n')
+        import_root = tmp_path / "private-import"
+        payloads, validation_calls = _stub_verified_real_scene_import(
+            monkeypatch,
+            import_root,
+        )
+        (import_root / "web/private.txt").write_text(
+            "not receipt bound",
+            encoding="utf-8",
+        )
+
+        with _running_server(
+            tmp_path,
+            real_scene_import_root=import_root,
+        ) as server:
+            status, headers, payload = _request(
+                server,
+                "GET",
+                "/web/data/recon/recon_manifest.json",
+            )
+            ply_status, ply_headers, ply_payload = _request(
+                server,
+                "HEAD",
+                "/web/data/recon/recon_full.ply",
+            )
+            private_status, _, _ = _request(
+                server,
+                "GET",
+                "/web/data/recon/private.txt",
+            )
+
+        assert validation_calls == [
+            (import_root / "import-receipt.json", import_root),
+        ]
+        assert status == 200
+        assert payload == payloads["web/recon_manifest.json"]
+        assert headers["etag"] == (
+            f'"sha256:{hashlib.sha256(payload).hexdigest()}"'
+        )
+        assert headers["cache-control"] == (
+            "public, max-age=0, must-revalidate"
+        )
+        assert ply_status == 200
+        assert ply_payload == b""
+        assert int(ply_headers["content-length"]) == len(
+            payloads["web/recon_full.ply"]
+        )
+        assert private_status == 404
+
+    @pytest.mark.parametrize(
+        ("source_role", "geometry_usability", "target_units"),
+        [
+            ("real-smoke", "metric-aligned", "meters"),
+            ("production-acceptance", "preview-only", "meters"),
+            ("production-acceptance", "metric-aligned", "arbitrary"),
+        ],
+    )
+    def test_real_scene_mount_rejects_nonproduction_receipts(
+        self,
+        tmp_path,
+        monkeypatch,
+        source_role,
+        geometry_usability,
+        target_units,
+    ):
+        _write_v2_project(tmp_path)
+        import_root = tmp_path / "private-import"
+        _stub_verified_real_scene_import(
+            monkeypatch,
+            import_root,
+            source_role=source_role,
+            geometry_usability=geometry_usability,
+            target_units=target_units,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="production-acceptance.*metric-aligned.*meters",
+        ):
+            make_server(
+                tmp_path,
+                host="127.0.0.1",
+                port=0,
+                real_scene_import_root=import_root,
+            )
+
+    def test_real_scene_mount_fails_closed_if_bound_bytes_change(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        _write_v2_project(tmp_path)
+        import_root = tmp_path / "private-import"
+        _stub_verified_real_scene_import(monkeypatch, import_root)
+
+        with _running_server(
+            tmp_path,
+            real_scene_import_root=import_root,
+        ) as server:
+            (import_root / "web/recon_manifest.json").write_bytes(
+                b'{"scene":"changed-after-startup"}\n',
+            )
+            status, _, payload = _request(
+                server,
+                "GET",
+                "/web/data/recon/recon_manifest.json",
+            )
+
+        assert status == 409
+        assert json.loads(payload)["error"]["code"] == (
+            "mounted_reconstruction_changed"
+        )
 
     def test_path_traversal_and_symlink_escape_are_blocked(self, tmp_path):
         _write_v2_project(tmp_path)

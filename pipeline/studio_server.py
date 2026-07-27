@@ -18,6 +18,7 @@ API contract:
 * ``GET /api/world/mesh-assets/...`` -> immutable audited GLB/texture bytes.
 * ``GET /api/world/material-maps/...`` -> immutable verified PBR map bytes.
 * ``GET /web/data/production-camera-plan.json`` -> deterministic synthetic plan.
+* ``GET /web/data/recon/...`` -> optional receipt-bound production import.
 * ``GET``/``HEAD`` below approved static roots -> project-relative files.
 * every mutating method -> structured HTTP 405; no job is started.
 """
@@ -32,12 +33,16 @@ import json
 import mimetypes
 import re
 import secrets
+import stat
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -56,6 +61,11 @@ from pipeline.real_scene_acceptance import (
     RealSceneAcceptanceError,
     load_latest_real_scene_acceptance,
     validate_real_scene_acceptance,
+)
+from pipeline.real_scene_import import (
+    ImportArtifactBinding,
+    RealSceneImportReceipt,
+    validate_real_scene_import_receipt,
 )
 from pipeline.render_chunk_to_ply import render_single_chunk
 from pipeline.studio_jobs import JobContractError, JobService, WriterBusyError
@@ -148,6 +158,7 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 STATIC_ROOTS = {"assets", "handoff", "recon", "web"}
 EVIDENCE_ROOTS = {"recon", "web"}
+MOUNTED_RECONSTRUCTION_PREFIX = "/web/data/recon/"
 ALLOWED_RUN_STATUSES = {"queued", "running", "succeeded", "failed", "canceled"}
 STUDIO_COMMAND_IDS = ("ingest", "reconstruct", "world", "validate-assets")
 READ_ONLY_REASON = "Preview 只读模式 · 可浏览场景与证据，重建任务暂未开放"
@@ -2154,6 +2165,148 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
     return snapshot
 
 
+class MountedReconstructionError(ValueError):
+    """Raised when a verified reconstruction mount changes or is unsafe."""
+
+
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)()
+    )
+
+
+def _stable_regular_file_bytes(
+    root: Path,
+    binding: ImportArtifactBinding,
+) -> bytes:
+    path = root / binding.path
+    try:
+        before = path.lstat()
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise MountedReconstructionError(
+            f"mounted reconstruction artifact is unavailable: {binding.path}"
+        ) from exc
+    if (
+        _is_linklike(path)
+        or not stat.S_ISREG(before.st_mode)
+        or resolved != path
+        or not _is_below(root, resolved)
+    ):
+        raise MountedReconstructionError(
+            f"mounted reconstruction artifact is unsafe: {binding.path}"
+        )
+    try:
+        payload = path.read_bytes()
+        after = path.lstat()
+    except OSError as exc:
+        raise MountedReconstructionError(
+            f"mounted reconstruction artifact cannot be read: {binding.path}"
+        ) from exc
+    before_signature = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    after_signature = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+    if (
+        before_signature != after_signature
+        or _is_linklike(path)
+        or len(payload) != binding.byte_length
+        or hashlib.sha256(payload).hexdigest() != binding.sha256
+    ):
+        raise MountedReconstructionError(
+            f"mounted reconstruction artifact changed: {binding.path}"
+        )
+    return payload
+
+
+@dataclass(frozen=True)
+class VerifiedReconstructionMount:
+    """Receipt-bound, read-only projection of one production import."""
+
+    root: Path
+    receipt: RealSceneImportReceipt
+    bindings: Mapping[str, ImportArtifactBinding]
+
+    def binding_for_request(
+        self,
+        request_path: str,
+    ) -> ImportArtifactBinding | None:
+        if not request_path.startswith(MOUNTED_RECONSTRUCTION_PREFIX):
+            return None
+        relative = request_path.removeprefix(
+            MOUNTED_RECONSTRUCTION_PREFIX
+        )
+        if (
+            not relative
+            or "\\" in relative
+            or "\x00" in relative
+            or any(
+                part in {"", ".", ".."} or part.startswith(".")
+                for part in PurePosixPath(relative).parts
+            )
+        ):
+            return None
+        return self.bindings.get(f"web/{relative}")
+
+    def read(self, binding: ImportArtifactBinding) -> bytes:
+        return _stable_regular_file_bytes(self.root, binding)
+
+
+def _load_verified_reconstruction_mount(
+    import_root: str | Path,
+) -> VerifiedReconstructionMount:
+    candidate = Path(import_root).expanduser().absolute()
+    if _is_linklike(candidate) or not candidate.is_dir():
+        raise MountedReconstructionError(
+            "real-scene import root must be a regular directory"
+        )
+    try:
+        root = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise MountedReconstructionError(
+            "real-scene import root cannot be resolved safely"
+        ) from exc
+    if root != candidate:
+        raise MountedReconstructionError(
+            "real-scene import root must not traverse a link"
+        )
+    receipt = validate_real_scene_import_receipt(
+        root / "import-receipt.json",
+        root,
+    )
+    if (
+        receipt.source_role != "production-acceptance"
+        or receipt.geometry_usability != "metric-aligned"
+        or receipt.target_units != "meters"
+    ):
+        raise MountedReconstructionError(
+            "mounted reconstruction requires a production-acceptance, "
+            "metric-aligned receipt in meters"
+        )
+    bindings = {
+        binding.path: binding
+        for binding in receipt.artifacts
+        if binding.path.startswith("web/")
+    }
+    if receipt.manifest_path not in bindings:
+        raise MountedReconstructionError(
+            "mounted reconstruction receipt does not bind its web manifest"
+        )
+    return VerifiedReconstructionMount(
+        root=root,
+        receipt=receipt,
+        bindings=MappingProxyType(bindings),
+    )
+
+
 def resolve_static_path(project_root: str | Path, url_path: str) -> Path:
     """Resolve a percent-encoded URL path within approved project subtrees."""
 
@@ -3847,6 +4000,61 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
                 return
+        reconstruction_mount = getattr(
+            self.server,
+            "reconstruction_mount",
+            None,
+        )
+        if (
+            reconstruction_mount is not None
+            and request_path.startswith(MOUNTED_RECONSTRUCTION_PREFIX)
+        ):
+            binding = reconstruction_mount.binding_for_request(request_path)
+            if binding is None:
+                self._error(
+                    HTTPStatus.NOT_FOUND,
+                    "mounted_reconstruction_not_found",
+                    "The requested file is not bound by the mounted receipt.",
+                    head_only=head_only,
+                )
+                return
+            try:
+                payload = reconstruction_mount.read(binding)
+            except MountedReconstructionError:
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "mounted_reconstruction_changed",
+                    "The mounted reconstruction changed after validation.",
+                    head_only=head_only,
+                )
+                return
+            etag = f'"sha256:{binding.sha256}"'
+            cache_control = "public, max-age=0, must-revalidate"
+            request_etags = {
+                candidate.strip()
+                for candidate in self.headers.get(
+                    "If-None-Match",
+                    "",
+                ).split(",")
+                if candidate.strip()
+            }
+            if "*" in request_etags or etag in request_etags:
+                self._send_not_modified(
+                    etag,
+                    cache_control=cache_control,
+                )
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                payload,
+                content_type=_content_type(
+                    reconstruction_mount.root / binding.path
+                ),
+                cache_control=cache_control,
+                head_only=head_only,
+                extra_headers={"ETag": etag},
+            )
+            return
         try:
             target = resolve_static_path(self.project_root, request_path)
         except PathAccessError:
@@ -4046,12 +4254,18 @@ def make_server(
     host: str = "127.0.0.1",
     port: int = 8765,
     enable_jobs: bool = False,
+    real_scene_import_root: str | Path | None = None,
 ) -> ThreadingHTTPServer:
     """Create a configured server without starting its event loop."""
 
     root = Path(project_root).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(root)
+    reconstruction_mount = (
+        _load_verified_reconstruction_mount(real_scene_import_root)
+        if real_scene_import_root is not None
+        else None
+    )
 
     class ProjectRequestHandler(StudioRequestHandler):
         project_root = root
@@ -4062,6 +4276,7 @@ def make_server(
     server.job_service = None
     server.request_token = None
     server.capabilities = read_only_capabilities()
+    server.reconstruction_mount = reconstruction_mount
     bound_host, bound_port = server.server_address[:2]
     server.canonical_host = f"{bound_host}:{bound_port}"
     server.canonical_origin = f"http://{server.canonical_host}"
@@ -4104,12 +4319,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="enable the B1 ingest job path when startup safety checks pass",
     )
+    parser.add_argument(
+        "--real-scene-import-root",
+        help=(
+            "mount one fully verified production import at "
+            "/web/data/recon/"
+        ),
+    )
     args = parser.parse_args(argv)
     server = make_server(
         args.root,
         host=args.host,
         port=args.port,
         enable_jobs=args.enable_jobs,
+        real_scene_import_root=args.real_scene_import_root,
     )
     host, port = server.server_address[:2]
     print(f"Nantai 3D Studio: http://{host}:{port}/web/studio/")
@@ -4117,6 +4340,11 @@ def main(argv: list[str] | None = None) -> int:
         print("B1 ingest jobs enabled on the bound loopback origin.")
     else:
         print(f"Read-only adapter: {server.capabilities['reason']}")
+    if server.reconstruction_mount is not None:
+        print(
+            "Mounted verified production reconstruction: "
+            f"{server.reconstruction_mount.root}"
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

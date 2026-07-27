@@ -217,7 +217,24 @@ def validate_handoff() -> None:
 
 
 def serve() -> None:
-    run([PY, "-m", "pipeline.studio_server", "--host", "127.0.0.1", "--port", "8000"])
+    command = [
+        PY,
+        "-m",
+        "pipeline.studio_server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+    ]
+    real_scene_import_root = os.environ.get("REAL_SCENE_IMPORT_ROOT")
+    if real_scene_import_root:
+        command.extend(
+            [
+                "--real-scene-import-root",
+                real_scene_import_root,
+            ]
+        )
+    run(command)
 
 
 def _preview_archive() -> str:
