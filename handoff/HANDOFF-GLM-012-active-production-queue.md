@@ -270,6 +270,26 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 - Modify: `pipeline/remote_shell_executor.py`
 - Modify: `tests/test_remote_shell_executor.py`
 
+**当前未提交草稿预审：拒绝，禁止按现状提交。**
+
+`RemoteContainerLifecycleReceipt` + 新 standalone 测试目前只证明 caller 能自构造一份
+自洽 JSON，未证明 worker 的真实 durable transition。返工必须满足：
+
+1. 删除原始 `workspace` 路径，改为 caller/worker 可独立重算的
+   `workspace_identity_sha256`；公开或异常输出不得含远程私有路径。
+2. 删除 caller 自报的 `submitted/restored/polled/fetched` 时间线和任意
+   `transition_evidence_sha256`。E1 只有 worker 发布的单一
+   `container-created-identity-verified` transition；poll/fetch 状态不属于该 receipt。
+3. receipt 必须由 worker 在真实 `container-id.txt` durable + runtime image inspect
+   成功后发布。caller 只能 load/rederive/verify，不能用公开 builder 代替 producer。
+4. 必须实现 worker bounded lifecycle reader，并接入 caller 的 poll/restore/fetch；
+   standalone model round-trip 测试不能替代执行顺序、wrong-attempt/container-swap 和
+   reconnect 行为测试。
+5. `DurableIOError(published=True)` 表示 namespace 可能已经发布但 sync unknown；
+   测试不得断言 destination 必然不存在或可安全 retry，cleanup 也不得掩盖该状态。
+6. 新测试折回本任务列出的 worker/executor 测试路径；不要用额外测试文件绕过联合
+   fixture 与调用图。
+
 - [ ] **Step 1: 为 lifecycle receipt 建立 RED**
 
 先固定这些行为测试：
