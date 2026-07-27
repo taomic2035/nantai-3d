@@ -57,5 +57,13 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
   Splatfacto、import/chunk、render/viewer/human review 和 aggregate acceptance 合同。
 - fresh canary 得到真实照片 COLMAP 与本机 Brush `preview-only` 证据；未取得云 GPU
   production 结果、米制对齐或真实 Viewer/human acceptance。
-- 最新 `main@348422f` 出现跨平台 CI 回归；当前修复与连续执行队列见
+- 跨平台 CI 回归已关闭；P1-1 的 pinned Node/Playwright/Chromium Viewer runtime
+  门和 P1-2 的 remote-shell readiness/identity/TOCTOU/canonical publication
+  已进入 main。
+- P1-3A/B/C 已完成 monotonic remote observation、单点 tamper、durable job ref、
+  fresh executor restore、同 attempt reconnect 与显式 retry/new attempt。
+- P1-4A 已完成 source/target 重复对应点、非有限值、共线/近共面与生产默认 span
+  policy 的 fail-closed 输入门。
+- 当前未关闭的是 P1-3D 固定演练 runner、P1-4B/C 米制证据/runner 信任门、
+  P1-5 云 CUDA readiness 与 production result closure；连续执行队列见
   [HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md)。
