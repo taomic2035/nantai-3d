@@ -92,4 +92,8 @@ def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
     assert "nantai.viewer-camera-set.v2" in manual
     assert "registered-camera-maximin-v1" in manual
     assert "不能手写或任意挑选三机位" in manual
+    assert "REAL_SCENE_IMPORT_ROOT" in manual
+    assert "--real-scene-import-root" in manual
+    assert "receipt 白名单" in manual
     assert "camera-set v2" in status
+    assert "receipt-bound" in status

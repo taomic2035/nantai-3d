@@ -261,7 +261,29 @@ registration 以 `registered-camera-maximin-v1` 确定性选出三个空间分�
 `nantai.viewer-camera-set.v2` 同时内容锁定 import receipt、aligned registration 和
 scene manifest；policy 精确绑定三个 pose ID。输出目录必须不存在，不会覆盖旧证据。
 
-保持 Studio 正在运行，然后执行：
+在另一个 PowerShell 终端启动 Studio，并显式只读挂载同一份 import：
+
+```powershell
+$env:REAL_SCENE_IMPORT_ROOT = "$run\imported"
+python make.py serve
+```
+
+等价的底层命令是：
+
+```powershell
+python -m pipeline.studio_server `
+  --root . `
+  --host 127.0.0.1 `
+  --port 8000 `
+  --real-scene-import-root "$run\imported"
+```
+
+服务器启动前会重新验证 `import-receipt.json` 和全部绑定产物，只接受
+`production-acceptance / metric-aligned / meters`。浏览器只能访问 receipt 白名单中
+`web/` 下的重建 manifest、PLY 和 chunks；训练输入、控制点、日志及其它私有文件不会
+被映射。挂载字节在启动后发生变化时请求会 fail closed，不能回落到仓库 demo。
+
+保持该 Studio 进程运行，然后执行：
 
 ```powershell
 node scripts\capture_viewer_acceptance.mjs `

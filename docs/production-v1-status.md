@@ -79,6 +79,9 @@ Viewer v2 代码门已经就绪：
 - production camera-set v2 producer 从复验通过的 metric-aligned COLMAP registration
   确定性选取三个空间分离机位，并绑定 import receipt、aligned registration 与 scene
   manifest；v1 或任一来源 SHA 漂移均 fail closed；
+- Studio 的 `--real-scene-import-root` 会在启动时复验整份 production import，并把
+  receipt-bound `web/` 重建白名单只读映射到 Viewer 固定 URL；未绑定文件、preview
+  receipt、仓库 demo 回落和启动后字节漂移均拒绝；
 - capture input、截图与复制出的代码采用 root-bounded、no-symlink、no-replace
   路径；浏览器可执行文件流式哈希，不按文件大小整块分配内存；
 - 浏览器实际收到的 scene manifest 与 acceptance probe 响应字节必须分别匹配
