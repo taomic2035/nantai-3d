@@ -31,6 +31,7 @@ from pipeline.remote_shell_executor import RemoteShellStatus
 _ROOT = Path(__file__).resolve().parents[1]
 _CONTAINER_IDENTITY = "registry.example/nantai@sha256:" + "c" * 64
 _DEFAULT_CONTAINER_ID = "a" * 64
+_TEST_EXECUTABLE = Path(sys.executable).resolve()
 
 
 def _sha(payload: bytes) -> str:
@@ -69,7 +70,7 @@ def _runtime_policy() -> ProductionRuntimePolicy:
             ).read_bytes()
         ),
         expected_container_runtime_sha256=_sha(
-            Path(sys.executable).read_bytes()
+            _TEST_EXECUTABLE.read_bytes()
         ),
         expected_nvidia_smi_sha256="6" * 64,
         expected_python_sha256="7" * 64,
@@ -282,7 +283,9 @@ def _patch_worker(monkeypatch, fake: FakeDocker) -> None:
     monkeypatch.setattr(
         "cloud.remote_training_worker.shutil.which",
         lambda name: (
-            sys.executable if name in {"docker", "podman"} else None
+            str(_TEST_EXECUTABLE)
+            if name in {"docker", "podman"}
+            else None
         ),
     )
 
@@ -651,7 +654,9 @@ def test_worker_publishes_closed_lifecycle_after_digest_before_start(
     monkeypatch.setattr(
         "cloud.remote_training_worker.shutil.which",
         lambda name: (
-            sys.executable if name in {"docker", "podman"} else None
+            str(_TEST_EXECUTABLE)
+            if name in {"docker", "podman"}
+            else None
         ),
     )
 
@@ -1217,7 +1222,9 @@ def test_worker_lifecycle_order_brackets_digest_and_start(
     monkeypatch.setattr(
         "cloud.remote_training_worker.shutil.which",
         lambda name: (
-            sys.executable if name in {"docker", "podman"} else None
+            str(_TEST_EXECUTABLE)
+            if name in {"docker", "podman"}
+            else None
         ),
     )
     monkeypatch.setattr(
@@ -1516,7 +1523,9 @@ def test_worker_uses_structured_argv_no_shell(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "cloud.remote_training_worker.shutil.which",
         lambda name: (
-            sys.executable if name in {"docker", "podman"} else None
+            str(_TEST_EXECUTABLE)
+            if name in {"docker", "podman"}
+            else None
         ),
     )
 

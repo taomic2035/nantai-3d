@@ -151,6 +151,13 @@ def _regular_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(files, key=lambda path: path.as_posix()))
 
 
+def _safe_evidence_files(root: Path) -> tuple[Path, ...]:
+    try:
+        return _regular_files(root)
+    except RealSceneCaptureError:
+        return ()
+
+
 def _stage_root_for(
     workspace: Path,
     receipt: StageReceipt,
@@ -269,7 +276,7 @@ class RealScenePipelineOperations:
                     state="unknown",
                     artifacts=(),
                     reason=f"dataset fetch is incomplete: {exc}",
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
             return StageExecution(
                 state="completed",
@@ -298,7 +305,7 @@ class RealScenePipelineOperations:
                 state="blocked",
                 artifacts=(),
                 reason=f"private capture preparation failed: {exc}",
-                evidence_artifacts=_regular_files(stage_root),
+                evidence_artifacts=_safe_evidence_files(stage_root),
             )
         return StageExecution(
             state="completed",
@@ -373,7 +380,7 @@ class RealScenePipelineOperations:
                 state="blocked",
                 artifacts=(),
                 reason=f"SfM execution failed: {exc}",
-                evidence_artifacts=_regular_files(stage_root),
+                evidence_artifacts=_safe_evidence_files(stage_root),
             )
         if not result.quality.training_allowed:
             reasons = "; ".join(result.quality.rejection_reasons) or (
@@ -514,7 +521,7 @@ class RealScenePipelineOperations:
                 state="blocked",
                 artifacts=(),
                 reason=f"local Brush preview failed: {exc}",
-                evidence_artifacts=_regular_files(stage_root),
+                evidence_artifacts=_safe_evidence_files(stage_root),
             )
         return StageExecution(
             state="completed",
@@ -548,7 +555,7 @@ class RealScenePipelineOperations:
                 state="blocked",
                 artifacts=(),
                 reason=f"production bundle preparation failed: {exc}",
-                evidence_artifacts=_regular_files(stage_root),
+                evidence_artifacts=_safe_evidence_files(stage_root),
             )
         try:
             config = self._remote_config()
@@ -575,7 +582,7 @@ class RealScenePipelineOperations:
                 state="blocked",
                 artifacts=(),
                 reason=f"remote executor preflight failed: {exc}",
-                evidence_artifacts=_regular_files(stage_root),
+                evidence_artifacts=_safe_evidence_files(stage_root),
             )
         job_path = stage_root / "remote-job.private.json"
         lifecycle_path = (
@@ -594,7 +601,7 @@ class RealScenePipelineOperations:
                     "remote recovery evidence is incomplete; "
                     "job and lifecycle must be persisted together"
                 ),
-                evidence_artifacts=_regular_files(stage_root),
+                evidence_artifacts=_safe_evidence_files(stage_root),
             )
         if job_exists:
             try:
@@ -621,7 +628,7 @@ class RealScenePipelineOperations:
                         "remote recovery evidence is invalid: "
                         f"{exc}"
                     ),
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
         else:
             try:
@@ -639,7 +646,7 @@ class RealScenePipelineOperations:
                         "remote submission state is unknown: "
                         f"{exc}"
                     ),
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
 
         deadline = time.monotonic() + self.options.remote_timeout_seconds
@@ -651,7 +658,7 @@ class RealScenePipelineOperations:
                     state="unknown",
                     artifacts=(),
                     reason=f"remote poll state is unknown: {exc}",
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
             self._write_private_model(
                 stage_root / "remote-observation.private.json",
@@ -671,7 +678,7 @@ class RealScenePipelineOperations:
                                 "remote lifecycle was not bound before "
                                 "timeout; no success was inferred"
                             ),
-                            evidence_artifacts=_regular_files(stage_root),
+                            evidence_artifacts=_safe_evidence_files(stage_root),
                         )
                     time.sleep(
                         self.options.remote_poll_interval_seconds
@@ -681,7 +688,7 @@ class RealScenePipelineOperations:
                     state="unknown",
                     artifacts=(),
                     reason=f"remote lifecycle state is unknown: {exc}",
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
             try:
                 if lifecycle_path.exists() or lifecycle_path.is_symlink():
@@ -712,14 +719,14 @@ class RealScenePipelineOperations:
                         "remote lifecycle publication is unknown: "
                         f"{exc}"
                     ),
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
             if observation.state == "failed":
                 return StageExecution(
                     state="blocked",
                     artifacts=(),
                     reason=(f"remote Splatfacto failed with exit code {observation.exit_code}"),
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
             if observation.state == "unknown":
                 if observation.exit_code != 0:
@@ -727,7 +734,7 @@ class RealScenePipelineOperations:
                         state="unknown",
                         artifacts=(),
                         reason=("remote Splatfacto state is unknown; no success was inferred"),
-                        evidence_artifacts=_regular_files(stage_root),
+                        evidence_artifacts=_safe_evidence_files(stage_root),
                     )
                 try:
                     receipt = executor.fetch(
@@ -739,21 +746,21 @@ class RealScenePipelineOperations:
                         state="blocked",
                         artifacts=(),
                         reason=f"remote result failed validation: {exc}",
-                        evidence_artifacts=_regular_files(stage_root),
+                        evidence_artifacts=_safe_evidence_files(stage_root),
                     )
                 except (OSError, RemoteShellExecutionError) as exc:
                     return StageExecution(
                         state="unknown",
                         artifacts=(),
                         reason=(f"remote result closure is unknown: {exc}"),
-                        evidence_artifacts=_regular_files(stage_root),
+                        evidence_artifacts=_safe_evidence_files(stage_root),
                     )
                 if receipt.state != "succeeded" or receipt.quality_role != "production":
                     return StageExecution(
                         state="blocked",
                         artifacts=(),
                         reason=("remote result receipt is not succeeded production evidence"),
-                        evidence_artifacts=_regular_files(stage_root),
+                        evidence_artifacts=_safe_evidence_files(stage_root),
                     )
                 self._write_private_model(
                     stage_root / "executor-attempt.json",
@@ -768,7 +775,7 @@ class RealScenePipelineOperations:
                     state="unknown",
                     artifacts=(),
                     reason="remote Splatfacto polling timed out",
-                    evidence_artifacts=_regular_files(stage_root),
+                    evidence_artifacts=_safe_evidence_files(stage_root),
                 )
             time.sleep(self.options.remote_poll_interval_seconds)
 
@@ -805,7 +812,7 @@ class RealScenePipelineOperations:
                 state="blocked",
                 artifacts=(),
                 reason=f"real-scene import failed: {exc}",
-                evidence_artifacts=_regular_files(stage_root),
+                evidence_artifacts=_safe_evidence_files(stage_root),
             )
         return StageExecution(
             state="completed",

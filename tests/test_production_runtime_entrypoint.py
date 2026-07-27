@@ -43,7 +43,9 @@ def _sha_file(path: Path) -> str:
 
 
 def _copy_executable(target: Path) -> Path:
-    shutil.copyfile(sys.executable, target)
+    source = Path(sys.executable).resolve()
+    shutil.copyfile(source, target)
+    shutil.copymode(source, target)
     return target
 
 

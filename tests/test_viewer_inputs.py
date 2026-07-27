@@ -208,8 +208,8 @@ def test_materializer_derives_three_content_bound_registered_camera_poses(
                 output_path=workspace / "viewer/report.json",
                 decision_path=workspace / "viewer/decision.json",
                 evidence_root=evidence_root,
-                node_executable=Path(sys.executable),
-                python_executable=Path(sys.executable),
+                node_executable=Path(sys.executable).resolve(),
+                python_executable=Path(sys.executable).resolve(),
                 headless=True,
             )
         )
