@@ -82,7 +82,7 @@ def _executable(role: str) -> StableExecutableObservation:
 def _measurement() -> ProductionRuntimeMeasurement:
     executables = tuple(_executable(role) for role in _ROLES)
     environment = ExecutionEnvironmentObservation(
-        kind="existing-container",
+        kind="fresh-job-container",
         container_runtime="docker",
         container_instance_id="1" * 64,
         configured_container_identity=_CONTAINER,
@@ -293,6 +293,17 @@ def test_executable_toctou_is_rejected():
             probe_definition_sha256=executable.probe_definition_sha256,
             before=executable.before,
             after=changed,
+        )
+
+
+def test_runtime_measurement_forbids_reused_container_identity():
+    measurement = _measurement()
+
+    with pytest.raises(ValidationError, match="fresh-job-container"):
+        ExecutionEnvironmentObservation.model_validate(
+            measurement.environment.model_copy(
+                update={"kind": "existing-container"}
+            ).model_dump()
         )
 
 

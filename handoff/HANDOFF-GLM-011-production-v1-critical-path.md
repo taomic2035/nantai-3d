@@ -99,10 +99,10 @@ GPU 逻辑。
 - `ready` 必须由模型重算，不能由 caller 提供。
 
 GLM 不要再在 `remote_shell_executor.py` 或 checker 内定义平行的
-`RemoteReadinessEvidence.v2` 信任模型。G3 必须把 fixed raw probe observations
-适配为上述 measurement，再由该模块的 policy/decision 唯一派生 acceptance。
+`RemoteReadinessEvidence.v2` 信任模型。G3 只保留无副作用 host preflight；
+job-bound 的 G2 measurement 必须在 G4 的 fresh training container 内产生。
 
-### G3 — Fixed read-only production probes
+### G3 — Fixed read-only host preflight
 
 优先路径：
 
@@ -112,27 +112,23 @@ GLM 不要再在 `remote_shell_executor.py` 或 checker 内定义平行的
 完成定义：
 
 - probe registry 固定且内容寻址，caller 不能传任意命令；
-- 只连接已运行、全 ID 固定且镜像 digest 匹配的 container；不得启动新容器；
-- 实测 `nvidia-smi` 的 GPU UUID/name/memory/driver；
-- 实测 CUDA runtime，而不是从 driver 字符串推断；
-- 在绑定的 production environment 内实测 Python、Nerfstudio `1.1.5` 和
-  `ns-train splatfacto --help` 的结构化 schema；
-- readiness 不安装包、不改 PATH、不启动新容器、不跑 SfM/训练；
-- 每个 executable 和 environment identity 做前后快照；变化即 TOCTOU blocked；
+- 只证明 SSH/host key、container runtime、immutable image 可解析、worker/checker
+  identity 和 GPU 调度前置条件；
+- preflight 不安装包、不改 PATH、不创建/启动容器、不跑 SfM/训练；
+- host executable 做前后快照；变化即 TOCTOU blocked；
 - stdout/stderr 有大小上限和 secret redaction，非 UTF-8/截断/timeout 稳定 blocked。
-- 每个 raw probe 绑定 `execution_environment_sha256`，并构造
-  `ProductionRuntimeMeasurement.create(...)`；checker 不输出 caller 可填的
-  `ready=true`。
+- checker 不输出 production `ready=true`，也不构造 G2 measurement；宿主
+  `nvidia-smi`/Python/Nerfstudio 不能代表随后创建的训练容器。
 
-无 GPU 时测试 fixture 仍要证明 parser 与状态机，但 `ready` 只能来自真实 probe
-observations。
+无 GPU 时 fixture 仍要证明 parser 与状态机，但状态只能是 transport preflight
+结果或 `blocked-external-input`。
 
 当前 1747 行草稿不能直接提交：它仍运行宿主任意 `nerfstudio_python`、没有真实
 CUDA runtime 和 `ns-train splatfacto` CLI schema，并在 remote shell 内重复定义
 G2 schema。先把 `training_executor.py` 中被 `4150cfb` 替代的 drill 草稿从 diff
-移除；再只提交 checker + G2 adapter + 对应测试。`docs/manual` 等代码闭环后另交。
+移除；再只提交 host preflight + 对应测试。`docs/manual` 等代码闭环后另交。
 
-### G4 — Remote caller 端到端接入
+### G4 — Fresh job-container clearance 与 remote caller
 
 允许路径：
 
@@ -142,14 +138,23 @@ G2 schema。先把 `training_executor.py` 中被 `4150cfb` 替代的 drill 草�
 
 完成定义：
 
-- submit 固定 checker，poll/fetch 后验证 G2 canonical report；
-- host key、durable job ref、workspace、commit 和 runtime evidence identity 串成一条
-  closure chain；
+- host preflight 通过后才分配 durable job/attempt/workspace；
+- worker 不再用无法取得实例身份的 `docker run --rm`；先以 immutable digest
+  `create` fresh job container，记录完整 container ID，再 `start` 同一实例；
+- 同一 container 的入口先执行 fixed clearance probes，实测 GPU UUID/name/memory/
+  driver、CUDA runtime、Python、Nerfstudio `1.1.5`、`ns-train splatfacto` CLI
+  schema 和六个 executable 前后快照；
+- raw probes 绑定 job/workspace/container environment SHA，构造并验证 G2
+  measurement/policy/decision；decision 非 accepted 时绝不启动训练；
+- clearance accepted 后才在同一 container process chain 中训练；不得换 container；
+- result bundle v2 绑定 runtime measurement/policy/decision canonical bytes 与 SHA，
+  旧 result bundle v1 保持历史可读但不能满足 Production V1；
 - reconnect 后必须恢复同一 probe attempt，不得新建“看起来成功”的 attempt；
 - absence/timeout/transport unknown 映射为 `blocked-external-input` 或 `unknown`，
   永远不映射 ready；
 - no-replace durable publication，覆盖 collision、partial、sync failure、replay、
-  wrong-attempt 和 result swap。
+  wrong-attempt、container swap 和 result swap；
+- result/failure evidence耐久发布完成后才清理 job container。
 
 联合回归必须包含 readiness + remote shell + operations + runner，不只跑 checker。
 
@@ -171,6 +176,8 @@ G2 schema。先把 `training_executor.py` 中被 `4150cfb` 替代的 drill 草�
 完成定义：
 
 - 验证同一 dataset/config/trainer/container/commit/attempt 从请求贯穿结果；
+- 重新验证 result bundle v2 内的 G2 decision，要求
+  `kind=fresh-job-container` 且 container ID 与实际训练实例一致；
 - 非 mock training log、export PLY、dataparser transform、held-out render/evaluation
   与 runtime evidence 全部以 canonical SHA 绑定；
 - 至少 100,000 个 finite Gaussians、完整 INRIA schema、identity dataparser；

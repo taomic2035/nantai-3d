@@ -240,7 +240,7 @@ class StableExecutableObservation(FrozenModel):
 
 
 class ExecutionEnvironmentObservation(FrozenModel):
-    kind: Literal["existing-container"]
+    kind: Literal["fresh-job-container"]
     container_runtime: Literal["docker", "podman"]
     container_instance_id: str = Field(pattern=_SHA256_PATTERN)
     configured_container_identity: str = Field(

@@ -20,7 +20,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
 | production import 与 runner 复验 | 原始字节重算；低 RMS 自报不能通过 |
-| production runtime evidence | 六 probe/六 executable 合同已完成，待 checker 接入 |
+| production runtime evidence | 六 probe/六 executable 合同已完成，待 fresh job-container 接入 |
 | Viewer/Studio 与 synthetic QA | 可用，但不能代替真实重建验收 |
 
 ## 正式版关键路径
