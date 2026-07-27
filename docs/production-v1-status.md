@@ -20,8 +20,8 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
 | production import、acceptance 与 runner 复验 | v3 receipt 绑定 G2/G5；import 与最终 acceptance 均重开原始 runtime、manifest、render、closure 字节 |
-| production runtime evidence | 六 probe/六 executable 合同已完成，待 fresh job-container 接入 |
-| production result closure | v2 manifest、closure 与 import 消费端已完成，待 remote caller 产出 |
+| production runtime evidence | 六 probe/六 executable 已接入 fresh-container 主入口；待真实 GPU fresh accepted 证据 |
+| production result closure | worker/caller 已接通 v2 archive、render decision 与 closure；待真实 GPU 产物 |
 | Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；尚未对真实重建运行，不能签署 production |
 
 ## 正式版关键路径
@@ -50,13 +50,16 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 2. `F1` 代码门：Codex `0d6c9e7` 已接通同一 lifecycle container 的固定六探针
    entrypoint；非 accepted、身份/TOCTOU 漂移或 publication collision 均无法进入训练。
    仍缺获批真实 GPU 上的 fresh accepted 机器证据；
-3. **当前 `G1`**：让 `train-production` producer 产出既有 import 合同要求的八个
-   结果文件，并把 F1 三份 runtime evidence 纳入 result-bundle v2；
-4. GLM `H1 → I1`：poll 不越过 deadline、所有路径关闭 executor；大型 PLY receipt
-   复验使用 bounded-memory stable digest。
+3. `G1` 已由 Codex `1727f8f` + `92b76b5` 关闭：clearance evidence 不提前占用
+   training result boundary；worker 以 no-replace 方式物化 runtime 三件套与
+   container ID，产出 result-bundle v2；caller 复验后派生 render decision 与
+   production closure；
+4. **当前 GLM `H1 → I1 → J1 → K1`**：poll 不越过 deadline、所有路径关闭
+   executor；大型 PLY receipt 使用 bounded-memory stable digest；result archive
+   流式校验/提取并补齐 v2 fetch 端到端矩阵。
 
-A1–F1 与 P0-CI 的 repo-local 代码门已关闭，不再重做。GLM 立即连续执行
-`H1 → I1`；Codex 接 G1 producer。每项独立提交并 push；真实 GPU 运行前状态仍是
+A1–G1 与 P0-CI 的 repo-local 代码门已关闭，不再重做。GLM 立即连续执行
+`H1 → I1 → J1 → K1`，每项独立提交并 push；真实 GPU 运行前状态仍是
 modeled-unverified，不能签署 Production V1。
 
 ### P0 — 外部输入：正式素材与测量

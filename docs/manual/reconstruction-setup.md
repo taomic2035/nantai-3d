@@ -193,6 +193,15 @@ CUDA、Python、Nerfstudio、`ns-train splatfacto` CLI schema 与六个 executab
 和 host container-runtime 的 policy SHA。旧 attempt 不能补写这些绑定，必须创建
 fresh attempt；代码测试通过也不等于已经取得真实 GPU accepted evidence。
 
+clearance 三件套先发布到 attempt 根目录的 `production-runtime/`，不会提前创建
+训练脚本要求必须不存在的 `runtime/production-run`。只有训练成功后，worker 才以
+no-replace 方式把三件套和完整 container ID 物化到 result root，生成严格白名单的
+`nantai.remote-result-bundle.v2`。caller 会重新绑定 lifecycle、status、job/attempt、
+remote target、durable job ref、workspace、container、训练与 held-out render；
+archive 验证通过后才在本地派生 `render-evaluation/decision.json` 与
+`production-training-closure.json`，避免 closure 反向进入自身绑定的 archive 形成
+循环 SHA。
+
 连接丢失或远端状态无法验证时结果必须是 `unknown`；`RESUME=1` 只重连原 job，
 不会上传、初始化、启动或重复提交；operator 明确使用 `RETRY=1` 才创建新 attempt。
 
@@ -227,7 +236,7 @@ ns-export gaussian-splat \
   --output-dir exports/splat
 ```
 
-下载以下最终产物：
+手动训练至少下载以下最终产物：
 
 ```text
 point_cloud.ply
@@ -237,6 +246,25 @@ training-result.json
 
 request/result 只证明其声明并通过内容闭合检查的事实；stub 或失败 result 不能冒充
 真实训练。
+
+通过 `train-production` 的正式远程路径时，不要手工拼装上述文件。verified fetch
+会落地以下八个 import 合同入口：
+
+```text
+remote-result/result-bundle-manifest.json
+remote-result/production-runtime/measurement.json
+remote-result/production-runtime/policy.json
+remote-result/production-runtime/decision.json
+remote-result/render-evaluation/policy.json
+remote-result/render-evaluation/report.json
+remote-result/render-evaluation/decision.json
+remote-result/production-training-closure.json
+```
+
+同目录还包含 archive 白名单中的 PLY、训练 provenance、dataparser transform、日志、
+相机与渲染 payload。八个入口齐全也不自动代表正式版：runtime decision、render
+decision、closure、米制 alignment 与最终 Viewer/human acceptance 必须对同一 scene
+identity 全部重新验证通过。
 
 ## 5. 导入、对齐和分块
 

@@ -7,41 +7,31 @@
 **目标：** 在没有真实 GPU、secret 和正式素材时，继续关闭 Production V1 远程训练与
 大型产物链路中可由 repo-local fake transport / 文件系统证明的工程缺口。
 
-**当前基线：** 至少 `a789d4b`。共享 worktree 目前有 Codex 的 G1 未提交修改，GLM
-不得 reset、checkout、stash、rebase 或清理它们。
+**当前基线：** 至少 `92b76b5`。Codex 已 push G1，J1/K1 的 executor path 已解锁。
+共享 worktree 仍不得 reset、checkout、stash、rebase 或清理其它 agent 的修改。
 
 ## 连续顺序
 
 ```text
 H1 deadline / executor-close（立即开始）
   → I1 import artifact bounded-memory digest（H1 push 后立即开始）
-  → J1 result-bundle streaming verify/extract（等 Codex G1 push 通知后开始）
+  → J1 result-bundle streaming verify/extract
   → K1 production v2 fetch integration matrix
 ```
 
 H1 与 I1 现在即可连续完成，不依赖 CUDA、Blender、正式素材、secret 或 Codex 新接口。
-J1/K1 只有“Codex 尚未 push G1”是暂缓理由；前两项不是。
+G1 已由 `1727f8f` + `92b76b5` push；四项之间都不再等待 Codex 口头确认。
 
 ## 共享工作树边界
 
-Codex 当前独占以下 dirty paths：
-
-- `cloud/production_runtime_entrypoint.py`
-- `cloud/remote_training_worker.py`
-- `pipeline/remote_shell_executor.py`
-- `tests/test_production_runtime_entrypoint.py`
-- `tests/test_production_training_closure.py`
-- `tests/test_real_scene_import.py`
-- `tests/test_remote_training_worker.py`
-
-因此：
+开始每张工单前先读 `git status --short`。因此：
 
 - H1 只改 `pipeline/real_scene_operations.py` 和
   `tests/test_real_scene_operations.py`；
 - I1 只改 `pipeline/real_scene_import.py`，并新建
-  `tests/test_real_scene_import_streaming.py`，不要碰当前 dirty 的
+  `tests/test_real_scene_import_streaming.py`，不要改
   `tests/test_real_scene_import.py`；
-- J1/K1 等 Codex 明确 G1 已 push、上述 executor path 变干净后再动；
+- J1/K1 只在 H1/I1 push 后开始，路径已经由 `92b76b5` 解锁；
 - 禁止 `git add -A`、`git commit -a`；只做路径限定 stage/commit；
 - GLM 提交不写 Codex co-author。
 
@@ -144,15 +134,14 @@ git commit --only pipeline/real_scene_import.py tests/test_real_scene_import_str
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-I1 push 后回报 H1/I1 证据；若 Codex 尚未通知 G1 已 push，只等待 J1 的 path 解锁，
-不要重新做审计或改 Viewer/Studio/release。
+I1 push 后回报 H1/I1 证据并立即开始 J1；不要重新做审计或改
+Viewer/Studio/release。
 
 ---
 
 ## J1：production result-bundle 流式校验与提取
 
-**启动门：** Codex 已 push G1，并明确
-`pipeline/remote_shell_executor.py` 不再是 dirty path。
+**启动门：** 已满足。Codex G1 为 `92b76b5`；H1/I1 push 后立即开始。
 
 **Files**
 

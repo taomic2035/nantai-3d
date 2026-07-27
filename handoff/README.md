@@ -6,7 +6,8 @@
 ## 当前真实场景主线
 
 1. [GLM 当前连续工单](HANDOFF-GLM-012-active-production-queue.md) — 唯一执行入口：
-   `H1 → I1` 现在连续完成；Codex G1 push 解锁后继续 `J1 → K1`。每项都有独立
+   `H1 → I1 → J1 → K1` 连续完成；Codex G1 已由 `92b76b5` push 并解锁后两项。
+   每项都有独立
    文件边界、RED/GREEN、提交和停止条件，不再从已关闭的 F1/G1 历史开工
 2. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
 3. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
