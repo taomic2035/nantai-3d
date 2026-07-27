@@ -15,6 +15,167 @@ Brush preview、远程 transport 演练，以及测量 / policy / decision 分�
 import 门；仍缺真实云 GPU 训练产物、真实场景实测控制点和真实 Viewer/human
 acceptance。
 
+## GLM 立即执行队列（不要等待 Codex 再次分配）
+
+下面 8 个任务按顺序连续执行。每完成一个就做路径限定小提交、用一次性代理 push，
+然后立即进入下一项。Codex 当前独立实现
+`pipeline/production_training_closure.py` 与对应测试；GLM 不得修改该路径，也不得
+新建平行的 result-closure schema。
+
+### NOW-1 — 删除 superseded drill 草稿
+
+允许路径：
+
+- `pipeline/training_executor.py`
+- `tests/test_training_executor.py`
+
+动作：
+
+1. 从当前未提交 diff 删除 `RemoteTrainingDrill*`、caller 自报 `outcome="pass"` 及
+   对应约 500 行测试；
+2. 保留 main 上由 `pipeline/remote_training_drill.py` 和 `4150cfb` 提供的固定
+   11-case drill；
+3. 运行 `pytest -q tests/test_training_executor.py tests/test_remote_training_drill.py`。
+
+完成信号：这两个文件相对 `HEAD` 无 superseded drill diff。不要为了“保留工作量”
+迁移代码。
+
+### NOW-2 — 把 G3 收窄为 host preflight
+
+允许路径：
+
+- `cloud/remote_readiness_checker.py`
+- `tests/test_remote_readiness_checker.py`
+
+动作：
+
+1. 删除 caller 可传的任意 `nerfstudio_python`、GPU name/memory/driver 数值；
+2. 固定只读 probe registry，只测 SSH/host key、container runtime、immutable
+   image digest 可解析、worker/checker identity 与 GPU scheduler 前置条件；
+3. 输出字段必须明确为 `host-preflight`，不得出现 production `ready=true`；
+4. timeout、非 UTF-8、截断、缺命令、image 不可解析统一 fail closed；
+5. 先写 RED：宿主有 Python/Nerfstudio 也不能证明训练容器 ready。
+
+专项门：
+
+```powershell
+python -m pytest -q tests/test_remote_readiness_checker.py
+python -m ruff check cloud/remote_readiness_checker.py tests/test_remote_readiness_checker.py
+git diff --check
+```
+
+### NOW-3 — G3 防欺骗与 TOCTOU
+
+仍只修改 NOW-2 两条路径：
+
+1. probe command definition、resolved executable path、regular-file SHA 和 size
+   内容寻址；
+2. container runtime 与 checker executable 前后各取一次快照；
+3. wrapper/path/file identity 任一变化即 blocked；
+4. stdout/stderr 分别设固定 byte cap，先截断/标记再做 secret redaction；
+5. 增加 wrapper spoof、symlink、mid-probe replace、oversize、secret、timeout、
+   malformed observation 的 RED/GREEN 用例。
+
+不要在本任务构造 G2 measurement；G2 只能来自 fresh job container。
+
+### NOW-4 — 审计并测试 fresh container 生命周期
+
+允许路径：
+
+- `cloud/remote_training_worker.py`
+- `tests/test_remote_training_worker.py`
+
+先只做行为测试与最小实现，不接 G2 schema：
+
+1. `docker create` 使用 immutable digest 并取得完整 container ID；
+2. 后续 clearance 和 training 明确指向同一 ID；
+3. durable result/failure publication 完成前不能 remove；
+4. wrong ID、short ID、inspect digest drift、start 失败、publication partial、
+   reconnect replay 都必须 fail closed；
+5. shell argv 必须结构化传递，禁止字符串拼接 secret/路径。
+
+如果现有 worker 的职责不适合直接创建容器，先交付一个可复现 RED 测试和最小接口
+合同，不要大改 remote caller。
+
+### NOW-5 — G4 remote caller 第一小步
+
+允许路径：
+
+- `pipeline/remote_shell_executor.py`
+- `tests/test_remote_shell_executor.py`
+
+动作：
+
+1. 移除当前 diff 中平行 `RemoteReadinessEvidence.v2`；
+2. 新增 fresh-container lifecycle receipt，只记录 job/attempt/workspace、
+   immutable digest、完整 container ID 与 durable state transition；
+3. receipt 不得包含 caller 自报 GPU/CUDA/Nerfstudio pass；
+4. no-replace publication，覆盖 collision、wrong-attempt、container swap、
+   result swap、partial/sync failure；
+5. reconnect 必须恢复同一 attempt/container，不得静默创建替代实例。
+
+完成后停在接口边界，等 Codex review；不要自行复制
+`production_runtime_evidence.py` 的模型。
+
+### NOW-6 — G4 clearance probe adapter
+
+只有 NOW-5 review 通过后才开始。仍限 remote shell 两条路径：
+
+1. 在同一 fresh container 内运行固定六 probe；
+2. 原始 observation 交给 Codex 已有
+   `pipeline.production_runtime_evidence` 构造 measurement/policy/decision；
+3. decision 非 accepted，训练入口必须保持不可达；
+4. accepted 后同一 container 才进入 training；
+5. 增加 container swap、executable drift、GPU UUID drift、CUDA/Python/
+   Nerfstudio/CLI schema drift 与 probe TOCTOU 用例。
+
+### NOW-7 — 外部门控 blocked report
+
+允许新增：
+
+- `pipeline/production_external_inputs.py`
+- `tests/test_production_external_inputs.py`
+
+交付 canonical、duplicate-key-safe、内容寻址的 blocked report，逐项列出：
+
+- SSH endpoint 与 pinned host key；
+- immutable CUDA image digest；
+- rights-cleared production dataset identity；
+- Nerfstudio `1.1.5` / Splatfacto requirement；
+- 至少四个非共面实测控制点；
+- production Viewer human acceptance 尚未取得。
+
+不得记录 token、私钥、完整环境变量、私有绝对路径；blocked report 不得含
+`ready`、`verified-production`、`metric-aligned` 或 release-allowed 声明。
+
+### NOW-8 — 静态安全审计转成 RED 测试
+
+允许路径：
+
+- `cloud/train_3dgs_nerfstudio.sh`
+- `tests/test_cloud_prepared_training_script.py`
+- `cloud/remote_training_worker.py`
+- `tests/test_remote_training_worker.py`
+
+逐项检查 mutable image/tag、未固定 CLI、shell injection、结果自报成功、发布前
+清理、日志泄密。每发现一项先加入可重复 RED 测试，再做最小修复；没有复现的猜测
+不要改生产代码。
+
+### 每项回执模板
+
+GLM 每次只回：
+
+1. `NOW-n` 与 commit SHA；
+2. 精确修改路径；
+3. RED 测试名及失败原因；
+4. GREEN 命令、passed/skipped 数；
+5. ruff 与 `git diff --check`；
+6. 尚未解决的风险；
+7. 已自动开始的下一项编号。
+
+这份队列本身就是继续工作的授权；只有需要新 secret、真实 endpoint、付费 GPU 或
+修改 Codex-owned 路径时才停下来询问。
+
 ### 已关闭，不要重做
 
 | 项 | 证据 |
