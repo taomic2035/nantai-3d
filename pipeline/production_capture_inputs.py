@@ -27,6 +27,7 @@ from pipeline.real_dataset import (
     load_real_dataset_source,
     validate_capture_rights,
 )
+from pipeline.registration_quality import RegistrationQualityPolicy
 
 
 class ProductionCaptureInputError(ValueError):
@@ -38,8 +39,10 @@ class ProductionCaptureInputMaterialization:
     output_dir: Path
     rights_path: Path
     source_path: Path
+    registration_policy_path: Path
     rights_sha256: str
     source_sha256: str
+    registration_policy_sha256: str
 
 
 def _is_linklike(path: Path) -> bool:
@@ -81,7 +84,16 @@ def _models(
     processing_purposes: tuple[str, ...],
     redistribution_allowed: bool,
     release_inclusion_allowed: bool,
-) -> tuple[CaptureRightsReceipt, LocalCaptureSource]:
+    min_registered_count: int,
+    min_registered_ratio: float,
+    min_session_coverage_ratio: float,
+    max_unregistered_consecutive_run: int,
+    min_largest_connected_model_share: float,
+) -> tuple[
+    CaptureRightsReceipt,
+    LocalCaptureSource,
+    RegistrationQualityPolicy,
+]:
     try:
         rights = CaptureRightsReceipt(
             schema="nantai.capture-rights-receipt.v1",
@@ -105,12 +117,25 @@ def _models(
             redistribution_allowed=redistribution_allowed,
             release_inclusion_allowed=release_inclusion_allowed,
         )
+        registration_policy = RegistrationQualityPolicy(
+            min_registered_count=min_registered_count,
+            min_registered_ratio=min_registered_ratio,
+            min_session_coverage_ratio=(
+                min_session_coverage_ratio
+            ),
+            max_unregistered_consecutive_run=(
+                max_unregistered_consecutive_run
+            ),
+            min_largest_connected_model_share=(
+                min_largest_connected_model_share
+            ),
+        )
         validate_capture_rights(source, rights)
     except (ValidationError, ValueError) as exc:
         raise ProductionCaptureInputError(
             f"production capture inputs are invalid: {exc}"
         ) from exc
-    return rights, source
+    return rights, source, registration_policy
 
 
 def _write_private_file(path: Path, payload: bytes) -> None:
@@ -135,9 +160,14 @@ def materialize_production_capture_inputs(
     processing_purposes: tuple[str, ...],
     redistribution_allowed: bool,
     release_inclusion_allowed: bool,
+    min_registered_count: int,
+    min_registered_ratio: float,
+    min_session_coverage_ratio: float,
+    max_unregistered_consecutive_run: int,
+    min_largest_connected_model_share: float,
 ) -> ProductionCaptureInputMaterialization:
     output = _output_directory(Path(output_dir))
-    rights, source = _models(
+    rights, source, registration_policy = _models(
         dataset_id=dataset_id,
         operator=operator,
         capture_scope=capture_scope,
@@ -145,9 +175,21 @@ def materialize_production_capture_inputs(
         processing_purposes=processing_purposes,
         redistribution_allowed=redistribution_allowed,
         release_inclusion_allowed=release_inclusion_allowed,
+        min_registered_count=min_registered_count,
+        min_registered_ratio=min_registered_ratio,
+        min_session_coverage_ratio=min_session_coverage_ratio,
+        max_unregistered_consecutive_run=(
+            max_unregistered_consecutive_run
+        ),
+        min_largest_connected_model_share=(
+            min_largest_connected_model_share
+        ),
     )
     rights_payload = canonical_model_bytes(rights)
     source_payload = canonical_model_bytes(source)
+    registration_policy_payload = canonical_model_bytes(
+        registration_policy
+    )
     staging = output.parent / (
         f".{output.name}.{uuid.uuid4().hex}.staging"
     )
@@ -156,19 +198,38 @@ def materialize_production_capture_inputs(
         staging.mkdir(mode=0o700)
         staging_rights = staging / "capture-rights-receipt.json"
         staging_source = staging / "production-source.json"
+        staging_policy = staging / "registration-policy.json"
         _write_private_file(staging_rights, rights_payload)
         _write_private_file(staging_source, source_payload)
+        _write_private_file(
+            staging_policy,
+            registration_policy_payload,
+        )
         flush_file(staging_rights)
         flush_file(staging_source)
+        flush_file(staging_policy)
         flush_directory(staging)
         reopened_rights = load_capture_rights_receipt(
             staging_rights
         )
         reopened_source = load_real_dataset_source(staging_source)
+        try:
+            reopened_policy_payload = staging_policy.read_bytes()
+            reopened_policy = (
+                RegistrationQualityPolicy.model_validate_json(
+                    reopened_policy_payload
+                )
+            )
+        except (OSError, ValidationError) as exc:
+            raise ProductionCaptureInputError(
+                "registration policy changed before publication"
+            ) from exc
         if (
             reopened_rights != rights
             or reopened_source != source
+            or reopened_policy != registration_policy
             or not isinstance(reopened_source, LocalCaptureSource)
+            or reopened_policy_payload != registration_policy_payload
         ):
             raise ProductionCaptureInputError(
                 "production capture inputs changed before publication"
@@ -201,6 +262,7 @@ def materialize_production_capture_inputs(
             for name in (
                 "capture-rights-receipt.json",
                 "production-source.json",
+                "registration-policy.json",
             ):
                 candidate = staging / name
                 try:
@@ -215,8 +277,14 @@ def materialize_production_capture_inputs(
         output_dir=output,
         rights_path=output / "capture-rights-receipt.json",
         source_path=output / "production-source.json",
+        registration_policy_path=(
+            output / "registration-policy.json"
+        ),
         rights_sha256=hashlib.sha256(rights_payload).hexdigest(),
         source_sha256=hashlib.sha256(source_payload).hexdigest(),
+        registration_policy_sha256=hashlib.sha256(
+            registration_policy_payload
+        ).hexdigest(),
     )
 
 
@@ -258,6 +326,31 @@ def _parser() -> argparse.ArgumentParser:
         "--release-inclusion-allowed",
         action="store_true",
     )
+    parser.add_argument(
+        "--min-registered-count",
+        type=int,
+        required=True,
+    )
+    parser.add_argument(
+        "--min-registered-ratio",
+        type=float,
+        required=True,
+    )
+    parser.add_argument(
+        "--min-session-coverage-ratio",
+        type=float,
+        required=True,
+    )
+    parser.add_argument(
+        "--max-unregistered-consecutive-run",
+        type=int,
+        required=True,
+    )
+    parser.add_argument(
+        "--min-largest-connected-model-share",
+        type=float,
+        required=True,
+    )
     return parser
 
 
@@ -275,6 +368,17 @@ def main(argv: list[str] | None = None) -> int:
             release_inclusion_allowed=(
                 args.release_inclusion_allowed
             ),
+            min_registered_count=args.min_registered_count,
+            min_registered_ratio=args.min_registered_ratio,
+            min_session_coverage_ratio=(
+                args.min_session_coverage_ratio
+            ),
+            max_unregistered_consecutive_run=(
+                args.max_unregistered_consecutive_run
+            ),
+            min_largest_connected_model_share=(
+                args.min_largest_connected_model_share
+            ),
         )
     except ProductionCaptureInputError as exc:
         print(f"production capture inputs blocked: {exc}")
@@ -283,6 +387,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Rights SHA-256: {result.rights_sha256}")
     print(f"Production source: {result.source_path}")
     print(f"Source SHA-256: {result.source_sha256}")
+    print(
+        f"Registration policy: {result.registration_policy_path}"
+    )
+    print(
+        "Registration policy SHA-256: "
+        f"{result.registration_policy_sha256}"
+    )
     return 0
 
 
