@@ -70,6 +70,7 @@ def _remote_lifecycle(job: RemoteShellJobRef, *, container_id="a" * 64):
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         workspace_identity_sha256=workspace_sha,
         container_identity="registry.example/nantai@sha256:" + "c" * 64,
         container_id=container_id,
@@ -119,6 +120,7 @@ def _production_fixture(tmp_path, monkeypatch):
         submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
         request_sha256="b" * 64,
         training_bundle_sha256="c" * 64,
+        runtime_policy_sha256="e" * 64,
         config_identity_sha256="d" * 64,
         remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
     )
@@ -311,6 +313,7 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
         submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
         request_sha256="b" * 64,
         training_bundle_sha256="c" * 64,
+        runtime_policy_sha256="e" * 64,
         config_identity_sha256="d" * 64,
         remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
     )
@@ -407,6 +410,7 @@ def test_existing_remote_job_is_restored_without_resubmit(
         submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
         request_sha256="b" * 64,
         training_bundle_sha256="c" * 64,
+        runtime_policy_sha256="e" * 64,
         config_identity_sha256="d" * 64,
         remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
     )

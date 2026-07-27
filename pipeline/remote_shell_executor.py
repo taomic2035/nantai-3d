@@ -39,6 +39,11 @@ from cloud.validate_dataparser_transform import (
     DataparserTransformError,
     validate_dataparser_transform,
 )
+from pipeline.production_runtime_evidence import (
+    ProductionRuntimeEvidenceError,
+    ProductionRuntimePolicy,
+    load_production_runtime_policy_bytes,
+)
 from pipeline.real_scene_training import (
     HeldOutSplit,
     RealSceneTrainingError,
@@ -285,6 +290,10 @@ class RemoteShellExecutorConfig(FrozenModel):
     expected_checker_config_sha256: str = Field(
         pattern=_SHA256_PATTERN,
     )
+    runtime_policy_path: Path
+    expected_runtime_policy_sha256: str = Field(
+        pattern=_SHA256_PATTERN,
+    )
     connect_timeout_seconds: int = Field(default=20, ge=1, le=300)
     command_timeout_seconds: int = Field(default=120, ge=1, le=3600)
     max_command_output_bytes: int = Field(
@@ -334,6 +343,7 @@ class RemoteShellExecutorConfig(FrozenModel):
             self.scp_binary,
             self.private_key_path,
             self.known_hosts_path,
+            self.runtime_policy_path,
         )
         if any(not path.is_absolute() for path in local_paths):
             raise ValueError("remote executor local paths must be absolute")
@@ -343,8 +353,8 @@ class RemoteShellExecutorConfig(FrozenModel):
 
 
 class RemoteShellStatus(FrozenModel):
-    schema_id: Literal["nantai.remote-shell-status.v1"] = Field(
-        default="nantai.remote-shell-status.v1",
+    schema_id: Literal["nantai.remote-shell-status.v2"] = Field(
+        default="nantai.remote-shell-status.v2",
         alias="schema",
         serialization_alias="schema",
     )
@@ -352,6 +362,7 @@ class RemoteShellStatus(FrozenModel):
     attempt_id: str = Field(pattern=_ID_PATTERN)
     request_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_policy_sha256: str = Field(pattern=_SHA256_PATTERN)
     state: Literal["running", "succeeded", "failed"]
     updated_at_utc: datetime
     exit_code: int | None = None
@@ -673,6 +684,7 @@ class RemoteShellJobRef(ExecutorJobRef):
     )
     request_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_policy_sha256: str = Field(pattern=_SHA256_PATTERN)
     config_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
     remote_job_path: str
 
@@ -697,8 +709,8 @@ class RemoteContainerLifecycleReceipt(FrozenModel):
     and must be recomputed by the loader; callers cannot self-report it.
     """
 
-    schema_id: Literal["nantai.remote-container-lifecycle.v1"] = Field(
-        default="nantai.remote-container-lifecycle.v1",
+    schema_id: Literal["nantai.remote-container-lifecycle.v2"] = Field(
+        default="nantai.remote-container-lifecycle.v2",
         alias="schema",
         serialization_alias="schema",
     )
@@ -706,6 +718,7 @@ class RemoteContainerLifecycleReceipt(FrozenModel):
     attempt_id: str = Field(pattern=_ID_PATTERN)
     request_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_policy_sha256: str = Field(pattern=_SHA256_PATTERN)
     workspace_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
     container_identity: str = Field(pattern=_CONTAINER_PATTERN)
     container_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -2196,6 +2209,58 @@ def _verify_known_host(config: RemoteShellExecutorConfig) -> None:
         )
 
 
+def _load_bound_runtime_policy(
+    config: RemoteShellExecutorConfig,
+) -> ProductionRuntimePolicy:
+    path = config.runtime_policy_path
+    try:
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > 1024 * 1024
+        ):
+            raise RemoteShellExecutionError(
+                "production runtime policy must be a bounded regular file"
+            )
+        with path.open("rb") as stream:
+            payload = stream.read(1024 * 1024 + 1)
+        after = path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except OSError:
+        raise RemoteShellExecutionError(
+            "production runtime policy cannot be read"
+        ) from None
+    if (
+        len(payload) > 1024 * 1024
+        or len(payload) != before.st_size
+        or _stat_signature(before) != _stat_signature(after)
+    ):
+        raise RemoteShellExecutionError(
+            "production runtime policy changed while read"
+        )
+    try:
+        policy = load_production_runtime_policy_bytes(payload)
+    except ProductionRuntimeEvidenceError as exc:
+        raise RemoteShellExecutionError(
+            "production runtime policy is invalid"
+        ) from exc
+    if (
+        policy.content_sha256
+        != config.expected_runtime_policy_sha256
+        or policy.expected_container_identity
+        != config.container_identity
+        or policy.expected_worker_sha256
+        != config.expected_worker_sha256
+    ):
+        raise RemoteShellExecutionError(
+            "production runtime policy differs from remote config"
+        )
+    return policy
+
+
 class RemoteShellExecutor:
     """Strict submit/poll/fetch implementation for one configured host."""
 
@@ -2213,6 +2278,7 @@ class RemoteShellExecutor:
         self._jobs: dict[tuple[str, str], _JobContext] = {}
         self._private_key_guard = None
         self._closed = False
+        self._runtime_policy: ProductionRuntimePolicy | None = None
         _validate_local_regular_file(
             config.ssh_binary,
             label="ssh binary",
@@ -2232,11 +2298,13 @@ class RemoteShellExecutor:
         key_guard = _assert_private_key_protected(config.private_key_path)
         try:
             _verify_known_host(config)
+            policy = _load_bound_runtime_policy(config)
         except BaseException:
             if key_guard is not None:
                 key_guard.Close()
             raise
         self._private_key_guard = key_guard
+        self._runtime_policy = policy
 
     def close(self) -> None:
         if self._closed:
@@ -2346,7 +2414,13 @@ class RemoteShellExecutor:
         ]
         return self._invoke(argv, phase=phase)
 
-    def _scp_upload(self, source: Path, destination: str):
+    def _scp_upload(
+        self,
+        source: Path,
+        destination: str,
+        *,
+        phase: str,
+    ):
         argv = [
             str(self.config.scp_binary),
             *self._common_options(scp=True),
@@ -2354,7 +2428,7 @@ class RemoteShellExecutor:
             str(source),
             f"{self.config.ssh_target}:{destination}",
         ]
-        return self._invoke(argv, phase="training bundle upload")
+        return self._invoke(argv, phase=phase)
 
     def _scp_download(self, source: str, destination: Path):
         argv = [
@@ -2429,12 +2503,22 @@ class RemoteShellExecutor:
             raise RemoteShellExecutionError(
                 "remote submit received the wrong executor identity"
             )
+        measured_policy = _load_bound_runtime_policy(self.config)
+        if measured_policy != self._runtime_policy:
+            raise RemoteShellExecutionError(
+                "production runtime policy changed after executor creation"
+            )
         attempt_id = "attempt-" + uuid.uuid4().hex
         submitted_at = self._now()
         remote_job_path = (
             f"{self.config.remote_root}/{bundle.input_identity.job_id}/"
             f"{attempt_id}"
         )
+        runtime_policy = self._runtime_policy
+        if runtime_policy is None:
+            raise RemoteShellExecutionError(
+                "production runtime policy is not loaded"
+            )
         worker = (
             f"{self.config.remote_repo_root}/"
             "cloud/remote_training_worker.py"
@@ -2454,13 +2538,25 @@ class RemoteShellExecutor:
                 bundle.input_identity.request_sha256,
                 "--training-bundle-sha256",
                 bundle.bundle.bundle_sha256,
+                "--runtime-policy-sha256",
+                runtime_policy.content_sha256,
             ],
             phase="remote job initialization",
         )
         self._require_zero(init, phase="remote job initialization")
+        policy_upload = self._scp_upload(
+            self.config.runtime_policy_path,
+            f"{remote_job_path}/production-runtime-policy.json",
+            phase="production runtime policy upload",
+        )
+        self._require_zero(
+            policy_upload,
+            phase="production runtime policy upload",
+        )
         upload = self._scp_upload(
             bundle.bundle.path,
             f"{remote_job_path}/training-job.zip",
+            phase="training bundle upload",
         )
         self._require_zero(upload, phase="training bundle upload")
         start = self._ssh(
@@ -2487,6 +2583,7 @@ class RemoteShellExecutor:
             submitted_at_utc=submitted_at,
             request_sha256=bundle.input_identity.request_sha256,
             training_bundle_sha256=bundle.bundle.bundle_sha256,
+            runtime_policy_sha256=runtime_policy.content_sha256,
             config_identity_sha256=(
                 remote_shell_executor_config_sha256(self.config)
             ),
@@ -2543,12 +2640,14 @@ class RemoteShellExecutor:
             bundle.input_identity.job_id,
             bundle.input_identity.request_sha256,
             bundle.bundle.bundle_sha256,
+            self.config.expected_runtime_policy_sha256,
             expected_path,
         )
         measured_identity = (
             job.job_id,
             job.request_sha256,
             job.training_bundle_sha256,
+            job.runtime_policy_sha256,
             job.remote_job_path,
         )
         if measured_identity != expected_identity:
@@ -2672,6 +2771,8 @@ class RemoteShellExecutor:
             or receipt.request_sha256 != job.request_sha256
             or receipt.training_bundle_sha256
             != job.training_bundle_sha256
+            or receipt.runtime_policy_sha256
+            != job.runtime_policy_sha256
             or receipt.workspace_identity_sha256
             != expected_workspace_sha
             or receipt.container_identity
@@ -2801,12 +2902,14 @@ class RemoteShellExecutor:
             status.attempt_id,
             status.request_sha256,
             status.training_bundle_sha256,
+            status.runtime_policy_sha256,
         )
         expected = (
             context.job.job_id,
             context.job.attempt_id,
             context.job.request_sha256,
             context.job.training_bundle_sha256,
+            context.job.runtime_policy_sha256,
         )
         if identity != expected:
             raise RemoteShellExecutionError(

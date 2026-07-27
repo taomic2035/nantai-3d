@@ -20,6 +20,11 @@ from cloud.remote_training_worker import (
     start_job,
 )
 from pipeline.durable_io import DurableIOError
+from pipeline.production_runtime_evidence import (
+    ProductionRuntimePolicy,
+    canonical_production_runtime_policy_bytes,
+    training_cli_schema_sha256,
+)
 from pipeline.remote_shell_executor import RemoteShellStatus
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -31,20 +36,58 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _runtime_policy() -> ProductionRuntimePolicy:
+    options = (
+        "--auto-scale-poses",
+        "--center-method",
+        "--orientation-method",
+        "--scale-factor",
+    )
+    return ProductionRuntimePolicy.create(
+        expected_exact_commit="1" * 40,
+        expected_remote_target_sha256="2" * 64,
+        expected_probe_set_sha256="3" * 64,
+        expected_container_identity=_CONTAINER_IDENTITY,
+        expected_gpu_uuid="GPU-12345678-1234-1234-1234-123456789abc",
+        min_gpu_memory_mib=16_384,
+        expected_cuda_runtime_version="12.4",
+        expected_python_version="3.11.9",
+        expected_nerfstudio_version="1.1.5",
+        expected_training_cli_schema_sha256=(
+            training_cli_schema_sha256(
+                trainer_name="nerfstudio-splatfacto",
+                observed_options=options,
+            )
+        ),
+        required_training_cli_options=options,
+        expected_checker_sha256="4" * 64,
+        expected_container_runtime_sha256="5" * 64,
+        expected_nvidia_smi_sha256="6" * 64,
+        expected_python_sha256="7" * 64,
+        expected_training_cli_sha256="8" * 64,
+        expected_worker_sha256="9" * 64,
+    )
+
+
 def _init_job(
     job_dir: Path,
     *,
     bundle: bytes = b"verified-training-bundle",
 ) -> None:
     job_dir.parent.parent.mkdir(parents=True, exist_ok=True)
+    policy = _runtime_policy()
     spec = RemoteWorkerSpec(
         job_id="job-1",
         attempt_id="attempt-1",
         request_sha256="a" * 64,
         training_bundle_sha256=_sha(bundle),
+        runtime_policy_sha256=policy.content_sha256,
     )
     initialize_job(job_dir=job_dir, spec=spec)
     (job_dir / "training-job.zip").write_bytes(bundle)
+    (job_dir / "production-runtime-policy.json").write_bytes(
+        canonical_production_runtime_policy_bytes(policy)
+    )
 
 
 @dataclass
@@ -213,6 +256,93 @@ def _subcommands(fake: FakeDocker) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# F1a: production runtime policy is a bound job input
+# ---------------------------------------------------------------------------
+
+
+def test_worker_binds_runtime_policy_to_spec_and_lifecycle(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    bundle = b"verified-training-bundle"
+    policy = _runtime_policy()
+    job_dir.parent.parent.mkdir(parents=True, exist_ok=True)
+    spec = RemoteWorkerSpec(
+        job_id="job-1",
+        attempt_id="attempt-1",
+        request_sha256="a" * 64,
+        training_bundle_sha256=_sha(bundle),
+        runtime_policy_sha256=policy.content_sha256,
+    )
+    initialize_job(job_dir=job_dir, spec=spec)
+    (job_dir / "training-job.zip").write_bytes(bundle)
+    (job_dir / "production-runtime-policy.json").write_bytes(
+        canonical_production_runtime_policy_bytes(policy)
+    )
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 0
+    )
+
+    lifecycle = worker.load_container_lifecycle_receipt(
+        (job_dir / "container-lifecycle.json").read_bytes()
+    )
+    assert lifecycle.runtime_policy_sha256 == policy.content_sha256
+    assert _subcommands(fake).index("create") < _subcommands(fake).index(
+        "start"
+    )
+
+
+def test_worker_rejects_runtime_policy_swap_before_container_create(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    bundle = b"verified-training-bundle"
+    policy = _runtime_policy()
+    job_dir.parent.parent.mkdir(parents=True, exist_ok=True)
+    spec = RemoteWorkerSpec(
+        job_id="job-1",
+        attempt_id="attempt-1",
+        request_sha256="a" * 64,
+        training_bundle_sha256=_sha(bundle),
+        runtime_policy_sha256="f" * 64,
+    )
+    initialize_job(job_dir=job_dir, spec=spec)
+    (job_dir / "training-job.zip").write_bytes(bundle)
+    (job_dir / "production-runtime-policy.json").write_bytes(
+        canonical_production_runtime_policy_bytes(policy)
+    )
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 75
+    )
+
+    assert "create" not in _subcommands(fake)
+    assert "start" not in _subcommands(fake)
+    assert not (job_dir / "container-lifecycle.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # E1: durable container lifecycle receipt
 # ---------------------------------------------------------------------------
 
@@ -281,18 +411,22 @@ def test_worker_publishes_closed_lifecycle_after_digest_before_start(
         "attempt_id",
         "request_sha256",
         "training_bundle_sha256",
+        "runtime_policy_sha256",
         "workspace_identity_sha256",
         "container_identity",
         "container_id",
         "transition",
         "receipt_sha256",
     }
-    assert receipt["schema"] == "nantai.remote-container-lifecycle.v1"
+    assert receipt["schema"] == "nantai.remote-container-lifecycle.v2"
     assert receipt["job_id"] == "job-1"
     assert receipt["attempt_id"] == "attempt-1"
     assert receipt["request_sha256"] == "a" * 64
     assert receipt["training_bundle_sha256"] == _sha(
         b"verified-training-bundle"
+    )
+    assert receipt["runtime_policy_sha256"] == (
+        _runtime_policy().content_sha256
     )
     assert receipt["workspace_identity_sha256"] == (
         _expected_workspace_identity_sha256(
@@ -425,11 +559,13 @@ def test_stable_reader_rejects_file_mutation_during_read(
 
 
 def _lifecycle_fixture(job_dir: Path):
+    policy = _runtime_policy()
     return worker.build_container_lifecycle_receipt(
         job_id="job-1",
         attempt_id="attempt-1",
         request_sha256="a" * 64,
         training_bundle_sha256=_sha(b"verified-training-bundle"),
+        runtime_policy_sha256=policy.content_sha256,
         workspace_path=str(job_dir.absolute()),
         container_identity=_CONTAINER_IDENTITY,
         container_id="b" * 64,
@@ -712,6 +848,7 @@ def test_lifecycle_staging_cleanup_preserves_published_durable_error(
         attempt_id="attempt-1",
         request_sha256="a" * 64,
         training_bundle_sha256="b" * 64,
+        runtime_policy_sha256=_runtime_policy().content_sha256,
         workspace_path=str(job_dir.absolute()),
         container_identity=_CONTAINER_IDENTITY,
         container_id=_DEFAULT_CONTAINER_ID,
@@ -1226,6 +1363,7 @@ def test_worker_init_is_exclusive_and_status_is_canonical(tmp_path):
         attempt_id="attempt-1",
         request_sha256="a" * 64,
         training_bundle_sha256="b" * 64,
+        runtime_policy_sha256=_runtime_policy().content_sha256,
     )
     initialize_job(job_dir=job_dir, spec=spec)
 

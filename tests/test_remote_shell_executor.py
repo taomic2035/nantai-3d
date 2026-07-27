@@ -18,6 +18,11 @@ from pydantic import ValidationError
 
 import pipeline.remote_shell_executor as remote_module
 from pipeline.durable_io import DurableIOError
+from pipeline.production_runtime_evidence import (
+    ProductionRuntimePolicy,
+    canonical_production_runtime_policy_bytes,
+    training_cli_schema_sha256,
+)
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_training import (
     HeldOutSplit,
@@ -186,6 +191,14 @@ def _config(tmp_path) -> RemoteShellExecutorConfig:
     private_key = tmp_path / "id_ed25519"
     private_key.write_bytes(b"private-key")
     _protect_private_key(private_key)
+    container_identity = (
+        "registry.example/nantai@sha256:" + ("c" * 64)
+    )
+    policy = _runtime_policy(container_identity)
+    runtime_policy_path = tmp_path / "production-runtime-policy.json"
+    runtime_policy_path.write_bytes(
+        canonical_production_runtime_policy_bytes(policy)
+    )
     return RemoteShellExecutorConfig(
         ssh_binary=_executable(tmp_path / "ssh"),
         scp_binary=_executable(tmp_path / "scp"),
@@ -197,13 +210,71 @@ def _config(tmp_path) -> RemoteShellExecutorConfig:
         port=2222,
         remote_root="/srv/nantai-jobs",
         remote_repo_root="/srv/nantai-3d",
-        container_identity=(
-            "registry.example/nantai@sha256:" + ("c" * 64)
-        ),
+        container_identity=container_identity,
         expected_worker_sha256="d" * 64,
         expected_worker_version="1.0.0",
         expected_checker_config_sha256="e" * 64,
+        runtime_policy_path=runtime_policy_path,
+        expected_runtime_policy_sha256=policy.content_sha256,
     )
+
+
+def _runtime_policy(
+    container_identity: str,
+) -> ProductionRuntimePolicy:
+    options = (
+        "--auto-scale-poses",
+        "--center-method",
+        "--orientation-method",
+        "--scale-factor",
+    )
+    return ProductionRuntimePolicy.create(
+        expected_exact_commit="1" * 40,
+        expected_remote_target_sha256="2" * 64,
+        expected_probe_set_sha256="3" * 64,
+        expected_container_identity=container_identity,
+        expected_gpu_uuid="GPU-12345678-1234-1234-1234-123456789abc",
+        min_gpu_memory_mib=16_384,
+        expected_cuda_runtime_version="12.4",
+        expected_python_version="3.11.9",
+        expected_nerfstudio_version="1.1.5",
+        expected_training_cli_schema_sha256=(
+            training_cli_schema_sha256(
+                trainer_name="nerfstudio-splatfacto",
+                observed_options=options,
+            )
+        ),
+        required_training_cli_options=options,
+        expected_checker_sha256="4" * 64,
+        expected_container_runtime_sha256="5" * 64,
+        expected_nvidia_smi_sha256="6" * 64,
+        expected_python_sha256="7" * 64,
+        expected_training_cli_sha256="8" * 64,
+        expected_worker_sha256="d" * 64,
+    )
+
+
+def _config_with_runtime_policy(
+    tmp_path,
+    *,
+    expected_sha256: str | None = None,
+) -> tuple[RemoteShellExecutorConfig, ProductionRuntimePolicy]:
+    base = _config(tmp_path)
+    policy = _runtime_policy(base.container_identity)
+    policy_path = tmp_path / "production-runtime-policy.json"
+    policy_path.write_bytes(
+        canonical_production_runtime_policy_bytes(policy)
+    )
+    fields = base.model_dump()
+    fields.update(
+        {
+            "runtime_policy_path": policy_path,
+            "expected_runtime_policy_sha256": (
+                expected_sha256 or policy.content_sha256
+            ),
+        }
+    )
+    return RemoteShellExecutorConfig.model_validate(fields), policy
 
 
 class _Runner:
@@ -281,7 +352,7 @@ def test_submit_uses_strict_host_key_no_shell_and_redacts_key(
     job = executor.submit(prepared)
 
     assert job.executor_kind == "remote-shell-nerfstudio"
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == 4
     for argv, kwargs in runner.calls:
         assert kwargs["shell"] is False
         assert argv[argv.index("-F") + 1] == os.devnull
@@ -293,6 +364,84 @@ def test_submit_uses_strict_host_key_no_shell_and_redacts_key(
     audit = "\n".join(" ".join(argv) for argv in executor.command_audit)
     assert str(executor.config.private_key_path) not in audit
     assert "<redacted-private-key>" in audit
+
+
+def test_submit_uploads_bound_runtime_policy_before_worker_start(
+    tmp_path,
+    monkeypatch,
+):
+    bundle = _bundle(tmp_path)
+    monkeypatch.setattr(
+        remote_module,
+        "verify_production_training_job_bundle",
+        lambda path: bundle,
+    )
+    config, policy = _config_with_runtime_policy(tmp_path)
+    runner = _Runner()
+    executor = RemoteShellExecutor(
+        config,
+        run_command=runner,
+        now=lambda: _T0,
+    )
+
+    job = executor.submit(executor.prepare(bundle))
+
+    assert job.runtime_policy_sha256 == policy.content_sha256
+    assert len(runner.calls) == 4
+    init_argv = runner.calls[0][0]
+    assert "--runtime-policy-sha256" in init_argv[-1]
+    assert policy.content_sha256 in init_argv[-1]
+    policy_upload = runner.calls[1][0]
+    bundle_upload = runner.calls[2][0]
+    start_argv = runner.calls[3][0]
+    assert str(config.runtime_policy_path) in policy_upload
+    assert "production-runtime-policy.json" in policy_upload[-1]
+    assert str(bundle.path) in bundle_upload
+    assert "training-job.zip" in bundle_upload[-1]
+    assert " start " in f" {start_argv[-1]} "
+
+
+def test_executor_rejects_runtime_policy_sha_mismatch_before_transport(
+    tmp_path,
+):
+    config, _policy = _config_with_runtime_policy(
+        tmp_path,
+        expected_sha256="f" * 64,
+    )
+    runner = _Runner()
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="runtime policy",
+    ):
+        RemoteShellExecutor(config, run_command=runner)
+
+    assert runner.calls == []
+
+
+def test_submit_revalidates_runtime_policy_before_transport(
+    tmp_path,
+    monkeypatch,
+):
+    bundle = _bundle(tmp_path)
+    monkeypatch.setattr(
+        remote_module,
+        "verify_production_training_job_bundle",
+        lambda path: bundle,
+    )
+    config, _policy = _config_with_runtime_policy(tmp_path)
+    runner = _Runner()
+    executor = RemoteShellExecutor(config, run_command=runner)
+    prepared = executor.prepare(bundle)
+    config.runtime_policy_path.write_bytes(b"{}\n")
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="runtime policy",
+    ):
+        executor.submit(prepared)
+
+    assert runner.calls == []
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL policy")
@@ -426,6 +575,7 @@ def test_poll_rejects_changed_job_identity(tmp_path, monkeypatch):
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="running",
         updated_at_utc=_T0,
     )
@@ -1144,6 +1294,7 @@ def test_fetch_only_succeeds_after_local_provenance_closure(
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="succeeded",
         updated_at_utc=_T0,
         exit_code=0,
@@ -1509,6 +1660,7 @@ def test_poll_rejects_status_with_drifted_request_sha(tmp_path, monkeypatch):
         attempt_id=job.attempt_id,
         request_sha256="0" * 64,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="running",
         updated_at_utc=_T0,
     )
@@ -1530,11 +1682,35 @@ def test_poll_rejects_status_with_drifted_training_bundle_sha(
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256="0" * 64,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="running",
         updated_at_utc=_T0,
     )
     runner.responses.append(_lifecycle_response(_lifecycle_receipt(job)))
     runner.responses.append(_status_response(drifted))
+    with pytest.raises(RemoteShellExecutionError, match="identity"):
+        executor.poll(job)
+
+
+def test_poll_rejects_status_with_drifted_runtime_policy_sha(
+    tmp_path,
+    monkeypatch,
+):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    job = executor.submit(prepared)
+
+    drifted = RemoteShellStatus(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256="0" * 64,
+        state="running",
+        updated_at_utc=_T0,
+    )
+    runner.responses.append(_lifecycle_response(_lifecycle_receipt(job)))
+    runner.responses.append(_status_response(drifted))
+
     with pytest.raises(RemoteShellExecutionError, match="identity"):
         executor.poll(job)
 
@@ -1548,6 +1724,7 @@ def test_poll_rejects_status_with_drifted_job_id(tmp_path, monkeypatch):
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="running",
         updated_at_utc=_T0,
     )
@@ -1607,6 +1784,7 @@ def _running_status(job: RemoteShellJobRef, *, updated_at: datetime = _T0):
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="running",
         updated_at_utc=updated_at,
     )
@@ -1618,6 +1796,7 @@ def _failed_status(job: RemoteShellJobRef, *, updated_at: datetime = _T0):
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="failed",
         updated_at_utc=updated_at,
         exit_code=1,
@@ -1637,6 +1816,7 @@ def _succeeded_status(
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="succeeded",
         updated_at_utc=updated_at,
         exit_code=0,
@@ -1680,6 +1860,7 @@ def _lifecycle_receipt(
         attempt_id=job.attempt_id,
         request_sha256=request_sha,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         workspace_identity_sha256=workspace_sha,
         container_identity=identity,
         container_id=container_id,
@@ -1692,6 +1873,7 @@ def _lifecycle_receipt(
         attempt_id=job.attempt_id,
         request_sha256=request_sha,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         workspace_identity_sha256=workspace_sha,
         container_identity=identity,
         container_id=container_id,
@@ -1720,7 +1902,7 @@ def test_submit_keeps_receipt_not_started_until_authoritative_poll(
     assert context.receipt.state == "not-started"
     assert context.receipt.observations[0].state == "not-started"
     assert len(context.receipt.observations) == 1
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == 4
 
 
 def test_restore_attaches_existing_job_without_transport(
@@ -2064,6 +2246,7 @@ def test_poll_succeeded_returns_unknown_until_verified(
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="succeeded",
         updated_at_utc=_T0,
         exit_code=0,
@@ -2111,6 +2294,7 @@ def test_fetch_interrupted_cleans_staging(tmp_path, monkeypatch):
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="succeeded",
         updated_at_utc=_T0,
         exit_code=0,
@@ -2787,6 +2971,7 @@ def test_poll_rejects_lifecycle_with_wrong_attempt(tmp_path, monkeypatch):
         attempt_id="attempt-other",
         request_sha256=base.request_sha256,
         training_bundle_sha256=base.training_bundle_sha256,
+        runtime_policy_sha256=base.runtime_policy_sha256,
         workspace_identity_sha256=base.workspace_identity_sha256,
         container_identity=base.container_identity,
         container_id=base.container_id,
@@ -2918,6 +3103,7 @@ def test_fetch_rejects_lifecycle_container_swap(tmp_path, monkeypatch):
         attempt_id=job.attempt_id,
         request_sha256=job.request_sha256,
         training_bundle_sha256=job.training_bundle_sha256,
+        runtime_policy_sha256=job.runtime_policy_sha256,
         state="succeeded",
         updated_at_utc=_T0,
         exit_code=0,
@@ -2948,6 +3134,7 @@ def test_lifecycle_receipt_is_content_addressed_and_round_trips():
         submitted_at_utc=_T0,
         request_sha256="a" * 64,
         training_bundle_sha256="b" * 64,
+        runtime_policy_sha256="c" * 64,
         config_identity_sha256="e" * 64,
         remote_job_path="/srv/nantai-jobs/job-1/attempt-1",
     )

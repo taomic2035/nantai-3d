@@ -29,6 +29,10 @@ from pipeline.durable_io import (  # noqa: E402
     flush_file,
     publish_file_noreplace,
 )
+from pipeline.production_runtime_evidence import (  # noqa: E402
+    ProductionRuntimeEvidenceError,
+    load_production_runtime_policy_bytes,
+)
 from pipeline.remote_shell_executor import (  # noqa: E402
     RemoteContainerLifecycleReceipt,
     RemoteResultBundleError,
@@ -70,8 +74,8 @@ _MAX_SPEC_BYTES = 1024 * 1024
 
 
 class RemoteWorkerSpec(FrozenModel):
-    schema_id: Literal["nantai.remote-worker-spec.v1"] = Field(
-        default="nantai.remote-worker-spec.v1",
+    schema_id: Literal["nantai.remote-worker-spec.v2"] = Field(
+        default="nantai.remote-worker-spec.v2",
         alias="schema",
         serialization_alias="schema",
     )
@@ -79,6 +83,7 @@ class RemoteWorkerSpec(FrozenModel):
     attempt_id: str = Field(pattern=_ID_PATTERN)
     request_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_policy_sha256: str = Field(pattern=_SHA256_PATTERN)
 
 
 def _canonical_spec_bytes(spec: RemoteWorkerSpec) -> bytes:
@@ -296,6 +301,7 @@ def _write_failure_status(
             attempt_id=spec.attempt_id,
             request_sha256=spec.request_sha256,
             training_bundle_sha256=spec.training_bundle_sha256,
+            runtime_policy_sha256=spec.runtime_policy_sha256,
             state="failed",
             updated_at_utc=datetime.now(UTC),
             exit_code=exit_code,
@@ -329,6 +335,7 @@ def build_container_lifecycle_receipt(
     attempt_id: str,
     request_sha256: str,
     training_bundle_sha256: str,
+    runtime_policy_sha256: str,
     workspace_path: str,
     container_identity: str,
     container_id: str,
@@ -349,6 +356,7 @@ def build_container_lifecycle_receipt(
         attempt_id=attempt_id,
         request_sha256=request_sha256,
         training_bundle_sha256=training_bundle_sha256,
+        runtime_policy_sha256=runtime_policy_sha256,
         workspace_identity_sha256=workspace_identity_sha256,
         container_identity=container_identity,
         container_id=container_id,
@@ -361,6 +369,7 @@ def build_container_lifecycle_receipt(
         attempt_id=attempt_id,
         request_sha256=request_sha256,
         training_bundle_sha256=training_bundle_sha256,
+        runtime_policy_sha256=runtime_policy_sha256,
         workspace_identity_sha256=workspace_identity_sha256,
         container_identity=container_identity,
         container_id=container_id,
@@ -784,6 +793,7 @@ def run_job(
             attempt_id=spec.attempt_id,
             request_sha256=spec.request_sha256,
             training_bundle_sha256=spec.training_bundle_sha256,
+            runtime_policy_sha256=spec.runtime_policy_sha256,
             state="running",
             updated_at_utc=datetime.now(UTC),
         ),
@@ -793,6 +803,27 @@ def run_job(
     container_id: str | None = None
     container_started = False
     try:
+        try:
+            runtime_policy = load_production_runtime_policy_bytes(
+                _read_stable(
+                    job_dir / "production-runtime-policy.json",
+                    max_bytes=1024 * 1024,
+                    label="production runtime policy",
+                )
+            )
+        except ProductionRuntimeEvidenceError as exc:
+            raise RemoteWorkerError(
+                "production runtime policy is invalid"
+            ) from exc
+        if (
+            runtime_policy.content_sha256
+            != spec.runtime_policy_sha256
+            or runtime_policy.expected_container_identity
+            != container_identity
+        ):
+            raise RemoteWorkerError(
+                "production runtime policy differs from job spec"
+            )
         expected_image_id = _resolve_image_id(
             runtime=container_runtime,
             identity=container_identity,
@@ -818,6 +849,7 @@ def run_job(
             attempt_id=spec.attempt_id,
             request_sha256=spec.request_sha256,
             training_bundle_sha256=spec.training_bundle_sha256,
+            runtime_policy_sha256=spec.runtime_policy_sha256,
             workspace_path=str(job_dir),
             container_identity=container_identity,
             container_id=container_id,
@@ -906,6 +938,7 @@ def run_job(
                     training_bundle_sha256=(
                         spec.training_bundle_sha256
                     ),
+                    runtime_policy_sha256=spec.runtime_policy_sha256,
                     state="succeeded",
                     updated_at_utc=datetime.now(UTC),
                     exit_code=0,
@@ -1109,6 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--attempt-id", required=True)
     init.add_argument("--request-sha256", required=True)
     init.add_argument("--training-bundle-sha256", required=True)
+    init.add_argument("--runtime-policy-sha256", required=True)
     start = subparsers.add_parser("start")
     _add_start_arguments(start)
     start.add_argument("--detach", action="store_true")
@@ -1132,6 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
                     training_bundle_sha256=(
                         args.training_bundle_sha256
                     ),
+                    runtime_policy_sha256=args.runtime_policy_sha256,
                 ),
             )
             return 0
