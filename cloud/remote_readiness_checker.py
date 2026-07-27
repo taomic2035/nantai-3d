@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Measure one remote CUDA runtime and worker without changing remote state."""
+"""Host preflight: verify remote host can run a fresh GPU container.
+
+This is NOT a production readiness check. It only verifies host-level
+preconditions: the container runtime version, an immutable image digest,
+worker/checker binary identity, and that the container runtime can
+schedule GPU jobs (nvidia runtime registered). It does NOT measure the
+GPU itself, run Nerfstudio, or prove that a training container will be
+ready — host nvidia-smi/Python/Nerfstudio cannot represent the fresh
+job container that G2 measurement must observe.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -20,10 +30,17 @@ DEFAULT_CONFIG = Path("/etc/nantai/remote-readiness.json")
 _MAX_CONFIG_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024
 _MAX_WORKER_BYTES = 16 * 1024 * 1024
+_MAX_RUNTIME_BYTES = 256 * 1024 * 1024
 _CONTAINER_PATTERN = re.compile(
     r"^[A-Za-z0-9._/:+-]+@sha256:[0-9a-f]{64}$"
 )
 _VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+_SECRET_PATTERNS = [
+    re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----[^\n]*"),
+    re.compile(
+        rb"(?i)(password|token|secret|credential)\s*[=:]\s*[^\s]+"
+    ),
+]
 
 
 class RemoteReadinessCheckError(ValueError):
@@ -173,6 +190,14 @@ def _load_config(
     return parsed, payload, signature
 
 
+def _redact_secrets(data: bytes) -> bytes:
+    """Mask private keys and credential-like patterns from probe output."""
+    redacted = data
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub(b"<redacted>", redacted)
+    return redacted
+
+
 def _run_bounded(
     argv: list[str],
     *,
@@ -189,21 +214,25 @@ def _run_bounded(
         raise RemoteReadinessCheckError(
             "readiness probe could not be executed"
         ) from exc
+    if completed.returncode != 0:
+        raise RemoteReadinessCheckError(
+            "readiness probe did not produce bounded success"
+        )
     stdout = completed.stdout or b""
     stderr = completed.stderr or b""
     if isinstance(stdout, str):
         stdout = stdout.encode("utf-8", errors="replace")
     if isinstance(stderr, str):
         stderr = stderr.encode("utf-8", errors="replace")
-    if (
-        completed.returncode != 0
-        or len(stdout) > _MAX_OUTPUT_BYTES
-        or len(stderr) > _MAX_OUTPUT_BYTES
-    ):
+    if len(stdout) > _MAX_OUTPUT_BYTES:
         raise RemoteReadinessCheckError(
-            "readiness probe did not produce bounded success"
+            "readiness probe stdout exceeded byte cap"
         )
-    return stdout
+    if len(stderr) > _MAX_OUTPUT_BYTES:
+        raise RemoteReadinessCheckError(
+            "readiness probe stderr exceeded byte cap"
+        )
+    return _redact_secrets(stdout)
 
 
 def _safe_text(payload: bytes, *, label: str) -> str:
@@ -225,12 +254,56 @@ def _safe_text(payload: bytes, *, label: str) -> str:
     return value
 
 
+_SUPPORTED_SCHEDULER_ADAPTERS = frozenset({"docker", "podman"})
+
+
+def _probe_gpu_scheduler(
+    *,
+    runtime_name: str,
+    runtime_resolved: str,
+    run_command: Callable[..., subprocess.CompletedProcess],
+) -> None:
+    """Verify the container runtime can schedule GPU jobs.
+
+    This is a host-level precondition: it checks that the nvidia
+    container runtime is registered with the configured container
+    runtime. It does NOT measure the GPU itself — host GPU identity
+    belongs in the fresh job container (G2), not in host preflight.
+
+    Only the docker/podman ``info --format {{json .Runtimes}}`` adapter
+    is supported; any other runtime name must fail closed rather than
+    be treated as compatible with docker's private output format.
+    """
+    if runtime_name not in _SUPPORTED_SCHEDULER_ADAPTERS:
+        raise RemoteReadinessCheckError(
+            "GPU scheduler adapter is not supported for runtime"
+        )
+    output = _run_bounded(
+        [runtime_resolved, "info", "--format", "{{json .Runtimes}}"],
+        run_command=run_command,
+    )
+    try:
+        runtimes = json.loads(output.decode("ascii"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RemoteReadinessCheckError(
+            "container runtime info is invalid"
+        ) from exc
+    if (
+        not isinstance(runtimes, dict)
+        or "nvidia" not in runtimes
+    ):
+        raise RemoteReadinessCheckError(
+            "container runtime cannot schedule GPU jobs"
+        )
+
+
 def collect_remote_readiness(
     config_path: str | Path = DEFAULT_CONFIG,
     *,
     run_command: Callable[..., subprocess.CompletedProcess] = (
         subprocess.run
     ),
+    which: Callable[[str], str | None] = shutil.which,
 ) -> dict[str, Any]:
     config_file = Path(config_path)
     config, config_bytes, config_signature = _load_config(
@@ -241,16 +314,33 @@ def collect_remote_readiness(
     worker_path = Path(config["worker_path"])
     worker_python = config["worker_python"]
 
+    runtime_resolved = which(runtime)
+    if not runtime_resolved:
+        raise RemoteReadinessCheckError(
+            "container runtime binary not found"
+        )
+    runtime_bytes, runtime_signature = _stable_bytes(
+        Path(runtime_resolved),
+        label="container runtime binary",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    checker_path = Path(__file__)
+    checker_bytes, checker_signature = _stable_bytes(
+        checker_path,
+        label="checker executable",
+        maximum_bytes=_MAX_WORKER_BYTES,
+    )
+
     runtime_version = _safe_text(
         _run_bounded(
-            [runtime, "--version"],
+            [runtime_resolved, "--version"],
             run_command=run_command,
         ),
         label="container runtime version",
     )
     image_output = _run_bounded(
         [
-            runtime,
+            runtime_resolved,
             "image",
             "inspect",
             "--format",
@@ -273,6 +363,12 @@ def collect_remote_readiness(
         raise RemoteReadinessCheckError(
             "container image digest was not measured"
         )
+
+    _probe_gpu_scheduler(
+        runtime_name=runtime,
+        runtime_resolved=runtime_resolved,
+        run_command=run_command,
+    )
 
     worker_bytes, worker_signature = _stable_bytes(
         worker_path,
@@ -302,6 +398,32 @@ def collect_remote_readiness(
         raise RemoteReadinessCheckError(
             "remote worker changed during probe"
         )
+
+    runtime_after, runtime_after_sig = _stable_bytes(
+        Path(runtime_resolved),
+        label="container runtime binary",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    if (
+        runtime_bytes != runtime_after
+        or runtime_signature != runtime_after_sig
+    ):
+        raise RemoteReadinessCheckError(
+            "container runtime binary changed during probe"
+        )
+    checker_after, checker_after_sig = _stable_bytes(
+        checker_path,
+        label="checker executable",
+        maximum_bytes=_MAX_WORKER_BYTES,
+    )
+    if (
+        checker_bytes != checker_after
+        or checker_signature != checker_after_sig
+    ):
+        raise RemoteReadinessCheckError(
+            "checker executable changed during probe"
+        )
+
     try:
         config_after, signature_after = _stable_bytes(
             config_file,
@@ -357,7 +479,8 @@ def canonical_evidence_bytes(evidence: dict[str, Any]) -> bytes:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Emit canonical evidence for one immutable remote runtime identity"
+            "Emit canonical host-preflight evidence "
+            "(not production readiness)"
         )
     )
     parser.add_argument(
