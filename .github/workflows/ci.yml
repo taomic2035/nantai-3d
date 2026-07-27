@@ -111,6 +111,42 @@ jobs:
           path: ${{ runner.temp }}/viewer-runtime-preflight.json
           if-no-files-found: error
 
+  remote-training-drill:
+    name: remote-training-drill (fixed transport fixtures)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install editable source and locked dev contract
+        run: python -m pip install -e ".[dev]"
+
+      - name: Execute fixed P1-3A/B/C registry from clean exact HEAD
+        run: |
+          python -I scripts/run_remote_training_drill.py \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/remote-training-drill.json" \
+            --request-sha256 48af7c5d7bea4df0083122ca31cec7db6b0a6677ee58eb960ba93aa76c20a851 \
+            --training-config-sha256 ab5c0285c159d271a34c653ab632053783a3908387b10129afd3d09a59b14712 \
+            --dataset-receipt-sha256 d4f6678b5dcc05c41dc5cec0681a2c7743d1d019e3c1d39c1583ff2e4ea0d5bc \
+            --trainer-name nerfstudio-splatfacto \
+            --trainer-version 1.1.5 \
+            --container-identity registry.invalid/nantai-ci-fixture@sha256:251c5841df8afb72015c91e8496f6b66764840da802fcf016c449b5518bb46ef
+
+      - name: Upload canonical drill report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-training-drill
+          path: ${{ runner.temp }}/remote-training-drill.json
+          if-no-files-found: error
+
   reproducibility:
     name: repro-assets (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
