@@ -445,8 +445,110 @@ def _stub_verified_real_scene_import(
     target_units: str = "meters",
     recon_payload: bytes = b"ply\nverified-production\n",
 ) -> tuple[dict[str, bytes], list[tuple[Path, Path]]]:
+    recon_sha256 = hashlib.sha256(recon_payload).hexdigest()
+    manifest = {
+        "schema_version": 2,
+        "gaussian_count": 100_000,
+        "bounds": {
+            "min": [-10.0, -10.0, -2.0],
+            "max": [10.0, 10.0, 8.0],
+        },
+        "lod": {},
+        "full_3dgs": "recon_full.ply",
+        "artifacts": {
+            "full_3dgs": {
+                "path": "recon_full.ply",
+                "kind": "3dgs-ply",
+                "fidelity": "full-3dgs",
+                "sha256": recon_sha256,
+                "bytes": len(recon_payload),
+                "attributes": [
+                    "x",
+                    "y",
+                    "z",
+                    "f_dc_0",
+                    "f_dc_1",
+                    "f_dc_2",
+                    "opacity",
+                    "scale_0",
+                    "scale_1",
+                    "scale_2",
+                    "rot_0",
+                    "rot_1",
+                    "rot_2",
+                    "rot_3",
+                ],
+                "sh_degree": 0,
+                "immutable": False,
+            },
+            "lod": {},
+        },
+        "sessions": [
+            {
+                "session_id": "production",
+                "kind": "photo_batch",
+                "n_images": 24,
+            }
+        ],
+        "coordinate_contract": {
+            "pose_frame": {
+                "frame_id": "sfm-camera",
+                "handedness": "right",
+                "axes": "sfm-arbitrary",
+                "units": "arbitrary",
+                "metric_status": "arbitrary",
+                "geo_aligned": "unaligned",
+                "provenance": "sfm",
+                "evidence": ["accepted-real-photo-sfm"],
+            },
+            "target_frame": {
+                "frame_id": "world-enu",
+                "handedness": "right",
+                "axes": "enu-z-up",
+                "units": "meters",
+                "metric_status": "metric",
+                "geo_aligned": "aligned",
+                "provenance": "measured",
+                "evidence": ["measured-control-points"],
+            },
+            "alignment_status": "aligned",
+            "metric_evidence": ["measured-control-points"],
+            "transform_chain": [
+                {
+                    "transform_id": "sim3-production",
+                    "source_frame": "sfm-camera",
+                    "target_frame": "world-enu",
+                }
+            ],
+            "ancestry": [
+                {
+                    "source_frame": {
+                        "frame_id": "sfm-camera",
+                        "handedness": "right",
+                        "axes": "sfm-arbitrary",
+                        "units": "arbitrary",
+                        "metric_status": "arbitrary",
+                        "geo_aligned": "unaligned",
+                        "provenance": "sfm",
+                        "evidence": ["accepted-real-photo-sfm"],
+                    }
+                }
+            ],
+        },
+        "provenance": {
+            "requested_reconstruction_engine": "splatfacto",
+            "actual_reconstruction_engine": "nerfstudio-splatfacto",
+            "synthetic": False,
+            "geometry_usability": "metric-aligned",
+        },
+    }
     payloads = {
-        "web/recon_manifest.json": b'{"scene":"verified-production"}\n',
+        "web/recon_manifest.json": json.dumps(
+            manifest,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii"),
         "web/recon_full.ply": recon_payload,
         "web/chunks/chunks.json": b'{"chunks":[]}\n',
     }
@@ -460,6 +562,8 @@ def _stub_verified_real_scene_import(
         geometry_usability=geometry_usability,
         target_units=target_units,
         manifest_path="web/recon_manifest.json",
+        gaussian_count=100_000,
+        sh_degree=0,
         artifacts=tuple(
             SimpleNamespace(
                 path=relative,
@@ -3264,6 +3368,11 @@ class TestHttpContract:
                 "GET",
                 "/web/data/recon/private.txt",
             )
+            project_status, _, project_payload = _request(
+                server,
+                "GET",
+                "/api/project",
+            )
 
         assert validation_calls == [
             (import_root / "import-receipt.json", import_root),
@@ -3282,6 +3391,28 @@ class TestHttpContract:
             payloads["web/recon_full.ply"]
         )
         assert private_status == 404
+        assert project_status == 200
+        project = json.loads(project_payload)
+        assert project["reconstruction"]["evidence_status"] == (
+            "receipt-bound-production-import"
+        )
+        assert project["reconstruction"]["geometry_usability"] == (
+            "metric-aligned"
+        )
+        assert project["reconstruction"]["synthetic"] is False
+        assert project["reconstruction"]["artifact"]["uri"] == (
+            "/web/data/recon/recon_full.ply"
+        )
+        assert project["reconstruction"]["artifact"]["sha256"] == (
+            hashlib.sha256(payloads["web/recon_full.ply"]).hexdigest()
+        )
+        assert project["coordinate"]["world_frame"] == "world-enu"
+        assert project["coordinate"]["units"] == "meters"
+        assert "reconstruction-manifest:receipt-bound-mount" in (
+            project["diagnostics"]
+        )
+        assert str(import_root).encode() not in project_payload
+        assert b"private-import" not in project_payload
 
     @pytest.mark.parametrize(
         ("source_role", "geometry_usability", "target_units"),
@@ -3341,10 +3472,19 @@ class TestHttpContract:
                 "GET",
                 "/web/data/recon/recon_manifest.json",
             )
+            project_status, _, project_payload = _request(
+                server,
+                "GET",
+                "/api/project",
+            )
 
         assert status == 409
         assert json.loads(payload)["error"]["code"] == (
             "mounted_reconstruction_changed"
+        )
+        assert project_status == 500
+        assert json.loads(project_payload)["error"]["code"] == (
+            "project_snapshot_failed"
         )
 
     def test_real_scene_mount_streams_large_ply_without_path_read_bytes(

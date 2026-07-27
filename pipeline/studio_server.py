@@ -2334,6 +2334,151 @@ def _load_verified_reconstruction_mount(
     )
 
 
+def _mounted_manifest_projection(
+    mount: VerifiedReconstructionMount,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    manifest_binding = mount.bindings[mount.receipt.manifest_path]
+    if manifest_binding.byte_length > MAX_JSON_BYTES:
+        raise MountedReconstructionError(
+            "mounted reconstruction manifest exceeds the JSON limit"
+        )
+    with mount.open(manifest_binding) as stream:
+        payload = stream.read(MAX_JSON_BYTES + 1)
+    try:
+        manifest = json.loads(payload)
+    except (UnicodeError, ValueError) as exc:
+        raise MountedReconstructionError(
+            "mounted reconstruction manifest is not valid JSON"
+        ) from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 2
+    ):
+        raise MountedReconstructionError(
+            "mounted reconstruction requires a schema-v2 manifest"
+        )
+    full_relative = manifest.get("full_3dgs")
+    descriptor = _v2_full_artifact_descriptor(manifest)
+    if not isinstance(full_relative, str) or descriptor is None:
+        raise MountedReconstructionError(
+            "mounted reconstruction full artifact descriptor is invalid"
+        )
+    full_binding = mount.bindings.get(f"web/{full_relative}")
+    if (
+        full_binding is None
+        or descriptor["sha256"] != full_binding.sha256
+        or descriptor["bytes"] != full_binding.byte_length
+    ):
+        raise MountedReconstructionError(
+            "mounted reconstruction full artifact is not receipt bound"
+        )
+    attributes = descriptor.get("attributes")
+    if not isinstance(attributes, list) or any(
+        not isinstance(value, str) or not value
+        for value in attributes
+    ):
+        raise MountedReconstructionError(
+            "mounted reconstruction attributes are invalid"
+        )
+    provenance = manifest.get("provenance")
+    if not isinstance(provenance, dict):
+        raise MountedReconstructionError(
+            "mounted reconstruction provenance is invalid"
+        )
+    lod = manifest.get("lod")
+    lod_levels: list[int] = []
+    if isinstance(lod, dict):
+        for raw_level, relative in lod.items():
+            try:
+                level = int(raw_level)
+            except (TypeError, ValueError):
+                continue
+            if (
+                level >= 0
+                and isinstance(relative, str)
+                and f"web/{relative}" in mount.bindings
+            ):
+                lod_levels.append(level)
+    full_path = mount.root / full_binding.path
+    reconstruction = {
+        "requested_engine": provenance.get(
+            "requested_reconstruction_engine",
+            "unknown",
+        ),
+        "actual_engine": provenance.get(
+            "actual_reconstruction_engine",
+            "unknown",
+        ),
+        "synthetic": False,
+        "geometry_usability": mount.receipt.geometry_usability,
+        "attributes": attributes,
+        "sh_degree": mount.receipt.sh_degree,
+        "renderer_capabilities": ["dc-color"],
+        "gaussian_count": mount.receipt.gaussian_count,
+        "lod": sorted(set(lod_levels)),
+        "evidence_status": "receipt-bound-production-import",
+        "artifact": {
+            "id": f"recon-scene-full-{full_binding.sha256[:12]}",
+            "kind": "3dgs-ply",
+            "uri": f"{MOUNTED_RECONSTRUCTION_PREFIX}{full_relative}",
+            "sha256": full_binding.sha256,
+            "bytes": full_binding.byte_length,
+            "created_at": _iso_mtime(full_path),
+            "immutable": False,
+        },
+    }
+    bounds = manifest.get("bounds")
+    if isinstance(bounds, dict):
+        reconstruction["bounds"] = bounds
+    sessions = manifest.get("sessions")
+    stitch = {
+        "sessions": len(sessions) if isinstance(sessions, list) else 0,
+        "overlap_ratio": manifest.get("overlap_ratio"),
+        "dedup_voxel_m": manifest.get("dedup_voxel_m"),
+        "replacement_regions": manifest.get("replacement_regions", 0),
+        "lod_counts": [],
+    }
+    coordinate = _coordinate_snapshot(mount.root, manifest)
+    return coordinate, reconstruction, stitch
+
+
+def _apply_mounted_manifest_projection(
+    snapshot: dict[str, Any],
+    mount: VerifiedReconstructionMount,
+) -> None:
+    coordinate, reconstruction, stitch = _mounted_manifest_projection(
+        mount
+    )
+    snapshot["coordinate"] = coordinate
+    snapshot["reconstruction"] = reconstruction
+    snapshot["stitch"] = stitch
+    snapshot["pipeline"]["align"] = _step(
+        available=True,
+        trust="verified",
+    )
+    snapshot["pipeline"]["reconstruct"] = _step(
+        available=True,
+        trust="proxy",
+    )
+    snapshot["pipeline"]["review"] = _step(
+        available=True,
+        trust="proxy",
+    )
+    diagnostics = [
+        item
+        for item in snapshot.get("diagnostics", [])
+        if not item.startswith(
+            (
+                "reconstruction-manifest:",
+                "reconstruction-artifact:",
+                "coordinate-provenance:",
+            )
+        )
+    ]
+    diagnostics.append("reconstruction-manifest:receipt-bound-mount")
+    snapshot["diagnostics"] = diagnostics
+
+
 def resolve_static_path(project_root: str | Path, url_path: str) -> Path:
     """Resolve a percent-encoded URL path within approved project subtrees."""
 
@@ -2950,6 +3095,16 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if request_path == "/api/project":
             try:
                 snapshot = build_project_snapshot(self.project_root)
+                reconstruction_mount = getattr(
+                    self.server,
+                    "reconstruction_mount",
+                    None,
+                )
+                if reconstruction_mount is not None:
+                    _apply_mounted_manifest_projection(
+                        snapshot,
+                        reconstruction_mount,
+                    )
                 if getattr(self.server, "write_enabled", False):
                     active = next((
                         run for run in self.server.job_service.ledger.list_runs()
