@@ -545,6 +545,36 @@ def test_dataset_present_unverified_allows_source_only():
     assert entry.rights_receipt_content_sha256 is None
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        RequirementEntry(
+            requirement_id=RequirementId.SSH_ENDPOINT,
+            state=RequirementState.MISSING,
+            reason_code=ReasonCode.NO_VIEWER_ACCEPTANCE_EVIDENCE,
+        ),
+        RequirementEntry(
+            requirement_id=RequirementId.IMMUTABLE_CUDA_IMAGE,
+            state=RequirementState.UNKNOWN,
+            reason_code=ReasonCode.NO_CONTAINER_DIGEST_BOUND,
+        ),
+        RequirementEntry(
+            requirement_id=RequirementId.PRODUCTION_DATASET,
+            state=RequirementState.PRESENT_UNVERIFIED,
+            reason_code=ReasonCode.OPERATOR_INPUT_BOUND_BUT_UNVERIFIED,
+            operator_input_content_sha256=_SHA_A,
+        ),
+    ],
+)
+def test_report_rejects_reason_code_that_disagrees_with_requirement_state(
+    entry,
+):
+    with pytest.raises((ProductionExternalInputsError, ValueError), match="reason_code"):
+        build_blocked_report(
+            entries=_entries_with({entry.requirement_id: entry})
+        )
+
+
 # ---------------------------------------------------------------------------
 # Top-level report validators
 # ---------------------------------------------------------------------------
@@ -887,6 +917,28 @@ def test_cli_rejects_unknown_requirement_id(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--operator-input-sha256", "ssh-endpoint:token=do-not-echo"),
+        ("--operator-input-sha256", "password=do-not-echo"),
+        ("--state-unknown", "secret=do-not-echo"),
+    ],
+)
+def test_cli_rejects_malformed_values_without_echoing_them(
+    tmp_path,
+    capsys,
+    flag,
+    value,
+):
+    output = tmp_path / "blocked.json"
+    with pytest.raises(SystemExit):
+        cli_main(["--output", str(output), flag, value])
+    captured = capsys.readouterr()
+    assert "do-not-echo" not in captured.err
+    assert "do-not-echo" not in captured.out
+
+
 def test_cli_state_unknown_marks_requirement_unknown(tmp_path):
     output = tmp_path / "blocked.json"
     rc = cli_main(
@@ -971,6 +1023,22 @@ def test_publish_blocked_report_rejects_missing_parent(tmp_path):
         publish_blocked_report(report, output=output)
 
 
+def test_publish_blocked_report_rejects_destination_symlink(tmp_path):
+    report = build_default_blocked_report()
+    output = tmp_path / "blocked.json"
+    target = tmp_path / "symlink-target.json"
+    try:
+        output.symlink_to(target)
+    except OSError:
+        pytest.skip("filesystem does not permit symlink creation")
+
+    with pytest.raises(ProductionExternalInputsError, match="already exists"):
+        publish_blocked_report(report, output=output)
+
+    assert output.is_symlink()
+    assert not target.exists()
+
+
 def test_publish_blocked_report_atomic_under_fault(tmp_path, monkeypatch):
     """If durable publication fails after namespace change, destination
     must not be left as an empty/partial file and must remain replayable.
@@ -996,3 +1064,31 @@ def test_publish_blocked_report_atomic_under_fault(tmp_path, monkeypatch):
         if p.name.startswith(f".{output.name}.")
     ]
     assert not leftovers
+
+
+def test_publication_cleanup_failure_does_not_mask_durability_state(
+    tmp_path,
+    monkeypatch,
+):
+    from pipeline import production_external_inputs as pei
+
+    report = build_default_blocked_report()
+    output = tmp_path / "blocked.json"
+
+    def fail_publish(source, destination):
+        raise pei.DurableIOError(
+            "sync failed after publish",
+            published=True,
+        )
+
+    def fail_cleanup(self, *, missing_ok=False):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(pei, "publish_file_noreplace", fail_publish)
+    monkeypatch.setattr(Path, "unlink", fail_cleanup)
+
+    with pytest.raises(ProductionExternalInputsError) as caught:
+        publish_blocked_report(report, output=output)
+
+    assert isinstance(caught.value.__cause__, pei.DurableIOError)
+    assert caught.value.__cause__.published is True

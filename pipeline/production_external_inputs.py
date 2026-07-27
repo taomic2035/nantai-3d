@@ -214,6 +214,13 @@ class BlockedExternalInputsReport(FrozenModel):
             raise ValueError("requirements must be sorted by requirement_id")
         if sorted({e.requirement_id for e in v}, key=lambda r: r.value) != expected:
             raise ValueError("requirements must cover all six RequirementId values")
+        for entry in v:
+            expected_reason = _expected_reason_for_entry(entry)
+            if entry.reason_code != expected_reason:
+                raise ValueError(
+                    f"{entry.requirement_id.value} reason_code disagrees "
+                    "with its state and bound identities"
+                )
         return v
 
 
@@ -225,6 +232,20 @@ _DEFAULT_REASON_FOR: dict[RequirementId, ReasonCode] = {
     RequirementId.NON_COPLANAR_CONTROL_POINTS: ReasonCode.NO_CONTROL_POINTS_MEASURED,
     RequirementId.VIEWER_HUMAN_ACCEPTANCE: ReasonCode.NO_VIEWER_ACCEPTANCE_EVIDENCE,
 }
+
+
+def _expected_reason_for_entry(entry: RequirementEntry) -> ReasonCode:
+    if entry.state == RequirementState.MISSING:
+        return _DEFAULT_REASON_FOR[entry.requirement_id]
+    if entry.state == RequirementState.UNKNOWN:
+        return ReasonCode.UNKNOWN_PROBE_OUTCOME
+    if entry.requirement_id == RequirementId.PRODUCTION_DATASET:
+        if entry.rights_receipt_content_sha256 is None:
+            return ReasonCode.OPERATOR_INPUT_BOUND_BUT_RIGHTS_RECEIPT_MISSING
+        return ReasonCode.OPERATOR_INPUT_BOUND_BUT_UNVERIFIED
+    if entry.requirement_id == RequirementId.VIEWER_HUMAN_ACCEPTANCE:
+        return ReasonCode.OPERATOR_INPUT_BOUND_BUT_VIEWER_ACCEPTANCE_PENDING
+    return ReasonCode.OPERATOR_INPUT_BOUND_BUT_UNVERIFIED
 
 
 def _canonical_json_bytes(payload: Any) -> bytes:
@@ -340,9 +361,10 @@ def _build_blocked_report(
 def build_default_blocked_report() -> BlockedExternalInputsReport:
     """Build a blocked report with all six requirements in ``missing`` state.
 
-    No operator input, no placeholder identity, no host, no digest, no
-    SHA.  This is the canonical report emitted when no external values
-    are available; the CLI uses it as the default.
+    No operator input, no placeholder identity, no host, no digest, and no
+    external identity SHA. The report still carries its own content-addressed
+    ``report_sha256``. This is the canonical report emitted when no external
+    values are available; the CLI uses it as the default.
     """
     entries = [
         RequirementEntry(
@@ -440,8 +462,12 @@ def publish_blocked_report(
     as a replay or collision and is rejected; the caller must not
     overwrite audit-trail files.
     """
-    output = Path(output).resolve()
-    if not output.parent.exists():
+    output = Path(output).absolute()
+    if output.exists() or output.is_symlink():
+        raise ProductionExternalInputsError(
+            "blocked report destination already exists; replay blocked"
+        )
+    if not output.parent.is_dir():
         raise ProductionExternalInputsError(
             "output parent directory must exist"
         )
@@ -458,20 +484,27 @@ def publish_blocked_report(
         flush_file(temporary)
         publish_file_noreplace(temporary, output)
     except DurableIOError as exc:
-        temporary.unlink(missing_ok=True)
+        _best_effort_unlink(temporary)
         raise ProductionExternalInputsError(
             "blocked report durable publication failed"
         ) from exc
     except FileExistsError as exc:
-        temporary.unlink(missing_ok=True)
+        _best_effort_unlink(temporary)
         raise ProductionExternalInputsError(
             "blocked report destination already exists; replay blocked"
         ) from exc
     except OSError as exc:
-        temporary.unlink(missing_ok=True)
+        _best_effort_unlink(temporary)
         raise ProductionExternalInputsError(
             "blocked report publication cannot be opened"
         ) from exc
+
+
+def _best_effort_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _parse_operator_input_spec(
@@ -481,17 +514,17 @@ def _parse_operator_input_spec(
         rid_str, sha = spec.split(":", 1)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"invalid --operator-input-sha256 format: {spec!r}"
+            "invalid --operator-input-sha256 format"
         ) from exc
     try:
         rid = RequirementId(rid_str)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"unknown requirement_id: {rid_str!r}"
+            "unknown requirement_id for --operator-input-sha256"
         ) from exc
     if not re.fullmatch(_SHA256_PATTERN, sha):
         raise argparse.ArgumentTypeError(
-            f"operator input SHA-256 must be 64 hex: {sha!r}"
+            "operator input SHA-256 must be 64 lowercase hex characters"
         )
     return rid, sha
 
@@ -562,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             rid = RequirementId(raw_id)
         except ValueError:
-            parser.error(f"unknown requirement_id for --state-unknown: {raw_id!r}")
+            parser.error("unknown requirement_id for --state-unknown")
         if rid in unknown_ids:
             parser.error(f"duplicate --state-unknown for {rid.value}")
         if rid in operator_inputs:
