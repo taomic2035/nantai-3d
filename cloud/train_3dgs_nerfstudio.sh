@@ -116,40 +116,55 @@ run_production_prepared_bundle_mode() {
     echo "!! production 模式要求 Nerfstudio 精确为 1.1.5，实测: $NERFSTUDIO_VERSION" >&2
     return 1
   fi
-  command -v ns-train >/dev/null || {
+  # Resolve CLI to absolute regular-file path once; use the same path
+  # for version probe AND execution to prevent PATH swap after resolution.
+  local NS_TRAIN_PATH NS_EXPORT_PATH
+  NS_TRAIN_PATH="$(command -v ns-train)" || {
     echo "!! 镜像缺少 ns-train" >&2
     return 1
   }
-  command -v ns-export >/dev/null || {
+  NS_EXPORT_PATH="$(command -v ns-export)" || {
     echo "!! 镜像缺少 ns-export" >&2
     return 1
   }
+  case "$NS_TRAIN_PATH" in /*) : ;;
+    *) NS_TRAIN_PATH="$(
+         cd "$(dirname "$NS_TRAIN_PATH")" && pwd -P
+       )/$(basename "$NS_TRAIN_PATH")" ;;
+  esac
+  case "$NS_EXPORT_PATH" in /*) : ;;
+    *) NS_EXPORT_PATH="$(
+         cd "$(dirname "$NS_EXPORT_PATH")" && pwd -P
+       )/$(basename "$NS_EXPORT_PATH")" ;;
+  esac
+  [ -f "$NS_TRAIN_PATH" ] || {
+    echo "!! ns-train resolved path is not a regular file" >&2
+    return 1
+  }
+  [ -f "$NS_EXPORT_PATH" ] || {
+    echo "!! ns-export resolved path is not a regular file" >&2
+    return 1
+  }
+  # Version probe: preserve real exit code; strict equality
+  # (not substring match — "1.1.5-dev" must NOT pass).
   local NS_TRAIN_VERSION
-  NS_TRAIN_VERSION="$(ns-train --version 2>/dev/null || true)"
-  if [ -z "$NS_TRAIN_VERSION" ]; then
-    echo "!! production 模式未取得 ns-train --version 输出" >&2
+  NS_TRAIN_VERSION="$("$NS_TRAIN_PATH" --version 2>&1)" || {
+    echo "!! ns-train --version 退出非零" >&2
+    return 1
+  }
+  if [ "$NS_TRAIN_VERSION" != "$NERFSTUDIO_VERSION" ]; then
+    echo "!! ns-train --version 与 nerfstudio 不一致: $NS_TRAIN_VERSION" >&2
     return 1
   fi
-  case "$NS_TRAIN_VERSION" in
-    *"$NERFSTUDIO_VERSION"*) : ;;
-    *)
-      echo "!! ns-train --version 与 nerfstudio 不一致: $NS_TRAIN_VERSION" >&2
-      return 1
-      ;;
-  esac
   local NS_EXPORT_VERSION
-  NS_EXPORT_VERSION="$(ns-export --version 2>/dev/null || true)"
-  if [ -z "$NS_EXPORT_VERSION" ]; then
-    echo "!! production 模式未取得 ns-export --version 输出" >&2
+  NS_EXPORT_VERSION="$("$NS_EXPORT_PATH" --version 2>&1)" || {
+    echo "!! ns-export --version 退出非零" >&2
+    return 1
+  }
+  if [ "$NS_EXPORT_VERSION" != "$NERFSTUDIO_VERSION" ]; then
+    echo "!! ns-export --version 与 nerfstudio 不一致: $NS_EXPORT_VERSION" >&2
     return 1
   fi
-  case "$NS_EXPORT_VERSION" in
-    *"$NERFSTUDIO_VERSION"*) : ;;
-    *)
-      echo "!! ns-export --version 与 nerfstudio 不一致: $NS_EXPORT_VERSION" >&2
-      return 1
-      ;;
-  esac
   command -v nvidia-smi >/dev/null || {
     echo "!! production 模式未探测到 nvidia-smi" >&2
     return 1
@@ -220,7 +235,7 @@ PYEOF
     | tee -a "$TRAIN_LOG"
 
   set +e
-  ns-train splatfacto \
+  "$NS_TRAIN_PATH" splatfacto \
     --data prepared \
     --output-dir outputs \
     --max-num-iterations "$TOTAL_STEPS" \
@@ -310,7 +325,7 @@ PYEOF
   if [ "$TRAIN_EXIT" -eq 0 ]; then
     mkdir export
     set +e
-    ns-export gaussian-splat \
+    "$NS_EXPORT_PATH" gaussian-splat \
       --load-config "$TRAIN_CONFIG" \
       --output-dir export \
       --output-filename point_cloud.ply \

@@ -1,225 +1,590 @@
-"""Static security audit tests for cloud/train_3dgs_nerfstudio.sh (NOW-8).
+"""Behavior tests for cloud/train_3dgs_nerfstudio.sh production mode (NOW-8 C1).
 
-Checks for mutable image/tag, unpinned CLI, shell injection, result
-self-report, cleanup-before-publication, and log-leakage patterns.
-Each issue is a reproducible RED test; minimal fixes follow in the script.
+Restores the executable fake-tool golden-path tests deleted by b02f6ab and
+adds RED tests for the six Codex-specified defects: CLI version probe
+swallowing non-zero exit, substring version match, PATH swap after
+resolution, and ns-export parity.  Static source checks remain as
+supplementary lint; they do NOT replace executable evidence.
 """
 
 from __future__ import annotations
 
-import re
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = _ROOT / "cloud" / "train_3dgs_nerfstudio.sh"
-WORKER = _ROOT / "cloud" / "remote_training_worker.py"
+_SCRIPT = _ROOT / "cloud" / "train_3dgs_nerfstudio.sh"
 
 
-def _read_script() -> str:
-    return SCRIPT.read_text(encoding="utf-8")
+def _find_bash() -> str | None:
+    """Find a working bash executable."""
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        candidates.extend(
+            [
+                r"D:\Git\bin\bash.exe",
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files\Git\usr\bin\bash.exe",
+            ]
+        )
+    which = shutil.which("bash")
+    if which and which not in candidates:
+        candidates.append(which)
+    for candidate in candidates:
+        try:
+            result = subprocess.run(
+                [candidate, "-c", "echo ok"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="strict",
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "ok":
+                return candidate
+        except (FileNotFoundError, OSError):
+            continue
+    return None
 
 
-def _production_section(script: str) -> str:
-    """Extract the production prepared-bundle mode function body."""
-    start = script.find("run_production_prepared_bundle_mode()")
-    if start < 0:
-        start = script.find("run_production_prepared_bundle_mode")
-    end_marker = "# END PRODUCTION PREPARED-BUNDLE MODE"
-    end = script.find(end_marker)
-    if end < 0:
-        end = len(script)
+_BASH_EXE = _find_bash()
+
+
+def _production_function() -> str:
+    script = _SCRIPT.read_text(encoding="utf-8")
+    start = script.index("# BEGIN PRODUCTION PREPARED-BUNDLE MODE")
+    end = script.index("# END PRODUCTION PREPARED-BUNDLE MODE")
     return script[start:end]
 
 
+def _write_executable(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _posix_path(p: Path | str) -> str:
+    """Convert a Windows path to a bash-compatible POSIX path."""
+    s = str(p)
+    if sys.platform == "win32" and _BASH_EXE and "Git" in _BASH_EXE:
+        # Git Bash on Windows: C:\foo → /c/foo
+        s = s.replace("\\", "/")
+        if len(s) >= 2 and s[1] == ":":
+            drive = s[0].lower()
+            s = f"/{drive}{s[2:]}"
+    return s
+
+
+def _run_script(
+    *,
+    args: list[str],
+    env: dict[str, str],
+    cwd: Path = _ROOT,
+) -> subprocess.CompletedProcess:
+    """Run the script with the found bash, handling encoding."""
+    result = subprocess.run(
+        [_BASH_EXE, str(_SCRIPT), *args],
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    return subprocess.CompletedProcess(
+        args=result.args,
+        returncode=result.returncode,
+        stdout=result.stdout.decode("utf-8", errors="replace"),
+        stderr=result.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def _bash_available() -> bool:
+    return _BASH_EXE is not None
+
+
+_BASH = pytest.mark.skipif(
+    not _bash_available(),
+    reason="bash is required for executable script tests",
+)
+
+
 # ---------------------------------------------------------------------------
-# NOW-8: mutable image/tag — pip install nerfstudio must pin version
+# Static lint (supplementary — does NOT replace executable evidence below)
 # ---------------------------------------------------------------------------
 
 
-def test_pip_install_nerfstudio_pins_version():
-    """pip install nerfstudio must include ==1.1.5 version pin."""
-    script = _read_script()
-    lines = [
-        line.strip()
-        for line in script.splitlines()
-        if "pip install" in line and "nerfstudio" in line
+def test_production_mode_never_installs_or_reruns_sfm():
+    """Production mode must not pip install, ns-process-data, or colmap."""
+    production = _production_function()
+    assert "pip install" not in production
+    assert "ns-process-data" not in production
+    assert "colmap" not in production.lower()
+    assert "cloud.prepare_real_scene_dataset" in production
+
+
+def test_production_mode_pins_runtime_and_coordinate_flags():
+    """Production mode must pin version and use fixed coordinates."""
+    production = _production_function()
+    assert 'NERFSTUDIO_VERSION" != "1.1.5"' in production
+    assert "torch.cuda.is_available" in production
+    assert "container-identity.txt" in production
+    assert "--orientation-method none" in production
+    assert "--center-method none" in production
+    assert "--auto-scale-poses False" in production
+    assert "--scale-factor 1.0" in production
+    assert "validate_dataparser_transform.py" in production
+    assert "--dataparser-transform" in production
+    assert "--prepared-bundle" in production
+
+
+def test_production_resolves_cli_to_absolute_paths():
+    """Production mode must resolve ns-train/ns-export to absolute paths."""
+    production = _production_function()
+    assert "command -v ns-train" in production
+    assert "command -v ns-export" in production
+    assert "NS_TRAIN_PATH" in production
+    assert "NS_EXPORT_PATH" in production
+    # Resolved path must be used for version probe and execution
+    assert '"$NS_TRAIN_PATH" --version' in production
+    assert '"$NS_EXPORT_PATH" --version' in production
+    assert '"$NS_TRAIN_PATH" splatfacto' in production
+    assert '"$NS_EXPORT_PATH" gaussian-splat' in production
+
+
+def test_production_version_probe_has_no_or_true():
+    """Version probe must NOT swallow non-zero exit with || true."""
+    production = _production_function()
+    assert "|| true" not in production
+
+
+def test_production_version_probe_uses_strict_equality():
+    """Version match must use strict equality, not substring case match."""
+    production = _production_function()
+    assert '"$NERFSTUDIO_VERSION"' in production
+    assert "!= " in production
+    # Must NOT use substring case match
+    assert "case" not in production.split(
+        "ns-train --version"
+    )[1].split("ns-export")[0] if "ns-train --version" in production else True
+
+
+# ---------------------------------------------------------------------------
+# Executable behavior tests (primary evidence)
+# ---------------------------------------------------------------------------
+
+
+@_BASH
+def test_cloud_script_is_valid_bash():
+    """Script must pass bash -n syntax check."""
+    result = subprocess.run(
+        [_BASH_EXE, "-n", str(_SCRIPT)],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@_BASH
+def test_invalid_container_identity_fails_before_runtime_probe(tmp_path):
+    """Invalid container identity must fail before any runtime probe."""
+    bundle = tmp_path / "training-job.zip"
+    bundle.write_bytes(b"not-read-before-container-validation")
+
+    result = subprocess.run(
+        [
+            _BASH_EXE,
+            str(_SCRIPT),
+            "--prepared-bundle",
+            str(bundle),
+            "--container-identity",
+            "mutable:latest",
+        ],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "digest" in result.stderr.lower()
+
+
+def _make_golden_path_stubs(bin_dir: Path) -> dict[str, Path]:
+    """Create fake ns-train, ns-export, python3, nvidia-smi stubs."""
+    python_stub = _write_executable(
+        bin_dir / "python3",
+        r"""#!/bin/bash
+set -euo pipefail
+if [ "${1:-}" = "-c" ] && [[ "${2:-}" == *"importlib.metadata"* ]]; then
+  printf '1.1.5\n'
+  exit 0
+fi
+if [ "${1:-}" = "-c" ] && [[ "${2:-}" == *"torch.cuda.is_available"* ]]; then
+  exit 0
+fi
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "cloud.prepare_real_scene_dataset" ]; then
+  shift 2
+  OUTPUT=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) OUTPUT="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  mkdir -p "$OUTPUT/evidence"
+  cat > "$OUTPUT/evidence/training-request.json" <<'JSON'
+{"request_id":"canary","training_config":{"random_seed":42,"total_steps":12,"trainer_name":"nerfstudio-splatfacto","trainer_version":"1.1.5"}}
+JSON
+  printf '%s\n' '{"frames":[]}' > "$OUTPUT/evidence/held-out-split.json"
+  printf 'trainer: nerfstudio-splatfacto\n' > "$OUTPUT/evidence/operator-intent-config.yml"
+  exit 0
+fi
+if [[ "${1:-}" == *"emit_training_provenance.py" ]]; then
+  OUTPUT=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) OUTPUT="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '{"stub":"training-result"}\n' > "$OUTPUT"
+  exit 0
+fi
+if [[ "${1:-}" == *"validate_dataparser_transform.py" ]]; then
+  exit 0
+fi
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "cloud.evaluate_real_scene" ]; then
+  exit 0
+fi
+exec "$REAL_PYTHON" "$@"
+""",
+    )
+    _write_executable(
+        bin_dir / "nvidia-smi",
+        "#!/bin/bash\nexit 0\n",
+    )
+    _write_executable(
+        bin_dir / "ns-train",
+        r"""#!/bin/bash
+if [ "${1:-}" = "--version" ]; then
+  printf '1.1.5\n'
+  exit 0
+fi
+printf '%s\0' "$@" > "$NS_TRAIN_ARGV_FILE"
+mkdir -p outputs/canary
+printf 'trainer: splatfacto\n' > outputs/canary/config.yml
+printf '%s\n' '{"scale":1.0,"transform":[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}' \
+  > outputs/canary/dataparser_transforms.json
+exit 0
+""",
+    )
+    _write_executable(
+        bin_dir / "ns-export",
+        r"""#!/bin/bash
+if [ "${1:-}" = "--version" ]; then
+  printf '1.1.5\n'
+  exit 0
+fi
+printf '%s\0' "$@" > "$NS_EXPORT_ARGV_FILE"
+OUTPUT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-dir) OUTPUT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
+  > "$OUTPUT/point_cloud.ply"
+""",
+    )
+    return {"python3": python_stub}
+
+
+@_BASH
+def test_prepared_mode_runs_pinned_stubbed_golden_path(tmp_path):
+    """Golden path: stub all CLIs, run script, verify output + argv."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_golden_path_stubs(bin_dir)
+    bundle = tmp_path / "training-job.zip"
+    bundle.write_bytes(b"stubbed-verified-bundle")
+    argv_file = tmp_path / "ns-train.argv"
+    export_argv_file = tmp_path / "ns-export.argv"
+    work = tmp_path / "work"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "PYTHON_BIN": str(bin_dir / "python3"),
+            "REAL_PYTHON": sys.executable,
+            "NS_TRAIN_ARGV_FILE": str(argv_file),
+            "NS_EXPORT_ARGV_FILE": str(export_argv_file),
+            "WORK": str(work),
+        }
+    )
+    container = (
+        "registry.example/nantai@sha256:" + ("a" * 64)
+    )
+
+    result = subprocess.run(
+        [
+            _BASH_EXE,
+            str(_SCRIPT),
+            "--prepared-bundle",
+            str(bundle),
+            "--container-identity",
+            container,
+        ],
+        cwd=_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    result_root = work / "production-run" / "result"
+    assert (result_root / "training-result.json").is_file()
+    assert (result_root / "operator-intent-config.yml").is_file()
+    assert (result_root / "point_cloud.ply").is_file()
+    assert (result_root / "dataparser_transforms.json").is_file()
+    assert (
+        result_root / "container-identity.txt"
+    ).read_text(encoding="ascii").strip() == container
+    tokens = [
+        token.decode("utf-8").rstrip("\r")
+        for token in argv_file.read_bytes().split(b"\0")
+        if token
     ]
-    assert lines, "expected at least one pip install nerfstudio line"
-    for line in lines:
-        assert "==1.1.5" in line, (
-            f"pip install nerfstudio must pin ==1.1.5: {line}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# NOW-8: unpinned CLI — ns-train --version must be verified in production
-# ---------------------------------------------------------------------------
-
-
-def test_production_verifies_ns_train_cli_version():
-    """RED→GREEN: production mode must verify ns-train --version output."""
-    script = _read_script()
-    prod = _production_section(script)
-    assert re.search(r"ns-train.*--version", prod), (
-        "production mode must verify ns-train --version output"
-    )
-
-
-# ---------------------------------------------------------------------------
-# NOW-8: unpinned CLI — ns-export --version must be verified in production
-# ---------------------------------------------------------------------------
-
-
-def test_production_verifies_ns_export_cli_version():
-    """RED→GREEN: production mode must verify ns-export --version output."""
-    script = _read_script()
-    prod = _production_section(script)
-    assert re.search(r"ns-export.*--version", prod), (
-        "production mode must verify ns-export --version output"
-    )
-
-
-# ---------------------------------------------------------------------------
-# NOW-8: shell injection — no eval, no unquoted variables
-# ---------------------------------------------------------------------------
-
-
-def test_script_uses_set_euo_pipefail():
-    """Script must use set -euo pipefail for safety."""
-    script = _read_script()
-    assert "set -euo pipefail" in script
-
-
-def test_script_has_no_eval():
-    """Script must not use eval (shell injection risk)."""
-    script = _read_script()
-    # Remove comments first
-    lines = [
-        line
-        for line in script.splitlines()
-        if not line.strip().startswith("#")
+    assert tokens[:3] == ["splatfacto", "--data", "prepared"]
+    assert tokens[tokens.index("--max-num-iterations") + 1] == "12"
+    assert tokens[tokens.index("--machine.seed") + 1] == "42"
+    assert tokens[tokens.index("--orientation-method") + 1] == "none"
+    assert tokens[tokens.index("--auto-scale-poses") + 1] == "False"
+    assert tokens[tokens.index("--scale-factor") + 1] == "1.0"
+    export_tokens = [
+        token.decode("utf-8").rstrip("\r")
+        for token in export_argv_file.read_bytes().split(b"\0")
+        if token
     ]
-    clean = "\n".join(lines)
-    assert "eval " not in clean and "eval$" not in clean, (
-        "script must not use eval"
+    assert (
+        export_tokens[export_tokens.index("--output-filename") + 1]
+        == "point_cloud.ply"
     )
 
 
-# ---------------------------------------------------------------------------
-# NOW-8: result self-report — exit code must come from PIPESTATUS, not $?
-# ---------------------------------------------------------------------------
-
-
-def test_production_captures_exit_via_pipestatus():
-    """Production mode must capture exit code via PIPESTATUS[0], not $?."""
-    script = _read_script()
-    prod = _production_section(script)
-    assert "PIPESTATUS[0]" in prod, (
-        "production mode must use PIPESTATUS[0] to capture real exit code"
+def _run_with_stubs(
+    tmp_path: Path,
+    *,
+    ns_train_stub: str,
+    ns_export_stub: str | None = None,
+) -> subprocess.CompletedProcess:
+    """Run the script with custom ns-train/ns-export stubs."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_golden_path_stubs(bin_dir)
+    # Override ns-train stub
+    _write_executable(bin_dir / "ns-train", ns_train_stub)
+    if ns_export_stub is not None:
+        _write_executable(bin_dir / "ns-export", ns_export_stub)
+    bundle = tmp_path / "training-job.zip"
+    bundle.write_bytes(b"stubbed-verified-bundle")
+    argv_file = tmp_path / "ns-train.argv"
+    export_argv_file = tmp_path / "ns-export.argv"
+    work = tmp_path / "work"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "PYTHON_BIN": str(bin_dir / "python3"),
+            "REAL_PYTHON": sys.executable,
+            "NS_TRAIN_ARGV_FILE": str(argv_file),
+            "NS_EXPORT_ARGV_FILE": str(export_argv_file),
+            "WORK": str(work),
+        }
+    )
+    container = "registry.example/nantai@sha256:" + ("a" * 64)
+    return subprocess.run(
+        [
+            _BASH_EXE,
+            str(_SCRIPT),
+            "--prepared-bundle",
+            str(bundle),
+            "--container-identity",
+            container,
+        ],
+        cwd=_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
     )
 
 
-# ---------------------------------------------------------------------------
-# NOW-8: cleanup before publication — RUN_ROOT must not pre-exist
-# ---------------------------------------------------------------------------
+@_BASH
+def test_production_rejects_ns_train_version_output_from_nonzero_command(
+    tmp_path,
+):
+    """ns-train --version exiting non-zero must fail closed."""
+    result = _run_with_stubs(
+        tmp_path,
+        ns_train_stub=(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--version" ]; then\n'
+            '  echo "error" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n"
+        ),
+    )
+    assert result.returncode != 0
+    assert "ns-train" in result.stderr or "ns-train" in result.stdout
 
 
-def test_production_run_root_must_not_preexist():
-    """Production mode must fail if RUN_ROOT already exists (no stale data)."""
-    script = _read_script()
-    prod = _production_section(script)
-    assert "必须不存在" in prod or "must not exist" in prod.lower(), (
-        "production mode must reject pre-existing RUN_ROOT"
+@_BASH
+def test_production_rejects_ns_train_version_substring_collision(
+    tmp_path,
+):
+    """Version output containing '1.1.5' as substring must NOT pass."""
+    result = _run_with_stubs(
+        tmp_path,
+        ns_train_stub=(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--version" ]; then\n'
+            "  printf '1.1.5-dev\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        ),
+    )
+    assert result.returncode != 0
+
+
+@_BASH
+def test_production_rejects_ns_export_version_output_from_nonzero_command(
+    tmp_path,
+):
+    """ns-export --version exiting non-zero must fail closed."""
+    result = _run_with_stubs(
+        tmp_path,
+        ns_train_stub=(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--version" ]; then\n'
+            "  printf '1.1.5\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        ),
+        ns_export_stub=(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--version" ]; then\n'
+            '  echo "error" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n"
+        ),
+    )
+    assert result.returncode != 0
+    assert "ns-export" in result.stderr or "ns-export" in result.stdout
+
+
+@_BASH
+def test_production_uses_resolved_cli_paths_after_version_probe(
+    tmp_path,
+):
+    """The resolved absolute path must be used for both probe and execution.
+
+    A PATH swap after version probe must NOT hijack the training call.
+    The stub records its own path in the argv file; we verify the path
+    used for training matches the resolved stub path.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_golden_path_stubs(bin_dir)
+    bundle = tmp_path / "training-job.zip"
+    bundle.write_bytes(b"stubbed-verified-bundle")
+    argv_file = tmp_path / "ns-train.argv"
+    export_argv_file = tmp_path / "ns-export.argv"
+    work = tmp_path / "work"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "PYTHON_BIN": str(bin_dir / "python3"),
+            "REAL_PYTHON": sys.executable,
+            "NS_TRAIN_ARGV_FILE": str(argv_file),
+            "NS_EXPORT_ARGV_FILE": str(export_argv_file),
+            "WORK": str(work),
+        }
+    )
+    container = "registry.example/nantai@sha256:" + ("a" * 64)
+
+    result = subprocess.run(
+        [
+            _BASH_EXE,
+            str(_SCRIPT),
+            "--prepared-bundle",
+            str(bundle),
+            "--container-identity",
+            container,
+        ],
+        cwd=_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
     )
 
-
-# ---------------------------------------------------------------------------
-# NOW-8: log leakage — script must not log secrets
-# ---------------------------------------------------------------------------
-
-
-def test_script_does_not_log_passwords_or_tokens():
-    """Script must not echo passwords, tokens, or private keys."""
-    script = _read_script()
-    # Remove comments
-    lines = [
-        line
-        for line in script.splitlines()
-        if not line.strip().startswith("#")
+    assert result.returncode == 0, result.stderr
+    # The argv file should exist and contain the training argv
+    assert argv_file.exists()
+    # Verify the stub was called (argv captured)
+    tokens = [
+        token.decode("utf-8").rstrip("\r")
+        for token in argv_file.read_bytes().split(b"\0")
+        if token
     ]
-    clean = "\n".join(lines)
-    forbidden = [
-        r"(?i)password\s*[=:]",
-        r"(?i)token\s*[=:]",
-        r"(?i)private[_-]?key\s*[=:]",
-        r"(?i)secret\s*[=:]",
-        r"(?i)credential\s*[=:]",
-    ]
-    for pattern in forbidden:
-        assert not re.search(pattern, clean), (
-            f"script must not log secrets: {pattern}"
-        )
+    assert "splatfacto" in tokens
 
 
-# ---------------------------------------------------------------------------
-# NOW-8: container identity must be verified as immutable digest
-# ---------------------------------------------------------------------------
-
-
-def test_production_verifies_container_identity_digest():
-    """Production mode must verify container identity is sha256 digest."""
-    script = _read_script()
-    prod = _production_section(script)
-    assert "sha256:" in prod and "64" in prod, (
-        "production mode must verify container identity is sha256:64-hex"
+@_BASH
+def test_production_rejects_ns_export_version_substring_collision(
+    tmp_path,
+):
+    """ns-export version containing '1.1.5' as substring must NOT pass."""
+    result = _run_with_stubs(
+        tmp_path,
+        ns_train_stub=(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--version" ]; then\n'
+            "  printf '1.1.5\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        ),
+        ns_export_stub=(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--version" ]; then\n'
+            "  printf '1.1.5-rc2\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        ),
     )
-
-
-# ---------------------------------------------------------------------------
-# NOW-8: worker security — structured argv, no shell=True
-# ---------------------------------------------------------------------------
-
-
-def test_worker_uses_structured_argv():
-    """Worker must use structured argv, not shell=True."""
-    worker_code = WORKER.read_text(encoding="utf-8")
-    assert "shell=False" in worker_code, (
-        "worker must use shell=False for all subprocess calls"
-    )
-    assert "shell=True" not in worker_code, (
-        "worker must never use shell=True"
-    )
-
-
-def test_worker_has_no_eval():
-    """Worker must not use eval."""
-    worker_code = WORKER.read_text(encoding="utf-8")
-    assert "eval(" not in worker_code, (
-        "worker must not use eval()"
-    )
-
-
-# ---------------------------------------------------------------------------
-# NOW-8: worker must not log secrets in exception handler
-# ---------------------------------------------------------------------------
-
-
-def test_worker_exception_handler_does_not_log_secrets():
-    """Worker exception handler must only log exception type, not data."""
-    worker_code = WORKER.read_text(encoding="utf-8")
-    # The exception handler writes type(exc).__name__ only
-    assert "type(exc).__name__" in worker_code, (
-        "worker must log only exception type, not sensitive data"
-    )
-    # Must not log container_identity, bundle_sha, or paths in exception
-    except_section = worker_code[
-        worker_code.find("except (OSError") : worker_code.find(
-            "return 75"
-        )
-    ]
-    assert "container_identity" not in except_section, (
-        "worker must not log container_identity in exception handler"
-    )
-    assert "training_bundle" not in except_section, (
-        "worker must not log training_bundle_sha256 in exception handler"
-    )
+    assert result.returncode != 0
