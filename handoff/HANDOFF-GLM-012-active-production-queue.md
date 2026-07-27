@@ -19,9 +19,9 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ## 执行规则
 
-这是 GLM 当前唯一执行入口。B1 已关闭，当前 active ticket 是 C1；随后按
-C1 → D1 → E1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有
-需要 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
+这是 GLM 当前唯一执行入口。B1/C1 已关闭，当前 active ticket 是 D1；随后按
+D1 → E1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有需要
+secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
 Viewer/Studio/release/schema 路径时才暂停。
 
 - 共享单一 `main` / worktree；只能路径限定 `git add` 和 `git commit --only`。
@@ -120,7 +120,24 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 
 本项不得重做；直接执行 C1。
 
-### Task C1: 恢复 production shell 的可执行安全门（当前 active）
+### Task C1: production shell 可执行安全门（已关闭）
+
+**关闭证据：** GLM `b02a271` 恢复 fake-tool golden path；Codex `5557ed1` 根据
+Nerfstudio v1.1.5 官方 entrypoint 源码修正了不存在的 `--version` 假设。包版本由
+`importlib.metadata` 严格锁为 `1.1.5`，绝对 regular-file CLI 使用官方支持的
+Tyro `-h` 做无副作用 probe，输出丢弃且不能泄露 canary。真实 PATH replacement
+测试证明 probe 后移除原 CLI 不会落入后位恶意程序。fresh C1 为
+`13 passed, 0 skipped`；与 durable I/O、worker、remote shell 联合回归为
+`113 passed, 3 skipped`。
+
+官方依据：
+
+- `ns-train`：
+  <https://github.com/nerfstudio-project/nerfstudio/blob/v1.1.5/nerfstudio/scripts/train.py>
+- `ns-export`：
+  <https://github.com/nerfstudio-project/nerfstudio/blob/v1.1.5/nerfstudio/scripts/exporter.py>
+- package version / console scripts：
+  <https://github.com/nerfstudio-project/nerfstudio/blob/v1.1.5/pyproject.toml>
 
 **Files:**
 
@@ -169,9 +186,9 @@ git commit --only cloud/train_3dgs_nerfstudio.sh tests/test_cloud_prepared_train
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-提交成功后自动开始 D1。
+本项不得重做；直接执行 D1。
 
-### Task D1: 交付无占位身份的 blocked-external-input report
+### Task D1: 交付无占位身份的 blocked-external-input report（当前 active）
 
 **Files:**
 

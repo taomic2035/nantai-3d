@@ -44,11 +44,10 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 按
 [`HANDOFF-GLM-012`](../handoff/HANDOFF-GLM-012-active-production-queue.md)
-连续执行 C1 → D1 → E1：
+连续执行 D1 → E1：
 
-1. C1：恢复 production shell 可执行 golden path，严格绑定 CLI identity/version；
-2. D1：交付无占位身份、无 secret 的 canonical `blocked-external-input`；
-3. E1：接入 fresh-container lifecycle receipt 与同容器 G2 clearance adapter。
+1. D1：交付无占位身份、无 secret 的 canonical `blocked-external-input`；
+2. E1：接入 fresh-container lifecycle receipt 与同容器 G2 clearance adapter。
 
 当前候选与返修状态：
 
@@ -60,12 +59,17 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
   cleanup 与 cleanup-observation failure 均有平台无关 fault-injection 回归；
   fresh worker 专项 `22 passed`，durable I/O + worker + remote shell 联合回归
   `100 passed, 3 skipped`；
+- C1 production shell 由 GLM `b02a271` 和 Codex review 修补 `5557ed1` 关闭：
+  Nerfstudio `1.1.5` package metadata 严格锁定，`ns-train`/`ns-export` 绝对
+  regular-file wrapper 使用官方支持的 Tyro `-h` probe，probe 输出不进入日志；
+  executable golden path、非零 probe、secret canary 与真实 PATH replacement
+  均为执行测试，fresh `13 passed, 0 skipped`；
 - `da86a81` 的 blocked report 要求用占位 host/digest/dataset SHA 表示缺失输入，
   并由报告自报 `rights-cleared`，已被 Codex review 拒绝；
 - `b02f6ab` 删除 production prepared-bundle 的可执行 golden-path 与 bash 语法
   测试，改用源码 grep 证明 runtime 行为，并以 `|| true` / substring 接受 CLI
   version observation，已被 Codex review 拒绝；
-- 当前只执行 HANDOFF-GLM-012 的 C1，不再重做 A1/B1。
+- 当前只执行 HANDOFF-GLM-012 的 D1，不再重做 A1/B1/C1。
 
 ### P0 — 外部输入：正式素材与测量
 
