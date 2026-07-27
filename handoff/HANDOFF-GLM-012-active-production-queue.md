@@ -19,8 +19,9 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ## Codex 即时指令（2026-07-27 18:40）
 
-GLM 当前不是“无事可做”。工作树里的 D1 草稿 fresh 结果为
-`45 passed, 10 failed`，尚不可提交。按下面顺序连续执行：
+GLM 当前不是“无事可做”。工作树里的 D1 草稿在第一轮 `45 passed, 10 failed`
+后已推进到 fresh `51 passed, 4 failed`，另有 `11` 个 Ruff 错误，尚不可提交。
+按下面顺序连续执行：
 
 ```text
 D1.1 修复 canonical report 与 CLI 10 个失败
@@ -35,23 +36,26 @@ closure/import/Viewer/release schema，否则不得回复“无待推进工作�
 Codex 口头确认。每个 ticket 独立提交并 push，随后立即开始下一项；Codex 在提交后
 异步 review。
 
-### D1.1 当前精确返修单
+### D1.1 当前四个 RED 与 Ruff 返修单
 
 1. 保留合法的顶层 `report_sha256`。修正
-   `test_missing_dataset_never_requires_or_emits_placeholder_sha`，只解析并检查
+   `test_missing_dataset_never_requires_or_emits_placeholder_sha` 与
+   `test_cli_emits_blocked_report_without_any_external_values`，只解析并检查
    `production-dataset` requirement 的 identity/receipt 字段，不得用全文
    64-hex 正则误杀报告自身内容 SHA。
-2. duplicate-key-safe JSON 解析后，显式把封闭字符串映射为
-   `RequirementId` / `RequirementState` / `ReasonCode`，再交给 strict Pydantic
-   model。未知枚举值必须拒绝，但 canonical JSON round-trip 必须可读。
-3. CLI 参数错误必须经过 `argparse` 的 `type=` 或 `parser.error(...)`，对直接调用
+2. CLI 参数错误必须经过 `argparse` 的 `type=` 或 `parser.error(...)`，对直接调用
    `main([...])` 产生有界 `SystemExit(2)`；不得把 `ArgumentTypeError` / `ValueError`
-   traceback 泄漏给调用者，也不得回显 secret-bearing 原值。
-4. requirement ID 固定为 `production-dataset`，不能命名成
+   traceback 泄漏给调用者，也不得回显 secret-bearing 原值。当前剩余用例是
+   `test_cli_rejects_invalid_operator_sha` 与
+   `test_cli_rejects_unknown_requirement_id`。
+3. requirement ID 固定为 `production-dataset`，不能命名成
    `rights-cleared-dataset` 并自证 rights。rights 只有 source content SHA 与
    receipt SHA 同时绑定时才是 `present-unverified`，仍不能推导 release allowed。
-5. 先只修上述根因，不删测试、不降 strict、不放宽 canonical/no-replace 门。完成后
-   预期本文件全部 `55 passed`，再跑 ruff 与 `git diff --check`。
+4. Ruff 当前 `11` 项：三个 `str, Enum` 改为 `StrEnum`，`Optional[T]` 改为
+   `T | None`，移除不必要的 forward-reference 引号并整理测试 import。机械修复后
+   必须重跑专项，不能只运行 `ruff --fix` 就提交。
+5. 不删测试、不降 strict、不放宽 canonical/no-replace 门。完成后预期本文件全部
+   `55 passed`，再跑 ruff 与 `git diff --check`。
 
 ## 执行规则
 
