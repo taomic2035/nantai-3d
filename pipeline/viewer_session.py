@@ -10,6 +10,10 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from pipeline.human_review_inputs import (
+    HumanReviewInputError,
+    materialize_human_review_policy,
+)
 from pipeline.studio_server import make_server
 
 
@@ -78,6 +82,7 @@ class ViewerSessionOptions:
     evidence_root: Path
     node_executable: Path
     python_executable: Path
+    human_review_policy_output_path: Path | None = None
     headless: bool = False
     measurement_timeout_ms: int = 120_000
 
@@ -136,13 +141,29 @@ def _validated_options(
         options.decision_path,
         label="Viewer decision",
     )
-    for path, label in (
+    human_review_policy_output_path = (
+        _require_absent(
+            options.human_review_policy_output_path,
+            label="human review policy",
+        )
+        if options.human_review_policy_output_path is not None
+        else None
+    )
+    bounded_paths = [
         (import_root, "real-scene import root"),
         (policy_path, "Viewer policy"),
         (camera_set_path, "Viewer camera set"),
         (output_path, "Viewer report"),
         (decision_path, "Viewer decision"),
-    ):
+    ]
+    if human_review_policy_output_path is not None:
+        bounded_paths.append(
+            (
+                human_review_policy_output_path,
+                "human review policy",
+            )
+        )
+    for path, label in bounded_paths:
         _require_below_evidence_root(
             evidence_root,
             path,
@@ -166,6 +187,9 @@ def _validated_options(
         evidence_root=evidence_root,
         node_executable=node_executable,
         python_executable=python_executable,
+        human_review_policy_output_path=(
+            human_review_policy_output_path
+        ),
         headless=options.headless,
         measurement_timeout_ms=options.measurement_timeout_ms,
     )
@@ -269,6 +293,24 @@ def run_production_viewer_session(
         raise ViewerSessionError(
             "Viewer capture process returned no exit status"
         )
+    if (
+        return_code == 0
+        and validated.human_review_policy_output_path is not None
+    ):
+        try:
+            materialize_human_review_policy(
+                evidence_root=validated.evidence_root,
+                viewer_policy_path=validated.policy_path,
+                viewer_report_path=validated.output_path,
+                output_path=(
+                    validated.human_review_policy_output_path
+                ),
+            )
+        except HumanReviewInputError as exc:
+            raise ViewerSessionError(
+                "Viewer capture completed but its human review policy "
+                f"could not be materialized: {exc}"
+            ) from exc
     return return_code
 
 
@@ -294,6 +336,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-set", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--decision", type=Path)
+    parser.add_argument(
+        "--human-review-policy-output",
+        type=Path,
+        help=(
+            "After an accepted capture, derive one bound human-review "
+            "policy at this absent path"
+        ),
+    )
     parser.add_argument("--evidence-root", type=Path, required=True)
     parser.add_argument("--node", default="node")
     parser.add_argument("--python", default=sys.executable)
@@ -340,6 +390,13 @@ def main(argv: list[str] | None = None) -> int:
                 ).expanduser().absolute(),
                 node_executable=node_executable,
                 python_executable=python_executable,
+                human_review_policy_output_path=(
+                    Path(
+                        args.human_review_policy_output
+                    ).expanduser().absolute()
+                    if args.human_review_policy_output is not None
+                    else None
+                ),
                 headless=args.headless,
                 measurement_timeout_ms=args.measurement_timeout_ms,
             )

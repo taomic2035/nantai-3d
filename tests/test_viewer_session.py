@@ -171,6 +171,129 @@ def test_session_closes_server_when_capture_process_cannot_start(
     assert server.close_calls == 1
 
 
+def test_successful_session_materializes_bound_human_review_policy(
+    tmp_path,
+    monkeypatch,
+):
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    human_policy_output = (
+        options.evidence_root / "review/human-review-policy.json"
+    )
+    options = replace(
+        options,
+        human_review_policy_output_path=human_policy_output,
+    )
+    server = _FakeServer()
+    calls = []
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    def _materialize(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        session_module,
+        "materialize_human_review_policy",
+        _materialize,
+    )
+
+    result = run_production_viewer_session(options)
+
+    assert result == 0
+    assert calls == [
+        {
+            "evidence_root": options.evidence_root,
+            "viewer_policy_path": options.policy_path,
+            "viewer_report_path": options.output_path,
+            "output_path": human_policy_output,
+        }
+    ]
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+
+
+def test_session_rejects_human_review_policy_collision_before_port(
+    tmp_path,
+    monkeypatch,
+):
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    output = options.evidence_root / "review/human-review-policy.json"
+    output.parent.mkdir()
+    output.write_text("existing\n", encoding="utf-8")
+    options = replace(
+        options,
+        human_review_policy_output_path=output,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        lambda *_args, **_kwargs: pytest.fail(
+            "server must remain unreachable"
+        ),
+    )
+
+    with pytest.raises(ViewerSessionError, match="already exists"):
+        run_production_viewer_session(options)
+
+
+def test_session_reports_post_capture_human_policy_failure_without_rerun(
+    tmp_path,
+    monkeypatch,
+):
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    options = replace(
+        options,
+        human_review_policy_output_path=(
+            options.evidence_root / "review/human-review-policy.json"
+        ),
+    )
+    server = _FakeServer()
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    def _fail(**_kwargs):
+        raise session_module.HumanReviewInputError(
+            "simulated report drift"
+        )
+
+    monkeypatch.setattr(
+        session_module,
+        "materialize_human_review_policy",
+        _fail,
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="capture completed.*could not be materialized",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+
+
 @pytest.mark.parametrize(
     "missing",
     [
@@ -245,6 +368,7 @@ def test_session_rejects_output_collision_before_binding_a_port(
         "camera_set_path",
         "output_path",
         "decision_path",
+        "human_review_policy_output_path",
     ],
 )
 def test_session_rejects_evidence_paths_outside_evidence_root(
