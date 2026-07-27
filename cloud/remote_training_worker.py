@@ -105,6 +105,13 @@ def _real_directory(path: Path, *, label: str) -> None:
         raise RemoteWorkerError(f"{label} must be a real directory")
 
 
+def _best_effort_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     """Write payload via temp + fsync + atomic_replace.
 
@@ -130,7 +137,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             f"cannot publish remote worker file: {path.name}"
         ) from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        _best_effort_unlink(temporary)
 
 
 def _publish_container_id(path: Path, container_id: str) -> None:
@@ -165,7 +172,7 @@ def _publish_container_id(path: Path, container_id: str) -> None:
             "container-id.txt publication cannot be opened"
         ) from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        _best_effort_unlink(temporary)
 
 
 def _read_stable(path: Path, *, max_bytes: int, label: str) -> bytes:

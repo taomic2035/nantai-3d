@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from cloud import remote_training_worker as worker
 from cloud.remote_training_worker import (
     RemoteWorkerError,
     RemoteWorkerSpec,
@@ -906,6 +907,73 @@ def test_worker_does_not_remove_when_container_id_durability_is_unknown(
         job_dir / "container-id.txt"
     ).read_text(encoding="ascii").strip() == _DEFAULT_CONTAINER_ID
     assert "rm" not in _subcommands(fake)
+
+
+def test_status_staging_cleanup_never_masks_unpublished_durability_error(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "status.json"
+    original_unlink = Path.unlink
+
+    def reject_replace(source, destination):
+        raise DurableIOError(
+            "status namespace was not published",
+            published=False,
+        )
+
+    def reject_staging_cleanup(path, *, missing_ok=False):
+        if path.name.startswith(".status.json.") and path.suffix == ".tmp":
+            raise OSError("staging cleanup failed")
+        return original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(worker, "atomic_replace", reject_replace)
+    monkeypatch.setattr(Path, "unlink", reject_staging_cleanup)
+
+    with pytest.raises(DurableIOError) as exc_info:
+        worker._atomic_write(target, b"{}\n")
+
+    assert exc_info.value.published is False
+    assert "not published" in str(exc_info.value)
+
+
+def test_container_id_staging_cleanup_never_masks_published_durability_error(
+    tmp_path,
+    monkeypatch,
+):
+    target = tmp_path / "container-id.txt"
+    original_unlink = Path.unlink
+
+    def publish_then_fail(source, destination):
+        source = Path(source)
+        destination = Path(destination)
+        os.link(source, destination)
+        raise DurableIOError(
+            "container id namespace published but sync failed",
+            published=True,
+        )
+
+    def reject_staging_cleanup(path, *, missing_ok=False):
+        if (
+            path.name.startswith(".container-id.txt.")
+            and path.suffix == ".tmp"
+        ):
+            raise OSError("staging cleanup failed")
+        return original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(
+        worker,
+        "publish_file_noreplace",
+        publish_then_fail,
+    )
+    monkeypatch.setattr(Path, "unlink", reject_staging_cleanup)
+
+    with pytest.raises(DurableIOError) as exc_info:
+        worker._publish_container_id(target, _DEFAULT_CONTAINER_ID)
+
+    assert exc_info.value.published is True
+    assert "published but sync failed" in str(exc_info.value)
+    assert target.read_text(encoding="ascii").strip() == _DEFAULT_CONTAINER_ID
 
 
 def test_worker_cleanup_observation_failure_never_rewrites_terminal_status(
