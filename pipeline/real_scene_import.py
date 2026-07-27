@@ -15,6 +15,7 @@ import math
 import os
 import shutil
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -56,9 +57,23 @@ from pipeline.metric_alignment_evidence import (
     measure_metric_alignment,
     verify_metric_alignment_decision,
 )
+from pipeline.production_runtime_evidence import (
+    ProductionRuntimeEvidenceError,
+    load_production_runtime_decision_bytes,
+    load_production_runtime_measurement_bytes,
+    load_production_runtime_policy_bytes,
+)
+from pipeline.production_training_closure import (
+    ProductionTrainingClosure,
+    ProductionTrainingClosureError,
+    load_production_result_manifest_bytes,
+    load_production_training_closure_bytes,
+    verify_production_training_closure,
+)
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_training import (
     RealSceneTrainingError,
+    load_training_job_evaluation_bytes,
     load_training_job_input_bytes,
     verify_production_training_job_bundle,
     verify_training_job_bundle,
@@ -76,6 +91,13 @@ from pipeline.reconstruct import reconstruct
 from pipeline.reconstruction_artifact_integrity import (
     IntegrityReport,
     verify_recon_artifacts,
+)
+from pipeline.render_evaluation import (
+    RenderDecision,
+    RenderEvaluationError,
+    RenderEvaluationPolicy,
+    RenderEvaluationReport,
+    validate_render_evaluation,
 )
 from pipeline.spatial_chunk import verify_chunks_integrity
 from pipeline.training_executor import ExecutorAttemptReceipt
@@ -167,8 +189,11 @@ class RealSceneImportIntegrity(FrozenModel):
 
 
 class RealSceneImportReceipt(FrozenModel):
-    schema_id: Literal["nantai.real-scene-import-receipt.v2"] = Field(
-        default="nantai.real-scene-import-receipt.v2",
+    schema_id: Literal[
+        "nantai.real-scene-import-receipt.v2",
+        "nantai.real-scene-import-receipt.v3",
+    ] = Field(
+        default="nantai.real-scene-import-receipt.v3",
         alias="schema",
         serialization_alias="schema",
     )
@@ -177,6 +202,17 @@ class RealSceneImportReceipt(FrozenModel):
     training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_request_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_result_sha256: str = Field(pattern=_SHA256_PATTERN)
+    production_training_closure_path: (
+        Literal["evidence/production-training-closure.json"] | None
+    ) = None
+    production_training_closure_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    production_runtime_decision_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
     gaussian_count: int = Field(ge=1)
     sh_degree: int = Field(ge=0)
     normalized_quaternion_count: int = Field(ge=0)
@@ -268,6 +304,11 @@ class RealSceneImportReceipt(FrozenModel):
             self.alignment_policy_sha256,
             self.alignment_decision_sha256,
         )
+        production_closure_fields = (
+            self.production_training_closure_path,
+            self.production_training_closure_sha256,
+            self.production_runtime_decision_sha256,
+        )
         if not required <= set(paths):
             raise ValueError(
                 "import receipt is missing a required artifact binding"
@@ -275,6 +316,8 @@ class RealSceneImportReceipt(FrozenModel):
         if self.source_role == "production-acceptance":
             if (
                 self.training_quality_role != "production"
+                or self.schema_id
+                != "nantai.real-scene-import-receipt.v3"
                 or self.gaussian_count < 100_000
                 or self.target_units != "meters"
                 or self.geometry_usability != "metric-aligned"
@@ -283,6 +326,10 @@ class RealSceneImportReceipt(FrozenModel):
                 or self.alignment_rms_m > 0.25
                 or any(value is None for value in alignment_paths)
                 or any(value is None for value in alignment_shas)
+                or any(
+                    value is None
+                    for value in production_closure_fields
+                )
             ):
                 raise ValueError(
                     "production import requires production training, "
@@ -292,6 +339,10 @@ class RealSceneImportReceipt(FrozenModel):
                 raise ValueError(
                     "production import is missing bound alignment evidence"
                 )
+            if self.production_training_closure_path not in paths:
+                raise ValueError(
+                    "production import is missing bound training closure"
+                )
         elif (
             self.target_units != "arbitrary"
             or self.geometry_usability != "preview-only"
@@ -299,6 +350,9 @@ class RealSceneImportReceipt(FrozenModel):
             or self.alignment_rms_m is not None
             or any(value is not None for value in alignment_paths)
             or any(value is not None for value in alignment_shas)
+            or any(
+                value is not None for value in production_closure_fields
+            )
         ):
             raise ValueError(
                 "internal canary must remain arbitrary and preview-only"
@@ -725,6 +779,171 @@ def _load_training_material(
     )
 
 
+def _verify_production_closure_evidence(
+    training_root: Path,
+    material: _TrainingMaterial,
+    closure: ProductionTrainingClosure,
+) -> None:
+    result_root = (
+        Path(training_root).expanduser().absolute() / "remote-result"
+    )
+    try:
+        manifest = load_production_result_manifest_bytes(
+            _read_regular_bytes(
+                result_root / "result-bundle-manifest.json",
+                label="production result manifest",
+            )
+        )
+        runtime_measurement = (
+            load_production_runtime_measurement_bytes(
+                _read_regular_bytes(
+                    result_root
+                    / "production-runtime/measurement.json",
+                    label="production runtime measurement",
+                )
+            )
+        )
+        runtime_policy = load_production_runtime_policy_bytes(
+            _read_regular_bytes(
+                result_root / "production-runtime/policy.json",
+                label="production runtime policy",
+            )
+        )
+        runtime_decision = load_production_runtime_decision_bytes(
+            _read_regular_bytes(
+                result_root / "production-runtime/decision.json",
+                label="production runtime decision",
+            )
+        )
+        render_policy, _ = _load_canonical_model(
+            result_root / "render-evaluation/policy.json",
+            RenderEvaluationPolicy,
+            label="render evaluation policy",
+        )
+        render_report, _ = _load_canonical_model(
+            result_root / "render-evaluation/report.json",
+            RenderEvaluationReport,
+            label="render evaluation report",
+        )
+        render_decision, _ = _load_canonical_model(
+            result_root / "render-evaluation/decision.json",
+            RenderDecision,
+            label="render evaluation decision",
+        )
+        member_payloads: dict[str, bytes] = {}
+        for member in manifest.members:
+            payload = _read_regular_bytes(
+                result_root / member.path,
+                label=f"production result member {member.path}",
+                allow_empty=member.path
+                in {"worker.stdout.log", "worker.stderr.log"},
+            )
+            if (
+                len(payload) != member.byte_length
+                or hashlib.sha256(payload).hexdigest()
+                != member.sha256
+            ):
+                raise RealSceneImportError(
+                    "production result manifest member differs: "
+                    f"{member.path}"
+                )
+            member_payloads[member.path] = payload
+        bundle = verify_production_training_job_bundle(
+            Path(training_root).expanduser().absolute()
+            / "training-bundle/training-job.zip"
+        )
+        if bundle.bundle_sha256 != material.bundle_sha256:
+            raise RealSceneImportError(
+                "production training bundle changed before render "
+                "revalidation"
+            )
+        evaluation_sources = load_training_job_evaluation_bytes(
+            bundle
+        )
+        split_bytes = material.input_bytes_by_path.get(
+            "training/held-out-split.json"
+        )
+        if split_bytes is None:
+            raise RealSceneImportError(
+                "production held-out split bytes are unavailable"
+            )
+        with tempfile.TemporaryDirectory(
+            prefix="nantai-import-render-",
+        ) as temporary:
+            evaluation_root = Path(temporary) / "run"
+            split_path = (
+                evaluation_root
+                / "prepared/evidence/held-out-split.json"
+            )
+            split_path.parent.mkdir(parents=True)
+            split_path.write_bytes(split_bytes)
+            transforms_path = (
+                evaluation_root / "prepared/transforms.json"
+            )
+            transforms_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            transforms_path.write_bytes(
+                member_payloads[
+                    "render-evaluation/transforms.json"
+                ]
+            )
+            for logical_path, payload in evaluation_sources.items():
+                source_path = (
+                    evaluation_root / "prepared/images" / logical_path
+                )
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                source_path.write_bytes(payload)
+            for relative, payload in member_payloads.items():
+                if not relative.startswith("render-evaluation/"):
+                    continue
+                target = evaluation_root / "result" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+            derived_render_decision = validate_render_evaluation(
+                render_policy,
+                render_report,
+                evaluation_root,
+            )
+        if derived_render_decision != render_decision:
+            raise RealSceneImportError(
+                "render evaluation decision differs from reopened bytes"
+            )
+        verify_production_training_closure(
+            closure=closure,
+            training_bundle_sha256=material.bundle_sha256,
+            result_bundle_archive_sha256=(
+                material.attempt.result_bundle_sha256
+            ),
+            manifest=manifest,
+            attempt=material.attempt,
+            request=material.request,
+            result=material.result,
+            runtime_measurement=runtime_measurement,
+            runtime_policy=runtime_policy,
+            runtime_decision=runtime_decision,
+            render_policy=render_policy,
+            render_report=render_report,
+            render_decision=render_decision,
+        )
+    except (
+        OSError,
+        ProductionRuntimeEvidenceError,
+        ProductionTrainingClosureError,
+        RealSceneImportError,
+        RealSceneTrainingError,
+        RenderEvaluationError,
+        ValueError,
+    ) as exc:
+        if isinstance(exc, RealSceneImportError):
+            raise
+        raise RealSceneImportError(
+            "production closure runtime, manifest, or render evidence "
+            "cannot be revalidated"
+        ) from exc
+
+
 def _recon_integrity_is_closed(report: IntegrityReport) -> bool:
     chunks = report.chunks_report
     return (
@@ -1054,6 +1273,45 @@ def _validate_metric_alignment_claims(
         )
 
 
+def _validate_production_closure_claims(
+    root: Path,
+    receipt: RealSceneImportReceipt,
+) -> None:
+    if receipt.source_role != "production-acceptance":
+        return
+    path = receipt.production_training_closure_path
+    if path is None:
+        raise RealSceneImportError(
+            "production import training closure path is missing"
+        )
+    try:
+        closure = load_production_training_closure_bytes(
+            _read_regular_bytes(
+                root / path,
+                label="bound production training closure",
+            )
+        )
+    except ProductionTrainingClosureError as exc:
+        raise RealSceneImportError(
+            "bound production training closure is invalid"
+        ) from exc
+    if (
+        receipt.production_training_closure_sha256
+        != closure.content_sha256
+        or receipt.production_runtime_decision_sha256
+        != closure.runtime_decision_sha256
+        or receipt.training_bundle_sha256
+        != closure.training_bundle_sha256
+        or receipt.training_request_sha256 != closure.request_sha256
+        or receipt.training_result_sha256 != closure.result_sha256
+        or receipt.gaussian_count != closure.gaussian_count
+        or receipt.sh_degree != closure.sh_degree
+    ):
+        raise RealSceneImportError(
+            "production import receipt differs from training closure"
+        )
+
+
 def validate_real_scene_import_receipt(
     receipt_path: Path,
     output_root: Path,
@@ -1089,6 +1347,7 @@ def validate_real_scene_import_receipt(
                 f"import artifact sha256/size mismatch: {binding.path}"
             )
     _validate_metric_alignment_claims(root, receipt)
+    _validate_production_closure_claims(root, receipt)
     _validate_manifest_claims(root, receipt)
     recon_report = verify_recon_artifacts(root / receipt.manifest_path)
     if not _recon_integrity_is_closed(recon_report):
@@ -1151,12 +1410,88 @@ def import_real_scene(
             "chunk_size must be a finite positive number"
         )
     material = _load_training_material(training_root)
+    production_closure: ProductionTrainingClosure | None = None
+    closure_bytes: bytes | None = None
     if (
         source_role == "production-acceptance"
         and material.quality_role != "production"
     ):
         raise RealSceneImportError(
             "preview-only Brush training cannot satisfy production import"
+        )
+    if source_role == "production-acceptance":
+        closure_path = (
+            Path(training_root).expanduser().absolute()
+            / "remote-result/production-training-closure.json"
+        )
+        try:
+            closure_bytes = _read_regular_bytes(
+                closure_path,
+                label="production training closure",
+            )
+            production_closure = load_production_training_closure_bytes(
+                closure_bytes
+            )
+        except (
+            OSError,
+            ProductionTrainingClosureError,
+            RealSceneImportError,
+        ) as exc:
+            raise RealSceneImportError(
+                "production training closure is missing or invalid"
+            ) from exc
+        required_closure_evidence = (
+            "result-bundle-manifest.json",
+            "production-runtime/measurement.json",
+            "production-runtime/policy.json",
+            "production-runtime/decision.json",
+            "render-evaluation/policy.json",
+            "render-evaluation/report.json",
+            "render-evaluation/decision.json",
+        )
+        if any(
+            (closure_path.parent / relative).is_symlink()
+            or not (closure_path.parent / relative).is_file()
+            for relative in required_closure_evidence
+        ):
+            raise RealSceneImportError(
+                "production closure raw runtime, manifest, or render "
+                "evidence is missing"
+            )
+        trained = _one_output_binding(material.result, "trained_ply")
+        dataparser = _one_output_binding(
+            material.result,
+            "dataparser_transform_json",
+        )
+        if (
+            production_closure.job_id != material.attempt.job_id
+            or production_closure.attempt_id
+            != material.attempt.attempt_id
+            or production_closure.training_bundle_sha256
+            != material.bundle_sha256
+            or production_closure.result_bundle_archive_sha256
+            != material.attempt.result_bundle_sha256
+            or production_closure.request_sha256
+            != request_canonical_sha256(material.request)
+            or production_closure.result_sha256
+            != result_canonical_sha256(material.result)
+            or production_closure.point_cloud_sha256
+            != trained.artifact_sha256
+            or production_closure.trainer_config_sha256
+            != hashlib.sha256(material.config_bytes).hexdigest()
+            or production_closure.training_log_sha256
+            != hashlib.sha256(material.log_bytes).hexdigest()
+            or production_closure.dataparser_transform_sha256
+            != dataparser.artifact_sha256
+        ):
+            raise RealSceneImportError(
+                "production training closure identity differs from "
+                "reopened training evidence"
+            )
+        _verify_production_closure_evidence(
+            training_root,
+            material,
+            production_closure,
         )
     minimum = 100_000 if source_role == "production-acceptance" else None
     semantics = inspect_real_scene_ply(
@@ -1189,6 +1524,15 @@ def import_real_scene(
         )
     try:
         root.mkdir(parents=True)
+        if (
+            production_closure is not None
+            and closure_bytes is not None
+        ):
+            _write_new(
+                root
+                / "evidence/production-training-closure.json",
+                closure_bytes,
+            )
         source_copy = root / "inputs/source.ply"
         _write_new(source_copy, material.source_ply_bytes)
         normalized = root / "inputs/normalized.ply"
@@ -1410,6 +1754,21 @@ def import_real_scene(
                 material.request
             ),
             training_result_sha256=result_sha,
+            production_training_closure_path=(
+                "evidence/production-training-closure.json"
+                if production_closure is not None
+                else None
+            ),
+            production_training_closure_sha256=(
+                production_closure.content_sha256
+                if production_closure is not None
+                else None
+            ),
+            production_runtime_decision_sha256=(
+                production_closure.runtime_decision_sha256
+                if production_closure is not None
+                else None
+            ),
             gaussian_count=semantics.gaussian_count,
             sh_degree=semantics.sh_degree,
             normalized_quaternion_count=(

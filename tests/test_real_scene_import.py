@@ -15,6 +15,19 @@ from pipeline.metric_alignment_evidence import (
     MetricAlignmentPolicy,
     canonical_metric_alignment_policy_bytes,
 )
+from pipeline.production_runtime_evidence import (
+    canonical_production_runtime_decision_bytes,
+    canonical_production_runtime_measurement_bytes,
+    canonical_production_runtime_policy_bytes,
+)
+from pipeline.production_training_closure import (
+    ProductionResultBundleManifestV2,
+    ProductionResultMember,
+    ProductionTrainingClosure,
+    canonical_production_result_manifest_bytes,
+    canonical_production_training_closure_bytes,
+    derive_production_training_closure,
+)
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_import import (
     RealSceneImportError,
@@ -27,6 +40,11 @@ from pipeline.real_scene_import import (
 from pipeline.real_scene_runner import (
     RealSceneRunner,
     RealSceneSourceIdentity,
+)
+from pipeline.real_scene_training import (
+    HeldOutSplit,
+    TrainingImageIdentity,
+    held_out_split_canonical_bytes,
 )
 from pipeline.recon_schema import (
     AlignmentStatus,
@@ -44,6 +62,16 @@ from pipeline.recon_schema import (
     SplatInput,
     TransformMethod,
 )
+from pipeline.render_evaluation import (
+    RenderCameraRecord,
+    RenderDecision,
+    RenderEvaluationPolicy,
+    RenderEvaluationProtocol,
+    RenderEvaluationReport,
+    RenderFrameMetric,
+    render_artifact_stem,
+    render_evaluation_sha256,
+)
 from pipeline.training_executor import (
     ExecutorInputIdentity,
     ExecutorObservation,
@@ -58,8 +86,16 @@ from pipeline.training_provenance import (
     TrainingResult,
     build_training_result,
     request_canonical_sha256,
+    result_canonical_sha256,
 )
 from scripts.prepare_import import prepare_from_registration
+from tests.test_production_training_closure import (
+    _derive as derive_closure_fixture,
+)
+from tests.test_production_training_closure import (
+    _fixture as production_closure_fixture,
+)
+from tests.test_render_evaluation import _png as render_png
 
 _BASE_PROPERTIES = (
     "x",
@@ -393,6 +429,8 @@ def _write_production_training_stage(
     *,
     count: int,
     dataparser_scale: float = 1.0,
+    include_production_closure: bool = True,
+    invalid_render_camera: bool = False,
 ) -> SimpleNamespace:
     result_root = root / "remote-result"
     result_root.mkdir(parents=True)
@@ -410,9 +448,36 @@ def _write_production_training_stage(
     registration_bytes = (
         registration.model_dump_json(indent=2) + "\n"
     ).encode()
+    evaluation_payloads = {
+        "held-out/frame.png": b"held-out source\n",
+        "training/frame.png": b"training source\n",
+    }
+    ordered_images = tuple(
+        sorted(
+            (
+                TrainingImageIdentity(
+                    logical_path=path,
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                )
+                for path, payload in evaluation_payloads.items()
+            ),
+            key=lambda identity: (
+                identity.sha256,
+                identity.logical_path,
+            ),
+        )
+    )
+    split = HeldOutSplit(
+        ratio=0.5,
+        total_count=2,
+        held_out=ordered_images[:1],
+        train=ordered_images[1:],
+    )
+    split_bytes = held_out_split_canonical_bytes(split)
     input_bytes = {
         "capture/manifest.json": b"capture-manifest\n",
         "sfm/registration.json": registration_bytes,
+        "training/held-out-split.json": split_bytes,
     }
     bindings = tuple(
         TrainingInputBinding(
@@ -424,6 +489,7 @@ def _write_production_training_stage(
         for kind, path in (
             ("capture_manifest", "capture/manifest.json"),
             ("registration_json", "sfm/registration.json"),
+            ("held_out_split", "training/held-out-split.json"),
         )
     )
     config_bytes = b"trainer: nerfstudio-splatfacto\nversion: 1.1.5\n"
@@ -484,10 +550,10 @@ def _write_production_training_stage(
         actual_log_bytes=log_bytes,
         input_bytes_by_path=input_bytes,
         gpu_environment=GpuEnvironment(
-            gpu_name="NVIDIA production GPU",
-            gpu_memory_mb=24_576,
-            cuda_version="12.4",
-            driver_version="550.54",
+            gpu_name="NVIDIA RTX 4090",
+            gpu_memory_mb=24_564,
+            cuda_version="12.8",
+            driver_version="575.64.03",
         ),
         exit_code=0,
         actual_ply_path="point_cloud.ply",
@@ -541,14 +607,266 @@ def _write_production_training_stage(
     (root / "executor-attempt.json").write_bytes(
         canonical_model_bytes(attempt)
     )
-    return SimpleNamespace(
+    fixture = SimpleNamespace(
         verified_bundle=SimpleNamespace(
             path=bundle_path,
             bundle_sha256=hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
             manifest=SimpleNamespace(dataset_receipt_sha256="d" * 64),
             request=request,
         ),
+        attempt=attempt,
         input_bytes=input_bytes,
+        evaluation_bytes={
+            identity.logical_path: evaluation_payloads[
+                identity.logical_path
+            ]
+            for identity in split.held_out
+        },
+        include_production_closure=include_production_closure,
+        invalid_render_camera=invalid_render_camera,
+        request=request,
+        result=result,
+        split=split,
+    )
+    if include_production_closure and count >= 100_000:
+        _write_production_closure_evidence(root, fixture)
+    return fixture
+
+
+def _write_production_closure_evidence(
+    root: Path,
+    fixture: SimpleNamespace,
+) -> None:
+    result_root = root / "remote-result"
+    base = production_closure_fixture()
+    runtime = base["runtime"]
+    runtime_policy = base["runtime_policy"]
+    runtime_decision = base["runtime_decision"]
+    transforms_bytes = (
+        b'{"test_filenames":["bound-by-camera-records"]}\n'
+    )
+    held_out = fixture.split.held_out[0]
+    source_bytes = fixture.evaluation_bytes[held_out.logical_path]
+    protocol = RenderEvaluationProtocol(
+        width=4,
+        height=3,
+        crop_mode="center-crop",
+        colour_space="srgb",
+        alpha_handling="reject",
+        mask_handling="none",
+        ssim_window_size=11,
+        ssim_sigma=1.5,
+        ssim_data_range=1.0,
+        lpips_backbone="alex",
+    )
+    render_policy = RenderEvaluationPolicy(
+        held_out_split_sha256=hashlib.sha256(
+            fixture.input_bytes["training/held-out-split.json"]
+        ).hexdigest(),
+        transforms_sha256=hashlib.sha256(
+            transforms_bytes
+        ).hexdigest(),
+        evaluator_container_digest=(
+            runtime.environment.observed_container_identity
+        ),
+        protocol=protocol,
+        minimum_mean_psnr=24.0,
+        minimum_mean_ssim=0.8,
+        maximum_mean_lpips=0.25,
+        minimum_worst_psnr=18.0,
+    )
+    camera = RenderCameraRecord(
+        frame_id=held_out.logical_path,
+        source_path=(
+            f"prepared/images/{held_out.logical_path}"
+        ),
+        source_sha256=held_out.sha256,
+        transforms_sha256=render_policy.transforms_sha256,
+        camera_model="perspective",
+        source_width=4,
+        source_height=3,
+        fx=4.0,
+        fy=4.0,
+        cx=2.0,
+        cy=1.5,
+        camera_to_world=(
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+        ),
+    )
+    camera_bytes = (
+        b"not a camera record\n"
+        if fixture.invalid_render_camera
+        else canonical_model_bytes(camera)
+    )
+    render_bytes = render_png(4, 3)
+    stem = render_artifact_stem(held_out.logical_path)
+    frame = RenderFrameMetric(
+        frame_id=held_out.logical_path,
+        source_path=(
+            f"prepared/images/{held_out.logical_path}"
+        ),
+        source_byte_length=len(source_bytes),
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        render_path=(
+            f"result/render-evaluation/renders/{stem}.png"
+        ),
+        render_byte_length=len(render_bytes),
+        render_sha256=hashlib.sha256(render_bytes).hexdigest(),
+        camera_path=(
+            f"result/render-evaluation/cameras/{stem}.json"
+        ),
+        camera_byte_length=len(camera_bytes),
+        camera_sha256=hashlib.sha256(camera_bytes).hexdigest(),
+        psnr=28.0,
+        ssim=0.9,
+        lpips=0.1,
+    )
+    config_bytes = (
+        result_root / "operator-intent-config.yml"
+    ).read_bytes()
+    report = RenderEvaluationReport(
+        evaluation_id="evaluation-production-import",
+        policy_sha256=render_evaluation_sha256(render_policy),
+        held_out_split_sha256=render_policy.held_out_split_sha256,
+        evaluator_container_digest=(
+            render_policy.evaluator_container_digest
+        ),
+        protocol=render_policy.protocol,
+        frames=(frame,),
+        trainer_config_sha256=hashlib.sha256(
+            config_bytes
+        ).hexdigest(),
+        mean_psnr=28.0,
+        mean_ssim=0.9,
+        mean_lpips=0.1,
+        worst_psnr=28.0,
+    )
+    decision = RenderDecision(
+        accepted=True,
+        failed_thresholds=(),
+        policy_sha256=render_evaluation_sha256(render_policy),
+        report_sha256=render_evaluation_sha256(report),
+        frame_count=1,
+        mean_psnr=28.0,
+        mean_ssim=0.9,
+        mean_lpips=0.1,
+        worst_psnr=28.0,
+    )
+    payloads = {
+        "container-id.txt": (
+            runtime.environment.container_instance_id + "\n"
+        ).encode("ascii"),
+        "container-identity.txt": (
+            runtime.environment.observed_container_identity + "\n"
+        ).encode("ascii"),
+        "dataparser_transforms.json": (
+            result_root / "dataparser_transforms.json"
+        ).read_bytes(),
+        "operator-intent-config.yml": config_bytes,
+        "point_cloud.ply": (
+            result_root / "point_cloud.ply"
+        ).read_bytes(),
+        "production-runtime/decision.json": (
+            canonical_production_runtime_decision_bytes(
+                runtime_decision
+            )
+        ),
+        "production-runtime/measurement.json": (
+            canonical_production_runtime_measurement_bytes(runtime)
+        ),
+        "production-runtime/policy.json": (
+            canonical_production_runtime_policy_bytes(runtime_policy)
+        ),
+        f"render-evaluation/cameras/{stem}.json": camera_bytes,
+        "render-evaluation/policy.json": canonical_model_bytes(
+            render_policy
+        ),
+        f"render-evaluation/renders/{stem}.png": render_bytes,
+        "render-evaluation/report.json": canonical_model_bytes(report),
+        "render-evaluation/trainer-config.yml": config_bytes,
+        "render-evaluation/transforms.json": transforms_bytes,
+        "training-request.json": canonical_model_bytes(fixture.request),
+        "training-result.json": canonical_model_bytes(fixture.result),
+        "training.log": (
+            result_root / "training.log"
+        ).read_bytes(),
+        "worker.stderr.log": b"stderr",
+        "worker.stdout.log": b"stdout",
+    }
+    for relative, payload in payloads.items():
+        path = result_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    manifest = ProductionResultBundleManifestV2(
+        job_id=fixture.attempt.job_id,
+        attempt_id=fixture.attempt.attempt_id,
+        request_sha256=request_canonical_sha256(fixture.request),
+        training_bundle_sha256=(
+            fixture.verified_bundle.bundle_sha256
+        ),
+        container_instance_id=(
+            runtime.environment.container_instance_id
+        ),
+        container_identity=(
+            runtime.environment.observed_container_identity
+        ),
+        runtime_measurement_artifact_sha256=hashlib.sha256(
+            payloads["production-runtime/measurement.json"]
+        ).hexdigest(),
+        runtime_policy_artifact_sha256=hashlib.sha256(
+            payloads["production-runtime/policy.json"]
+        ).hexdigest(),
+        runtime_decision_artifact_sha256=hashlib.sha256(
+            payloads["production-runtime/decision.json"]
+        ).hexdigest(),
+        members=tuple(
+            ProductionResultMember(
+                path=path,
+                byte_length=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+            for path, payload in sorted(payloads.items())
+        ),
+    )
+    (result_root / "result-bundle-manifest.json").write_bytes(
+        canonical_production_result_manifest_bytes(manifest)
+    )
+    (result_root / "render-evaluation/decision.json").write_bytes(
+        canonical_model_bytes(decision)
+    )
+    closure = derive_production_training_closure(
+        training_bundle_sha256=(
+            fixture.verified_bundle.bundle_sha256
+        ),
+        result_bundle_archive_sha256=(
+            fixture.attempt.result_bundle_sha256
+        ),
+        manifest=manifest,
+        attempt=fixture.attempt,
+        request=fixture.request,
+        result=fixture.result,
+        runtime_measurement=runtime,
+        runtime_policy=runtime_policy,
+        runtime_decision=runtime_decision,
+        render_policy=render_policy,
+        render_report=report,
+        render_decision=decision,
+    )
+    (
+        result_root / "production-training-closure.json"
+    ).write_bytes(
+        canonical_production_training_closure_bytes(closure)
     )
 
 
@@ -644,6 +962,11 @@ def _patch_production_bundle(monkeypatch, fixture) -> None:
         "load_training_job_input_bytes",
         lambda bundle: fixture.input_bytes,
     )
+    monkeypatch.setattr(
+        import_module,
+        "load_training_job_evaluation_bytes",
+        lambda bundle: fixture.evaluation_bytes,
+    )
 
 
 def test_non_identity_nerfstudio_transform_blocks_import(
@@ -694,6 +1017,221 @@ def _write_control_points(path: Path) -> Path:
     return path
 
 
+def test_production_import_requires_g5_training_closure(
+    tmp_path,
+    monkeypatch,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+        include_production_closure=False,
+    )
+    _patch_production_bundle(monkeypatch, fixture)
+
+    with pytest.raises(RealSceneImportError, match="production.*closure"):
+        import_real_scene(
+            training_root,
+            tmp_path / "import",
+            source_role="production-acceptance",
+            control_points_path=_write_control_points(
+                tmp_path / "control-points.json"
+            ),
+            geo_origin=(26.0, 119.0, 10.0),
+        )
+
+
+def test_production_import_rejects_invalid_g5_training_closure(
+    tmp_path,
+    monkeypatch,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+        include_production_closure=False,
+    )
+    _patch_production_bundle(monkeypatch, fixture)
+    (
+        training_root
+        / "remote-result/production-training-closure.json"
+    ).write_bytes(b"{}\n")
+
+    with pytest.raises(RealSceneImportError, match="production.*closure"):
+        import_real_scene(
+            training_root,
+            tmp_path / "import",
+            source_role="production-acceptance",
+            control_points_path=_write_control_points(
+                tmp_path / "control-points.json"
+            ),
+            geo_origin=(26.0, 119.0, 10.0),
+        )
+
+
+def test_production_import_rejects_closure_for_another_job(
+    tmp_path,
+    monkeypatch,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+        include_production_closure=False,
+    )
+    _patch_production_bundle(monkeypatch, fixture)
+    unrelated = production_closure_fixture()
+    (
+        training_root
+        / "remote-result/production-training-closure.json"
+    ).write_bytes(
+        canonical_production_training_closure_bytes(
+            derive_closure_fixture(unrelated)
+        )
+    )
+
+    with pytest.raises(
+        RealSceneImportError,
+        match="production.*closure|job|attempt",
+    ):
+        import_real_scene(
+            training_root,
+            tmp_path / "import",
+            source_role="production-acceptance",
+            control_points_path=_write_control_points(
+                tmp_path / "control-points.json"
+            ),
+            geo_origin=(26.0, 119.0, 10.0),
+        )
+
+
+def test_production_import_rejects_identity_only_closure_without_raw_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+        include_production_closure=False,
+    )
+    _patch_production_bundle(monkeypatch, fixture)
+    base = derive_closure_fixture(production_closure_fixture())
+    fields = base.model_dump(
+        exclude={"closure_id", "content_sha256"},
+    )
+    fields.update(
+        {
+            "training_bundle_sha256": (
+                fixture.verified_bundle.bundle_sha256
+            ),
+            "result_bundle_archive_sha256": (
+                fixture.attempt.result_bundle_sha256
+            ),
+            "attempt_receipt_sha256": hashlib.sha256(
+                canonical_model_bytes(fixture.attempt)
+            ).hexdigest(),
+            "request_sha256": request_canonical_sha256(
+                fixture.request
+            ),
+            "result_sha256": result_canonical_sha256(fixture.result),
+            "job_id": fixture.attempt.job_id,
+            "attempt_id": fixture.attempt.attempt_id,
+            "point_cloud_sha256": fixture.result.primary_ply_sha256,
+            "gaussian_count": 100_000,
+            "sh_degree": 0,
+            "trainer_config_sha256": (
+                fixture.result.actual_config_sha256
+            ),
+            "training_log_sha256": (
+                fixture.result.training_log_sha256
+            ),
+            "dataparser_transform_sha256": next(
+                binding.artifact_sha256
+                for binding in fixture.result.output_bindings
+                if binding.artifact_kind
+                == "dataparser_transform_json"
+            ),
+        }
+    )
+    forged = ProductionTrainingClosure.create(**fields)
+    (
+        training_root
+        / "remote-result/production-training-closure.json"
+    ).write_bytes(
+        canonical_production_training_closure_bytes(forged)
+    )
+
+    with pytest.raises(
+        RealSceneImportError,
+        match="runtime|manifest|raw|evidence",
+    ):
+        import_real_scene(
+            training_root,
+            tmp_path / "import",
+            source_role="production-acceptance",
+            control_points_path=_write_control_points(
+                tmp_path / "control-points.json"
+            ),
+            geo_origin=(26.0, 119.0, 10.0),
+        )
+
+
+def test_production_import_revalidates_runtime_evidence_bytes(
+    tmp_path,
+    monkeypatch,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+    )
+    _patch_production_bundle(monkeypatch, fixture)
+    decision_path = (
+        training_root
+        / "remote-result/production-runtime/decision.json"
+    )
+    decision_path.write_bytes(decision_path.read_bytes() + b" ")
+
+    with pytest.raises(
+        RealSceneImportError,
+        match="runtime|closure|canonical",
+    ):
+        import_real_scene(
+            training_root,
+            tmp_path / "import",
+            source_role="production-acceptance",
+            control_points_path=_write_control_points(
+                tmp_path / "control-points.json"
+            ),
+            geo_origin=(26.0, 119.0, 10.0),
+        )
+
+
+def test_production_import_rejects_content_closed_invalid_camera_record(
+    tmp_path,
+    monkeypatch,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+        invalid_render_camera=True,
+    )
+    _patch_production_bundle(monkeypatch, fixture)
+
+    with pytest.raises(RealSceneImportError, match="render|camera"):
+        import_real_scene(
+            training_root,
+            tmp_path / "import",
+            source_role="production-acceptance",
+            control_points_path=_write_control_points(
+                tmp_path / "control-points.json"
+            ),
+            geo_origin=(26.0, 119.0, 10.0),
+        )
+
+
 def test_production_import_is_metric_chunked_and_content_closed(
     tmp_path,
     monkeypatch,
@@ -722,7 +1260,15 @@ def test_production_import_is_metric_chunked_and_content_closed(
     )
     transform = manifest["coordinate_contract"]["transform_chain"][0]
     assert receipt.training_quality_role == "production"
-    assert receipt.schema_id == "nantai.real-scene-import-receipt.v2"
+    assert receipt.schema_id == "nantai.real-scene-import-receipt.v3"
+    assert receipt.production_training_closure_path == (
+        "evidence/production-training-closure.json"
+    )
+    assert receipt.production_training_closure_sha256 is not None
+    assert receipt.production_runtime_decision_sha256 is not None
+    assert (
+        output_root / receipt.production_training_closure_path
+    ).is_file()
     assert receipt.gaussian_count == 100_000
     assert receipt.target_units == "meters"
     assert receipt.chunk_units == "metres"
