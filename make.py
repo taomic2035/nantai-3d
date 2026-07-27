@@ -36,6 +36,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PY = sys.executable
+NPM = "npm.cmd" if os.name == "nt" else "npm"
 # HANDOFF-002 is the cross-platform-reproducible (quantized) asset baseline;
 # HANDOFF-001 stays as history (its bytes are not reproducible off macOS).
 ASSET_DELIVERABLE = "handoff/deliverables/HANDOFF-002"
@@ -93,6 +94,8 @@ def node_test(pattern: str) -> None:
 # ============ targets ============
 def setup() -> None:
     run([PY, "-m", "pip", "install", "-e", ".[dev]"])
+    run([NPM, "ci"])
+    run([NPM, "run", "install:viewer-runtime"])
 
 
 def test() -> None:

@@ -23,12 +23,15 @@ help:
 
 setup:
 	$(PY) -m pip install -e ".[dev]"
+	npm ci
+	npm run install:viewer-runtime
 
 test:
 	$(PY) -m pytest tests/ -q
 	node --test web/viewer/*.test.mjs
 	node --test web/studio/*.test.mjs
 	node --test scripts/capture_viewer_acceptance.test.mjs
+	node --test scripts/viewer_runtime_preflight.test.mjs
 
 ingest:
 	$(PY) -m pipeline.ingest --input input --output photos

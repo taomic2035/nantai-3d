@@ -3,8 +3,13 @@
   "version": "1.0.0-rc.2",
   "private": true,
   "description": "Pinned browser runtime for Nantai 3D Viewer acceptance",
+  "engines": {
+    "node": "22.14.0"
+  },
   "scripts": {
     "capture:viewer": "node scripts/capture_viewer_acceptance.mjs",
+    "install:viewer-runtime": "playwright install chromium",
+    "preflight:viewer-runtime": "node scripts/viewer_runtime_preflight.mjs",
     "test:viewer": "node --test web/viewer/*.test.mjs"
   },
   "devDependencies": {

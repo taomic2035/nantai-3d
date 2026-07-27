@@ -39,7 +39,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.14.0"
+          cache: npm
 
       - name: Install (editable + dev extras)
         if: runner.os != 'Windows'
@@ -49,6 +50,12 @@ jobs:
         if: runner.os == 'Windows'
         run: python -m pip install -e ".[dev,windows-jobs]"
 
+      - name: Install pinned Node runtime (npm ci)
+        # npm ci refuses to drift from package-lock.json; this is the only
+        # Node dependency install step in CI, never `npm install` or a
+        # floating global package.
+        run: npm ci
+
       - name: Test (pytest + node --test)
         # symlink-dependent tests self-skip when the runner lacks the
         # privilege to create symlinks (default on Windows).
@@ -56,6 +63,47 @@ jobs:
 
       - name: Lint (ruff)
         run: python make.py lint
+
+  viewer-runtime:
+    name: viewer-runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+
+      - name: Install locked Node dependencies
+        run: npm ci
+
+      - name: Install locked Chromium runtime (Ubuntu)
+        if: runner.os == 'Linux'
+        run: npx --no-install playwright install --with-deps chromium
+
+      - name: Install locked Chromium runtime (Windows)
+        if: runner.os == 'Windows'
+        run: npx --no-install playwright install chromium
+
+      - name: Prove Viewer runtime capabilities
+        if: always()
+        run: node scripts/viewer_runtime_preflight.mjs --output "$RUNNER_TEMP/viewer-runtime-preflight.json"
+
+      - name: Upload Viewer runtime preflight report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-runtime-preflight-${{ matrix.os }}
+          path: ${{ runner.temp }}/viewer-runtime-preflight.json
+          if-no-files-found: error
 
   reproducibility:
     name: repro-assets (${{ matrix.os }})
