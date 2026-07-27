@@ -47,6 +47,89 @@ def test_direct_cli_help_works_in_isolated_python():
 
 
 @pytest.mark.parametrize(
+    ("status", "expected_code"),
+    (("ready", 0), ("failed", 2)),
+)
+def test_remote_preflight_cli_bypasses_dataset_and_publishes_report(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    status,
+    expected_code,
+):
+    cli = _load_cli()
+    config = tmp_path / "remote-config.json"
+    output = tmp_path / "preflight.json"
+    report = SimpleNamespace(status=status)
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "load_real_dataset_source",
+        lambda _path: pytest.fail("preflight must not load a dataset"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_remote_shell_preflight_from_path",
+        lambda path: calls.append(("run", path)) or report,
+    )
+    monkeypatch.setattr(
+        cli,
+        "publish_remote_shell_preflight",
+        lambda value, path: calls.append(("publish", value, path)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "canonical_remote_shell_preflight_bytes",
+        lambda value: b'{"schema":"test"}\n',
+    )
+
+    result = cli.main(
+        [
+            "preflight-remote",
+            "--remote-config",
+            str(config),
+            "--preflight-report",
+            str(output),
+        ]
+    )
+
+    assert result == expected_code
+    assert calls == [
+        ("run", config),
+        ("publish", report, output),
+    ]
+    assert capsys.readouterr().out == '{"schema":"test"}\n'
+
+
+def test_remote_preflight_cli_rejects_dataset_arguments(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    cli = _load_cli()
+    monkeypatch.setattr(
+        cli,
+        "run_remote_shell_preflight_from_path",
+        lambda _path: pytest.fail("invalid invocation must not probe"),
+    )
+
+    result = cli.main(
+        [
+            "preflight-remote",
+            "--remote-config",
+            str(tmp_path / "remote.json"),
+            "--preflight-report",
+            str(tmp_path / "preflight.json"),
+            "--source",
+            str(tmp_path / "source.json"),
+        ]
+    )
+
+    assert result == 2
+    assert "accepts only" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
     ("script_name", "expected_help"),
     (
         ("fetch_real_dataset.py", "verify-only"),

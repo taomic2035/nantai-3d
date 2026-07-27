@@ -49,6 +49,7 @@ PREVIEW_DIST = ".nantai-studio/releases/v1.0.0-preview.2"
 REAL_CANARY_SOURCE = "config/real-scene/nerfstudio-poster.json"
 REAL_SCENE_TARGETS = frozenset(
     {
+        "preflight-remote",
         "fetch",
         "sfm",
         "train-preview",
@@ -68,6 +69,7 @@ REAL_OPTION_FLAGS = {
     "CONTROL_POINTS": "--control-points",
     "GEO_ORIGIN": "--geo-origin",
     "REMOTE_CONFIG": "--remote-config",
+    "PREFLIGHT_REPORT": "--preflight-report",
     "VIEWER_POLICY": "--viewer-policy",
     "VIEWER_REPORT": "--viewer-report",
     "HUMAN_REVIEW_POLICY": "--human-review-policy",
@@ -285,7 +287,37 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
         options[name] = value
     if len(subtargets) != 1 or subtargets[0] not in REAL_SCENE_TARGETS:
         raise ValueError(f"{mode} requires exactly one known real-scene subtarget")
-    if mode == "real-canary":
+    target = subtargets[0]
+    if target == "preflight-remote":
+        if mode != "real-scene":
+            raise ValueError(
+                "real-canary cannot run preflight-remote"
+            )
+        if "SOURCE" in options:
+            raise ValueError(
+                "preflight-remote does not consume SOURCE"
+            )
+        unsupported = sorted(
+            set(options)
+            - {"REMOTE_CONFIG", "PREFLIGHT_REPORT"}
+        )
+        if unsupported:
+            raise ValueError(
+                "preflight-remote rejects unrelated options: "
+                + ", ".join(unsupported)
+            )
+        missing = [
+            name
+            for name in ("REMOTE_CONFIG", "PREFLIGHT_REPORT")
+            if name not in options
+        ]
+        if missing:
+            raise ValueError(
+                "preflight-remote requires "
+                + ", ".join(f"{name}=" for name in missing)
+            )
+        source = None
+    elif mode == "real-canary":
         forbidden = {
             "SOURCE",
             "MEDIA_ROOT",
@@ -311,10 +343,10 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
         PY,
         "-m",
         "scripts.real_scene",
-        subtargets[0],
-        "--source",
-        source,
+        target,
     ]
+    if source is not None:
+        command.extend(("--source", source))
     for name, flag in REAL_OPTION_FLAGS.items():
         if name in options:
             command.extend((flag, options[name]))

@@ -1836,6 +1836,61 @@ class TestRemoteShellPreflight:
         assert not output.exists()
         assert not tuple(output.parent.glob(".*.staging"))
 
+    def test_preflight_publication_is_immutable(self, tmp_path):
+        report = run_remote_shell_preflight(
+            _config(tmp_path),
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        output = tmp_path / "private" / "preflight.json"
+
+        published = remote_module.publish_remote_shell_preflight(
+            report,
+            output,
+        )
+
+        assert published == output
+        assert output.read_bytes() == (
+            canonical_remote_shell_preflight_bytes(report)
+        )
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="cannot replace",
+        ):
+            remote_module.publish_remote_shell_preflight(
+                report,
+                output,
+            )
+
+    def test_preflight_from_path_rejects_config_replacement(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        config_path = tmp_path / "remote-config.json"
+        payload = remote_module._canonical_model_bytes(config)
+        config_path.write_bytes(payload)
+        replaced = False
+
+        def replace_config(argv, **kwargs):
+            nonlocal replaced
+            del argv, kwargs
+            if not replaced:
+                replacement = tmp_path / "replacement.json"
+                replacement.write_bytes(payload)
+                os.replace(replacement, config_path)
+                replaced = True
+            return _readiness_response(config)
+
+        report = remote_module.run_remote_shell_preflight_from_path(
+            config_path,
+            run_command=replace_config,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert report.failure_code == "local-transport-drift"
+
     def test_remote_probe_is_required_for_ready(self, tmp_path):
         config = _config(tmp_path)
         report = run_remote_shell_preflight(

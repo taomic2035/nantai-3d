@@ -104,8 +104,14 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     ).encode("ascii")
 
 
-def _load_config(path: Path) -> tuple[dict[str, Any], bytes]:
-    payload, _signature = _stable_bytes(
+def _load_config(
+    path: Path,
+) -> tuple[
+    dict[str, Any],
+    bytes,
+    tuple[int, int, int, int, int, int],
+]:
+    payload, signature = _stable_bytes(
         path,
         label="remote readiness config",
         maximum_bytes=_MAX_CONFIG_BYTES,
@@ -164,7 +170,7 @@ def _load_config(path: Path) -> tuple[dict[str, Any], bytes]:
             raise RemoteReadinessCheckError(
                 f"{field} must be an absolute path"
             )
-    return parsed, payload
+    return parsed, payload, signature
 
 
 def _run_bounded(
@@ -226,7 +232,10 @@ def collect_remote_readiness(
         subprocess.run
     ),
 ) -> dict[str, Any]:
-    config, config_bytes = _load_config(Path(config_path))
+    config_file = Path(config_path)
+    config, config_bytes, config_signature = _load_config(
+        config_file
+    )
     runtime = config["container_runtime"]
     identity = config["container_identity"]
     worker_path = Path(config["worker_path"])
@@ -292,6 +301,23 @@ def collect_remote_readiness(
     ):
         raise RemoteReadinessCheckError(
             "remote worker changed during probe"
+        )
+    try:
+        config_after, signature_after = _stable_bytes(
+            config_file,
+            label="remote readiness config",
+            maximum_bytes=_MAX_CONFIG_BYTES,
+        )
+    except RemoteReadinessCheckError as exc:
+        raise RemoteReadinessCheckError(
+            "remote readiness config changed during probe"
+        ) from exc
+    if (
+        config_signature != signature_after
+        or config_bytes != config_after
+    ):
+        raise RemoteReadinessCheckError(
+            "remote readiness config changed during probe"
         )
 
     return {

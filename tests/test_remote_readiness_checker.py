@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from cloud import remote_readiness_checker as checker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,3 +112,136 @@ def test_checker_measures_runtime_image_and_worker_identity(tmp_path):
     }
     assert len(calls) == 3
     assert checker.canonical_evidence_bytes(evidence).endswith(b"\n")
+
+
+def test_checker_rejects_unmeasured_container_digest(tmp_path):
+    config, _worker, _config_bytes = _write_config(tmp_path)
+
+    def run(argv, **kwargs):
+        del kwargs
+        if argv[-1] == "--version" and argv[0] == "docker":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                b"Docker version 28.0.0\n",
+                b"",
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                ["registry.example/other@sha256:" + ("f" * 64)]
+            ).encode("ascii")
+            + b"\n",
+            b"",
+        )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="digest was not measured",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+        )
+
+
+def test_checker_rejects_worker_replacement_during_probe(tmp_path):
+    config, worker, _config_bytes = _write_config(tmp_path)
+
+    def run(argv, **kwargs):
+        del kwargs
+        if argv[-1] == "--version" and argv[0] == "docker":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                b"Docker version 28.0.0\n",
+                b"",
+            )
+        if argv[0] == "docker":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps([CONTAINER_IDENTITY]).encode("ascii")
+                + b"\n",
+                b"",
+            )
+        replacement = tmp_path / "replacement.py"
+        replacement.write_bytes(b"remote-worker-v2\n")
+        replacement.replace(worker)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            b"1.0.0\n",
+            b"",
+        )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="changed during probe",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+        )
+
+
+def test_checker_rejects_config_replacement_during_probe(tmp_path):
+    config, _worker, config_bytes = _write_config(tmp_path)
+    replaced = False
+
+    def run(argv, **kwargs):
+        nonlocal replaced
+        del kwargs
+        if argv[-1] == "--version" and argv[0] == "docker":
+            replacement = tmp_path / "replacement.json"
+            replacement.write_bytes(config_bytes)
+            replacement.replace(config)
+            replaced = True
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                b"Docker version 28.0.0\n",
+                b"",
+            )
+        if argv[0] == "docker":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps([CONTAINER_IDENTITY]).encode("ascii")
+                + b"\n",
+                b"",
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            b"1.0.0\n",
+            b"",
+        )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="config changed during probe",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+        )
+    assert replaced
+
+
+def test_checker_rejects_duplicate_config_keys(tmp_path):
+    config, _worker, payload = _write_config(tmp_path)
+    config.write_bytes(
+        payload.replace(
+            b"{",
+            b'{"container_runtime":"docker",',
+            1,
+        )
+    )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="duplicate keys",
+    ):
+        checker.collect_remote_readiness(config)

@@ -76,9 +76,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path(".nantai-studio/real-scene"),
     )
-    parser.add_argument("--run-id", default="default")
+    parser.add_argument("--run-id")
     parser.add_argument("--media-root", type=Path)
     parser.add_argument("--rights", type=Path)
     parser.add_argument("--policy", type=Path)
@@ -90,7 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--viewer-report", type=Path)
     parser.add_argument("--human-review-policy", type=Path)
     parser.add_argument("--human-visual-review", type=Path)
-    parser.add_argument("--chunk-size", type=float, default=50.0)
+    parser.add_argument("--chunk-size", type=float)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry", action="store_true")
     return parser
@@ -129,6 +128,30 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "preflight-remote requires --preflight-report"
                 )
+            irrelevant = (
+                args.source,
+                args.workspace,
+                args.run_id,
+                args.media_root,
+                args.rights,
+                args.policy,
+                args.control_points,
+                args.geo_origin,
+                args.viewer_policy,
+                args.viewer_report,
+                args.human_review_policy,
+                args.human_visual_review,
+                args.chunk_size,
+            )
+            if (
+                any(value is not None for value in irrelevant)
+                or args.resume
+                or args.retry
+            ):
+                raise ValueError(
+                    "preflight-remote accepts only --remote-config and"
+                    " --preflight-report"
+                )
             report = run_remote_shell_preflight_from_path(
                 args.remote_config,
             )
@@ -151,8 +174,16 @@ def main(argv: list[str] | None = None) -> int:
         source = load_real_dataset_source(args.source)
         _validate_runtime_inputs(args, source)
         options = RealSceneRunOptions(
-            workspace_base=args.workspace,
-            run_id=args.run_id,
+            workspace_base=(
+                args.workspace
+                if args.workspace is not None
+                else Path(".nantai-studio/real-scene")
+            ),
+            run_id=(
+                args.run_id
+                if args.run_id is not None
+                else "default"
+            ),
             media_root=args.media_root,
             rights_path=args.rights,
             policy_path=args.policy,
@@ -163,7 +194,11 @@ def main(argv: list[str] | None = None) -> int:
             viewer_report_path=args.viewer_report,
             human_review_policy_path=args.human_review_policy,
             human_visual_review_path=args.human_visual_review,
-            chunk_size=args.chunk_size,
+            chunk_size=(
+                args.chunk_size
+                if args.chunk_size is not None
+                else 50.0
+            ),
         )
         receipt = run_real_scene(
             args.source,

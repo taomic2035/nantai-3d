@@ -91,7 +91,8 @@ COLMAP 不适合把全部视频帧直接投入匹配。
 - 独立 known-hosts 文件和预期 host-key fingerprint；
 - 绝对 remote root / remote repository root；
 - `docker` 或 `podman`；
-- 带 digest 的不可变 CUDA container identity。
+- 带 digest 的不可变 CUDA container identity；
+- 远端 readiness config SHA、worker 文件 SHA 和稳定 worker version。
 
 配置、私钥和私有主机地址不得提交到仓库。具备这些输入后才运行：
 
@@ -99,6 +100,40 @@ COLMAP 不适合把全部视频帧直接投入匹配。
 .venv/bin/python make.py real-canary RUN_ID=my-real-canary \
   REMOTE_CONFIG=/absolute/private/remote.json train-production
 ```
+
+### 3.6 先做无训练副作用的远端体检
+
+远端体检不会上传 bundle、创建 job 或启动容器。它只运行固定命令
+`nantai-remote-readiness-checker`，实测容器 runtime、不可变镜像 digest 和 worker
+文件/版本。先在远端部署仓库内的纯标准库 checker：
+
+```bash
+sudo install -m 0755 cloud/remote_readiness_checker.py \
+  /usr/local/bin/nantai-remote-readiness-checker
+```
+
+由 operator 在远端创建 `/etc/nantai/remote-readiness.json`。文件必须是单行、
+key 排序、末尾换行的 canonical JSON，且只含以下字段：
+
+```json
+{"container_identity":"registry.example/nantai@sha256:<64-hex>","container_runtime":"docker","schema":"nantai.remote-readiness-config.v1","worker_path":"/srv/nantai-3d/cloud/remote_training_worker.py","worker_python":"/usr/bin/python3"}
+```
+
+先在远端直接运行一次，取得输出中的 `checker_config_sha256`、`worker_sha256` 和
+`worker_version`，再把三者作为 `expected_checker_config_sha256`、
+`expected_worker_sha256`、`expected_worker_version` 写入本地私有 remote config。
+随后在本机执行：
+
+```powershell
+.\.venv\Scripts\python.exe make.py real-scene `
+  REMOTE_CONFIG=C:/absolute/private/remote.json `
+  PREFLIGHT_REPORT=C:/absolute/private/remote-preflight.json `
+  preflight-remote
+```
+
+只有 canonical report 的 `status=ready` 才允许进入 production submit。超时、连接
+失败、镜像/worker 不匹配、输入在检查期间被替换都会 fail closed。报告采用独占创建，
+不会覆盖旧证据；请为每次 fresh 检查使用新文件名，并把报告留在 operator 私有目录。
 
 连接丢失或远端状态无法验证时结果必须是 `unknown`；`RESUME=1` 不会重复提交，
 除非 operator 明确使用 `RETRY=1` 创建新 attempt。

@@ -78,6 +78,7 @@ from pipeline.remote_shell_executor import (
     RemoteShellExecutionError,
     RemoteShellExecutor,
     RemoteShellExecutorConfig,
+    load_remote_shell_executor_config,
 )
 from pipeline.studio_revisions import (
     CaptureBundleError,
@@ -519,11 +520,9 @@ class RealScenePipelineOperations:
     def _remote_config(self) -> RemoteShellExecutorConfig:
         if self.options.remote_config_path is None:
             raise RemoteShellExecutionError("production training requires REMOTE_CONFIG")
-        try:
-            raw = self.options.remote_config_path.read_bytes()
-            return RemoteShellExecutorConfig.model_validate_json(raw)
-        except (OSError, ValidationError) as exc:
-            raise RemoteShellExecutionError(f"remote executor config is invalid: {exc}") from exc
+        return load_remote_shell_executor_config(
+            self.options.remote_config_path,
+        )
 
     @staticmethod
     def _write_private_model(path: Path, model: BaseModel) -> None:

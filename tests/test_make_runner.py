@@ -74,6 +74,44 @@ class TestMainDispatch:
 
 
 class TestRealSceneDispatch:
+    def test_remote_preflight_needs_no_dataset_source(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        assert (
+            make.main(
+                [
+                    "make.py",
+                    "real-scene",
+                    "REMOTE_CONFIG=C:/private/remote.json",
+                    "PREFLIGHT_REPORT=C:/private/preflight.json",
+                    "preflight-remote",
+                ]
+            )
+            == 0
+        )
+
+        assert calls == [
+            [
+                make.PY,
+                "-m",
+                "scripts.real_scene",
+                "preflight-remote",
+                "--remote-config",
+                "C:/private/remote.json",
+                "--preflight-report",
+                "C:/private/preflight.json",
+            ]
+        ]
+
     def test_real_canary_binds_committed_source_and_subtarget(
         self,
         make,
@@ -160,6 +198,13 @@ class TestRealSceneDispatch:
             ["real-scene", "SOURCE=a", "SOURCE=b", "fetch"],
             ["real-scene", "SOURCE=a", "fetch", "sfm"],
             ["real-scene", "SOURCE=a", "UNKNOWN=x", "fetch"],
+            [
+                "real-scene",
+                "SOURCE=a",
+                "REMOTE_CONFIG=b",
+                "PREFLIGHT_REPORT=c",
+                "preflight-remote",
+            ],
             ["real-canary", "SOURCE=a", "fetch"],
             ["real-canary", "RESUME=1", "RETRY=1", "fetch"],
         ],
