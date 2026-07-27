@@ -206,6 +206,16 @@ class StageExecution:
     evidence_artifacts: tuple[Path, ...] = ()
 
 
+@dataclass(frozen=True)
+class ResolvedProductionImport:
+    workspace_root: Path
+    import_root: Path
+    import_receipt_path: Path
+    stage_receipt_path: Path
+    stage_receipt_sha256: str
+    source_sha256: str
+
+
 class RealSceneOperations(Protocol):
     def execute(
         self,
@@ -297,6 +307,153 @@ def _read_receipt(path: Path) -> tuple[StageReceipt, str]:
     if raw != canonical_stage_receipt_bytes(receipt):
         raise DatasetEvidenceError("stage receipt is not canonical JSON")
     return receipt, digest
+
+
+def resolve_latest_production_import(
+    source_path: Path,
+    *,
+    workspace_base: Path,
+    run_id: str,
+) -> ResolvedProductionImport:
+    """Resolve and revalidate the latest completed production import."""
+
+    if re.fullmatch(_ID_PATTERN, run_id) is None:
+        raise ValueError("run_id must be a safe portable identifier")
+    source = load_real_dataset_source(Path(source_path))
+    if source.role != "production-acceptance":
+        raise RealSceneBlockedError(
+            "latest production import requires a production-acceptance source"
+        )
+    source_sha256 = hashlib.sha256(
+        canonical_model_bytes(source)
+    ).hexdigest()
+    workspace = (
+        Path(workspace_base).expanduser().absolute()
+        / run_id
+        / source.dataset_id
+        / source_sha256[:16]
+    )
+    try:
+        workspace_real = workspace.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RealSceneBlockedError(
+            "real-scene workspace is unavailable"
+        ) from exc
+    if workspace_real != workspace or not workspace.is_dir():
+        raise RealSceneBlockedError(
+            "real-scene workspace must be a real directory"
+        )
+    receipt_directory = workspace / "receipts/import"
+    try:
+        directory_real = receipt_directory.resolve(strict=True)
+        children = tuple(receipt_directory.iterdir())
+    except (OSError, RuntimeError) as exc:
+        raise RealSceneBlockedError(
+            "production import receipts are unavailable"
+        ) from exc
+    if (
+        directory_real != receipt_directory
+        or not receipt_directory.is_dir()
+        or not children
+    ):
+        raise RealSceneBlockedError(
+            "production import receipt directory is invalid or empty"
+        )
+    paths: list[Path] = []
+    for child in children:
+        try:
+            inspected = child.lstat()
+        except OSError as exc:
+            raise DatasetEvidenceError(
+                "production import receipt member cannot be inspected"
+            ) from exc
+        if (
+            child.suffix != ".json"
+            or stat.S_ISLNK(inspected.st_mode)
+            or not stat.S_ISREG(inspected.st_mode)
+        ):
+            raise DatasetEvidenceError(
+                "production import receipt directory contains a foreign member"
+            )
+        paths.append(child)
+    loaded = tuple(_read_receipt(path) for path in sorted(paths))
+    for receipt, _digest in loaded:
+        if (
+            receipt.stage != "import"
+            or receipt.dataset_id != source.dataset_id
+            or receipt.source_sha256 != source_sha256
+        ):
+            raise DatasetEvidenceError(
+                "production import receipt directory contains a foreign receipt"
+            )
+    receipt, digest = max(
+        loaded,
+        key=lambda item: (
+            item[0].created_at_utc,
+            item[0].attempt_id,
+        ),
+    )
+    if receipt.status != "completed":
+        raise RealSceneBlockedError(
+            f"latest production import is {receipt.status}: "
+            f"{receipt.reason}"
+        )
+    for binding in (*receipt.evidence, *receipt.outputs):
+        actual = _hash_artifact(
+            workspace.joinpath(
+                *PurePosixPath(binding.path).parts
+            ),
+            workspace=workspace,
+        )
+        if (
+            actual.sha256 != binding.sha256
+            or actual.byte_length != binding.byte_length
+        ):
+            raise DatasetEvidenceError(
+                f"stage artifact sha256/size mismatch: {binding.path}"
+            )
+    import_root = (
+        workspace / "stages/import" / receipt.attempt_id
+    )
+    import_receipt_path = import_root / "import-receipt.json"
+    expected_relative = import_receipt_path.relative_to(
+        workspace
+    ).as_posix()
+    if (
+        sum(
+            binding.path == expected_relative
+            for binding in receipt.outputs
+        )
+        != 1
+    ):
+        raise RealSceneBlockedError(
+            "completed production import does not bind exactly one import receipt"
+        )
+    try:
+        from pipeline.real_scene_import import (
+            validate_real_scene_import_receipt,
+        )
+
+        imported = validate_real_scene_import_receipt(
+            import_receipt_path,
+            import_root,
+        )
+    except (OSError, ValueError) as exc:
+        raise RealSceneBlockedError(
+            f"latest production import cannot be revalidated: {exc}"
+        ) from exc
+    if imported.source_role != "production-acceptance":
+        raise RealSceneBlockedError(
+            "latest production import has a non-production source role"
+        )
+    return ResolvedProductionImport(
+        workspace_root=workspace,
+        import_root=import_root,
+        import_receipt_path=import_receipt_path,
+        stage_receipt_path=receipt_directory / f"{digest}.json",
+        stage_receipt_sha256=digest,
+        source_sha256=source_sha256,
+    )
 
 
 class RealSceneRunner:

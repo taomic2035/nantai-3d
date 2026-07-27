@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from pipeline.real_dataset import DatasetEvidenceError, HfDatasetSource, canonical_model_bytes
+from pipeline.real_dataset import (
+    DatasetEvidenceError,
+    HfDatasetSource,
+    LocalCaptureSource,
+    canonical_model_bytes,
+)
 from pipeline.real_scene_runner import (
     RealSceneBlockedError,
     RealSceneRunner,
     RealSceneRunOptions,
     RealSceneSourceIdentity,
+    StageArtifactBinding,
     StageExecution,
+    StageReceipt,
+    canonical_stage_receipt_bytes,
+    resolve_latest_production_import,
     run_real_scene,
 )
 
@@ -419,6 +430,163 @@ def test_run_real_scene_binds_canonical_source_and_run_id(tmp_path):
         / "poster"
         / source_sha[:16]
     ).is_dir()
+
+
+def _production_import_locator_fixture(tmp_path, monkeypatch):
+    source = LocalCaptureSource(
+        schema="nantai.real-dataset-source.v1",
+        dataset_id="village-a",
+        role="production-acceptance",
+        source_kind="local-capture",
+        rights_receipt_sha256="b" * 64,
+        redistribution_allowed=False,
+        release_inclusion_allowed=False,
+    )
+    source_path = tmp_path / "source.json"
+    source_bytes = canonical_model_bytes(source)
+    source_path.write_bytes(source_bytes)
+    source_sha = hashlib.sha256(source_bytes).hexdigest()
+    workspace_base = tmp_path / "real-scene"
+    run_id = "production-a"
+    workspace = (
+        workspace_base
+        / run_id
+        / source.dataset_id
+        / source_sha[:16]
+    )
+    attempt_id = "attempt-import-one"
+    import_root = workspace / "stages/import" / attempt_id
+    import_root.mkdir(parents=True)
+    import_receipt_path = import_root / "import-receipt.json"
+    import_payload = b'{"schema":"fixture"}\n'
+    import_receipt_path.write_bytes(import_payload)
+    binding = StageArtifactBinding(
+        path=import_receipt_path.relative_to(workspace).as_posix(),
+        byte_length=len(import_payload),
+        sha256=hashlib.sha256(import_payload).hexdigest(),
+    )
+    receipt = StageReceipt(
+        dataset_id=source.dataset_id,
+        source_sha256=source_sha,
+        stage="import",
+        attempt_id=attempt_id,
+        created_at_utc=datetime(2026, 7, 27, tzinfo=UTC),
+        status="completed",
+        prerequisites=(),
+        outputs=(binding,),
+        alignment_rms_m=0.1,
+    )
+    payload = canonical_stage_receipt_bytes(receipt)
+    receipt_dir = workspace / "receipts/import"
+    receipt_dir.mkdir(parents=True)
+    receipt_path = (
+        receipt_dir / f"{hashlib.sha256(payload).hexdigest()}.json"
+    )
+    receipt_path.write_bytes(payload)
+    monkeypatch.setattr(
+        "pipeline.real_scene_import.validate_real_scene_import_receipt",
+        lambda path, root: (
+            SimpleNamespace(source_role="production-acceptance")
+            if path == import_receipt_path and root == import_root
+            else pytest.fail("resolver used a different import")
+        ),
+    )
+    return {
+        "source": source,
+        "source_path": source_path,
+        "source_sha": source_sha,
+        "workspace_base": workspace_base,
+        "run_id": run_id,
+        "workspace": workspace,
+        "import_root": import_root,
+        "import_receipt_path": import_receipt_path,
+        "stage_receipt_path": receipt_path,
+    }
+
+
+def test_latest_production_import_resolver_returns_content_bound_stage(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _production_import_locator_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+
+    resolved = resolve_latest_production_import(
+        fixture["source_path"],
+        workspace_base=fixture["workspace_base"],
+        run_id=fixture["run_id"],
+    )
+
+    assert resolved.workspace_root == fixture["workspace"]
+    assert resolved.import_root == fixture["import_root"]
+    assert resolved.import_receipt_path == fixture["import_receipt_path"]
+    assert resolved.stage_receipt_path == fixture["stage_receipt_path"]
+    assert (
+        resolved.stage_receipt_sha256
+        == fixture["stage_receipt_path"].stem
+    )
+    assert resolved.source_sha256 == fixture["source_sha"]
+
+
+def test_latest_production_import_resolver_rejects_newer_blocked_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _production_import_locator_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    blocked = StageReceipt(
+        dataset_id=fixture["source"].dataset_id,
+        source_sha256=fixture["source_sha"],
+        stage="import",
+        attempt_id="attempt-import-two",
+        created_at_utc=(
+            datetime(2026, 7, 27, tzinfo=UTC)
+            + timedelta(seconds=1)
+        ),
+        status="blocked",
+        prerequisites=(),
+        outputs=(),
+        reason="fresh import evidence rejected",
+    )
+    payload = canonical_stage_receipt_bytes(blocked)
+    path = (
+        fixture["workspace"]
+        / "receipts/import"
+        / f"{hashlib.sha256(payload).hexdigest()}.json"
+    )
+    path.write_bytes(payload)
+
+    with pytest.raises(
+        RealSceneBlockedError,
+        match="latest production import is blocked",
+    ):
+        resolve_latest_production_import(
+            fixture["source_path"],
+            workspace_base=fixture["workspace_base"],
+            run_id=fixture["run_id"],
+        )
+
+
+def test_latest_production_import_resolver_rejects_artifact_tamper(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _production_import_locator_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    fixture["import_receipt_path"].write_bytes(b"tampered\n")
+
+    with pytest.raises(DatasetEvidenceError, match="sha256"):
+        resolve_latest_production_import(
+            fixture["source_path"],
+            workspace_base=fixture["workspace_base"],
+            run_id=fixture["run_id"],
+        )
 
 
 @pytest.mark.parametrize("chunk_size", [True, "50", float("nan"), 0, -1])
