@@ -15,7 +15,7 @@
 
 ## 1. 安装与体检
 
-需要 Python 3.11+、Node.js 20+。Windows：
+需要 Python 3.11+、仓库锁定的 Node.js 22.14.0。Windows：
 
 ```powershell
 python -m venv .venv
@@ -77,8 +77,11 @@ COLMAP 不适合把全部视频帧直接投入匹配。
 .venv/bin/python make.py real-canary RUN_ID=my-real-canary train-preview
 ```
 
-重复检查已完成阶段使用 `RESUME=1`；失败或 `unknown` 后重新执行必须显式
-`RETRY=1`。resume 会重新打开并哈希 receipt 绑定的 bytes，不以“文件存在”作为成功。
+重复检查已完成阶段使用 `RESUME=1`；`blocked/failed` 后重新执行必须显式
+`RETRY=1`。`train-production` 为 `unknown` 时，`RESUME=1` 会严格重开原
+job/bundle/config 证据并继续 poll/fetch，同一 attempt 内不会再次 submit；
+`RETRY=1` 才会创建新的 attempt。resume 会重新打开并哈希 receipt 绑定的 bytes，
+不以“文件存在”作为成功。
 发现已完成 bytes 损坏时会保留旧 completed receipt，并新增 blocked evidence。
 
 内部 canary 的数据是 `internal-only`，没有声明可再发行许可；Brush 输出始终是
@@ -135,8 +138,8 @@ key 排序、末尾换行的 canonical JSON，且只含以下字段：
 失败、镜像/worker 不匹配、输入在检查期间被替换都会 fail closed。报告采用独占创建，
 不会覆盖旧证据；请为每次 fresh 检查使用新文件名，并把报告留在 operator 私有目录。
 
-连接丢失或远端状态无法验证时结果必须是 `unknown`；`RESUME=1` 不会重复提交，
-除非 operator 明确使用 `RETRY=1` 创建新 attempt。
+连接丢失或远端状态无法验证时结果必须是 `unknown`；`RESUME=1` 只重连原 job，
+不会上传、初始化、启动或重复提交；operator 明确使用 `RETRY=1` 才创建新 attempt。
 
 ## 4. 高质量路径：COLMAP + 云 GPU
 

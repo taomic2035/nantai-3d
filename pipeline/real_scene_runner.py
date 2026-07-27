@@ -539,6 +539,7 @@ class RealSceneRunner:
         resume: bool,
         retry: bool,
     ) -> StageReceipt:
+        recovering: StageReceipt | None = None
         latest = self._latest(stage)
         if latest is not None:
             receipt, digest = latest
@@ -552,7 +553,14 @@ class RealSceneRunner:
                         error=exc,
                     )
             self._verify_artifact_bindings(receipt.evidence)
-            if not retry:
+            if (
+                stage == "train-production"
+                and receipt.status == "unknown"
+                and resume
+                and not retry
+            ):
+                recovering = receipt
+            elif not retry:
                 raise RealSceneBlockedError(
                     f"{stage} has {receipt.status} evidence "
                     f"({receipt.reason}); explicit retry is required"
@@ -579,9 +587,20 @@ class RealSceneRunner:
                 ),
             )
 
+        if (
+            recovering is not None
+            and recovering.prerequisites != prerequisite_bindings
+        ):
+            raise RealSceneBlockedError(
+                "train-production recovery prerequisite identity differs"
+            )
         if stage == "import":
             self._preflight_control_points()
-        attempt_id = "attempt-" + uuid.uuid4().hex
+        attempt_id = (
+            recovering.attempt_id
+            if recovering is not None
+            else "attempt-" + uuid.uuid4().hex
+        )
         stage_root = self.workspace / "stages" / stage / attempt_id
         execution = self.operations.execute(
             stage,
@@ -633,12 +652,20 @@ class RealSceneRunner:
         else:
             outputs = ()
             reason = execution.reason or (f"{stage} returned {execution.state}")
+        created_at = self._now()
+        if (
+            recovering is not None
+            and created_at <= recovering.created_at_utc
+        ):
+            created_at = recovering.created_at_utc + timedelta(
+                microseconds=1,
+            )
         receipt = StageReceipt(
             dataset_id=self.source.dataset_id,
             source_sha256=self.source.source_sha256,
             stage=stage,
             attempt_id=attempt_id,
-            created_at_utc=self._now(),
+            created_at_utc=created_at,
             status=execution.state,
             prerequisites=prerequisite_bindings,
             evidence=evidence,

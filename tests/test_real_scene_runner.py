@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,13 @@ class _Operations:
         )
 
 
-def _runner(tmp_path, *, role="internal-canary", control_points=None):
+def _runner(
+    tmp_path,
+    *,
+    role="internal-canary",
+    control_points=None,
+    now=None,
+):
     operations = _Operations()
     runner = RealSceneRunner(
         source=RealSceneSourceIdentity(
@@ -61,6 +68,7 @@ def _runner(tmp_path, *, role="internal-canary", control_points=None):
         operations=operations,
         control_points_path=control_points,
         geo_origin=(31.2, 121.5, 4.0) if control_points else None,
+        now=now,
     )
     return runner, operations
 
@@ -267,7 +275,7 @@ def test_production_import_persists_bad_rms_as_blocked(tmp_path, rms):
         runner.run("import")
 
 
-def test_unknown_remote_state_requires_explicit_retry_and_is_preserved(
+def test_unknown_remote_state_resumes_the_same_attempt(
     tmp_path,
 ):
     control_points = _control_points(tmp_path / "control-points.json")
@@ -275,6 +283,7 @@ def test_unknown_remote_state_requires_explicit_retry_and_is_preserved(
         tmp_path,
         role="production-acceptance",
         control_points=control_points,
+        now=lambda: datetime(2026, 7, 27, tzinfo=UTC),
     )
     operations.states["train-production"] = (
         "unknown",
@@ -288,16 +297,51 @@ def test_unknown_remote_state_requires_explicit_retry_and_is_preserved(
     )
     with pytest.raises(RealSceneBlockedError, match="explicit retry"):
         runner.run("train-production")
+    first_payload = json.loads(
+        first_paths[0].read_text(encoding="ascii")
+    )
 
     operations.states["train-production"] = ("completed", None)
-    receipt = runner.run("train-production", retry=True)
+    receipt = runner.run("train-production", resume=True)
 
     assert receipt.status == "completed"
+    assert receipt.attempt_id == first_payload["attempt_id"]
+    assert receipt.created_at_utc > datetime.fromisoformat(
+        first_payload["created_at_utc"],
+    )
     all_paths = tuple(
         (runner.receipt_root / "train-production").glob("*.json")
     )
     assert len(first_paths) == 1
     assert len(all_paths) == 2
+    assert runner.run("train-production").status == "completed"
+
+
+def test_unknown_remote_state_explicit_retry_uses_new_attempt(
+    tmp_path,
+):
+    control_points = _control_points(tmp_path / "control-points.json")
+    runner, operations = _runner(
+        tmp_path,
+        role="production-acceptance",
+        control_points=control_points,
+    )
+    operations.states["train-production"] = (
+        "unknown",
+        "remote host unreachable",
+    )
+    with pytest.raises(RealSceneBlockedError, match="unreachable"):
+        runner.run("train-production")
+    first_path = next(
+        (runner.receipt_root / "train-production").glob("*.json")
+    )
+    first = json.loads(first_path.read_text(encoding="ascii"))
+
+    operations.states["train-production"] = ("completed", None)
+    retried = runner.run("train-production", retry=True)
+
+    assert retried.status == "completed"
+    assert retried.attempt_id != first["attempt_id"]
 
 
 def test_workspace_is_source_parameterized(tmp_path):
