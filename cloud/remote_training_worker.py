@@ -74,8 +74,8 @@ _MAX_SPEC_BYTES = 1024 * 1024
 
 
 class RemoteWorkerSpec(FrozenModel):
-    schema_id: Literal["nantai.remote-worker-spec.v2"] = Field(
-        default="nantai.remote-worker-spec.v2",
+    schema_id: Literal["nantai.remote-worker-spec.v3"] = Field(
+        default="nantai.remote-worker-spec.v3",
         alias="schema",
         serialization_alias="schema",
     )
@@ -84,6 +84,8 @@ class RemoteWorkerSpec(FrozenModel):
     request_sha256: str = Field(pattern=_SHA256_PATTERN)
     training_bundle_sha256: str = Field(pattern=_SHA256_PATTERN)
     runtime_policy_sha256: str = Field(pattern=_SHA256_PATTERN)
+    remote_target_sha256: str = Field(pattern=_SHA256_PATTERN)
+    durable_job_ref_sha256: str = Field(pattern=_SHA256_PATTERN)
 
 
 def _canonical_spec_bytes(spec: RemoteWorkerSpec) -> bytes:
@@ -484,9 +486,12 @@ _CONTAINER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 def _create_container_argv(
     *,
     runtime: str,
+    runtime_name: str,
     repo_root: Path,
     job_dir: Path,
     container_identity: str,
+    remote_target_sha256: str,
+    durable_job_ref_sha256: str,
 ) -> list[str]:
     """Build structured docker create argv (no string concatenation)."""
     return [
@@ -504,12 +509,35 @@ def _create_container_argv(
         f"type=bind,src={repo_root},dst=/workspace,readonly",
         "--mount",
         f"type=bind,src={job_dir},dst=/job",
+        "--mount",
+        (
+            "type=bind,"
+            f"src={runtime},"
+            "dst=/nantai-host/container-runtime,readonly"
+        ),
         "--workdir",
         "/workspace",
         "--env",
         "WORK=/job/runtime",
         container_identity,
-        "bash",
+        "python",
+        "cloud/production_runtime_entrypoint.py",
+        "--job-dir",
+        "/job",
+        "--repo-root",
+        "/workspace",
+        "--mounted-container-runtime-path",
+        "/nantai-host/container-runtime",
+        "--container-runtime",
+        runtime_name,
+        "--remote-target-sha256",
+        remote_target_sha256,
+        "--durable-job-ref-sha256",
+        durable_job_ref_sha256,
+        "--container-identity",
+        container_identity,
+        "--",
+        "/bin/bash",
         "cloud/train_3dgs_nerfstudio.sh",
         "--prepared-bundle",
         "/job/training-job.zip",
@@ -540,16 +568,22 @@ def _run_container_command(
 def _create_fresh_container(
     *,
     runtime: str,
+    runtime_name: str,
     repo_root: Path,
     job_dir: Path,
     container_identity: str,
+    remote_target_sha256: str,
+    durable_job_ref_sha256: str,
 ) -> str:
     """docker create with immutable digest; return full container ID."""
     argv = _create_container_argv(
         runtime=runtime,
+        runtime_name=runtime_name,
         repo_root=repo_root,
         job_dir=job_dir,
         container_identity=container_identity,
+        remote_target_sha256=remote_target_sha256,
+        durable_job_ref_sha256=durable_job_ref_sha256,
     )
     completed = _run_container_command(argv, capture_stdout=True)
     if completed.returncode != 0:
@@ -820,26 +854,57 @@ def run_job(
             != spec.runtime_policy_sha256
             or runtime_policy.expected_container_identity
             != container_identity
+            or runtime_policy.expected_remote_target_sha256
+            != spec.remote_target_sha256
         ):
             raise RemoteWorkerError(
                 "production runtime policy differs from job spec"
             )
+        _, checker_sha256 = _hash_stable(
+            repo_root / "cloud" / "production_runtime_entrypoint.py",
+            label="production runtime entrypoint",
+        )
+        if checker_sha256 != runtime_policy.expected_checker_sha256:
+            raise RemoteWorkerError(
+                "production runtime entrypoint differs from policy"
+            )
+        resolved_runtime = shutil.which(container_runtime)
+        if not resolved_runtime or not Path(resolved_runtime).is_absolute():
+            raise RemoteWorkerError(
+                "container runtime did not resolve to an absolute path"
+            )
+        runtime_path = Path(resolved_runtime)
+        _, runtime_sha256 = _hash_stable(
+            runtime_path,
+            label="container runtime executable",
+        )
+        if (
+            runtime_sha256
+            != runtime_policy.expected_container_runtime_sha256
+        ):
+            raise RemoteWorkerError(
+                "container runtime executable differs from policy"
+            )
+        runtime_command = str(runtime_path)
         expected_image_id = _resolve_image_id(
-            runtime=container_runtime,
+            runtime=runtime_command,
             identity=container_identity,
         )
         container_id = _create_fresh_container(
-            runtime=container_runtime,
+            runtime=runtime_command,
+            runtime_name=container_runtime,
             repo_root=repo_root,
             job_dir=job_dir,
             container_identity=container_identity,
+            remote_target_sha256=spec.remote_target_sha256,
+            durable_job_ref_sha256=spec.durable_job_ref_sha256,
         )
         _publish_container_id(
             job_dir / "container-id.txt",
             container_id,
         )
         _verify_container_digest(
-            runtime=container_runtime,
+            runtime=runtime_command,
             container_id=container_id,
             expected_image_id=expected_image_id,
             expected_identity=container_identity,
@@ -856,7 +921,7 @@ def run_job(
         )
         _publish_container_lifecycle(job_dir, lifecycle_receipt)
         exit_code = _start_container(
-            runtime=container_runtime,
+            runtime=runtime_command,
             container_id=container_id,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
@@ -892,7 +957,7 @@ def run_job(
             rm_exit = -1
             if container_id is not None:
                 rm_exit = _remove_container(
-                    runtime=container_runtime,
+                    runtime=runtime_command,
                     container_id=container_id,
                 )
             observation_published = _safe_record_cleanup_observation(
@@ -974,7 +1039,7 @@ def run_job(
         rm_exit = -1
         if container_id is not None:
             rm_exit = _remove_container(
-                runtime=container_runtime,
+                runtime=runtime_command,
                 container_id=container_id,
             )
         observation_published = _safe_record_cleanup_observation(
@@ -1043,7 +1108,7 @@ def run_job(
         rm_exit = -1
         if container_id is not None:
             rm_exit = _remove_container(
-                runtime=container_runtime,
+                runtime=runtime_command,
                 container_id=container_id,
             )
         observation_published = _safe_record_cleanup_observation(
@@ -1143,6 +1208,8 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--request-sha256", required=True)
     init.add_argument("--training-bundle-sha256", required=True)
     init.add_argument("--runtime-policy-sha256", required=True)
+    init.add_argument("--remote-target-sha256", required=True)
+    init.add_argument("--durable-job-ref-sha256", required=True)
     start = subparsers.add_parser("start")
     _add_start_arguments(start)
     start.add_argument("--detach", action="store_true")
@@ -1167,6 +1234,8 @@ def main(argv: list[str] | None = None) -> int:
                         args.training_bundle_sha256
                     ),
                     runtime_policy_sha256=args.runtime_policy_sha256,
+                    remote_target_sha256=args.remote_target_sha256,
+                    durable_job_ref_sha256=args.durable_job_ref_sha256,
                 ),
             )
             return 0

@@ -43,6 +43,7 @@ from pipeline.remote_shell_executor import (
     build_remote_result_bundle,
     canonical_container_lifecycle_bytes,
     canonical_remote_result_manifest_bytes,
+    canonical_remote_shell_job_ref_bytes,
     canonical_remote_shell_preflight_bytes,
     canonical_remote_status_bytes,
     compute_container_lifecycle_sha256,
@@ -214,6 +215,7 @@ def _config(tmp_path) -> RemoteShellExecutorConfig:
         expected_worker_sha256="d" * 64,
         expected_worker_version="1.0.0",
         expected_checker_config_sha256="e" * 64,
+        remote_target_sha256="2" * 64,
         runtime_policy_path=runtime_policy_path,
         expected_runtime_policy_sha256=policy.content_sha256,
     )
@@ -391,6 +393,12 @@ def test_submit_uploads_bound_runtime_policy_before_worker_start(
     init_argv = runner.calls[0][0]
     assert "--runtime-policy-sha256" in init_argv[-1]
     assert policy.content_sha256 in init_argv[-1]
+    assert "--remote-target-sha256" in init_argv[-1]
+    assert policy.expected_remote_target_sha256 in init_argv[-1]
+    assert "--durable-job-ref-sha256" in init_argv[-1]
+    assert hashlib.sha256(
+        canonical_remote_shell_job_ref_bytes(job)
+    ).hexdigest() in init_argv[-1]
     policy_upload = runner.calls[1][0]
     bundle_upload = runner.calls[2][0]
     start_argv = runner.calls[3][0]
@@ -407,6 +415,24 @@ def test_executor_rejects_runtime_policy_sha_mismatch_before_transport(
     config, _policy = _config_with_runtime_policy(
         tmp_path,
         expected_sha256="f" * 64,
+    )
+    runner = _Runner()
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="runtime policy",
+    ):
+        RemoteShellExecutor(config, run_command=runner)
+
+    assert runner.calls == []
+
+
+def test_executor_rejects_runtime_policy_remote_target_mismatch(
+    tmp_path,
+):
+    config, _policy = _config_with_runtime_policy(tmp_path)
+    config = config.model_copy(
+        update={"remote_target_sha256": "9" * 64}
     )
     runner = _Runner()
 

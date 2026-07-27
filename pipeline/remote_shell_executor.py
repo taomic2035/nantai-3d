@@ -290,6 +290,7 @@ class RemoteShellExecutorConfig(FrozenModel):
     expected_checker_config_sha256: str = Field(
         pattern=_SHA256_PATTERN,
     )
+    remote_target_sha256: str = Field(pattern=_SHA256_PATTERN)
     runtime_policy_path: Path
     expected_runtime_policy_sha256: str = Field(
         pattern=_SHA256_PATTERN,
@@ -2254,6 +2255,8 @@ def _load_bound_runtime_policy(
         != config.container_identity
         or policy.expected_worker_sha256
         != config.expected_worker_sha256
+        or policy.expected_remote_target_sha256
+        != config.remote_target_sha256
     ):
         raise RemoteShellExecutionError(
             "production runtime policy differs from remote config"
@@ -2523,6 +2526,21 @@ class RemoteShellExecutor:
             f"{self.config.remote_repo_root}/"
             "cloud/remote_training_worker.py"
         )
+        job = RemoteShellJobRef(
+            job_id=bundle.input_identity.job_id,
+            attempt_id=attempt_id,
+            submitted_at_utc=submitted_at,
+            request_sha256=bundle.input_identity.request_sha256,
+            training_bundle_sha256=bundle.bundle.bundle_sha256,
+            runtime_policy_sha256=runtime_policy.content_sha256,
+            config_identity_sha256=(
+                remote_shell_executor_config_sha256(self.config)
+            ),
+            remote_job_path=remote_job_path,
+        )
+        durable_job_ref_sha256 = hashlib.sha256(
+            canonical_remote_shell_job_ref_bytes(job)
+        ).hexdigest()
         init = self._ssh(
             [
                 "python3",
@@ -2540,6 +2558,10 @@ class RemoteShellExecutor:
                 bundle.bundle.bundle_sha256,
                 "--runtime-policy-sha256",
                 runtime_policy.content_sha256,
+                "--remote-target-sha256",
+                self.config.remote_target_sha256,
+                "--durable-job-ref-sha256",
+                durable_job_ref_sha256,
             ],
             phase="remote job initialization",
         )
@@ -2577,18 +2599,6 @@ class RemoteShellExecutor:
             phase="remote job start",
         )
         self._require_zero(start, phase="remote job start")
-        job = RemoteShellJobRef(
-            job_id=bundle.input_identity.job_id,
-            attempt_id=attempt_id,
-            submitted_at_utc=submitted_at,
-            request_sha256=bundle.input_identity.request_sha256,
-            training_bundle_sha256=bundle.bundle.bundle_sha256,
-            runtime_policy_sha256=runtime_policy.content_sha256,
-            config_identity_sha256=(
-                remote_shell_executor_config_sha256(self.config)
-            ),
-            remote_job_path=remote_job_path,
-        )
         receipt = new_attempt(
             bundle.input_identity,
             attempt_id=attempt_id,

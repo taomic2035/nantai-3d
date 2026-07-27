@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,8 +61,16 @@ def _runtime_policy() -> ProductionRuntimePolicy:
             )
         ),
         required_training_cli_options=options,
-        expected_checker_sha256="4" * 64,
-        expected_container_runtime_sha256="5" * 64,
+        expected_checker_sha256=_sha(
+            (
+                _ROOT
+                / "cloud"
+                / "production_runtime_entrypoint.py"
+            ).read_bytes()
+        ),
+        expected_container_runtime_sha256=_sha(
+            Path(sys.executable).read_bytes()
+        ),
         expected_nvidia_smi_sha256="6" * 64,
         expected_python_sha256="7" * 64,
         expected_training_cli_sha256="8" * 64,
@@ -82,6 +91,8 @@ def _init_job(
         request_sha256="a" * 64,
         training_bundle_sha256=_sha(bundle),
         runtime_policy_sha256=policy.content_sha256,
+        remote_target_sha256=policy.expected_remote_target_sha256,
+        durable_job_ref_sha256="3" * 64,
     )
     initialize_job(job_dir=job_dir, spec=spec)
     (job_dir / "training-job.zip").write_bytes(bundle)
@@ -249,6 +260,12 @@ def _patch_worker(monkeypatch, fake: FakeDocker) -> None:
     monkeypatch.setattr(
         "cloud.remote_training_worker.subprocess.run", fake.run
     )
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.shutil.which",
+        lambda name: (
+            sys.executable if name in {"docker", "podman"} else None
+        ),
+    )
 
 
 def _subcommands(fake: FakeDocker) -> list[str]:
@@ -274,6 +291,8 @@ def test_worker_binds_runtime_policy_to_spec_and_lifecycle(
         request_sha256="a" * 64,
         training_bundle_sha256=_sha(bundle),
         runtime_policy_sha256=policy.content_sha256,
+        remote_target_sha256=policy.expected_remote_target_sha256,
+        durable_job_ref_sha256="3" * 64,
     )
     initialize_job(job_dir=job_dir, spec=spec)
     (job_dir / "training-job.zip").write_bytes(bundle)
@@ -317,6 +336,8 @@ def test_worker_rejects_runtime_policy_swap_before_container_create(
         request_sha256="a" * 64,
         training_bundle_sha256=_sha(bundle),
         runtime_policy_sha256="f" * 64,
+        remote_target_sha256=policy.expected_remote_target_sha256,
+        durable_job_ref_sha256="3" * 64,
     )
     initialize_job(job_dir=job_dir, spec=spec)
     (job_dir / "training-job.zip").write_bytes(bundle)
@@ -340,6 +361,92 @@ def test_worker_rejects_runtime_policy_swap_before_container_create(
     assert "create" not in _subcommands(fake)
     assert "start" not in _subcommands(fake)
     assert not (job_dir / "container-lifecycle.json").exists()
+
+
+def test_worker_container_entrypoint_gates_training_in_same_instance(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 0
+    )
+
+    create = next(call for call in fake.calls if call[1] == "create")
+    assert any(
+        value.endswith(
+            ",dst=/nantai-host/container-runtime,readonly"
+        )
+        for value in create
+    )
+    checker_index = create.index(
+        "cloud/production_runtime_entrypoint.py"
+    )
+    separator_index = create.index("--")
+    training_index = create.index(
+        "cloud/train_3dgs_nerfstudio.sh"
+    )
+    assert checker_index < separator_index < training_index
+    assert create[training_index - 1] == "/bin/bash"
+
+
+def test_worker_rejects_unbound_clearance_entrypoint_before_create(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    bundle = b"verified-training-bundle"
+    original = _runtime_policy()
+    fields = original.model_dump(
+        exclude={"policy_id", "content_sha256"}
+    )
+    fields["expected_checker_sha256"] = "f" * 64
+    policy = ProductionRuntimePolicy.create(**fields)
+    job_dir.parent.parent.mkdir(parents=True, exist_ok=True)
+    initialize_job(
+        job_dir=job_dir,
+        spec=RemoteWorkerSpec(
+            job_id="job-1",
+            attempt_id="attempt-1",
+            request_sha256="a" * 64,
+            training_bundle_sha256=_sha(bundle),
+            runtime_policy_sha256=policy.content_sha256,
+            remote_target_sha256=(
+                policy.expected_remote_target_sha256
+            ),
+            durable_job_ref_sha256="3" * 64,
+        ),
+    )
+    (job_dir / "training-job.zip").write_bytes(bundle)
+    (job_dir / "production-runtime-policy.json").write_bytes(
+        canonical_production_runtime_policy_bytes(policy)
+    )
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 75
+    )
+    assert "create" not in _subcommands(fake)
+    assert "start" not in _subcommands(fake)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +496,12 @@ def test_worker_publishes_closed_lifecycle_after_digest_before_start(
     monkeypatch.setattr(
         "cloud.remote_training_worker.subprocess.run",
         observe_start,
+    )
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.shutil.which",
+        lambda name: (
+            sys.executable if name in {"docker", "podman"} else None
+        ),
     )
 
     assert (
@@ -951,6 +1064,12 @@ def test_worker_lifecycle_order_brackets_digest_and_start(
         observe_runtime,
     )
     monkeypatch.setattr(
+        "cloud.remote_training_worker.shutil.which",
+        lambda name: (
+            sys.executable if name in {"docker", "podman"} else None
+        ),
+    )
+    monkeypatch.setattr(
         worker,
         "_publish_container_lifecycle",
         observe_lifecycle_publish,
@@ -1243,6 +1362,12 @@ def test_worker_uses_structured_argv_no_shell(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "cloud.remote_training_worker.subprocess.run", checking_run
     )
+    monkeypatch.setattr(
+        "cloud.remote_training_worker.shutil.which",
+        lambda name: (
+            sys.executable if name in {"docker", "podman"} else None
+        ),
+    )
 
     returncode = start_job(
         job_dir=job_dir,
@@ -1364,6 +1489,10 @@ def test_worker_init_is_exclusive_and_status_is_canonical(tmp_path):
         request_sha256="a" * 64,
         training_bundle_sha256="b" * 64,
         runtime_policy_sha256=_runtime_policy().content_sha256,
+        remote_target_sha256=(
+            _runtime_policy().expected_remote_target_sha256
+        ),
+        durable_job_ref_sha256="3" * 64,
     )
     initialize_job(job_dir=job_dir, spec=spec)
 
