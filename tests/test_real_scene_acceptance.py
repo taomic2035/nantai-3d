@@ -531,6 +531,35 @@ def test_acceptance_publication_is_content_addressed_and_idempotent(
     assert first_path.read_bytes() == canonical_real_scene_acceptance_bytes(report)
 
 
+def test_acceptance_publication_flush_failure_leaves_no_final_report(
+    tmp_path,
+    monkeypatch,
+):
+    root, _path, report = _acceptance_report(
+        tmp_path,
+        role="internal-canary",
+    )
+
+    def fail_flush(_path):
+        raise OSError("simulated flush failure")
+
+    monkeypatch.setattr(
+        acceptance_module,
+        "_validate_acceptance_evidence",
+        lambda *_args, **_kwargs: _accepted_evidence(role="internal-canary"),
+    )
+    monkeypatch.setattr("pipeline.durable_io.flush_file", fail_flush)
+
+    with pytest.raises(
+        RealSceneAcceptanceError,
+        match="cannot be published",
+    ):
+        publish_real_scene_acceptance(report, root)
+
+    assert not tuple(root.glob("real-scene-acceptance-*.json"))
+    assert not tuple(root.glob(".*.staging"))
+
+
 def test_latest_acceptance_pointer_is_relative_content_bound_and_idempotent(
     tmp_path,
 ):
@@ -559,6 +588,42 @@ def test_latest_acceptance_pointer_is_relative_content_bound_and_idempotent(
         "report_sha256",
         "report_byte_length",
     }
+
+
+def test_latest_acceptance_pointer_flush_failure_preserves_previous_pointer(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "real-scene"
+    first_payload = b'{"schema":"first"}\n'
+    first = root / "run-a" / (
+        f"real-scene-acceptance-{hashlib.sha256(first_payload).hexdigest()}.json"
+    )
+    first.parent.mkdir(parents=True)
+    first.write_bytes(first_payload)
+    pointer = publish_real_scene_acceptance_pointer(first, root)
+    previous = pointer.read_bytes()
+
+    second_payload = b'{"schema":"second"}\n'
+    second = root / "run-b" / (
+        f"real-scene-acceptance-{hashlib.sha256(second_payload).hexdigest()}.json"
+    )
+    second.parent.mkdir()
+    second.write_bytes(second_payload)
+
+    def fail_flush(_path):
+        raise OSError("simulated flush failure")
+
+    monkeypatch.setattr("pipeline.durable_io.flush_file", fail_flush)
+
+    with pytest.raises(
+        RealSceneAcceptanceError,
+        match="cannot be published",
+    ):
+        publish_real_scene_acceptance_pointer(second, root)
+
+    assert pointer.read_bytes() == previous
+    assert not tuple(root.glob(".latest-acceptance-*.tmp"))
 
 
 def test_latest_acceptance_pointer_rejects_report_tamper_and_unsafe_paths(

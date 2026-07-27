@@ -930,38 +930,65 @@ def publish_real_scene_acceptance(
     payload = canonical_real_scene_acceptance_bytes(report)
     digest = hashlib.sha256(payload).hexdigest()
     path = boundary / f"real-scene-acceptance-{digest}.json"
+    from pipeline.durable_io import (
+        DurableIOError,
+        flush_file,
+        publish_file_noreplace,
+    )
+
+    descriptor = -1
+    temporary = ""
     try:
-        descriptor = os.open(
-            path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".staging",
+            dir=boundary,
         )
-    except FileExistsError:
-        reference = AcceptanceEvidenceReference(
-            path=path.name,
-            sha256=digest,
-            byte_length=len(payload),
-        )
-        existing = _hash_reference(
-            boundary,
-            reference,
-            retain_bytes=True,
-        )
-        if existing != payload:
-            raise RealSceneAcceptanceError(
-                "content-addressed acceptance path contains different bytes"
-            ) from None
-    except OSError as exc:
-        raise RealSceneAcceptanceError("acceptance report cannot be published") from exc
-    else:
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+        flush_file(temporary)
         try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except OSError as exc:
-            path.unlink(missing_ok=True)
-            raise RealSceneAcceptanceError("acceptance report cannot be published") from exc
+            publish_file_noreplace(temporary, path)
+            temporary = ""
+        except FileExistsError:
+            reference = AcceptanceEvidenceReference(
+                path=path.name,
+                sha256=digest,
+                byte_length=len(payload),
+            )
+            existing = _hash_reference(
+                boundary,
+                reference,
+                retain_bytes=True,
+            )
+            if existing != payload:
+                raise RealSceneAcceptanceError(
+                    "content-addressed acceptance path contains different bytes"
+                ) from None
+    except RealSceneAcceptanceError:
+        raise
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RealSceneAcceptanceError(
+            f"acceptance report cannot be published ({state})"
+        ) from exc
+    except OSError as exc:
+        raise RealSceneAcceptanceError(
+            "acceptance report cannot be published"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary:
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
+                pass
     return path, validate_real_scene_acceptance(path)
 
 
@@ -989,6 +1016,12 @@ def publish_real_scene_acceptance_pointer(
     )
     payload = canonical_real_scene_acceptance_pointer_bytes(pointer)
     destination = boundary / "latest-acceptance.json"
+    from pipeline.durable_io import (
+        DurableIOError,
+        atomic_replace,
+        flush_file,
+    )
+
     descriptor = -1
     temporary = ""
     try:
@@ -1000,12 +1033,22 @@ def publish_real_scene_acceptance_pointer(
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = -1
             stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
+        flush_file(temporary)
+        atomic_replace(temporary, destination)
         temporary = ""
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RealSceneAcceptanceError(
+            f"acceptance pointer cannot be published ({state})"
+        ) from exc
     except OSError as exc:
-        raise RealSceneAcceptanceError("acceptance pointer cannot be published") from exc
+        raise RealSceneAcceptanceError(
+            "acceptance pointer cannot be published"
+        ) from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
