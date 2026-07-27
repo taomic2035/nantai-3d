@@ -250,11 +250,24 @@ request/result 只证明其声明并通过内容闭合检查的事实；stub 或
 `production-acceptance` import 生成 provenance-bound Viewer 输入：
 
 ```powershell
-$run = (Resolve-Path .nantai-studio\runs\production-site-a).Path
+$source = (Resolve-Path .nantai-studio\private\production-source.json).Path
+$workspace = (Resolve-Path .nantai-studio\real-scene).Path
+$runId = "production-site-a"
+$paths = python -m pipeline.real_scene_paths `
+  --source "$source" `
+  --workspace "$workspace" `
+  --run-id "$runId" | ConvertFrom-Json
+$run = $paths.workspace_root
+$importRoot = $paths.import_root
 python -m pipeline.viewer_inputs `
-  --import-root "$run\imported" `
+  --import-root "$importRoot" `
   --output-dir "$run\viewer-inputs"
 ```
+
+`pipeline.real_scene_paths` 不猜目录名：它重开 source 和该 identity 的全部 import stage
+receipts，选择时间与 attempt ID 最新的一份，只接受 `completed`，复核 receipt 文件名、
+每个 output SHA/字节数和完整 production import。最新 receipt 为 blocked/unknown、
+出现异源 receipt、路径链接或任何字节漂移时命令返回 2，不会回退到旧 import。
 
 producer 只接受 metric-aligned production import，并从 accepted aligned COLMAP
 registration 以 `registered-camera-maximin-v1` 确定性选出三个空间分离机位。生成的
@@ -329,6 +342,31 @@ python scripts/record_real_scene_review.py `
 命令中的 `accepted` 只是填写格式示例，必须按截图真实观感改成 `accepted`、
 `rejected` 或 `unknown`。脚本会重开 Viewer policy、camera set、scene、代码与截图，
 任一 SHA、字节数、pose 顺序或路径漂移都会拒绝写入；它不会替 reviewer 自动接受。
+
+七类结论全部完成后，使用同一个 source、workspace、run ID、控制点和 geo origin
+执行最终 aggregate。local-capture 的媒体、rights 和 registration policy 也必须重复
+提供，runner 会重新绑定既有阶段 receipt，不会相信命令行自报的成功：
+
+```powershell
+python -m scripts.real_scene accept `
+  --source "$source" `
+  --workspace "$workspace" `
+  --run-id "$runId" `
+  --media-root "C:\private\capture" `
+  --rights "C:\private\capture-rights.json" `
+  --policy "C:\private\registration-policy.json" `
+  --control-points "C:\private\control-points.json" `
+  --geo-origin "26.0801,119.2967,12.5" `
+  --viewer-policy "$run\viewer-inputs\policy.json" `
+  --viewer-report "$run\viewer\performance-report.v2.json" `
+  --human-review-policy "$run\review\human-review-policy.json" `
+  --human-visual-review "$run\evidence\human-visual-review.json"
+```
+
+只有返回的 accept stage receipt 为 `status=completed`，且内容寻址 aggregate 与 latest
+pointer 都发布成功，才说明仓库内 Production V1 门全部通过。`blocked`、`unknown`、
+命令返回 2 或 Studio 显示 invalid evidence 都不得发布；修复证据后用 `--retry` 新建
+attempt，不能覆盖旧 receipt。
 
 验收时至少确认：
 

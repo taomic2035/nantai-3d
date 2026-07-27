@@ -87,6 +87,9 @@ def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
     status = _read("docs/production-v1-status.md")
 
     assert "python -m pipeline.viewer_inputs" in manual
+    assert "python -m pipeline.real_scene_paths" in manual
+    assert "$paths.import_root" in manual
+    assert "不会回退到旧 import" in manual
     assert "--import-root" in manual
     assert "--output-dir" in manual
     assert "nantai.viewer-camera-set.v2" in manual
@@ -103,6 +106,10 @@ def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
     assert "--viewer-report" in manual
     assert "全部七类结论" in manual
     assert "不会替 reviewer 自动接受" in manual
+    assert "python -m scripts.real_scene accept" in manual
+    assert "--human-visual-review" in manual
+    assert "status=completed" in manual
+    assert "--retry" in manual
     assert "camera-set v2" in status
     assert "receipt-bound" in status
     assert "viewer_session" in status

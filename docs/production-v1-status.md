@@ -79,6 +79,8 @@ Viewer v2 代码门已经就绪：
 - production camera-set v2 producer 从复验通过的 metric-aligned COLMAP registration
   确定性选取三个空间分离机位，并绑定 import receipt、aligned registration 与 scene
   manifest；v1 或任一来源 SHA 漂移均 fail closed；
+- `pipeline.real_scene_paths` 从 source/workspace/run ID 重建 runner identity，只返回
+  最新且重新验证通过的 completed production import，不靠手写 attempt 目录；
 - Studio 的 `--real-scene-import-root` 会在启动时复验整份 production import，并把
   receipt-bound `web/` 重建白名单只读映射到 Viewer 固定 URL；未绑定文件、preview
   receipt、仓库 demo 回落和启动后字节漂移均拒绝；
