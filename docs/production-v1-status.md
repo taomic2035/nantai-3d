@@ -15,7 +15,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 真实数据 source/rights/receipt | caller 已实现，缺正式素材输入 |
 | fresh COLMAP 与注册质量门 | canary 已实跑，正式素材尚未运行 |
 | 本地 Brush preview | 已实跑，只能 preview-only |
-| 远程 submit/poll/fetch/reconnect | lifecycle receipt 与恢复语义已关闭；固定演练 registry 仍有一个旧 pytest node 待刷新 |
+| 远程 submit/poll/fetch/reconnect | lifecycle receipt、恢复语义与固定演练 registry 已关闭；远程固定演练 job 已通过 |
 | 远程演练真实性边界 | transport-fixture 与 fresh-container evidence 已分层，不把 fixture 当真实 GPU |
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
@@ -46,16 +46,14 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 [`HANDOFF-GLM-012`](../handoff/HANDOFF-GLM-012-active-production-queue.md)
 连续执行，不等待新的口头分配：
 
-1. `P0-CI`：把固定演练的旧 pytest node 改绑到 authoritative-poll 语义；
-2. `F1`：在同一 lifecycle container 内运行六探针 clearance，身份或 TOCTOU 漂移
+1. `P0-CI`：已由 Codex `70a965e` 关闭，专项 `12 passed`；
+2. **当前 `F1`**：在同一 lifecycle container 内运行六探针 clearance，身份或 TOCTOU 漂移
    均 fail closed；
 3. `G1`：让 `train-production` producer 产出既有 import 合同要求的八个结果文件；
 4. `H1`：poll 不越过 deadline，所有终态与异常路径显式关闭 executor。
 
-A1–E1 已关闭，不再重做。当前代码仍可直接观察到
-`pipeline/remote_training_drill.py` 引用已删除的
-`test_submit_advances_receipt_to_running`，因此 `P0-CI` 是首项，不是外部阻塞。
-GLM 每项独立提交并 push；Codex review 前保持 candidate。
+A1–E1 与 P0-CI 已关闭，不再重做。GLM 现在从 F1 开始，完成后不等待口头确认，
+直接连续执行 G1、H1。每项独立提交并 push；Codex review 前保持 candidate。
 
 ### P0 — 外部输入：正式素材与测量
 

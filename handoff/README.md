@@ -6,7 +6,8 @@
 ## 当前真实场景主线
 
 1. [GLM 当前四项连续工单](HANDOFF-GLM-012-active-production-queue.md) — 打开后先执行
-   顶部“GLM 立即执行卡”；当前从 `P0-CI` 开始，随后自动进入 `F1 → G1 → H1`
+   顶部“GLM 立即执行卡”；`P0-CI` 已关闭，当前从 `F1` 开始，随后自动进入
+   `G1 → H1`
 2. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
 3. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
 4. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
@@ -17,10 +18,9 @@ Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cf
 `0ad9417` 关闭；P1-4C production import 与 runner 字节复验由 `23a2ece`、
 `8693848` 关闭。production runtime evidence 合同由 `cba2a19` 关闭，production
 result bundle v2 与最终身份 closure 由 `5a0ca09` 关闭。B1/C1/D1/E1 已关闭，
-E1 candidate `b71e5de` 与 Codex closure `ab0c7dc` 已推送。GLM 当前先修
-`remote-training-drill` 的旧 pytest registry，再连续推进 F1 同容器六探针、G1
-operations producer 和 H1 deadline/executor-close 硬化；active paths、命令与停止
-条件只看
+E1 candidate `b71e5de` 与 Codex closure `ab0c7dc` 已推送；P0-CI registry 漂移由
+Codex `70a965e` 关闭。GLM 当前从 F1 同容器六探针开始，再连续推进 G1 operations
+producer 和 H1 deadline/executor-close 硬化；active paths、命令与停止条件只看
 [HANDOFF-GLM-012](HANDOFF-GLM-012-active-production-queue.md)。HANDOFF-GLM-011
 仅保留近期 review 背景，不再作为开工单。
 

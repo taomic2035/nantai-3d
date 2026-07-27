@@ -19,21 +19,19 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ## GLM 立即执行卡（2026-07-27，当前有效）
 
-不要再回复“无事可做”。本次核对基线 `84a1b27` 的代码证据仍显示
-`pipeline/remote_training_drill.py` 引用了已经删除的
-`test_submit_advances_receipt_to_running`。按下面四张票连续执行；完成一张就独立
-提交、用一次性代理 push，然后直接开始下一张，不等待 Codex 回执。
+不要再回复“无事可做”。`P0-CI` 已由 Codex 在 `70a965e` 关闭；现在从 `F1`
+开始，随后连续执行 `G1 → H1`。完成一张就独立提交、用一次性代理 push，然后直接
+开始下一张，不等待 Codex 回执。
 
 | 顺序 | Ticket | 只允许主动修改 | 必须交付的结果 |
 |---|---|---|---|
-| 1 | `P0-CI` | `pipeline/remote_training_drill.py`、`tests/test_remote_training_drill.py` | registry 改绑 `test_submit_keeps_receipt_not_started_until_authoritative_poll`，锁定 node ID 与 not-started 语义，恢复 `remote-training-drill` CI |
+| 已关闭 | `P0-CI` | `pipeline/remote_training_drill.py`、`tests/test_remote_training_drill.py` | `70a965e` 已刷新 registry；专项 `12 passed`，远程固定演练 job 通过 |
 | 2 | `F1` | `pipeline/remote_shell_executor.py`、`tests/test_remote_shell_executor.py` | 同一 lifecycle container 内六探针 clearance；container/executable/GPU/TOCTOU 漂移全部 fail closed；非 accepted 时训练 argv 不可达 |
 | 3 | `G1` | `pipeline/real_scene_operations.py`、`tests/test_real_scene_operations.py`；确有必要才继续修改 F1 两文件 | `train-production` 只在 accepted clearance 后运行并产出既有 import 所需八个 result 文件；不修改消费端 schema |
 | 4 | `H1` | `pipeline/real_scene_operations.py`、`tests/test_real_scene_operations.py` | poll sleep 不越过 deadline；success/failed/exception 都显式关闭 executor |
 
-**现在只从 `P0-CI` 开始。** 先写 RED，确认旧 registry 的 node-not-found，再做最小
-修复并运行本文件 Task P0-CI 给出的 pytest、Ruff 和 `git diff --check` 命令。提交信息
-固定为 `fix: refresh remote drill lifecycle case`。回执格式只写：
+**现在只从 `F1` 开始。** 先写本文件 Task F1 列出的七个行为 RED，再接入既有
+`pipeline.production_runtime_evidence`；不要新建平行 schema。回执格式只写：
 
 ```text
 ticket / commit SHA / changed paths / RED failure / GREEN counts + skipped
@@ -44,7 +42,7 @@ ticket / commit SHA / changed paths / RED failure / GREEN counts + skipped
 Codex-owned Viewer/Studio/release/acceptance aggregate。普通实现选择、测试失败和 CI 等待
 都不是暂停理由。
 
-## 当前 active ticket：P0-CI 固定演练 registry 刷新
+## 当前 active ticket：F1 同容器六探针 clearance adapter
 
 E1 fresh-container lifecycle 已完成实现、两轮独立 review、提交并 push。关闭证据：
 
@@ -60,18 +58,18 @@ E1 fresh-container lifecycle 已完成实现、两轮独立 review、提交并 p
   `git diff --check` 通过；规格和代码质量 review 均 APPROVED。
 - GLM candidate `b71e5de` 与 Codex closure `ab0c7dc` 已在 `origin/main`。
 
-当前 `main` 的 GitHub Actions `remote-training-drill` 只失败一项：
-`P1-3A-submit-running` registry 仍引用已删除的旧节点
-`test_submit_advances_receipt_to_running`，pytest 因 node not found 退出 4。E1 已把
-权威语义改为：submit 保持 `not-started`，直到 lifecycle/status 的权威 poll。
+`P0-CI` 已由 Codex 在 `70a965e` 修复：稳定 case ID 现在绑定
+`test_submit_keeps_receipt_not_started_until_authoritative_poll`，registry 测试同时
+锁定新 node ID 与 not-started 语义；专项 `12 passed`、Ruff 和 diff-check 通过，
+GitHub Actions `remote-training-drill (fixed transport fixtures)` 通过。GLM 应立即
+执行 F1，不等待其余矩阵。
 
 ## Codex 即时指令（2026-07-27 20:35）
 
 GLM 现在按以下顺序连续执行，不再返工已关闭任务，也不等待口头确认：
 
 ```text
-P0-CI 固定演练 registry 刷新
-  → F1 同容器六探针 clearance adapter
+F1 同容器六探针 clearance adapter
   → G1 operations caller 接入与结果 producer 闭环
   → H1 deadline / executor-close 硬化
 ```
@@ -92,8 +90,8 @@ Codex 口头确认。每个 ticket 独立提交并 push，随后立即开始下�
 
 ## 执行规则
 
-这是 GLM 当前唯一执行入口。B1/C1/D1/E1 已关闭，当前 active ticket 是 P0-CI；
-随后按 P0-CI → F1 → G1 → H1 连续推进。一项提交并 push 后立即开始下一项，不等待
+这是 GLM 当前唯一执行入口。B1/C1/D1/E1/P0-CI 已关闭，当前 active ticket 是 F1；
+随后按 F1 → G1 → H1 连续推进。一项提交并 push 后立即开始下一项，不等待
 口头确认。只有需要
 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
 Viewer/Studio/release/schema 路径时才暂停。
@@ -389,9 +387,9 @@ git commit --only cloud/remote_training_worker.py pipeline/remote_shell_executor
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-E1 已关闭；现在先关闭 P0-CI，再立即开始 F1。
+E1 与 P0-CI 已关闭；现在立即开始 F1。
 
-### Task P0-CI: 固定演练 registry 刷新（现在先做）
+### Task P0-CI: 固定演练 registry 刷新（已由 `70a965e` 关闭）
 
 **Files:**
 
@@ -419,7 +417,7 @@ git commit --only pipeline/remote_training_drill.py tests/test_remote_training_d
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
-push 后立即查看新 CI；无论其它长测试是否仍在运行，都先开始 F1，不得回复“无事可做”。
+专项结果：`12 passed`；Ruff、diff-check 与远程固定演练 job 通过。
 
 ### Task F1: 同容器六探针 clearance adapter
 
