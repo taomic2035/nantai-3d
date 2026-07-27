@@ -342,23 +342,45 @@ runtime measurement/policy/decision、request/result/attempt、训练输出、da
 closure 不是 PLY parser，也不替代 raw-byte verifier。caller 若跳过 1–4，即使能构造
 模型对象也不得发布 verified result。
 
-### G6 — 把 result closure 接回 runner/import
+### G6 — 把 result closure 接回 runner/import（消费端已关闭）
 
-允许路径：
+Codex `49c1f9b` 已完成：
 
-- `pipeline/real_scene_operations.py`
-- `pipeline/real_scene_runner.py`
-- `pipeline/real_scene_import.py`（只允许适配 G5，不改 `23a2ece` 的对齐信任门）
-- 对应测试
+- production import 缺失、非法、跨 job 或 identity-only closure 一律 blocked；
+- 重新打开 result manifest v2 的每个成员并核对 SHA/size；
+- 重新验证 G2 measurement/policy/decision；
+- 从 production training ZIP 重新读取 held-out 原图；
+- 重新执行 render split/transforms/RGB PNG/camera/report/policy validator；
+- 重新推导 G5 closure，不能信任内存模型或旧 decision；
+- `real-scene-import-receipt.v3` 绑定 G5 closure 与 G2 runtime decision SHA；
+- runner 的现有 completed-receipt revalidation 会重开 v3 import receipt 和 closure；
+- preview/Brush 路径保持 preview-only。
 
-完成定义：
+GLM G4 producer 现在必须精确交付下列本地文件，否则 import 会稳定 blocked：
 
-- `train-production` 只有消费 G5 verified closure 才能进入 import；
-- receipt 绑定 G2 runtime SHA 与 G5 closure SHA；
-- resume 时重新打开所有字节，不信任内存对象或旧 stage 状态；
-- blocked receipt 不得含 `production`、`metric`、`aligned` 或可发布声明；
-- fake operation 直接填低 RMS / accepted / production 的测试必须被拒绝；
-- preview/Brush 路径保持 preview-only，不回归。
+```text
+remote-result/result-bundle-manifest.json
+remote-result/production-runtime/measurement.json
+remote-result/production-runtime/policy.json
+remote-result/production-runtime/decision.json
+remote-result/render-evaluation/policy.json
+remote-result/render-evaluation/report.json
+remote-result/render-evaluation/decision.json
+remote-result/production-training-closure.json
+```
+
+顺序必须是：
+
+1. 下载并运行 archive v2 raw verifier；
+2. 运行 training provenance、identity dataparser 与 render raw validator；
+3. 将 archive 内 manifest 和 runtime/render 成员 no-replace 落到上述路径；
+4. caller 本地推导并持久化 render decision；
+5. 最后调用 `derive_production_training_closure` 并 no-replace 持久化 closure；
+6. closure durable publication 完成后才把 executor receipt 标为 succeeded。
+
+`production-training-closure.json` 不能成为它所绑定的 archive manifest member，否则
+会形成 manifest↔closure 循环 SHA；它是 raw archive 验证成功后由 caller 本地推导的
+后置证据。GLM 只需完成 producer，不要再修改 import schema。
 
 ### G7 — 外部执行前的机器清单
 

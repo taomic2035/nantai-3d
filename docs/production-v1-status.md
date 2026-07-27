@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27，基线 `5a0ca09`
+更新：2026-07-27，基线 `49c1f9b`
 
 ## 一句话状态
 
@@ -19,9 +19,9 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 远程演练真实性边界 | 固定 11 cases，明确为 transport-fixture |
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
-| production import 与 runner 复验 | 原始字节重算；低 RMS 自报不能通过 |
+| production import 与 runner 复验 | v3 receipt 绑定 G2/G5；原始训练、render、closure 字节重算 |
 | production runtime evidence | 六 probe/六 executable 合同已完成，待 fresh job-container 接入 |
-| production result closure | v2 manifest 与最终身份闭环已完成，待 remote caller 产出并接回 runner |
+| production result closure | v2 manifest、closure 与 import 消费端已完成，待 remote caller 产出 |
 | Viewer/Studio 与 synthetic QA | 可用，但不能代替真实重建验收 |
 
 ## 正式版关键路径
@@ -33,7 +33,7 @@ P0 正式采集与权利
                                             ↓
 GLM G1-G4 云 GPU runtime / remote caller → P2 非 mock CUDA 3DGS
                                             ↓
-Codex G5 result closure（已完成）→ GLM/Codex G6 runner 接入
+Codex G5 closure / G6 import（已完成）→ GLM G4 producer 接入
                                             ↓
 P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 ```
@@ -69,7 +69,7 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 ### P1 — Codex：真实产物消费与 Viewer 验收
 
-收到 remote caller 产生的 G5 verified result 后：
+import/runner 消费端已经就绪。收到 remote caller 产生的 G5 verified result 后：
 
 1. fresh production import，复验 runtime/result/alignment 全部 SHA；
 2. 生成同一 scene identity 的 chunks、LOD 和 Viewer manifest；
