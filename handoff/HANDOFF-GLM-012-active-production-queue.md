@@ -265,36 +265,57 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 
 **Files:**
 
+- Modify: `cloud/remote_training_worker.py`
+- Modify: `tests/test_remote_training_worker.py`
 - Modify: `pipeline/remote_shell_executor.py`
 - Modify: `tests/test_remote_shell_executor.py`
 
 - [ ] **Step 1: 为 lifecycle receipt 建立 RED**
 
-测试必须覆盖 no-replace collision、wrong attempt、container swap、result swap、
-namespace 已发布但 sync unknown、reconnect 恢复不同 container。receipt 只记录
-job/attempt/workspace、immutable image digest、完整 container ID 与 durable
-transition，不得让 caller 自报 GPU/CUDA/Nerfstudio pass。
+先固定这些行为测试：
+
+```text
+test_worker_publishes_canonical_lifecycle_after_digest_verification
+test_worker_lifecycle_reader_is_bounded_stable_and_duplicate_safe
+test_poll_does_not_report_running_before_lifecycle_is_bound
+test_lifecycle_rejects_wrong_attempt
+test_lifecycle_rejects_container_swap
+test_lifecycle_publication_collision_is_fail_closed
+test_lifecycle_sync_unknown_preserves_original_container
+test_restore_requires_same_durable_lifecycle_receipt
+```
+
+receipt 只记录 job/attempt/workspace identity SHA、immutable image digest、完整
+container ID 与单一 durable transition，不得让 caller 自报
+GPU/CUDA/Nerfstudio pass。
 
 - [ ] **Step 2: 实现并验证 lifecycle**
 
-receipt 只能记录 job/attempt/workspace、immutable image digest、完整 container ID 与
-durable transition。`prepare → submit → restore → poll → fetch` 的每一步都必须复核
-同一 attempt/container；reconnect 只能恢复原实例。不得把 host preflight 或 caller
-自报值写成 GPU/CUDA/Nerfstudio 通过。
+worker 在 `container-id.txt` 已 durable、image digest 已由 runtime inspect 复核后，
+训练启动前 no-replace 发布 canonical `container-lifecycle.json`，transition 固定为
+`container-created-identity-verified`。新增与 `status` 同等级的只读
+`lifecycle --job-dir --max-bytes` 命令，使用 stable regular-file read；禁止 caller
+直接 `cat`、信任 symlink 或解析自由文本。
+
+caller 对 lifecycle 做 duplicate-key-safe、canonical、SHA 与完整 identity 复核。
+receipt 未到只返回 `unknown`，不能返回 `running`；一旦绑定，`poll → fetch` 必须一直
+复核同一 attempt/container。reconnect 只能恢复同一 durable receipt，不能创建替代
+实例。F1 之前 receipt 模型中不得出现 GPU name/UUID、CUDA、Python、Nerfstudio 或
+`accepted/ready` 字段。
 
 - [ ] **Step 3: 联合回归**
 
 ```powershell
 python -m pytest -q tests/test_remote_shell_executor.py tests/test_remote_training_worker.py
-python -m ruff check pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
-git diff --check -- pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
+python -m ruff check cloud/remote_training_worker.py pipeline/remote_shell_executor.py tests/test_remote_training_worker.py tests/test_remote_shell_executor.py
+git diff --check -- cloud/remote_training_worker.py pipeline/remote_shell_executor.py tests/test_remote_training_worker.py tests/test_remote_shell_executor.py
 ```
 
 - [ ] **Step 4: 路径限定提交并 push**
 
 ```powershell
-git add -- pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py
-git commit --only pipeline/remote_shell_executor.py tests/test_remote_shell_executor.py -m "feat: bind remote lifecycle receipt"
+git add -- cloud/remote_training_worker.py pipeline/remote_shell_executor.py tests/test_remote_training_worker.py tests/test_remote_shell_executor.py
+git commit --only cloud/remote_training_worker.py pipeline/remote_shell_executor.py tests/test_remote_training_worker.py tests/test_remote_shell_executor.py -m "feat: bind remote lifecycle receipt"
 git -c http.proxy=http://127.0.0.1:7890 push origin main
 ```
 
