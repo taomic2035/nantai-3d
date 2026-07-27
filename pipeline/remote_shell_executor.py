@@ -739,7 +739,7 @@ class _JobContext:
     bundle: VerifiedTrainingJobBundle
     receipt: ExecutorAttemptReceipt
     last_status: RemoteShellStatus | None = None
-    bound_container_id: str | None = None
+    bound_lifecycle_receipt: RemoteContainerLifecycleReceipt | None = None
 
 
 def _canonical_model_bytes(model: BaseModel) -> bytes:
@@ -1047,6 +1047,19 @@ def publish_remote_shell_job_ref(
     )
 
 
+def publish_remote_container_lifecycle_receipt(
+    receipt: RemoteContainerLifecycleReceipt,
+    output: Path,
+) -> Path:
+    """Durably publish one immutable private lifecycle receipt."""
+
+    return _publish_remote_private_record(
+        canonical_container_lifecycle_bytes(receipt),
+        output,
+        label="remote container lifecycle receipt",
+    )
+
+
 def _reject_duplicate_pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -1160,6 +1173,102 @@ def load_remote_shell_job_ref(
             "remote job reference is not canonical"
         )
     return job
+
+
+def _open_file_identity_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Fields stable across path and descriptor stat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_mode,
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
+def load_remote_container_lifecycle_receipt(
+    path: str | Path,
+) -> RemoteContainerLifecycleReceipt:
+    lifecycle_path = Path(path)
+    if not lifecycle_path.is_absolute():
+        raise RemoteShellExecutionError(
+            "remote container lifecycle path must be absolute"
+        )
+    descriptor = -1
+    try:
+        before = lifecycle_path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
+            before.st_mode
+        ):
+            raise RemoteShellExecutionError(
+                "remote container lifecycle must be a regular file"
+            )
+        if before.st_size <= 0 or before.st_size > _MAX_LIFECYCLE_BYTES:
+            raise RemoteShellExecutionError(
+                "remote container lifecycle size is invalid"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(lifecycle_path, flags)
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or _open_file_identity_signature(descriptor_before)
+            != _open_file_identity_signature(before)
+        ):
+            raise RemoteShellExecutionError(
+                "remote container lifecycle changed while read"
+            )
+        chunks: list[bytes] = []
+        measured = 0
+        while measured <= _MAX_LIFECYCLE_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(
+                    64 * 1024,
+                    _MAX_LIFECYCLE_BYTES + 1 - measured,
+                ),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            measured += len(chunk)
+        payload = b"".join(chunks)
+        descriptor_after = os.fstat(descriptor)
+        final_path = lifecycle_path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote container lifecycle cannot be read"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if (
+        len(payload) > _MAX_LIFECYCLE_BYTES
+        or _stat_signature(before) != _stat_signature(final_path)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _open_file_identity_signature(before)
+        != _open_file_identity_signature(descriptor_before)
+        or _open_file_identity_signature(descriptor_after)
+        != _open_file_identity_signature(final_path)
+        or len(payload) != before.st_size
+    ):
+        raise RemoteShellExecutionError(
+            "remote container lifecycle changed while read"
+        )
+    return load_container_lifecycle_receipt(payload)
 
 
 def _portable_member(value: str) -> PurePosixPath:
@@ -2389,13 +2498,6 @@ class RemoteShellExecutor:
             created_at_utc=submitted_at,
             quality_role="production",
         )
-        receipt = advance_attempt(
-            receipt,
-            ExecutorObservation(
-                state="running",
-                observed_at_utc=submitted_at,
-            ),
-        )
         self._jobs[(job.job_id, job.attempt_id)] = _JobContext(
             job=job,
             bundle=bundle.bundle,
@@ -2407,8 +2509,10 @@ class RemoteShellExecutor:
         self,
         bundle: ExecutorJobBundle,
         job: RemoteShellJobRef,
+        *,
+        expected_lifecycle: RemoteContainerLifecycleReceipt,
     ) -> RemoteShellJobRef:
-        """Attach one verified submitted job without remote side effects."""
+        """Attach one verified submitted job without submission side effects."""
 
         if self._closed:
             raise RemoteShellExecutionError(
@@ -2456,12 +2560,17 @@ class RemoteShellExecutor:
             raise RemoteShellExecutionError(
                 "remote job is already attached"
             )
+        self._verify_lifecycle_identity(expected_lifecycle, job)
         try:
             lifecycle_receipt = self._fetch_lifecycle(job)
         except RemoteShellTransportError as exc:
             raise RemoteShellExecutionError(
                 "restore requires a durable lifecycle receipt"
             ) from exc
+        if lifecycle_receipt != expected_lifecycle:
+            raise RemoteShellExecutionError(
+                "remote lifecycle receipt changed since it was persisted"
+            )
         self._verify_lifecycle_identity(lifecycle_receipt, job)
         receipt = new_attempt(
             bundle.input_identity,
@@ -2469,18 +2578,11 @@ class RemoteShellExecutor:
             created_at_utc=job.submitted_at_utc,
             quality_role="production",
         )
-        receipt = advance_attempt(
-            receipt,
-            ExecutorObservation(
-                state="running",
-                observed_at_utc=job.submitted_at_utc,
-            ),
-        )
         self._jobs[key] = _JobContext(
             job=job,
             bundle=verified.bundle,
             receipt=receipt,
-            bound_container_id=lifecycle_receipt.container_id,
+            bound_lifecycle_receipt=lifecycle_receipt,
         )
         return job
 
@@ -2491,6 +2593,19 @@ class RemoteShellExecutor:
                 "remote job reference identity is unknown or changed"
             )
         return context
+
+    def bound_lifecycle_receipt(
+        self,
+        job: ExecutorJobRef,
+    ) -> RemoteContainerLifecycleReceipt:
+        """Return the complete receipt only after authoritative binding."""
+
+        receipt = self._context(job).bound_lifecycle_receipt
+        if receipt is None:
+            raise RemoteShellExecutionError(
+                "remote lifecycle receipt is not bound"
+            )
+        return receipt
 
     def _fetch_lifecycle(
         self,
@@ -2566,8 +2681,65 @@ class RemoteShellExecutor:
                 "remote lifecycle identity differs from submitted job"
             )
 
+    def _bind_or_revalidate_lifecycle(
+        self,
+        context: _JobContext,
+        receipt: RemoteContainerLifecycleReceipt,
+        *,
+        allow_bind: bool,
+    ) -> None:
+        """Bind once, then require the complete durable receipt to match."""
+
+        bound = context.bound_lifecycle_receipt
+        if bound is not None and receipt != bound:
+            raise RemoteShellExecutionError(
+                "remote lifecycle receipt changed after binding; "
+                "container swap or receipt replacement detected"
+            )
+        self._verify_lifecycle_identity(receipt, context.job)
+        if bound is None:
+            if not allow_bind:
+                raise RemoteShellExecutionError(
+                    "operation requires a prebound lifecycle receipt"
+                )
+            context.bound_lifecycle_receipt = receipt
+
+    @staticmethod
+    def _record_poll_observation(
+        context: _JobContext,
+        observation: ExecutorObservation,
+    ) -> ExecutorObservation:
+        context.receipt = advance_attempt(context.receipt, observation)
+        return observation
+
+    def _record_status_observation(
+        self,
+        context: _JobContext,
+        status: RemoteShellStatus,
+        observation: ExecutorObservation,
+    ) -> ExecutorObservation:
+        recorded = self._record_poll_observation(context, observation)
+        context.last_status = status
+        return recorded
+
     def poll(self, job: ExecutorJobRef) -> ExecutorObservation:
         context = self._context(job)
+        try:
+            lifecycle_receipt = self._fetch_lifecycle(context.job)
+        except RemoteShellTransportError:
+            return self._record_poll_observation(
+                context,
+                normalize_poll_result(
+                    exit_code=None,
+                    reachable=False,
+                    observed_at_utc=self._now(),
+                ),
+            )
+        self._bind_or_revalidate_lifecycle(
+            context,
+            lifecycle_receipt,
+            allow_bind=True,
+        )
         worker = (
             f"{self.config.remote_repo_root}/"
             "cloud/remote_training_worker.py"
@@ -2586,16 +2758,22 @@ class RemoteShellExecutor:
                 phase="remote status poll",
             )
         except RemoteShellTransportError:
-            return normalize_poll_result(
-                exit_code=None,
-                reachable=False,
-                observed_at_utc=self._now(),
+            return self._record_poll_observation(
+                context,
+                normalize_poll_result(
+                    exit_code=None,
+                    reachable=False,
+                    observed_at_utc=self._now(),
+                ),
             )
         if completed.returncode != 0:
-            return normalize_poll_result(
-                exit_code=None,
-                reachable=False,
-                observed_at_utc=self._now(),
+            return self._record_poll_observation(
+                context,
+                normalize_poll_result(
+                    exit_code=None,
+                    reachable=False,
+                    observed_at_utc=self._now(),
+                ),
             )
         stdout = completed.stdout
         if isinstance(stdout, str):
@@ -2634,52 +2812,38 @@ class RemoteShellExecutor:
             raise RemoteShellExecutionError(
                 "remote status identity differs from submitted job"
             )
-        context.last_status = status
         if status.state == "running":
-            if context.bound_container_id is None:
-                try:
-                    receipt = self._fetch_lifecycle(context.job)
-                except RemoteShellTransportError:
-                    return normalize_poll_result(
-                        exit_code=None,
-                        reachable=False,
-                        observed_at_utc=self._now(),
-                    )
-                self._verify_lifecycle_identity(receipt, context.job)
-                context.bound_container_id = receipt.container_id
-            else:
-                try:
-                    receipt = self._fetch_lifecycle(context.job)
-                except RemoteShellTransportError:
-                    return normalize_poll_result(
-                        exit_code=None,
-                        reachable=False,
-                        observed_at_utc=self._now(),
-                    )
-                self._verify_lifecycle_identity(receipt, context.job)
-                if receipt.container_id != context.bound_container_id:
-                    raise RemoteShellExecutionError(
-                        "remote lifecycle container swap detected"
-                    )
-            return ExecutorObservation(
-                state="running",
-                observed_at_utc=status.updated_at_utc,
+            return self._record_status_observation(
+                context,
+                status,
+                ExecutorObservation(
+                    state="running",
+                    observed_at_utc=status.updated_at_utc,
+                ),
             )
         if status.state == "failed":
-            return normalize_poll_result(
-                exit_code=status.exit_code,
+            return self._record_status_observation(
+                context,
+                status,
+                normalize_poll_result(
+                    exit_code=status.exit_code,
+                    reachable=True,
+                    observed_at_utc=status.updated_at_utc,
+                    stdout_sha256=status.stdout_sha256,
+                    stderr_sha256=status.stderr_sha256,
+                ),
+            )
+        return self._record_status_observation(
+            context,
+            status,
+            normalize_poll_result(
+                exit_code=0,
                 reachable=True,
                 observed_at_utc=status.updated_at_utc,
+                outputs_verified=False,
                 stdout_sha256=status.stdout_sha256,
                 stderr_sha256=status.stderr_sha256,
-            )
-        return normalize_poll_result(
-            exit_code=0,
-            reachable=True,
-            observed_at_utc=status.updated_at_utc,
-            outputs_verified=False,
-            stdout_sha256=status.stdout_sha256,
-            stderr_sha256=status.stderr_sha256,
+            ),
         )
 
     def _verify_result_semantics(
@@ -2764,27 +2928,21 @@ class RemoteShellExecutor:
             raise RemoteShellExecutionError(
                 "fetch requires a succeeded remote status observation"
             )
-        if context.bound_container_id is None:
-            try:
-                receipt = self._fetch_lifecycle(context.job)
-            except RemoteShellTransportError as exc:
-                raise RemoteShellExecutionError(
-                    "fetch requires a durable lifecycle receipt"
-                ) from exc
-            self._verify_lifecycle_identity(receipt, context.job)
-            context.bound_container_id = receipt.container_id
-        else:
-            try:
-                receipt = self._fetch_lifecycle(context.job)
-            except RemoteShellTransportError as exc:
-                raise RemoteShellExecutionError(
-                    "fetch cannot verify lifecycle container"
-                ) from exc
-            self._verify_lifecycle_identity(receipt, context.job)
-            if receipt.container_id != context.bound_container_id:
-                raise RemoteShellExecutionError(
-                    "fetch detected lifecycle container swap"
-                )
+        if context.bound_lifecycle_receipt is None:
+            raise RemoteShellExecutionError(
+                "fetch requires a prebound lifecycle receipt"
+            )
+        try:
+            lifecycle_receipt = self._fetch_lifecycle(context.job)
+        except RemoteShellTransportError as exc:
+            raise RemoteShellExecutionError(
+                "fetch cannot verify lifecycle receipt"
+            ) from exc
+        self._bind_or_revalidate_lifecycle(
+            context,
+            lifecycle_receipt,
+            allow_bind=False,
+        )
         destination = Path(destination).expanduser().absolute()
         if destination.exists() or destination.is_symlink():
             raise RemoteShellExecutionError(

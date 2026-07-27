@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+import pipeline.real_scene_operations as operations_module
+from pipeline.durable_io import DurableIOError
 from pipeline.real_dataset import HfDatasetSource
 from pipeline.real_scene_operations import RealScenePipelineOperations
 from pipeline.real_scene_runner import (
@@ -13,8 +18,13 @@ from pipeline.real_scene_runner import (
     StageExecution,
 )
 from pipeline.remote_shell_executor import (
+    RemoteContainerLifecycleReceipt,
+    RemoteShellExecutionError,
     RemoteShellJobRef,
+    canonical_container_lifecycle_bytes,
     canonical_remote_shell_job_ref_bytes,
+    compute_container_lifecycle_sha256,
+    compute_workspace_identity_sha256,
 )
 from pipeline.training_executor import ExecutorObservation
 
@@ -47,6 +57,72 @@ def _runner(tmp_path: Path, operations) -> RealSceneRunner:
         workspace_base=tmp_path / "real-scene",
         operations=operations,
     )
+
+
+def _remote_lifecycle(job: RemoteShellJobRef, *, container_id="a" * 64):
+    workspace_sha = compute_workspace_identity_sha256(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        workspace_path=job.remote_job_path,
+    )
+    provisional = RemoteContainerLifecycleReceipt.model_construct(
+        job_id=job.job_id,
+        attempt_id=job.attempt_id,
+        request_sha256=job.request_sha256,
+        training_bundle_sha256=job.training_bundle_sha256,
+        workspace_identity_sha256=workspace_sha,
+        container_identity="registry.example/nantai@sha256:" + "c" * 64,
+        container_id=container_id,
+        transition="container-created-identity-verified",
+        receipt_sha256="0" * 64,
+    )
+    return RemoteContainerLifecycleReceipt(
+        **{
+            **provisional.model_dump(exclude={"receipt_sha256"}),
+            "receipt_sha256": compute_container_lifecycle_sha256(
+                provisional
+            ),
+        }
+    )
+
+
+def _production_fixture(tmp_path, monkeypatch):
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+            remote_config_path=tmp_path / "remote.json",
+            remote_poll_interval_seconds=0.001,
+            remote_timeout_seconds=1,
+        ),
+    )
+    stage_root = tmp_path / "workspace/stages/train-production/attempt-one"
+    stage_root.mkdir(parents=True)
+    bundle = stage_root / "training-bundle.zip"
+    bundle.write_bytes(b"bundle")
+    prepared = SimpleNamespace(path=bundle)
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: prepared,
+    )
+    config = SimpleNamespace(
+        container_identity="image@sha256:" + "a" * 64,
+        container_runtime="docker",
+        expected_host_key_fingerprint="SHA256:" + "A" * 43,
+    )
+    monkeypatch.setattr(operations, "_remote_config", lambda: config)
+    job = RemoteShellJobRef(
+        job_id="job-one",
+        attempt_id="attempt-one",
+        submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+        request_sha256="b" * 64,
+        training_bundle_sha256="c" * 64,
+        config_identity_sha256="d" * 64,
+        remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
+    )
+    return operations, stage_root, prepared, config, job
 
 
 def test_hf_fetch_receipt_binds_downloaded_payload_bytes(
@@ -238,6 +314,17 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
         config_identity_sha256="d" * 64,
         remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
     )
+    monotonic = iter((0.0, 2.0))
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: next(monotonic),
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
 
     class FakeRemoteExecutor:
         def __init__(self, config):
@@ -256,6 +343,10 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
                 state="unknown",
                 observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
             )
+
+        def bound_lifecycle_receipt(self, submitted):
+            assert submitted == job
+            raise RemoteShellExecutionError("lifecycle not bound")
 
     monkeypatch.setattr(
         "pipeline.real_scene_operations.RemoteShellExecutor",
@@ -322,6 +413,10 @@ def test_existing_remote_job_is_restored_without_resubmit(
     (stage_root / "remote-job.private.json").write_bytes(
         canonical_remote_shell_job_ref_bytes(job)
     )
+    lifecycle = _remote_lifecycle(job)
+    (stage_root / "remote-container-lifecycle.private.json").write_bytes(
+        canonical_container_lifecycle_bytes(lifecycle)
+    )
     calls = {"restore": 0, "submit": 0}
 
     class FakeRemoteExecutor:
@@ -332,9 +427,16 @@ def test_existing_remote_job_is_restored_without_resubmit(
             assert verified == prepared
             return prepared
 
-        def restore(self, measured_prepared, measured_job):
+        def restore(
+            self,
+            measured_prepared,
+            measured_job,
+            *,
+            expected_lifecycle,
+        ):
             assert measured_prepared == prepared
             assert measured_job == job
+            assert expected_lifecycle == lifecycle
             calls["restore"] += 1
             return measured_job
 
@@ -349,6 +451,10 @@ def test_existing_remote_job_is_restored_without_resubmit(
                 observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
             )
 
+        def bound_lifecycle_receipt(self, measured_job):
+            assert measured_job == job
+            return lifecycle
+
     monkeypatch.setattr(
         "pipeline.real_scene_operations.RemoteShellExecutor",
         FakeRemoteExecutor,
@@ -362,6 +468,433 @@ def test_existing_remote_job_is_restored_without_resubmit(
 
     assert execution.state == "unknown"
     assert calls == {"restore": 1, "submit": 0}
+
+
+def test_initial_lifecycle_binding_is_persisted_before_fetch(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    calls = {"fetch": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            assert measured == prepared
+            return prepared
+
+        def submit(self, measured):
+            assert measured == prepared
+            return job
+
+        def poll(self, measured):
+            assert measured == job
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            assert measured == job
+            return lifecycle
+
+        def fetch(self, measured, _destination):
+            assert measured == job
+            calls["fetch"] += 1
+            path = (
+                stage_root
+                / "remote-container-lifecycle.private.json"
+            )
+            assert path.read_bytes() == (
+                canonical_container_lifecycle_bytes(lifecycle)
+            )
+            raise RemoteShellExecutionError("stop after ordering check")
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert calls["fetch"] == 1
+
+
+def test_first_unbound_poll_retries_then_persists_bound_lifecycle(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    calls = {"poll": 0, "fetch": 0}
+    monotonic = iter((0.0, 0.1))
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: next(monotonic),
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            assert measured == prepared
+            return job
+
+        def poll(self, measured):
+            assert measured == job
+            calls["poll"] += 1
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            assert measured == job
+            if calls["poll"] == 1:
+                raise RemoteShellExecutionError("not bound yet")
+            return lifecycle
+
+        def fetch(self, measured, _destination):
+            assert measured == job
+            calls["fetch"] += 1
+            path = (
+                stage_root
+                / "remote-container-lifecycle.private.json"
+            )
+            assert path.read_bytes() == (
+                canonical_container_lifecycle_bytes(lifecycle)
+            )
+            raise RemoteShellExecutionError("stop after ordering check")
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert calls == {"poll": 2, "fetch": 1}
+
+
+def test_remote_job_without_lifecycle_fails_before_remote_methods(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    (stage_root / "remote-job.private.json").write_bytes(
+        canonical_remote_shell_job_ref_bytes(job)
+    )
+    calls = {"submit": 0, "restore": 0, "poll": 0, "fetch": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            assert measured == prepared
+            return prepared
+
+        def __getattr__(self, name):
+            if name in calls:
+                def called(*_args, **_kwargs):
+                    calls[name] += 1
+                    raise AssertionError(f"{name} must not be called")
+                return called
+            raise AttributeError(name)
+
+    monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state in {"blocked", "unknown"}
+    assert calls == {"submit": 0, "restore": 0, "poll": 0, "fetch": 0}
+
+
+def test_remote_lifecycle_without_job_is_unknown_without_remote_methods(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    (
+        stage_root / "remote-container-lifecycle.private.json"
+    ).write_bytes(canonical_container_lifecycle_bytes(lifecycle))
+    calls = {"submit": 0, "restore": 0, "poll": 0, "fetch": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            assert measured == prepared
+            return prepared
+
+        def __getattr__(self, name):
+            if name in calls:
+                def called(*_args, **_kwargs):
+                    calls[name] += 1
+                    raise AssertionError(f"{name} must not be called")
+                return called
+            raise AttributeError(name)
+
+    monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert calls == {"submit": 0, "restore": 0, "poll": 0, "fetch": 0}
+
+
+def test_malformed_remote_lifecycle_blocks_restore(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    (stage_root / "remote-job.private.json").write_bytes(
+        canonical_remote_shell_job_ref_bytes(job)
+    )
+    (
+        stage_root / "remote-container-lifecycle.private.json"
+    ).write_bytes(b'{"schema":"bad","schema":"duplicate"}\n')
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            assert measured == prepared
+            return prepared
+
+        def restore(self, *_args, **_kwargs):
+            raise AssertionError("malformed lifecycle must block restore")
+
+    monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+
+
+def test_symlink_remote_lifecycle_blocks_restore(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    (stage_root / "remote-job.private.json").write_bytes(
+        canonical_remote_shell_job_ref_bytes(job)
+    )
+    target = tmp_path / "lifecycle.json"
+    target.write_bytes(
+        canonical_container_lifecycle_bytes(_remote_lifecycle(job))
+    )
+    lifecycle_path = (
+        stage_root / "remote-container-lifecycle.private.json"
+    )
+    try:
+        lifecycle_path.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            assert measured == prepared
+            return prepared
+
+        def restore(self, *_args, **_kwargs):
+            raise AssertionError("symlink lifecycle must block restore")
+
+    monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["competing-destination", "published-false", "published-true"],
+)
+def test_lifecycle_publication_error_blocks_fetch(
+    tmp_path,
+    monkeypatch,
+    fault,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    existing = b"competing lifecycle\n"
+    calls = {"publish": 0, "fetch": 0}
+    from pipeline.durable_io import publish_file_noreplace as real_publish
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            assert measured == prepared
+            return job
+
+        def poll(self, measured):
+            assert measured == job
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            assert measured == job
+            return lifecycle
+
+        def fetch(self, *_args):
+            calls["fetch"] += 1
+            raise AssertionError("publication error must block fetch")
+
+    def fail_publish(source, destination):
+        destination = Path(destination)
+        if destination.name != "remote-container-lifecycle.private.json":
+            return real_publish(source, destination)
+        calls["publish"] += 1
+        if fault == "competing-destination":
+            destination.write_bytes(existing)
+            raise FileExistsError("competing writer won")
+        if fault == "published-true":
+            os.link(source, destination)
+            raise DurableIOError(
+                "published but sync failed",
+                published=True,
+            )
+        raise DurableIOError(
+            "publication failed before namespace change",
+            published=False,
+        )
+
+    monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
+    monkeypatch.setattr(
+        "pipeline.durable_io.publish_file_noreplace",
+        fail_publish,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert calls == {"publish": 1, "fetch": 0}
+    lifecycle_path = (
+        stage_root / "remote-container-lifecycle.private.json"
+    )
+    if fault == "competing-destination":
+        assert lifecycle_path.read_bytes() == existing
+        assert "cannot be published" in execution.reason
+    elif fault == "published-true":
+        assert lifecycle_path.read_bytes() == (
+            canonical_container_lifecycle_bytes(lifecycle)
+        )
+        assert "published but durability is unconfirmed" in execution.reason
+    else:
+        assert not lifecycle_path.exists()
+        assert "not published" in execution.reason
+    assert not tuple(stage_root.glob(".*.staging"))
+
+
+def test_persisted_lifecycle_mismatch_blocks_terminal_fetch(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    persisted = _remote_lifecycle(job)
+    remote = _remote_lifecycle(job, container_id="f" * 64)
+    (stage_root / "remote-job.private.json").write_bytes(
+        canonical_remote_shell_job_ref_bytes(job)
+    )
+    (
+        stage_root / "remote-container-lifecycle.private.json"
+    ).write_bytes(canonical_container_lifecycle_bytes(persisted))
+    calls = {"restore": 0, "fetch": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            assert measured == config
+
+        def prepare(self, measured):
+            return measured
+
+        def restore(self, measured, measured_job, *, expected_lifecycle):
+            assert measured == prepared
+            assert measured_job == job
+            assert expected_lifecycle == persisted
+            calls["restore"] += 1
+            return job
+
+        def poll(self, measured):
+            assert measured == job
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            assert measured == job
+            return remote
+
+        def fetch(self, *_args):
+            calls["fetch"] += 1
+            raise AssertionError("mismatch must block fetch")
+
+    monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert calls == {"restore": 1, "fetch": 0}
 
 
 def test_import_stage_invokes_content_closed_scene_adapter(

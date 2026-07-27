@@ -78,8 +78,10 @@ from pipeline.remote_shell_executor import (
     RemoteShellExecutionError,
     RemoteShellExecutor,
     RemoteShellExecutorConfig,
+    load_remote_container_lifecycle_receipt,
     load_remote_shell_executor_config,
     load_remote_shell_job_ref,
+    publish_remote_container_lifecycle_receipt,
     publish_remote_shell_job_ref,
 )
 from pipeline.studio_revisions import (
@@ -576,10 +578,37 @@ class RealScenePipelineOperations:
                 evidence_artifacts=_regular_files(stage_root),
             )
         job_path = stage_root / "remote-job.private.json"
-        if job_path.exists() or job_path.is_symlink():
+        lifecycle_path = (
+            stage_root
+            / "remote-container-lifecycle.private.json"
+        )
+        job_exists = job_path.exists() or job_path.is_symlink()
+        lifecycle_exists = (
+            lifecycle_path.exists() or lifecycle_path.is_symlink()
+        )
+        if job_exists != lifecycle_exists:
+            return StageExecution(
+                state="unknown",
+                artifacts=(),
+                reason=(
+                    "remote recovery evidence is incomplete; "
+                    "job and lifecycle must be persisted together"
+                ),
+                evidence_artifacts=_regular_files(stage_root),
+            )
+        if job_exists:
             try:
                 job = load_remote_shell_job_ref(job_path)
-                executor.restore(prepared, job)
+                expected_lifecycle = (
+                    load_remote_container_lifecycle_receipt(
+                        lifecycle_path
+                    )
+                )
+                executor.restore(
+                    prepared,
+                    job,
+                    expected_lifecycle=expected_lifecycle,
+                )
             except (
                 OSError,
                 ValidationError,
@@ -628,6 +657,63 @@ class RealScenePipelineOperations:
                 stage_root / "remote-observation.private.json",
                 observation,
             )
+            try:
+                lifecycle_receipt = (
+                    executor.bound_lifecycle_receipt(job)
+                )
+            except RemoteShellExecutionError as exc:
+                if observation.state == "unknown":
+                    if time.monotonic() >= deadline:
+                        return StageExecution(
+                            state="unknown",
+                            artifacts=(),
+                            reason=(
+                                "remote lifecycle was not bound before "
+                                "timeout; no success was inferred"
+                            ),
+                            evidence_artifacts=_regular_files(stage_root),
+                        )
+                    time.sleep(
+                        self.options.remote_poll_interval_seconds
+                    )
+                    continue
+                return StageExecution(
+                    state="unknown",
+                    artifacts=(),
+                    reason=f"remote lifecycle state is unknown: {exc}",
+                    evidence_artifacts=_regular_files(stage_root),
+                )
+            try:
+                if lifecycle_path.exists() or lifecycle_path.is_symlink():
+                    persisted_lifecycle = (
+                        load_remote_container_lifecycle_receipt(
+                            lifecycle_path
+                        )
+                    )
+                    if persisted_lifecycle != lifecycle_receipt:
+                        raise RemoteShellExecutionError(
+                            "persisted remote lifecycle differs "
+                            "from bound receipt"
+                        )
+                else:
+                    publish_remote_container_lifecycle_receipt(
+                        lifecycle_receipt,
+                        lifecycle_path,
+                    )
+            except (
+                OSError,
+                ValidationError,
+                RemoteShellExecutionError,
+            ) as exc:
+                return StageExecution(
+                    state="unknown",
+                    artifacts=(),
+                    reason=(
+                        "remote lifecycle publication is unknown: "
+                        f"{exc}"
+                    ),
+                    evidence_artifacts=_regular_files(stage_root),
+                )
             if observation.state == "failed":
                 return StageExecution(
                     state="blocked",

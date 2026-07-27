@@ -599,6 +599,108 @@ def test_worker_lifecycle_sync_unknown_preserves_published_container(
     assert "rm" not in _subcommands(fake)
 
 
+def test_worker_lifecycle_publish_race_preserves_both_identities(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    conflicting = _lifecycle_fixture(job_dir)
+    conflicting_bytes = worker.canonical_container_lifecycle_bytes(
+        conflicting
+    )
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+    real_publish = worker.publish_file_noreplace
+    lifecycle_publish_attempts = 0
+
+    def publish_racing_destination(source, destination):
+        nonlocal lifecycle_publish_attempts
+        destination = Path(destination)
+        if destination.name != "container-lifecycle.json":
+            return real_publish(source, destination)
+        lifecycle_publish_attempts += 1
+        descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(conflicting_bytes)
+        raise FileExistsError(
+            "competing writer published lifecycle first"
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "publish_file_noreplace",
+        publish_racing_destination,
+    )
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 75
+    )
+
+    assert lifecycle_publish_attempts == 1
+    assert (
+        job_dir / "container-lifecycle.json"
+    ).read_bytes() == conflicting_bytes
+    assert (
+        job_dir / "container-id.txt"
+    ).read_text(encoding="ascii").strip() == _DEFAULT_CONTAINER_ID
+    assert "start" not in _subcommands(fake)
+    assert "rm" not in _subcommands(fake)
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "running"
+    assert not (job_dir / "cleanup-observation.json").exists()
+
+
+def test_worker_lifecycle_staging_collision_is_unpublished_failure(
+    tmp_path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "jobs" / "job-1" / "attempt-1"
+    _init_job(job_dir)
+    staging = job_dir / ".container-lifecycle.collision.tmp"
+    staging.write_bytes(b"other-writer-staging\n")
+    monkeypatch.setattr(
+        worker.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="collision"),
+    )
+    fake = FakeDocker()
+    _patch_worker(monkeypatch, fake)
+
+    assert (
+        start_job(
+            job_dir=job_dir,
+            repo_root=_ROOT,
+            container_identity=_CONTAINER_IDENTITY,
+            container_runtime="docker",
+            detach=False,
+        )
+        == 75
+    )
+
+    assert staging.read_bytes() == b"other-writer-staging\n"
+    assert not (job_dir / "container-lifecycle.json").exists()
+    assert "start" not in _subcommands(fake)
+    assert "rm" in _subcommands(fake)
+    status = RemoteShellStatus.model_validate_json(
+        read_status(job_dir, max_bytes=64 * 1024),
+    )
+    assert status.state == "failed"
+
+
 def test_lifecycle_staging_cleanup_preserves_published_durable_error(
     tmp_path,
     monkeypatch,

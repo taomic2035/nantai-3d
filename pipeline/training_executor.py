@@ -158,7 +158,7 @@ class ExecutorObservation(FrozenModel):
 
 
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    "not-started": frozenset({"running"}),
+    "not-started": frozenset({"running", "unknown", "failed"}),
     "running": frozenset(
         {"running", "succeeded", "failed", "unknown"}
     ),

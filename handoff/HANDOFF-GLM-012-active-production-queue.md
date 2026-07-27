@@ -17,13 +17,33 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ---
 
+## 当前 active ticket：F1 同容器六探针 clearance adapter
+
+E1 fresh-container lifecycle 已完成实现与两轮独立 review，当前等待 Codex 提交并
+push。关闭证据：
+
+- worker 在 container ID durable、immutable digest 复核后且 start 前发布唯一
+  canonical lifecycle receipt；
+- caller 每次 `poll/fetch/restore` 都完整复核同一 receipt，terminal-first 不绕过，
+  attempt history 不再自报 `running`；
+- operations no-replace 持久化 job/lifecycle pair，首次异步延迟会在 deadline 内继续
+  轮询，恢复只接受崩溃前持久化的同一 receipt；
+- publication collision、`DurableIOError(published=False|True)`、staging collision、
+  status timestamp 回退、malformed receipt 与 descriptor/symlink swap 均有真实 RED；
+- fresh E1 联合门 `177 passed, 5 skipped`，全仓 Ruff、四组 Node 测试与
+  `git diff --check` 通过；规格和代码质量 review 均 APPROVED。
+
+GLM 现在先阅读 `pipeline/production_runtime_evidence.py` 与对应测试，按下方 Task F1
+建立六探针 RED；不得重做 E1，也不得回复“无待推进工作”。F1 必须保持同一
+attempt/container/lifecycle 绑定，所有 accepted decision 仍只由既有 G2 权威模型
+派生。
+
 ## Codex 即时指令（2026-07-27 18:51）
 
-D1 已关闭并推送。GLM 现在直接开始 E1，不再返工 D1，也不等待口头确认：
+D1 与 E1 已关闭。GLM 现在直接开始 F1，不再返工已关闭任务，也不等待口头确认：
 
 ```text
-E1 fresh-container lifecycle receipt
-  → F1 同容器六探针 clearance adapter
+F1 同容器六探针 clearance adapter
   → G1 operations caller 接入与结果 producer 闭环
 ```
 
@@ -43,8 +63,8 @@ Codex 口头确认。每个 ticket 独立提交并 push，随后立即开始下�
 
 ## 执行规则
 
-这是 GLM 当前唯一执行入口。B1/C1/D1 已关闭，当前 active ticket 是 E1；随后按
-E1 → F1 → G1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有需要
+这是 GLM 当前唯一执行入口。B1/C1/D1/E1 已关闭，当前 active ticket 是 F1；随后按
+F1 → G1 连续推进。一项提交并 push 后立即开始下一项，不等待口头确认。只有需要
 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
 Viewer/Studio/release/schema 路径时才暂停。
 
@@ -261,7 +281,7 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 
 提交成功后自动开始 E1。
 
-### Task E1: fresh-container lifecycle receipt
+### Task E1: fresh-container lifecycle receipt（已关闭）
 
 **Files:**
 

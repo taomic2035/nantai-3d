@@ -175,6 +175,28 @@ def test_allowed_state_transitions_preserve_observation_history():
     assert succeeded.result_bundle_sha256 == _SHA_D
 
 
+@pytest.mark.parametrize("first_state", ["running", "unknown", "failed"])
+def test_not_started_accepts_first_authoritative_observation(first_state):
+    advanced = advance_attempt(
+        _attempt(),
+        _observation(first_state, _T1),
+    )
+
+    assert advanced.state == first_state
+    assert tuple(item.state for item in advanced.observations) == (
+        "not-started",
+        first_state,
+    )
+
+
+def test_not_started_rejects_unverified_direct_success():
+    with pytest.raises(TrainingExecutorError, match="transition"):
+        advance_attempt(
+            _attempt(),
+            _observation("succeeded", _T1),
+        )
+
+
 def test_running_can_fail_but_failed_attempt_cannot_be_rewritten():
     running = advance_attempt(_attempt(), _observation("running", _T1))
     failed = advance_attempt(running, _observation("failed", _T2))

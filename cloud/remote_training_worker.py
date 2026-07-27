@@ -48,6 +48,10 @@ class RemoteWorkerError(ValueError):
     """The immutable remote attempt cannot be initialized or advanced."""
 
 
+class _LifecycleCollisionError(RemoteWorkerError):
+    """Another writer won lifecycle publication; preserve all evidence."""
+
+
 class FrozenModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -387,28 +391,36 @@ def _publish_container_lifecycle(
         job_dir
         / f".container-lifecycle.{uuid.uuid4().hex}.tmp"
     )
+    temporary_created = False
     try:
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             0o600,
         )
+        temporary_created = True
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
         flush_file(temporary)
-        publish_file_noreplace(temporary, job_dir / "container-lifecycle.json")
+        try:
+            publish_file_noreplace(
+                temporary,
+                job_dir / "container-lifecycle.json",
+            )
+        except FileExistsError as exc:
+            raise _LifecycleCollisionError(
+                "container-lifecycle.json already exists; "
+                "replay or collision blocked"
+            ) from exc
     except DurableIOError:
         raise
-    except FileExistsError as exc:
-        raise RemoteWorkerError(
-            "container-lifecycle.json already exists; replay or collision blocked"
-        ) from exc
     except OSError as exc:
         raise RemoteWorkerError(
             "container-lifecycle.json publication cannot be opened"
         ) from exc
     finally:
-        _best_effort_unlink(temporary)
+        if temporary_created:
+            _best_effort_unlink(temporary)
 
 
 def read_lifecycle(job_dir: Path, *, max_bytes: int) -> bytes:
@@ -688,6 +700,8 @@ def _publication_published(exc: BaseException) -> bool:
         return exc.published is True
     if isinstance(exc, DurableIOError):
         return exc.published is True
+    if isinstance(exc, _LifecycleCollisionError):
+        return True
     return False
 
 
