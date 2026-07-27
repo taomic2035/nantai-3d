@@ -1694,6 +1694,37 @@ def test_remote_job_ref_loader_is_canonical_and_duplicate_safe(
         remote_module.load_remote_shell_job_ref(path)
 
 
+def test_remote_job_ref_publication_flush_failure_leaves_no_final(
+    tmp_path,
+    monkeypatch,
+):
+    executor, _runner, prepared = _prepared_executor(
+        tmp_path,
+        monkeypatch,
+    )
+    job = executor.submit(prepared)
+    output = tmp_path / "private" / "remote-job.json"
+
+    def fail_flush(_path):
+        raise OSError("simulated flush failure")
+
+    monkeypatch.setattr(
+        "pipeline.durable_io.flush_file",
+        fail_flush,
+    )
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="cannot be published",
+    ):
+        remote_module.publish_remote_shell_job_ref(
+            job,
+            output,
+        )
+
+    assert not output.exists()
+    assert not tuple(output.parent.glob(".*.staging"))
+
+
 def test_poll_running_returns_running_observation(tmp_path, monkeypatch):
     executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
     job = executor.submit(prepared)

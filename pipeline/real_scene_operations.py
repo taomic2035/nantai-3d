@@ -79,6 +79,8 @@ from pipeline.remote_shell_executor import (
     RemoteShellExecutor,
     RemoteShellExecutorConfig,
     load_remote_shell_executor_config,
+    load_remote_shell_job_ref,
+    publish_remote_shell_job_ref,
 )
 from pipeline.studio_revisions import (
     CaptureBundleError,
@@ -573,19 +575,43 @@ class RealScenePipelineOperations:
                 reason=f"remote executor preflight failed: {exc}",
                 evidence_artifacts=_regular_files(stage_root),
             )
-        try:
-            job = executor.submit(prepared)
-            self._write_private_model(
-                stage_root / "remote-job.private.json",
-                job,
-            )
-        except (OSError, ValidationError, RemoteShellExecutionError) as exc:
-            return StageExecution(
-                state="unknown",
-                artifacts=(),
-                reason=f"remote submission state is unknown: {exc}",
-                evidence_artifacts=_regular_files(stage_root),
-            )
+        job_path = stage_root / "remote-job.private.json"
+        if job_path.exists() or job_path.is_symlink():
+            try:
+                job = load_remote_shell_job_ref(job_path)
+                executor.restore(prepared, job)
+            except (
+                OSError,
+                ValidationError,
+                RemoteShellExecutionError,
+            ) as exc:
+                return StageExecution(
+                    state="blocked",
+                    artifacts=(),
+                    reason=(
+                        "remote recovery evidence is invalid: "
+                        f"{exc}"
+                    ),
+                    evidence_artifacts=_regular_files(stage_root),
+                )
+        else:
+            try:
+                job = executor.submit(prepared)
+                publish_remote_shell_job_ref(job, job_path)
+            except (
+                OSError,
+                ValidationError,
+                RemoteShellExecutionError,
+            ) as exc:
+                return StageExecution(
+                    state="unknown",
+                    artifacts=(),
+                    reason=(
+                        "remote submission state is unknown: "
+                        f"{exc}"
+                    ),
+                    evidence_artifacts=_regular_files(stage_root),
+                )
 
         deadline = time.monotonic() + self.options.remote_timeout_seconds
         while True:

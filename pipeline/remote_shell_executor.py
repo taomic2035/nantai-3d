@@ -761,16 +761,16 @@ def _build_remote_shell_preflight_report(
     )
 
 
-def publish_remote_shell_preflight(
-    report: RemoteShellPreflightReport,
+def _publish_remote_private_record(
+    payload: bytes,
     output: Path,
+    *,
+    label: str,
 ) -> Path:
-    """Durably publish one immutable preflight report without replacement."""
-
     destination = Path(output)
     if not destination.is_absolute():
         raise RemoteShellExecutionError(
-            "remote preflight output path must be absolute"
+            f"{label} output path must be absolute"
         )
     parent = destination.parent
     try:
@@ -778,20 +778,19 @@ def publish_remote_shell_preflight(
         parent_stat = parent.lstat()
     except OSError as exc:
         raise RemoteShellExecutionError(
-            "remote preflight report cannot be published"
+            f"{label} cannot be published"
         ) from exc
     if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(
         parent_stat.st_mode
     ):
         raise RemoteShellExecutionError(
-            "remote preflight report cannot be published"
+            f"{label} cannot be published"
         )
     if destination.exists() or destination.is_symlink():
         raise RemoteShellExecutionError(
-            "remote preflight report cannot replace an existing path"
+            f"{label} cannot replace an existing path"
         )
 
-    payload = canonical_remote_shell_preflight_bytes(report)
     from pipeline.durable_io import (
         DurableIOError,
         flush_file,
@@ -819,11 +818,11 @@ def publish_remote_shell_preflight(
             else "not published"
         )
         raise RemoteShellExecutionError(
-            f"remote preflight report cannot be published ({state})"
+            f"{label} cannot be published ({state})"
         ) from exc
     except OSError as exc:
         raise RemoteShellExecutionError(
-            "remote preflight report cannot be published"
+            f"{label} cannot be published"
         ) from exc
     finally:
         if descriptor >= 0:
@@ -834,6 +833,32 @@ def publish_remote_shell_preflight(
             except OSError:
                 pass
     return destination
+
+
+def publish_remote_shell_preflight(
+    report: RemoteShellPreflightReport,
+    output: Path,
+) -> Path:
+    """Durably publish one immutable preflight report without replacement."""
+
+    return _publish_remote_private_record(
+        canonical_remote_shell_preflight_bytes(report),
+        output,
+        label="remote preflight report",
+    )
+
+
+def publish_remote_shell_job_ref(
+    job: RemoteShellJobRef,
+    output: Path,
+) -> Path:
+    """Durably publish one immutable private remote-job reference."""
+
+    return _publish_remote_private_record(
+        canonical_remote_shell_job_ref_bytes(job),
+        output,
+        label="remote job reference",
+    )
 
 
 def _reject_duplicate_pairs(pairs):

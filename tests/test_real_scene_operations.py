@@ -12,7 +12,11 @@ from pipeline.real_scene_runner import (
     RealSceneSourceIdentity,
     StageExecution,
 )
-from pipeline.training_executor import ExecutorJobRef, ExecutorObservation
+from pipeline.remote_shell_executor import (
+    RemoteShellJobRef,
+    canonical_remote_shell_job_ref_bytes,
+)
+from pipeline.training_executor import ExecutorObservation
 
 
 def _source() -> HfDatasetSource:
@@ -225,11 +229,14 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
             expected_host_key_fingerprint="SHA256:" + "A" * 43,
         ),
     )
-    job = ExecutorJobRef(
-        executor_kind="remote-shell-nerfstudio",
+    job = RemoteShellJobRef(
         job_id="job-one",
         attempt_id="attempt-one",
         submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+        request_sha256="b" * 64,
+        training_bundle_sha256="c" * 64,
+        config_identity_sha256="d" * 64,
+        remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
     )
 
     class FakeRemoteExecutor:
@@ -264,6 +271,97 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
     assert execution.state == "unknown"
     assert "no success was inferred" in execution.reason
     assert any(path.name == "remote-job.private.json" for path in execution.evidence_artifacts)
+
+
+def test_existing_remote_job_is_restored_without_resubmit(
+    tmp_path,
+    monkeypatch,
+):
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+            remote_config_path=tmp_path / "remote.json",
+            remote_poll_interval_seconds=0.001,
+            remote_timeout_seconds=1,
+        ),
+    )
+    stage_root = (
+        tmp_path
+        / "workspace/stages/train-production/attempt-one"
+    )
+    stage_root.mkdir(parents=True)
+    bundle = stage_root / "training-bundle.zip"
+    bundle.write_bytes(b"bundle")
+    prepared = SimpleNamespace(path=bundle)
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: prepared,
+    )
+    config = SimpleNamespace(
+        container_identity="image@sha256:" + "a" * 64,
+        container_runtime="docker",
+        expected_host_key_fingerprint="SHA256:" + "A" * 43,
+    )
+    monkeypatch.setattr(
+        operations,
+        "_remote_config",
+        lambda: config,
+    )
+    job = RemoteShellJobRef(
+        job_id="job-one",
+        attempt_id="attempt-one",
+        submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+        request_sha256="b" * 64,
+        training_bundle_sha256="c" * 64,
+        config_identity_sha256="d" * 64,
+        remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
+    )
+    (stage_root / "remote-job.private.json").write_bytes(
+        canonical_remote_shell_job_ref_bytes(job)
+    )
+    calls = {"restore": 0, "submit": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured_config):
+            assert measured_config == config
+
+        def prepare(self, verified):
+            assert verified == prepared
+            return prepared
+
+        def restore(self, measured_prepared, measured_job):
+            assert measured_prepared == prepared
+            assert measured_job == job
+            calls["restore"] += 1
+            return measured_job
+
+        def submit(self, _prepared):
+            calls["submit"] += 1
+            raise AssertionError("restore must not resubmit")
+
+        def poll(self, measured_job):
+            assert measured_job == job
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+            )
+
+    monkeypatch.setattr(
+        "pipeline.real_scene_operations.RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute(
+        "train-production",
+        stage_root,
+        (),
+    )
+
+    assert execution.state == "unknown"
+    assert calls == {"restore": 1, "submit": 0}
 
 
 def test_import_stage_invokes_content_closed_scene_adapter(
