@@ -38,6 +38,7 @@ from pipeline.recon_schema import (
 from pipeline.registration_quality import (
     RegistrationQualityPolicy,
     RegistrationQualityReport,
+    build_colmap_runtime_evidence,
     derive_training_allowed,
 )
 
@@ -74,8 +75,19 @@ def _write_registration_json(
         )
         for i in range(registered)
     ]
+    pose_frame = _local_frame()
+    if engine == "colmap":
+        pose_frame = pose_frame.model_copy(update={
+            "evidence": (
+                build_colmap_runtime_evidence(
+                    binary_name="colmap.exe",
+                    binary_sha256="c" * 64,
+                    engine_version="COLMAP 4.1.0",
+                ),
+            ),
+        })
     reg = RegistrationResult(
-        schema_version=2, engine=engine, pose_frame=_local_frame(),
+        schema_version=2, engine=engine, pose_frame=pose_frame,
         world_frame=None, alignment_status=AlignmentStatus.UNALIGNED,
         sessions=[CaptureSession(session_id="s0", kind="photo_batch",
                                   source="test", images=all_images)],
@@ -232,6 +244,7 @@ class TestEmitRegistrationQualityColmap:
         report = RegistrationQualityReport.model_validate_json(
             out.read_text(encoding="utf-8"))
         assert report.engine == "colmap"
+        assert report.engine_version == "COLMAP 4.1.0"
         assert report.registered_count == total
         assert report.quality_accepted is True
         # training_allowed needs: non-mock + capture_manifest + no rejections

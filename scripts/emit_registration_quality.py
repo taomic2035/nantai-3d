@@ -93,8 +93,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-invocation-succeeded", dest="invocation_succeeded",
                     action="store_false",
                     help="mark the invocation as failed (crashed SfM)")
-    ap.add_argument("--engine-version", default=None,
-                    help="COLMAP engine version string (e.g. '4.1.0')")
+    ap.add_argument(
+        "--engine-version",
+        default=None,
+        metavar="EXPECTED_ENGINE_VERSION",
+        help=(
+            "optional assertion against the exact version already bound in "
+            "registration runtime evidence (e.g. 'COLMAP 4.1.0'); this option "
+            "does not provide or override version evidence"
+        ),
+    )
     ap.add_argument("--output", default="quality-report.json",
                     help="output quality-report.json path")
     args = ap.parse_args(argv)
