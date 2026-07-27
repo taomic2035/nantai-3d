@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import pipeline.real_scene_training as training_module
+from pipeline.durable_io import DurableIOError
 from pipeline.ingest_manifest import IngestParams
 from pipeline.real_scene_capture import PreparedRealCapture, RealSfmResult
 from pipeline.real_scene_training import (
@@ -402,6 +403,77 @@ def test_bundle_sync_failure_never_publishes_output(
     assert flushed
     assert not output.exists()
     assert tuple(tmp_path.glob(".bundle.*.staging")) == ()
+
+
+def test_bundle_publish_failure_preserves_untrusted_stale_staging(
+    tmp_path,
+    monkeypatch,
+):
+    capture = _capture(tmp_path / "capture", count=10)
+    sfm, policy = _sfm(capture, tmp_path / "run")
+    output = tmp_path / "bundle"
+    stale = tmp_path / ".bundle.stale.staging"
+    stale.mkdir()
+    (stale / "training-job.zip").write_bytes(b"untrusted")
+
+    def fail_publish(source, destination):
+        del source, destination
+        raise OSError("simulated publish failure")
+
+    monkeypatch.setattr(
+        "pipeline.durable_io.publish_directory_noreplace",
+        fail_publish,
+    )
+
+    with pytest.raises(RealSceneTrainingError, match="deterministic training ZIP"):
+        build_training_job_bundle(
+            capture,
+            sfm,
+            _training_config(),
+            output,
+            policy=policy,
+        )
+
+    assert not output.exists()
+    assert stale.is_dir()
+    assert (stale / "training-job.zip").read_bytes() == b"untrusted"
+    assert tuple(tmp_path.glob(".bundle.*.staging")) == (stale,)
+
+
+def test_bundle_reports_published_when_parent_sync_is_unconfirmed(
+    tmp_path,
+    monkeypatch,
+):
+    capture = _capture(tmp_path / "capture", count=10)
+    sfm, policy = _sfm(capture, tmp_path / "run")
+    output = tmp_path / "bundle"
+
+    def publish_then_fail(source, destination):
+        source.replace(destination)
+        raise DurableIOError(
+            "simulated parent sync failure",
+            published=True,
+        )
+
+    monkeypatch.setattr(
+        "pipeline.durable_io.publish_directory_noreplace",
+        publish_then_fail,
+    )
+
+    with pytest.raises(
+        RealSceneTrainingError,
+        match="published but durability is unconfirmed",
+    ):
+        build_training_job_bundle(
+            capture,
+            sfm,
+            _training_config(),
+            output,
+            policy=policy,
+        )
+
+    verified = verify_training_job_bundle(output / "training-job.zip")
+    assert verified.path == output / "training-job.zip"
 
 
 def test_bundle_rejects_mock_or_rejected_sfm(tmp_path):

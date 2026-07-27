@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
+from pipeline.durable_io import DurableIOError
 from pipeline.training_executor import (
     ExecutorInputIdentity,
     ExecutorObservation,
@@ -416,3 +417,66 @@ def test_atomic_replace_failure_preserves_previous_journal(
 
     assert path.read_bytes() == before
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_stale_journal_candidate_never_overrides_valid_journal(tmp_path):
+    path = tmp_path / "real-scene-journal.json"
+    initial_attempt = _attempt()
+    initial = RealSceneJournal(
+        run_id="real-scene-canary-001",
+        created_at_utc=_T0,
+        attempts=(initial_attempt,),
+    )
+    create_or_load_real_scene_journal(path, initial)
+    before = path.read_bytes()
+    stale = tmp_path / ".real-scene-journal.json.stale.tmp"
+    stale.write_bytes(b'{"untrusted":true}\n')
+
+    loaded = create_or_load_real_scene_journal(path, initial)
+
+    assert loaded == initial
+    assert path.read_bytes() == before
+    assert stale.read_bytes() == b'{"untrusted":true}\n'
+
+
+def test_journal_reports_published_when_directory_sync_is_unconfirmed(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "real-scene-journal.json"
+    initial_attempt = _attempt()
+    initial = RealSceneJournal(
+        run_id="real-scene-canary-001",
+        created_at_utc=_T0,
+        attempts=(initial_attempt,),
+    )
+    create_or_load_real_scene_journal(path, initial)
+    running = advance_attempt(
+        initial_attempt,
+        _observation("running", _T1),
+    )
+    updated = initial.model_copy(update={"attempts": (running,)})
+
+    def publish_then_fail(source, destination):
+        source.replace(destination)
+        raise DurableIOError(
+            "simulated directory sync failure",
+            published=True,
+        )
+
+    monkeypatch.setattr(
+        "pipeline.durable_io.atomic_replace",
+        publish_then_fail,
+    )
+
+    with pytest.raises(
+        TrainingExecutorError,
+        match="published but durability is unconfirmed",
+    ):
+        write_real_scene_journal(
+            path,
+            previous=initial,
+            updated=updated,
+        )
+
+    assert load_real_scene_journal(path) == updated

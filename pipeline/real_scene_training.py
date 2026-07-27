@@ -890,6 +890,7 @@ def build_training_job_bundle(
     )
 
     from pipeline.durable_io import (
+        DurableIOError,
         flush_directory,
         flush_file,
         publish_directory_noreplace,
@@ -898,8 +899,10 @@ def build_training_job_bundle(
     output = _require_absent_output(Path(output_dir))
     staging = output.parent / f".{output.name}.{uuid.uuid4().hex}.staging"
     final = staging / "training-job.zip"
+    staging_owned = False
     try:
         staging.mkdir()
+        staging_owned = True
         with zipfile.ZipFile(
             final,
             mode="w",
@@ -917,12 +920,21 @@ def build_training_job_bundle(
         publish_directory_noreplace(staging, output)
     except RealSceneTrainingError:
         raise
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RealSceneTrainingError(
+            f"cannot create deterministic training ZIP ({state}): {exc}"
+        ) from exc
     except (OSError, zipfile.BadZipFile) as exc:
         raise RealSceneTrainingError(
             f"cannot create deterministic training ZIP: {exc}"
         ) from exc
     finally:
-        if staging.exists() and not staging.is_symlink():
+        if staging_owned and staging.exists() and not staging.is_symlink():
             shutil.rmtree(staging, ignore_errors=True)
 
     verified = verify_training_job_bundle(output / "training-job.zip")

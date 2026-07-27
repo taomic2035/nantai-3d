@@ -9,8 +9,10 @@ callers never confuse "not published" with "published, durability unknown".
 
 from __future__ import annotations
 
+import ctypes
 import os
 import stat
+import sys
 from pathlib import Path
 
 
@@ -82,29 +84,32 @@ def flush_directory(path: str | Path) -> None:
 
 def _flush_directory_windows(path: Path) -> None:
     try:
+        import pywintypes
         import win32file
     except ImportError as exc:
         raise DurableIOError(
-            "directory sync on Windows requires pywin32; install "
-            "pywin32 or disable directory sync explicitly"
+            "directory sync on Windows requires pywin32"
         ) from exc
-    handle = win32file.CreateFile(
-        str(path),
-        win32file.GENERIC_WRITE,
-        (
-            win32file.FILE_SHARE_READ
-            | win32file.FILE_SHARE_WRITE
-            | win32file.FILE_SHARE_DELETE
-        ),
-        None,
-        win32file.OPEN_EXISTING,
-        win32file.FILE_FLAG_BACKUP_SEMANTICS,
-        None,
-    )
     try:
-        win32file.FlushFileBuffers(handle)
-    finally:
-        handle.Close()
+        handle = win32file.CreateFile(
+            str(path),
+            win32file.GENERIC_WRITE,
+            (
+                win32file.FILE_SHARE_READ
+                | win32file.FILE_SHARE_WRITE
+                | win32file.FILE_SHARE_DELETE
+            ),
+            None,
+            win32file.OPEN_EXISTING,
+            win32file.FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        try:
+            win32file.FlushFileBuffers(handle)
+        finally:
+            handle.Close()
+    except pywintypes.error as exc:
+        raise DurableIOError("Windows directory sync failed") from exc
 
 
 def atomic_replace(source: str | Path, destination: str | Path) -> None:
@@ -171,7 +176,7 @@ def publish_directory_noreplace(
         _move_windows(source_path, destination_path, replace=False)
         return
     try:
-        os.rename(source_path, destination_path)
+        _rename_directory_noreplace_posix(source_path, destination_path)
     except OSError:
         raise
     try:
@@ -183,6 +188,62 @@ def publish_directory_noreplace(
         ) from exc
 
 
+def _rename_directory_noreplace_posix(
+    source: Path,
+    destination: Path,
+) -> None:
+    """Use an atomic kernel no-replace directory rename where supported."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise DurableIOError(
+                "atomic no-replace directory publication requires renameat2"
+            )
+        renameat2.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            -100,
+            source_bytes,
+            -100,
+            destination_bytes,
+            1,
+        )
+    elif sys.platform == "darwin":
+        renamex_np = getattr(libc, "renamex_np", None)
+        if renamex_np is None:
+            raise DurableIOError(
+                "atomic no-replace directory publication requires renamex_np"
+            )
+        renamex_np.argtypes = (
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renamex_np.restype = ctypes.c_int
+        result = renamex_np(source_bytes, destination_bytes, 0x00000004)
+    else:
+        raise DurableIOError(
+            "atomic no-replace directory publication is unsupported"
+        )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(
+            error,
+            os.strerror(error),
+            str(destination),
+        )
+
+
 def _move_windows(
     source: Path,
     destination: Path,
@@ -190,6 +251,7 @@ def _move_windows(
     replace: bool,
 ) -> None:
     try:
+        import pywintypes
         import win32file
     except ImportError as exc:
         raise DurableIOError(
@@ -200,7 +262,7 @@ def _move_windows(
         flags |= win32file.MOVEFILE_REPLACE_EXISTING
     try:
         win32file.MoveFileEx(str(source), str(destination), flags)
-    except OSError as exc:
+    except (OSError, pywintypes.error) as exc:
         raise DurableIOError(
             "durable Windows publication failed",
             published=False,

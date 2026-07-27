@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import pipeline.remote_shell_executor as remote_module
+from pipeline.durable_io import DurableIOError
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_training import (
     HeldOutSplit,
@@ -459,6 +460,129 @@ def test_result_bundle_sync_failure_never_exposes_final(
     assert flushed
     assert not output.exists()
     assert tuple(tmp_path.glob(".result.zip.*.staging")) == ()
+
+
+def test_result_bundle_publish_failure_does_not_promote_stale_staging(
+    tmp_path,
+    monkeypatch,
+):
+    request_sha = request_canonical_sha256(_request())
+    result_root = tmp_path / "result"
+    result_root.mkdir()
+    members = {
+        "container-identity.txt": (
+            "registry.example/nantai@sha256:" + ("c" * 64) + "\n"
+        ).encode("ascii"),
+        "dataparser_transforms.json": (
+            b'{"scale":1.0,"transform":'
+            b'[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}\n'
+        ),
+        "operator-intent-config.yml": b"config\n",
+        "point_cloud.ply": b"ply\n",
+        "training-request.json": b"{}\n",
+        "training-result.json": b"{}\n",
+        "training.log": b"log\n",
+        "worker.stderr.log": b"",
+        "worker.stdout.log": b"container completed\n",
+    }
+    for name, payload in members.items():
+        (result_root / name).write_bytes(payload)
+    output = tmp_path / "result.zip"
+    stale = tmp_path / ".result.zip.stale.staging"
+    stale.write_bytes(b"untrusted")
+
+    def fail_publish(source, destination):
+        del source, destination
+        raise OSError("simulated publish failure")
+
+    monkeypatch.setattr(
+        "pipeline.durable_io.publish_file_noreplace",
+        fail_publish,
+    )
+
+    with pytest.raises(RemoteResultBundleError, match="cannot be written"):
+        build_remote_result_bundle(
+            result_root=result_root,
+            output_path=output,
+            job_id="job-expected",
+            attempt_id="attempt-expected",
+            request_sha256=request_sha,
+            training_bundle_sha256="d" * 64,
+            container_identity=(
+                "registry.example/nantai@sha256:" + ("c" * 64)
+            ),
+        )
+
+    assert not output.exists()
+    assert stale.read_bytes() == b"untrusted"
+    assert tuple(tmp_path.glob(".result.zip.*.staging")) == (stale,)
+
+
+def test_result_bundle_reports_published_when_sync_is_unconfirmed(
+    tmp_path,
+    monkeypatch,
+):
+    request_sha = request_canonical_sha256(_request())
+    result_root = tmp_path / "result"
+    result_root.mkdir()
+    members = {
+        "container-identity.txt": (
+            "registry.example/nantai@sha256:" + ("c" * 64) + "\n"
+        ).encode("ascii"),
+        "dataparser_transforms.json": (
+            b'{"scale":1.0,"transform":'
+            b'[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}\n'
+        ),
+        "operator-intent-config.yml": b"config\n",
+        "point_cloud.ply": b"ply\n",
+        "training-request.json": b"{}\n",
+        "training-result.json": b"{}\n",
+        "training.log": b"log\n",
+        "worker.stderr.log": b"",
+        "worker.stdout.log": b"container completed\n",
+    }
+    for name, payload in members.items():
+        (result_root / name).write_bytes(payload)
+    output = tmp_path / "result.zip"
+
+    def publish_then_fail(source, destination):
+        source.replace(destination)
+        raise DurableIOError(
+            "simulated directory sync failure",
+            published=True,
+        )
+
+    monkeypatch.setattr(
+        "pipeline.durable_io.publish_file_noreplace",
+        publish_then_fail,
+    )
+
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="published but durability is unconfirmed",
+    ):
+        build_remote_result_bundle(
+            result_root=result_root,
+            output_path=output,
+            job_id="job-expected",
+            attempt_id="attempt-expected",
+            request_sha256=request_sha,
+            training_bundle_sha256="d" * 64,
+            container_identity=(
+                "registry.example/nantai@sha256:" + ("c" * 64)
+            ),
+        )
+
+    verify_remote_result_bundle(
+        output,
+        expected_job_id="job-expected",
+        expected_attempt_id="attempt-expected",
+        expected_request_sha256=request_sha,
+        expected_training_bundle_sha256="d" * 64,
+        expected_container_identity=(
+            "registry.example/nantai@sha256:" + ("c" * 64)
+        ),
+    )
 
 
 def _evaluation_png() -> bytes:

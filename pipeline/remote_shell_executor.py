@@ -855,7 +855,11 @@ def build_remote_result_bundle(
         container_identity=container_identity,
         members=tuple(members),
     )
-    from pipeline.durable_io import flush_file, publish_file_noreplace
+    from pipeline.durable_io import (
+        DurableIOError,
+        flush_file,
+        publish_file_noreplace,
+    )
 
     staging = output.parent / (
         f".{output.name}.{uuid.uuid4().hex}.staging"
@@ -915,6 +919,15 @@ def build_remote_result_bundle(
         publish_file_noreplace(staging, output)
     except RemoteResultBundleError:
         raise
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RemoteResultBundleError(
+            f"remote result bundle cannot be written ({state})"
+        ) from exc
     except OSError as exc:
         raise RemoteResultBundleError(
             "remote result bundle cannot be written"
@@ -1123,6 +1136,93 @@ def _validate_local_regular_file(
         raise RemoteShellExecutionError(f"{label} is not executable")
 
 
+# SIDs that grant access to more than the owner. Any allow-ACE for one
+# of these on a private key file means the key is too broadly readable.
+_BROAD_READ_SIDS = (
+    "S-1-1-0",        # Everyone
+    "S-1-5-11",       # Authenticated Users
+    "S-1-5-32-545",   # BUILTIN\Users
+)
+# Access mask bits that would let a principal read the key bytes.
+_READ_ACCESS_MASK = (
+    0x0001            # FILE_READ_DATA
+    | 0x0002          # FILE_READ_EA
+    | 0x0004          # FILE_READ_ATTRIBUTES
+    | 0x0008          # FILE_EXECUTE (list for dirs, not relevant here)
+    | 0x00020000      # READ_CONTROL
+    | 0x80000000      # GENERIC_READ
+)
+
+
+def _assert_private_key_protected(path: Path) -> None:
+    """Reject private keys that are readable by group/other.
+
+    POSIX keeps the existing ``st_mode & 0o077`` check. Windows cannot
+    rely on the synthesized POSIX bits (always 0o666), so the DACL is
+    inspected via ``pywin32``; if a broad SID (Everyone / Authenticated
+    Users / Users) holds a read allow-ACE, the key is rejected. If the
+    DACL cannot be inspected, the check fails closed.
+    """
+
+    if os.name != "nt":
+        try:
+            mode = stat.S_IMODE(path.lstat().st_mode)
+        except OSError as exc:
+            raise RemoteShellExecutionError(
+                "SSH private key cannot be inspected"
+            ) from exc
+        if mode & 0o077:
+            raise RemoteShellExecutionError(
+                "SSH private key permissions are too broad"
+            )
+        return
+
+    try:
+        import win32security
+    except ImportError as exc:
+        raise RemoteShellExecutionError(
+            "Windows private key ACL check requires pywin32; "
+            "cannot prove key is protected (fail-closed)"
+        ) from exc
+    try:
+        sd = win32security.GetNamedSecurityInfo(
+            str(path),
+            win32security.SE_FILE_OBJECT,
+            win32security.DACL_SECURITY_INFORMATION,
+        )
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "SSH private key ACL cannot be inspected"
+        ) from exc
+    dacl = sd.GetSecurityDescriptorDacl()
+    if dacl is None:
+        raise RemoteShellExecutionError(
+            "SSH private key has no DACL (everyone can read)"
+        )
+    broad_sid_objects = []
+    for sid_string in _BROAD_READ_SIDS:
+        try:
+            broad_sid_objects.append(
+                win32security.ConvertStringSidToSid(sid_string)
+            )
+        except OSError:
+            pass
+    for ace_index in range(dacl.GetAceCount()):
+        ace = dacl.GetAce(ace_index)
+        ace_type = ace[0]
+        ace_mask = ace[2]
+        ace_sid = ace[3]
+        if ace_type != win32security.ACCESS_ALLOWED_ACE_TYPE:
+            continue
+        if not (ace_mask & _READ_ACCESS_MASK):
+            continue
+        for broad_sid in broad_sid_objects:
+            if win32security.EqualSid(ace_sid, broad_sid):
+                raise RemoteShellExecutionError(
+                    "SSH private key is readable by non-owner"
+                )
+
+
 def _host_key_fingerprint(key_blob: bytes) -> str:
     encoded = base64.b64encode(hashlib.sha256(key_blob).digest())
     return "SHA256:" + encoded.decode("ascii").rstrip("=")
@@ -1195,23 +1295,14 @@ class RemoteShellExecutor:
             label="SSH private key",
             executable=False,
         )
-        try:
-            key_mode = stat.S_IMODE(config.private_key_path.lstat().st_mode)
-        except OSError as exc:
-            raise RemoteShellExecutionError(
-                "SSH private key cannot be inspected"
-            ) from exc
-        if key_mode & 0o077:
-            raise RemoteShellExecutionError(
-                "SSH private key permissions are too broad"
-            )
+        _assert_private_key_protected(config.private_key_path)
         _verify_known_host(config)
 
     def _common_options(self, *, scp: bool) -> list[str]:
         port_flag = "-P" if scp else "-p"
         return [
             "-F",
-            "/dev/null",
+            os.devnull,
             "-i",
             str(self.config.private_key_path),
             port_flag,
@@ -1225,7 +1316,7 @@ class RemoteShellExecutor:
             "-o",
             f"UserKnownHostsFile={self.config.known_hosts_path}",
             "-o",
-            "GlobalKnownHostsFile=/dev/null",
+            f"GlobalKnownHostsFile={os.devnull}",
             "-o",
             f"HostKeyAlias={self.config.known_host}",
             "-o",

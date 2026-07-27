@@ -577,7 +577,7 @@ def load_real_scene_journal(path: Path) -> RealSceneJournal:
 
 
 def _atomic_write_journal(path: Path, payload: bytes) -> None:
-    from pipeline.durable_io import atomic_replace
+    from pipeline.durable_io import DurableIOError, atomic_replace
 
     parent = path.parent
     try:
@@ -604,6 +604,15 @@ def _atomic_write_journal(path: Path, payload: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         atomic_replace(temporary, path)
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise TrainingExecutorError(
+            f"real-scene journal atomic write failed ({state})"
+        ) from exc
     except OSError as exc:
         raise TrainingExecutorError(
             "real-scene journal atomic write failed"
