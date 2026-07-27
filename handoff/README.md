@@ -10,6 +10,10 @@
 3. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
 4. [Roaming graph producer（P2）](HANDOFF-GLM-009-roaming-graph-producer.md)
 
+Production V1 的 P0 已在 `0247440` 与
+[CI run 30234423540](https://github.com/taomic2035/nantai-3d/actions/runs/30234423540)
+关闭；GLM 当前从 P1-1A（Viewer acceptance 入标准门）开始连续执行。
+
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。
 

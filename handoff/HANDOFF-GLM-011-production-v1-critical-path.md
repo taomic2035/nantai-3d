@@ -5,7 +5,7 @@
 Owner：GLM lane
 
 Reviewer：Codex
-基线：`main@2d3402143aded798d1dc7231797e0bb1a4c8753b`
+已验证实现基线：`main@02474403d0f2ca769a3a8f38d77a4a420b0ad01e`
 
 本文件是 GLM 当前唯一的首要执行入口。旧的 GLM-007/008 只用于历史追溯；
 GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
@@ -24,8 +24,15 @@ GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
   host key、null device 和 secret-redaction 保持 fail closed。
 - P0-5 已由 `2d34021` 关闭：Windows canonical bytes、PATH、Git Bash 结构检查和
   ZIP 原始反斜杠成员拒绝专项门为 `81 passed, 7 skipped`。
-- 当前唯一 P0 断点是 P0-6：必须取得 `2d34021` 或后续修复 exact HEAD 的本地全门
-  与 Ubuntu/Windows × Python 3.11/3.13 远端全绿；不能引用旧 run 或局部测试代替。
+- P0-6 已由 `0247440` 关闭：本地 `make.py test` 为 Python
+  `3353 passed, 90 skipped`、Viewer Node `216/216`、Studio Node `103/103`，
+  全范围 ruff 与 `git diff --check` 通过。
+- exact-HEAD
+  [CI run 30234423540](https://github.com/taomic2035/nantai-3d/actions/runs/30234423540)
+  的 Ubuntu/Windows × Python 3.11/3.13 四个 test job、两个 reproducibility job
+  与 compare job 全部通过。
+- **GLM 当前立即领取 P1-1A**，随后连续执行 P1-1B、P1-1C、P1-1D、P1-2A；
+  不再等待 P0 或 Codex 另行提醒。
 - 当前 canary 只有真实照片 COLMAP 与本机 Brush `preview-only` 证据。尚无
   非 mock CUDA 3DGS、实测米制对齐、真实 Viewer/human acceptance，因此不能
   报告“真实 3D 场景完成”或“production accepted”。
