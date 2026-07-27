@@ -100,6 +100,7 @@ def test() -> None:
     node_test("web/viewer/*.test.mjs")
     node_test("web/studio/*.test.mjs")
     node_test("scripts/capture_viewer_acceptance.test.mjs")
+    node_test("scripts/viewer_runtime_preflight.test.mjs")
 
 
 def lint() -> None:
