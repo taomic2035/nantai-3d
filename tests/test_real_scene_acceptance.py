@@ -11,6 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 import pipeline.real_scene_acceptance as acceptance_module
+import pipeline.real_scene_import as import_module
+from pipeline.production_training_closure import (
+    load_production_training_closure_bytes,
+)
 from pipeline.real_scene_acceptance import (
     REQUIRED_VISUAL_CATEGORIES,
     AcceptanceDirectoryReference,
@@ -48,6 +52,10 @@ from pipeline.render_evaluation import (
 )
 from pipeline.viewer_acceptance import ViewerPerformancePolicy
 from scripts.record_real_scene_review import main as record_review_main
+from tests.test_real_scene_import import (
+    _patch_production_bundle,
+    _write_production_training_stage,
+)
 
 POSES = (
     "pose-" + "a" * 64,
@@ -704,6 +712,59 @@ def test_production_acceptance_requires_rights_metric_and_every_gate(
         decision = validate_real_scene_acceptance(path)
         assert decision.production_release_allowed is False
         assert gate in decision.failed_gates
+
+
+def test_aggregate_reopens_original_production_runtime_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    training_root = tmp_path / "training"
+    fixture = _write_production_training_stage(
+        training_root,
+        count=100_000,
+    )
+    _patch_production_bundle(monkeypatch, fixture)
+    material = import_module._load_training_material(training_root)
+    closure_path = (
+        training_root
+        / "remote-result/production-training-closure.json"
+    )
+    closure = load_production_training_closure_bytes(
+        closure_path.read_bytes()
+    )
+    imported = SimpleNamespace(
+        schema_id="nantai.real-scene-import-receipt.v3",
+        production_training_closure_sha256=closure.content_sha256,
+        production_runtime_decision_sha256=(
+            closure.runtime_decision_sha256
+        ),
+    )
+    report = SimpleNamespace(
+        source_role="production-acceptance",
+        training_root=SimpleNamespace(path="training"),
+    )
+    acceptance_module._revalidate_production_training_evidence(
+        report,
+        tmp_path,
+        material,
+        imported,
+    )
+    decision_path = (
+        training_root
+        / "remote-result/production-runtime/decision.json"
+    )
+    decision_path.write_bytes(decision_path.read_bytes() + b" ")
+
+    with pytest.raises(
+        RealSceneAcceptanceError,
+        match="production.*runtime|training.*evidence",
+    ):
+        acceptance_module._revalidate_production_training_evidence(
+            report,
+            tmp_path,
+            material,
+            imported,
+        )
 
 
 def test_aggregate_rejects_reference_tamper_before_derivation(

@@ -24,6 +24,10 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.production_training_closure import (
+    ProductionTrainingClosureError,
+    load_production_training_closure_bytes,
+)
 from pipeline.real_dataset import (
     REAL_DATASET_SOURCE,
     CaptureRightsReceipt,
@@ -36,7 +40,11 @@ from pipeline.real_dataset import (
     validate_dataset_receipt,
 )
 from pipeline.real_scene_import import (
+    RealSceneImportError,
+    RealSceneImportReceipt,
     _load_training_material,
+    _TrainingMaterial,
+    _verify_production_closure_evidence,
     validate_real_scene_import_receipt,
 )
 from pipeline.real_scene_training import (
@@ -1492,6 +1500,62 @@ def _validate_packaged_render_evaluation(
         return validate_render_evaluation(policy, report, view)
 
 
+def _revalidate_production_training_evidence(
+    report: RealSceneAcceptance,
+    root: Path,
+    material: _TrainingMaterial,
+    imported: RealSceneImportReceipt,
+) -> None:
+    """Reopen the original G2/G5 evidence behind a production import."""
+
+    if report.source_role != "production-acceptance":
+        return
+    if (
+        material.quality_role != "production"
+        or imported.schema_id != "nantai.real-scene-import-receipt.v3"
+        or imported.production_training_closure_sha256 is None
+        or imported.production_runtime_decision_sha256 is None
+    ):
+        raise RealSceneAcceptanceError(
+            "production import has no verified training evidence"
+        )
+    training_root = _member_path(
+        root,
+        report.training_root.path,
+        label="production training root",
+    )
+    closure_bytes = _read_acceptance_member(
+        training_root,
+        "remote-result/production-training-closure.json",
+        label="production training closure",
+    )
+    try:
+        closure = load_production_training_closure_bytes(closure_bytes)
+    except ProductionTrainingClosureError as exc:
+        raise RealSceneAcceptanceError(
+            "production training evidence is invalid"
+        ) from exc
+    if (
+        closure.content_sha256
+        != imported.production_training_closure_sha256
+        or closure.runtime_decision_sha256
+        != imported.production_runtime_decision_sha256
+    ):
+        raise RealSceneAcceptanceError(
+            "production training evidence differs from the import receipt"
+        )
+    try:
+        _verify_production_closure_evidence(
+            training_root,
+            material,
+            closure,
+        )
+    except RealSceneImportError as exc:
+        raise RealSceneAcceptanceError(
+            "production training runtime evidence cannot be revalidated"
+        ) from exc
+
+
 def _validate_acceptance_evidence(
     report: RealSceneAcceptance,
     root: Path,
@@ -1621,6 +1685,12 @@ def _validate_acceptance_evidence(
         or imported.training_result_sha256 != result_canonical_sha256(material.result)
     ):
         raise RealSceneAcceptanceError("import receipt differs from source/training evidence")
+    _revalidate_production_training_evidence(
+        report,
+        root,
+        material,
+        imported,
+    )
 
     render_policy = _canonical_model_from_bytes(
         payloads[report.render_policy.path],
