@@ -76,6 +76,10 @@ class RemoteShellExecutionError(ValueError):
     """Remote execution evidence is unsafe, incomplete, or ambiguous."""
 
 
+class RemoteShellTransportError(RemoteShellExecutionError):
+    """A bounded transport invocation could not produce an observation."""
+
+
 class RemoteResultBundleError(ValueError):
     """A downloaded result archive failed content or semantic closure."""
 
@@ -95,6 +99,73 @@ _FINGERPRINT_PATTERN = r"^SHA256:[A-Za-z0-9+/]{43}$"
 _CONTAINER_PATTERN = (
     r"^[A-Za-z0-9._/:+-]+@sha256:[0-9a-f]{64}$"
 )
+PreflightFailureCode = Literal[
+    "remote-probe-required",
+    "remote-probe-not-executed",
+    "ssh-binary-missing",
+    "ssh-binary-invalid",
+    "scp-binary-missing",
+    "scp-binary-invalid",
+    "private-key-missing",
+    "private-key-uninspectable",
+    "private-key-invalid",
+    "known-hosts-missing",
+    "known-hosts-invalid",
+    "local-transport-drift",
+    "remote-unreachable",
+    "remote-runtime-invalid",
+    "remote-worker-invalid",
+    "remote-runtime-and-worker-invalid",
+    "remote-checker-invalid",
+    "remote-checker-config-mismatch",
+    "remote-runtime-mismatch",
+    "remote-container-mismatch",
+    "remote-worker-mismatch",
+]
+_PREFLIGHT_FAILURE_REASONS: dict[PreflightFailureCode, str] = {
+    "remote-probe-required": "remote probe is required for readiness",
+    "remote-probe-not-executed": (
+        "remote probe was requested but not executed"
+    ),
+    "ssh-binary-missing": "ssh binary is missing",
+    "ssh-binary-invalid": "ssh binary is invalid",
+    "scp-binary-missing": "scp binary is missing",
+    "scp-binary-invalid": "scp binary is invalid",
+    "private-key-missing": "SSH private key is missing",
+    "private-key-uninspectable": "SSH private key cannot be inspected",
+    "private-key-invalid": (
+        "SSH private key permissions are too broad or invalid"
+    ),
+    "known-hosts-missing": "known-hosts file is missing",
+    "known-hosts-invalid": (
+        "known-hosts fingerprint or file verification failed"
+    ),
+    "local-transport-drift": (
+        "local transport changed during remote probe"
+    ),
+    "remote-unreachable": "remote probe could not reach the target",
+    "remote-runtime-invalid": "container runtime did not respond",
+    "remote-worker-invalid": "worker binary not found on remote",
+    "remote-runtime-and-worker-invalid": (
+        "container runtime did not respond; "
+        "worker binary not found on remote"
+    ),
+    "remote-checker-invalid": (
+        "remote readiness checker response is invalid"
+    ),
+    "remote-checker-config-mismatch": (
+        "remote readiness checker config does not match"
+    ),
+    "remote-runtime-mismatch": (
+        "remote container runtime identity does not match"
+    ),
+    "remote-container-mismatch": (
+        "remote container image digest does not match"
+    ),
+    "remote-worker-mismatch": (
+        "remote worker identity does not match"
+    ),
+}
 _MAX_STATUS_BYTES = 64 * 1024
 _DEFAULT_MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024
 _DEFAULT_MAX_MEMBER_BYTES = 12 * 1024 * 1024 * 1024
@@ -189,6 +260,15 @@ class RemoteShellExecutorConfig(FrozenModel):
     remote_repo_root: str
     container_identity: str = Field(pattern=_CONTAINER_PATTERN)
     container_runtime: Literal["docker", "podman"] = "docker"
+    expected_worker_sha256: str = Field(pattern=_SHA256_PATTERN)
+    expected_worker_version: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+    )
+    expected_checker_config_sha256: str = Field(
+        pattern=_SHA256_PATTERN,
+    )
     connect_timeout_seconds: int = Field(default=20, ge=1, le=300)
     command_timeout_seconds: int = Field(default=120, ge=1, le=3600)
     max_command_output_bytes: int = Field(
@@ -331,6 +411,28 @@ class RemoteShellPreflightReport(FrozenModel):
     status: Literal["ready", "blocked-external-input", "failed"]
     checked_at_utc: datetime
 
+    report_id: str = Field(
+        pattern=r"^remote-preflight-[0-9a-f]{64}$",
+    )
+    content_sha256: str = Field(pattern=_SHA256_PATTERN)
+    config_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
+    ssh_binary_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    scp_binary_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    private_key_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    known_hosts_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+
     # Identity binding — proves this report is for one specific remote target.
     container_identity: str = Field(pattern=_CONTAINER_PATTERN)
     expected_host_key_fingerprint: str = Field(pattern=_FINGERPRINT_PATTERN)
@@ -347,30 +449,99 @@ class RemoteShellPreflightReport(FrozenModel):
     known_hosts_verified: bool = False
 
     # Remote read-only capability check results (None when not probed).
+    checker_version: (
+        Literal["nantai.remote-readiness-checker.v1"] | None
+    ) = None
+    expected_checker_config_sha256: str = Field(
+        pattern=_SHA256_PATTERN,
+    )
+    checker_config_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    container_runtime_version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+    )
+    measured_container_identity: str | None = Field(
+        default=None,
+        pattern=_CONTAINER_PATTERN,
+    )
     container_runtime_verified: bool | None = None
+    container_image_verified: bool | None = None
+    worker_binary_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    worker_version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+    )
     worker_binary_verified: bool | None = None
 
+    failure_code: PreflightFailureCode | None = None
     failure_reason: str | None = None
 
     _utc = field_validator("checked_at_utc")(_require_utc)
 
+    @field_validator("container_runtime_version")
+    @classmethod
+    def _safe_runtime_version(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is not None:
+            _no_controls(value, label="container runtime version")
+        return value
+
     @model_validator(mode="after")
     def _status_evidence_is_consistent(self) -> RemoteShellPreflightReport:
         if self.status == "ready":
-            if self.failure_reason is not None:
+            if (
+                self.failure_code is not None
+                or self.failure_reason is not None
+            ):
                 raise ValueError(
-                    "ready preflight report must not carry a failure_reason"
+                    "ready preflight report must not carry failure evidence"
                 )
             if not (
                 self.ssh_binary_found
                 and self.scp_binary_found
                 and self.private_key_protection_verified
                 and self.known_hosts_verified
+                and self.ssh_binary_sha256 is not None
+                and self.scp_binary_sha256 is not None
+                and self.private_key_sha256 is not None
+                and self.known_hosts_sha256 is not None
+                and self.checker_version
+                == "nantai.remote-readiness-checker.v1"
+                and self.checker_config_sha256
+                == self.expected_checker_config_sha256
+                and self.container_runtime_version is not None
+                and self.measured_container_identity
+                == self.container_identity
+                and self.container_runtime_verified is True
+                and self.container_image_verified is True
+                and self.worker_binary_sha256 is not None
+                and self.worker_version is not None
+                and self.worker_binary_verified is True
             ):
                 raise ValueError(
-                    "ready preflight report requires all local checks to pass"
+                    "ready preflight report requires all checks to pass"
                 )
         else:
+            if (
+                self.failure_code is None
+                or self.failure_reason
+                != _PREFLIGHT_FAILURE_REASONS[self.failure_code]
+            ):
+                raise ValueError(
+                    f"{self.status} preflight report requires fixed failure"
+                    " evidence"
+                )
             if (
                 self.failure_reason is None
                 or self.failure_reason.strip() == ""
@@ -379,7 +550,44 @@ class RemoteShellPreflightReport(FrozenModel):
                     f"{self.status} preflight report requires a"
                     " non-empty failure_reason"
                 )
+        expected_content = remote_shell_preflight_content_sha256(self)
+        if self.content_sha256 != expected_content:
+            raise ValueError(
+                "preflight report content_sha256 disagrees"
+            )
+        if self.report_id != f"remote-preflight-{expected_content}":
+            raise ValueError("preflight report_id disagrees")
         return self
+
+
+class RemoteReadinessEvidence(FrozenModel):
+    schema_id: Literal["nantai.remote-readiness-evidence.v1"] = Field(
+        default="nantai.remote-readiness-evidence.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    checker_version: Literal["nantai.remote-readiness-checker.v1"]
+    checker_config_sha256: str = Field(pattern=_SHA256_PATTERN)
+    container_runtime: Literal["docker", "podman"]
+    container_runtime_version: str = Field(
+        min_length=1,
+        max_length=256,
+    )
+    container_identity: str = Field(pattern=_CONTAINER_PATTERN)
+    worker_sha256: str = Field(pattern=_SHA256_PATTERN)
+    worker_version: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+    )
+
+    @field_validator("container_runtime_version")
+    @classmethod
+    def _safe_runtime_version(cls, value: str) -> str:
+        return _no_controls(
+            value,
+            label="container runtime version",
+        )
 
 
 class RemoteResultBundleMember(FrozenModel):
@@ -502,6 +710,119 @@ def canonical_remote_shell_preflight_bytes(
     return _canonical_model_bytes(report)
 
 
+def remote_shell_preflight_content_sha256(
+    report: RemoteShellPreflightReport,
+) -> str:
+    payload = report.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude={"report_id", "content_sha256"},
+    )
+    canonical = (
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _build_remote_shell_preflight_report(
+    **fields,
+) -> RemoteShellPreflightReport:
+    zero = "0" * 64
+    provisional = RemoteShellPreflightReport.model_construct(
+        report_id=f"remote-preflight-{zero}",
+        content_sha256=zero,
+        **fields,
+    )
+    digest = remote_shell_preflight_content_sha256(provisional)
+    return RemoteShellPreflightReport(
+        report_id=f"remote-preflight-{digest}",
+        content_sha256=digest,
+        **fields,
+    )
+
+
+def publish_remote_shell_preflight(
+    report: RemoteShellPreflightReport,
+    output: Path,
+) -> Path:
+    """Durably publish one immutable preflight report without replacement."""
+
+    destination = Path(output)
+    if not destination.is_absolute():
+        raise RemoteShellExecutionError(
+            "remote preflight output path must be absolute"
+        )
+    parent = destination.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        parent_stat = parent.lstat()
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote preflight report cannot be published"
+        ) from exc
+    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(
+        parent_stat.st_mode
+    ):
+        raise RemoteShellExecutionError(
+            "remote preflight report cannot be published"
+        )
+    if destination.exists() or destination.is_symlink():
+        raise RemoteShellExecutionError(
+            "remote preflight report cannot replace an existing path"
+        )
+
+    payload = canonical_remote_shell_preflight_bytes(report)
+    from pipeline.durable_io import (
+        DurableIOError,
+        flush_file,
+        publish_file_noreplace,
+    )
+
+    descriptor = -1
+    staging = ""
+    try:
+        descriptor, staging = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".staging",
+            dir=parent,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+        flush_file(staging)
+        publish_file_noreplace(staging, destination)
+        staging = ""
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RemoteShellExecutionError(
+            f"remote preflight report cannot be published ({state})"
+        ) from exc
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote preflight report cannot be published"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if staging:
+            try:
+                Path(staging).unlink(missing_ok=True)
+            except OSError:
+                pass
+    return destination
+
+
 def _reject_duplicate_pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -509,6 +830,60 @@ def _reject_duplicate_pairs(pairs):
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def load_remote_shell_executor_config(
+    path: str | Path,
+) -> RemoteShellExecutorConfig:
+    config_path = Path(path)
+    if not config_path.is_absolute():
+        raise RemoteShellExecutionError(
+            "remote executor config path must be absolute"
+        )
+    try:
+        before = config_path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
+            before.st_mode
+        ):
+            raise RemoteShellExecutionError(
+                "remote executor config must be a regular file"
+            )
+        if before.st_size <= 0 or before.st_size > 1024 * 1024:
+            raise RemoteShellExecutionError(
+                "remote executor config size is invalid"
+            )
+        payload = config_path.read_bytes()
+        after = config_path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote executor config cannot be read"
+        ) from exc
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise RemoteShellExecutionError(
+            "remote executor config changed while read"
+        )
+    try:
+        raw = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        if not isinstance(raw, dict):
+            raise ValueError("remote executor config must be an object")
+        config = RemoteShellExecutorConfig.model_validate_json(payload)
+    except (UnicodeError, ValueError) as exc:
+        raise RemoteShellExecutionError(
+            "remote executor config is invalid or has duplicate keys"
+        ) from exc
+    if payload != _canonical_model_bytes(config):
+        raise RemoteShellExecutionError(
+            "remote executor config is not canonical"
+        )
+    return config
 
 
 def _portable_member(value: str) -> PurePosixPath:
@@ -1527,12 +1902,24 @@ class RemoteShellExecutor:
             raise RemoteShellExecutionError(
                 "remote shell executor is closed"
             )
+
+        def redact(item: str) -> str:
+            if item == str(self.config.private_key_path):
+                return "<redacted-private-key>"
+            if item == str(self.config.ssh_binary):
+                return "<ssh-binary>"
+            if item == str(self.config.scp_binary):
+                return "<scp-binary>"
+            if item == self.config.ssh_target:
+                return "<redacted-ssh-target>"
+            if item.startswith("UserKnownHostsFile="):
+                return "UserKnownHostsFile=<redacted-known-hosts>"
+            if item.startswith("HostKeyAlias="):
+                return "HostKeyAlias=<redacted-known-host>"
+            return item
+
         redacted = tuple(
-            (
-                "<redacted-private-key>"
-                if item == str(self.config.private_key_path)
-                else item
-            )
+            redact(item)
             for item in argv
         )
         self.command_audit.append(redacted)
@@ -1544,7 +1931,7 @@ class RemoteShellExecutor:
                 timeout=self.config.command_timeout_seconds,
             )
         except (OSError, subprocess.SubprocessError):
-            raise RemoteShellExecutionError(
+            raise RemoteShellTransportError(
                 f"{phase} transport could not be executed"
             ) from None
         stdout = completed.stdout or b""
@@ -1750,18 +2137,25 @@ class RemoteShellExecutor:
             f"{self.config.remote_repo_root}/"
             "cloud/remote_training_worker.py"
         )
-        completed = self._ssh(
-            [
-                "python3",
-                worker,
-                "status",
-                "--job-dir",
-                context.job.remote_job_path,
-                "--max-bytes",
-                str(_MAX_STATUS_BYTES),
-            ],
-            phase="remote status poll",
-        )
+        try:
+            completed = self._ssh(
+                [
+                    "python3",
+                    worker,
+                    "status",
+                    "--job-dir",
+                    context.job.remote_job_path,
+                    "--max-bytes",
+                    str(_MAX_STATUS_BYTES),
+                ],
+                phase="remote status poll",
+            )
+        except RemoteShellTransportError:
+            return normalize_poll_result(
+                exit_code=None,
+                reachable=False,
+                observed_at_utc=self._now(),
+            )
         if completed.returncode != 0:
             return normalize_poll_result(
                 exit_code=None,
@@ -2022,6 +2416,7 @@ class RemoteShellExecutor:
 class _LocalCheckOutcome:
     verified: bool
     blocked: bool
+    code: PreflightFailureCode | None = None
     detail: str | None = None
 
 
@@ -2030,6 +2425,8 @@ def _probe_local_regular_file(
     *,
     label: str,
     executable: bool,
+    missing_code: PreflightFailureCode,
+    invalid_code: PreflightFailureCode,
 ) -> _LocalCheckOutcome:
     """Check a local binary or config file without raising.
 
@@ -2041,6 +2438,7 @@ def _probe_local_regular_file(
         return _LocalCheckOutcome(
             verified=False,
             blocked=True,
+            code=missing_code,
             detail=f"{label} is missing",
         )
     try:
@@ -2053,6 +2451,7 @@ def _probe_local_regular_file(
         return _LocalCheckOutcome(
             verified=False,
             blocked=False,
+            code=invalid_code,
             detail=str(exc),
         )
     return _LocalCheckOutcome(verified=True, blocked=False)
@@ -2066,6 +2465,7 @@ def _probe_private_key_protection(
         return _LocalCheckOutcome(
             verified=False,
             blocked=True,
+            code="private-key-missing",
             detail="SSH private key is missing",
         )
     try:
@@ -2076,6 +2476,11 @@ def _probe_private_key_protection(
         return _LocalCheckOutcome(
             verified=False,
             blocked=blocked,
+            code=(
+                "private-key-uninspectable"
+                if blocked
+                else "private-key-invalid"
+            ),
             detail=detail,
         )
     if handle is not None:
@@ -2091,6 +2496,7 @@ def _probe_known_hosts(
         return _LocalCheckOutcome(
             verified=False,
             blocked=True,
+            code="known-hosts-missing",
             detail="known-hosts file is missing",
         )
     try:
@@ -2099,17 +2505,76 @@ def _probe_known_hosts(
         return _LocalCheckOutcome(
             verified=False,
             blocked=False,
+            code="known-hosts-invalid",
             detail=str(exc),
         )
     return _LocalCheckOutcome(verified=True, blocked=False)
 
 
 @dataclass(frozen=True)
+class _PreflightInputSnapshot:
+    sha256: str
+    stat_signature: tuple[int, int, int, int, int, int]
+
+
+def _preflight_input_snapshot(
+    path: Path,
+    *,
+    label: str,
+) -> _PreflightInputSnapshot | None:
+    try:
+        before = path.lstat()
+        sha256 = _stable_file_sha(
+            path,
+            label=label,
+            max_bytes=512 * 1024 * 1024,
+        )[1]
+        after = path.lstat()
+    except (OSError, RemoteResultBundleError):
+        return None
+    before_signature = _stat_signature(before)
+    after_signature = _stat_signature(after)
+    if before_signature != after_signature:
+        return None
+    return _PreflightInputSnapshot(
+        sha256=sha256,
+        stat_signature=after_signature,
+    )
+
+
+@dataclass(frozen=True)
 class _RemoteProbeOutcome:
     runtime_verified: bool | None
+    image_verified: bool | None
     worker_verified: bool | None
     blocked: bool
+    code: PreflightFailureCode | None = None
     detail: str | None = None
+    evidence: RemoteReadinessEvidence | None = None
+
+
+def _parse_remote_readiness_evidence(
+    payload: bytes,
+) -> RemoteReadinessEvidence:
+    if not payload or len(payload) > _MAX_STATUS_BYTES:
+        raise RemoteShellExecutionError(
+            "remote readiness evidence size is invalid"
+        )
+    try:
+        raw = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        evidence = RemoteReadinessEvidence.model_validate(raw)
+    except (UnicodeError, ValueError) as exc:
+        raise RemoteShellExecutionError(
+            "remote readiness evidence is invalid"
+        ) from exc
+    if payload != _canonical_model_bytes(evidence):
+        raise RemoteShellExecutionError(
+            "remote readiness evidence is not canonical"
+        )
+    return evidence
 
 
 def _probe_remote_capabilities(
@@ -2136,49 +2601,90 @@ def _probe_remote_capabilities(
     except RemoteShellExecutionError as exc:
         return _RemoteProbeOutcome(
             runtime_verified=None,
+            image_verified=None,
             worker_verified=None,
             blocked=False,
+            code="local-transport-drift",
             detail=f"local transport changed during remote probe: {exc}",
         )
     try:
-        worker_path = (
-            f"{config.remote_repo_root}/cloud/remote_training_worker.py"
+        completed = executor._ssh(
+            ["nantai-remote-readiness-checker"],
+            phase="remote readiness checker",
         )
-        runtime_completed = executor._ssh(
-            [config.container_runtime, "--version"],
-            phase="remote runtime probe",
-        )
-        runtime_verified = runtime_completed.returncode == 0
-
-        worker_completed = executor._ssh(
-            ["test", "-f", worker_path],
-            phase="remote worker probe",
-        )
-        worker_verified = worker_completed.returncode == 0
-
-        if runtime_verified and worker_verified:
+        if completed.returncode != 0:
             return _RemoteProbeOutcome(
-                runtime_verified=True,
-                worker_verified=True,
+                runtime_verified=False,
+                image_verified=False,
+                worker_verified=False,
                 blocked=False,
-                detail=None,
+                code="remote-checker-invalid",
+                detail=_PREFLIGHT_FAILURE_REASONS[
+                    "remote-checker-invalid"
+                ],
             )
-        details: list[str] = []
-        if not runtime_verified:
-            details.append("container runtime did not respond")
-        if not worker_verified:
-            details.append("worker binary not found on remote")
+        try:
+            evidence = _parse_remote_readiness_evidence(
+                completed.stdout,
+            )
+        except RemoteShellExecutionError:
+            return _RemoteProbeOutcome(
+                runtime_verified=False,
+                image_verified=False,
+                worker_verified=False,
+                blocked=False,
+                code="remote-checker-invalid",
+                detail=_PREFLIGHT_FAILURE_REASONS[
+                    "remote-checker-invalid"
+                ],
+            )
+        runtime_verified = (
+            evidence.container_runtime == config.container_runtime
+        )
+        image_verified = (
+            evidence.container_identity == config.container_identity
+        )
+        worker_verified = (
+            evidence.worker_sha256 == config.expected_worker_sha256
+            and evidence.worker_version
+            == config.expected_worker_version
+        )
+        checker_config_verified = (
+            evidence.checker_config_sha256
+            == config.expected_checker_config_sha256
+        )
+        if not checker_config_verified:
+            code: PreflightFailureCode = (
+                "remote-checker-config-mismatch"
+            )
+        elif not runtime_verified:
+            code: PreflightFailureCode = "remote-runtime-mismatch"
+        elif not image_verified:
+            code = "remote-container-mismatch"
+        elif not worker_verified:
+            code = "remote-worker-mismatch"
+        else:
+            code = None
         return _RemoteProbeOutcome(
             runtime_verified=runtime_verified,
+            image_verified=image_verified,
             worker_verified=worker_verified,
             blocked=False,
-            detail="; ".join(details),
+            code=code,
+            detail=(
+                None
+                if code is None
+                else _PREFLIGHT_FAILURE_REASONS[code]
+            ),
+            evidence=evidence,
         )
     except RemoteShellExecutionError:
         return _RemoteProbeOutcome(
             runtime_verified=None,
+            image_verified=None,
             worker_verified=None,
             blocked=True,
+            code="remote-unreachable",
             detail="remote probe could not reach the target",
         )
     finally:
@@ -2217,19 +2723,69 @@ def run_remote_shell_preflight(
         config.ssh_binary,
         label="ssh binary",
         executable=True,
+        missing_code="ssh-binary-missing",
+        invalid_code="ssh-binary-invalid",
     )
     scp_outcome = _probe_local_regular_file(
         config.scp_binary,
         label="scp binary",
         executable=True,
+        missing_code="scp-binary-missing",
+        invalid_code="scp-binary-invalid",
     )
     key_outcome = _probe_private_key_protection(config.private_key_path)
     hosts_outcome = _probe_known_hosts(config)
 
     local_outcomes = [ssh_outcome, scp_outcome, key_outcome, hosts_outcome]
+    local_snapshot_inputs = {
+        "ssh_binary_sha256": _preflight_input_snapshot(
+            config.ssh_binary,
+            label="ssh binary",
+        ),
+        "scp_binary_sha256": _preflight_input_snapshot(
+            config.scp_binary,
+            label="scp binary",
+        ),
+        "private_key_sha256": _preflight_input_snapshot(
+            config.private_key_path,
+            label="SSH private key",
+        ),
+        "known_hosts_sha256": _preflight_input_snapshot(
+            config.known_hosts_path,
+            label="known-hosts file",
+        ),
+    }
+    local_input_hashes = {
+        field: (
+            snapshot.sha256
+            if snapshot is not None
+            else None
+        )
+        for field, snapshot in local_snapshot_inputs.items()
+    }
+    if any(
+        outcome.verified and snapshot is None
+        for outcome, snapshot in zip(
+            local_outcomes,
+            local_snapshot_inputs.values(),
+            strict=True,
+        )
+    ):
+        local_outcomes.append(
+            _LocalCheckOutcome(
+                verified=False,
+                blocked=False,
+                code="local-transport-drift",
+                detail="local transport changed during snapshot",
+            )
+        )
     local_all_passed = all(o.verified for o in local_outcomes)
+    config_identity_sha256 = hashlib.sha256(
+        _canonical_model_bytes(config),
+    ).hexdigest()
 
     container_runtime_verified: bool | None = None
+    container_image_verified: bool | None = None
     worker_binary_verified: bool | None = None
     remote_outcome: _RemoteProbeOutcome | None = None
 
@@ -2240,48 +2796,92 @@ def run_remote_shell_preflight(
             command_audit=command_audit,
         )
         container_runtime_verified = remote_outcome.runtime_verified
+        container_image_verified = remote_outcome.image_verified
         worker_binary_verified = remote_outcome.worker_verified
+    local_drift = False
+    if local_all_passed and probe_remote:
+        post_snapshots = {
+            "ssh_binary_sha256": _preflight_input_snapshot(
+                config.ssh_binary,
+                label="ssh binary",
+            ),
+            "scp_binary_sha256": _preflight_input_snapshot(
+                config.scp_binary,
+                label="scp binary",
+            ),
+            "private_key_sha256": _preflight_input_snapshot(
+                config.private_key_path,
+                label="SSH private key",
+            ),
+            "known_hosts_sha256": _preflight_input_snapshot(
+                config.known_hosts_path,
+                label="known-hosts file",
+            ),
+        }
+        local_drift = (
+            post_snapshots != local_snapshot_inputs
+            or hashlib.sha256(
+                _canonical_model_bytes(config),
+            ).hexdigest()
+            != config_identity_sha256
+        )
 
     status: Literal["ready", "blocked-external-input", "failed"]
+    failure_code: PreflightFailureCode | None
     failure_reason: str | None
 
-    if local_all_passed:
+    if local_drift:
+        status = "failed"
+        failure_code = "local-transport-drift"
+    elif local_all_passed:
         if not probe_remote:
-            status = "ready"
-            failure_reason = None
+            status = "failed"
+            failure_code = "remote-probe-required"
         elif remote_outcome is None:
             status = "failed"
-            failure_reason = "remote probe was requested but not executed"
+            failure_code = "remote-probe-not-executed"
         elif remote_outcome.blocked:
             status = "blocked-external-input"
-            failure_reason = remote_outcome.detail
-        elif remote_outcome.runtime_verified and remote_outcome.worker_verified:
+            failure_code = remote_outcome.code
+        elif (
+            remote_outcome.runtime_verified
+            and remote_outcome.image_verified
+            and remote_outcome.worker_verified
+        ):
             status = "ready"
-            failure_reason = None
+            failure_code = None
         else:
             status = "failed"
-            failure_reason = remote_outcome.detail
+            failure_code = remote_outcome.code
     else:
-        blocked_details = [
-            o.detail
-            for o in local_outcomes
-            if not o.verified and o.blocked
+        failed_outcomes = [
+            outcome
+            for outcome in local_outcomes
+            if not outcome.verified and not outcome.blocked
         ]
-        failed_details = [
-            o.detail
-            for o in local_outcomes
-            if not o.verified and not o.blocked
+        blocked_outcomes = [
+            outcome
+            for outcome in local_outcomes
+            if not outcome.verified and outcome.blocked
         ]
-        if blocked_details:
-            status = "blocked-external-input"
-            failure_reason = "; ".join(blocked_details + failed_details)
-        else:
+        if failed_outcomes:
             status = "failed"
-            failure_reason = "; ".join(failed_details)
+            failure_code = failed_outcomes[0].code
+        else:
+            status = "blocked-external-input"
+            failure_code = blocked_outcomes[0].code
 
-    return RemoteShellPreflightReport(
+    failure_reason = (
+        None
+        if failure_code is None
+        else _PREFLIGHT_FAILURE_REASONS[failure_code]
+    )
+
+    return _build_remote_shell_preflight_report(
         status=status,
         checked_at_utc=now_fn(),
+        config_identity_sha256=config_identity_sha256,
+        **local_input_hashes,
         container_identity=config.container_identity,
         expected_host_key_fingerprint=config.expected_host_key_fingerprint,
         known_host=config.known_host,
@@ -2293,7 +2893,111 @@ def run_remote_shell_preflight(
         scp_binary_found=scp_outcome.verified,
         private_key_protection_verified=key_outcome.verified,
         known_hosts_verified=hosts_outcome.verified,
+        checker_version=(
+            remote_outcome.evidence.checker_version
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
+        expected_checker_config_sha256=(
+            config.expected_checker_config_sha256
+        ),
+        checker_config_sha256=(
+            remote_outcome.evidence.checker_config_sha256
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
+        container_runtime_version=(
+            remote_outcome.evidence.container_runtime_version
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
+        measured_container_identity=(
+            remote_outcome.evidence.container_identity
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
         container_runtime_verified=container_runtime_verified,
+        container_image_verified=container_image_verified,
+        worker_binary_sha256=(
+            remote_outcome.evidence.worker_sha256
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
+        worker_version=(
+            remote_outcome.evidence.worker_version
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
         worker_binary_verified=worker_binary_verified,
+        failure_code=failure_code,
         failure_reason=failure_reason,
+    )
+
+
+def run_remote_shell_preflight_from_path(
+    config_path: str | Path,
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess] | None = None,
+    now: Callable[[], datetime] | None = None,
+    command_audit: list[tuple[str, ...]] | None = None,
+) -> RemoteShellPreflightReport:
+    """Load, probe, and recheck one immutable config-path snapshot."""
+
+    path = Path(config_path)
+    if not path.is_absolute():
+        raise RemoteShellExecutionError(
+            "remote executor config path must be absolute"
+        )
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote executor config cannot be read"
+        ) from exc
+    config = load_remote_shell_executor_config(path)
+    report = run_remote_shell_preflight(
+        config,
+        probe_remote=True,
+        run_command=run_command,
+        now=now,
+        command_audit=command_audit,
+    )
+
+    drifted = False
+    try:
+        after_config = load_remote_shell_executor_config(path)
+        after = path.lstat()
+        drifted = (
+            _stat_signature(before) != _stat_signature(after)
+            or after_config != config
+        )
+    except RemoteShellExecutionError:
+        drifted = True
+    if not drifted:
+        return report
+
+    fields = report.model_dump(
+        mode="python",
+        by_alias=False,
+        exclude={
+            "report_id",
+            "content_sha256",
+            "status",
+            "failure_code",
+            "failure_reason",
+        },
+    )
+    return _build_remote_shell_preflight_report(
+        **fields,
+        status="failed",
+        failure_code="local-transport-drift",
+        failure_reason=_PREFLIGHT_FAILURE_REASONS[
+            "local-transport-drift"
+        ],
     )

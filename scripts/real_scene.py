@@ -24,8 +24,15 @@ from pipeline.real_scene_runner import (  # noqa: E402
     run_real_scene,
 )
 from pipeline.recon_schema import GeoAnchor  # noqa: E402
+from pipeline.remote_shell_executor import (  # noqa: E402
+    RemoteShellExecutionError,
+    canonical_remote_shell_preflight_bytes,
+    publish_remote_shell_preflight,
+    run_remote_shell_preflight_from_path,
+)
 
 _TARGETS = (
+    "preflight-remote",
     "fetch",
     "sfm",
     "train-preview",
@@ -65,7 +72,7 @@ def _parser() -> argparse.ArgumentParser:
         description=("Resume-safe real image/video reconstruction orchestration")
     )
     parser.add_argument("target", choices=_TARGETS)
-    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--source", type=Path)
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -78,6 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-points", type=Path)
     parser.add_argument("--geo-origin")
     parser.add_argument("--remote-config", type=Path)
+    parser.add_argument("--preflight-report", type=Path)
     parser.add_argument("--viewer-policy", type=Path)
     parser.add_argument("--viewer-report", type=Path)
     parser.add_argument("--human-review-policy", type=Path)
@@ -112,6 +120,33 @@ def _validate_runtime_inputs(args, source) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.target == "preflight-remote":
+            if args.remote_config is None:
+                raise ValueError(
+                    "preflight-remote requires --remote-config"
+                )
+            if args.preflight_report is None:
+                raise ValueError(
+                    "preflight-remote requires --preflight-report"
+                )
+            report = run_remote_shell_preflight_from_path(
+                args.remote_config,
+            )
+            publish_remote_shell_preflight(
+                report,
+                args.preflight_report,
+            )
+            print(
+                canonical_remote_shell_preflight_bytes(
+                    report,
+                ).decode("ascii"),
+                end="",
+            )
+            return 0 if report.status == "ready" else 2
+        if args.source is None:
+            raise ValueError(
+                f"{args.target} requires --source"
+            )
         geo_origin = _geo_origin(args.geo_origin)
         source = load_real_dataset_source(args.source)
         _validate_runtime_inputs(args, source)
@@ -140,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     except (
         DatasetEvidenceError,
         RealSceneBlockedError,
+        RemoteShellExecutionError,
         ValueError,
     ) as exc:
         print(f"real-scene blocked: {exc}", file=sys.stderr)

@@ -30,6 +30,8 @@ from pipeline.remote_shell_executor import (  # noqa: E402
     canonical_remote_status_bytes,
 )
 
+REMOTE_WORKER_VERSION = "1.0.0"
+
 
 class RemoteWorkerError(ValueError):
     """The immutable remote attempt cannot be initialized or advanced."""
@@ -480,6 +482,11 @@ def _add_start_arguments(parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run one immutable remote Nantai training attempt",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=REMOTE_WORKER_VERSION,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     init = subparsers.add_parser("init")

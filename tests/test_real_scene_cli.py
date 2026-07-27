@@ -43,6 +43,7 @@ def test_direct_cli_help_works_in_isolated_python():
 
     assert result.returncode == 0, result.stderr
     assert "train-production" in result.stdout
+    assert "preflight-remote" in result.stdout
 
 
 @pytest.mark.parametrize(
