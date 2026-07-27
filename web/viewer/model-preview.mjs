@@ -211,6 +211,40 @@ export function resolveRequestedModelPreviewManifestUrl(pageUrl, fallbackManifes
   return manifestUrl.href;
 }
 
+export function shouldAttemptModelPreview(search = '') {
+  return new URLSearchParams(search).get('presentation') !== 'points';
+}
+
+export function advanceSkippedModelPreview(onStage) {
+  if (typeof onStage !== 'function') {
+    throw new TypeError('Skipped model preview requires a stage callback');
+  }
+  for (const [stage, detail] of [
+    ['model-manifest', '显式点云模式，跳过可选模型清单'],
+    ['model-bytes', '显式点云模式，跳过可选模型字节'],
+    ['model-parse', '显式点云模式，跳过可选模型解析'],
+  ]) {
+    onStage(stage, detail);
+  }
+  return { status: 'skipped' };
+}
+
+export function modelPreviewStartupCompletion({
+  modelPreviewStatus,
+  fallbackUsed,
+}) {
+  if (fallbackUsed === true) {
+    return '高斯 / 点云后备可交互；模型失败未改变场景可信度';
+  }
+  if (modelPreviewStatus === 'loaded') {
+    return '已校验模型场景可交互';
+  }
+  if (modelPreviewStatus === 'skipped') {
+    return '显式高斯 / 点云场景可交互；未验证可选模型';
+  }
+  throw new TypeError('Startup completion requires loaded, skipped, or fallback evidence');
+}
+
 function bytesToHex(bytes) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }

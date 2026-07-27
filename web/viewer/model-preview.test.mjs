@@ -246,6 +246,53 @@ test('selects only a same-origin private L0 manifest from the page query', () =>
   }
 });
 
+test('explicit point presentation bypasses optional model preview loading', () => {
+  const {
+    advanceSkippedModelPreview,
+    modelPreviewStartupCompletion,
+    shouldAttemptModelPreview,
+  } = subject();
+
+  assert.equal(shouldAttemptModelPreview('?embed=1&presentation=points'), false);
+  assert.equal(shouldAttemptModelPreview('?presentation=mesh'), true);
+  assert.equal(shouldAttemptModelPreview('?presentation=model'), true);
+  assert.equal(shouldAttemptModelPreview('?embed=1'), true);
+
+  const stages = [];
+  assert.deepEqual(
+    advanceSkippedModelPreview((stage, detail) => {
+      stages.push({ stage, detail });
+    }),
+    { status: 'skipped' },
+  );
+  assert.deepEqual(
+    stages.map(({ stage }) => stage),
+    ['model-manifest', 'model-bytes', 'model-parse'],
+  );
+  assert.equal(stages.every(({ detail }) => /点云/.test(detail)), true);
+  assert.match(
+    modelPreviewStartupCompletion({
+      modelPreviewStatus: 'skipped',
+      fallbackUsed: false,
+    }),
+    /未验证可选模型/,
+  );
+  assert.match(
+    modelPreviewStartupCompletion({
+      modelPreviewStatus: 'loaded',
+      fallbackUsed: false,
+    }),
+    /已校验模型/,
+  );
+  assert.match(
+    modelPreviewStartupCompletion({
+      modelPreviewStatus: 'rejected',
+      fallbackUsed: true,
+    }),
+    /后备可交互/,
+  );
+});
+
 test('verifies the fetched GLB bytes against the manifest SHA-256', async () => {
   const { modelPreviewSha256, verifyModelPreviewBytes } = subject();
   const bytes = new TextEncoder().encode('verified model bytes');

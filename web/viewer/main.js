@@ -85,13 +85,16 @@ import {
   updateSkyDome,
 } from './sky-dome.mjs';
 import {
+  advanceSkippedModelPreview,
   modelPreviewCameraPose,
   modelPreviewDisclosure,
   modelPreviewSha256,
+  modelPreviewStartupCompletion,
   modelPreviewTrustMetadata,
   resolveModelPreviewUrl,
   resolveRequestedModelPreviewManifestUrl,
   selectEmbeddedModelPreviewCamera,
+  shouldAttemptModelPreview,
   validateModelPreviewManifest,
   verifyModelPreviewBytes,
 } from './model-preview.mjs';
@@ -2750,11 +2753,16 @@ async function main() {
   applyFraming(computeFraming(manifest, reconManifest));
   setStartupStage('reconstruction', '初始化高斯渲染器与点云后备');
   await loadReconstructionLayer();
-  const modelPreviewResult = await loadModelPreview(
-    modelPreviewManifestUrl,
-    { onStage: setStartupStage },
-  );
-  if (modelPreviewResult.status !== 'loaded') {
+  const modelPreviewResult = shouldAttemptModelPreview(window.location.search)
+    ? await loadModelPreview(
+      modelPreviewManifestUrl,
+      { onStage: setStartupStage },
+    )
+    : advanceSkippedModelPreview(setStartupStage);
+  if (
+    modelPreviewResult.status !== 'loaded'
+    && modelPreviewResult.status !== 'skipped'
+  ) {
     showStartupFailure(
       modelPreviewResult.stage,
       modelPreviewResult.reason ?? '模型预览不可用',
@@ -2836,9 +2844,10 @@ async function main() {
 
   startupState = completeStartup(
     startupState,
-    startupState.fallback_used
-      ? '高斯 / 点云后备可交互；模型失败未改变场景可信度'
-      : '已校验模型场景可交互',
+    modelPreviewStartupCompletion({
+      modelPreviewStatus: modelPreviewResult.status,
+      fallbackUsed: startupState.fallback_used,
+    }),
   );
   renderStartup();
   document.getElementById('loading').style.display = 'none';
