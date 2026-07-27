@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import os
+import stat
 import sys
 import uuid
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 
@@ -22,6 +24,14 @@ from pipeline.real_scene_acceptance import (  # noqa: E402
     canonical_human_review_policy_bytes,
     record_human_visual_review,
     validate_human_visual_review,
+)
+from pipeline.viewer_acceptance import (  # noqa: E402
+    ViewerAcceptanceError,
+    ViewerPerformancePolicy,
+    ViewerPerformanceReportV2,
+    canonical_viewer_performance_policy_bytes,
+    load_viewer_performance_report_bytes,
+    verify_viewer_capture_report,
 )
 
 
@@ -41,11 +51,19 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="CATEGORY=accepted|rejected|unknown",
     )
-    parser.add_argument(
+    screenshots = parser.add_mutually_exclusive_group()
+    screenshots.add_argument(
         "--screenshot",
         action="append",
         default=[],
         metavar="POSE_ID=RELATIVE.png",
+    )
+    screenshots.add_argument(
+        "--viewer-report",
+        help=(
+            "Verified Viewer v2 report whose screenshot bindings are "
+            "reused for this review"
+        ),
     )
     parser.add_argument("--reviewed-at")
     parser.add_argument("--output")
@@ -94,6 +112,129 @@ def _load_policy(path: Path) -> HumanReviewPolicy:
             "human review policy is not canonical JSON"
         )
     return policy
+
+
+def _identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        item.st_dev,
+        item.st_ino,
+        item.st_mode,
+        item.st_size,
+        item.st_mtime_ns,
+    )
+
+
+def _read_evidence_file(
+    root: Path,
+    path: Path,
+    *,
+    label: str,
+) -> bytes:
+    try:
+        root_real = root.resolve(strict=True)
+        candidate = path if path.is_absolute() else root / path
+        candidate = candidate.absolute()
+        candidate.relative_to(root_real)
+        current = root_real
+        for part in candidate.relative_to(root_real).parts:
+            current = current / part
+            inspected = current.lstat()
+            if stat.S_ISLNK(inspected.st_mode):
+                raise RealSceneAcceptanceError(
+                    f"{label} must not traverse a symlink"
+                )
+        before = candidate.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise RealSceneAcceptanceError(
+                f"{label} must be a real regular file"
+            )
+        with candidate.open("rb") as stream:
+            payload = stream.read()
+            after = os.fstat(stream.fileno())
+        final = candidate.lstat()
+    except RealSceneAcceptanceError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise RealSceneAcceptanceError(
+            f"{label} is unavailable or escapes the run root"
+        ) from exc
+    if (
+        not payload
+        or _identity(before) != _identity(after)
+        or _identity(after) != _identity(final)
+    ):
+        raise RealSceneAcceptanceError(
+            f"{label} is empty or changed while being read"
+        )
+    return payload
+
+
+def _viewer_screenshots(
+    *,
+    root: Path,
+    report_path: Path,
+    human_policy: HumanReviewPolicy,
+) -> dict[str, str]:
+    report_payload = _read_evidence_file(
+        root,
+        report_path,
+        label="Viewer capture report",
+    )
+    try:
+        report = load_viewer_performance_report_bytes(report_payload)
+    except ViewerAcceptanceError as exc:
+        raise RealSceneAcceptanceError(
+            f"Viewer capture report is invalid: {exc}"
+        ) from exc
+    if not isinstance(report, ViewerPerformanceReportV2):
+        raise RealSceneAcceptanceError(
+            "human review requires a Viewer v2 capture report"
+        )
+    viewer_policy_path = root.joinpath(
+        *PurePosixPath(report.viewer_policy.path).parts
+    )
+    viewer_policy_payload = _read_evidence_file(
+        root,
+        viewer_policy_path,
+        label="Viewer capture policy",
+    )
+    try:
+        viewer_policy = ViewerPerformancePolicy.model_validate_json(
+            viewer_policy_payload
+        )
+    except ValidationError as exc:
+        raise RealSceneAcceptanceError(
+            "Viewer capture policy is invalid"
+        ) from exc
+    if (
+        viewer_policy_payload
+        != canonical_viewer_performance_policy_bytes(viewer_policy)
+    ):
+        raise RealSceneAcceptanceError(
+            "Viewer capture policy is not canonical JSON"
+        )
+    try:
+        verify_viewer_capture_report(
+            viewer_policy,
+            report,
+            root,
+        )
+    except ViewerAcceptanceError as exc:
+        raise RealSceneAcceptanceError(
+            f"Viewer capture cannot be verified: {exc}"
+        ) from exc
+    pose_ids = tuple(row.pose_id for row in report.poses)
+    if (
+        human_policy.source_role != report.source_role
+        or human_policy.required_pose_ids != pose_ids
+    ):
+        raise RealSceneAcceptanceError(
+            "human review policy differs from Viewer report role or pose order"
+        )
+    return {
+        screenshot.pose_id: screenshot.path
+        for screenshot in report.screenshots
+    }
 
 
 def _output_path(root: Path, requested: str | None) -> Path:
@@ -179,6 +320,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = Path(args.run_root)
         policy = _load_policy(Path(args.policy))
+        screenshots = (
+            _viewer_screenshots(
+                root=root,
+                report_path=Path(args.viewer_report),
+                human_policy=policy,
+            )
+            if args.viewer_report
+            else _pairs(
+                args.screenshot,
+                label="screenshot",
+            )
+        )
         review = record_human_visual_review(
             policy=policy,
             root=root,
@@ -187,10 +340,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.disposition,
                 label="disposition",
             ),
-            screenshots=_pairs(
-                args.screenshot,
-                label="screenshot",
-            ),
+            screenshots=screenshots,
             reviewed_at=_reviewed_at(args.reviewed_at),
         )
         decision = validate_human_visual_review(

@@ -12,6 +12,9 @@ import pytest
 
 import pipeline.real_scene_acceptance as acceptance_module
 import pipeline.real_scene_import as import_module
+from pipeline.human_review_inputs import (
+    PRODUCTION_MAXIMUM_SCREENSHOT_BYTES,
+)
 from pipeline.production_training_closure import (
     load_production_training_closure_bytes,
 )
@@ -50,7 +53,10 @@ from pipeline.render_evaluation import (
     render_artifact_stem,
     render_evaluation_sha256,
 )
-from pipeline.viewer_acceptance import ViewerPerformancePolicy
+from pipeline.viewer_acceptance import (
+    ViewerPerformancePolicy,
+    canonical_viewer_performance_report_bytes,
+)
 from scripts.record_real_scene_review import main as record_review_main
 from tests.test_real_scene_import import (
     _patch_production_bundle,
@@ -495,6 +501,67 @@ def test_human_review_cli_records_missing_category_as_unknown(
     decision = validate_human_visual_review(_policy(), review, root)
     assert decision.unknown_categories == (REQUIRED_VISUAL_CATEGORIES[-1],)
     assert "PENDING" in capsys.readouterr().out
+
+
+def _viewer_bound_cli_fixture(tmp_path):
+    root = tmp_path / "run"
+    root.mkdir()
+    report = _viewer_report_v2(root)
+    report_path = root / "viewer/report.json"
+    report_path.write_bytes(
+        canonical_viewer_performance_report_bytes(report)
+    )
+    policy = HumanReviewPolicy(
+        source_role="production-acceptance",
+        required_categories=REQUIRED_VISUAL_CATEGORIES,
+        required_pose_ids=tuple(row.pose_id for row in report.poses),
+        maximum_screenshot_bytes=PRODUCTION_MAXIMUM_SCREENSHOT_BYTES,
+    )
+    policy_path = root / "human-review-policy.json"
+    policy_path.write_bytes(canonical_human_review_policy_bytes(policy))
+    args = [
+        "--run-root",
+        str(root),
+        "--reviewer",
+        "Reviewer One",
+        "--policy",
+        str(policy_path),
+        "--viewer-report",
+        str(report_path),
+        "--reviewed-at",
+        "2026-07-26T12:00:00Z",
+    ]
+    for category in REQUIRED_VISUAL_CATEGORIES:
+        args.extend(["--disposition", f"{category}=accepted"])
+    return root, policy, report, args
+
+
+def test_human_review_cli_derives_screenshots_from_verified_viewer_report(
+    tmp_path,
+):
+    root, policy, report, args = _viewer_bound_cli_fixture(tmp_path)
+
+    exit_code = record_review_main(args)
+
+    assert exit_code == 0
+    output = root / "evidence/human-visual-review.json"
+    review = HumanVisualReview.model_validate_json(output.read_bytes())
+    assert tuple(
+        (row.pose_id, row.path) for row in review.screenshots
+    ) == tuple((row.pose_id, row.path) for row in report.screenshots)
+    assert validate_human_visual_review(policy, review, root).accepted is True
+
+
+def test_human_review_cli_rejects_tampered_viewer_screenshot(
+    tmp_path,
+):
+    root, _policy, report, args = _viewer_bound_cli_fixture(tmp_path)
+    (root / report.screenshots[0].path).write_bytes(b"tampered")
+
+    exit_code = record_review_main(args)
+
+    assert exit_code == 2
+    assert not (root / "evidence/human-visual-review.json").exists()
 
 
 def _acceptance_reference(root, relative: str) -> AcceptanceEvidenceReference:
