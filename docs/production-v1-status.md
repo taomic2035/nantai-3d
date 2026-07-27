@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27，基线 `49c1f9b`
+更新：2026-07-27，基线 `42f0e61`
 
 ## 一句话状态
 
@@ -19,10 +19,10 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 远程演练真实性边界 | 固定 11 cases，明确为 transport-fixture |
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
-| production import 与 runner 复验 | v3 receipt 绑定 G2/G5；原始训练、render、closure 字节重算 |
+| production import、acceptance 与 runner 复验 | v3 receipt 绑定 G2/G5；import 与最终 acceptance 均重开原始 runtime、manifest、render、closure 字节 |
 | production runtime evidence | 六 probe/六 executable 合同已完成，待 fresh job-container 接入 |
 | production result closure | v2 manifest、closure 与 import 消费端已完成，待 remote caller 产出 |
-| Viewer/Studio 与 synthetic QA | 可用，但不能代替真实重建验收 |
+| Viewer/Studio 与 synthetic QA | 可用；Viewer v1 数值报告尚未绑定可信采集 runner，不能签署 production |
 
 ## 正式版关键路径
 
@@ -55,6 +55,14 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 7. 无端点时交付 canonical `blocked-external-input`；
 8. 把 worker / shell 静态安全发现转成可重复 RED 测试。
 
+当前候选不能视为关闭：
+
+- `c66a00a` 的 container lifecycle 仍允许任意 resolved image ID、覆盖
+  `container-id.txt`，也未证明 terminal 状态耐久后才 cleanup；
+- `da86a81` 的 blocked report 要求用占位 host/digest/dataset SHA 表示缺失输入，
+  并由报告自报 `rights-cleared`，已被 Codex review 拒绝；
+- 两项精确返修入口均在 `HANDOFF-GLM-011`，测试绿色不能替代返修。
+
 ### P0 — 外部输入：正式素材与测量
 
 必须准备同一个 scene identity 的：
@@ -69,7 +77,12 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 ### P1 — Codex：真实产物消费与 Viewer 验收
 
-import/runner 消费端已经就绪。收到 remote caller 产生的 G5 verified result 后：
+import/runner/aggregate 的原始证据消费端已经就绪。下一项仓库内 P0 是 Viewer v2
+采集凭证：production acceptance 必须绑定 scene manifest、camera set、policy、
+采集脚本、Node/Playwright/browser executable 的内容身份与前后快照；可手写的
+Viewer v1 报告只保留 canary/兼容用途。
+
+收到 remote caller 产生的 G5 verified result 后：
 
 1. fresh production import，复验 runtime/result/alignment 全部 SHA；
 2. 生成同一 scene identity 的 chunks、LOD 和 Viewer manifest；
