@@ -17,6 +17,33 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ---
 
+## GLM 立即执行卡（2026-07-27，当前有效）
+
+不要再回复“无事可做”。本次核对基线 `84a1b27` 的代码证据仍显示
+`pipeline/remote_training_drill.py` 引用了已经删除的
+`test_submit_advances_receipt_to_running`。按下面四张票连续执行；完成一张就独立
+提交、用一次性代理 push，然后直接开始下一张，不等待 Codex 回执。
+
+| 顺序 | Ticket | 只允许主动修改 | 必须交付的结果 |
+|---|---|---|---|
+| 1 | `P0-CI` | `pipeline/remote_training_drill.py`、`tests/test_remote_training_drill.py` | registry 改绑 `test_submit_keeps_receipt_not_started_until_authoritative_poll`，锁定 node ID 与 not-started 语义，恢复 `remote-training-drill` CI |
+| 2 | `F1` | `pipeline/remote_shell_executor.py`、`tests/test_remote_shell_executor.py` | 同一 lifecycle container 内六探针 clearance；container/executable/GPU/TOCTOU 漂移全部 fail closed；非 accepted 时训练 argv 不可达 |
+| 3 | `G1` | `pipeline/real_scene_operations.py`、`tests/test_real_scene_operations.py`；确有必要才继续修改 F1 两文件 | `train-production` 只在 accepted clearance 后运行并产出既有 import 所需八个 result 文件；不修改消费端 schema |
+| 4 | `H1` | `pipeline/real_scene_operations.py`、`tests/test_real_scene_operations.py` | poll sleep 不越过 deadline；success/failed/exception 都显式关闭 executor |
+
+**现在只从 `P0-CI` 开始。** 先写 RED，确认旧 registry 的 node-not-found，再做最小
+修复并运行本文件 Task P0-CI 给出的 pytest、Ruff 和 `git diff --check` 命令。提交信息
+固定为 `fix: refresh remote drill lifecycle case`。回执格式只写：
+
+```text
+ticket / commit SHA / changed paths / RED failure / GREEN counts + skipped
+/ ruff / diff-check / CI URL or status / next ticket already started
+```
+
+以下情况才允许暂停：需要真实 secret、私有正式素材、付费 GPU，或者必须修改
+Codex-owned Viewer/Studio/release/acceptance aggregate。普通实现选择、测试失败和 CI 等待
+都不是暂停理由。
+
 ## 当前 active ticket：P0-CI 固定演练 registry 刷新
 
 E1 fresh-container lifecycle 已完成实现、两轮独立 review、提交并 push。关闭证据：
