@@ -208,6 +208,36 @@ def _write_status(job_dir: Path, status: RemoteShellStatus) -> None:
     )
 
 
+def _write_failure_status(
+    job_dir: Path,
+    spec: RemoteWorkerSpec,
+    *,
+    exit_code: int,
+    stdout_sha: str,
+    stderr_sha: str,
+) -> None:
+    """Publish a terminal failure status without re-deriving identity fields.
+
+    Keeps exception handlers free of identity-bearing strings so that
+    failure paths cannot leak the originating bundle SHA via logs or
+    stack traces.
+    """
+    _write_status(
+        job_dir,
+        RemoteShellStatus(
+            job_id=spec.job_id,
+            attempt_id=spec.attempt_id,
+            request_sha256=spec.request_sha256,
+            training_bundle_sha256=spec.training_bundle_sha256,
+            state="failed",
+            updated_at_utc=datetime.now(UTC),
+            exit_code=exit_code,
+            stdout_sha256=stdout_sha,
+            stderr_sha256=stderr_sha,
+        ),
+    )
+
+
 def read_status(job_dir: Path, *, max_bytes: int) -> bytes:
     raw = _read_stable(
         Path(job_dir).absolute() / "status.json",
@@ -462,19 +492,12 @@ def run_job(
             label="worker stderr log",
         )
         if exit_code != 0:
-            _write_status(
+            _write_failure_status(
                 job_dir,
-                RemoteShellStatus(
-                    job_id=spec.job_id,
-                    attempt_id=spec.attempt_id,
-                    request_sha256=spec.request_sha256,
-                    training_bundle_sha256=spec.training_bundle_sha256,
-                    state="failed",
-                    updated_at_utc=datetime.now(UTC),
-                    exit_code=exit_code,
-                    stdout_sha256=stdout_sha,
-                    stderr_sha256=stderr_sha,
-                ),
+                spec,
+                exit_code=exit_code,
+                stdout_sha=stdout_sha,
+                stderr_sha=stderr_sha,
             )
             if container_id is not None:
                 _remove_container(
@@ -541,19 +564,12 @@ def run_job(
             stderr_path,
             label="worker stderr log",
         )
-        _write_status(
+        _write_failure_status(
             job_dir,
-            RemoteShellStatus(
-                job_id=spec.job_id,
-                attempt_id=spec.attempt_id,
-                request_sha256=spec.request_sha256,
-                training_bundle_sha256=spec.training_bundle_sha256,
-                state="failed",
-                updated_at_utc=datetime.now(UTC),
-                exit_code=75,
-                stdout_sha256=stdout_sha,
-                stderr_sha256=stderr_sha,
-            ),
+            spec,
+            exit_code=75,
+            stdout_sha=stdout_sha,
+            stderr_sha=stderr_sha,
         )
         if container_id is not None:
             _remove_container(

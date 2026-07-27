@@ -124,6 +124,32 @@ run_production_prepared_bundle_mode() {
     echo "!! 镜像缺少 ns-export" >&2
     return 1
   }
+  local NS_TRAIN_VERSION
+  NS_TRAIN_VERSION="$(ns-train --version 2>/dev/null || true)"
+  if [ -z "$NS_TRAIN_VERSION" ]; then
+    echo "!! production 模式未取得 ns-train --version 输出" >&2
+    return 1
+  fi
+  case "$NS_TRAIN_VERSION" in
+    *"$NERFSTUDIO_VERSION"*) : ;;
+    *)
+      echo "!! ns-train --version 与 nerfstudio 不一致: $NS_TRAIN_VERSION" >&2
+      return 1
+      ;;
+  esac
+  local NS_EXPORT_VERSION
+  NS_EXPORT_VERSION="$(ns-export --version 2>/dev/null || true)"
+  if [ -z "$NS_EXPORT_VERSION" ]; then
+    echo "!! production 模式未取得 ns-export --version 输出" >&2
+    return 1
+  fi
+  case "$NS_EXPORT_VERSION" in
+    *"$NERFSTUDIO_VERSION"*) : ;;
+    *)
+      echo "!! ns-export --version 与 nerfstudio 不一致: $NS_EXPORT_VERSION" >&2
+      return 1
+      ;;
+  esac
   command -v nvidia-smi >/dev/null || {
     echo "!! production 模式未探测到 nvidia-smi" >&2
     return 1
@@ -397,7 +423,7 @@ echo "=== 1. 安装 nerfstudio（含 gsplat/splatfacto 后端）==="
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" \
   || { echo "!! 先装匹配 CUDA 的 torch，再重跑"; exit 1; }
 pip install --upgrade pip
-pip install nerfstudio          # 会拉 gsplat；失败见文末排错
+pip install nerfstudio==1.1.5   # 会拉 gsplat；失败见文末排错
 command -v ns-train >/dev/null || { echo "!! nerfstudio 安装未成功"; exit 1; }
 command -v colmap  >/dev/null || echo "注意: 云上无 colmap，ns-process-data 需要它；装：apt-get install -y colmap 或用带 colmap 的镜像"
 
