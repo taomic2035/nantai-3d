@@ -155,8 +155,13 @@ def _setup_publishable_run(tmp_path: Path, topology: str):
 
 
 def _start_helper(*args: str) -> subprocess.Popen:
+    python = (
+        getattr(sys, "_base_executable", sys.executable)
+        if os.name == "nt"
+        else sys.executable
+    )
     return subprocess.Popen(
-        [sys.executable, str(HELPER), *args],
+        [python, str(HELPER), *args],
         cwd=Path(__file__).parents[1],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -191,8 +196,13 @@ def _read_json_line(process: subprocess.Popen, *, timeout: float = 30) -> dict:
 
 
 def _recover_in_fresh_process(root: Path) -> dict:
+    python = (
+        getattr(sys, "_base_executable", sys.executable)
+        if os.name == "nt"
+        else sys.executable
+    )
     result = subprocess.run(
-        [sys.executable, str(HELPER), "recover", str(root)],
+        [python, str(HELPER), "recover", str(root)],
         cwd=Path(__file__).parents[1],
         capture_output=True,
         text=True,
