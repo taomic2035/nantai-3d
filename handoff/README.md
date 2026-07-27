@@ -5,13 +5,16 @@
 
 ## 当前真实场景主线
 
-1. [真实场景差距与连续队列](HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md)
-2. [明确下一队列与临时 Git 代理](HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md)
-3. [Roaming graph producer](HANDOFF-GLM-009-roaming-graph-producer.md)
-4. [P7 recovered-pose Viewer QA](HANDOFF-CODEX-013-viewer-qa-p7-recovered-pose-splat.md)
+1. [Production V1 关键路径连续队列](HANDOFF-GLM-011-production-v1-critical-path.md)
+2. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
+3. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
+4. [Roaming graph producer（P2）](HANDOFF-GLM-009-roaming-graph-producer.md)
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。
+
+GLM-007/008 与 P7 recovered-pose Viewer QA 已被 Production V1 主线替代，只在
+Git 历史中用于回归追溯，不再作为当前任务入口。
 
 ## 当前 synthetic / Blender 主线
 

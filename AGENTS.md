@@ -86,10 +86,8 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 ## 当前协作入口
 
 - [`handoff/README.md`](handoff/README.md) — 当前 handoff 索引
-- [`handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md`](handoff/HANDOFF-GLM-007-real-scene-gap-and-independent-queue.md)
-- [`handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md`](handoff/HANDOFF-GLM-008-explicit-next-queue-and-git-proxy.md)
+- [`handoff/HANDOFF-GLM-011-production-v1-critical-path.md`](handoff/HANDOFF-GLM-011-production-v1-critical-path.md)
 - [`handoff/HANDOFF-GLM-009-roaming-graph-producer.md`](handoff/HANDOFF-GLM-009-roaming-graph-producer.md)
-- [`handoff/HANDOFF-CODEX-013-viewer-qa-p7-recovered-pose-splat.md`](handoff/HANDOFF-CODEX-013-viewer-qa-p7-recovered-pose-splat.md)
 - [`handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md`](handoff/HANDOFF-OPUS-006-production-camera-quality-gates.md)
 - [`handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md`](handoff/HANDOFF-OPUS-007-batch6-modules-productionization.md)
 

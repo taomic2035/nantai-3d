@@ -49,3 +49,13 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 
 设计图、synthetic Blender、mock/COLMAP 失败 smoke、stub trainer 与本机 Brush 小样
 都不能替代这些门。
+
+## 2026-07-26 至 07-27：Preview2 与 Production V1 caller
+
+- 发布 `v1.0.0-preview.2`；Release 仍是 synthetic point-preview，不冒充真实重建。
+- 新增 rights/receipt、fresh real COLMAP、held-out split、local Brush、remote-shell
+  Splatfacto、import/chunk、render/viewer/human review 和 aggregate acceptance 合同。
+- fresh canary 得到真实照片 COLMAP 与本机 Brush `preview-only` 证据；未取得云 GPU
+  production 结果、米制对齐或真实 Viewer/human acceptance。
+- 最新 `main@348422f` 出现跨平台 CI 回归；当前修复与连续执行队列见
+  [HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md)。
