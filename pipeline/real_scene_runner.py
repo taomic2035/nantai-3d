@@ -380,6 +380,59 @@ class RealSceneRunner:
             ),
         )
 
+    def _verify_production_import_output(
+        self,
+        *,
+        stage_root: Path,
+        artifacts: tuple[Path, ...],
+        claimed_alignment_rms_m: float | None,
+    ) -> float:
+        from pipeline.real_scene_import import (
+            RealSceneImportError,
+            validate_real_scene_import_receipt,
+        )
+
+        root = Path(stage_root).expanduser().absolute()
+        expected_receipt = root / "import-receipt.json"
+        artifact_paths = tuple(
+            Path(path).expanduser().absolute() for path in artifacts
+        )
+        try:
+            for path in artifact_paths:
+                path.relative_to(root)
+        except ValueError as exc:
+            raise RealSceneBlockedError(
+                "production import artifacts must stay inside the stage root"
+            ) from exc
+        if artifact_paths.count(expected_receipt) != 1:
+            raise RealSceneBlockedError(
+                "production import requires exactly one canonical import receipt"
+            )
+        try:
+            imported = validate_real_scene_import_receipt(
+                expected_receipt,
+                root,
+            )
+        except (OSError, RealSceneImportError, ValueError) as exc:
+            raise RealSceneBlockedError(
+                f"production import receipt revalidation failed: {exc}"
+            ) from exc
+        if (
+            imported.source_role != "production-acceptance"
+            or imported.alignment_rms_m is None
+            or imported.alignment_measurement_sha256 is None
+            or imported.alignment_policy_sha256 is None
+            or imported.alignment_decision_sha256 is None
+        ):
+            raise RealSceneBlockedError(
+                "production import receipt has no accepted metric evidence"
+            )
+        if claimed_alignment_rms_m != imported.alignment_rms_m:
+            raise RealSceneBlockedError(
+                "production import caller RMS differs from verified receipt"
+            )
+        return imported.alignment_rms_m
+
     def _verify_completed(
         self,
         receipt: StageReceipt,
@@ -418,6 +471,25 @@ class RealSceneRunner:
             )
         self._verify_artifact_bindings(receipt.evidence)
         self._verify_artifact_bindings(receipt.outputs)
+        if (
+            receipt.stage == "import"
+            and self.source.role == "production-acceptance"
+        ):
+            self._verify_production_import_output(
+                stage_root=(
+                    self.workspace
+                    / "stages"
+                    / "import"
+                    / receipt.attempt_id
+                ),
+                artifacts=tuple(
+                    self.workspace.joinpath(
+                        *PurePosixPath(binding.path).parts
+                    )
+                    for binding in receipt.outputs
+                ),
+                claimed_alignment_rms_m=receipt.alignment_rms_m,
+            )
         return receipt
 
     def _verify_artifact_bindings(
@@ -623,6 +695,35 @@ class RealSceneRunner:
                     *execution.artifacts,
                 ),
             )
+        elif (
+            execution.state == "completed"
+            and stage == "import"
+            and self.source.role == "production-acceptance"
+        ):
+            try:
+                verified_rms = self._verify_production_import_output(
+                    stage_root=stage_root,
+                    artifacts=execution.artifacts,
+                    claimed_alignment_rms_m=execution.alignment_rms_m,
+                )
+            except RealSceneBlockedError as exc:
+                execution = StageExecution(
+                    state="blocked",
+                    artifacts=(),
+                    reason=str(exc),
+                    alignment_rms_m=execution.alignment_rms_m,
+                    evidence_artifacts=(
+                        *execution.evidence_artifacts,
+                        *execution.artifacts,
+                    ),
+                )
+            else:
+                execution = StageExecution(
+                    state="completed",
+                    artifacts=execution.artifacts,
+                    alignment_rms_m=verified_rms,
+                    evidence_artifacts=execution.evidence_artifacts,
+                )
         evidence = tuple(
             sorted(
                 (

@@ -275,6 +275,32 @@ def test_production_import_persists_bad_rms_as_blocked(tmp_path, rms):
         runner.run("import")
 
 
+def test_production_import_rejects_low_rms_without_metric_evidence(
+    tmp_path,
+):
+    control_points = _control_points(tmp_path / "control-points.json")
+    runner, operations = _runner(
+        tmp_path,
+        role="production-acceptance",
+        control_points=control_points,
+    )
+    operations.alignment_rms_m["import"] = 0.1
+
+    with pytest.raises(RealSceneBlockedError, match="import receipt"):
+        runner.run("import")
+
+    receipt_path = next(
+        (runner.receipt_root / "import").glob("*.json")
+    )
+    payload = json.loads(receipt_path.read_text(encoding="ascii"))
+    assert payload["status"] == "blocked"
+    assert payload["alignment_rms_m"] == pytest.approx(0.1)
+    assert payload["outputs"] == []
+    assert "import receipt" in payload["reason"]
+    with pytest.raises(RealSceneBlockedError, match="explicit retry"):
+        runner.run("import")
+
+
 def test_unknown_remote_state_resumes_the_same_attempt(
     tmp_path,
 ):

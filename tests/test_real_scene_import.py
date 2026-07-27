@@ -24,6 +24,10 @@ from pipeline.real_scene_import import (
     inspect_real_scene_ply,
     validate_real_scene_import_receipt,
 )
+from pipeline.real_scene_runner import (
+    RealSceneRunner,
+    RealSceneSourceIdentity,
+)
 from pipeline.recon_schema import (
     AlignmentStatus,
     AxisConvention,
@@ -749,6 +753,24 @@ def test_production_import_is_metric_chunked_and_content_closed(
         output_root / "import-receipt.json",
         output_root,
     ) == receipt
+    runner = RealSceneRunner(
+        source=RealSceneSourceIdentity(
+            dataset_id="production-fixture",
+            role="production-acceptance",
+            source_sha256="a" * 64,
+        ),
+        workspace_base=tmp_path / "runner",
+        operations=SimpleNamespace(),
+    )
+    assert runner._verify_production_import_output(
+        stage_root=output_root,
+        artifacts=tuple(
+            path
+            for path in output_root.rglob("*")
+            if path.is_file()
+        ),
+        claimed_alignment_rms_m=receipt.alignment_rms_m,
+    ) == pytest.approx(0.0, abs=1e-12)
 
     replacement_policy = MetricAlignmentPolicy.create(
         max_rms_m=0.2,
