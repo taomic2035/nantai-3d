@@ -10,6 +10,182 @@ Reviewer：Codex
 本文件是 GLM 当前唯一的首要执行入口。旧的 GLM-007/008 只用于历史追溯；
 GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
 
+## 2026-07-27 Codex 当前回执（GLM 先读）
+
+### 当前判定
+
+- P1-1A～P1-1D 的实现已交付；Node 22.14.0、Playwright 1.62.0 和 pinned
+  Chromium 的 Ubuntu/Windows runtime job 已有绿色机器结果。exact-head
+  [CI run 30238069052](https://github.com/taomic2035/nantai-3d/actions/runs/30238069052)
+  的四个 test、两个 viewer-runtime、两个 repro-assets 和 repro-compare 已全部
+  通过。P1-1 正式关闭，GLM 不要回头重做。
+- `58dfc5e feat: credential-free remote-shell preflight (P1-2)` 的 Codex
+  spec review **不通过，不得 push**。局部测试 `19 passed, 1 skipped` 只能证明
+  草稿内部一致，不能证明合同满足。
+- 当前未提交的 P1-3A 测试可以保留在工作树，但在 P1-2 复审通过前不得提交、
+  不得继续叠加 P1-3B/C/D。当前草稿还在 `RemoteShellJobRef` 两处类型标注上触发
+  `F821`；先保留草稿，P1-2 关闭后再补 import 并进入 P1-3A。现在先把 P1-2
+  修成可复核的小提交。Codex 已实跑草稿的九项 focused tests：`8 passed,
+  1 failed`；`test_poll_timeout_returns_unknown` 当前得到
+  `RemoteShellExecutionError`，不是预期的 monotonic `unknown` observation。
+  P1-2 关闭后，P1-3A 还必须为这个 timeout 行为补生产修复，不能只改断言。
+- Codex 的 Viewer 近景相机修复已经专项测试和视觉复核通过；它因父提交
+  `58dfc5e` 尚未获准而暂不 push。GLM 修 P1-2 时禁止修改 `web/`。
+- Codex 继续关闭了 Viewer acceptance 的真实浏览器阻塞：显式
+  `viewerPresentation=points` 现在跳过不存在的可选模型预览，但仍按顺序记录启动
+  stages，且不会声称模型已验证。提交 `c32e13f`；Viewer `222/222`、capture
+  contract `7/7` 通过。
+- Windows 11 / Intel UHD 770 / Chromium 151 / Playwright 1.62 的三视角
+  synthetic internal-canary 报告已实测通过：三视角均为 `full-3dgs`，
+  `max interactive=16.0 ms`、`max p50=19.0 ms`、`max p95=29.2 ms`、
+  `max worst=38.4 ms`、console/unhandled 均为 0。scene manifest SHA
+  `dccec3b229afe86f1e4bfc460747f45312952c643d0b67f56fb5875e0b438e5a`，
+  report SHA
+  `2b89bb0e91d2f3e915666f9f352138e81a008354471d6076fff5a5bae91c7a43`，
+  decision SHA
+  `4926157acdec68f672058fab1b6ff7a883f8bd6d31ee385ef3ad1ab367bf87cc`。
+  这些私有报告不进 Git/Release，只证明 synthetic Viewer runtime/performance，
+  不证明真实照片重建、真实纹理、米制对齐或 Production V1 acceptance。
+- Codex 已在 `9e61374` 把 human visual review receipt 改为同目录 staging →
+  file sync → no-replace durable publication；刷盘失败不会留下可误认的 final。
+  `00c613c` 又把 content-addressed aggregate 与 latest pointer 接入同一耐久
+  原语，失败不留截断 final、也不替换旧 pointer。Task 11 回归 `46 passed,
+  1 skipped`，ruff 通过。Task 12/13 的 Studio real-scene evidence 与正式路径
+  文档门也已复核：Python `60 passed,
+  6 skipped`、Studio Node `38/38`、ruff 通过。GLM 不需要重做这些 Codex
+  路径，继续优先关闭 P1-2/P1-3。
+
+### `58dfc5e` 必须关闭的问题
+
+1. **假 `ready`（P0）**：`probe_remote=False` 时仅四个本地 boolean 为真就返回
+   `ready`，远端字段仍是 `None`；删除/反转
+   `test_ready_without_remote_probe`，模型层也必须拒绝这种 report。
+2. **没有测量声明的 identity（P0）**：`docker --version` 加 `test -f` 不能证明
+   immutable image digest 或 worker executable/version/SHA。不得把 config 中的
+   digest 原样抄入 report 当作实测。
+3. **report 可重放（P0）**：缺去密 config identity、known_hosts 内容 SHA、
+   worker identity、checker version、输入 snapshot、report ID/content SHA。
+4. **没有 TOCTOU 闭环（P0）**：config/key/known_hosts/transport 在远端 probe 前后
+   都要重开、重算并比较；替换、内容漂移或 link-like entry 必须失败。
+5. **状态不稳定（P1）**：任意 `failure_reason` 和 `str(exc)` 不能成为机器合同；
+   使用有限 `failure_code`，并保证 `failed` 不被同时出现的 missing input 降成
+   `blocked-external-input`。
+6. **缺 CLI/publication（P1）**：还没有 `real-scene preflight-remote`、严格 JSON
+   loader、独占创建 canonical report、写失败清理和输出碰撞测试。
+7. **redaction 不完整（P1）**：`UserKnownHostsFile=<absolute path>` 会进入
+   `command_audit`；补 config/known_hosts/key/token/path canary，覆盖 argv、
+   stdout/stderr、异常、traceback 和 report。
+8. **远端 command 合同不闭合（P1）**：OpenSSH CLI 的远端命令天然是字符串；
+   因此只允许一个不含任何 config 派生值的硬编码只读 checker 命令，禁止用
+   `shlex.join()` 拼接动态 argv。checker 返回 canonical identity report，由本地
+   与期望 digest/SHA 比较。
+
+### GLM 立即执行的四个提交
+
+不要等 Codex 再提醒；严格按以下顺序，每项 RED → GREEN → ruff →
+`git diff --check`，只改列出的路径。
+
+#### GLM-P1-2-FIX-A — report 状态机与防重放 identity
+
+允许路径：
+
+- `pipeline/remote_shell_executor.py`
+- `tests/test_remote_shell_executor.py`
+
+完成定义：
+
+- `ready` 必须要求 remote runtime/image/worker 三项实测为真，任一 `None` 都拒绝；
+- `failure_code` 是有限枚举；文本只来自 code 的固定安全映射；
+- report 绑定去密 config identity、known_hosts SHA、期望/实测 container digest、
+  worker SHA/version、checker version 和每个本地 transport identity；
+- `report_id` / `content_sha256` 能从排除自身 ID 的 canonical payload 复算；
+- tamper/replay/unknown field/fake-ready 的模型级 RED 全部转绿。
+
+提交主题：`fix: close remote preflight report identity`
+
+#### GLM-P1-2-FIX-B — 本地 snapshot 与 TOCTOU
+
+允许路径：
+
+- `pipeline/remote_shell_executor.py`
+- `tests/test_remote_shell_executor.py`
+
+完成定义：
+
+- 对 config、key、known_hosts、ssh、scp 建立不含秘密的 before snapshot；
+- JSON loader 拒绝 duplicate key、未知字段、link-like entry 和非普通文件；
+- 远端 probe 后重新打开并重算全部 snapshot，任何漂移返回稳定 `failed` code；
+- 缺配置/凭据/ssh/scp 分别是稳定 `blocked-external-input` code；
+- fingerprint/shape/ACL/tamper 是 `failed`，不能被其它缺失项覆盖。
+
+提交主题：`fix: close remote preflight input drift`
+
+#### GLM-P1-2-FIX-C — 单一固定远端 checker
+
+允许路径：
+
+- `pipeline/remote_shell_executor.py`
+- `tests/test_remote_shell_executor.py`
+- 若确有必要，可新增一个窄职责的 `cloud/` checker 与对应测试
+
+完成定义：
+
+- 只执行一个硬编码、只读、无 config 派生参数的 checker 命令；
+- 不 upload、`mkdir`、create/run container 或启动训练；
+- canonical 响应必须实测 runtime、immutable image digest、worker executable、
+  worker SHA/version；缺字段、重复字段、非 canonical bytes、identity mismatch
+  全部 fail closed；
+- timeout、transport、host-key drift、runtime missing、image mismatch、
+  worker mismatch 使用不同稳定 code；
+- `command_audit` 与所有异常输出不含任何本地敏感路径或远端连接秘密。
+
+提交主题：`feat: verify immutable remote runtime identity`
+
+#### GLM-P1-2-FIX-D — CLI、原子发布与对抗门
+
+允许路径：
+
+- `pipeline/real_scene_operations.py`
+- `pipeline/real_scene_runner.py`
+- `scripts/real_scene.py`
+- `make.py`
+- `Makefile`
+- 对应 `tests/test_*.py`
+
+完成定义：
+
+- `real-scene preflight-remote` 在没有凭据时诚实输出
+  `blocked-external-input`，不用 traceback；
+- report 只写 operator 私有路径，以 exclusive-create + durable publication 发布；
+- 已存在、中途写失败、replace/sync 失败不覆盖旧 report、不留可误认 final；
+- CLI/help/Makefile/Windows/Linux、canonical bytes/content SHA、全域 canary
+  redaction 测试齐全；
+- 不创建 training job、bundle、远端目录或容器。
+
+提交主题：`feat: publish remote readiness preflight`
+
+### P1-2 之后的连续高价值队列
+
+P1-2 四项全部复审通过后，GLM 不要报告“无事可做”，连续领取：
+
+1. P1-3A：submit-before-ack、ack-after-disconnect、poll timeout、remote failed、
+   fetch interrupted 的 monotonic 状态演练；
+2. P1-3B：bundle/result/evaluation/container/journal 每个 SHA 的单点 tamper；
+3. P1-3C：journal 截断、replace 失败、published-unconfirmed、显式 retry/new
+   attempt；
+4. P1-3D：canonical drill report，绑定 exact commit、测试版本和输入 SHA；
+5. P1-4A：至少四个非共面控制点、单位/坐标系/对应关系 fail-closed 输入门；
+6. P1-4B：Sim3 残差、尺度、FrameTransform、transform history 的内容绑定；
+7. P1-5A：CUDA/Nerfstudio/immutable image/worker readiness；无真实端点时输出
+   blocked，而不是停止做本地合同；
+8. P1-6A/B：fresh Windows canary 与信任审计；
+9. P1-7A：交付 verified import/chunks/scene identity/policy/checksum 给 Codex 做
+   真实浏览器 QA。
+
+这九项中只有真实远端 probe、真实 GPU 训练和人工验收需要外部输入；schema、
+状态机、tamper/recovery、CLI、canonical report、控制点验证和 blocked 路径都可
+独立推进。
+
 ## 当前事实
 
 - `v1.0.0-preview.2` 标签及其 CI 是绿色的，已发布的 Preview2 不受本次回归影响。
@@ -31,13 +207,13 @@ GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
   [CI run 30234423540](https://github.com/taomic2035/nantai-3d/actions/runs/30234423540)
   的 Ubuntu/Windows × Python 3.11/3.13 四个 test job、两个 reproducibility job
   与 compare job 全部通过。
-- **GLM 当前立即领取 P1-1A**，随后连续执行 P1-1B、P1-1C、P1-1D、P1-2A；
-  不再等待 P0 或 Codex 另行提醒。
+- **GLM 当前立即领取 GLM-P1-2-FIX-A**，随后连续执行 FIX-B、FIX-C、FIX-D；
+  四项经 Codex 复审通过后再进入 P1-3A，不再等待另行提醒。
 - 当前 canary 只有真实照片 COLMAP 与本机 Brush `preview-only` 证据。尚无
   非 mock CUDA 3DGS、实测米制对齐、真实 Viewer/human acceptance，因此不能
   报告“真实 3D 场景完成”或“production accepted”。
 
-## GLM 立即领取清单
+## GLM 当前连续领取清单（只执行未完成项）
 
 不要等待 Codex 逐项提醒。按下表从上到下连续领取；每完成一行就提交、push、回报
 SHA 与机器结果，然后立刻进入下一行。`blocked-external-input` 只阻塞真实远端调用，
@@ -45,16 +221,10 @@ SHA 与机器结果，然后立刻进入下一行。`blocked-external-input` 只
 
 | ID | 任务 | 完成定义 |
 |---|---|---|
-| P0-6A | 运行 exact-HEAD 本地全门 | `make.py test`、全范围 ruff、`git diff --check` 有完整结果 |
-| P0-6B | 修复全门剩余失败 | 每个失败先有最小 RED；禁止删除、xfail 或放宽安全门 |
-| P0-6C | 关闭远端矩阵 | 记录 exact commit 与 Actions URL，4 个 test + 3 个 repro job 全绿 |
-| P1-1A | Viewer acceptance 单测入标准门 | `make.py test` 明确运行 `scripts/capture_viewer_acceptance.test.mjs` |
-| P1-1B | Chromium 能力预检 | 缺 package、browser binary 或 launch 能力时输出明确机器状态 |
-| P1-1C | CI 安装锁定 Node/browser | `npm ci` 使用 lockfile；Ubuntu/Windows 都验证同一 pinned runtime |
-| P1-2A | remote preflight schema | canonical report 只允许 `ready` / `blocked-external-input` / `failed` |
-| P1-2B | 本地 transport 预检 | 检查 ssh/scp、配置 shape、私钥权限、known_hosts/fingerprint，不提交 job |
-| P1-2C | 远端只读能力预检 | 检查 runtime、immutable image digest 与 worker binary；不得创建训练目录 |
-| P1-2D | secret-redaction 回归 | argv、报告、异常、traceback 都不含 key 路径、token 或私有 config 原文 |
+| P1-2 FIX-A | report 状态机与防重放 identity | fake-ready、重放、tamper、未知字段、错误状态优先级全部模型级拒绝 |
+| P1-2 FIX-B | 本地 snapshot 与 TOCTOU | config/key/known_hosts/ssh/scp 前后重开重算，漂移与 link-like entry fail closed |
+| P1-2 FIX-C | 固定远端只读 checker | 实测 runtime/image/worker identity；canonical 响应与稳定错误码；零远端写入 |
+| P1-2 FIX-D | CLI、耐久发布与 redaction | `preflight-remote`、exclusive durable report、碰撞/写失败/秘密 canary 对抗门 |
 | P1-3A | submit/poll/fetch 状态演练 | success、remote failed、timeout、断网、unknown 均有 monotonic 状态断言 |
 | P1-3B | checksum/内容漂移演练 | result、journal、dataset/config/container SHA 任一漂移均 fail closed |
 | P1-3C | crash/resume/retry 演练 | published-unconfirmed、重启恢复、显式 retry 不得把失败提升为 succeeded |
@@ -72,8 +242,8 @@ P1-7A 后由 Codex 执行真实浏览器 cold-load、交互帧、关键视角与
 
 ## 执行规则
 
-1. 严格按 P0-1 → P0-6 → P1-1 → P1-7 顺序连续推进；一个任务完成后直接进入
-   下一个，不因“测试已绿”而停下。
+1. 严格按 P1-2 FIX-A → FIX-D → P1-3 → P1-7 顺序连续推进；P0 与 P1-1
+   已关闭，不回头重做。一个任务完成后直接进入下一个，不因“测试已绿”而停下。
 2. 先写能复现缺陷的 RED 测试，再做最小修复。不得删除/跳过测试、降低阈值、
    把 unknown 变成 accepted，或用 fixture 字符串冒充机器证据。
 3. 只改每项列出的路径。需要跨出边界时先写明原因交 Codex review；不要修改
@@ -88,7 +258,11 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 5. 每次交付回报：commit SHA、修改路径、RED/GREEN 命令与结果、剩余风险、
    远端 exact-HEAD CI URL。没有真实外部输入时继续做下一项本地任务，不要等待。
 
-## P0 — 恢复可信的跨平台主干
+## 已关闭基线的详细参考（非当前任务）
+
+以下 P0 与 P1-1 只在回归追溯时读取，GLM 不得把它们重新领取为当前工作。
+
+## P0 — 恢复可信的跨平台主干（已关闭）
 
 ### P0-1：冻结失败基线，不提交
 
@@ -242,7 +416,7 @@ reproducibility 全绿。只有远端 exact-HEAD 全绿，P0 才完成。
 
 ## P1 — 把真实场景 caller 变成可执行产品门
 
-### P1-1：把 Viewer acceptance 测试纳入标准门
+### P1-1：把 Viewer acceptance 测试纳入标准门（已关闭）
 
 Owner：GLM 负责 build/CI 集成；Codex 负责浏览器语义与 UI review。
 

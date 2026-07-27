@@ -12,7 +12,14 @@
 
 Production V1 的 P0 已在 `0247440` 与
 [CI run 30234423540](https://github.com/taomic2035/nantai-3d/actions/runs/30234423540)
-关闭；GLM 当前从 P1-1A（Viewer acceptance 入标准门）开始连续执行。
+关闭；P1-1 的 Viewer runtime / CI 门已经实现。GLM 当前唯一最高优先级是修复
+`58dfc5e` 的 P1-2 remote preflight 审计问题，具体四个小提交与后续连续队列见
+[HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md#2026-07-27-codex-当前回执glm-先读)。
+P1-2 通过前不得 push 该提交，也不得继续叠加 P1-3。
+
+P1-1 的 exact-head
+[CI run 30238069052](https://github.com/taomic2035/nantai-3d/actions/runs/30238069052)
+已全绿。
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。
