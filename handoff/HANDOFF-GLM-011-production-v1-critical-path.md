@@ -189,6 +189,7 @@ GLM 每次只回：
 | P1-4B 测量 / policy / decision | `0ad9417` |
 | P1-4C production import / runner 复验 | `23a2ece`, `8693848` |
 | G2 production runtime evidence 合同 | `cba2a19` |
+| G5 production result closure 合同 | `5a0ca09` |
 
 `P1-3D` 的证据范围只是 `transport-fixture`，不等于云 GPU 训练；`P1-4C` 已禁止
 runner 仅凭低 RMS 放行，但这只证明 caller 能验证真实证据，不代表已经取得真实
@@ -319,33 +320,27 @@ G2 schema。先把 `training_executor.py` 中被 `4150cfb` 替代的 drill 草�
 
 联合回归必须包含 readiness + remote shell + operations + runner，不只跑 checker。
 
-### G5 — Production result closure
+### G5 — Production result closure（已由 Codex 关闭）
 
-优先新增：
+已交付：
 
-- `pipeline/production_training_result.py`
-- `tests/test_production_training_result.py`
+- `pipeline/production_training_closure.py`
+- `tests/test_production_training_closure.py`
 
-消费已有：
+`5a0ca09` 已实现严格 result-bundle v2 whitelist、fresh-container identity、
+runtime measurement/policy/decision、request/result/attempt、训练输出、dataparser
+与 held-out render 的内容寻址闭环。GLM 不要建立平行 schema。
 
-- training request/bundle/result/attempt；
-- G2 runtime evidence；
-- dataparser identity transform；
-- `pipeline/render_evaluation.py` 的 held-out report；
-- trained INRIA PLY。
+接入时必须先运行已有 raw verifier，再调用 closure：
 
-完成定义：
+1. `verify_remote_result_bundle` 验 archive whitelist、regular file、SHA/size；
+2. `validate_training_provenance` 验 authoritative config/log/PLY/input bytes；
+3. dataparser validator 验 identity transform；
+4. render evaluator 验相机、render bytes、帧指标与 policy；
+5. 最后才允许 `derive_production_training_closure` 绑定上述身份。
 
-- 验证同一 dataset/config/trainer/container/commit/attempt 从请求贯穿结果；
-- 重新验证 result bundle v2 内的 G2 decision，要求
-  `kind=fresh-job-container` 且 container ID 与实际训练实例一致；
-- 非 mock training log、export PLY、dataparser transform、held-out render/evaluation
-  与 runtime evidence 全部以 canonical SHA 绑定；
-- 至少 100,000 个 finite Gaussians、完整 INRIA schema、identity dataparser；
-- stub/fake/local Brush/transport-fixture 永远不能满足 production closure；
-- policy 和 measurement 分层；改验收阈值不能重写训练观测 SHA；
-- 任一文件缺失、extra、link-like、替换、截断、重放、wrong attempt 或 evaluation
-  未通过都返回 blocked，不产生 verified result。
+closure 不是 PLY parser，也不替代 raw-byte verifier。caller 若跳过 1–4，即使能构造
+模型对象也不得发布 verified result。
 
 ### G6 — 把 result closure 接回 runner/import
 

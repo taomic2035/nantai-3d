@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27，基线 `8693848`
+更新：2026-07-27，基线 `5a0ca09`
 
 ## 一句话状态
 
@@ -21,6 +21,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | measurement / policy / decision | 已独立内容寻址 |
 | production import 与 runner 复验 | 原始字节重算；低 RMS 自报不能通过 |
 | production runtime evidence | 六 probe/六 executable 合同已完成，待 fresh job-container 接入 |
+| production result closure | v2 manifest 与最终身份闭环已完成，待 remote caller 产出并接回 runner |
 | Viewer/Studio 与 synthetic QA | 可用，但不能代替真实重建验收 |
 
 ## 正式版关键路径
@@ -32,7 +33,7 @@ P0 正式采集与权利
                                             ↓
 GLM G1-G4 云 GPU runtime / remote caller → P2 非 mock CUDA 3DGS
                                             ↓
-GLM G5-G6 production result closure → Codex production import
+Codex G5 result closure（已完成）→ GLM/Codex G6 runner 接入
                                             ↓
 P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 ```
@@ -43,15 +44,16 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 按
 [`HANDOFF-GLM-011`](../handoff/HANDOFF-GLM-011-production-v1-critical-path.md)
-连续执行 G1–G7：
+连续执行 NOW-1–NOW-8：
 
 1. 冻结旧 readiness v1，删除被替代的 caller 自报 pass 草稿；
-2. 新建 production runtime evidence；
-3. 固定 read-only GPU/CUDA/Nerfstudio/CLI probes 与 executable TOCTOU；
-4. 接入 remote caller、reconnect 和耐久发布；
-5. 闭合真实 training log / PLY / dataparser / held-out evaluation；
-6. 只允许 verified production result 进入 runner/import；
-7. 无端点时交付 canonical `blocked-external-input`，有端点时原样实跑。
+2. 收窄 fixed read-only host preflight；
+3. 加固 executable identity、输出上限与 TOCTOU；
+4. 实现 fresh container 生命周期与耐久发布；
+5. 在同一 container 内接入 G2 clearance；
+6. 只允许 G5 verified closure 进入 runner/import；
+7. 无端点时交付 canonical `blocked-external-input`；
+8. 把 worker / shell 静态安全发现转成可重复 RED 测试。
 
 ### P0 — 外部输入：正式素材与测量
 
@@ -67,7 +69,7 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 ### P1 — Codex：真实产物消费与 Viewer 验收
 
-收到 G5 verified result 后：
+收到 remote caller 产生的 G5 verified result 后：
 
 1. fresh production import，复验 runtime/result/alignment 全部 SHA；
 2. 生成同一 scene identity 的 chunks、LOD 和 Viewer manifest；

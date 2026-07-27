@@ -13,9 +13,10 @@
 Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cfb`
 关闭；P1-4A 由 `42df736` 关闭，P1-4B 的测量 / policy / decision 分层由
 `0ad9417` 关闭；P1-4C production import 与 runner 字节复验由 `23a2ece`、
-`8693848` 关闭。production runtime evidence 合同由 `cba2a19` 关闭。GLM 当前只
-连续推进 P1-5 的 fixed read-only probe、remote caller、production result closure
-与 runner 接入；具体边界见
+`8693848` 关闭。production runtime evidence 合同由 `cba2a19` 关闭，production
+result bundle v2 与最终身份 closure 由 `5a0ca09` 关闭。GLM 当前按 NOW-1–NOW-8
+连续推进 fixed read-only host preflight、fresh-container remote caller、clearance
+adapter、blocked report 与 runner 接入；具体边界见
 [HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md)。
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
