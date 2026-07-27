@@ -14,6 +14,11 @@ GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
 
 ### 已关闭，不要重做
 
+- P1-3C 的真实恢复主路径已由 Codex 在 `c9da535`、`1750d08`、`e2082a6`
+  关闭：job ref 绑定 exact config identity，strict canonical loader，fresh
+  executor `restore`，同 stage root reconnect，以及 `RESUME=1` 原 attempt
+  poll/fetch 均已接通；专项 `113 passed, 3 skipped`。GLM 不要再写一套平行
+  recovery API，也不要把 model-only journal 测试作为新的 C 关闭证据。
 - `origin/main@cb189a8` 已同步。P1-2 的固定远端 checker、runtime/image/worker
   identity、输入 TOCTOU、canonical report、durable no-replace publication、
   `real-scene preflight-remote` 与 operator 手册均已闭环；专项
@@ -43,6 +48,20 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
    任意传入的 `outcome="pass"`，没有固定 case registry、case evidence SHA、
    实际 runner、exact-HEAD/clean-tree 校验和 durable publication。这样的 canonical
    JSON 只能证明“声明被哈希”，不能证明 drill 真运行过。
+
+### 当前 P1-4 草稿复审补充
+
+工作树的 `alignment.py` / `test_alignment.py` 暂不提交，先关闭三项：
+
+1. 当前 duplicate 测试同时重复 source 和 target，只证明 target duplicate 门触发；
+   还必须单独拒绝重复 source position，避免同一 SfM 点被重复行加权。
+2. “near-coplanar”测试把 `min_span_ratio=1.0` 设成任何有限 3D 点集都几乎不可能
+   通过的阈值，不能证明生产默认阈值能区分近共面；使用默认/冻结 production policy
+   和一对阈值两侧 fixture。
+3. 现有 `Sim3AlignmentEvidence.to_evidence()` round-trip 只是旧 evidence string
+   自洽；P1-4B 仍缺 measured residual 与 policy decision 的独立 content SHA、
+   registration/control-points/transform-history 绑定，以及失败时禁止
+   metric/aligned/ENU 的 runner 断言。
 
 ### GLM 连续执行清单（明确顺序，不要再报告无事可做）
 
