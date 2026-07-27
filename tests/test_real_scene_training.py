@@ -36,6 +36,7 @@ from pipeline.recon_schema import (
 from pipeline.registration import mock_register
 from pipeline.registration_quality import (
     RegistrationQualityPolicy,
+    build_colmap_runtime_evidence,
     build_registration_quality_report,
     enumerate_sparse_models,
 )
@@ -159,7 +160,14 @@ def _sfm(
                 metric_status=MetricStatus.ARBITRARY,
                 geo_aligned=GeoAlignment.UNALIGNED,
                 provenance=FrameProvenance.SFM,
-                evidence=["colmap-joint-model"],
+                evidence=[
+                    "colmap-joint-model",
+                    build_colmap_runtime_evidence(
+                        binary_name="colmap",
+                        binary_sha256="a" * 64,
+                        engine_version="COLMAP 4.1.0",
+                    ),
+                ],
             ),
             "alignment_status": AlignmentStatus.UNALIGNED,
         },

@@ -18,7 +18,6 @@
     python -m pipeline.registration --photos photos --out recon/registration.json
 """
 import argparse
-import functools
 import hashlib
 import json
 import re
@@ -46,7 +45,10 @@ from pipeline.recon_schema import (
     RegistrationResult,
     gps_to_enu,
 )
-from pipeline.registration_quality import enumerate_sparse_models
+from pipeline.registration_quality import (
+    build_colmap_runtime_evidence,
+    enumerate_sparse_models,
+)
 
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 
@@ -501,16 +503,30 @@ def colmap_available() -> bool:
     return _find_colmap_binary() is not None
 
 
-@functools.lru_cache(maxsize=1)
-def colmap_version() -> str:
+def _sha256_colmap_binary(binary: str | Path) -> str:
+    """Hash the executable bytes so runtime evidence identifies one binary."""
+
+    digest = hashlib.sha256()
+    try:
+        with Path(binary).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise RuntimeError("COLMAP binary cannot be hashed") from exc
+    return digest.hexdigest()
+
+
+def colmap_version(binary: str | Path | None = None) -> str:
     """Return the exact active COLMAP version or fail closed."""
 
-    binary = _find_colmap_binary()
-    if binary is None:
+    resolved_binary = (
+        _find_colmap_binary() if binary is None else str(binary)
+    )
+    if resolved_binary is None:
         raise RuntimeError("COLMAP version probe cannot find the active binary")
     try:
         completed = subprocess.run(
-            [binary, "feature_extractor", "-h"],
+            [resolved_binary, "feature_extractor", "-h"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -525,8 +541,7 @@ def colmap_version() -> str:
     return f"COLMAP {match.group(1)}"
 
 
-@functools.lru_cache(maxsize=1)
-def _colmap_sift_group() -> str:
+def _colmap_sift_group(binary: str | Path | None = None) -> str:
     """COLMAP use_gpu 选项组前缀：'Feature'(现行) 或 'Sift'(旧版)。
 
     COLMAP 把 ``--SiftExtraction/--SiftMatching`` 改名为
@@ -534,11 +549,13 @@ def _colmap_sift_group() -> str:
     的 nocuda 版已是 Feature*）。探测已安装 build 的帮助文本，两种命名都适配，
     避免 'unrecognised option' 直接失败。
     """
-    binary = _find_colmap_binary()
-    if binary is None:
+    resolved_binary = (
+        _find_colmap_binary() if binary is None else str(binary)
+    )
+    if resolved_binary is None:
         return "Feature"
     try:
-        out = subprocess.run([binary, "feature_extractor", "-h"],
+        out = subprocess.run([resolved_binary, "feature_extractor", "-h"],
                              capture_output=True, text=True, timeout=30)
         text = (out.stdout or "") + (out.stderr or "")
         if "SiftExtraction.use_gpu" in text and "FeatureExtraction.use_gpu" not in text:
@@ -583,6 +600,8 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
         raise RuntimeError(
             "colmap not found: checked third/colmap/bin/ and PATH. "
             "Install COLMAP or use --engine mock.")
+    binary_sha256 = _sha256_colmap_binary(colmap_bin)
+    engine_version = colmap_version(colmap_bin)
 
     def run(args: list[str]):
         logger.info(f"colmap {' '.join(args[:2])} ...")
@@ -599,7 +618,7 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
                 f"colmap {args[0]} 失败 (exit {proc.returncode}):\n"
                 f"{proc.stderr[-2000:] if proc.stderr else proc.stdout[-2000:]}")
 
-    grp = _colmap_sift_group()  # 'Feature'(现行) / 'Sift'(旧版) — 两种 COLMAP 命名都适配
+    grp = _colmap_sift_group(colmap_bin)
     gpu_flag = "1" if use_gpu else "0"
     run(["feature_extractor", "--database_path", str(db),
          "--image_path", str(photos_dir),
@@ -628,6 +647,8 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
     for candidate in model_dirs:
         run(["model_converter", "--input_path", str(candidate),
              "--output_path", str(candidate), "--output_type", "TXT"])
+    if _sha256_colmap_binary(colmap_bin) != binary_sha256:
+        raise RuntimeError("COLMAP binary changed during registration")
 
     sparse_enumeration = enumerate_sparse_models(sparse, n_images)
     model_dir = sparse / str(sparse_enumeration.selected_model_index)
@@ -730,6 +751,11 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
         provenance=FrameProvenance.SFM,
         evidence=[
             "colmap-joint-model",
+            build_colmap_runtime_evidence(
+                binary_name=Path(colmap_bin).name,
+                binary_sha256=binary_sha256,
+                engine_version=engine_version,
+            ),
             "colmap-intrinsics-source:cameras.txt",
             "no-sim3-alignment-evidence",
             coverage_evidence,

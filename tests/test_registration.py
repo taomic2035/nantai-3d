@@ -1,4 +1,5 @@
 """统一坐标系配准: 会话划分 / mock 确定性 / 坐标一致性 / COLMAP 解析"""
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -223,15 +224,123 @@ def _stub_colmap_commands(monkeypatch):
         "_find_colmap_binary",
         lambda: "colmap",
     )
-    registration_module._colmap_sift_group.cache_clear()
+    monkeypatch.setattr(
+        registration_module,
+        "_sha256_colmap_binary",
+        lambda _: "a" * 64,
+    )
     monkeypatch.setattr(
         registration_module.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout=""),
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stderr="COLMAP 4.1.0\n" if "-h" in args[0] else "",
+            stdout="",
+        ),
     )
 
 
 class TestColmapRegistrationEvidence:
+    def test_runtime_version_and_commands_use_one_resolved_binary(
+        self,
+        photos_dir,
+        tmp_path,
+        monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        _write_colmap_model(
+            workspace,
+            cameras="1 PINHOLE 1000 800 710 720 501 399\n",
+            images="1 1 0 0 0 0 0 0 1 IMG_000.jpg\n\n",
+        )
+        first_path = tmp_path / "colmap-a"
+        second_path = tmp_path / "colmap-b"
+        first_path.write_bytes(b"first-colmap-binary")
+        second_path.write_bytes(b"second-colmap-binary")
+        first_binary = str(first_path)
+        second_binary = str(second_path)
+        resolved = iter((first_binary, second_binary))
+        monkeypatch.setattr(
+            registration_module,
+            "_find_colmap_binary",
+            lambda: next(resolved),
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(args, **kwargs):
+            del kwargs
+            calls.append(args)
+            if args[1:] == ["feature_extractor", "-h"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr="COLMAP 4.1.0 (Commit measured)\n",
+                    stdout="",
+                )
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
+
+        result = registration_module.colmap_register(photos_dir, workspace)
+
+        assert calls
+        assert {call[0] for call in calls} == {first_binary}
+        runtime_entries = [
+            item
+            for item in result.pose_frame.evidence
+            if item.startswith("colmap.runtime.v1=")
+        ]
+        assert len(runtime_entries) == 1
+        runtime = json.loads(runtime_entries[0].split("=", 1)[1])
+        assert runtime == {
+            "binary_name": "colmap-a",
+            "binary_sha256": hashlib.sha256(
+                b"first-colmap-binary"
+            ).hexdigest(),
+            "engine_version": "COLMAP 4.1.0",
+        }
+
+    def test_registration_rejects_colmap_binary_changed_during_run(
+        self,
+        photos_dir,
+        tmp_path,
+        monkeypatch,
+    ):
+        workspace = tmp_path / "colmap"
+        _write_colmap_model(
+            workspace,
+            cameras="1 PINHOLE 1000 800 710 720 501 399\n",
+            images="1 1 0 0 0 0 0 0 1 IMG_000.jpg\n\n",
+        )
+        binary = tmp_path / "colmap-bin"
+        binary.write_bytes(b"fake-colmap")
+        monkeypatch.setattr(
+            registration_module,
+            "_find_colmap_binary",
+            lambda: str(binary),
+        )
+        measured = iter(("a" * 64, "b" * 64))
+        monkeypatch.setattr(
+            registration_module,
+            "_sha256_colmap_binary",
+            lambda _: next(measured),
+            raising=False,
+        )
+
+        def fake_run(args, **kwargs):
+            del kwargs
+            if args[1:] == ["feature_extractor", "-h"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr="COLMAP 4.1.0\n",
+                    stdout="",
+                )
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="binary.*changed|changed.*binary"):
+            registration_module.colmap_register(photos_dir, workspace)
+
     def test_largest_sparse_model_drives_registration_and_evidence(
         self,
         photos_dir,
@@ -263,12 +372,20 @@ class TestColmapRegistrationEvidence:
             "_find_colmap_binary",
             lambda: "colmap",
         )
-        registration_module._colmap_sift_group.cache_clear()
+        monkeypatch.setattr(
+            registration_module,
+            "_sha256_colmap_binary",
+            lambda _: "a" * 64,
+        )
 
         def fake_run(args, **kwargs):
             del kwargs
             calls.append(args)
-            return SimpleNamespace(returncode=0, stderr="", stdout="")
+            return SimpleNamespace(
+                returncode=0,
+                stderr="COLMAP 4.1.0\n" if "-h" in args else "",
+                stdout="",
+            )
 
         monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
 
@@ -425,7 +542,11 @@ class TestColmapSubprocessTimeout:
 
         def fake_run(args, capture_output=True, text=True, timeout=None, **kwargs):
             if "-h" in args:  # sift 命名探测: 放行, 返回帮助文本
-                return SimpleNamespace(returncode=0, stderr="", stdout="")
+                return SimpleNamespace(
+                    returncode=0,
+                    stderr="COLMAP 4.1.0\n",
+                    stdout="",
+                )
             raise subprocess.TimeoutExpired(cmd=args, timeout=timeout or 1)
 
         monkeypatch.setattr(
@@ -433,7 +554,11 @@ class TestColmapSubprocessTimeout:
             "_find_colmap_binary",
             lambda: "colmap",
         )
-        registration_module._colmap_sift_group.cache_clear()
+        monkeypatch.setattr(
+            registration_module,
+            "_sha256_colmap_binary",
+            lambda _: "a" * 64,
+        )
         monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
         with pytest.raises(RuntimeError, match="超时|timeout|timed out"):
             registration_module.colmap_register(photos_dir, workspace)
@@ -452,14 +577,22 @@ class TestColmapSubprocessTimeout:
         def fake_run(args, capture_output=True, text=True, timeout=None, **kwargs):
             if "-h" not in args:  # 只记重活阶段, 跳过 sift 探测
                 seen.append((args[1], timeout))
-            return SimpleNamespace(returncode=0, stderr="", stdout="")
+            return SimpleNamespace(
+                returncode=0,
+                stderr="COLMAP 4.1.0\n" if "-h" in args else "",
+                stdout="",
+            )
 
         monkeypatch.setattr(
             registration_module,
             "_find_colmap_binary",
             lambda: "colmap",
         )
-        registration_module._colmap_sift_group.cache_clear()
+        monkeypatch.setattr(
+            registration_module,
+            "_sha256_colmap_binary",
+            lambda _: "a" * 64,
+        )
         monkeypatch.setattr(registration_module.subprocess, "run", fake_run)
         registration_module.colmap_register(photos_dir, workspace)
 
@@ -561,8 +694,6 @@ class TestFindColmapBinary:
                 ),
             ),
         )
-        reg.colmap_version.cache_clear()
-
         assert reg.colmap_version() == "COLMAP 4.1.0"
 
     def test_version_probe_rejects_an_unidentified_binary(self, monkeypatch):
@@ -578,10 +709,24 @@ class TestFindColmapBinary:
                 stderr="",
             ),
         )
-        reg.colmap_version.cache_clear()
-
         with pytest.raises(RuntimeError, match="version"):
             reg.colmap_version()
+
+    def test_version_probe_does_not_cache_a_replaced_binary(self, monkeypatch):
+        import pipeline.registration as reg
+
+        versions = iter(("COLMAP 4.1.0\n", "COLMAP 4.2.0\n"))
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0,
+                stdout="",
+                stderr=next(versions),
+            ),
+        )
+        assert reg.colmap_version("/tools/colmap") == "COLMAP 4.1.0"
+        assert reg.colmap_version("/tools/colmap") == "COLMAP 4.2.0"
 
     def test_colmap_register_raises_clear_error_when_binary_missing(
         self, tmp_path, monkeypatch,

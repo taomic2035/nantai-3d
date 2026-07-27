@@ -51,6 +51,7 @@ from pipeline.registration_quality import (
     RegistrationQualityPolicy,
     SparseModelEntry,
     SparseModelEnumeration,
+    build_colmap_runtime_evidence,
     build_registration_quality_report,
 )
 
@@ -467,8 +468,19 @@ def _build_colmap_rq_artifacts(
         )
         for i in range(registered)
     ]
+    pose_frame = _local_frame().model_copy(
+        update={
+            "evidence": (
+                build_colmap_runtime_evidence(
+                    binary_name="colmap",
+                    binary_sha256="a" * 64,
+                    engine_version="COLMAP 4.1.0",
+                ),
+            ),
+        },
+    )
     reg = RegistrationResult(
-        schema_version=2, engine="colmap", pose_frame=_local_frame(),
+        schema_version=2, engine="colmap", pose_frame=pose_frame,
         world_frame=None, alignment_status=AlignmentStatus.UNALIGNED,
         sessions=[CaptureSession(session_id="s0", kind="photo_batch",
                                   source="test", images=all_images)],

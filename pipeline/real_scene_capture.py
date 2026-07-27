@@ -36,7 +36,7 @@ from pipeline.recon_schema import (
     FrameProvenance,
     RegistrationResult,
 )
-from pipeline.registration import colmap_version, register
+from pipeline.registration import register
 from pipeline.registration_quality import (
     RegistrationQualityPolicy,
     RegistrationQualityReport,
@@ -434,15 +434,6 @@ def run_real_sfm(
             f"unexpected registration engine: {registration.engine}"
         )
 
-    try:
-        engine_version = (
-            colmap_version() if registration.engine == "colmap" else None
-        )
-    except RuntimeError as exc:
-        raise RealSceneCaptureError(
-            f"COLMAP version evidence is unavailable: {exc}"
-        ) from exc
-
     capture_manifest_path = capture.capture.bundle / "manifest.json"
     capture_manifest_bytes = capture_manifest_path.read_bytes()
     try:
@@ -454,7 +445,6 @@ def run_real_sfm(
             policy=policy,
             sparse_enumeration=sparse_enumeration,
             invocation_succeeded=True,
-            engine_version=engine_version,
         )
         validate_registration_quality(
             report=quality,

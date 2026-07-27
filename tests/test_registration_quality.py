@@ -76,6 +76,26 @@ def _local_frame() -> CoordinateFrame:
         metric_status=MetricStatus.ARBITRARY,
         geo_aligned=GeoAlignment.UNALIGNED,
         provenance=FrameProvenance.SFM,
+        evidence=(
+            'colmap.runtime.v1={"binary_name":"colmap",'
+            f'"binary_sha256":"{"a" * 64}",'
+            '"engine_version":"COLMAP 4.1.0"}',
+        ),
+    )
+
+
+def _external_frame() -> CoordinateFrame:
+    """Frame for non-COLMAP engines — no COLMAP runtime evidence allowed."""
+
+    return CoordinateFrame(
+        frame_id="external",
+        handedness=Handedness.RIGHT,
+        axes=AxisConvention.SFM_ARBITRARY,
+        units=CoordinateUnits.ARBITRARY,
+        metric_status=MetricStatus.ARBITRARY,
+        geo_aligned=GeoAlignment.UNALIGNED,
+        provenance=FrameProvenance.UNKNOWN,
+        evidence=(),
     )
 
 
@@ -107,10 +127,12 @@ def _make_registration_result(
         )
         for img in registered_images
     ]
+    # Non-COLMAP engines must not carry COLMAP runtime evidence.
+    pose_frame = _local_frame() if engine == "colmap" else _external_frame()
     return RegistrationResult(
         schema_version=2,
         engine=engine,  # type: ignore[arg-type]
-        pose_frame=_local_frame(),
+        pose_frame=pose_frame,
         world_frame=None,
         alignment_status=AlignmentStatus.UNALIGNED,
         sessions=[CaptureSession(
@@ -541,6 +563,101 @@ class TestTrainingAllowed:
 # ============================================================
 
 class TestBuilder:
+    def test_builder_derives_colmap_version_from_registration_bytes(self):
+        report, _, _, _, _ = _build_honest_report()
+
+        assert report.engine_version == "COLMAP 4.1.0"
+
+    def test_builder_rejects_colmap_version_that_disagrees_with_registration(self):
+        registration = _make_registration_result(
+            registered_images=["img000.jpg"],
+            total_images=1,
+        )
+        reg_bytes = registration.model_dump_json().encode("utf-8")
+
+        with pytest.raises(ValueError, match="engine_version"):
+            build_registration_quality_report(
+                registration=registration,
+                registration_json_bytes=reg_bytes,
+                capture_manifest=None,
+                capture_manifest_bytes=None,
+                policy=_make_policy(
+                    min_registered_count=1,
+                    min_registered_ratio=1.0,
+                    min_session_coverage_ratio=1.0,
+                    max_unregistered_consecutive_run=0,
+                    min_largest_connected_model_share=1.0,
+                ),
+                sparse_enumeration=_make_sparse_enum(
+                    model_image_count=1,
+                    total_input_images=1,
+                ),
+                invocation_succeeded=True,
+                engine_version="COLMAP 9.9.9",
+            )
+
+    def test_builder_fails_closed_when_colmap_registration_lacks_runtime_evidence(self):
+        """engine='colmap' registration must carry exactly one runtime evidence
+        entry; a registration that omits it cannot be promoted to a quality
+        report — the version would otherwise be silently unknown."""
+        registration = _make_registration_result(
+            registered_images=["img000.jpg"],
+            total_images=1,
+        ).model_copy(
+            update={
+                "pose_frame": _local_frame().model_copy(
+                    update={"evidence": ("colmap-joint-model",)},
+                ),
+            },
+        )
+        reg_bytes = registration.model_dump_json().encode("utf-8")
+
+        with pytest.raises(ValueError, match="runtime evidence"):
+            build_registration_quality_report(
+                registration=registration,
+                registration_json_bytes=reg_bytes,
+                capture_manifest=None,
+                capture_manifest_bytes=None,
+                policy=_make_policy(
+                    min_registered_count=1,
+                    min_registered_ratio=1.0,
+                    min_session_coverage_ratio=1.0,
+                    max_unregistered_consecutive_run=0,
+                    min_largest_connected_model_share=1.0,
+                ),
+                sparse_enumeration=_make_sparse_enum(
+                    model_image_count=1,
+                    total_input_images=1,
+                ),
+                invocation_succeeded=True,
+            )
+
+    def test_builder_rejects_non_colmap_registration_with_colmap_runtime_evidence(self):
+        """engine='external' must not carry COLMAP runtime evidence —
+        non-COLMAP engines cannot borrow COLMAP's measured version."""
+        smuggling_frame = _external_frame().model_copy(
+            update={"evidence": _local_frame().evidence},
+        )
+        registration = _make_registration_result(
+            registered_images=["img000.jpg"],
+            total_images=1,
+            engine="external",
+        ).model_copy(
+            update={"pose_frame": smuggling_frame},
+        )
+        reg_bytes = registration.model_dump_json().encode("utf-8")
+
+        with pytest.raises(ValueError, match="non-COLMAP|runtime evidence"):
+            build_registration_quality_report(
+                registration=registration,
+                registration_json_bytes=reg_bytes,
+                capture_manifest=None,
+                capture_manifest_bytes=None,
+                policy=_make_policy(),
+                sparse_enumeration=None,
+                invocation_succeeded=True,
+            )
+
     def test_builder_derives_registered_count_from_poses(self):
         report, registration, _, _, _ = _build_honest_report(
             registered_count=18, total_images=20)
@@ -623,6 +740,19 @@ class TestBuilder:
 # ============================================================
 
 class TestValidation:
+    def test_validate_rederives_colmap_engine_version(self):
+        report, _, reg_bytes, manifest_bytes, sparse = _build_honest_report()
+        tampered = report.model_copy(update={"engine_version": "COLMAP 9.9.9"})
+
+        with pytest.raises(ValueError, match="engine_version"):
+            validate_registration_quality(
+                tampered,
+                _make_policy(),
+                reg_bytes,
+                capture_manifest_bytes=manifest_bytes,
+                sparse_enumeration=sparse,
+            )
+
     def test_validate_accepts_honest_built_report(self):
         report, _, reg_bytes, manifest_bytes, sparse = _build_honest_report()
         validate_registration_quality(
@@ -712,6 +842,7 @@ class TestAdversarialFailClosed:
             capture_manifest_sha256=manifest_sha,
             policy_canonical_sha256=policy_canonical_sha256(policy),
             engine="colmap",
+            engine_version="COLMAP 4.1.0",
             registered_count=100,  # lie — bytes say 2
             total_input_images=20,
             registered_ratio=1.0,  # lie
@@ -799,6 +930,7 @@ class TestAdversarialFailClosed:
             capture_manifest_sha256=manifest_sha,
             policy_canonical_sha256=policy_canonical_sha256(policy),
             engine="colmap",
+            engine_version="COLMAP 4.1.0",
             registered_count=2,  # honest count (matches poses)
             total_input_images=20,
             registered_ratio=0.1,

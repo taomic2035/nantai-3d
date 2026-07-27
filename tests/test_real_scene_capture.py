@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date
 from pathlib import Path
 
@@ -369,7 +370,19 @@ def test_sfm_accepts_only_matching_colmap_model_capture_and_poses(
                     metric_status=MetricStatus.ARBITRARY,
                     geo_aligned=GeoAlignment.UNALIGNED,
                     provenance=FrameProvenance.SFM,
-                    evidence=["colmap-joint-model"],
+                    evidence=[
+                        "colmap-joint-model",
+                        "colmap.runtime.v1="
+                        + json.dumps(
+                            {
+                                "binary_name": "colmap",
+                                "binary_sha256": "a" * 64,
+                                "engine_version": "COLMAP 4.1.0",
+                            },
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    ],
                 ),
                 "alignment_status": AlignmentStatus.UNALIGNED,
             }
@@ -414,7 +427,19 @@ def test_sfm_quality_report_binds_exact_colmap_version(
                     metric_status=MetricStatus.ARBITRARY,
                     geo_aligned=GeoAlignment.UNALIGNED,
                     provenance=FrameProvenance.SFM,
-                    evidence=["colmap-joint-model"],
+                    evidence=[
+                        "colmap-joint-model",
+                        "colmap.runtime.v1="
+                        + json.dumps(
+                            {
+                                "binary_name": "colmap",
+                                "binary_sha256": "a" * 64,
+                                "engine_version": "COLMAP 4.1.0",
+                            },
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                    ],
                 ),
                 "alignment_status": AlignmentStatus.UNALIGNED,
             }
@@ -429,7 +454,9 @@ def test_sfm_quality_report_binds_exact_colmap_version(
     )
     monkeypatch.setattr(
         "pipeline.real_scene_capture.colmap_version",
-        lambda: "COLMAP 4.1.0",
+        lambda: pytest.fail(
+            "run_real_sfm must not re-probe COLMAP after registration"
+        ),
         raising=False,
     )
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +30,80 @@ class FrozenModel(BaseModel):
 
 
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_COLMAP_RUNTIME_PREFIX = "colmap.runtime.v1="
+_COLMAP_VERSION_RE = re.compile(r"^COLMAP \d+(?:\.\d+)+$")
+
+
+def build_colmap_runtime_evidence(
+    *,
+    binary_name: str,
+    binary_sha256: str,
+    engine_version: str,
+) -> str:
+    """Build canonical runtime evidence for the binary used by registration."""
+
+    if (
+        not binary_name
+        or binary_name in {".", ".."}
+        or "/" in binary_name
+        or "\\" in binary_name
+    ):
+        raise ValueError("COLMAP runtime binary_name must be one basename")
+    if _COLMAP_VERSION_RE.fullmatch(engine_version) is None:
+        raise ValueError("COLMAP runtime engine_version is not exact")
+    if re.fullmatch(_SHA256_PATTERN, binary_sha256) is None:
+        raise ValueError("COLMAP runtime binary_sha256 is not exact")
+    payload = {
+        "binary_name": binary_name,
+        "binary_sha256": binary_sha256,
+        "engine_version": engine_version,
+    }
+    return _COLMAP_RUNTIME_PREFIX + json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def derive_registration_engine_version(
+    registration: RegistrationResult,
+) -> str | None:
+    """Derive COLMAP version only from the content-bound registration."""
+
+    entries = tuple(
+        item.removeprefix(_COLMAP_RUNTIME_PREFIX)
+        for item in registration.pose_frame.evidence
+        if item.startswith(_COLMAP_RUNTIME_PREFIX)
+    )
+    if registration.engine != "colmap":
+        if entries:
+            raise ValueError(
+                "non-COLMAP registration must not contain COLMAP runtime evidence"
+            )
+        return None
+    if len(entries) != 1:
+        raise ValueError(
+            "engine='colmap' requires exactly one COLMAP runtime evidence entry"
+        )
+    try:
+        payload = json.loads(entries[0])
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("COLMAP runtime evidence is not valid JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "binary_name",
+        "binary_sha256",
+        "engine_version",
+    }:
+        raise ValueError("COLMAP runtime evidence fields are invalid")
+    canonical = build_colmap_runtime_evidence(
+        binary_name=payload["binary_name"],
+        binary_sha256=payload["binary_sha256"],
+        engine_version=payload["engine_version"],
+    ).removeprefix(_COLMAP_RUNTIME_PREFIX)
+    if entries[0] != canonical:
+        raise ValueError("COLMAP runtime evidence is not canonical")
+    return payload["engine_version"]
 
 
 # ============================================================
@@ -490,6 +565,15 @@ def build_registration_quality_report(
         raise ValueError(
             f"sparse_enumeration is not allowed for engine={engine!r}"
         )
+    # Always derive so non-COLMAP engines cannot smuggle COLMAP runtime
+    # evidence (and colmap engines cannot omit it). The caller-supplied
+    # engine_version, if any, must agree with the derived value.
+    derived_engine_version = derive_registration_engine_version(registration)
+    if engine_version is not None and engine_version != derived_engine_version:
+        raise ValueError(
+            "engine_version disagrees with registration runtime evidence"
+        )
+    engine_version = derived_engine_version
 
     # 4. Derive measured fields.
     registered_names = _derive_registered_names(registration)
@@ -622,6 +706,13 @@ def validate_registration_quality(
         raise ValueError(
             f"engine mismatch: report claims {report.engine!r} but "
             f"registration.engine is {registration.engine!r}"
+        )
+    # Always re-derive so non-COLMAP engines cannot smuggle COLMAP runtime
+    # evidence, and colmap engines cannot omit it.
+    derived_engine_version = derive_registration_engine_version(registration)
+    if report.engine_version != derived_engine_version:
+        raise ValueError(
+            "engine_version does not match registration runtime evidence"
         )
 
     # 5. Capture manifest: if SHA is bound, bytes must be supplied and match.
