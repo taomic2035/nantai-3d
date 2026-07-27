@@ -17,18 +17,18 @@ runtime、`pipeline.durable_io`、canonical JSON。
 
 ## GLM 即时派单（2026-07-28，覆盖下方旧开工顺序）
 
-基线固定为 `e791958`。不要再从 F1 开工；Codex 已核对当前调用图：
-`remote_training_worker.py` 创建容器后直接 `docker start -a`，而容器命令立即执行
-`train_3dgs_nerfstudio.sh`。因此仅修改 `remote_shell_executor.py` 无法诚实实现
-“同一容器先 clearance、accepted 后训练”。在入口合同修正前，不得用平行 schema、
-caller 自报 accepted 或测试专用后门伪造 F1。
+开始前必须 fast-forward 到至少 `0d6c9e7`。不要再从 F1 开工：Codex 已把 container
+主命令改为固定 clearance entrypoint；同一 container instance 的 canonical
+measurement/policy/decision 只有重算为 accepted 后才 `exec` 训练，worker 同时绑定
+remote target、durable job-ref、entrypoint 和 container-runtime SHA。真实 GPU 尚未
+运行，因此仍是 modeled-unverified，但 F1 的 repo-local seam 已关闭。
 
 现在连续执行：
 
 ```text
 H1 deadline / executor-close
   → I1 bounded-memory import hashing
-  → 回报 F1 真实缺口（只列调用符号和最小所需路径，不写新 plan）
+  → 回报 H1/I1 机器证据并等待 Codex review
 ```
 
 ### 立即做 H1
@@ -75,14 +75,15 @@ H1 push 后不等待 Codex，立即执行下方 Task I1。I1 也 push 后，只�
 ```text
 H1 SHA / I1 SHA / changed paths / RED failure / GREEN counts + skipped
 / ruff / diff-check / CI status
-/ F1 seam: _create_container_argv → _start_container → train script
+/ next external gate IDs only
 ```
 
 不要回复“无事可做”，也不要在这两项之间等待 review。
 
 ### Codex 并行边界
 
-Codex 已在 `1e3e1f2` 关闭 F1a runtime-policy job binding，主动修改范围为：
+Codex 已用 `1e3e1f2` + `0d6c9e7` 关闭 F1 runtime-policy binding 与同容器
+clearance-before-training，主动修改范围为：
 
 - `pipeline/remote_shell_executor.py`
 - `cloud/remote_training_worker.py`

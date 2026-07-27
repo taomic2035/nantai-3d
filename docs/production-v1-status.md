@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-27（状态以当前 `main` 与机器证据为准）
+更新：2026-07-28（状态以当前 `main` 与机器证据为准）
 
 ## 一句话状态
 
@@ -47,13 +47,17 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 连续执行，不等待新的口头分配：
 
 1. `P0-CI`：已由 Codex `70a965e` 关闭，专项 `12 passed`；
-2. **当前 `F1`**：在同一 lifecycle container 内运行六探针 clearance，身份或 TOCTOU 漂移
-   均 fail closed；
-3. `G1`：让 `train-production` producer 产出既有 import 合同要求的八个结果文件；
-4. `H1`：poll 不越过 deadline，所有终态与异常路径显式关闭 executor。
+2. `F1` 代码门：Codex `0d6c9e7` 已接通同一 lifecycle container 的固定六探针
+   entrypoint；非 accepted、身份/TOCTOU 漂移或 publication collision 均无法进入训练。
+   仍缺获批真实 GPU 上的 fresh accepted 机器证据；
+3. **当前 `G1`**：让 `train-production` producer 产出既有 import 合同要求的八个
+   结果文件，并把 F1 三份 runtime evidence 纳入 result-bundle v2；
+4. GLM `H1 → I1`：poll 不越过 deadline、所有路径关闭 executor；大型 PLY receipt
+   复验使用 bounded-memory stable digest。
 
-A1–E1 与 P0-CI 已关闭，不再重做。GLM 现在从 F1 开始，完成后不等待口头确认，
-直接连续执行 G1、H1。每项独立提交并 push；Codex review 前保持 candidate。
+A1–F1 与 P0-CI 的 repo-local 代码门已关闭，不再重做。GLM 立即连续执行
+`H1 → I1`；Codex 接 G1 producer。每项独立提交并 push；真实 GPU 运行前状态仍是
+modeled-unverified，不能签署 Production V1。
 
 ### P0 — 外部输入：正式素材与测量
 

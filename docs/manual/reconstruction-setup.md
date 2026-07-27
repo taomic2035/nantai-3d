@@ -119,6 +119,7 @@ registration 阈值没有默认值；示例值必须按本次采集和正式验�
 - 绝对 remote root / remote repository root；
 - `docker` 或 `podman`；
 - 带 digest 的不可变 CUDA container identity；
+- operator 内容锁定的 `remote_target_sha256`；
 - 远端 readiness config SHA、worker 文件 SHA 和稳定 worker version。
 - 一份 canonical `production-runtime-policy.v1` 的绝对私有路径及其
   `content_sha256`。
@@ -167,7 +168,7 @@ key 排序、末尾换行的 canonical JSON，且只含以下字段：
 remote config 还必须包含：
 
 ```json
-{"expected_runtime_policy_sha256":"<policy content_sha256>","runtime_policy_path":"C:/absolute/private/production-runtime-policy.json"}
+{"expected_runtime_policy_sha256":"<policy content_sha256>","remote_target_sha256":"<operator-bound remote target sha256>","runtime_policy_path":"C:/absolute/private/production-runtime-policy.json"}
 ```
 
 这里的 policy 必须显式绑定 exact commit、远端目标身份 SHA、固定 probe-set SHA、
@@ -178,8 +179,19 @@ policy；worker 会在创建容器前再次验证同一 `content_sha256`，并�
 status 和 lifecycle v2。policy 缺失、被替换或与 container/worker identity 不一致时
 训练不可达。
 
-上述 schema 已升级为 worker spec/status/lifecycle v2；旧 attempt 不能补写新绑定，
-必须由 operator 创建 fresh attempt 重新取得机器证据。
+固定 probe-set SHA 由代码推导，不能手写：
+
+```powershell
+python -c "from cloud.production_runtime_entrypoint import fixed_production_probe_set_sha256 as f; print(f())"
+```
+
+worker spec 已升级为 v3，status/lifecycle 保持 v2。fresh container 的主入口现在是
+`cloud/production_runtime_entrypoint.py`：它在同一 container instance 内测量 GPU、
+CUDA、Python、Nerfstudio、`ns-train splatfacto` CLI schema 与六个 executable 的
+前后快照；measurement/policy/decision 以 no-replace 方式耐久发布且重新验证为
+`accepted` 后，才用 `exec` 替换为训练进程。worker 在创建容器前还会校验 entrypoint
+和 host container-runtime 的 policy SHA。旧 attempt 不能补写这些绑定，必须创建
+fresh attempt；代码测试通过也不等于已经取得真实 GPU accepted evidence。
 
 连接丢失或远端状态无法验证时结果必须是 `unknown`；`RESUME=1` 只重连原 job，
 不会上传、初始化、启动或重复提交；operator 明确使用 `RETRY=1` 才创建新 attempt。
