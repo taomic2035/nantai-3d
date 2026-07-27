@@ -25,6 +25,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const POSE_ID = /^pose-[0-9a-f]{64}$/;
 const CAMERA_POSE_SCHEMA = 'nantai.viewer-camera-pose.v1';
 const CAMERA_SET_SCHEMA = 'nantai.viewer-camera-set.v1';
+const CAMERA_SET_SCHEMA_V2 = 'nantai.viewer-camera-set.v2';
 const POLICY_SCHEMA = 'nantai.viewer-performance-policy.v1';
 const REPORT_SCHEMA = 'nantai.viewer-performance-report.v1';
 const REPORT_SCHEMA_V2 = 'nantai.viewer-performance-report.v2';
@@ -291,9 +292,42 @@ export function assertCanonicalPolicyBytes(value, bytes) {
 
 function validatedCameraSet(value) {
   plainRecord(value, 'camera set');
-  exactKeys(value, ['schema', 'poses'], 'camera set');
-  if (value.schema !== CAMERA_SET_SCHEMA || !Array.isArray(value.poses)) {
+  if (
+    value.schema !== CAMERA_SET_SCHEMA
+    && value.schema !== CAMERA_SET_SCHEMA_V2
+  ) {
     throw new TypeError('camera set schema is unsupported');
+  }
+  const production = value.schema === CAMERA_SET_SCHEMA_V2;
+  exactKeys(
+    value,
+    production
+      ? [
+        'schema',
+        'source_role',
+        'selection_strategy',
+        'scene_manifest_sha256',
+        'import_receipt_sha256',
+        'aligned_registration_sha256',
+        'poses',
+      ]
+      : ['schema', 'poses'],
+    'camera set',
+  );
+  if (!Array.isArray(value.poses)) {
+    throw new TypeError('camera set poses must be an array');
+  }
+  if (
+    production
+    && (
+      value.source_role !== 'production-acceptance'
+      || value.selection_strategy !== 'registered-camera-maximin-v1'
+      || !SHA256.test(value.scene_manifest_sha256)
+      || !SHA256.test(value.import_receipt_sha256)
+      || !SHA256.test(value.aligned_registration_sha256)
+    )
+  ) {
+    throw new TypeError('production camera set provenance is invalid');
   }
   if (value.poses.length !== 3) {
     throw new TypeError('camera set must contain exactly three poses');
@@ -318,7 +352,17 @@ function validatedCameraSet(value) {
   if (new Set(poses.map((item) => item.pose_id)).size !== poses.length) {
     throw new TypeError('camera set pose ids must be unique');
   }
-  return { schema: CAMERA_SET_SCHEMA, poses };
+  return production
+    ? {
+      schema: CAMERA_SET_SCHEMA_V2,
+      source_role: value.source_role,
+      selection_strategy: value.selection_strategy,
+      scene_manifest_sha256: value.scene_manifest_sha256,
+      import_receipt_sha256: value.import_receipt_sha256,
+      aligned_registration_sha256: value.aligned_registration_sha256,
+      poses,
+    }
+    : { schema: CAMERA_SET_SCHEMA, poses };
 }
 
 export function validateCaptureContract({
@@ -331,6 +375,22 @@ export function validateCaptureContract({
   const validatedCameraSetValue = validatedCameraSet(cameraSet);
   if (!SOURCE_ROLES.has(sourceRole)) {
     throw new TypeError('source role is unsupported');
+  }
+  if (
+    sourceRole === 'production-acceptance'
+    && validatedCameraSetValue.schema !== CAMERA_SET_SCHEMA_V2
+  ) {
+    throw new TypeError(
+      'production Viewer camera set requires v2 import provenance',
+    );
+  }
+  if (
+    sourceRole === 'internal-canary'
+    && validatedCameraSetValue.schema !== CAMERA_SET_SCHEMA
+  ) {
+    throw new TypeError(
+      'internal canary camera set must use the v1 untrusted schema',
+    );
   }
   const poseIds = validatedCameraSetValue.poses.map((item) => item.pose_id);
   if (
@@ -346,6 +406,24 @@ export function validateCaptureContract({
     studioUrl: localStudioUrl(studioUrl),
     sourceRole,
   });
+}
+
+export function verifyProductionCameraSetScene(
+  cameraSet,
+  sceneManifestSha256,
+) {
+  const validated = validatedCameraSet(cameraSet);
+  if (validated.schema !== CAMERA_SET_SCHEMA_V2) {
+    throw new TypeError('production Viewer camera set requires v2 provenance');
+  }
+  if (
+    !SHA256.test(sceneManifestSha256)
+    || validated.scene_manifest_sha256 !== sceneManifestSha256
+  ) {
+    throw new TypeError(
+      'production camera set scene manifest binding disagrees',
+    );
+  }
 }
 
 function boundedMessages(messages) {
@@ -1642,6 +1720,10 @@ export async function main(argv = process.argv.slice(2)) {
       .digest('hex');
     let productionContext = null;
     if (contract.sourceRole === 'production-acceptance') {
+      verifyProductionCameraSetScene(
+        contract.cameraSet,
+        sceneManifestSha256,
+      );
       assertCanonicalPolicyBytes(policy, policyBytes);
       const captureScriptPath = fileURLToPath(import.meta.url);
       const scriptDirectory = path.dirname(captureScriptPath);

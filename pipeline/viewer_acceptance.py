@@ -128,6 +128,105 @@ class ViewerPerformancePolicy(FrozenModel):
         return self
 
 
+def _validated_enu_coordinates(
+    value: dict[str, int | float],
+    *,
+    label: str,
+) -> dict[str, int | float]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"east", "north", "up"}
+        or any(
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, (int, float))
+            or not math.isfinite(float(coordinate))
+            for coordinate in value.values()
+        )
+    ):
+        raise ValueError(f"{label} must be a finite ENU coordinate")
+    return value
+
+
+class ViewerCameraPose(FrozenModel):
+    pose_id: str = Field(pattern=_POSE_PATTERN)
+    schema_id: Literal["nantai.viewer-camera-pose.v1"] = Field(
+        default="nantai.viewer-camera-pose.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    position: dict[str, int | float]
+    look_at: dict[str, int | float]
+
+    @field_validator("position", "look_at")
+    @classmethod
+    def _coordinates_are_finite(
+        cls,
+        value: dict[str, int | float],
+        info,
+    ) -> dict[str, int | float]:
+        return _validated_enu_coordinates(
+            value,
+            label=f"Viewer camera pose {info.field_name}",
+        )
+
+    @model_validator(mode="after")
+    def _pose_id_is_content_addressed(self) -> ViewerCameraPose:
+        payload = {
+            "schema": self.schema_id,
+            "position": self.position,
+            "look_at": self.look_at,
+        }
+        if self.pose_id != viewer_camera_pose_id(payload):
+            raise ValueError("Viewer camera pose content hash disagrees")
+        return self
+
+
+class ViewerCameraSetV1(FrozenModel):
+    schema_id: Literal["nantai.viewer-camera-set.v1"] = Field(
+        default="nantai.viewer-camera-set.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    poses: tuple[ViewerCameraPose, ...] = Field(
+        min_length=3,
+        max_length=3,
+    )
+
+    @model_validator(mode="after")
+    def _poses_are_unique(self) -> ViewerCameraSetV1:
+        pose_ids = tuple(pose.pose_id for pose in self.poses)
+        if len(pose_ids) != len(set(pose_ids)):
+            raise ValueError("Viewer camera set pose ids must be unique")
+        return self
+
+
+class ViewerCameraSetV2(FrozenModel):
+    schema_id: Literal["nantai.viewer-camera-set.v2"] = Field(
+        default="nantai.viewer-camera-set.v2",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    source_role: Literal["production-acceptance"]
+    selection_strategy: Literal["registered-camera-maximin-v1"]
+    scene_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
+    import_receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+    aligned_registration_sha256: str = Field(pattern=_SHA256_PATTERN)
+    poses: tuple[ViewerCameraPose, ...] = Field(
+        min_length=3,
+        max_length=3,
+    )
+
+    @model_validator(mode="after")
+    def _poses_are_unique(self) -> ViewerCameraSetV2:
+        pose_ids = tuple(pose.pose_id for pose in self.poses)
+        if len(pose_ids) != len(set(pose_ids)):
+            raise ValueError("Viewer camera set pose ids must be unique")
+        return self
+
+
+ViewerCameraSet = ViewerCameraSetV1 | ViewerCameraSetV2
+
+
 class ViewerRuntimeIdentity(FrozenModel):
     browser_name: str = Field(min_length=1)
     browser_version: str = Field(min_length=1)
@@ -655,7 +754,15 @@ def load_viewer_performance_report_bytes(
     return report
 
 
-def _viewer_camera_set_pose_ids(payload: bytes) -> tuple[str, ...]:
+def canonical_viewer_camera_set_bytes(
+    camera_set: ViewerCameraSet,
+) -> bytes:
+    return _canonical_json_bytes(
+        camera_set.model_dump(mode="json", by_alias=True)
+    )
+
+
+def load_viewer_camera_set_bytes(payload: bytes) -> ViewerCameraSet:
     try:
         decoded = json.loads(
             payload.decode("ascii"),
@@ -665,37 +772,14 @@ def _viewer_camera_set_pose_ids(payload: bytes) -> tuple[str, ...]:
             raise ValueError("camera set root must be an object")
         if payload != _canonical_json_bytes(decoded):
             raise ValueError("camera set must be canonical JSON")
-        if set(decoded) != {"schema", "poses"}:
-            raise ValueError("camera set has an unexpected field set")
-        if decoded["schema"] != "nantai.viewer-camera-set.v1":
+        schema = decoded.get("schema")
+        if schema == "nantai.viewer-camera-set.v1":
+            model_type = ViewerCameraSetV1
+        elif schema == "nantai.viewer-camera-set.v2":
+            model_type = ViewerCameraSetV2
+        else:
             raise ValueError("camera set schema is unsupported")
-        rows = decoded["poses"]
-        if not isinstance(rows, list) or len(rows) != 3:
-            raise ValueError("camera set must contain exactly three poses")
-        pose_ids: list[str] = []
-        for index, row in enumerate(rows):
-            if (
-                not isinstance(row, dict)
-                or set(row)
-                != {"pose_id", "schema", "position", "look_at"}
-            ):
-                raise ValueError(
-                    f"camera set pose {index} has an unexpected field set"
-                )
-            pose_payload = {
-                "schema": row["schema"],
-                "position": row["position"],
-                "look_at": row["look_at"],
-            }
-            expected_pose_id = viewer_camera_pose_id(pose_payload)
-            if row["pose_id"] != expected_pose_id:
-                raise ValueError(
-                    f"camera set pose {index} content hash disagrees"
-                )
-            pose_ids.append(row["pose_id"])
-        if len(pose_ids) != len(set(pose_ids)):
-            raise ValueError("camera set pose ids must be unique")
-        return tuple(pose_ids)
+        return model_type.model_validate_json(payload)
     except ViewerAcceptanceError:
         raise
     except (UnicodeDecodeError, ValueError, TypeError) as exc:
@@ -806,7 +890,7 @@ def verify_viewer_capture_report(
     policy: ViewerPerformancePolicy,
     report: ViewerPerformanceReport | ViewerPerformanceReportV2,
     root: Path,
-) -> None:
+) -> ViewerCameraSetV2:
     if not isinstance(report, ViewerPerformanceReportV2):
         raise ViewerAcceptanceError(
             "production Viewer capture requires a v2 report"
@@ -822,6 +906,7 @@ def verify_viewer_capture_report(
         raise ViewerAcceptanceError(
             "Viewer capture policy binding disagrees"
         )
+    camera_set: ViewerCameraSet | None = None
     for name in (
         "scene_manifest",
         "viewer_policy",
@@ -841,7 +926,21 @@ def verify_viewer_capture_report(
                 "Viewer capture policy is not canonical or differs"
             )
         if name == "camera_set":
-            camera_pose_ids = _viewer_camera_set_pose_ids(payload)
+            camera_set = load_viewer_camera_set_bytes(payload)
+            if not isinstance(camera_set, ViewerCameraSetV2):
+                raise ViewerAcceptanceError(
+                    "production Viewer camera set requires v2 provenance"
+                )
+            if (
+                camera_set.scene_manifest_sha256
+                != validated.scene_manifest.sha256
+            ):
+                raise ViewerAcceptanceError(
+                    "Viewer camera set scene manifest binding disagrees"
+                )
+            camera_pose_ids = tuple(
+                pose.pose_id for pose in camera_set.poses
+            )
             report_pose_ids = tuple(
                 pose.pose_id for pose in validated.poses
             )
@@ -859,6 +958,8 @@ def verify_viewer_capture_report(
             label=f"Viewer screenshot {screenshot.pose_id}",
         )
     derive_viewer_decision(policy, validated)
+    assert isinstance(camera_set, ViewerCameraSetV2)
+    return camera_set
 
 
 def _canonical_json(value: object) -> str:

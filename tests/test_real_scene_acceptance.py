@@ -57,6 +57,10 @@ from tests.test_real_scene_import import (
     _write_production_training_stage,
 )
 from tests.test_viewer_acceptance import (
+    ALIGNED_REGISTRATION_SHA256,
+    IMPORT_RECEIPT_SHA256,
+)
+from tests.test_viewer_acceptance import (
     _policy as _viewer_policy,
 )
 from tests.test_viewer_acceptance import (
@@ -298,7 +302,48 @@ def test_production_acceptance_reopens_v2_capture_and_binds_human_screenshots(
         root=tmp_path,
         expected_scene_manifest_path=viewer_report.scene_manifest.path,
         expected_viewer_policy_path=viewer_report.viewer_policy.path,
+        expected_import_receipt_sha256=IMPORT_RECEIPT_SHA256,
+        expected_aligned_registration_sha256=(
+            ALIGNED_REGISTRATION_SHA256
+        ),
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("import", "import receipt"),
+        ("registration", "aligned registration"),
+    ],
+)
+def test_production_acceptance_rejects_camera_set_provenance_drift(
+    tmp_path,
+    field,
+    message,
+):
+    viewer_report = _viewer_report_v2(tmp_path)
+    human_review = _review_for_viewer_capture(tmp_path, viewer_report)
+
+    with pytest.raises(RealSceneAcceptanceError, match=message):
+        acceptance_module._validate_bound_viewer_capture(
+            source_role="production-acceptance",
+            viewer_policy=_viewer_policy(),
+            viewer_report=viewer_report,
+            human_review=human_review,
+            root=tmp_path,
+            expected_scene_manifest_path=viewer_report.scene_manifest.path,
+            expected_viewer_policy_path=viewer_report.viewer_policy.path,
+            expected_import_receipt_sha256=(
+                "a" * 64
+                if field == "import"
+                else IMPORT_RECEIPT_SHA256
+            ),
+            expected_aligned_registration_sha256=(
+                "a" * 64
+                if field == "registration"
+                else ALIGNED_REGISTRATION_SHA256
+            ),
+        )
 
 
 def test_production_acceptance_rejects_viewer_v1_without_capture_receipt(
@@ -313,6 +358,10 @@ def test_production_acceptance_rejects_viewer_v1_without_capture_receipt(
             root=tmp_path,
             expected_scene_manifest_path="imported/manifest.json",
             expected_viewer_policy_path="viewer/policy.json",
+            expected_import_receipt_sha256=IMPORT_RECEIPT_SHA256,
+            expected_aligned_registration_sha256=(
+                ALIGNED_REGISTRATION_SHA256
+            ),
         )
 
 
@@ -355,6 +404,10 @@ def test_production_acceptance_rejects_human_screenshot_not_from_capture(
             root=tmp_path,
             expected_scene_manifest_path=viewer_report.scene_manifest.path,
             expected_viewer_policy_path=viewer_report.viewer_policy.path,
+            expected_import_receipt_sha256=IMPORT_RECEIPT_SHA256,
+            expected_aligned_registration_sha256=(
+                ALIGNED_REGISTRATION_SHA256
+            ),
         )
 
 

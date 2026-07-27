@@ -11,6 +11,7 @@ import pytest
 from pipeline.viewer_acceptance import (
     StableViewerExecutableObservation,
     ViewerAcceptanceError,
+    ViewerCameraSetV2,
     ViewerCaptureArtifactBinding,
     ViewerExecutableSnapshot,
     ViewerPerformancePolicy,
@@ -28,8 +29,19 @@ from pipeline.viewer_acceptance import (
     viewer_camera_pose_id,
 )
 
+SCENE_MANIFEST_BYTES = b'{"scene":"real"}\n'
+IMPORT_RECEIPT_SHA256 = "e" * 64
+ALIGNED_REGISTRATION_SHA256 = "f" * 64
 
-def _camera_set_bytes(offset: int = 0) -> tuple[bytes, tuple[str, ...]]:
+
+def _camera_set_bytes(
+    offset: int = 0,
+    *,
+    version: int = 2,
+    scene_manifest_sha256: str | None = None,
+    import_receipt_sha256: str = IMPORT_RECEIPT_SHA256,
+    aligned_registration_sha256: str = ALIGNED_REGISTRATION_SHA256,
+) -> tuple[bytes, tuple[str, ...]]:
     def numeric_projection(value):
         if (
             isinstance(value, bool)
@@ -76,10 +88,24 @@ def _camera_set_bytes(offset: int = 0) -> tuple[bytes, tuple[str, ...]]:
                 **payload,
             }
         )
-    camera_set = {
-        "schema": "nantai.viewer-camera-set.v1",
-        "poses": rows,
-    }
+    if version == 1:
+        camera_set = {
+            "schema": "nantai.viewer-camera-set.v1",
+            "poses": rows,
+        }
+    else:
+        camera_set = {
+            "schema": "nantai.viewer-camera-set.v2",
+            "source_role": "production-acceptance",
+            "selection_strategy": "registered-camera-maximin-v1",
+            "scene_manifest_sha256": (
+                scene_manifest_sha256
+                or hashlib.sha256(SCENE_MANIFEST_BYTES).hexdigest()
+            ),
+            "import_receipt_sha256": import_receipt_sha256,
+            "aligned_registration_sha256": aligned_registration_sha256,
+            "poses": rows,
+        }
     payload = (
         json.dumps(
             camera_set,
@@ -221,7 +247,7 @@ def _report_v2(tmp_path) -> ViewerPerformanceReportV2:
         "scene_manifest": _capture_binding(
             tmp_path,
             "imported/manifest.json",
-            b'{"scene":"real"}\n',
+            SCENE_MANIFEST_BYTES,
         ),
         "viewer_policy": _capture_binding(
             tmp_path,
@@ -295,7 +321,63 @@ def test_v2_capture_report_is_content_addressed_and_reopens_every_bound_file(
     assert report.schema_id == "nantai.viewer-performance-report.v2"
     assert report.report_id == f"viewer-capture-{report.content_sha256}"
     assert load_viewer_performance_report_bytes(payload) == report
-    assert verify_viewer_capture_report(_policy(), report, tmp_path) is None
+    camera_set = verify_viewer_capture_report(_policy(), report, tmp_path)
+    assert isinstance(camera_set, ViewerCameraSetV2)
+    assert camera_set.import_receipt_sha256 == IMPORT_RECEIPT_SHA256
+    assert (
+        camera_set.aligned_registration_sha256
+        == ALIGNED_REGISTRATION_SHA256
+    )
+
+
+def test_production_v2_capture_rejects_legacy_unproven_camera_set(tmp_path):
+    report = _report_v2(tmp_path)
+    legacy_bytes, legacy_pose_ids = _camera_set_bytes(version=1)
+    assert legacy_pose_ids == POSES
+    legacy_binding = _capture_binding(
+        tmp_path,
+        report.camera_set.path,
+        legacy_bytes,
+    )
+    fields = {
+        field: getattr(report, field)
+        for field in ViewerPerformanceReportV2.model_fields
+        if field not in {"report_id", "content_sha256"}
+    }
+    fields["camera_set"] = legacy_binding
+    resigned = build_viewer_performance_report_v2(**fields)
+
+    with pytest.raises(
+        ViewerAcceptanceError,
+        match="production.*camera set|camera set.*v2",
+    ):
+        verify_viewer_capture_report(_policy(), resigned, tmp_path)
+
+
+def test_production_v2_capture_rejects_camera_set_for_another_scene(tmp_path):
+    report = _report_v2(tmp_path)
+    changed_bytes, changed_pose_ids = _camera_set_bytes(
+        scene_manifest_sha256="a" * 64,
+    )
+    assert changed_pose_ids == POSES
+    changed_binding = _capture_binding(
+        tmp_path,
+        report.camera_set.path,
+        changed_bytes,
+    )
+    fields = {
+        field: getattr(report, field)
+        for field in ViewerPerformanceReportV2.model_fields
+        if field not in {"report_id", "content_sha256"}
+    }
+    fields["camera_set"] = changed_binding
+    resigned = build_viewer_performance_report_v2(**fields)
+
+    with pytest.raises(
+        ViewerAcceptanceError,
+        match="camera set.*scene manifest",
+    ):
+        verify_viewer_capture_report(_policy(), resigned, tmp_path)
 
 
 def test_v2_capture_report_rejects_executable_toctou(tmp_path):

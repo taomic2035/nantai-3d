@@ -46,12 +46,26 @@ function pose(index) {
   };
 }
 
-function cameraSet() {
+function cameraSet({
+  production = false,
+  sceneManifestSha256 = 'd'.repeat(64),
+} = {}) {
   const { poseIdFor } = subject();
   const poses = [0, 1, 2].map((index) => {
     const payload = pose(index);
     return { pose_id: poseIdFor(payload), ...payload };
   });
+  if (production) {
+    return {
+      schema: 'nantai.viewer-camera-set.v2',
+      source_role: 'production-acceptance',
+      selection_strategy: 'registered-camera-maximin-v1',
+      scene_manifest_sha256: sceneManifestSha256,
+      import_receipt_sha256: 'e'.repeat(64),
+      aligned_registration_sha256: 'f'.repeat(64),
+      poses,
+    };
+  }
   return {
     schema: 'nantai.viewer-camera-set.v1',
     poses,
@@ -137,7 +151,7 @@ test('camera pose ids bind exact canonical ENU payloads', () => {
 
 test('capture contract accepts exactly three bound poses on local Studio', () => {
   const { validateCaptureContract } = subject();
-  const cameras = cameraSet();
+  const cameras = cameraSet({ production: true });
 
   const contract = validateCaptureContract({
     policy: policy(cameras),
@@ -150,6 +164,34 @@ test('capture contract accepts exactly three bound poses on local Studio', () =>
   assert.equal(contract.cameraSet.poses.length, 3);
   assert.equal(contract.policy.warmup_frame_count, 120);
   assert.equal(contract.sourceRole, 'production-acceptance');
+});
+
+test('production capture rejects a legacy camera set without import provenance', () => {
+  const { validateCaptureContract } = subject();
+  const cameras = cameraSet();
+
+  assert.throws(
+    () => validateCaptureContract({
+      policy: policy(cameras),
+      cameraSet: cameras,
+      studioUrl: 'http://127.0.0.1:8767/web/studio/',
+      sourceRole: 'production-acceptance',
+    }),
+    /production.*camera set.*v2/i,
+  );
+});
+
+test('production camera set must bind the served scene manifest', () => {
+  const { verifyProductionCameraSetScene } = subject();
+  const cameras = cameraSet({ production: true });
+
+  assert.doesNotThrow(
+    () => verifyProductionCameraSetScene(cameras, 'd'.repeat(64)),
+  );
+  assert.throws(
+    () => verifyProductionCameraSetScene(cameras, 'a'.repeat(64)),
+    /camera set.*scene manifest/i,
+  );
 });
 
 test('capture contract rejects remote, direct-viewer, and credentialed URLs', () => {
@@ -262,7 +304,10 @@ test('production v2 report binds capture inputs executables and screenshots', ()
     validateCaptureContract,
     viewerReportV2ContentSha,
   } = subject();
-  const cameras = cameraSet();
+  const cameras = cameraSet({
+    production: true,
+    sceneManifestSha256: sha('scene'),
+  });
   const contract = validateCaptureContract({
     policy: policy(cameras),
     cameraSet: cameras,

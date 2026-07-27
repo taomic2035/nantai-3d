@@ -1413,6 +1413,8 @@ def _validate_bound_viewer_capture(
     root: Path,
     expected_scene_manifest_path: str,
     expected_viewer_policy_path: str,
+    expected_import_receipt_sha256: str,
+    expected_aligned_registration_sha256: str,
 ) -> None:
     if source_role != "production-acceptance":
         return
@@ -1421,7 +1423,7 @@ def _validate_bound_viewer_capture(
             "production acceptance requires Viewer v2 capture evidence"
         )
     try:
-        verify_viewer_capture_report(
+        camera_set = verify_viewer_capture_report(
             viewer_policy,
             viewer_report,
             root,
@@ -1430,6 +1432,20 @@ def _validate_bound_viewer_capture(
         raise RealSceneAcceptanceError(
             f"Viewer v2 capture evidence is invalid: {exc}"
         ) from exc
+    if (
+        camera_set.import_receipt_sha256
+        != expected_import_receipt_sha256
+    ):
+        raise RealSceneAcceptanceError(
+            "Viewer camera set differs from accepted import receipt"
+        )
+    if (
+        camera_set.aligned_registration_sha256
+        != expected_aligned_registration_sha256
+    ):
+        raise RealSceneAcceptanceError(
+            "Viewer camera set differs from accepted aligned registration"
+        )
     if (
         viewer_report.scene_manifest.path
         != expected_scene_manifest_path
@@ -1834,6 +1850,29 @@ def _validate_acceptance_evidence(
         raise RealSceneAcceptanceError(
             "human review policy differs from viewer pose/source contract"
         )
+    aligned_registration_path = (
+        imported.alignment_observed_registration_path
+    )
+    aligned_registration_bindings = tuple(
+        binding
+        for binding in imported.artifacts
+        if binding.path == aligned_registration_path
+    )
+    if (
+        report.source_role == "production-acceptance"
+        and (
+            aligned_registration_path is None
+            or len(aligned_registration_bindings) != 1
+        )
+    ):
+        raise RealSceneAcceptanceError(
+            "production import aligned registration binding is missing"
+        )
+    expected_aligned_registration_sha256 = (
+        aligned_registration_bindings[0].sha256
+        if aligned_registration_bindings
+        else "0" * 64
+    )
     _validate_bound_viewer_capture(
         source_role=report.source_role,
         viewer_policy=viewer_policy,
@@ -1844,6 +1883,12 @@ def _validate_acceptance_evidence(
             f"{report.import_root.path}/{imported.manifest_path}"
         ),
         expected_viewer_policy_path=report.viewer_policy.path,
+        expected_import_receipt_sha256=hashlib.sha256(
+            payloads[report.import_receipt.path]
+        ).hexdigest(),
+        expected_aligned_registration_sha256=(
+            expected_aligned_registration_sha256
+        ),
     )
     human_decision = validate_human_visual_review(
         human_policy,

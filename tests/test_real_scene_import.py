@@ -49,6 +49,8 @@ from pipeline.real_scene_training import (
 from pipeline.recon_schema import (
     AlignmentStatus,
     AxisConvention,
+    CameraIntrinsics,
+    CameraPose,
     CaptureSession,
     CoordinateFrame,
     CoordinateUnits,
@@ -236,6 +238,16 @@ def _aligned_registration() -> RegistrationResult:
         method=TransformMethod.CONTROL_POINTS,
         evidence=("survey-control-points",),
     )
+    camera_positions = (
+        (0.0, 0.0, 1.5),
+        (8.0, 0.0, 1.5),
+        (0.0, 7.0, 2.0),
+        (8.0, 7.0, 2.5),
+    )
+    images = [
+        f"registered/frame-{index:03d}.png"
+        for index in range(len(camera_positions))
+    ]
     return RegistrationResult(
         engine="colmap",
         pose_frame=pose_frame,
@@ -247,10 +259,27 @@ def _aligned_registration() -> RegistrationResult:
                 session_id="photo-session",
                 kind="photo_batch",
                 source="capture",
-                images=["frame.png"],
+                images=images,
             )
         ],
-        poses=[],
+        poses=[
+            CameraPose(
+                image=image,
+                session_id="photo-session",
+                quat_wxyz=[1.0, 0.0, 0.0, 0.0],
+                t_xyz=list(position),
+                intrinsics=CameraIntrinsics.from_fov(
+                    width=1600,
+                    height=900,
+                    fov_deg=65.0,
+                ),
+            )
+            for image, position in zip(
+                images,
+                camera_positions,
+                strict=True,
+            )
+        ],
     )
 
 
