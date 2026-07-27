@@ -3,165 +3,225 @@
 日期：2026-07-27
 
 Owner：GLM lane
-
 Reviewer：Codex
 
-这是 GLM 当前唯一的 P0/P1 执行入口。已完成过程已压缩到
-[HISTORY.md](HISTORY.md)，完整逐轮内容可从 Git 历史读取。
+这是 GLM 当前唯一的 P0/P1 执行入口。完成一项后直接进入下一项，不等待再次分配。
+已完成过程压缩在 [HISTORY.md](HISTORY.md)，完整原文从 Git 历史读取。
 
 ## 当前结论
 
-Production V1 仍未完成。当前具备可运行的外围 caller、真实照片 COLMAP canary、
-受限 Brush preview、remote-shell 安全合同和 synthetic Viewer/Blender 证据；
-仍缺真实云 GPU 训练产物、实测米制对齐和真实重建 Viewer/human acceptance。
+Production V1 仍未完成。仓库已经闭合本地 caller、真实照片 COLMAP canary、受限
+Brush preview、远程 transport 演练，以及测量 / policy / decision 分层的正式
+import 门；仍缺真实云 GPU 训练产物、真实场景实测控制点和真实 Viewer/human
+acceptance。
 
 ### 已关闭，不要重做
 
-| 项 | 证据 | 结论 |
-|---|---|---|
-| P0 跨平台基线 | `0247440` 及后续 CI | durable I/O、Windows SSH、canonical fixture、全门恢复 |
-| P1-1 Viewer runtime | CI run `30238069052` | Node 22.14.0、Playwright 1.62.0、pinned Chromium |
-| P1-2 remote readiness | `207eba2`, `cb189a8` | fixed checker、identity/TOCTOU、canonical no-replace publication |
-| P1-3A/B | `6bb1c47`, `e16d6de` | monotonic timeout/unknown 与单点 tamper |
-| P1-3C | `c9da535`, `1750d08`, `e2082a6` | durable job ref、fresh executor restore、原 attempt reconnect、显式 retry |
-| P1-4A | `42df736` | source/target duplicate、非有限值、共线/近共面、默认 span policy |
+| 项 | 证据 |
+|---|---|
+| P0 跨平台基线 | `0247440` 及后续 exact-head CI |
+| P1-1 Viewer runtime | CI run `30238069052` |
+| P1-2 remote readiness v1 基线 | `207eba2`, `cb189a8` |
+| P1-3A/B/C reconnect / retry | `6bb1c47` 至 `e2082a6` |
+| P1-3D 固定 11-case 演练 | `4150cfb`，remote artifact accepted |
+| P1-4A 对应点与退化门 | `42df736` |
+| P1-4B 测量 / policy / decision | `0ad9417` |
+| P1-4C production import 复验 | `23a2ece`，469 passed / 5 skipped |
 
-push 只使用一次性代理：
+`P1-3D` 的证据范围只是 `transport-fixture`，不等于云 GPU 训练；`P1-4C` 只证明
+caller 能验证真实证据，不代表已经取得真实测量。
 
-```powershell
-git -c http.proxy=http://127.0.0.1:7890 push origin main
-```
+## 共享工作树即时审计
 
-## GLM 立即连续执行
+GLM 当前未提交草稿涉及：
 
-不要等待 Codex 再分配；按顺序 RED → GREEN → ruff → `git diff --check`，每项路径
-限定小提交。遇到外部端点缺失时实现稳定 blocked 合同，然后继续下一项。
+- `cloud/remote_readiness_checker.py`
+- `pipeline/remote_shell_executor.py`
+- `pipeline/training_executor.py`
+- 四个对应测试文件
 
-### 2026-07-27 P1-5A 草稿即时 review（先修，不得提交当前形态）
+2026-07-27 当前窄回归为 `162 passed, 3 skipped`，ruff 绿色，但仍不得整体提交。
+测试绿没有解决以下信任问题：
 
-Codex 已实跑当前共享工作树：`tests/test_remote_readiness_checker.py` 为
-`4 failed, 3 passed`，ruff 为 `F821`。必须先处理：
+1. 不能原地改变 `nantai.remote-readiness-evidence.v1` 的字段语义；
+2. caller 传入的 GPU 名、显存、driver 或任意 `nerfstudio_python` 不构成观测；
+3. 宿主 Python 版本不等于 immutable production execution environment；
+4. 还缺 CUDA runtime、GPU UUID、训练 CLI schema 和 executable identity；
+5. 所有 probe 必须防 wrapper spoof、路径替换和 probe 中途 TOCTOU；
+6. `training_executor.py` 中 caller 可自报 pass 的 P1-3D 草稿已经被 `4150cfb`
+   替代，必须删除而不是提交。
 
-1. `_CONTAIDER_PATTERN` 拼写使 `_CONTAINER_PATTERN` 在运行时未定义；
-2. 不得原地扩容 `nantai.remote-readiness-evidence.v1` 却仍保留 v1：
-   `RemoteReadinessEvidence` caller 会把新增 GPU/Nerfstudio 字段当 extra 拒绝；
-   使用完整端到端 v2，或新增独立 production-runtime evidence，旧 P1-2 v1 保持兼容；
-3. 宿主任意 `nerfstudio_python` 返回 `1.1.5` 不能证明 immutable container/
-   production worker 的环境；必须绑定实际 execution-environment identity；
-4. 当前只测 GPU 名、显存、driver，仍缺 CUDA runtime 与训练 CLI schema；
-5. `nvidia-smi`、Python/训练 CLI 也必须有 executable identity 与前后快照，
-   防止 arbitrary binary、wrapper spoof 和 probe 中途替换；
-6. 新字段必须进入 remote parser、preflight report、ready validator、content SHA、
-   tamper/TOCTOU/redaction/blocked tests，不能只让 checker 局部 fixture 绿色。
+## GLM 连续任务包
 
-修复顺序：先恢复原有 v1 全绿，再写 v2 parser/model 的 RED；然后实现 checker，
-最后跑 checker + remote-shell + operations/runner 联合测试。不要仅修拼写后提交。
+执行纪律：每包 RED → GREEN → ruff → `git diff --check`，路径限定小提交并使用一次性
+代理 push。不得把当前 1600 行草稿一次提交。若没有真实端点，交付稳定
+`blocked-external-input` 机器报告后继续下一包。
 
-### 1. P1-3D1 — 固定演练 registry
+### G1 — 清理草稿与冻结 v1 兼容性
 
 允许路径：
 
-- `pipeline/training_executor.py`
-- `tests/test_training_executor.py`
-- 必要时新增窄职责 `scripts/` runner 与测试
+- `cloud/remote_readiness_checker.py`
+- `pipeline/remote_shell_executor.py`
+- `tests/test_remote_readiness_checker.py`
+- `tests/test_remote_shell_executor.py`
+- 删除 `pipeline/training_executor.py` / 对应测试中被 `4150cfb` 替代的草稿
 
 完成定义：
 
-- 固定 P1-3A/B/C 的 case ID、suite、执行函数、预期 observation/failure code；
-- 删除 caller 可传 `outcome="pass"` 的生产入口；
-- report 只消费 runner 实际观测；缺失、重复、unknown、skipped 均不能 accepted；
-- case-set 自身有 canonical definition SHA。
+- 原 P1-2 v1 fixture、canonical bytes、content SHA 和 caller 行为保持不变；
+- 新生产 GPU 信息不得塞入 v1；
+- 为生产 runtime 新建独立 schema，不接受 caller 自报 observation；
+- 先提交一个仅恢复边界、删除 superseded 草稿的小提交。
 
-当前草稿的 `build_remote_training_drill_report(**fields)` 允许 caller 自报 pass，
-只能保留为 RED/反例，不能提交为完成实现。
+拒绝条件：修改旧 v1 golden bytes、保留 caller `outcome="pass"`、一个提交混入后续
+GPU 逻辑。
 
-### 2. P1-3D2 — 逐 case 与 aggregate 内容绑定
+### G2 — Production runtime evidence schema
 
-完成定义：
+建议新增窄职责模块：
 
-- 每项绑定 case-definition SHA、input-identity SHA、observation SHA 和稳定 failure
-  code；free-text 仅做人读摘要；
-- aggregate 绑定 exact commit、clean-tree、Python/pytest/ruff 版本、完整 case-set
-  SHA、dataset/config/trainer/container identity；
-- 明确 `evidence_scope=transport-fixture`，不得冒充真实云 GPU 或训练结果；
-- 任一字段 tamper/replay/unknown field/duplicate key 都 fail closed。
-
-### 3. P1-3D3 — standalone runner 与耐久发布
+- `pipeline/production_runtime_evidence.py`
+- `tests/test_production_runtime_evidence.py`
 
 完成定义：
 
-- runner 自己执行固定 cases，不读取 caller 传入的 pass/fail；
-- dirty tree、timeout、工具版本不可读、case 未执行一律 fail closed；
-- sibling staging → file sync → no-replace publish；
-- 覆盖碰撞、写失败、sync 失败、截断、重放和残留 partial；
-- 报告只写 operator 私有/verification 输出，不进 Release。
+- 独立 canonical schema 绑定 remote host key、job/workspace identity、immutable
+  container digest、GPU UUID/name/memory、driver、CUDA runtime、Python、
+  Nerfstudio 和 `ns-train splatfacto` CLI schema；
+- 每个可执行文件绑定 resolved path、regular-file bytes SHA、size、版本输出和
+  probe command definition SHA；
+- report 同时绑定 exact commit、clean tree、probe set SHA 与原始 observation SHA；
+- duplicate key、unknown field、非 ASCII/noncanonical、NaN/Inf、缺项和 SHA 漂移
+  全部拒绝；
+- `ready` 必须由模型重算，不能由 caller 提供。
 
-### 4. P1-4B — measured / policy / decision 分层
+测试必须至少覆盖 honest round trip、每字段 tamper、duplicate key、GPU UUID
+缺失、mutable image tag、错误 Nerfstudio 版本、错误 CLI schema。
+
+### G3 — Fixed read-only production probes
 
 优先路径：
 
-- `pipeline/alignment.py`
-- `pipeline/real_scene_acceptance.py`
-- 对应测试
+- `cloud/remote_readiness_checker.py`
+- `tests/test_remote_readiness_checker.py`
 
 完成定义：
 
-- measurement 只含实测 scale/rotation/translation、逐点 residual、RMSE/max 和
-  registration/control-points/transform-history SHA；
-- policy 单独 canonical content SHA；
-- decision 同时绑定 measurement SHA 与 policy SHA；
-- 改阈值只改变 policy/decision SHA，不改变 measured residual SHA；
-- frame、axis、handedness、unit 或 identity 漂移全部 fail closed。
+- probe registry 固定且内容寻址，caller 不能传任意命令；
+- 实测 `nvidia-smi` 的 GPU UUID/name/memory/driver；
+- 实测 CUDA runtime，而不是从 driver 字符串推断；
+- 在绑定的 production environment 内实测 Python、Nerfstudio `1.1.5` 和
+  `ns-train splatfacto --help` 的结构化 schema；
+- readiness 不安装包、不改 PATH、不启动新容器、不跑 SfM/训练；
+- 每个 executable 和 environment identity 做前后快照；变化即 TOCTOU blocked；
+- stdout/stderr 有大小上限和 secret redaction，非 UTF-8/截断/timeout 稳定 blocked。
 
-### 5. P1-4C — import runner 信任门
+无 GPU 时测试 fixture 仍要证明 parser 与状态机，但 `ready` 只能来自真实 probe
+observations。
 
-优先路径：
+### G4 — Remote caller 端到端接入
 
-- `pipeline/real_scene_runner.py`
+允许路径：
+
+- `pipeline/remote_shell_executor.py`
 - `pipeline/real_scene_operations.py`
 - 对应测试
 
 完成定义：
 
-- caller 验证 measurement/policy/decision canonical bytes 与全部绑定 SHA；
-- 无控制点、退化、超阈值、identity drift 时 receipt 必须 blocked；
-- blocked 输出不得出现 `metric`、`aligned` 或 `world-ENU`；
-- 合格 fixture 必须由真实 alignment verifier 产生，不能给 fake operation 直接填
-  一个低 RMS。
+- submit 固定 checker，poll/fetch 后验证 G2 canonical report；
+- host key、durable job ref、workspace、commit 和 runtime evidence identity 串成一条
+  closure chain；
+- reconnect 后必须恢复同一 probe attempt，不得新建“看起来成功”的 attempt；
+- absence/timeout/transport unknown 映射为 `blocked-external-input` 或 `unknown`，
+  永远不映射 ready；
+- no-replace durable publication，覆盖 collision、partial、sync failure、replay、
+  wrong-attempt 和 result swap。
 
-工作树里的 `test_production_import_with_good_alignment_completes` 目前只验证
-`alignment_rms_m=0.1` 被抄入 receipt，不足以关闭本项。
+联合回归必须包含 readiness + remote shell + operations + runner，不只跑 checker。
 
-### 6. P1-5A — 云 GPU runtime readiness
+### G5 — Production result closure
+
+优先新增：
+
+- `pipeline/production_training_result.py`
+- `tests/test_production_training_result.py`
+
+消费已有：
+
+- training request/bundle/result/attempt；
+- G2 runtime evidence；
+- dataparser identity transform；
+- `pipeline/render_evaluation.py` 的 held-out report；
+- trained INRIA PLY。
 
 完成定义：
 
-- fixed read-only probe 实测 CUDA device、driver/runtime、Nerfstudio `1.1.5` 和
-  训练 CLI schema；
-- container 只接受 immutable digest，并绑定实际 binary/image identity；
-- readiness 不安装依赖、不改 PATH、不启动容器、不运行 SfM/训练；
-- 无端点/凭据/CUDA 时输出稳定 `blocked-external-input`，不得 fake ready。
+- 验证同一 dataset/config/trainer/container/commit/attempt 从请求贯穿结果；
+- 非 mock training log、export PLY、dataparser transform、held-out render/evaluation
+  与 runtime evidence 全部以 canonical SHA 绑定；
+- 至少 100,000 个 finite Gaussians、完整 INRIA schema、identity dataparser；
+- stub/fake/local Brush/transport-fixture 永远不能满足 production closure；
+- policy 和 measurement 分层；改验收阈值不能重写训练观测 SHA；
+- 任一文件缺失、extra、link-like、替换、截断、重放、wrong attempt 或 evaluation
+  未通过都返回 blocked，不产生 verified result。
 
-### 7. P1-5B — production result closure
+### G6 — 把 result closure 接回 runner/import
+
+允许路径：
+
+- `pipeline/real_scene_operations.py`
+- `pipeline/real_scene_runner.py`
+- `pipeline/real_scene_import.py`（只允许适配 G5，不改 `23a2ece` 的对齐信任门）
+- 对应测试
 
 完成定义：
 
-- 验证非 mock training log、export PLY、dataparser transform、held-out evaluation、
-  container identity 与全部内容 SHA；
-- stub/fake/local Brush 永远不能满足 production closure；
-- 任一产物缺失、身份漂移或 evaluation 未通过都不能进入 verified import。
+- `train-production` 只有消费 G5 verified closure 才能进入 import；
+- receipt 绑定 G2 runtime SHA 与 G5 closure SHA；
+- resume 时重新打开所有字节，不信任内存对象或旧 stage 状态；
+- blocked receipt 不得含 `production`、`metric`、`aligned` 或可发布声明；
+- fake operation 直接填低 RMS / accepted / production 的测试必须被拒绝；
+- preview/Brush 路径保持 preview-only，不回归。
 
-## Codex 并行责任
+### G7 — 外部执行前的机器清单
 
-- review GLM 每个提交和 exact-HEAD CI；
-- 维护 Viewer/Studio、发布和真实浏览器 QA；
-- 收到 verified real import/chunks/scene identity 后执行 cold load、三视角、
-  交互帧、console 与 human visual review；
-- 只有真实 GPU、米制对齐和真实 Viewer/human 证据齐全后才签署 Production V1。
+若仍无云 GPU/凭据，也必须交付：
 
-## 外部输入与最终五门
+- 一条不含 secret 的 production preflight CLI；
+- 一个 canonical blocked report，明确只缺哪些 external inputs；
+- operator 输入白名单：host、host key、workspace、immutable image digest、
+  dataset/config identities；
+- 禁止输出私钥、token、完整环境变量和私有数据路径；
+- fresh endpoint 到位后可从同一 CLI 一次运行 G3 → G4 → G5，不需要改代码。
 
-外部输入缺失不是停止本地合同工作的理由，但正式版必须同时取得：
+完成后继续审计 `cloud/remote_training_worker.py` 和
+`cloud/train_3dgs_nerfstudio.sh` 是否仍有 mutable image、未固定 CLI、shell
+injection、非耐久发布或结果自报成功，并提交一份机器可复现的 RED 用例；不要只写
+文字结论。
+
+## 提交与回执格式
+
+每个 GLM 提交回执必须包含：
+
+- commit SHA 和限定路径；
+- RED 失败证据、GREEN 测试命令与数字；
+- `git diff --check` 和 ruff；
+- schema/version 兼容性说明；
+- 未解决项与下一任务包编号；
+- exact-head CI URL（若已触发）。
+
+push：
+
+```powershell
+git -c http.proxy=http://127.0.0.1:7890 push origin main
+```
+
+## Codex 责任与最终五门
+
+Codex 负责 review GLM 每个小提交、exact-head CI、Viewer/Studio、发布和真实浏览器
+QA。正式版必须同时取得：
 
 1. rights-cleared、密集重叠的真实采集；
 2. accepted real-photo SfM；

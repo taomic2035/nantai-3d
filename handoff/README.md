@@ -10,19 +10,12 @@
 3. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
 4. [Roaming graph producer（P2）](HANDOFF-GLM-009-roaming-graph-producer.md)
 
-Production V1 的 P0 已在 `0247440` 与
-[CI run 30234423540](https://github.com/taomic2035/nantai-3d/actions/runs/30234423540)
-关闭；P1-1 的 Viewer runtime / CI 门已经实现。P1-2 已在
-`207eba2` + `cb189a8` 完成 fixed checker、identity/TOCTOU、canonical publication
-与 source-free CLI 闭环并推到远端。P1-3C 的新进程 reconnect 已由
-`c9da535` / `1750d08` / `e2082a6` 关闭，P1-4A 的重复对应点与退化输入门已由
-`42df736` 关闭。GLM 当前最高优先级是实现不可由 caller 自报 pass 的 P1-3D
-固定演练 runner，随后连续完成 P1-4B/4C 与 P1-5；具体完成定义见
+Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cfb`
+关闭；P1-4A 由 `42df736` 关闭，P1-4B 的测量 / policy / decision 分层由
+`0ad9417` 关闭；P1-4C production import 字节复验由 `23a2ece` 关闭。GLM 当前只
+连续推进 P1-5：production runtime evidence、fixed read-only probe、remote caller、
+production result closure 与 runner 接入；具体边界见
 [HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md)。
-
-P1-1 的 exact-head
-[CI run 30238069052](https://github.com/taomic2035/nantai-3d/actions/runs/30238069052)
-已全绿。
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。

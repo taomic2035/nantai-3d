@@ -55,6 +55,8 @@ Linux/macOS 将虚拟环境路径替换为 `.venv/bin/python`。
 配准（96/100）和本机 Brush 管线试跑；损坏恢复与远程状态未知演练也已留下不可变
 receipt。完整证据、SHA 和未完成项见
 [Production V1 真实黄金链路 canary 报告](docs/verification/2026-07-26-real-golden-path-canary.md)。
+当前关键路径与责任分工见
+[Production V1 状态与 TODO](docs/production-v1-status.md)。
 
 这仍不是正式场景：数据是 `internal-only`，坐标是
 `sfm-local / arbitrary / unaligned`，Brush 是 `preview-only`。真实 CUDA
@@ -94,6 +96,7 @@ git diff --check
 - [真实重建端到端手册](docs/manual/reconstruction-setup.md)
 - [真实数据与 Sim3/ENU 契约（完整源码仓库）](https://github.com/taomic2035/nantai-3d/blob/v1.0.0-preview.2/docs/real-data-workflow.md)
 - [Production V1 真实黄金链路 canary 证据](docs/verification/2026-07-26-real-golden-path-canary.md)
+- [Production V1 状态与 TODO](docs/production-v1-status.md)
 - [Synthetic 素材 Releases](docs/releases/synthetic-design-inputs.md)
 
 可信度只从机器字段、内容 SHA、transform history 和实测报告推导；未知或矛盾证据

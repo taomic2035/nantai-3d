@@ -4,6 +4,7 @@
 
 - [Preview2 下载、独立校验与运行](releases/1.0-preview.2.md)
 - [真实重建端到端手册](manual/reconstruction-setup.md)
+- [Production V1 状态与 TODO](production-v1-status.md)
 - [真实数据与 Sim3/ENU 契约](real-data-workflow.md)
 - [Synthetic 设计素材 Releases](releases/synthetic-design-inputs.md)
 
