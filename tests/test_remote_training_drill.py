@@ -73,6 +73,22 @@ def test_registry_is_fixed_and_content_addressed():
     ).hexdigest()
 
 
+def test_submit_case_tracks_authoritative_poll_semantics():
+    submit_case = next(
+        case
+        for case in DRILL_CASES
+        if case.case_id == "P1-3A-submit-running"
+    )
+
+    assert submit_case.pytest_node_id == (
+        "tests/test_remote_shell_executor.py::"
+        "test_submit_keeps_receipt_not_started_until_authoritative_poll"
+    )
+    assert submit_case.expected_semantics == (
+        "submit remains not-started until authoritative lifecycle/status poll"
+    )
+
+
 def test_public_runner_has_no_caller_supplied_outcome_or_cases():
     parameters = inspect.signature(run_remote_training_drills).parameters
     assert "case_results" not in parameters

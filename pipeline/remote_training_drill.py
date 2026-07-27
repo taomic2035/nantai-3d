@@ -99,8 +99,11 @@ DRILL_CASES: tuple[DrillCaseDefinition, ...] = (
     DrillCaseDefinition(
         "P1-3A-submit-running",
         "submit-poll-fetch",
-        "tests/test_remote_shell_executor.py::test_submit_advances_receipt_to_running",
-        "submit advances the immutable attempt receipt to running",
+        (
+            "tests/test_remote_shell_executor.py::"
+            "test_submit_keeps_receipt_not_started_until_authoritative_poll"
+        ),
+        "submit remains not-started until authoritative lifecycle/status poll",
     ),
     DrillCaseDefinition(
         "P1-3A-poll-timeout-unknown",
