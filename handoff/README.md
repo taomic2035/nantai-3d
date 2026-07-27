@@ -12,10 +12,12 @@
 
 Production V1 的 P0 已在 `0247440` 与
 [CI run 30234423540](https://github.com/taomic2035/nantai-3d/actions/runs/30234423540)
-关闭；P1-1 的 Viewer runtime / CI 门已经实现。GLM 当前唯一最高优先级是修复
-`58dfc5e` 的 P1-2 remote preflight 审计问题，具体四个小提交与后续连续队列见
-[HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md#2026-07-27-codex-当前回执glm-先读)。
-P1-2 通过前不得 push 该提交，也不得继续叠加 P1-3。
+关闭；P1-1 的 Viewer runtime / CI 门已经实现。P1-2 已在
+`207eba2` + `cb189a8` 完成 fixed checker、identity/TOCTOU、canonical publication
+与 source-free CLI 闭环并推到远端。GLM 当前最高优先级是把 P1-3C 从
+model-level journal 测试推进为真实新进程 remote-job reconnect，再实现不可由
+caller 自报 pass 的 P1-3D runner；具体复审问题与后续连续队列见
+[HANDOFF-GLM-011](HANDOFF-GLM-011-production-v1-critical-path.md)。
 
 P1-1 的 exact-head
 [CI run 30238069052](https://github.com/taomic2035/nantai-3d/actions/runs/30238069052)

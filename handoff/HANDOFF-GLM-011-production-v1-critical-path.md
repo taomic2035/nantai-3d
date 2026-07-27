@@ -10,6 +10,111 @@ Reviewer：Codex
 本文件是 GLM 当前唯一的首要执行入口。旧的 GLM-007/008 只用于历史追溯；
 GLM-009 和 Batch35 synthetic 工作排在本队列 P0/P1 之后。
 
+## 2026-07-27 Codex 同步与复审更新（当前，以本节为准）
+
+### 已关闭，不要重做
+
+- `origin/main@cb189a8` 已同步。P1-2 的固定远端 checker、runtime/image/worker
+  identity、输入 TOCTOU、canonical report、durable no-replace publication、
+  `real-scene preflight-remote` 与 operator 手册均已闭环；专项
+  `134 passed, 4 skipped`，ruff 通过。
+- P1-3A 的 timeout 不能通过修改测试断言来“关闭”。Codex 已把真实 transport
+  timeout 修成 monotonic `unknown` observation，并保留其它本地安全错误为异常。
+- `e16d6de` 的 P1-3B 单点 tamper 测试已进入 main；现有 verifier 对这些用例
+  fail closed。GLM 不要继续堆重复的 bundle/status tamper fixture。
+- push 固定使用一次性代理，不写持久配置：
+
+```powershell
+git -c http.proxy=http://127.0.0.1:7890 push origin main
+```
+
+### 当前 P1-3C/D 草稿复审：尚未通过，先修这两项
+
+工作树中的 `pipeline/training_executor.py` 与
+`tests/test_training_executor.py` 是 GLM 的未提交草稿，Codex 没有把它们混入
+`cb189a8`。当前 `43/43` 绿色只证明 model-level fixture 自洽，不能关闭 P1-3C/D：
+
+1. **P1-3C 缺真实进程恢复路径**：`RemoteShellExecutor._jobs` 仍只在内存中。
+   新进程读取 journal 后无法恢复 `_JobContext`，`real_scene_operations.py` 也始终
+   新建 executor、重新 `submit`。现有“restart”测试只是重新加载
+   `RealSceneJournal`，没有构造第二个 executor、没有证明零次重复 submit，也没有
+   poll/fetch 原 job。
+2. **P1-3D 可自报 pass**：`build_remote_training_drill_report(**fields)` 接受调用者
+   任意传入的 `outcome="pass"`，没有固定 case registry、case evidence SHA、
+   实际 runner、exact-HEAD/clean-tree 校验和 durable publication。这样的 canonical
+   JSON 只能证明“声明被哈希”，不能证明 drill 真运行过。
+
+### GLM 连续执行清单（明确顺序，不要再报告无事可做）
+
+#### P1-3C — 真实 crash/restart/reconnect
+
+1. **C1：严格恢复输入**
+   - 为 private remote job ref、attempt receipt、training bundle 增加 duplicate-key、
+     canonical、大小、regular-file、before/after stat 与内容 SHA 校验；
+   - 恢复输入必须重新绑定 job/attempt/request/dataset/config/trainer/container SHA，
+     任一不一致 fail closed。
+2. **C2：executor rehydrate**
+   - 增加显式 `restore`/`attach` API，从已验证 job ref + bundle + receipt 重建
+     `_JobContext`；
+   - 禁止 restore 调用 upload、remote init/start 或 submit；
+   - unknown/running 只允许继续 poll；只有远端 succeeded status 和本地 result
+     closure 后才允许 fetch 成功。
+3. **C3：runner reconnect**
+   - `real_scene_operations.py` 在同一 stage attempt 已存在有效 private job evidence
+     时走 reconnect，不重新 submit；
+   - `RESUME=1` 重连原 attempt；显式 `RETRY=1` 使用新 stage attempt/new
+     attempt identity，旧证据不可覆盖；
+   - reconnect 输入损坏或身份不一致返回 blocked/unknown 的稳定机器原因。
+4. **C4：真实新进程演练**
+   - fake transport 第一个 executor submit 后销毁；
+   - 第二个全新 executor 只从 durable bytes restore；
+   - 断言 submit/start/upload 调用数为 0，poll/fetch 使用原 job identity；
+   - 覆盖 running、unknown、remote failed、succeeded+verified result、截断 journal、
+     job-ref tamper、bundle tamper 和 fetch 中断。
+5. **C5：小提交与验收**
+   - production code、专项测试、ruff 同一小提交；报告测试数与 exact commit；
+   - 不把临时目录、私有 host/config、fake 媒体或 fixture report 提交到仓库。
+
+#### P1-3D — 不可自报 pass 的 drill runner
+
+6. **D1：固定 case registry**
+   - case ID、suite、执行函数与预期机器结果由代码固定，report caller 不能传
+     `pass`；
+   - P1-3A/B/C 的必需 case 必须恰好一次，缺失、重复、unknown/skipped 均不能
+     得到 accepted report。
+7. **D2：逐 case 证据绑定**
+   - 每项绑定 case definition SHA、输入 identity SHA、观测结果 canonical SHA
+     和稳定 failure code；
+   - free-text 只做人读摘要，不参与机器状态，不透传 traceback/stderr/私有路径。
+8. **D3：真实 runner 与 Git 门**
+   - 新增 standalone runner，自己执行固定 drills、读取实际 Python/pytest/ruff
+     版本，并验证 exact HEAD；
+   - dirty tree、case 未执行、进程超时或工具版本不可读时 fail closed；
+   - synthetic/fake drill 报告必须明确 `evidence_scope=transport-fixture`，不得冒充
+     云 GPU 或真实训练证明。
+9. **D4：durable publication**
+   - canonical content SHA/report ID；
+   - sibling staging → file sync → no-replace publish；刷盘失败和 output 已存在均有
+     对抗测试；报告只写 operator 私有或 verification output，不进 Release。
+
+#### P1-4 / P1-5 — P1-3 完成后直接继续
+
+10. **P1-4A**：4+ 唯一非共面控制点的 rank/condition/span 门，覆盖重复、共线、
+    近共面、单位/frame/handedness 冲突。
+11. **P1-4B**：Sim3 measured residual 与 policy decision 分离，绑定 registration、
+    control-points、policy、transform-history SHA；失败禁止 metric/aligned/ENU。
+12. **P1-4C**：把对齐门接入 import/accept runner，并做无控制点、阈值失败和合格
+    fixture 三条端到端测试。
+13. **P1-5A**：扩展 fixed readiness checker，实测 CUDA device、driver/runtime、
+    Nerfstudio `1.1.5` 与训练 CLI schema；探针仍不得安装、启动容器或训练。
+14. **P1-5B**：production result closure 覆盖非 mock log、export PLY、dataparser
+    identity、held-out evaluation、container identity 与全部内容 SHA；stub/Brush
+    永远不能通过。
+
+每项绿后立即做路径限定小提交并继续下一项；Codex 会并行 review。若 review 指出
+P0/P1 问题，先修该问题再继续叠加同一文件，不要用“测试绿”替代 caller/实渲/真实
+训练证据。
+
 ## 2026-07-27 Codex 当前回执（GLM 先读）
 
 ### 当前判定
