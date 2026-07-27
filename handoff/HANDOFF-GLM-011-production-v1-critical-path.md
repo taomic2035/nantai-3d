@@ -37,6 +37,26 @@ git -c http.proxy=http://127.0.0.1:7890 push origin main
 不要等待 Codex 再分配；按顺序 RED → GREEN → ruff → `git diff --check`，每项路径
 限定小提交。遇到外部端点缺失时实现稳定 blocked 合同，然后继续下一项。
 
+### 2026-07-27 P1-5A 草稿即时 review（先修，不得提交当前形态）
+
+Codex 已实跑当前共享工作树：`tests/test_remote_readiness_checker.py` 为
+`4 failed, 3 passed`，ruff 为 `F821`。必须先处理：
+
+1. `_CONTAIDER_PATTERN` 拼写使 `_CONTAINER_PATTERN` 在运行时未定义；
+2. 不得原地扩容 `nantai.remote-readiness-evidence.v1` 却仍保留 v1：
+   `RemoteReadinessEvidence` caller 会把新增 GPU/Nerfstudio 字段当 extra 拒绝；
+   使用完整端到端 v2，或新增独立 production-runtime evidence，旧 P1-2 v1 保持兼容；
+3. 宿主任意 `nerfstudio_python` 返回 `1.1.5` 不能证明 immutable container/
+   production worker 的环境；必须绑定实际 execution-environment identity；
+4. 当前只测 GPU 名、显存、driver，仍缺 CUDA runtime 与训练 CLI schema；
+5. `nvidia-smi`、Python/训练 CLI 也必须有 executable identity 与前后快照，
+   防止 arbitrary binary、wrapper spoof 和 probe 中途替换；
+6. 新字段必须进入 remote parser、preflight report、ready validator、content SHA、
+   tamper/TOCTOU/redaction/blocked tests，不能只让 checker 局部 fixture 绿色。
+
+修复顺序：先恢复原有 v1 全绿，再写 v2 parser/model 的 RED；然后实现 checker，
+最后跑 checker + remote-shell + operations/runner 联合测试。不要仅修拼写后提交。
+
 ### 1. P1-3D1 — 固定演练 registry
 
 允许路径：
