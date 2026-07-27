@@ -223,17 +223,20 @@ def read_status(job_dir: Path, *, max_bytes: int) -> bytes:
     return raw
 
 
-def _container_argv(
+_CONTAINER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _create_container_argv(
     *,
     runtime: str,
     repo_root: Path,
     job_dir: Path,
     container_identity: str,
 ) -> list[str]:
+    """Build structured docker create argv (no string concatenation)."""
     return [
         runtime,
-        "run",
-        "--rm",
+        "create",
         "--gpus",
         "all",
         "--network",
@@ -258,6 +261,133 @@ def _container_argv(
         "--container-identity",
         container_identity,
     ]
+
+
+def _run_container_command(
+    argv: list[str],
+    *,
+    stdout=None,
+    stderr=None,
+    capture_stdout: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run a docker subcommand with structured argv."""
+    return subprocess.run(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=stdout if not capture_stdout else subprocess.PIPE,
+        stderr=stderr if stderr is not None else subprocess.PIPE,
+        shell=False,
+        check=False,
+        text=capture_stdout,
+    )
+
+
+def _create_fresh_container(
+    *,
+    runtime: str,
+    repo_root: Path,
+    job_dir: Path,
+    container_identity: str,
+) -> str:
+    """docker create with immutable digest; return full container ID."""
+    argv = _create_container_argv(
+        runtime=runtime,
+        repo_root=repo_root,
+        job_dir=job_dir,
+        container_identity=container_identity,
+    )
+    completed = _run_container_command(argv, capture_stdout=True)
+    if completed.returncode != 0:
+        raise RemoteWorkerError(
+            "fresh container could not be created"
+        )
+    container_id = (completed.stdout or "").strip()
+    if not _CONTAINER_ID_PATTERN.fullmatch(container_id):
+        raise RemoteWorkerError(
+            "container create did not return a full 64-hex ID"
+        )
+    return container_id
+
+
+def _verify_container_digest(
+    *,
+    runtime: str,
+    container_id: str,
+    expected_identity: str,
+) -> None:
+    """docker inspect must confirm the container uses the immutable digest."""
+    completed = _run_container_command(
+        [runtime, "inspect", "--format", "{{.Image}}", container_id],
+        capture_stdout=True,
+    )
+    if completed.returncode != 0:
+        raise RemoteWorkerError(
+            "container identity could not be inspected"
+        )
+    image_ref = (completed.stdout or "").strip()
+    if image_ref != expected_identity and not image_ref.startswith(
+        "sha256:"
+    ):
+        raise RemoteWorkerError(
+            "container inspect digest does not match"
+        )
+    # Also verify the full RepoDigest matches
+    completed_digests = _run_container_command(
+        [
+            runtime,
+            "inspect",
+            "--format",
+            "{{json .Config.Image}}",
+            container_id,
+        ],
+        capture_stdout=True,
+    )
+    if completed_digests.returncode != 0:
+        raise RemoteWorkerError(
+            "container image digest could not be inspected"
+        )
+    config_image = (completed_digests.stdout or "").strip().strip('"')
+    if config_image != expected_identity:
+        raise RemoteWorkerError(
+            "container image reference drifted from spec"
+        )
+
+
+def _start_container(
+    *,
+    runtime: str,
+    container_id: str,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> int:
+    """docker start -a with stdout/stderr to log files; return exit code."""
+    with stdout_path.open("xb") as stdout, stderr_path.open(
+        "xb"
+    ) as stderr:
+        completed = subprocess.run(
+            [runtime, "start", "-a", container_id],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            shell=False,
+            check=False,
+        )
+    return completed.returncode
+
+
+def _remove_container(
+    *,
+    runtime: str,
+    container_id: str,
+) -> None:
+    """docker rm only after durable publication."""
+    completed = _run_container_command(
+        [runtime, "rm", "-f", container_id],
+        capture_stdout=False,
+    )
+    if completed.returncode != 0:
+        # removal failure is logged but does not undo durable publication
+        pass
 
 
 def run_job(
@@ -300,21 +430,29 @@ def run_job(
     )
     stdout_path = job_dir / "worker.stdout.log"
     stderr_path = job_dir / "worker.stderr.log"
+    container_id: str | None = None
     try:
-        with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
-            completed = subprocess.run(
-                _container_argv(
-                    runtime=container_runtime,
-                    repo_root=repo_root,
-                    job_dir=job_dir,
-                    container_identity=container_identity,
-                ),
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                shell=False,
-                check=False,
-            )
+        container_id = _create_fresh_container(
+            runtime=container_runtime,
+            repo_root=repo_root,
+            job_dir=job_dir,
+            container_identity=container_identity,
+        )
+        _atomic_write(
+            job_dir / "container-id.txt",
+            (container_id + "\n").encode("ascii"),
+        )
+        _verify_container_digest(
+            runtime=container_runtime,
+            container_id=container_id,
+            expected_identity=container_identity,
+        )
+        exit_code = _start_container(
+            runtime=container_runtime,
+            container_id=container_id,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
         _, stdout_sha = _hash_stable(
             stdout_path,
             label="worker stdout log",
@@ -323,7 +461,7 @@ def run_job(
             stderr_path,
             label="worker stderr log",
         )
-        if completed.returncode != 0:
+        if exit_code != 0:
             _write_status(
                 job_dir,
                 RemoteShellStatus(
@@ -333,12 +471,17 @@ def run_job(
                     training_bundle_sha256=spec.training_bundle_sha256,
                     state="failed",
                     updated_at_utc=datetime.now(UTC),
-                    exit_code=completed.returncode,
+                    exit_code=exit_code,
                     stdout_sha256=stdout_sha,
                     stderr_sha256=stderr_sha,
                 ),
             )
-            return completed.returncode
+            if container_id is not None:
+                _remove_container(
+                    runtime=container_runtime,
+                    container_id=container_id,
+                )
+            return exit_code
         result_root = (
             job_dir / "runtime" / "production-run" / "result"
         )
@@ -375,6 +518,11 @@ def run_job(
                 result_bundle_size_bytes=verified.byte_length,
             ),
         )
+        if container_id is not None:
+            _remove_container(
+                runtime=container_runtime,
+                container_id=container_id,
+            )
         return 0
     except (OSError, RemoteResultBundleError, RemoteWorkerError) as exc:
         stdout_path.touch(exist_ok=True)
@@ -407,6 +555,11 @@ def run_job(
                 stderr_sha256=stderr_sha,
             ),
         )
+        if container_id is not None:
+            _remove_container(
+                runtime=container_runtime,
+                container_id=container_id,
+            )
         return 75
 
 
