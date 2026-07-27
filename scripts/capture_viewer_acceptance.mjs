@@ -551,7 +551,7 @@ export function viewerReportV2ContentSha(report) {
   delete payload.report_id;
   delete payload.content_sha256;
   return createHash('sha256')
-    .update(canonicalJson(numericHashProjection(payload)))
+    .update(`${canonicalJson(numericHashProjection(payload))}\n`)
     .digest('hex');
 }
 

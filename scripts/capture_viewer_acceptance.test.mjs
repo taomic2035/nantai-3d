@@ -324,6 +324,21 @@ test('production v2 report binds capture inputs executables and screenshots', ()
   assert.equal(Object.hasOwn(report, 'accepted'), false);
 });
 
+test('Viewer v2 content hash includes the canonical LF byte', () => {
+  const { viewerReportV2ContentSha } = subject();
+  const report = {
+    schema: 'fixture',
+    label: 'x',
+    report_id: `viewer-capture-${'0'.repeat(64)}`,
+    content_sha256: '0'.repeat(64),
+  };
+
+  assert.equal(
+    viewerReportV2ContentSha(report),
+    sha('{"label":"x","schema":"fixture"}\n'),
+  );
+});
+
 test('production v2 report rejects executable and screenshot identity drift', () => {
   const { buildViewerPerformanceReportV2 } = subject();
   const baseReport = {

@@ -89,6 +89,13 @@ Viewer v2 代码门已经就绪：
 identity 的 production import、fresh 浏览器采集和人工观感签署。Viewer v1 仅保留
 internal-canary/兼容用途。
 
+Fresh synthetic browser canary 已实际运行 v2 runner，report ID 为
+`viewer-capture-b59449765e3a858fe7be7e68b92036f23f69f23eddb24c6de7cb31c5b46610ba`。
+它生成并重开 3 张 receipt-bound PNG，最终因 SwiftShader 软件渲染器、三机位加载
+超时及样本不足得到 `accepted=false`、10 个失败门。该结果只证明 v2 runner 的
+跨 JavaScript/Python 内容锁与 fail-closed 路径实跑，不提升 synthetic scene 信任。
+私有 canary 产物保留在忽略的 `.nantai-studio/`，不进入 Git 或 Release。
+
 收到 remote caller 产生的 G5 verified result 后：
 
 1. fresh production import，复验 runtime/result/alignment 全部 SHA；
