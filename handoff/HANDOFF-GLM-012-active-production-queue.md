@@ -20,7 +20,7 @@ runtime、`pipeline.durable_io`、canonical JSON。
 ## GLM 立即执行卡（2026-07-27，当前有效）
 
 不要再回复“无事可做”。`P0-CI` 已由 Codex 在 `70a965e` 关闭；现在从 `F1`
-开始，随后连续执行 `G1 → H1`。完成一张就独立提交、用一次性代理 push，然后直接
+开始，随后连续执行 `G1 → H1 → I1`。完成一张就独立提交、用一次性代理 push，然后直接
 开始下一张，不等待 Codex 回执。
 
 ### Codex 再派发（2026-07-27 22:20 +08:00）
@@ -39,7 +39,7 @@ F1 Step 2:
   接入唯一 production_runtime_evidence，不新建平行 schema
 F1 Step 3:
   专项测试 + Ruff + diff-check + 独立提交 + 临时代理 push
-随后直接开始 G1，再直接开始 H1
+随后直接开始 G1、H1、I1
 ```
 
 第一轮回执必须包含第一个真实 RED 的测试名和失败原因；只给设计说明、静态 grep、
@@ -53,6 +53,7 @@ acceptance aggregate 或本 handoff；这些路径由 Codex 保持。
 | 2 | `F1` | `pipeline/remote_shell_executor.py`、`tests/test_remote_shell_executor.py` | 同一 lifecycle container 内六探针 clearance；container/executable/GPU/TOCTOU 漂移全部 fail closed；非 accepted 时训练 argv 不可达 |
 | 3 | `G1` | `pipeline/real_scene_operations.py`、`tests/test_real_scene_operations.py`；确有必要才继续修改 F1 两文件 | `train-production` 只在 accepted clearance 后运行并产出既有 import 所需八个 result 文件；不修改消费端 schema |
 | 4 | `H1` | `pipeline/real_scene_operations.py`、`tests/test_real_scene_operations.py` | poll sleep 不越过 deadline；success/failed/exception 都显式关闭 executor |
+| 5 | `I1` | `pipeline/real_scene_import.py`、`tests/test_real_scene_import.py` | receipt artifact SHA/size 用 bounded-memory stable descriptor 计算；不改 schema、canonical receipt 或语义门 |
 
 **现在只从 `F1` 开始。** 先写本文件 Task F1 列出的七个行为 RED，再接入既有
 `pipeline.production_runtime_evidence`；不要新建平行 schema。回执格式只写：
@@ -96,6 +97,7 @@ GLM 现在按以下顺序连续执行，不再返工已关闭任务，也不等�
 F1 同容器六探针 clearance adapter
   → G1 operations caller 接入与结果 producer 闭环
   → H1 deadline / executor-close 硬化
+  → I1 import artifact bounded-memory 内容锁
 ```
 
 D1 关闭证据：
@@ -115,7 +117,7 @@ Codex 口头确认。每个 ticket 独立提交并 push，随后立即开始下�
 ## 执行规则
 
 这是 GLM 当前唯一执行入口。B1/C1/D1/E1/P0-CI 已关闭，当前 active ticket 是 F1；
-随后按 F1 → G1 → H1 连续推进。一项提交并 push 后立即开始下一项，不等待
+随后按 F1 → G1 → H1 → I1 连续推进。一项提交并 push 后立即开始下一项，不等待
 口头确认。只有需要
 secret、真实私有数据、付费 GPU，或必须修改 Codex-owned
 Viewer/Studio/release/schema 路径时才暂停。
@@ -562,9 +564,57 @@ test_train_production_closes_remote_executor_on_exception
 ```
 
 专项测试、Ruff、`git diff --check` 通过后独立提交
-`fix: bound remote polling and close executor`，使用一次性代理 push。H1 后回执 Codex
-review；若仍没有真实 endpoint/secret/GPU，只报告精确 external gate，不能声明正式版
-已完成。
+`fix: bound remote polling and close executor`，使用一次性代理 push。H1 完成后不等待
+Codex review，直接开始 I1；若仍没有真实 endpoint/secret/GPU，只报告精确 external
+gate，不能声明正式版已完成。
+
+### Task I1: real-scene import 大文件 bounded-memory 内容锁
+
+Codex `26a109c` 已让 Studio 对 receipt-bound PLY 采用 1 MiB 分块哈希与分块响应；
+但 `validate_real_scene_import_receipt` 在启动前仍通过整块 `bytes` 计算 artifact
+binding，百万级 Gaussian 会产生不必要的内存峰值。I1 关闭这个上游缺口，不依赖真实
+GPU、secret、正式素材或 Codex 新接口。
+
+**Files:**
+
+- Modify: `pipeline/real_scene_import.py`
+- Modify: `tests/test_real_scene_import.py`
+
+先建立以下行为 RED：
+
+```text
+test_import_artifact_bindings_hash_large_ply_in_bounded_chunks
+test_receipt_revalidation_hashes_large_bound_ply_in_bounded_chunks
+test_streaming_artifact_digest_rejects_mid_read_identity_or_size_change
+test_streaming_artifact_digest_rejects_linklike_or_nonregular_member
+test_streaming_artifact_digest_preserves_existing_canonical_receipt
+```
+
+实现一个私有 stable regular-file digest helper，固定每次读取不超过 1 MiB，使用同一
+descriptor 的 `lstat/fstat` 前后 identity、size、mtime 与 SHA-256 推导
+`(byte_length, sha256)`。把它同时接入 `_artifact_bindings` 和
+`validate_real_scene_import_receipt` 的 artifact binding 循环。要求：
+
+1. 不修改 `RealSceneImportReceipt` schema、artifact 排序或现有 canonical bytes；
+2. 不跳过 metric alignment、manifest/chunk/coordinate repack、PLY semantic 或
+   production closure 验证；
+3. symlink、junction、非 regular、读中替换/截断、hash/size mismatch 全部 fail closed；
+4. 测试必须用 read-size observer 证明每次读取 `<= 1 MiB`，不能只 grep 源码；
+5. 不修改 Studio、Viewer、release 或 acceptance aggregate。
+
+验证与提交：
+
+```powershell
+python -m pytest -q tests/test_real_scene_import.py
+python -m ruff check pipeline/real_scene_import.py tests/test_real_scene_import.py
+git diff --check -- pipeline/real_scene_import.py tests/test_real_scene_import.py
+git add -- pipeline/real_scene_import.py tests/test_real_scene_import.py
+git commit --only pipeline/real_scene_import.py tests/test_real_scene_import.py -m "perf: stream real scene artifact digests"
+git -c http.proxy=http://127.0.0.1:7890 push origin main
+```
+
+I1 push 后回执 Codex review；如果 F1/G1/H1/I1 均已完成且没有真实 endpoint，只提交
+精确 external blocker，不要把 repo-local 队列说成“从未存在”。
 
 ## Codex review 门
 
