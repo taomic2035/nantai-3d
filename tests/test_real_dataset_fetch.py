@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from pipeline.real_dataset import HfDatasetSource
+from pipeline.real_dataset import HfDatasetSource, canonical_model_bytes
 from pipeline.real_dataset_fetch import (
     DatasetDownloadError,
     HfHttpTransport,
@@ -328,23 +328,15 @@ def test_verify_only_cli_uses_existing_receipts_without_network(
     tmp_path: Path,
 ) -> None:
     source_path = tmp_path / "source.json"
-    source_path.write_text(
-        json.dumps(
-            _source().model_dump(mode="json", by_alias=True),
-            sort_keys=True,
-            ensure_ascii=True,
-            separators=(",", ":"),
-        )
-        + "\n",
-        encoding="ascii",
-    )
+    source_path.write_bytes(canonical_model_bytes(_source()))
     with _http_fixture() as (_state, transport):
         fetch_hf_dataset(_source(), tmp_path / "run", transport)
 
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/fetch_real_dataset.py",
+            "-m",
+            "scripts.fetch_real_dataset",
             str(source_path),
             str(tmp_path / "run"),
             "--verify-only",

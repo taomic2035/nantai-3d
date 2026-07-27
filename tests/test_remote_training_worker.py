@@ -24,7 +24,7 @@ def _sha(payload: bytes) -> str:
 
 
 def _write_runtime(path: Path) -> Path:
-    path.write_text(
+    path.write_bytes(
         r"""#!/bin/bash
 set -euo pipefail
 printf '%s\0' "$@" > "$REMOTE_CONTAINER_ARGV"
@@ -50,13 +50,16 @@ printf '{}\n' > "$RESULT/training-request.json"
 printf '{}\n' > "$RESULT/training-result.json"
 printf 'training complete\n' > "$RESULT/training.log"
 printf 'container completed\n'
-""",
-        encoding="utf-8",
+""".encode("ascii"),
     )
     path.chmod(0o755)
     return path
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="remote worker golden path executes a Linux container runtime",
+)
 def test_worker_runs_digest_container_and_publishes_success(tmp_path, monkeypatch):
     remote_root = tmp_path / "jobs"
     remote_root.mkdir()
@@ -76,7 +79,7 @@ def test_worker_runs_digest_container_and_publishes_success(tmp_path, monkeypatc
     argv_path = tmp_path / "container.argv"
     monkeypatch.setenv(
         "PATH",
-        f"{bin_dir}:{os.environ.get('PATH', '')}",
+        os.pathsep.join((str(bin_dir), os.environ.get("PATH", ""))),
     )
     monkeypatch.setenv("REMOTE_CONTAINER_ARGV", str(argv_path))
     container = "registry.example/nantai@sha256:" + ("c" * 64)

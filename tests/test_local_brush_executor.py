@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 import struct
 import subprocess
@@ -349,7 +350,7 @@ def test_local_brush_executor_produces_verified_preview_only_result(
     assert reconstruct_argv[
         reconstruct_argv.index("--brush-seed") + 1
     ] == "17"
-    assert reconstruct_kwargs["env"]["PATH"].split(":")[:2] == [
+    assert reconstruct_kwargs["env"]["PATH"].split(os.pathsep)[:2] == [
         str(config.brush_binary.parent),
         str(config.colmap_binary.parent),
     ]

@@ -1,12 +1,41 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _ROOT / "cloud" / "train_3dgs_nerfstudio.sh"
+
+_CLOUD_SCRIPT_IS_LINUX_TARGET = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "cloud/train_3dgs_nerfstudio.sh targets a Linux cloud GPU box; "
+        "Git Bash on Windows cannot reproduce Linux path/tool semantics"
+    ),
+)
+
+
+def _bash_binary() -> Path:
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git is not None:
+            git_root = Path(git).resolve().parent.parent
+            for candidate in (
+                git_root / "bin" / "bash.exe",
+                git_root / "usr" / "bin" / "bash.exe",
+            ):
+                if candidate.is_file():
+                    return candidate
+        pytest.skip("Git Bash is unavailable on Windows")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    return Path(bash)
 
 
 def _production_function() -> str:
@@ -46,7 +75,7 @@ def test_invalid_container_identity_fails_before_runtime_probe(tmp_path):
 
     result = subprocess.run(
         [
-            "bash",
+            str(_bash_binary()),
             str(_SCRIPT),
             "--prepared-bundle",
             str(bundle),
@@ -56,6 +85,8 @@ def test_invalid_container_identity_fails_before_runtime_probe(tmp_path):
         cwd=_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -64,11 +95,12 @@ def test_invalid_container_identity_fails_before_runtime_probe(tmp_path):
 
 
 def _write_executable(path: Path, text: str) -> Path:
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     path.chmod(0o755)
     return path
 
 
+@_CLOUD_SCRIPT_IS_LINUX_TARGET
 def test_prepared_mode_runs_pinned_stubbed_golden_path(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -171,7 +203,9 @@ printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
     env = os.environ.copy()
     env.update(
         {
-            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "PATH": os.pathsep.join(
+                (str(bin_dir), env.get("PATH", ""))
+            ),
             "PYTHON_BIN": str(python_stub),
             "REAL_PYTHON": sys.executable,
             "NS_TRAIN_ARGV_FILE": str(argv_file),
@@ -186,7 +220,7 @@ printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
 
     result = subprocess.run(
         [
-            "bash",
+            str(_bash_binary()),
             str(_SCRIPT),
             "--prepared-bundle",
             str(bundle),
@@ -197,6 +231,8 @@ printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -241,10 +277,12 @@ printf 'ply\nformat ascii 1.0\nelement vertex 1\nend_header\n0 0 0\n' \
 
 def test_cloud_script_is_valid_bash():
     result = subprocess.run(
-        ["bash", "-n", str(_SCRIPT)],
+        [str(_bash_binary()), "-n", str(_SCRIPT)],
         cwd=_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 

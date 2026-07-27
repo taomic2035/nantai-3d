@@ -1041,6 +1041,11 @@ def verify_training_job_bundle(path: Path) -> VerifiedTrainingJobBundle:
                     "archive members are not deterministically sorted"
                 )
             for info in infos:
+                if info.orig_filename != info.filename:
+                    raise RealSceneTrainingError(
+                        "archive member path changed during platform "
+                        f"normalization: {info.orig_filename!r}"
+                    )
                 _validate_archive_member_name(info.filename)
                 unix_mode = info.external_attr >> 16
                 if stat.S_ISLNK(unix_mode):

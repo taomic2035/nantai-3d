@@ -279,15 +279,17 @@ def _make_clean_manifest(
             },
         }
         chunks_path = chunks_dir / "chunks.json"
-        chunks_path.write_text(
-            json.dumps(
-                chunks_manifest,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            "utf-8",
+        chunks_path.write_bytes(
+            (
+                json.dumps(
+                    chunks_manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
         )
         manifest["artifacts"]["chunks"] = {
             "manifest": "chunks/chunks.json",

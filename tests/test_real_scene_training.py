@@ -588,7 +588,14 @@ def test_bundle_requires_absent_non_link_output_boundary(tmp_path):
     target = tmp_path / "target"
     target.mkdir()
     output = tmp_path / "output"
-    output.symlink_to(target, target_is_directory=True)
+    try:
+        output.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip(
+                "Windows SeCreateSymbolicLinkPrivilege not held"
+            )
+        raise
 
     with pytest.raises(RealSceneTrainingError, match="output"):
         build_training_job_bundle(
@@ -613,11 +620,16 @@ def test_bundle_requires_absent_non_link_output_boundary(tmp_path):
 )
 def test_verifier_rejects_unsafe_archive_member_names(tmp_path, member_name):
     archive_path = tmp_path / "unsafe.zip"
-    info = zipfile.ZipInfo(member_name)
+    written_name = "a/b" if member_name == "a\\b" else member_name
+    info = zipfile.ZipInfo(written_name)
     info.create_system = 3
     info.external_attr = (stat.S_IFREG | 0o644) << 16
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr(info, b"unsafe")
+    if member_name == "a\\b":
+        raw_archive = archive_path.read_bytes()
+        assert raw_archive.count(b"a/b") == 2
+        archive_path.write_bytes(raw_archive.replace(b"a/b", b"a\\b"))
 
     with pytest.raises(RealSceneTrainingError, match="member"):
         verify_training_job_bundle(archive_path)
