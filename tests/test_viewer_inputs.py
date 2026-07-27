@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 
 import pipeline.real_scene_import as import_module
+import pipeline.viewer_session as session_module
 from pipeline.real_scene_import import import_real_scene
 from pipeline.viewer_acceptance import (
     ViewerCameraSetV2,
@@ -16,6 +22,10 @@ from pipeline.viewer_acceptance import (
 from pipeline.viewer_inputs import (
     ViewerInputMaterializationError,
     materialize_production_viewer_inputs,
+)
+from pipeline.viewer_session import (
+    ViewerSessionOptions,
+    run_production_viewer_session,
 )
 from tests.test_real_scene_import import (
     _patch_production_bundle,
@@ -87,6 +97,48 @@ def test_materializer_derives_three_content_bound_registered_camera_poses(
             import_root=import_root,
             output_dir=output_dir,
         )
+
+    def _capture(argv, **kwargs):
+        studio_url = urlsplit(argv[argv.index("--studio-url") + 1])
+        connection = http.client.HTTPConnection(
+            studio_url.hostname,
+            studio_url.port,
+            timeout=30,
+        )
+        connection.request(
+            "GET",
+            "/web/data/recon/recon_manifest.json",
+        )
+        response = connection.getresponse()
+        served_manifest = response.read()
+        connection.close()
+        assert response.status == 200
+        assert served_manifest == manifest_bytes
+        assert kwargs == {
+            "cwd": Path(__file__).resolve().parents[1],
+            "check": False,
+        }
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(session_module.subprocess, "run", _capture)
+    evidence_root = tmp_path
+    assert (
+        run_production_viewer_session(
+            ViewerSessionOptions(
+                project_root=Path(__file__).resolve().parents[1],
+                import_root=import_root,
+                policy_path=result.policy_path,
+                camera_set_path=result.camera_set_path,
+                output_path=tmp_path / "viewer/report.json",
+                decision_path=tmp_path / "viewer/decision.json",
+                evidence_root=evidence_root,
+                node_executable=Path(sys.executable),
+                python_executable=Path(sys.executable),
+                headless=True,
+            )
+        )
+        == 0
+    )
 
 
 def test_materializer_rejects_preview_or_unverified_import_root(
