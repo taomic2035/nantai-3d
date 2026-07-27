@@ -307,6 +307,52 @@ def test_runtime_measurement_forbids_reused_container_identity():
         )
 
 
+def test_python_invoked_checker_and_worker_sources_may_be_nonexecutable():
+    for role in ("checker", "worker"):
+        snapshot = ExecutableSnapshot(
+            resolved_path=f"/workspace/cloud/{role}.py",
+            byte_length=4096,
+            sha256=_sha(role),
+            device=8,
+            inode=200 + _ROLES.index(role),
+            mode=0o100644,
+            mtime_ns=1_700_000_000_000_000_000,
+            ctime_ns=1_700_000_000_000_000_001,
+        )
+        observation = StableExecutableObservation(
+            role=role,
+            probe_definition_sha256=_sha(f"definition:{role}"),
+            before=snapshot,
+            after=snapshot,
+        )
+
+        assert observation.before.mode == 0o100644
+
+
+def test_direct_runtime_executable_must_retain_execute_mode():
+    snapshot = ExecutableSnapshot(
+        resolved_path="/opt/nantai/bin/ns-train",
+        byte_length=4096,
+        sha256=_sha("ns-train"),
+        device=8,
+        inode=203,
+        mode=0o100644,
+        mtime_ns=1_700_000_000_000_000_000,
+        ctime_ns=1_700_000_000_000_000_001,
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="direct runtime executable must be executable",
+    ):
+        StableExecutableObservation(
+            role="ns-train",
+            probe_definition_sha256=_sha("definition:ns-train"),
+            before=snapshot,
+            after=snapshot,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "remaining"),
     [

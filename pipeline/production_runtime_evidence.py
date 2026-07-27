@@ -216,11 +216,9 @@ class ExecutableSnapshot(FrozenModel):
     _path = field_validator("resolved_path")(_absolute_remote_path)
 
     @model_validator(mode="after")
-    def _is_regular_and_executable(self) -> ExecutableSnapshot:
-        if not stat.S_ISREG(self.mode) or self.mode & 0o111 == 0:
-            raise ValueError(
-                "runtime executable snapshot must be regular and executable"
-            )
+    def _is_regular(self) -> ExecutableSnapshot:
+        if not stat.S_ISREG(self.mode):
+            raise ValueError("runtime executable snapshot must be regular")
         return self
 
 
@@ -235,6 +233,13 @@ class StableExecutableObservation(FrozenModel):
         if self.before != self.after:
             raise ValueError(
                 f"{self.role} executable changed during probe"
+            )
+        if (
+            self.role not in {"checker", "worker"}
+            and self.before.mode & 0o111 == 0
+        ):
+            raise ValueError(
+                "direct runtime executable must be executable"
             )
         return self
 
