@@ -20,6 +20,7 @@ from pipeline.real_scene_training import (
     TrainingImageIdentity,
     build_held_out_split,
     build_training_job_bundle,
+    load_training_job_evaluation_bytes,
     load_training_job_input_bytes,
     verify_production_training_job_bundle,
     verify_training_job_bundle,
@@ -363,6 +364,7 @@ def test_bundle_is_byte_identical_and_separates_held_out_evaluation_pixels(
     production = verify_production_training_job_bundle(one.path)
     assert production.bundle_sha256 == verified.bundle_sha256
     input_bytes = load_training_job_input_bytes(verified)
+    evaluation_bytes = load_training_job_evaluation_bytes(production)
     split_bindings = tuple(
         binding
         for binding in verified.request.input_bindings
@@ -374,6 +376,12 @@ def test_bundle_is_byte_identical_and_separates_held_out_evaluation_pixels(
         actual = input_bytes[binding.artifact_path]
         assert len(actual) == binding.artifact_size_bytes
         assert hashlib.sha256(actual).hexdigest() == binding.artifact_sha256
+    assert set(evaluation_bytes) == {
+        identity.logical_path for identity in production.split.held_out
+    }
+    for identity in production.split.held_out:
+        actual = evaluation_bytes[identity.logical_path]
+        assert hashlib.sha256(actual).hexdigest() == identity.sha256
 
 
 def test_bundle_sync_failure_never_publishes_output(

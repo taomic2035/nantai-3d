@@ -323,6 +323,30 @@ def canonical_production_training_closure_bytes(
     )
 
 
+def load_production_result_manifest_bytes(
+    payload: bytes,
+) -> ProductionResultBundleManifestV2:
+    try:
+        json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        manifest = ProductionResultBundleManifestV2.model_validate_json(
+            payload
+        )
+    except ProductionTrainingClosureError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise ProductionTrainingClosureError(
+            "production result manifest is invalid"
+        ) from exc
+    if canonical_production_result_manifest_bytes(manifest) != payload:
+        raise ProductionTrainingClosureError(
+            "production result manifest bytes are noncanonical"
+        )
+    return manifest
+
+
 def _reject_duplicate_pairs(
     pairs: list[tuple[str, Any]],
 ) -> dict[str, Any]:

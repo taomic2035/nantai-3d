@@ -1456,6 +1456,51 @@ def load_training_job_input_bytes(
     return actual
 
 
+def load_training_job_evaluation_bytes(
+    bundle: VerifiedTrainingJobBundle,
+) -> dict[str, bytes]:
+    """Reopen the exact held-out pixels from a production training ZIP.
+
+    The production verifier runs both before and after the read so a mutable
+    archive cannot substitute evaluation pixels between identity validation
+    and consumption.  Keys are the held-out logical paths, not ZIP paths.
+    """
+
+    verified = verify_production_training_job_bundle(bundle.path)
+    if verified.bundle_sha256 != bundle.bundle_sha256:
+        raise RealSceneTrainingError(
+            "training bundle identity changed before loading evaluation"
+        )
+    try:
+        with zipfile.ZipFile(verified.path, "r") as archive:
+            payloads = {
+                identity.logical_path: archive.read(
+                    f"evaluation/payload/{identity.logical_path}"
+                )
+                for identity in verified.split.held_out
+            }
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise RealSceneTrainingError(
+            "held-out evaluation pixels cannot be loaded"
+        ) from exc
+    for identity in verified.split.held_out:
+        payload = payloads[identity.logical_path]
+        if hashlib.sha256(payload).hexdigest() != identity.sha256:
+            raise RealSceneTrainingError(
+                "held-out evaluation pixel identity mismatch: "
+                f"{identity.logical_path}"
+            )
+    rechecked = verify_production_training_job_bundle(bundle.path)
+    if (
+        rechecked.bundle_sha256 != verified.bundle_sha256
+        or rechecked.split != verified.split
+    ):
+        raise RealSceneTrainingError(
+            "training bundle changed while loading evaluation"
+        )
+    return payloads
+
+
 def verify_production_training_job_bundle(
     path: Path,
 ) -> VerifiedTrainingJobBundle:

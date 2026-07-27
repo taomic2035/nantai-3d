@@ -16,8 +16,10 @@ from pipeline.production_training_closure import (
     ProductionResultBundleManifestV2,
     ProductionResultMember,
     ProductionTrainingClosureError,
+    canonical_production_result_manifest_bytes,
     canonical_production_training_closure_bytes,
     derive_production_training_closure,
+    load_production_result_manifest_bytes,
     load_production_training_closure_bytes,
     verify_production_training_closure,
 )
@@ -351,6 +353,30 @@ def test_production_closure_binds_runtime_training_and_render_decisions():
         render_report=fixture["render_report"],
         render_decision=fixture["render_decision"],
     )
+
+
+def test_result_manifest_loader_requires_canonical_duplicate_free_json():
+    manifest = _fixture()["manifest"]
+    payload = canonical_production_result_manifest_bytes(manifest)
+    duplicate = payload.replace(
+        b'"schema":"nantai.remote-result-bundle.v2",',
+        (
+            b'"schema":"nantai.remote-result-bundle.v2",'
+            b'"schema":"nantai.remote-result-bundle.v2",'
+        ),
+    )
+
+    assert load_production_result_manifest_bytes(payload) == manifest
+    with pytest.raises(
+        ProductionTrainingClosureError,
+        match="duplicate",
+    ):
+        load_production_result_manifest_bytes(duplicate)
+    with pytest.raises(
+        ProductionTrainingClosureError,
+        match="noncanonical",
+    ):
+        load_production_result_manifest_bytes(payload.rstrip(b"\n"))
 
 
 def test_manifest_requires_runtime_evidence_and_paired_render_payloads():
