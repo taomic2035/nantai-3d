@@ -8,6 +8,102 @@ Reviewer：Codex
 这是 GLM 当前唯一的 P0/P1 执行入口。完成一项后直接进入下一项，不等待再次分配。
 已完成过程压缩在 [HISTORY.md](HISTORY.md)，完整原文从 Git 历史读取。
 
+## GLM 当前开工单（2026-07-27 Codex review）
+
+不要再回复“无待推进工作”。当前工作树中的 NOW-2 / NOW-3 / NOW-4 草稿尚未通过
+Codex review；下面任务均不依赖真实 endpoint、secret、付费 GPU 或 Codex 新接口。
+按 A → B → C 连续执行，完成一个就路径限定提交和 push，然后自动开始下一个。
+
+### A — 修完并提交 host preflight
+
+只允许修改：
+
+- `cloud/remote_readiness_checker.py`
+- `tests/test_remote_readiness_checker.py`
+
+当前草稿拒绝原因与必须先补的 RED：
+
+1. checker 已解析 `runtime_resolved`，但 probe 仍执行配置里的 `runtime` 名称；
+   测试必须证明 PATH wrapper 不能在解析后劫持执行，所有 runtime probe 统一执行
+   已解析的绝对 regular-file path；
+2. `_run_bounded` 当前静默截断 stdout/stderr 后继续解析；oversize 必须产生稳定的
+   fail-closed 错误，不能把截断数据当完整 observation，也不能把原始输出或 secret
+   写进异常、evidence 或日志；
+3. stdout 与 stderr 分别做 byte-cap；任一超限即 blocked。补齐 stdout oversize、
+   stderr oversize、含 secret oversize、非 UTF-8 和 timeout RED；
+4. 保持 `nantai.remote-readiness-evidence.v1` canonical 字段和 golden bytes 不变；
+   host preflight 不得自称 production-ready，不得塞入 G2 measurement；
+5. GPU scheduler probe 必须显式限定当前支持的 runtime/adapter。不能把
+   Docker `Runtimes.nvidia` 的私有输出格式误当成所有 runtime 通用事实。
+
+专项门：
+
+```powershell
+python -m pytest -q tests/test_remote_readiness_checker.py
+python -m ruff check cloud/remote_readiness_checker.py tests/test_remote_readiness_checker.py
+git diff --check
+```
+
+提交只包含上面两条路径。回执必须列出新增 RED 名称、GREEN 数量、v1 golden 是否
+保持不变；随后直接开始 B。
+
+### B — 给 fresh-container lifecycle 建立有效测试基线
+
+只允许修改：
+
+- `cloud/remote_training_worker.py`
+- `tests/test_remote_training_worker.py`
+
+当前草稿虽然把 `docker run --rm` 改成了 `create/start/rm`，但现有 golden-path
+测试在 Windows 被 skip，且仍断言旧 `run --rm`；因此新生命周期目前等于没有测试。
+先让平台无关单元测试能在 Windows/Linux 都运行，再做最小实现。
+
+必须先出现并验证的 RED：
+
+1. create 返回 short/空/非 hex ID；
+2. inspect 返回别的 image ID、别的 RepoDigest 或 mutable tag；
+3. `container-id.txt` 已存在、重放或 attempt/container swap；
+4. start 失败、result publication partial、status sync/replace 失败；
+5. durable success/failure evidence 尚未完成时调用 `rm`；
+6. reconnect 恢复成不同 container，或静默 create 替代实例；
+7. argv 中路径、digest 和参数始终为结构化参数，不能经 shell 拼接。
+
+实现门：
+
+- container ID 用 no-replace、可验证的 durable publication，重放不得覆盖；
+- 不能仅因 `.Image` 以 `sha256:` 开头就接受；必须定义并测试
+  configured immutable ref、resolved image content identity 与 container identity
+  三者的等式/绑定；
+- cleanup 只有在 durable terminal status/result 发布成功后可达；
+- cleanup 失败可以记录为 cleanup 状态，但不得倒写或伪造已发布的训练结果；
+- 不在本项构造 G2 schema，也不修改 Codex-owned closure/import 文件。
+
+专项门：
+
+```powershell
+python -m pytest -q tests/test_remote_training_worker.py
+python -m ruff check cloud/remote_training_worker.py tests/test_remote_training_worker.py
+git diff --check
+```
+
+提交只包含上面两条路径。回执必须明确 `passed/skipped`，不能用被 skip 的测试声称
+生命周期已覆盖；随后直接开始 C。
+
+### C — worker 静态攻击面与 operator blocked report
+
+B 通过 Codex review 后，不等待真实云资源，连续完成：
+
+1. 按 NOW-8 审计 `cloud/train_3dgs_nerfstudio.sh`：mutable image/tag、未固定 CLI、
+   shell injection、日志 secret、结果自报成功、发布前清理，每个真实问题先 RED；
+2. 按 NOW-7 实现 canonical `blocked-external-input` report 和无 secret preflight
+   CLI，使没有 endpoint/GPU 时仍能机器精确说明缺项；
+3. 再进入 NOW-5 lifecycle receipt；只做 attempt/container/durable transition，
+   不复制 G2/G5 schema。
+
+只有碰到以下边界才停：需要用户提供 secret、需要付费资源、需要访问真实私有数据，
+或必须修改 Codex-owned schema。普通代码设计、测试失败、Windows skip、网络 push
+重试都不是停工理由。
+
 ## 当前结论
 
 Production V1 仍未完成。仓库已经闭合本地 caller、真实照片 COLMAP canary、受限
