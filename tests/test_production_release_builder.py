@@ -8,6 +8,7 @@ import sys
 import zipfile
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,6 +75,46 @@ GATES = (
     "release-rights",
     "metric-alignment",
 )
+
+
+def test_source_identity_resolves_exact_head_and_tracked_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], Path]] = []
+
+    def run(command, *, cwd, **_kwargs):
+        calls.append((command, cwd))
+        if command[1:] == ["rev-parse", "--verify", "HEAD"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="a" * 40 + "\n",
+                stderr="",
+            )
+        if command[1:] == ["ls-files", "-z", "--"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="web/z.js\0LICENSE\0web/a.js\0",
+                stderr="",
+            )
+        raise AssertionError(command)
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    identity = builder_module.resolve_production_release_source_identity(
+        tmp_path
+    )
+
+    assert identity.source_commit == "a" * 40
+    assert identity.tracked_files == (
+        "LICENSE",
+        "web/a.js",
+        "web/z.js",
+    )
+    assert calls == [
+        (["git", "rev-parse", "--verify", "HEAD"], tmp_path.absolute()),
+        (["git", "ls-files", "-z", "--"], tmp_path.absolute()),
+    ]
 
 
 def _reference(root: Path, relative: str) -> AcceptanceEvidenceReference:

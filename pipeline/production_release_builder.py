@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -77,6 +78,59 @@ _MAXIMUM_PUBLIC_SOURCE_BYTES = 4 * 1024 * 1024 * 1024
 
 class ProductionReleaseBuilderError(ValueError):
     """Raised when private acceptance cannot produce a safe public projection."""
+
+
+@dataclass(frozen=True)
+class ProductionReleaseSourceIdentity:
+    source_commit: str
+    tracked_files: tuple[str, ...]
+
+
+def _git_source_output(repo_root: Path, arguments: list[str]) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ProductionReleaseBuilderError(
+            "Git source identity cannot be resolved"
+        )
+    return completed.stdout
+
+
+def resolve_production_release_source_identity(
+    repo_root: str | Path,
+) -> ProductionReleaseSourceIdentity:
+    root = Path(repo_root).expanduser().absolute()
+    source_commit = _git_source_output(
+        root,
+        ["rev-parse", "--verify", "HEAD"],
+    ).strip()
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise ProductionReleaseBuilderError(
+            "Git source commit is not canonical"
+        )
+    tracked_files = tuple(
+        sorted(
+            relative
+            for relative in _git_source_output(
+                root,
+                ["ls-files", "-z", "--"],
+            ).split("\0")
+            if relative
+        )
+    )
+    if not tracked_files:
+        raise ProductionReleaseBuilderError(
+            "Git tracked source list is empty"
+        )
+    return ProductionReleaseSourceIdentity(
+        source_commit=source_commit,
+        tracked_files=tracked_files,
+    )
 
 
 @dataclass(frozen=True)

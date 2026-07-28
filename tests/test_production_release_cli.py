@@ -4,8 +4,8 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
+import pipeline.production_release_builder as builder_module
 import scripts.build_production_release as build_cli
 from pipeline.production_release_builder import ProductionReleaseBuild
 from tests.production_release_fixtures import (
@@ -71,19 +71,6 @@ def test_build_cli_uses_exact_git_head_and_tracked_allowlist(
     output.parent.mkdir()
     observed = {}
 
-    def run(command, **_kwargs):
-        if command[1:3] == ["rev-parse", "--verify"]:
-            return SimpleNamespace(
-                returncode=0,
-                stdout="a" * 40 + "\n",
-                stderr="",
-            )
-        return SimpleNamespace(
-            returncode=0,
-            stdout="LICENSE\0pipeline/runtime.py\0",
-            stderr="",
-        )
-
     def build(**kwargs):
         observed.update(kwargs)
         return ProductionReleaseBuild(
@@ -96,7 +83,15 @@ def test_build_cli_uses_exact_git_head_and_tracked_allowlist(
             acceptance_report_sha256="e" * 64,
         )
 
-    monkeypatch.setattr(build_cli.subprocess, "run", run)
+    identity = builder_module.ProductionReleaseSourceIdentity(
+        source_commit="a" * 40,
+        tracked_files=("LICENSE", "pipeline/runtime.py"),
+    )
+    monkeypatch.setattr(
+        build_cli,
+        "resolve_production_release_source_identity",
+        lambda root: identity,
+    )
     monkeypatch.setattr(
         build_cli,
         "build_production_release_archive",
