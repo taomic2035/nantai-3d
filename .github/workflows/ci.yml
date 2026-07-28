@@ -254,7 +254,8 @@ jobs:
             "numpy==2.3.5" \
             "pydantic==2.13.4" \
             "plyfile==1.1.4" \
-            "loguru==0.7.3"
+            "loguru==0.7.3" \
+            "pywin32==311; sys_platform == 'win32'"
 
       - name: Test standard-library Production release contracts
         run: |
@@ -263,6 +264,7 @@ jobs:
             tests/test_production_release_contract.py \
             tests/test_production_release_verifier.py \
             tests/test_production_release_cli.py \
+            tests/test_production_release_privacy.py \
             tests/test_production_release_docs.py
 
       - name: Probe modeled package content ID
