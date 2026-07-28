@@ -133,15 +133,34 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
     folded: set[str] = set()
     total_bytes = 0
     observed_members = 0
-    for current, directories, names in os.walk(root, followlinks=False):
-        current_path = Path(current)
-        for directory in tuple(directories):
+    stack = []
+    try:
+        try:
+            stack.append((root, os.scandir(root)))
+        except OSError as exc:
+            _verification_error(
+                "release directory is unavailable",
+                exc,
+            )
+        while stack:
+            current_path, iterator = stack[-1]
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                iterator.close()
+                stack.pop()
+                continue
+            except OSError as exc:
+                _verification_error(
+                    "release directory is unavailable",
+                    exc,
+                )
             observed_members += 1
             if observed_members > limits.maximum_members:
                 _verification_error(
                     "release tree member count exceeds its maximum"
                 )
-            candidate = current_path / directory
+            candidate = current_path / entry.name
             relative = candidate.relative_to(root).as_posix()
             _require_path_budget(relative, limits=limits)
             try:
@@ -155,32 +174,15 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
                 _verification_error(
                     f"symlink release path is forbidden: {relative}"
                 )
-            if not stat.S_ISDIR(observed.st_mode):
-                _verification_error(
-                    f"release path must be a directory: {relative}"
-                )
-        for name in names:
-            observed_members += 1
-            if observed_members > limits.maximum_members:
-                _verification_error(
-                    "release tree member count exceeds its maximum"
-                )
-            candidate = current_path / name
-            relative = safe_posix_member_path(
-                candidate.relative_to(root).as_posix()
-            ).as_posix()
-            _require_path_budget(relative, limits=limits)
-            try:
-                observed = candidate.lstat()
-            except OSError as exc:
-                _verification_error(
-                    f"release file is unavailable: {relative}",
-                    exc,
-                )
-            if _is_linklike(candidate, observed=observed):
-                _verification_error(
-                    f"symlink release file is forbidden: {relative}"
-                )
+            if stat.S_ISDIR(observed.st_mode):
+                try:
+                    stack.append((candidate, os.scandir(candidate)))
+                except OSError as exc:
+                    _verification_error(
+                        f"release path is unavailable: {relative}",
+                        exc,
+                    )
+                continue
             if not stat.S_ISREG(observed.st_mode):
                 _verification_error(
                     f"release file must be regular: {relative}"
@@ -202,6 +204,9 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
                 _verification_error(
                     "release tree total size exceeds its maximum"
                 )
+    finally:
+        for _path, iterator in reversed(stack):
+            iterator.close()
     return files
 
 

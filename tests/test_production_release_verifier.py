@@ -737,6 +737,118 @@ def test_tree_verification_counts_empty_directories_as_members(
         )
 
 
+def test_tree_walk_stops_streaming_at_member_cap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "wide"
+    root.mkdir()
+    for index in range(20):
+        (root / f"{index:02d}.txt").write_text("x", encoding="utf-8")
+    original_scandir = verifier_module.os.scandir
+    yielded = 0
+
+    class TrackingScandir:
+        def __init__(self, path):
+            self._iterator = original_scandir(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal yielded
+            entry = next(self._iterator)
+            yielded += 1
+            return entry
+
+        def close(self):
+            self._iterator.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    monkeypatch.setattr(
+        verifier_module.os,
+        "scandir",
+        TrackingScandir,
+    )
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="member count",
+    ):
+        verifier_module._release_files(
+            root,
+            limits=ArchiveLimits(maximum_members=3),
+        )
+
+    assert yielded == 4
+
+
+def test_tree_walk_fails_closed_on_scandir_iteration_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "unreadable"
+    root.mkdir()
+    closed = False
+
+    class FailingScandir:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise PermissionError("denied")
+
+        def close(self):
+            nonlocal closed
+            closed = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    monkeypatch.setattr(
+        verifier_module.os,
+        "scandir",
+        lambda _path: FailingScandir(),
+    )
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="unavailable",
+    ):
+        verifier_module._release_files(root, limits=ArchiveLimits())
+
+    assert closed is True
+
+
+def test_tree_walk_fails_closed_on_lstat_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "release"
+    root.mkdir()
+    blocked = root / "blocked.txt"
+    blocked.write_text("x", encoding="utf-8")
+    original_lstat = Path.lstat
+
+    def fail_blocked(path):
+        if path == blocked:
+            raise PermissionError("denied")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fail_blocked)
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="unavailable",
+    ):
+        verifier_module._release_files(root, limits=ArchiveLimits())
+
+
 @pytest.mark.production_mutation
 @pytest.mark.skipif(
     sys.platform != "linux",

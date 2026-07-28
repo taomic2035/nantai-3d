@@ -329,15 +329,32 @@ def _release_files(
     observed: list[tuple[str, Path]] = []
     total_bytes = 0
     observed_members = 0
-    for current, directories, names in os.walk(root, followlinks=False):
-        current_path = Path(current)
-        for name in tuple(directories):
+    stack = []
+    try:
+        try:
+            stack.append((root, os.scandir(root)))
+        except OSError as exc:
+            raise ProductionReleasePrivacyError(
+                "release directory is unavailable"
+            ) from exc
+        while stack:
+            current_path, iterator = stack[-1]
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                iterator.close()
+                stack.pop()
+                continue
+            except OSError as exc:
+                raise ProductionReleasePrivacyError(
+                    "release directory is unavailable"
+                ) from exc
             observed_members += 1
             if observed_members > limits.maximum_members:
                 raise ProductionReleasePrivacyError(
                     "release member count exceeds its maximum"
                 )
-            candidate = current_path / name
+            candidate = current_path / entry.name
             relative = candidate.relative_to(root).as_posix()
             try:
                 member = safe_posix_member_path(relative)
@@ -360,45 +377,22 @@ def _release_files(
                 ) from exc
             if _is_linklike(candidate, observed=candidate_stat):
                 raise ProductionReleasePrivacyError(
-                    f"unsafe release directory: {relative}"
+                    f"unsafe release path: {relative}"
                 )
-            if not stat.S_ISDIR(candidate_stat.st_mode):
-                raise ProductionReleasePrivacyError(
-                    f"unsafe release directory: {relative}"
-                )
-        for name in names:
-            observed_members += 1
-            if observed_members > limits.maximum_members:
-                raise ProductionReleasePrivacyError(
-                    "release member count exceeds its maximum"
-                )
-            candidate = current_path / name
-            try:
-                relative = safe_posix_member_path(
-                    candidate.relative_to(root).as_posix()
-                ).as_posix()
-                candidate_stat = candidate.lstat()
-            except (OSError, ReleaseArchiveError) as exc:
-                raise ProductionReleasePrivacyError(
-                    "release file is unavailable or unsafe"
-                ) from exc
-            if _is_linklike(candidate, observed=candidate_stat):
-                raise ProductionReleasePrivacyError(
-                    f"unsafe release file: {relative}"
-                )
+            if stat.S_ISDIR(candidate_stat.st_mode):
+                try:
+                    stack.append((candidate, os.scandir(candidate)))
+                except OSError as exc:
+                    raise ProductionReleasePrivacyError(
+                        "release directory is unavailable"
+                    ) from exc
+                continue
             if not stat.S_ISREG(candidate_stat.st_mode):
                 raise ProductionReleasePrivacyError(
                     f"unsafe release file: {relative}"
                 )
+            relative = member.as_posix()
             observed.append((relative, candidate))
-            if (
-                len(relative.encode("utf-8")) > limits.maximum_path_bytes
-                or len(safe_posix_member_path(relative).parts)
-                > limits.maximum_path_components
-            ):
-                raise ProductionReleasePrivacyError(
-                    f"release file path exceeds its maximum: {relative}"
-                )
             if candidate_stat.st_size > limits.maximum_member_bytes:
                 raise ProductionReleasePrivacyError(
                     f"release file exceeds its maximum: {relative}"
@@ -408,6 +402,9 @@ def _release_files(
                 raise ProductionReleasePrivacyError(
                     "release total size exceeds its maximum"
                 )
+    finally:
+        for _path, iterator in reversed(stack):
+            iterator.close()
     return tuple(sorted(observed))
 
 
