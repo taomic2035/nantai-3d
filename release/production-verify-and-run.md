@@ -6,9 +6,14 @@ report, but they do not replace the omitted raw capture, control-point or
 operator evidence.
 
 ```powershell
-python scripts/verify_production_release.py . --json
+python make.py verify
 python make.py serve
 ```
+
+`verify` delegates exactly to the bundled
+`scripts/verify_production_release.py . --json`. Run it before installing
+dependencies or starting the server. The runtime runner does not accept a
+private scene import override.
 
 Open the Studio URL printed by the second command. The accepted scene manifest
 is mounted at `/web/data/recon/recon_manifest.json`; Studio and Viewer must

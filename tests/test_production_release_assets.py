@@ -439,20 +439,22 @@ def test_verify_cli_fails_closed(
     assert "mixed" in captured.err
 
 
-def _load_make_targets() -> set[str]:
+def _load_runtime_targets() -> set[str]:
     spec = importlib.util.spec_from_file_location(
-        "make_runner", _REPO_ROOT / "make.py"
+        "production_runtime_runner",
+        _REPO_ROOT / "release" / "production-runtime-runner.py",
     )
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return set(module.TARGETS)
+    return {"help", *module.TARGETS}
 
 
 def test_release_guide_make_py_targets_exist() -> None:
     """Every make.py target in the bundled release guide must be a real target."""
 
     guide = _RELEASE_GUIDE.read_text(encoding="utf-8")
-    targets = _load_make_targets()
+    targets = _load_runtime_targets()
     referenced = set(re.findall(r"make\.py\s+(\S+)", guide))
     assert referenced, "release guide must reference at least one make.py target"
     unknown = referenced - targets
@@ -463,4 +465,5 @@ def test_release_guide_references_bundled_offline_verifier() -> None:
     """The release guide must direct users to the bundled offline verifier."""
 
     guide = _RELEASE_GUIDE.read_text(encoding="utf-8")
+    assert "python make.py verify" in guide
     assert "scripts/verify_production_release.py" in guide

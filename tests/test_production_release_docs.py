@@ -77,6 +77,26 @@ def test_manual_states_privacy_and_hash_limits_without_promoting_reality() -> No
     assert re.search(r"不得.*v1\.0\.0", manual)
 
 
+def test_manual_separates_repository_and_extracted_runtime_commands() -> None:
+    manual = _read(MANUAL)
+    assert "仓库维护命令" in manual
+    runtime_section = manual.split("## 解压与运行", 1)[1].split(
+        "## 私有闭包与公开闭包",
+        1,
+    )[0]
+    assert "解压包命令" in runtime_section
+    for target in ("help", "verify", "serve"):
+        assert f"python make.py {target}" in runtime_section
+    for maintenance_target in (
+        "build-production",
+        "verify-production",
+        "audit-production-privacy",
+        "stage-production-assets",
+        "verify-production-assets",
+    ):
+        assert maintenance_target not in runtime_section
+
+
 def test_readme_and_status_keep_one_concise_authoritative_release_entry() -> None:
     readme = _read(ROOT / "README.md")
     docs_index = _read(ROOT / "docs/README.md")
@@ -120,6 +140,8 @@ def test_ci_has_three_os_production_contract_and_content_id_compare_jobs() -> No
         "tests/test_production_release_cli.py",
         "tests/test_production_release_privacy.py",
         "tests/test_production_release_assets.py",
+        "tests/test_production_runtime_runner.py",
+        "tests/test_production_release_builder.py",
     ):
         assert test_path in matrix_job
     assert "actions/upload-artifact@v4" in matrix_job

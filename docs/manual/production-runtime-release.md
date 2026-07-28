@@ -13,6 +13,21 @@ aggregate 明确给出 `production_release_allowed=true`，才能开始正式封
 `VERSION` 没有默认值。门禁未满足时不得填写或发布 `v1.0.0`，也不得预先创建正式
 tag；继续使用 Preview 版本号并保留 blocked/unknown 状态。
 
+## 仓库维护命令
+
+以下五个命令只属于源码仓库根目录的开发版 `make.py`：
+
+```text
+build-production
+verify-production
+audit-production-privacy
+stage-production-assets
+verify-production-assets
+```
+
+它们负责重验私有 acceptance、构建候选包、隐私审计和最终四件套整理。正式 runtime
+不会携带这些维护入口，也不会携带它们所需的私有策略、控制点或工作区。
+
 ## 构建
 
 私有验收根通常位于忽略的 `.nantai-studio/` 工作区。下面三个变量都必须显式提供：
@@ -102,14 +117,27 @@ modeled fixture 也不能通过。
 
 ## 解压与运行
 
-复验成功后解压到空目录，在包根安装并启动：
+下载后先解压到空目录。包根 `make.py` 是独立的最小 runner，不是源码仓库的开发
+runner。它的解压包命令只有：
+
+```text
+python make.py help
+python make.py verify
+python make.py serve
+```
+
+先在未安装依赖、未添加文件的包根复验；通过后再创建环境、安装并启动：
 
 ```powershell
+python make.py verify
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\Activate.ps1
 python make.py serve
 ```
+
+该 runner 拒绝构建、隐私审计、资产整理、多 target 组合和私有 import 输入，只使用
+包内内容绑定的 scene。任何未知 target 都以退出码 2 fail closed。
 
 打开 <http://127.0.0.1:8000/web/studio/>。Studio 必须显示
 `Production 包 · 已校验`；Viewer 必须加载包内完整 3DGS。scene 缺失、Spark
