@@ -1,0 +1,108 @@
+name: production-release-publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive_url:
+        description: "URL of the verified candidate ZIP"
+        required: true
+      package_content_id:
+        description: "Expected package content ID (64 hex)"
+        required: true
+      expected_sha256:
+        description: "Expected archive SHA-256"
+        required: true
+      version:
+        description: "Release version (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download candidate archive
+        run: |
+          mkdir -p "$RUNNER_TEMP/candidate"
+          curl -L -o "$RUNNER_TEMP/candidate/nantai-3d-${{ inputs.version }}-runtime.zip" \
+            "${{ inputs.archive_url }}"
+
+      - name: Verify archive bytes
+        env:
+          ARCHIVE: ${{ runner.temp }}/candidate/nantai-3d-${{ inputs.version }}-runtime.zip
+        run: |
+          actual_sha=$(sha256sum "$ARCHIVE" | cut -d' ' -f1)
+          echo "actual_sha=$actual_sha"
+          echo "expected_sha=${{ inputs.expected_sha256 }}"
+          if [ "$actual_sha" != "${{ inputs.expected_sha256 }}" ]; then
+            echo "SHA mismatch" >&2
+            exit 1
+          fi
+
+      - name: Stage production assets
+        env:
+          ARCHIVE: ${{ runner.temp }}/candidate/nantai-3d-${{ inputs.version }}-runtime.zip
+          PRIVACY_POLICY: ${{ secrets.PRIVACY_POLICY_PATH }}
+          RELEASE_DIR: ${{ runner.temp }}/release-assets
+          ACCEPTANCE_ROOT: ${{ secrets.ACCEPTANCE_ROOT_PATH }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python make.py stage-production-assets
+
+      - name: Verify staged assets
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release-assets
+        run: |
+          python make.py verify-production-assets
+
+      - name: Assert package content ID
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/release-assets
+        run: |
+          result=$(python make.py verify-production-assets 2>&1)
+          actual_id=$(echo "$result" | python -c "import sys,json; print(json.load(sys.stdin)['package_content_id'])")
+          echo "actual_id=$actual_id"
+          echo "expected_id=${{ inputs.package_content_id }}"
+          if [ "$actual_id" != "${{ inputs.package_content_id }}" ]; then
+            echo "package content ID mismatch" >&2
+            exit 1
+          fi
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git tag "${{ inputs.version }}" -m "Production release ${{ inputs.version }} (content_id=${{ inputs.package_content_id }})"
+          git push origin "${{ inputs.version }}"
+          gh release create "${{ inputs.version }}" \
+            "$RUNNER_TEMP/release-assets/nantai-3d-${{ inputs.version }}-runtime.zip" \
+            "$RUNNER_TEMP/release-assets/nantai-3d-${{ inputs.version }}-runtime.zip.sha256" \
+            "$RUNNER_TEMP/release-assets/PRODUCTION-RELEASE.json" \
+            "$RUNNER_TEMP/release-assets/SHA256SUMS.txt" \
+            --title "Nantai 3D ${{ inputs.version }}" \
+            --notes "Production release with verified acceptance root. Package content ID: ${{ inputs.package_content_id }}" \
+            --latest
+
+      - name: Re-download and re-verify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/downloaded"
+          gh release download "${{ inputs.version }}" \
+            --dir "$RUNNER_TEMP/downloaded" \
+            --clobber
+          RELEASE_DIR="$RUNNER_TEMP/downloaded" python make.py verify-production-assets
