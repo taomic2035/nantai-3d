@@ -121,18 +121,24 @@ def test_source_identity_resolves_exact_head_and_tracked_files(
 
     def run(command, *, cwd, **kwargs):
         calls.append((command, cwd, kwargs))
-        if command[1:] == ["rev-parse", "--verify", "HEAD"]:
+        if command[2:] == ["rev-parse", "--verify", "HEAD"]:
             return SimpleNamespace(
                 returncode=0,
                 stdout=b"a" * 40 + b"\n",
                 stderr=b"",
             )
-        if command[1:] == ["ls-files", "-z", "--"]:
+        if command[2:] == ["ls-files", "-z", "--"]:
             return SimpleNamespace(
                 returncode=0,
                 stdout=b"web/z.js\0LICENSE\0web/a.js\0",
                 stderr=b"",
             )
+        if command[2:] == [
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/replace",
+        ]:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(command)
 
     monkeypatch.setattr(builder_module.subprocess, "run", run)
@@ -147,18 +153,25 @@ def test_source_identity_resolves_exact_head_and_tracked_files(
         "web/a.js",
         "web/z.js",
     )
-    assert calls == [
-        (
-            ["git", "rev-parse", "--verify", "HEAD"],
-            tmp_path.absolute(),
-            {"capture_output": True, "text": False, "check": False},
-        ),
-        (
-            ["git", "ls-files", "-z", "--"],
-            tmp_path.absolute(),
-            {"capture_output": True, "text": False, "check": False},
-        ),
+    assert [command for command, _cwd, _kwargs in calls] == [
+        ["git", "--no-replace-objects", "rev-parse", "--verify", "HEAD"],
+        ["git", "--no-replace-objects", "ls-files", "-z", "--"],
+        [
+            "git",
+            "--no-replace-objects",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/replace",
+        ],
     ]
+    assert all(cwd == tmp_path.absolute() for _command, cwd, _kwargs in calls)
+    assert all(
+        kwargs["capture_output"] is True
+        and kwargs["text"] is False
+        and kwargs["check"] is False
+        and kwargs["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
+        for _command, _cwd, kwargs in calls
+    )
 
 
 def test_source_identity_hides_nonzero_git_output(
@@ -251,7 +264,7 @@ def test_source_identity_rejects_empty_tracked_output(
     monkeypatch,
 ) -> None:
     def run(command, **_kwargs):
-        if command[1] == "rev-parse":
+        if command[2] == "rev-parse":
             return SimpleNamespace(
                 returncode=0,
                 stdout=b"a" * 40 + b"\n",
@@ -270,12 +283,14 @@ def test_source_identity_decodes_tracked_path_bytes_reversibly(
     monkeypatch,
 ) -> None:
     def run(command, **_kwargs):
-        if command[1] == "rev-parse":
+        if command[2] == "rev-parse":
             return SimpleNamespace(
                 returncode=0,
                 stdout=b"a" * 40 + b"\n",
                 stderr=b"",
             )
+        if command[2] == "for-each-ref":
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         return SimpleNamespace(
             returncode=0,
             stdout=b"web/\xff.js\0LICENSE\0",
@@ -287,6 +302,45 @@ def test_source_identity_decodes_tracked_path_bytes_reversibly(
     identity = builder_module.resolve_production_release_source_identity(tmp_path)
 
     assert identity.tracked_files == ("LICENSE", "web/\udcff.js")
+
+
+def test_git_tree_lookup_disables_replacement_objects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    observed: dict[str, object] = {}
+    object_id = "b" * 40
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"100644 blob {object_id}\tpipeline/runtime.py\0"
+            ).encode("ascii"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    resolved = builder_module._git_tree_blob(
+        tmp_path,
+        source_commit="a" * 40,
+        relative="pipeline/runtime.py",
+    )
+
+    assert resolved == object_id
+    assert observed["command"] == [
+        "git",
+        "--no-replace-objects",
+        "ls-tree",
+        "-z",
+        "a" * 40,
+        "--",
+        "pipeline/runtime.py",
+    ]
+    assert observed["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
 def _reference(root: Path, relative: str) -> AcceptanceEvidenceReference:
@@ -1427,6 +1481,58 @@ def test_transient_worktree_edit_cannot_enter_archive_under_original_commit(
     ).hexdigest()
 
 
+def test_build_rejects_git_replacement_commit_before_publication(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    trusted_runner = (
+        repo / "release/production-runtime-runner.py"
+    ).read_bytes()
+    replacement_runner = b"raise SystemExit('replacement object leaked')\n"
+    (repo / "release/production-runtime-runner.py").write_bytes(
+        replacement_runner
+    )
+    _git(
+        repo,
+        "add",
+        "--",
+        "release/production-runtime-runner.py",
+    )
+    _git(repo, "commit", "--quiet", "-m", "replacement payload")
+    replacement_commit = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--quiet", "--detach", identity.source_commit)
+    _git(repo, "replace", identity.source_commit, replacement_commit)
+    assert _git(repo, "rev-parse", "HEAD") == identity.source_commit
+    assert (
+        _git(
+            repo,
+            "show",
+            f"{identity.source_commit}:release/production-runtime-runner.py",
+        ).encode("ascii")
+        == replacement_runner.rstrip(b"\n")
+    )
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="replacement refs",
+    ):
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert trusted_runner != replacement_runner
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+
+
 def test_build_rejects_git_tree_symlink_even_if_worktree_path_is_regular(
     tmp_path: Path,
     monkeypatch,
@@ -1483,7 +1589,13 @@ def test_streaming_git_failure_removes_snapshot_and_partial_output(
     real_popen = builder_module.subprocess.Popen
 
     def fail_git_blob_stream(command, *args, **kwargs):
-        if command[:3] == ["git", "cat-file", "blob"]:
+        if command[:4] == [
+            "git",
+            "--no-replace-objects",
+            "cat-file",
+            "blob",
+        ]:
+            assert kwargs["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
             raise FileNotFoundError("private git executable path")
         return real_popen(command, *args, **kwargs)
 
@@ -1525,9 +1637,15 @@ def test_clean_source_gate_tracks_template_not_development_runner(
     builder_module._ensure_release_sources_clean(tmp_path, ())
 
     command = observed["command"]
+    assert command[:3] == [
+        "git",
+        "--no-replace-objects",
+        "status",
+    ]
     assert "release/production-runtime-runner.py" in command
     assert "make.py" not in command
     assert observed["cwd"] == tmp_path
+    assert observed["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
 def test_build_is_deterministic_verified_and_no_replace(

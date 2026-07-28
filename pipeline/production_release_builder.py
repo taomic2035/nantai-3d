@@ -87,6 +87,16 @@ class ProductionReleaseBuilderError(ValueError):
     """Raised when private acceptance cannot produce a safe public projection."""
 
 
+def _git_provenance_command(arguments: Iterable[str]) -> list[str]:
+    return ["git", "--no-replace-objects", *arguments]
+
+
+def _git_provenance_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
+
+
 def _require_no_linklike_ancestors(path: Path, *, label: str) -> None:
     source = Path(path).expanduser().absolute()
     try:
@@ -124,13 +134,15 @@ def _git_source_output(
     arguments: list[str],
     operation: str,
 ) -> bytes:
+    command = _git_provenance_command(arguments)
     try:
         completed = subprocess.run(
-            ["git", *arguments],
+            command,
             cwd=repo_root,
             capture_output=True,
             text=False,
             check=False,
+            env=_git_provenance_environment(),
         )
     except OSError as exc:
         raise ProductionReleaseBuilderError(
@@ -139,7 +151,7 @@ def _git_source_output(
     if completed.returncode != 0:
         cause = subprocess.CalledProcessError(
             completed.returncode,
-            ["git", *arguments],
+            command,
         )
         raise ProductionReleaseBuilderError(
             f"Git source identity {operation} failed"
@@ -187,6 +199,15 @@ def resolve_production_release_source_identity(
     if not tracked_files:
         raise ProductionReleaseBuilderError(
             "Git source identity ls-files output is empty"
+        )
+    replacement_refs = _git_source_output(
+        root,
+        ["for-each-ref", "--format=%(refname)", "refs/replace"],
+        "replacement refs",
+    )
+    if replacement_refs:
+        raise ProductionReleaseBuilderError(
+            "Git replacement refs are not allowed for release provenance"
         )
     return ProductionReleaseSourceIdentity(
         source_commit=source_commit,
@@ -1390,6 +1411,9 @@ def _stream_git_blob(
     process = None
     digest = hashlib.sha256()
     byte_length = 0
+    command = _git_provenance_command(
+        ["cat-file", "blob", object_id],
+    )
     try:
         descriptor = os.open(
             destination,
@@ -1397,11 +1421,12 @@ def _stream_git_blob(
             0o600,
         )
         process = subprocess.Popen(
-            ["git", "cat-file", "blob", object_id],
+            command,
             cwd=repo_root,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=_git_provenance_environment(),
         )
         if process.stdout is None:
             raise TypeError("Git blob stdout pipe is unavailable")
@@ -1419,7 +1444,7 @@ def _stream_git_blob(
         if returncode != 0:
             cause = subprocess.CalledProcessError(
                 returncode,
-                ["git", "cat-file", "blob", object_id],
+                command,
             )
             raise ProductionReleaseBuilderError(
                 "Git source snapshot cat-file blob failed"
