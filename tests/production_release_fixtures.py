@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import zipfile
+from pathlib import Path
 
-from pipeline.release_archive import canonical_json_bytes
+from pipeline.production_release_contract import (
+    CHECKSUMS_NAME,
+    PRODUCTION_RELEASE_NAME,
+    build_production_receipt,
+)
+from pipeline.release_archive import canonical_json_bytes, deterministic_zip_info
 
 MODELED_ACCEPTANCE_SHA = "a" * 64
 MODELED_DECISION_SHA = "b" * 64
@@ -105,8 +112,22 @@ def modeled_public_evidence() -> dict[str, object]:
 
 
 def modeled_artifact_records() -> list[dict[str, object]]:
+    return [
+        {
+            "path": path,
+            "role": role,
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        for path, (role, payload) in reversed(
+            tuple(modeled_payloads().items())
+        )
+    ]
+
+
+def modeled_payloads() -> dict[str, tuple[str, bytes]]:
     evidence_bytes = canonical_json_bytes(modeled_public_evidence())
-    payloads = {
+    return {
         "evidence/public-evidence.json": (
             "public-evidence",
             evidence_bytes,
@@ -123,15 +144,6 @@ def modeled_artifact_records() -> list[dict[str, object]]:
         "web/studio/index.html": ("studio-runtime", b"<h1>Studio</h1>\n"),
         "web/viewer/index.html": ("viewer-runtime", b"<h1>Viewer</h1>\n"),
     }
-    return [
-        {
-            "path": path,
-            "role": role,
-            "bytes": len(payload),
-            "sha256": hashlib.sha256(payload).hexdigest(),
-        }
-        for path, (role, payload) in reversed(tuple(payloads.items()))
-    ]
 
 
 def modeled_entrypoints() -> dict[str, str]:
@@ -140,3 +152,49 @@ def modeled_entrypoints() -> dict[str, str]:
         "studio": "/web/studio/",
         "viewer": "/web/viewer/",
     }
+
+
+def write_modeled_production_tree(root: Path) -> dict[str, object]:
+    root.mkdir(parents=True, exist_ok=False)
+    payloads = modeled_payloads()
+    for relative, (_role, payload) in payloads.items():
+        destination = root.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    receipt = build_production_receipt(
+        version="v1.0.0",
+        source_commit="a" * 40,
+        artifacts=modeled_artifact_records(),
+        protected_roots=("web", "scripts", "pipeline", "evidence"),
+        entrypoints=modeled_entrypoints(),
+        public_evidence=modeled_public_evidence(),
+    )
+    receipt_bytes = canonical_json_bytes(receipt)
+    (root / PRODUCTION_RELEASE_NAME).write_bytes(receipt_bytes)
+    checksum_rows = [
+        f"{row['sha256']}  {row['path']}\n"
+        for row in receipt["artifacts"]
+    ]
+    checksum_rows.append(
+        f"{hashlib.sha256(receipt_bytes).hexdigest()}  "
+        f"{PRODUCTION_RELEASE_NAME}\n"
+    )
+    (root / CHECKSUMS_NAME).write_bytes(
+        "".join(sorted(checksum_rows)).encode("ascii")
+    )
+    return receipt
+
+
+def write_modeled_production_archive(
+    tree: Path,
+    archive_path: Path,
+    *,
+    wrapper: str = "nantai-3d-v1.0.0",
+) -> None:
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for source in sorted(path for path in tree.rglob("*") if path.is_file()):
+            relative = source.relative_to(tree).as_posix()
+            archive.writestr(
+                deterministic_zip_info(f"{wrapper}/{relative}"),
+                source.read_bytes(),
+            )
