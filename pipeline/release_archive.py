@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import unicodedata
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -77,8 +78,10 @@ def safe_posix_member_path(value: str) -> PurePosixPath:
 
     if not isinstance(value, str) or not value:
         raise ReleaseArchiveError("release member path must be a non-empty string")
-    if "\x00" in value or "\\" in value:
+    if "\x00" in value or "\\" in value or ":" in value:
         raise ReleaseArchiveError("release member path contains a forbidden character")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in value):
+        raise ReleaseArchiveError("release member path contains a control character")
     if value.startswith(("/", "//")) or _DRIVE_PREFIX.match(value):
         raise ReleaseArchiveError("release member path must be relative")
     parts = value.split("/")
@@ -204,6 +207,7 @@ def inspect_zip_members(
     observed: list[InspectedZipMember] = []
     exact_paths: set[str] = set()
     folded_paths: set[str] = set()
+    normalized_paths: set[str] = set()
     roots: set[str] = set()
     total_bytes = 0
     regular_count = 0
@@ -217,14 +221,20 @@ def inspect_zip_members(
         path = safe_posix_member_path(raw_path)
         canonical = path.as_posix()
         folded = canonical.casefold()
+        normalized = unicodedata.normalize("NFC", canonical)
         if canonical in exact_paths:
             raise ReleaseArchiveError(f"duplicate release archive member: {canonical}")
         if folded in folded_paths:
             raise ReleaseArchiveError(
                 f"case-fold collision in release archive: {canonical}"
             )
+        if normalized in normalized_paths:
+            raise ReleaseArchiveError(
+                f"normalization collision in release archive: {canonical}"
+            )
         exact_paths.add(canonical)
         folded_paths.add(folded)
+        normalized_paths.add(normalized)
         roots.add(path.parts[0])
 
         unix_mode = (info.external_attr >> 16) & 0xFFFF

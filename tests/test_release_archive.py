@@ -52,6 +52,18 @@ def test_safe_posix_member_path_accepts_one_canonical_relative_path() -> None:
         "web/trailing.",
         "web/trailing ",
         "web/\x00name",
+        "web/file:name.txt",
+        "web/\x01name",
+        "web/\x1f",
+        "web/\x7f",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "LPT1",
+        "nul.tar.gz",
+        "com1.log",
+        "aux.txt",
     ),
 )
 def test_safe_posix_member_path_rejects_ambiguous_names(candidate: str) -> None:
@@ -147,6 +159,20 @@ def _write_archive(
     with zipfile.ZipFile(path, "w") as archive:
         for name, payload in entries:
             archive.writestr(deterministic_zip_info(name), payload)
+
+
+def _write_raw_archive(
+    path,
+    entries: tuple[tuple[str, bytes], ...],
+) -> None:
+    """Write a ZIP bypassing ``safe_posix_member_path`` validation."""
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, payload in entries:
+            info = zipfile.ZipInfo(name)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | 0o644) << 16
+            archive.writestr(info, payload)
 
 
 def test_zip_inspection_accepts_one_bounded_canonical_root(tmp_path) -> None:
@@ -265,3 +291,47 @@ def test_zip_inspection_rejects_encrypted_and_nonregular_members() -> None:
     )
     with pytest.raises(ReleaseArchiveError, match="regular"):
         inspect_zip_members(symlink, ArchiveLimits())
+
+
+def test_zip_inspection_rejects_nfc_nfd_collision(tmp_path) -> None:
+    """NFC and NFD equivalents must collide under normalization."""
+    nfc_name = "nantai-runtime/web/\xe9.txt"
+    nfd_name = "nantai-runtime/web/e\u0301.txt"
+    archive_path = tmp_path / "nfc-nfd.zip"
+    _write_archive(
+        archive_path,
+        ((nfc_name, b"a"), (nfd_name, b"b")),
+    )
+    with zipfile.ZipFile(archive_path) as archive:
+        with pytest.raises(ReleaseArchiveError, match="normalization"):
+            inspect_zip_members(archive, ArchiveLimits())
+
+
+def test_zip_inspection_rejects_illegal_child_of_valid_root(tmp_path) -> None:
+    """A valid wrapper root must not exempt an illegal child path."""
+    archive_path = tmp_path / "bad-child.zip"
+    _write_raw_archive(
+        archive_path,
+        (("nantai-runtime/CON", b"x"),),
+    )
+    with zipfile.ZipFile(archive_path) as archive:
+        with pytest.raises(ReleaseArchiveError, match="reserved"):
+            inspect_zip_members(archive, ArchiveLimits())
+
+
+def test_zip_inspection_preserves_legal_utf8_names(tmp_path) -> None:
+    """Legal UTF-8 filenames (NFC) must be accepted."""
+    archive_path = tmp_path / "utf8.zip"
+    _write_archive(
+        archive_path,
+        (
+            ("nantai-runtime/web/\xe9.txt", b"a"),
+            ("nantai-runtime/\u5c71\u6751.txt", b"b"),
+        ),
+    )
+    with zipfile.ZipFile(archive_path) as archive:
+        observed = inspect_zip_members(archive, ArchiveLimits())
+
+    names = tuple(row.path.as_posix() for row in observed)
+    assert "nantai-runtime/web/\xe9.txt" in names
+    assert "nantai-runtime/\u5c71\u6751.txt" in names

@@ -305,3 +305,21 @@ def test_archive_extraction_refuses_existing_destination(tmp_path: Path) -> None
     with pytest.raises(ProductionReleaseVerificationError, match="exists"):
         extract_production_release_archive(archive, destination)
     assert list(destination.iterdir()) == []
+
+
+def test_archive_extraction_rejects_illegal_path_and_leaves_no_destination(
+    tmp_path: Path,
+) -> None:
+    """Illegal child path must be rejected before files are created."""
+    archive = tmp_path / "bad-child.zip"
+    with zipfile.ZipFile(archive, "w") as zip_handle:
+        info = zipfile.ZipInfo("nantai-runtime/CON")
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.create_system = 3
+        info.external_attr = (stat.S_IFREG | 0o644) << 16
+        zip_handle.writestr(info, b"x")
+
+    destination = tmp_path / "extracted"
+    with pytest.raises(ProductionReleaseVerificationError, match="reserved"):
+        extract_production_release_archive(archive, destination)
+    assert not destination.exists()
