@@ -285,8 +285,14 @@ def test_release_is_draft_verified_then_published_without_failure_mutation() -> 
     assert "_compare_files(bundle_dir / name, destination)" in transaction
     assert workflow["concurrency"]["cancel-in-progress"] == "false"
     assert workflow["concurrency"]["group"] == (
-        "production-release-${{ inputs.version }}"
+        "nantai-production-private-builder"
     )
+    private = workflow["jobs"]["private_stage"]
+    assert (
+        private["env"]["NANTAI_PRIVATE_BUILDER_THREAT_MODEL"]
+        == "trusted-single-writer"
+    )
+    assert "$RUNNER_OS" in "\n".join(_run_blocks(private))
 
     assert "release_id = release[\"id\"]" in transaction
     assert "release[\"id\"] != release_id" in transaction

@@ -58,6 +58,8 @@ identity 闭环，因此当前仍是 Preview。发布操作见
 TODO 见 [Production V1 状态](docs/production-v1-status.md)。
 正式 build/stage/report/extract mutation 只在 private Linux builder 上执行；
 Windows/macOS 支持下载四件套的只读验证、平台解压后的 runtime 复验和 Viewer。
+Production mutation 只允许 trusted single-writer 的 private Linux builder；它不声称
+抵御恶意 same-UID 进程，失败残留会保留且绝不作为 Release 资产上传。
 
 ## 真实场景工作流
 

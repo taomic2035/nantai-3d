@@ -17,10 +17,12 @@ from typing import BinaryIO
 from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.production_release_fs import (
     ProductionReleaseFSError,
+    ProductionReleaseMutationError,
     open_bound_directory,
     require_linux_mutation_support,
 )
 from pipeline.production_release_verifier import (
+    PRODUCTION_ARCHIVE_LIMITS,
     ProductionReleaseVerification,
     ProductionReleaseVerificationError,
     verify_production_release_archive_stream,
@@ -146,9 +148,36 @@ def publish_privacy_report(
                         published=(destination.name,),
                         retained=(destination.name,),
                     )
-            parent.fsync()
+                parent.fsync()
+                parent.verify_lexical_identity()
+                parent.verify_child_identity(destination.name, bound)
+                final_sha, final_bytes = bound.digest()
+                if (
+                    final_sha != observed_sha
+                    or final_bytes != observed_bytes
+                    or bound.read_bytes(
+                        maximum_bytes=len(payload)
+                    )
+                    != payload
+                ):
+                    raise ProductionReleasePrivacyError(
+                        "privacy report final held-handle seal failed",
+                        published=(destination.name,),
+                        retained=(destination.name,),
+                    )
     except ProductionReleasePrivacyError:
         raise
+    except ProductionReleaseMutationError as exc:
+        state = tuple(
+            dict.fromkeys(
+                ((destination.name,) if created else ()) + exc.retained
+            )
+        )
+        raise ProductionReleasePrivacyError(
+            f"{exc}; published={state}; retained={state}",
+            published=state,
+            retained=state,
+        ) from exc
     except (ProductionReleaseFSError, OSError) as exc:
         state = (destination.name,) if created else ()
         raise ProductionReleasePrivacyError(
@@ -291,13 +320,31 @@ def _load_policy(path: Path) -> _PrivacyPolicy:
     return _PrivacyPolicy(needles=tuple(needles))
 
 
-def _release_files(root: Path) -> tuple[tuple[str, Path], ...]:
+def _release_files(
+    root: Path,
+    *,
+    limits: ArchiveLimits = PRODUCTION_ARCHIVE_LIMITS,
+) -> tuple[tuple[str, Path], ...]:
     observed: list[tuple[str, Path]] = []
+    total_bytes = 0
     for current, directories, names in os.walk(root, followlinks=False):
         current_path = Path(current)
         for name in tuple(directories):
             candidate = current_path / name
             relative = candidate.relative_to(root).as_posix()
+            try:
+                member = safe_posix_member_path(relative)
+            except ReleaseArchiveError as exc:
+                raise ProductionReleasePrivacyError(
+                    "release directory is unavailable or unsafe"
+                ) from exc
+            if (
+                len(relative.encode("utf-8")) > limits.maximum_path_bytes
+                or len(member.parts) > limits.maximum_path_components
+            ):
+                raise ProductionReleasePrivacyError(
+                    f"release directory path exceeds its maximum: {relative}"
+                )
             try:
                 candidate_stat = candidate.lstat()
             except OSError as exc:
@@ -332,6 +379,27 @@ def _release_files(root: Path) -> tuple[tuple[str, Path], ...]:
                     f"unsafe release file: {relative}"
                 )
             observed.append((relative, candidate))
+            if (
+                len(relative.encode("utf-8")) > limits.maximum_path_bytes
+                or len(safe_posix_member_path(relative).parts)
+                > limits.maximum_path_components
+            ):
+                raise ProductionReleasePrivacyError(
+                    f"release file path exceeds its maximum: {relative}"
+                )
+            if len(observed) > limits.maximum_members:
+                raise ProductionReleasePrivacyError(
+                    "release file count exceeds its maximum"
+                )
+            if candidate_stat.st_size > limits.maximum_member_bytes:
+                raise ProductionReleasePrivacyError(
+                    f"release file exceeds its maximum: {relative}"
+                )
+            total_bytes += candidate_stat.st_size
+            if total_bytes > limits.maximum_total_bytes:
+                raise ProductionReleasePrivacyError(
+                    "release total size exceeds its maximum"
+                )
     return tuple(sorted(observed))
 
 

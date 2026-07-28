@@ -1631,19 +1631,25 @@ def _write_git_archive_member(
         returncode = process.wait()
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
-    except (
-        OSError,
-        TypeError,
-        ValueError,
-        ProductionReleaseFSError,
-        subprocess.CalledProcessError,
-    ) as exc:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
+    except Exception as exc:
         raise ProductionReleaseBuilderError(
             "Git source blob streaming failed"
         ) from exc
+    finally:
+        if process is not None:
+            try:
+                running = process.poll() is None
+            except Exception:
+                running = True
+            if running:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            try:
+                process.wait()
+            except Exception:
+                pass
     return digest, byte_length
 
 
@@ -1953,6 +1959,26 @@ def build_production_release_archive(
                 "Production sidecar changed while held"
             )
         parent.fsync()
+        parent.verify_lexical_identity()
+        parent.verify_child_identity(output.name, archive_bound)
+        parent.verify_child_identity(sidecar.name, sidecar_bound)
+        final_archive_sha, final_archive_bytes = archive_bound.digest()
+        final_sidecar_sha, final_sidecar_bytes = sidecar_bound.digest()
+        final_verification = verify_production_release_archive_stream(
+            archive_bound.stream
+        )
+        if (
+            final_archive_sha != archive_sha256
+            or final_archive_bytes != archive_bytes
+            or final_sidecar_sha != sidecar_sha
+            or final_sidecar_bytes != sidecar_bytes
+            or sidecar_bound.read_bytes(maximum_bytes=4_096)
+            != sidecar_payload
+            or final_verification != verification
+        ):
+            raise ProductionReleaseBuilderError(
+                "Production release final held-handle seal failed"
+            )
         return ProductionReleaseBuild(
             archive_path=output,
             archive_sha256=archive_sha256,
@@ -1975,11 +2001,22 @@ def build_production_release_archive(
             published=published,
             retained=tuple(retained),
         ) from exc
+    except ProductionReleaseMutationError as exc:
+        published = tuple(
+            dict.fromkeys((*public_names, *exc.published))
+        )
+        retained = tuple(
+            dict.fromkeys((*public_names, *exc.retained))
+        )
+        raise ProductionReleaseBuilderError(
+            f"{exc}; published={published}; retained={retained}",
+            published=published,
+            retained=retained,
+        ) from exc
     except (
         FileExistsError,
         OSError,
         ProductionReleaseFSError,
-        ProductionReleaseMutationError,
         ReleaseArchiveError,
         zipfile.BadZipFile,
     ) as exc:

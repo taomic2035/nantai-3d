@@ -636,6 +636,26 @@ def test_archive_stream_verifier_does_not_reopen_by_name(
     assert result.valid is True
 
 
+def test_tree_receipt_limits_fail_before_directory_walk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("tree walk must not start")
+
+    monkeypatch.setattr(verifier_module, "_release_files", forbidden)
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="member count",
+    ):
+        verify_production_release_tree(
+            root,
+            limits=ArchiveLimits(maximum_members=1),
+        )
+
+
 @pytest.mark.production_mutation
 @pytest.mark.skipif(
     sys.platform != "linux",
@@ -673,6 +693,35 @@ def test_archive_extraction_rejects_illegal_path_and_leaves_no_destination(
     destination = tmp_path / "extracted"
     with pytest.raises(ProductionReleaseVerificationError, match="reserved"):
         extract_production_release_archive(archive, destination)
+    assert not destination.exists()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
+def test_archive_extraction_rejects_path_budget_before_mutation(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "deep.zip"
+    with zipfile.ZipFile(archive, "w") as zip_handle:
+        info = zipfile.ZipInfo("root/deep/file.bin")
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.create_system = 3
+        info.external_attr = (stat.S_IFREG | 0o644) << 16
+        zip_handle.writestr(info, b"x")
+
+    destination = tmp_path / "extracted"
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="depth.*maximum",
+    ):
+        extract_production_release_archive(
+            archive,
+            destination,
+            limits=ArchiveLimits(maximum_path_components=2),
+        )
     assert not destination.exists()
 
 

@@ -67,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
         "checksums_path",
     ):
         payload[key] = str(payload[key])
+    payload["retained_private_paths"] = [
+        str(path) for path in payload["retained_private_paths"]
+    ]
     print(
         json.dumps(
             payload,

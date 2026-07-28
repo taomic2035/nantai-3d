@@ -5,7 +5,7 @@ import os
 import stat
 import warnings
 import zipfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -259,6 +259,29 @@ def test_zip_inspection_rejects_multiple_roots_and_expansion_limits(tmp_path) ->
                 archive,
                 ArchiveLimits(maximum_total_bytes=9_999),
             )
+
+
+@pytest.mark.parametrize(
+    ("limits", "member"),
+    (
+        (ArchiveLimits(maximum_path_bytes=8), "root/ééé.bin"),
+        (
+            ArchiveLimits(maximum_path_components=2),
+            "root/nested/file.bin",
+        ),
+    ),
+)
+def test_zip_inspection_rejects_path_budgets(
+    tmp_path: Path,
+    limits: ArchiveLimits,
+    member: str,
+) -> None:
+    archive_path = tmp_path / "path-budget.zip"
+    _write_archive(archive_path, ((member, b"x"),))
+
+    with zipfile.ZipFile(archive_path) as archive:
+        with pytest.raises(ReleaseArchiveError, match="path.*maximum"):
+            inspect_zip_members(archive, limits)
 
 
 class _MetadataArchive:

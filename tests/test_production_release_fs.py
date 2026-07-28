@@ -30,6 +30,11 @@ def test_bound_parent_survives_lexical_directory_replacement(
             payload.write_all(b"bound")
             payload.finish()
         bound.fsync()
+        with pytest.raises(
+            release_fs.ProductionReleaseMutationError,
+            match="lexical identity changed",
+        ):
+            bound.verify_lexical_identity()
 
     assert (moved / "payload.bin").read_bytes() == b"bound"
     assert not (original / "payload.bin").exists()
@@ -109,6 +114,63 @@ def test_components_are_single_names_and_no_replace(
 
     assert (parent / "existing").read_bytes() == b"sentinel"
     assert not (tmp_path / "escape").exists()
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Linux dirfd semantics are required",
+)
+def test_post_create_fsync_failure_reports_exact_retained_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    with release_fs.open_bound_directory(parent) as bound:
+        payload = bound.create_file("retained.bin")
+        payload.write_all(b"x")
+        monkeypatch.setattr(
+            release_fs.os,
+            "fsync",
+            lambda _descriptor: (_ for _ in ()).throw(OSError("injected")),
+        )
+        with pytest.raises(
+            release_fs.ProductionReleaseMutationError,
+            match="finish failed",
+        ) as raised:
+            payload.finish()
+        monkeypatch.undo()
+        payload.close()
+
+    assert raised.value.published == ("retained.bin",)
+    assert raised.value.retained == ("retained.bin",)
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Linux dirfd semantics are required",
+)
+def test_child_name_swap_is_detected_against_held_file(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    with release_fs.open_bound_directory(parent) as bound:
+        payload = bound.create_file("payload.bin")
+        payload.write_all(b"held")
+        payload.finish()
+        (parent / "payload.bin").rename(parent / "held.bin")
+        (parent / "payload.bin").write_bytes(b"replacement")
+
+        with pytest.raises(
+            release_fs.ProductionReleaseMutationError,
+            match="child identity changed",
+        ) as raised:
+            bound.verify_child_identity("payload.bin", payload)
+        payload.close()
+
+    assert raised.value.published == ("payload.bin",)
+    assert raised.value.retained == ("payload.bin",)
 
 
 def test_production_mutation_modules_expose_no_cleanup_or_replace_path() -> None:

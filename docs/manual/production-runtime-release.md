@@ -34,6 +34,12 @@ Production 的 `build-production`、带报告落盘的隐私审计、`stage-prod
 产物会保留供审计，不会回滚删除。Windows 和 macOS 继续支持只读 ZIP/四件套复验、
 解压后 runtime tree 复验和 Viewer 运行，但不能执行这些 Production mutation。
 
+该 private builder 的正式威胁边界是 **trusted single-writer OS account/workspace**：
+同一时刻只允许运行一个 Production 发布事务，操作系统账户及其工作区必须可信。这里
+不声称抵御恶意 same-UID 进程；同账户进程可使用 ptrace、chmod 或直接操作该账户持有
+的描述符，这在标准 Linux 权限模型内无法由本仓库代码隔离。若不能保证单写者和可信
+账户，必须在独立 VM/容器账户中重新执行，不得发布。
+
 ## 构建
 
 私有验收根通常位于忽略的 `.nantai-studio/` 工作区。下面三个变量都必须显式提供：
@@ -117,8 +123,11 @@ SHA256SUMS.txt
 ```
 
 独立 receipt 与 checksum 来自同一份已复验 ZIP；archive sidecar 按最终公开文件名重新
-计算。privacy policy、privacy report、QA 截图原件和私有 acceptance 仍留在私有
-工作区，不进入公开目录。这个步骤只收拢已验收字节，不替代双构建一致性、三平台
+计算。`PRODUCTION-RELEASE.json` 是 receipt-last 完成标记；这不是“原子目录导出”。
+任一步失败都会保留已创建的 snapshot、rebuild 或 partial public residue 供审计，
+调用方必须按机器返回的 `retained_private_paths` 和 `retained` 处理，不能上传残留。
+privacy policy、privacy report、QA 截图原件、candidate snapshot、acceptance rebuild
+和私有 acceptance 都留在私有工作区，不进入公开四件套。这个步骤只收拢已验收字节，不替代双构建一致性、三平台
 浏览器 QA、人工复核或 GitHub 下载后复验。
 
 发布后把四个 GitHub 资产下载到同一个全新目录，再整体复验。此时下载的 canonical

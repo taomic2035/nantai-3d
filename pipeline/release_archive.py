@@ -38,6 +38,8 @@ class ArchiveLimits:
     maximum_member_bytes: int = 8 * 1024 * 1024 * 1024
     maximum_total_bytes: int = 32 * 1024 * 1024 * 1024
     maximum_compression_ratio: int = 1_000
+    maximum_path_bytes: int = 4_096
+    maximum_path_components: int = 64
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -45,6 +47,8 @@ class ArchiveLimits:
             ("maximum_member_bytes", self.maximum_member_bytes),
             ("maximum_total_bytes", self.maximum_total_bytes),
             ("maximum_compression_ratio", self.maximum_compression_ratio),
+            ("maximum_path_bytes", self.maximum_path_bytes),
+            ("maximum_path_components", self.maximum_path_components),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ReleaseArchiveError(f"{name} must be a positive integer")
@@ -228,6 +232,15 @@ def inspect_zip_members(
         raw_path = info.filename[:-1] if is_directory else info.filename
         path = safe_posix_member_path(raw_path)
         canonical = path.as_posix()
+        if len(canonical.encode("utf-8")) > limits.maximum_path_bytes:
+            raise ReleaseArchiveError(
+                f"release archive member path exceeds its maximum: {canonical}"
+            )
+        if len(path.parts) > limits.maximum_path_components:
+            raise ReleaseArchiveError(
+                "release archive member path depth exceeds its maximum: "
+                f"{canonical}"
+            )
         folded = canonical.casefold()
         normalized = unicodedata.normalize("NFC", canonical)
         normalized_folded = portable_path_identity(canonical)

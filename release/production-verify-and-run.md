@@ -21,6 +21,11 @@ extraction API are private-Linux-builder-only append-only mutations. Downloaded
 archive and four-file verification remain read-only and cross-platform. On
 Windows or macOS, verify the four downloaded files first, extract with the
 platform tool into a new empty directory, then run the bundled `verify` command.
+The private builder assumes one trusted OS account/workspace and one writer. It
+does not claim to resist a malicious same-UID process, which can use ptrace,
+chmod, or the account's open descriptors. Publication is receipt-last, not an
+atomic directory export; partial snapshot/rebuild/public residue is retained
+for audit and must never be uploaded.
 
 ```powershell
 python make.py verify

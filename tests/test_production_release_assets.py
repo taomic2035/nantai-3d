@@ -422,6 +422,12 @@ def test_stage_exports_only_four_verified_public_assets(
     assert isinstance(rebuilt_output, Path)
     assert rebuilt_output.is_absolute()
     assert rebuilt_output.name == "acceptance-rebuild.zip"
+    assert result.retained_private_paths == (
+        rebuilt_output.parent,
+        rebuilt_output.parent / "candidate-snapshot.zip",
+        rebuilt_output,
+        rebuilt_output.with_suffix(".zip.sha256"),
+    )
     verification = verify_production_release_assets(output)
     assert verification.valid is True
     assert verification.package_content_id == receipt["package"]["content_id"]

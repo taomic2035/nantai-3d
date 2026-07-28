@@ -55,7 +55,8 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 远程 runtime/caller 的 A1–K1、P0-CI 与 L1–N1 均已关闭：真实 fetch 使用 bounded
 streaming，archive/receipt/tree/builder 共享 portable Unicode path identity，最终
-ZIP 可执行 no-secret-echo 的分块隐私机器审计，并以四件套原子导出/整体复验。GLM
+ZIP 可执行 no-secret-echo 的分块隐私机器审计，并以 receipt-last 四件套完成标记与
+整体复验；失败后的 snapshot/rebuild/partial residue 会保留审计，不是原子导出。GLM
 最终资产、跨平台与 runtime 自包含复核已经关闭。GLM-017/018 已从
 source/workspace/run identity 只读重开五阶段 journal，并在 `accept` 阶段重新调用
 权威 acceptance validator；[GLM-019](../handoff/FEEDBACK-HANDOFF-GLM-019-real-scene-serve-semantics.md)

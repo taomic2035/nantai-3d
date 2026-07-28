@@ -89,6 +89,10 @@ def _close_descriptor(descriptor: int) -> None:
         pass
 
 
+def _object_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode))
+
+
 class BoundFile:
     """One newly created regular file held by descriptor until completion."""
 
@@ -123,17 +127,36 @@ class BoundFile:
             raise ProductionReleaseFSError("bound file capability is closed")
         return self._stream
 
+    @property
+    def descriptor(self) -> int:
+        return self.stream.fileno()
+
+    def _mutation_error(
+        self,
+        action: str,
+        exc: Exception | None = None,
+    ) -> ProductionReleaseMutationError:
+        error = ProductionReleaseMutationError(
+            f"Production release file {action} failed; retained: {self.name}",
+            published=(self.name,),
+            retained=(self.name,),
+        )
+        if exc is not None:
+            error.__cause__ = exc
+        return error
+
     def write_all(self, payload: bytes) -> None:
-        view = memoryview(payload)
-        while view:
-            written = self.stream.write(view)
-            if written is None or written <= 0:
-                raise ProductionReleaseMutationError(
-                    f"Production release file write failed; retained: {self.name}",
-                    published=(self.name,),
-                    retained=(self.name,),
-                )
-            view = view[written:]
+        try:
+            view = memoryview(payload)
+            while view:
+                written = self.stream.write(view)
+                if written is None or written <= 0:
+                    raise self._mutation_error("write")
+                view = view[written:]
+        except ProductionReleaseMutationError:
+            raise
+        except Exception as exc:
+            raise self._mutation_error("write", exc) from exc
 
     def copy_from(
         self,
@@ -141,76 +164,89 @@ class BoundFile:
         *,
         expected_bytes: int | None = None,
     ) -> tuple[str, int]:
-        digest = hashlib.sha256()
-        observed_bytes = 0
-        while True:
-            chunk = source.read(STREAM_CHUNK_BYTES)
-            if not chunk:
-                break
-            observed_bytes += len(chunk)
-            if expected_bytes is not None and observed_bytes > expected_bytes:
-                raise ProductionReleaseMutationError(
-                    f"Production release source expanded; retained: {self.name}",
-                    published=(self.name,),
-                    retained=(self.name,),
-                )
-            digest.update(chunk)
-            self.write_all(chunk)
-        if expected_bytes is not None and observed_bytes != expected_bytes:
-            raise ProductionReleaseMutationError(
-                f"Production release source length changed; retained: {self.name}",
-                published=(self.name,),
-                retained=(self.name,),
-            )
-        return digest.hexdigest(), observed_bytes
+        try:
+            digest = hashlib.sha256()
+            observed_bytes = 0
+            while True:
+                chunk = source.read(STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                observed_bytes += len(chunk)
+                if (
+                    expected_bytes is not None
+                    and observed_bytes > expected_bytes
+                ):
+                    raise self._mutation_error("source length verification")
+                digest.update(chunk)
+                self.write_all(chunk)
+            if (
+                expected_bytes is not None
+                and observed_bytes != expected_bytes
+            ):
+                raise self._mutation_error("source length verification")
+            return digest.hexdigest(), observed_bytes
+        except ProductionReleaseMutationError:
+            raise
+        except Exception as exc:
+            raise self._mutation_error("source copy", exc) from exc
 
     def finish(self) -> None:
-        self.stream.flush()
-        os.fsync(self.stream.fileno())
+        try:
+            self.stream.flush()
+            os.fsync(self.stream.fileno())
+        except ProductionReleaseMutationError:
+            raise
+        except Exception as exc:
+            raise self._mutation_error("finish", exc) from exc
 
     def digest(self) -> tuple[str, int]:
         """Hash the same held inode; never reopen it by name."""
 
-        self.finish()
-        stream = self.stream
-        previous = stream.tell()
-        stream.seek(0)
-        digest = hashlib.sha256()
-        observed_bytes = 0
-        while True:
-            chunk = stream.read(STREAM_CHUNK_BYTES)
-            if not chunk:
-                break
-            observed_bytes += len(chunk)
-            digest.update(chunk)
-        after = os.fstat(stream.fileno())
-        if not stat.S_ISREG(after.st_mode) or after.st_size != observed_bytes:
-            raise ProductionReleaseMutationError(
-                f"Production release file changed; retained: {self.name}",
-                published=(self.name,),
-                retained=(self.name,),
-            )
-        stream.seek(previous)
-        return digest.hexdigest(), observed_bytes
+        try:
+            self.finish()
+            stream = self.stream
+            previous = stream.tell()
+            stream.seek(0)
+            digest = hashlib.sha256()
+            observed_bytes = 0
+            while True:
+                chunk = stream.read(STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                observed_bytes += len(chunk)
+                digest.update(chunk)
+            after = os.fstat(stream.fileno())
+            if not stat.S_ISREG(after.st_mode) or after.st_size != observed_bytes:
+                raise self._mutation_error("identity verification")
+            stream.seek(previous)
+            return digest.hexdigest(), observed_bytes
+        except ProductionReleaseMutationError:
+            raise
+        except Exception as exc:
+            raise self._mutation_error("digest", exc) from exc
 
     def read_bytes(self, *, maximum_bytes: int) -> bytes:
-        self.finish()
-        stream = self.stream
-        previous = stream.tell()
-        stream.seek(0)
-        payload = stream.read(maximum_bytes + 1)
-        stream.seek(previous)
-        if len(payload) > maximum_bytes:
-            raise ProductionReleaseMutationError(
-                f"Production release file exceeds limit; retained: {self.name}",
-                published=(self.name,),
-                retained=(self.name,),
-            )
-        return payload
+        try:
+            self.finish()
+            stream = self.stream
+            previous = stream.tell()
+            stream.seek(0)
+            payload = stream.read(maximum_bytes + 1)
+            stream.seek(previous)
+            if len(payload) > maximum_bytes:
+                raise self._mutation_error("bounded read")
+            return payload
+        except ProductionReleaseMutationError:
+            raise
+        except Exception as exc:
+            raise self._mutation_error("bounded read", exc) from exc
 
     def close(self) -> None:
         if self._stream is not None and not self._stream.closed:
-            self._stream.close()
+            try:
+                self._stream.close()
+            except Exception as exc:
+                raise self._mutation_error("close", exc) from exc
 
     def __enter__(self) -> BoundFile:
         return self
@@ -221,7 +257,15 @@ class BoundFile:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        if exc is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except ProductionReleaseMutationError:
+            # Preserve the original post-creation failure; it already carries
+            # the retained namespace state.
+            pass
 
 
 class BoundDirectory:
@@ -308,11 +352,19 @@ class BoundDirectory:
                 published=(relative,),
                 retained=(relative,),
             ) from exc
-        return BoundDirectory(
-            descriptor,
-            display_path=self.path / component,
-            relative_name=relative,
-        )
+        try:
+            return BoundDirectory(
+                descriptor,
+                display_path=self.path / component,
+                relative_name=relative,
+            )
+        except Exception as exc:
+            raise ProductionReleaseMutationError(
+                "created Production release directory is retained: "
+                f"{relative}",
+                published=(relative,),
+                retained=(relative,),
+            ) from exc
 
     def create_file(
         self,
@@ -342,7 +394,70 @@ class BoundDirectory:
         )
 
     def fsync(self) -> None:
-        os.fsync(self.descriptor)
+        try:
+            os.fsync(self.descriptor)
+        except Exception as exc:
+            state = (self.relative_name,) if self.relative_name else ()
+            raise ProductionReleaseMutationError(
+                "Production release directory fsync failed; "
+                f"retained: {state}",
+                published=state,
+                retained=state,
+            ) from exc
+
+    def verify_lexical_identity(self) -> None:
+        """Rewalk the lexical path and compare it with this held directory."""
+
+        try:
+            with open_bound_directory(self.path) as reopened:
+                held = os.fstat(self.descriptor)
+                lexical = os.fstat(reopened.descriptor)
+        except ProductionReleaseMutationError:
+            raise
+        except Exception as exc:
+            state = (self.relative_name,) if self.relative_name else ()
+            raise ProductionReleaseMutationError(
+                "Production release directory lexical identity is unavailable",
+                published=state,
+                retained=state,
+            ) from exc
+        if _object_identity(held) != _object_identity(lexical):
+            state = (self.relative_name,) if self.relative_name else ()
+            raise ProductionReleaseMutationError(
+                "Production release directory lexical identity changed",
+                published=state,
+                retained=state,
+            )
+
+    def verify_child_identity(
+        self,
+        name: str,
+        child: BoundDirectory | BoundFile,
+    ) -> None:
+        """Compare one child name under this dirfd with the held child inode."""
+
+        component = _component(name)
+        relative = self._relative(component)
+        try:
+            named = os.stat(
+                component,
+                dir_fd=self.descriptor,
+                follow_symlinks=False,
+            )
+            held = os.fstat(child.descriptor)
+        except Exception as exc:
+            raise ProductionReleaseMutationError(
+                "Production release child identity is unavailable: "
+                f"{relative}",
+                published=(relative,),
+                retained=(relative,),
+            ) from exc
+        if _object_identity(named) != _object_identity(held):
+            raise ProductionReleaseMutationError(
+                f"Production release child identity changed: {relative}",
+                published=(relative,),
+                retained=(relative,),
+            )
 
     def close(self) -> None:
         if self._descriptor >= 0:

@@ -1668,6 +1668,58 @@ def test_clean_source_gate_tracks_template_not_development_runner(
     assert observed["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
+def test_git_blob_stream_failure_always_kills_and_reaps_child(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class Process:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"payload")
+            self.killed = 0
+            self.waited = 0
+
+        def poll(self):
+            return None
+
+        def kill(self) -> None:
+            self.killed += 1
+
+        def wait(self) -> int:
+            self.waited += 1
+            return 0
+
+    process = Process()
+    monkeypatch.setattr(
+        builder_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "_write_archive_member",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected stream failure")
+        ),
+    )
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="blob streaming failed",
+    ) as raised:
+        builder_module._write_git_archive_member(
+            SimpleNamespace(),
+            wrapper="root",
+            repo_root=tmp_path,
+            object_id="a" * 40,
+            destination="payload.bin",
+            expected_bytes=7,
+        )
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert process.killed == 1
+    assert process.waited == 1
+
+
 @LINUX_MUTATION_ONLY
 def test_build_is_deterministic_verified_and_no_replace(
     tmp_path: Path,

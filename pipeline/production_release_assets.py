@@ -73,6 +73,7 @@ class ProductionReleaseAssets:
     package_content_id: str
     privacy_valid: bool
     scene_trust_effect: str
+    retained_private_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -468,34 +469,57 @@ def stage_production_release_assets(
     public_names: list[str] = []
     private_names: list[str] = []
     try:
-        source_stream = source.open("rb")
-        held_files.append(source_stream)
-        descriptor_before = os.fstat(source_stream.fileno())
-        if _signature(source_before) != _signature(descriptor_before):
+        parent = open_bound_directory(output.parent)
+        if parent.entry_exists(output.name):
             raise ProductionReleaseAssetsError(
-                "Production candidate archive changed before staging"
+                "Production release asset output directory must be absent"
             )
-        archive_digest = hashlib.sha256()
-        archive_bytes = 0
-        while True:
-            chunk = source_stream.read(_COPY_CHUNK_BYTES)
-            if not chunk:
-                break
-            archive_bytes += len(chunk)
-            archive_digest.update(chunk)
-        if archive_bytes != source_before.st_size:
+        rebuild_name = f".{output.name}.{uuid.uuid4().hex}.rebuild"
+        rebuild_dir = parent.create_directory(rebuild_name, mode=0o700)
+        private_names.append(rebuild_name)
+        snapshot_file = rebuild_dir.create_file(
+            "candidate-snapshot.zip",
+            mode=0o600,
+        )
+        held_files.append(snapshot_file)
+        private_names.append(
+            f"{rebuild_name}/candidate-snapshot.zip"
+        )
+        with source.open("rb") as source_stream:
+            descriptor_before = os.fstat(source_stream.fileno())
+            if _signature(source_before) != _signature(descriptor_before):
+                raise ProductionReleaseAssetsError(
+                    "Production candidate archive changed before staging"
+                )
+            copied_sha, archive_bytes = snapshot_file.copy_from(
+                source_stream,
+                expected_bytes=source_before.st_size,
+            )
+            descriptor_after = os.fstat(source_stream.fileno())
+            if _signature(source_before) != _signature(descriptor_after):
+                raise ProductionReleaseAssetsError(
+                    "Production candidate archive changed during snapshot"
+                )
+        snapshot_file.finish()
+        archive_sha256, snapshot_bytes = snapshot_file.digest()
+        if (
+            copied_sha != archive_sha256
+            or archive_bytes != snapshot_bytes
+            or archive_bytes != source_before.st_size
+        ):
             raise ProductionReleaseAssetsError(
-                "Production candidate archive changed during staging"
+                "Production candidate snapshot identity disagrees"
             )
-        archive_sha256 = archive_digest.hexdigest()
-        source_stream.seek(0)
-        verification = verify_production_release_archive_stream(source_stream)
+
+        verification = verify_production_release_archive_stream(
+            snapshot_file.stream
+        )
         privacy = audit_production_release_privacy_stream(
-            source_stream,
+            snapshot_file.stream,
             policy,
         )
         receipt_payload, checksums_payload = _archive_contract_payloads_stream(
-            source_stream
+            snapshot_file.stream
         )
         if verification.version != version:
             raise ProductionReleaseAssetsError(
@@ -525,23 +549,9 @@ def stage_production_release_assets(
             raise ProductionReleaseAssetsError(
                 "Production candidate identities disagree"
             )
-        descriptor_after = os.fstat(source_stream.fileno())
-        if _signature(source_before) != _signature(descriptor_after):
-            raise ProductionReleaseAssetsError(
-                "Production candidate archive changed during validation"
-            )
-
-        parent = open_bound_directory(output.parent)
-        if parent.entry_exists(output.name):
-            raise ProductionReleaseAssetsError(
-                "Production release asset output directory must be absent"
-            )
         source_identity_before = resolve_production_release_source_identity(
             repo
         )
-        rebuild_name = f".{output.name}.{uuid.uuid4().hex}.rebuild"
-        rebuild_dir = parent.create_directory(rebuild_name, mode=0o700)
-        private_names.append(rebuild_name)
         rebuilt_path = rebuild_dir.path / "acceptance-rebuild.zip"
         rebuilt_result = build_production_release_archive(
             repo_root=repo,
@@ -551,6 +561,13 @@ def stage_production_release_assets(
             source_commit=source_identity_before.source_commit,
             tracked_files=source_identity_before.tracked_files,
             output_parent=rebuild_dir,
+        )
+        private_names.extend(
+            (
+                f"{rebuild_name}/{rebuilt_result.archive_path.name}",
+                f"{rebuild_name}/"
+                f"{rebuilt_result.archive_path.name}.sha256",
+            )
         )
         if (
             resolve_production_release_source_identity(repo)
@@ -577,9 +594,10 @@ def stage_production_release_assets(
         archive_name = f"nantai-3d-{verification.version}-runtime.zip"
         archive_file = public_dir.create_file(archive_name, mode=0o644)
         held_files.append(archive_file)
-        source_stream.seek(0)
+        public_names.append(f"{output.name}/{archive_name}")
+        snapshot_file.stream.seek(0)
         copied_sha, copied_bytes = archive_file.copy_from(
-            source_stream,
+            snapshot_file.stream,
             expected_bytes=archive_bytes,
         )
         archive_file.finish()
@@ -596,6 +614,8 @@ def stage_production_release_assets(
         sidecar_payload = (
             f"{archive_sha256}  {archive_name}\n"
         ).encode("ascii")
+        public_payloads: dict[str, bytes] = {}
+        public_files = {archive_name: archive_file}
         for name, payload in (
             (f"{archive_name}.sha256", sidecar_payload),
             (CHECKSUMS_NAME, checksums_payload),
@@ -603,8 +623,11 @@ def stage_production_release_assets(
         ):
             bound = public_dir.create_file(name, mode=0o644)
             held_files.append(bound)
+            public_names.append(f"{output.name}/{name}")
             bound.write_all(payload)
             bound.finish()
+            public_payloads[name] = payload
+            public_files[name] = bound
             digest, byte_length = bound.digest()
             if (
                 byte_length != len(payload)
@@ -615,6 +638,63 @@ def stage_production_release_assets(
                 )
         public_dir.fsync()
         parent.fsync()
+
+        parent.verify_lexical_identity()
+        parent.verify_child_identity(rebuild_name, rebuild_dir)
+        parent.verify_child_identity(output.name, public_dir)
+        rebuild_dir.verify_lexical_identity()
+        rebuild_dir.verify_child_identity(
+            "candidate-snapshot.zip",
+            snapshot_file,
+        )
+        public_dir.verify_lexical_identity()
+        snapshot_sha, final_snapshot_bytes = snapshot_file.digest()
+        if (
+            snapshot_sha != archive_sha256
+            or final_snapshot_bytes != archive_bytes
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production candidate snapshot changed before commit"
+            )
+        for name, bound in public_files.items():
+            public_dir.verify_child_identity(name, bound)
+            digest, byte_length = bound.digest()
+            if name == archive_name:
+                expected_payload_sha = archive_sha256
+                expected_payload_bytes = archive_bytes
+            else:
+                expected_payload = public_payloads[name]
+                expected_payload_sha = hashlib.sha256(
+                    expected_payload
+                ).hexdigest()
+                expected_payload_bytes = len(expected_payload)
+                if bound.read_bytes(
+                    maximum_bytes=_MAXIMUM_PUBLIC_CONTRACT_BYTES
+                ) != expected_payload:
+                    raise ProductionReleaseAssetsError(
+                        f"Production public asset payload changed: {name}"
+                    )
+            if (
+                digest != expected_payload_sha
+                or byte_length != expected_payload_bytes
+            ):
+                raise ProductionReleaseAssetsError(
+                    f"Production public asset final seal failed: {name}"
+                )
+        final_verification = verify_production_release_archive_stream(
+            archive_file.stream
+        )
+        final_receipt, final_checksums = _archive_contract_payloads_stream(
+            archive_file.stream
+        )
+        if (
+            final_verification != verification
+            or final_receipt != receipt_payload
+            or final_checksums != checksums_payload
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production public archive final contracts disagree"
+            )
         return ProductionReleaseAssets(
             output_dir=output,
             archive_path=output / archive_name,
@@ -624,6 +704,14 @@ def stage_production_release_assets(
             package_content_id=verification.package_content_id,
             privacy_valid=True,
             scene_trust_effect="none",
+            retained_private_paths=(
+                rebuild_dir.path,
+                snapshot_file.path,
+                rebuilt_result.archive_path,
+                rebuilt_result.archive_path.with_suffix(
+                    f"{rebuilt_result.archive_path.suffix}.sha256"
+                ),
+            ),
         )
     except ProductionReleaseAssetsError as exc:
         published = exc.published or tuple(public_names)
@@ -633,8 +721,29 @@ def stage_production_release_assets(
             published=published,
             retained=retained,
         ) from exc
+    except ProductionReleaseMutationError as exc:
+        published = tuple(
+            dict.fromkeys((*public_names, *exc.published))
+        )
+        retained = tuple(
+            dict.fromkeys(
+                (*private_names, *public_names, *exc.retained)
+            )
+        )
+        raise ProductionReleaseAssetsError(
+            f"{exc}; published={published}; retained={retained}",
+            published=published,
+            retained=retained,
+        ) from exc
     except ProductionReleaseBuilderError as exc:
-        retained = tuple((*private_names, *public_names))
+        child_retained = tuple(
+            f"{rebuild_name}/{name}" for name in exc.retained
+        )
+        retained = tuple(
+            dict.fromkeys(
+                (*private_names, *public_names, *child_retained)
+            )
+        )
         raise ProductionReleaseAssetsError(
             f"Production acceptance rebuild failed: {exc}; "
             f"published={tuple(public_names)}; retained={retained}",
@@ -645,7 +754,6 @@ def stage_production_release_assets(
         FileExistsError,
         OSError,
         ProductionReleaseFSError,
-        ProductionReleaseMutationError,
         ProductionReleasePrivacyError,
         ProductionReleaseVerificationError,
         ReleaseArchiveError,

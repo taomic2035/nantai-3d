@@ -79,6 +79,17 @@ def test_manual_states_privacy_and_hash_limits_without_promoting_reality() -> No
     assert re.search(r"不得.*v1\.0\.0", manual)
 
 
+def test_manual_states_private_builder_threat_boundary_and_receipt_last() -> None:
+    manual = _read(MANUAL)
+
+    assert "trusted single-writer OS account/workspace" in manual
+    assert "恶意 same-UID" in manual
+    assert "ptrace" in manual
+    assert "receipt-last" in manual
+    assert "不是“原子目录导出”" in manual
+    assert "retained_private_paths" in manual
+
+
 def test_manual_hash_boundary_requires_an_external_trust_anchor() -> None:
     manual = _read(MANUAL)
     hash_boundary = manual.split("## 哈希与现实边界", 1)[1].split(

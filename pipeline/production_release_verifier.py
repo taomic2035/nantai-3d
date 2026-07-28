@@ -111,14 +111,32 @@ def _stable_payload(path: Path, *, maximum_bytes: int) -> bytes:
     return payload
 
 
-def _release_files(root: Path) -> set[str]:
+def _require_path_budget(
+    relative: str,
+    *,
+    limits: ArchiveLimits,
+) -> None:
+    member = safe_posix_member_path(relative)
+    if len(relative.encode("utf-8")) > limits.maximum_path_bytes:
+        _verification_error(
+            f"release path exceeds its maximum: {relative}"
+        )
+    if len(member.parts) > limits.maximum_path_components:
+        _verification_error(
+            f"release path depth exceeds its maximum: {relative}"
+        )
+
+
+def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
     files: set[str] = set()
     folded: set[str] = set()
+    total_bytes = 0
     for current, directories, names in os.walk(root, followlinks=False):
         current_path = Path(current)
         for directory in tuple(directories):
             candidate = current_path / directory
             relative = candidate.relative_to(root).as_posix()
+            _require_path_budget(relative, limits=limits)
             try:
                 observed = candidate.lstat()
             except OSError as exc:
@@ -139,6 +157,7 @@ def _release_files(root: Path) -> set[str]:
             relative = safe_posix_member_path(
                 candidate.relative_to(root).as_posix()
             ).as_posix()
+            _require_path_budget(relative, limits=limits)
             try:
                 observed = candidate.lstat()
             except OSError as exc:
@@ -162,6 +181,19 @@ def _release_files(root: Path) -> set[str]:
                 )
             folded.add(identity)
             files.add(relative)
+            if len(files) > limits.maximum_members:
+                _verification_error(
+                    "release tree member count exceeds its maximum"
+                )
+            if observed.st_size > limits.maximum_member_bytes:
+                _verification_error(
+                    f"release tree member exceeds its maximum: {relative}"
+                )
+            total_bytes += observed.st_size
+            if total_bytes > limits.maximum_total_bytes:
+                _verification_error(
+                    "release tree total size exceeds its maximum"
+                )
     return files
 
 
@@ -206,11 +238,12 @@ class _ReleaseReader(Protocol):
 
 
 class _TreeReader:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, limits: ArchiveLimits) -> None:
         self.root = root
+        self.limits = limits
 
     def files(self) -> set[str]:
-        return _release_files(self.root)
+        return _release_files(self.root, limits=self.limits)
 
     def payload(self, relative: str, *, maximum_bytes: int) -> bytes:
         return _stable_payload(
@@ -364,7 +397,11 @@ class _ArchiveReader:
         return digest.hexdigest(), observed_bytes
 
 
-def _verify_reader(reader: _ReleaseReader) -> ProductionReleaseVerification:
+def _verify_reader(
+    reader: _ReleaseReader,
+    *,
+    limits: ArchiveLimits,
+) -> ProductionReleaseVerification:
     """Verify one immutable release reader without promoting scene trust."""
 
     try:
@@ -379,6 +416,36 @@ def _verify_reader(reader: _ReleaseReader) -> ProductionReleaseVerification:
         raise ProductionReleaseVerificationError(
             f"Production receipt verification failed: {exc}"
         ) from exc
+
+    artifacts = tuple(receipt["artifacts"])
+    if len(artifacts) + 2 > limits.maximum_members:
+        raise ProductionReleaseVerificationError(
+            "Production receipt member count exceeds its maximum"
+        )
+    if len(receipt_payload) > limits.maximum_member_bytes:
+        raise ProductionReleaseVerificationError(
+            "Production receipt exceeds its member maximum"
+        )
+    declared_total = len(receipt_payload)
+    for artifact in artifacts:
+        relative = str(artifact["path"])
+        _require_path_budget(relative, limits=limits)
+        byte_length = int(artifact["bytes"])
+        if byte_length > limits.maximum_member_bytes:
+            raise ProductionReleaseVerificationError(
+                f"Production receipt member exceeds its maximum: {relative}"
+            )
+        declared_total += byte_length
+    checksum_bytes = _expected_checksum_bytes(receipt, receipt_payload)
+    if len(checksum_bytes) > limits.maximum_member_bytes:
+        raise ProductionReleaseVerificationError(
+            "Production checksum file exceeds its member maximum"
+        )
+    declared_total += len(checksum_bytes)
+    if declared_total > limits.maximum_total_bytes:
+        raise ProductionReleaseVerificationError(
+            "Production receipt total size exceeds its maximum"
+        )
 
     declared_paths = {
         str(artifact["path"]) for artifact in receipt["artifacts"]
@@ -425,7 +492,7 @@ def _verify_reader(reader: _ReleaseReader) -> ProductionReleaseVerification:
         CHECKSUMS_NAME,
         maximum_bytes=_CONTRACT_MAXIMUM_BYTES,
     )
-    if checksum_payload != _expected_checksum_bytes(receipt, receipt_payload):
+    if checksum_payload != checksum_bytes:
         raise ProductionReleaseVerificationError(
             "Production release checksum file is changed or noncanonical"
         )
@@ -498,6 +565,8 @@ def _verify_reader(reader: _ReleaseReader) -> ProductionReleaseVerification:
 
 def verify_production_release_tree(
     root: str | Path,
+    *,
+    limits: ArchiveLimits = PRODUCTION_ARCHIVE_LIMITS,
 ) -> ProductionReleaseVerification:
     """Verify one extracted Production runtime without promoting scene trust."""
 
@@ -521,7 +590,10 @@ def verify_production_release_tree(
         raise ProductionReleaseVerificationError(
             "Production release tree is missing or unsafe"
         )
-    return _verify_reader(_TreeReader(project_root))
+    return _verify_reader(
+        _TreeReader(project_root, limits=limits),
+        limits=limits,
+    )
 
 
 def extract_production_release_archive(
@@ -753,7 +825,8 @@ def verify_production_release_archive(
                 )
             with zipfile.ZipFile(stream) as archive:
                 result = _verify_reader(
-                    _ArchiveReader(archive, limits=limits)
+                    _ArchiveReader(archive, limits=limits),
+                    limits=limits,
                 )
             descriptor_after = os.fstat(stream.fileno())
         after = source.lstat()
@@ -791,7 +864,10 @@ def verify_production_release_archive_stream(
         previous = stream.tell()
         stream.seek(0)
         with zipfile.ZipFile(stream) as archive:
-            result = _verify_reader(_ArchiveReader(archive, limits=limits))
+            result = _verify_reader(
+                _ArchiveReader(archive, limits=limits),
+                limits=limits,
+            )
         stream.seek(previous)
         return result
     except ProductionReleaseVerificationError:

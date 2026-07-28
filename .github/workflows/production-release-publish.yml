@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-release-${{ inputs.version }}
+  group: nantai-production-private-builder
   cancel-in-progress: false
 
 jobs:
@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ inputs.version }}
+      NANTAI_PRIVATE_BUILDER_THREAT_MODEL: trusted-single-writer
     outputs:
       package_content_id: ${{ steps.verify_bundle.outputs.package_content_id }}
     steps:
@@ -61,6 +62,10 @@ jobs:
           fi
           if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
             echo "Checkout does not match the workflow source commit" >&2
+            exit 1
+          fi
+          if [[ "$RUNNER_OS" != "Linux" ]] || [[ "$NANTAI_PRIVATE_BUILDER_THREAT_MODEL" != "trusted-single-writer" ]]; then
+            echo "Private builder threat boundary is not satisfied" >&2
             exit 1
           fi
           if [[ "$ACCEPTANCE_ROOT" != /* ]] || [[ ! -d "$ACCEPTANCE_ROOT" ]] || [[ -L "$ACCEPTANCE_ROOT" ]]; then
