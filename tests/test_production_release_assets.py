@@ -221,11 +221,12 @@ def test_stage_rejects_junction_output_parent(
     output_parent = tmp_path / "junction-parent"
     output_parent.mkdir()
     output = output_parent / "release-assets"
-    original = Path.is_junction
+    original = getattr(Path, "is_junction", lambda self: False)
     monkeypatch.setattr(
         Path,
         "is_junction",
-        lambda path: path == output_parent or original(path),
+        lambda self: self == output_parent or original(self),
+        raising=False,
     )
 
     with pytest.raises(
@@ -256,11 +257,12 @@ def test_verify_rejects_junction_bundle_root(
         privacy_policy_path=policy,
         output_dir=output,
     )
-    original = Path.is_junction
+    original = getattr(Path, "is_junction", lambda self: False)
     monkeypatch.setattr(
         Path,
         "is_junction",
-        lambda path: path == output or original(path),
+        lambda self: self == output or original(self),
+        raising=False,
     )
 
     with pytest.raises(

@@ -57,11 +57,12 @@ def test_publish_directory_noreplace_rejects_junction_source(
     destination = tmp_path / "bundle"
     source.mkdir()
     (source / "training-job.zip").write_bytes(b"complete")
-    original = Path.is_junction
+    original = getattr(Path, "is_junction", lambda self: False)
     monkeypatch.setattr(
         Path,
         "is_junction",
-        lambda path: path == source or original(path),
+        lambda self: self == source or original(self),
+        raising=False,
     )
 
     with pytest.raises(
