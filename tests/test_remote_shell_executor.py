@@ -2623,6 +2623,70 @@ class TestRemoteShellPreflight:
         assert not report.known_hosts_verified
         assert "known-hosts file is missing" in report.failure_reason
 
+    def test_runtime_policy_missing_blocks_before_remote_probe(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        config.runtime_policy_path.unlink()
+        runner = _Runner()
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "blocked-external-input"
+        assert report.failure_code == "runtime-policy-missing"
+        assert report.failure_reason == (
+            "production runtime policy is missing"
+        )
+        assert runner.calls == []
+
+    def test_invalid_runtime_policy_fails_before_remote_probe(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        config.runtime_policy_path.write_bytes(b"{}\n")
+        runner = _Runner()
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert report.failure_code == "runtime-policy-invalid"
+        assert report.failure_reason == (
+            "production runtime policy is invalid or does not match config"
+        )
+        assert runner.calls == []
+
+    def test_runtime_policy_binding_mismatch_fails_before_remote_probe(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path).model_copy(
+            update={"expected_runtime_policy_sha256": "0" * 64},
+        )
+        runner = _Runner()
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert report.failure_code == "runtime-policy-invalid"
+        assert runner.calls == []
+
     def test_fingerprint_mismatch_returns_failed(self, tmp_path):
         config = _config(tmp_path)
         bad = config.model_copy(
@@ -2690,6 +2754,24 @@ class TestRemoteShellPreflight:
             config,
             probe_remote=True,
             run_command=mutate_known_hosts,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert report.failure_code == "local-transport-drift"
+
+    def test_remote_probe_rejects_runtime_policy_drift(self, tmp_path):
+        config = _config(tmp_path)
+
+        def mutate_runtime_policy(argv, **kwargs):
+            del argv, kwargs
+            config.runtime_policy_path.write_bytes(b"{}\n")
+            return _readiness_response(config)
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=mutate_runtime_policy,
             now=lambda: _T0,
         )
 

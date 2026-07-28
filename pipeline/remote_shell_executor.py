@@ -149,6 +149,8 @@ PreflightFailureCode = Literal[
     "private-key-invalid",
     "known-hosts-missing",
     "known-hosts-invalid",
+    "runtime-policy-missing",
+    "runtime-policy-invalid",
     "local-transport-drift",
     "remote-unreachable",
     "remote-runtime-invalid",
@@ -177,6 +179,12 @@ _PREFLIGHT_FAILURE_REASONS: dict[PreflightFailureCode, str] = {
     "known-hosts-missing": "known-hosts file is missing",
     "known-hosts-invalid": (
         "known-hosts fingerprint or file verification failed"
+    ),
+    "runtime-policy-missing": (
+        "production runtime policy is missing"
+    ),
+    "runtime-policy-invalid": (
+        "production runtime policy is invalid or does not match config"
     ),
     "local-transport-drift": (
         "local transport changed during remote probe"
@@ -4499,7 +4507,67 @@ def run_remote_shell_preflight(
     key_outcome = _probe_private_key_protection(config.private_key_path)
     hosts_outcome = _probe_known_hosts(config)
 
-    local_outcomes = [ssh_outcome, scp_outcome, key_outcome, hosts_outcome]
+    policy_snapshot: _PreflightInputSnapshot | None = None
+    if not (
+        config.runtime_policy_path.exists()
+        or config.runtime_policy_path.is_symlink()
+    ):
+        policy_outcome = _LocalCheckOutcome(
+            verified=False,
+            blocked=True,
+            code="runtime-policy-missing",
+            detail=_PREFLIGHT_FAILURE_REASONS[
+                "runtime-policy-missing"
+            ],
+        )
+    else:
+        policy_before = _preflight_input_snapshot(
+            config.runtime_policy_path,
+            label="production runtime policy",
+        )
+        try:
+            _load_bound_runtime_policy(config)
+        except RemoteShellExecutionError:
+            policy_outcome = _LocalCheckOutcome(
+                verified=False,
+                blocked=False,
+                code="runtime-policy-invalid",
+                detail=_PREFLIGHT_FAILURE_REASONS[
+                    "runtime-policy-invalid"
+                ],
+            )
+        else:
+            policy_after = _preflight_input_snapshot(
+                config.runtime_policy_path,
+                label="production runtime policy",
+            )
+            if (
+                policy_before is None
+                or policy_after is None
+                or policy_before != policy_after
+            ):
+                policy_outcome = _LocalCheckOutcome(
+                    verified=False,
+                    blocked=False,
+                    code="local-transport-drift",
+                    detail=_PREFLIGHT_FAILURE_REASONS[
+                        "local-transport-drift"
+                    ],
+                )
+            else:
+                policy_snapshot = policy_after
+                policy_outcome = _LocalCheckOutcome(
+                    verified=True,
+                    blocked=False,
+                )
+
+    transport_outcomes = [
+        ssh_outcome,
+        scp_outcome,
+        key_outcome,
+        hosts_outcome,
+    ]
+    local_outcomes = [*transport_outcomes, policy_outcome]
     local_snapshot_inputs = {
         "ssh_binary_sha256": _preflight_input_snapshot(
             config.ssh_binary,
@@ -4529,7 +4597,7 @@ def run_remote_shell_preflight(
     if any(
         outcome.verified and snapshot is None
         for outcome, snapshot in zip(
-            local_outcomes,
+            transport_outcomes,
             local_snapshot_inputs.values(),
             strict=True,
         )
@@ -4581,8 +4649,13 @@ def run_remote_shell_preflight(
                 label="known-hosts file",
             ),
         }
+        post_policy_snapshot = _preflight_input_snapshot(
+            config.runtime_policy_path,
+            label="production runtime policy",
+        )
         local_drift = (
             post_snapshots != local_snapshot_inputs
+            or post_policy_snapshot != policy_snapshot
             or hashlib.sha256(
                 _canonical_model_bytes(config),
             ).hexdigest()

@@ -164,6 +164,11 @@ key 排序、末尾换行的 canonical JSON，且只含以下字段：
 只有 canonical report 的 `status=ready` 才允许进入 production submit。超时、连接
 失败、镜像/worker 不匹配、输入在检查期间被替换都会 fail closed。报告采用独占创建，
 不会覆盖旧证据；请为每次 fresh 检查使用新文件名，并把报告留在 operator 私有目录。
+`ready` 还要求本地 `runtime_policy_path` 存在、是 canonical policy，且其内容 SHA、
+container/worker/remote-target 绑定与 remote config 完全一致；该检查发生在任何
+SSH probe 之前。policy 缺失返回 `blocked-external-input`，损坏或绑定不符返回
+`failed`，probe 期间发生字节漂移也返回 `failed`。真正 submit 时 executor 仍会
+重新打开 policy，因此 preflight report 不能代替提交时复验。
 
 remote config 还必须包含：
 
