@@ -173,7 +173,10 @@ SSH probe 之前。policy 缺失返回 `blocked-external-input`，损坏或绑�
 `failed`，probe 期间发生字节漂移也返回 `failed`。`train-production` 会在构建
 bundle 和任何远端副作用之前重新打开 canonical report，要求 `status=ready`，复核
 report/config identity、SSH/SCP/私钥/known-hosts 当前内容 SHA，并重新打开 runtime
-policy；任一项漂移都拒绝 submit。因此 preflight report 不能代替提交时复验。
+policy；本地 bundle 构建完成后还会立即重跑一次固定的只读远端 checker，要求
+checker config、container digest、runtime version、worker SHA/version 与报告一致，
+然后才允许远端 `init`。任一项漂移都拒绝 submit。因此 preflight report 不能代替
+提交时复验。
 
 remote config 还必须包含：
 

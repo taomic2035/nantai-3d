@@ -4936,6 +4936,75 @@ def run_remote_shell_preflight(
     )
 
 
+def revalidate_remote_shell_preflight_for_submit(
+    report_path: str | Path,
+    config: RemoteShellExecutorConfig,
+    *,
+    run_command: Callable[..., subprocess.CompletedProcess] | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> RemoteShellPreflightReport:
+    """Recheck remote readiness immediately before mutating submission.
+
+    The operator-supplied ready report is reopened and rebound to the current
+    local inputs first. A fresh read-only remote checker invocation must then
+    produce the same readiness facts; only timestamps and content-addressed
+    report identifiers may differ.
+    """
+
+    expected = validate_remote_shell_preflight_for_config(
+        report_path,
+        config,
+    )
+    current = run_remote_shell_preflight(
+        config,
+        probe_remote=True,
+        run_command=run_command,
+        now=now,
+    )
+    if current.status != "ready":
+        code = current.failure_code or "unknown"
+        raise RemoteShellExecutionError(
+            "submit-time remote readiness check failed: "
+            f"{code}"
+        )
+    stable_fields = (
+        "config_identity_sha256",
+        "ssh_binary_sha256",
+        "scp_binary_sha256",
+        "private_key_sha256",
+        "known_hosts_sha256",
+        "container_identity",
+        "expected_host_key_fingerprint",
+        "known_host",
+        "port",
+        "remote_root",
+        "remote_repo_root",
+        "container_runtime",
+        "ssh_binary_found",
+        "scp_binary_found",
+        "private_key_protection_verified",
+        "known_hosts_verified",
+        "checker_version",
+        "expected_checker_config_sha256",
+        "checker_config_sha256",
+        "container_runtime_version",
+        "measured_container_identity",
+        "container_runtime_verified",
+        "container_image_verified",
+        "worker_binary_sha256",
+        "worker_version",
+        "worker_binary_verified",
+    )
+    if any(
+        getattr(expected, field) != getattr(current, field)
+        for field in stable_fields
+    ):
+        raise RemoteShellExecutionError(
+            "submit-time remote readiness evidence drifted"
+        )
+    return current
+
+
 def run_remote_shell_preflight_from_path(
     config_path: str | Path,
     *,

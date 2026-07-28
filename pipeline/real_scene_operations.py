@@ -89,6 +89,7 @@ from pipeline.remote_shell_executor import (
     load_remote_shell_job_ref,
     publish_remote_container_lifecycle_receipt,
     publish_remote_shell_job_ref,
+    revalidate_remote_shell_preflight_for_submit,
     validate_remote_shell_preflight_for_config,
 )
 from pipeline.studio_revisions import (
@@ -815,6 +816,18 @@ class RealScenePipelineOperations:
                 state="blocked",
                 artifacts=(),
                 reason=f"production bundle preparation failed: {exc}",
+                evidence_artifacts=_safe_evidence_files(stage_root),
+            )
+        try:
+            revalidate_remote_shell_preflight_for_submit(
+                report_path,
+                config,
+            )
+        except (OSError, ValidationError, RemoteShellExecutionError) as exc:
+            return StageExecution(
+                state="blocked",
+                artifacts=(),
+                reason=f"remote executor preflight failed: {exc}",
                 evidence_artifacts=_safe_evidence_files(stage_root),
             )
         try:

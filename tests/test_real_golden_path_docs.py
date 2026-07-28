@@ -80,6 +80,7 @@ def test_real_canary_docs_do_not_promote_internal_evidence() -> None:
     assert "train-production" in manual
     assert "PREFLIGHT_REPORT=/absolute/private/remote-preflight.json" in manual
     assert "report/config identity" in manual
+    assert "立即重跑一次固定的只读远端 checker" in manual
     assert "production-acceptance" in workflow
     assert "rights receipt" in workflow
     assert "python -m pipeline.production_capture_inputs" in workflow

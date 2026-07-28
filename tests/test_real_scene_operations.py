@@ -59,6 +59,11 @@ def _accept_bound_remote_preflight(monkeypatch):
         "validate_remote_shell_preflight_for_config",
         lambda _path, _config: SimpleNamespace(status="ready"),
     )
+    monkeypatch.setattr(
+        operations_module,
+        "revalidate_remote_shell_preflight_for_submit",
+        lambda _path, _config: SimpleNamespace(status="ready"),
+    )
 
 
 def _runner(tmp_path: Path, operations) -> RealSceneRunner:
@@ -202,6 +207,72 @@ def test_train_production_validates_bound_preflight_before_bundle(
     assert execution.state == "blocked"
     assert "remote executor preflight failed" in execution.reason
     assert calls == [(report_path, config)]
+
+
+def test_train_production_rechecks_remote_readiness_after_bundle_before_executor(
+    tmp_path,
+    monkeypatch,
+):
+    report_path = tmp_path / "remote-preflight.json"
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+            remote_config_path=tmp_path / "remote.json",
+            remote_preflight_report_path=report_path,
+        ),
+    )
+    stage_root = tmp_path / "workspace/stages/train-production/attempt-one"
+    stage_root.mkdir(parents=True)
+    config = SimpleNamespace()
+    monkeypatch.setattr(operations, "_remote_config", lambda: config)
+    order = []
+    monkeypatch.setattr(
+        operations_module,
+        "validate_remote_shell_preflight_for_config",
+        lambda path, measured: order.append(
+            ("validate", path, measured)
+        ),
+    )
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: (
+            order.append(("bundle",))
+            or SimpleNamespace(path=stage_root / "training-bundle.zip")
+        ),
+    )
+
+    def reject_remote(path, measured):
+        order.append(("remote", path, measured))
+        raise RemoteShellExecutionError(
+            "submit-time remote readiness check failed"
+        )
+
+    monkeypatch.setattr(
+        operations_module,
+        "revalidate_remote_shell_preflight_for_submit",
+        reject_remote,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        lambda _config: pytest.fail(
+            "executor must not be constructed after readiness drift"
+        ),
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "remote executor preflight failed" in execution.reason
+    assert order == [
+        ("validate", report_path, config),
+        ("bundle",),
+        ("remote", report_path, config),
+    ]
 
 
 def test_train_production_preserves_drifted_public_config_and_blocks_executor(

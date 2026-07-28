@@ -2715,6 +2715,121 @@ class TestRemoteShellPreflight:
                 second,
             )
 
+    def test_submit_revalidation_accepts_matching_remote_evidence(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        initial_runner = _Runner()
+        initial_runner.responses.append(_readiness_response(config))
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=initial_runner,
+            now=lambda: _T0,
+        )
+        report_path = tmp_path / "preflight.json"
+        remote_module.publish_remote_shell_preflight(
+            report,
+            report_path,
+        )
+        submit_runner = _Runner()
+        submit_runner.responses.append(_readiness_response(config))
+
+        fresh = (
+            remote_module.revalidate_remote_shell_preflight_for_submit(
+                report_path,
+                config,
+                run_command=submit_runner,
+                now=lambda: _T1,
+            )
+        )
+
+        assert fresh.status == "ready"
+        assert len(submit_runner.calls) == 1
+        assert submit_runner.calls[0][0][-1] == (
+            "nantai-remote-readiness-checker"
+        )
+
+    def test_submit_revalidation_rejects_remote_worker_drift(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        initial_runner = _Runner()
+        initial_runner.responses.append(_readiness_response(config))
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=initial_runner,
+            now=lambda: _T0,
+        )
+        report_path = tmp_path / "preflight.json"
+        remote_module.publish_remote_shell_preflight(
+            report,
+            report_path,
+        )
+        submit_runner = _Runner()
+        submit_runner.responses.append(
+            _readiness_response(
+                config,
+                worker_sha256="9" * 64,
+            )
+        )
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="submit-time remote readiness check failed",
+        ):
+            remote_module.revalidate_remote_shell_preflight_for_submit(
+                report_path,
+                config,
+                run_command=submit_runner,
+                now=lambda: _T1,
+            )
+
+        assert len(submit_runner.calls) == 1
+        assert submit_runner.calls[0][0][-1] == (
+            "nantai-remote-readiness-checker"
+        )
+
+    def test_submit_revalidation_rejects_remote_runtime_version_drift(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        initial_runner = _Runner()
+        initial_runner.responses.append(_readiness_response(config))
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=initial_runner,
+            now=lambda: _T0,
+        )
+        report_path = tmp_path / "preflight.json"
+        remote_module.publish_remote_shell_preflight(
+            report,
+            report_path,
+        )
+        submit_runner = _Runner()
+        submit_runner.responses.append(
+            _readiness_response(
+                config,
+                container_runtime_version="Docker version 28.0.1",
+            )
+        )
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="remote readiness evidence drifted",
+        ):
+            remote_module.revalidate_remote_shell_preflight_for_submit(
+                report_path,
+                config,
+                run_command=submit_runner,
+                now=lambda: _T1,
+            )
+
     def test_report_identity_binds_config_and_local_input_bytes(
         self,
         tmp_path,
