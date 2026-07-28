@@ -13,6 +13,7 @@ from typing import Any
 from pipeline.release_archive import (
     ReleaseArchiveError,
     canonical_json_bytes,
+    portable_path_identity,
     safe_posix_member_path,
 )
 
@@ -491,12 +492,13 @@ def _validated_artifacts(
             raise ProductionReleaseContractError(
                 f"duplicate release artifact path: {path}"
             )
-        if path.casefold() in folded:
+        identity = portable_path_identity(path)
+        if identity in folded:
             raise ProductionReleaseContractError(
-                f"release artifact case-fold collision: {path}"
+                f"release artifact case-fold/normalization collision: {path}"
             )
         exact.add(path)
-        folded.add(path.casefold())
+        folded.add(identity)
         role = artifact["role"]
         if (
             not isinstance(role, str)
@@ -544,11 +546,12 @@ def _validated_protected_roots(values: Iterable[str]) -> list[str]:
             raise ProductionReleaseContractError(
                 "protected root path is invalid"
             ) from exc
-        if root.casefold() in folded:
+        identity = portable_path_identity(root)
+        if identity in folded:
             raise ProductionReleaseContractError(
-                "protected root case-fold collision"
+                "protected root case-fold/normalization collision"
             )
-        folded.add(root.casefold())
+        folded.add(identity)
         roots.append(root)
     roots.sort()
     required = {"evidence", "pipeline", "scripts", "web"}

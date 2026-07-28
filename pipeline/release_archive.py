@@ -73,6 +73,13 @@ def canonical_json_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def portable_path_identity(value: str) -> str:
+    """Return one cross-platform case/Unicode collision identity."""
+
+    normalized = unicodedata.normalize("NFC", value)
+    return unicodedata.normalize("NFC", normalized.casefold())
+
+
 def safe_posix_member_path(value: str) -> PurePosixPath:
     """Return one unambiguous cross-platform relative archive path."""
 
@@ -223,7 +230,7 @@ def inspect_zip_members(
         canonical = path.as_posix()
         folded = canonical.casefold()
         normalized = unicodedata.normalize("NFC", canonical)
-        normalized_folded = unicodedata.normalize("NFC", normalized.casefold())
+        normalized_folded = portable_path_identity(canonical)
         if canonical in exact_paths:
             raise ReleaseArchiveError(f"duplicate release archive member: {canonical}")
         if folded in folded_paths:

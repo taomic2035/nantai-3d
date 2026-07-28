@@ -117,6 +117,20 @@ def test_receipt_rejects_casefold_artifact_collision() -> None:
         _build_receipt(artifacts=(*artifacts, duplicate))
 
 
+def test_receipt_rejects_combined_casefold_normalization_collision() -> None:
+    artifacts = modeled_artifact_records()
+    upper_nfc = dict(artifacts[0])
+    upper_nfc["path"] = "evidence/\xc9.txt"
+    lower_nfd = dict(artifacts[0])
+    lower_nfd["path"] = "evidence/e\u0301.txt"
+
+    with pytest.raises(
+        ProductionReleaseContractError,
+        match="case-fold/normalization",
+    ):
+        _build_receipt(artifacts=(*artifacts, upper_nfc, lower_nfd))
+
+
 def test_public_evidence_loader_rejects_noncanonical_and_duplicate_json() -> None:
     payload = canonical_json_bytes(modeled_public_evidence())
 

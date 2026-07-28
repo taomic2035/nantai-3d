@@ -59,6 +59,7 @@ from pipeline.release_archive import (
     ReleaseArchiveError,
     canonical_json_bytes,
     deterministic_zip_info,
+    portable_path_identity,
     safe_posix_member_path,
     stable_regular_file_digest,
 )
@@ -1080,7 +1081,7 @@ def resolve_runtime_scene_payloads(
         ).as_posix()
         if (
             destination in destinations
-            or destination.casefold() in folded_destinations
+            or portable_path_identity(destination) in folded_destinations
         ):
             raise ProductionReleaseBuilderError(
                 f"duplicate mapped scene destination: {destination}"
@@ -1100,7 +1101,7 @@ def resolve_runtime_scene_payloads(
                 f"scene payload bytes changed: {relative}"
             )
         destinations.add(destination)
-        folded_destinations.add(destination.casefold())
+        folded_destinations.add(portable_path_identity(destination))
         payloads.append(
             SourcePayload(
                 source_path=source,
@@ -1158,7 +1159,7 @@ def _runtime_source_payloads(
         destination, role = mapped
         if (
             destination in destinations
-            or destination.casefold() in folded
+            or portable_path_identity(destination) in folded
         ):
             raise ProductionReleaseBuilderError(
                 f"duplicate runtime destination: {destination}"
@@ -1173,7 +1174,7 @@ def _runtime_source_payloads(
                 f"tracked runtime source is unavailable: {relative}"
             ) from exc
         destinations.add(destination)
-        folded.add(destination.casefold())
+        folded.add(portable_path_identity(destination))
         rows.append(
             SourcePayload(
                 source_path=source,
@@ -1375,13 +1376,13 @@ def build_production_release_archive(
             ).as_posix()
             if (
                 destination in destinations
-                or destination.casefold() in folded
+                or portable_path_identity(destination) in folded
             ):
                 raise ProductionReleaseBuilderError(
                     f"duplicate release destination: {destination}"
                 )
             destinations.add(destination)
-            folded.add(destination.casefold())
+            folded.add(portable_path_identity(destination))
 
         generated = {
             "evidence/public-evidence.json": (
@@ -1400,13 +1401,13 @@ def build_production_release_archive(
         for destination in generated:
             if (
                 destination in destinations
-                or destination.casefold() in folded
+                or portable_path_identity(destination) in folded
             ):
                 raise ProductionReleaseBuilderError(
                     f"duplicate generated destination: {destination}"
                 )
             destinations.add(destination)
-            folded.add(destination.casefold())
+            folded.add(portable_path_identity(destination))
 
         staging.mkdir(exist_ok=False)
         for source in sorted(

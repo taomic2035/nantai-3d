@@ -22,6 +22,7 @@ from pipeline.release_archive import (
     ArchiveLimits,
     ReleaseArchiveError,
     inspect_zip_members,
+    portable_path_identity,
     safe_posix_member_path,
     stable_regular_file_digest,
 )
@@ -144,11 +145,13 @@ def _release_files(root: Path) -> set[str]:
                 _verification_error(
                     f"release file must be regular: {relative}"
                 )
-            if relative.casefold() in folded:
+            identity = portable_path_identity(relative)
+            if identity in folded:
                 _verification_error(
-                    f"case-fold collision in release tree: {relative}"
+                    "case-fold/normalization collision in release tree: "
+                    f"{relative}"
                 )
-            folded.add(relative.casefold())
+            folded.add(identity)
             files.add(relative)
     return files
 
