@@ -684,6 +684,98 @@ def test_stable_file_sha_rejects_bytes_beyond_limit_during_read(
     assert injected is True
 
 
+def test_known_hosts_loader_rejects_redirected_ancestor(tmp_path):
+    config = _config(tmp_path)
+    real_parent = tmp_path / "real-known-hosts"
+    real_parent.mkdir()
+    path = real_parent / "known_hosts"
+    path.write_bytes(config.known_hosts_path.read_bytes())
+    redirected_parent = tmp_path / "redirected-known-hosts"
+    if os.name == "nt":
+        created = subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(redirected_parent),
+                str(real_parent),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+    else:
+        redirected_parent.symlink_to(
+            real_parent,
+            target_is_directory=True,
+        )
+    redirected = config.model_copy(
+        update={"known_hosts_path": redirected_parent / path.name}
+    )
+    try:
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="redirected|link-like|real path",
+        ):
+            remote_module._verify_known_host(redirected)
+    finally:
+        if os.name == "nt":
+            os.rmdir(redirected_parent)
+        else:
+            redirected_parent.unlink()
+
+
+def test_known_hosts_loader_rejects_replacement_before_open(
+    tmp_path,
+    monkeypatch,
+):
+    config = _config(tmp_path)
+    replacement = tmp_path / "replacement-known-hosts"
+    replacement.write_bytes(config.known_hosts_path.read_bytes())
+    actual_open = os.open
+    swapped = False
+
+    def swap_before_open(candidate, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(candidate) == config.known_hosts_path and not swapped:
+            os.replace(replacement, config.known_hosts_path)
+            swapped = True
+        return actual_open(candidate, flags, *args, **kwargs)
+
+    monkeypatch.setattr(remote_module.os, "open", swap_before_open)
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="changed while read",
+    ):
+        remote_module._verify_known_host(config)
+
+    assert swapped is True
+
+
+def test_known_hosts_loader_streams_bounded_chunks(
+    tmp_path,
+    monkeypatch,
+):
+    config = _config(tmp_path)
+    actual_read = os.read
+    requested_sizes: list[int] = []
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        requested_sizes.append(size)
+        return actual_read(descriptor, size)
+
+    monkeypatch.setattr(remote_module.os, "read", observe_read)
+
+    remote_module._verify_known_host(config)
+
+    assert requested_sizes
+    assert max(requested_sizes) <= 64 * 1024
+
+
 def test_submit_revalidates_runtime_policy_before_transport(
     tmp_path,
     monkeypatch,

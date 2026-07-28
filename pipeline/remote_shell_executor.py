@@ -3310,14 +3310,83 @@ def _host_key_fingerprint(key_blob: bytes) -> str:
 
 
 def _verify_known_host(config: RemoteShellExecutorConfig) -> None:
-    _validate_local_regular_file(
-        config.known_hosts_path,
-        label="known-hosts file",
-        executable=False,
-    )
+    path = config.known_hosts_path
+    descriptor = -1
     try:
-        raw = config.known_hosts_path.read_text(encoding="ascii")
-    except (OSError, UnicodeError) as exc:
+        redirected = first_linklike_path(Path(path.anchor), path)
+        if redirected is not None:
+            raise RemoteShellExecutionError(
+                "known-hosts file path is redirected or link-like"
+            )
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > _ONE_MIB
+        ):
+            raise RemoteShellExecutionError(
+                "known-hosts file must be a bounded regular file"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or _open_file_identity_signature(descriptor_before)
+            != _open_file_identity_signature(before)
+        ):
+            raise RemoteShellExecutionError(
+                "known-hosts file changed while read"
+            )
+        chunks: list[bytes] = []
+        measured = 0
+        while measured <= _ONE_MIB:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _ONE_MIB + 1 - measured),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            measured += len(chunk)
+        payload = b"".join(chunks)
+        descriptor_after = os.fstat(descriptor)
+        after = path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise RemoteShellExecutionError(
+            "known-hosts file cannot be read"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if (
+        not payload
+        or len(payload) > _ONE_MIB
+        or len(payload) != before.st_size
+        or _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _open_file_identity_signature(before)
+        != _open_file_identity_signature(descriptor_before)
+        or _open_file_identity_signature(descriptor_after)
+        != _open_file_identity_signature(after)
+    ):
+        raise RemoteShellExecutionError(
+            "known-hosts file changed while read"
+        )
+    try:
+        raw = payload.decode("ascii")
+    except UnicodeError as exc:
         raise RemoteShellExecutionError(
             "known-hosts file cannot be read"
         ) from exc
