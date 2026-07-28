@@ -81,10 +81,10 @@ def test_source_identity_resolves_exact_head_and_tracked_files(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    calls: list[tuple[list[str], Path]] = []
+    calls: list[tuple[list[str], Path, dict[str, object]]] = []
 
-    def run(command, *, cwd, **_kwargs):
-        calls.append((command, cwd))
+    def run(command, *, cwd, **kwargs):
+        calls.append((command, cwd, kwargs))
         if command[1:] == ["rev-parse", "--verify", "HEAD"]:
             return SimpleNamespace(
                 returncode=0,
@@ -112,8 +112,16 @@ def test_source_identity_resolves_exact_head_and_tracked_files(
         "web/z.js",
     )
     assert calls == [
-        (["git", "rev-parse", "--verify", "HEAD"], tmp_path.absolute()),
-        (["git", "ls-files", "-z", "--"], tmp_path.absolute()),
+        (
+            ["git", "rev-parse", "--verify", "HEAD"],
+            tmp_path.absolute(),
+            {"capture_output": True, "text": False, "check": False},
+        ),
+        (
+            ["git", "ls-files", "-z", "--"],
+            tmp_path.absolute(),
+            {"capture_output": True, "text": False, "check": False},
+        ),
     ]
 
 

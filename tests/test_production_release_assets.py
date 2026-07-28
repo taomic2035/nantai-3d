@@ -687,10 +687,11 @@ def test_cli_stages_exact_inputs_and_emits_ascii_json(
         "privacy_policy_path": policy,
         "output_dir": output,
     }
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    payload = json.loads(output)
     assert payload["archive_sha256"] == "a" * 64
     assert payload["privacy_valid"] is True
-    capsys.readouterr().out.encode("ascii")
+    output.encode("ascii")
 
 
 def test_cli_fails_without_partial_success_output(
@@ -786,10 +787,11 @@ def test_verify_cli_emits_ascii_json(
 
     assert exit_code == 0
     assert observed == [bundle]
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr().out
+    payload = json.loads(output)
     assert payload["valid"] is True
     assert payload["version"] == "v1.0.0"
-    capsys.readouterr().out.encode("ascii")
+    output.encode("ascii")
 
 
 def test_verify_cli_fails_closed(
