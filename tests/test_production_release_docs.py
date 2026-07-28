@@ -35,9 +35,12 @@ def test_manual_owns_the_exact_production_build_verify_and_run_path() -> None:
         "$env:ARCHIVE",
         "$env:PRIVACY_POLICY",
         "$env:PRIVACY_REPORT",
+        "$env:RELEASE_DIR",
         "python make.py build-production",
         "python make.py verify-production",
         "python make.py audit-production-privacy",
+        "python make.py stage-production-assets",
+        "python make.py verify-production-assets",
         "python make.py serve",
         "PRODUCTION-RELEASE.json",
         "evidence/public-evidence.json",
@@ -50,6 +53,12 @@ def test_manual_owns_the_exact_production_build_verify_and_run_path() -> None:
     assert re.search(r"production_release_allowed\s*=\s*true", manual)
     assert re.search(r"下载.*字节.*verify-production", manual, re.DOTALL)
     assert re.search(r"真实浏览器.*QA", manual, re.IGNORECASE)
+    assert re.search(
+        r"stage-production-assets.*四个.*公开",
+        manual,
+        re.DOTALL,
+    )
+    assert "nantai-3d-v1.0.0-runtime.zip.sha256" in manual
 
 
 def test_manual_states_privacy_and_hash_limits_without_promoting_reality() -> None:
@@ -110,6 +119,7 @@ def test_ci_has_three_os_production_contract_and_content_id_compare_jobs() -> No
         "tests/test_production_release_verifier.py",
         "tests/test_production_release_cli.py",
         "tests/test_production_release_privacy.py",
+        "tests/test_production_release_assets.py",
     ):
         assert test_path in matrix_job
     assert "actions/upload-artifact@v4" in matrix_job

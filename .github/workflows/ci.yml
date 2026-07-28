@@ -265,6 +265,7 @@ jobs:
             tests/test_production_release_verifier.py \
             tests/test_production_release_cli.py \
             tests/test_production_release_privacy.py \
+            tests/test_production_release_assets.py \
             tests/test_production_release_docs.py
 
       - name: Probe modeled package content ID

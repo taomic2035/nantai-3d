@@ -61,6 +61,45 @@ Windows/POSIX 私有绝对路径、symlink、非 regular file、额外文件或�
 也不提升 scene trust。`valid=true` 且报告中的 package content ID 与独立 verifier
 一致，才可继续。
 
+## 整理最终公开资产
+
+三平台 clean-room 浏览器 QA 和人工复核通过后，从已验证候选 ZIP 生成一个全新目录。
+`stage-production-assets` 会再次独立验证候选包、重新执行隐私审计、拒绝 modeled fixture，
+并且只发布四个最终公开资产：
+
+```powershell
+$env:ARCHIVE = (Resolve-Path .nantai-studio\releases\v1.0.0\build-a.zip).Path
+$env:PRIVACY_POLICY = (Resolve-Path .nantai-studio\private\privacy-policy.json).Path
+$env:RELEASE_DIR = (Join-Path $PWD ".nantai-studio\releases\v1.0.0\public-assets")
+python make.py stage-production-assets
+```
+
+`RELEASE_DIR` 必须不存在，命令不会覆盖旧目录。成功目录精确包含：
+
+```text
+nantai-3d-v1.0.0-runtime.zip
+nantai-3d-v1.0.0-runtime.zip.sha256
+PRODUCTION-RELEASE.json
+SHA256SUMS.txt
+```
+
+独立 receipt 与 checksum 来自同一份已复验 ZIP；archive sidecar 按最终公开文件名重新
+计算。privacy policy、privacy report、QA 截图原件和私有 acceptance 仍留在私有
+工作区，不进入公开目录。这个步骤只收拢已验收字节，不替代双构建一致性、三平台
+浏览器 QA、人工复核或 GitHub 下载后复验。
+
+发布后把四个 GitHub 资产下载到同一个全新目录，再整体复验：
+
+```powershell
+$env:RELEASE_DIR = (Resolve-Path .\downloaded-v1.0.0-assets).Path
+python make.py verify-production-assets
+```
+
+该命令要求目录精确包含四个 regular non-link 文件，验证 archive sidecar，独立解压
+并复验 ZIP，再逐字节比较外置与包内的 `PRODUCTION-RELEASE.json`、
+`SHA256SUMS.txt`。版本、package content ID、公开文件名或任意一项不一致都会拒绝，
+modeled fixture 也不能通过。
+
 ## 解压与运行
 
 复验成功后解压到空目录，在包根安装并启动：
@@ -111,7 +150,7 @@ console、帧时间、内存、空洞、漂浮物、遮挡与视角相关颜色�
 4. 构建机与下载后的 ZIP 都通过 `verify-production`；
 5. 最终 ZIP 通过 `audit-production-privacy`，报告 package content ID 一致；
 6. 解压包在真实浏览器完成冷启动和交互 QA；
-7. Release 只上传最终 ZIP、checksum 与精简说明；
+7. `stage-production-assets` 输出目录只含最终四件套，Release 不上传中间态；
 8. 最后才创建正式 tag，并再次确认没有私有或中间产物。
 
 更早的采集、训练、对齐和 Viewer 证据生成步骤见

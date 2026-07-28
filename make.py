@@ -24,6 +24,7 @@
     VERSION=<最终语义版本>     build-production 必填（例如 v1.0.0）
     PRIVACY_POLICY=<私有策略>  audit-production-privacy 必填
     PRIVACY_REPORT=<报告路径>  audit-production-privacy 必填
+    RELEASE_DIR=<公开四件套目录> stage-production-assets / verify-production-assets 必填
 
 与 Makefile 保持等价的 target 名称；Makefile 仍保留给有 make 的 POSIX 环境。
 例外：doctor / check-capture / inspect-recon / verify-recon-artifacts 目前只有本脚本有，
@@ -305,6 +306,35 @@ def audit_production_privacy() -> None:
     )
 
 
+def stage_production_assets() -> None:
+    archive = _required_environment("ARCHIVE")
+    policy = _required_environment("PRIVACY_POLICY")
+    output_dir = _required_environment("RELEASE_DIR")
+    run(
+        [
+            PY,
+            "scripts/stage_production_release_assets.py",
+            "--archive",
+            archive,
+            "--privacy-policy",
+            policy,
+            "--output-dir",
+            output_dir,
+        ]
+    )
+
+
+def verify_production_assets() -> None:
+    output_dir = _required_environment("RELEASE_DIR")
+    run(
+        [
+            PY,
+            "scripts/verify_production_release_assets.py",
+            output_dir,
+        ]
+    )
+
+
 def verify() -> None:
     test()
     assets()
@@ -449,6 +479,8 @@ TARGETS = {
     "build-production": build_production,
     "verify-production": verify_production,
     "audit-production-privacy": audit_production_privacy,
+    "stage-production-assets": stage_production_assets,
+    "verify-production-assets": verify_production_assets,
     "verify": verify,
     "clean": clean,
 }

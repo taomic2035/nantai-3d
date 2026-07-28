@@ -342,6 +342,99 @@ class TestProductionReleaseTargets:
         with pytest.raises(ValueError, match=missing):
             make.audit_production_privacy()
 
+    def test_stage_production_assets_uses_exact_inputs(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setenv("ARCHIVE", "dist/build-a.zip")
+        monkeypatch.setenv(
+            "PRIVACY_POLICY",
+            "private/privacy-policy.json",
+        )
+        monkeypatch.setenv(
+            "RELEASE_DIR",
+            "dist/v1.0.0-release-assets",
+        )
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.stage_production_assets()
+
+        assert calls == [
+            [
+                make.PY,
+                "scripts/stage_production_release_assets.py",
+                "--archive",
+                "dist/build-a.zip",
+                "--privacy-policy",
+                "private/privacy-policy.json",
+                "--output-dir",
+                "dist/v1.0.0-release-assets",
+            ]
+        ]
+
+    @pytest.mark.parametrize(
+        "missing",
+        ("ARCHIVE", "PRIVACY_POLICY", "RELEASE_DIR"),
+    )
+    def test_stage_production_assets_requires_exact_inputs(
+        self,
+        make,
+        monkeypatch,
+        missing,
+    ):
+        for name, value in (
+            ("ARCHIVE", "dist/build-a.zip"),
+            ("PRIVACY_POLICY", "private/privacy-policy.json"),
+            ("RELEASE_DIR", "dist/v1.0.0-release-assets"),
+        ):
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv(missing)
+
+        with pytest.raises(ValueError, match=missing):
+            make.stage_production_assets()
+
+    def test_verify_production_assets_uses_exact_directory(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setenv(
+            "RELEASE_DIR",
+            "downloads/v1.0.0-release-assets",
+        )
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.verify_production_assets()
+
+        assert calls == [
+            [
+                make.PY,
+                "scripts/verify_production_release_assets.py",
+                "downloads/v1.0.0-release-assets",
+            ]
+        ]
+
+    def test_verify_production_assets_requires_exact_directory(
+        self,
+        make,
+        monkeypatch,
+    ):
+        monkeypatch.delenv("RELEASE_DIR", raising=False)
+
+        with pytest.raises(ValueError, match="RELEASE_DIR"):
+            make.verify_production_assets()
+
     @pytest.mark.parametrize(
         ("target", "missing"),
         (

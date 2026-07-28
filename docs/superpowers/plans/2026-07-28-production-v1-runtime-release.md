@@ -1101,6 +1101,19 @@ filesystem path, credential/private-key marker, unverified file, symlink,
 non-regular file or read drift blocks release. Never delete evidence from the
 private acceptance to make the public scan pass; fix the projector/allowlist.
 
+After the three clean-room browser QA reports and human review pass, stage the
+exact four public Release assets from the verified candidate. This re-verifies
+the archive, reruns the privacy audit and rejects modeled fixtures:
+
+```powershell
+$env:RELEASE_DIR = (Join-Path $PWD ".nantai-studio/releases/v1.0.0/public-assets")
+python make.py stage-production-assets
+```
+
+The new directory must contain only the normalized runtime ZIP, its SHA sidecar,
+`PRODUCTION-RELEASE.json` and `SHA256SUMS.txt`. This staging step does not
+replace the two-build equality or clean-room QA gates.
+
 - [ ] **Step 5: Promote version/docs only after real QA**
 
 Set Python version to `1.0.0`, write concise `docs/releases/1.0.md`, and update
@@ -1123,10 +1136,17 @@ PRODUCTION-RELEASE.json
 SHA256SUMS.txt
 ```
 
-Download all four GitHub assets into a new directory, compare the archive SHA
-to the sidecar and rerun the offline verifier against downloaded bytes. The
-release is incomplete until this succeeds and the GitHub Actions run for the
-tag is green.
+Download all four GitHub assets into a new directory, then verify the bundle:
+
+```powershell
+$env:RELEASE_DIR = (Resolve-Path .\downloaded-v1.0.0-assets).Path
+python make.py verify-production-assets
+```
+
+This compares the archive SHA to its sidecar, reruns the offline verifier
+against downloaded bytes and proves the standalone receipt/checksum are
+byte-identical to the verified archive copies. The release is incomplete until
+this succeeds and the GitHub Actions run for the tag is green.
 
 ## Completion audit
 
