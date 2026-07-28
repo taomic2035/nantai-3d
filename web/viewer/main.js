@@ -131,6 +131,7 @@ import {
   completeStartup,
   createStartupState,
   failStartup,
+  productionRuntimeRequirement,
   startupViewModel,
 } from './startup-state.mjs';
 
@@ -143,6 +144,7 @@ const VIEWER_FOV_DEG = 65;
 // ============ 全局状态 ============
 let scene, camera, renderer, controls;
 let manifest = null;
+let requiredProductionScene = false;
 let worldManifestUrl = new URL('../data/manifest.json', import.meta.url).href;
 let chunkSizeM = null;
 let currentFrame = null;
@@ -2293,6 +2295,19 @@ async function loadReconManifest(url = reconManifestUrl) {
   }
 }
 
+async function loadProductionRuntimeRequirement() {
+  try {
+    const response = await fetch(
+      new URL('/api/project', window.location.origin).href,
+      { cache: 'no-store' },
+    );
+    if (!response.ok) return productionRuntimeRequirement();
+    return productionRuntimeRequirement(await response.json());
+  } catch {
+    return productionRuntimeRequirement();
+  }
+}
+
 function activeReconstructionState() {
   const spatialSpark = spatialSplatLayer?.getState();
   if (spatialSpark?.mode === 'spark-chunks') return spatialSpark;
@@ -2399,6 +2414,11 @@ async function loadReconstructionLayer() {
 
     let result = sparkResult;
     if (sparkResult.mode !== 'spark-chunks') {
+      if (requiredProductionScene) {
+        throw new Error(
+          `Production scene requires full 3DGS chunk rendering: ${sparkResult.reason}`,
+        );
+      }
       spatialSplatFallbackReason = sparkResult.reason;
       const pointResult = spatialPointLayer.load({
         manifest: reconManifest,
@@ -2428,6 +2448,11 @@ async function loadReconstructionLayer() {
   viewerBridge?.announceCapabilities();
 
   if (result.mode !== 'spark' && reconManifest) {
+    if (requiredProductionScene) {
+      throw new Error(
+        `Production scene requires full 3DGS rendering: ${result.reason}`,
+      );
+    }
     console.warn(`${result.reason}; 使用 DC point preview`);
     await updateRecon();
   }
@@ -2734,26 +2759,48 @@ async function main() {
   } catch (error) {
     console.warn('已拒绝不安全的模型预览入口，使用内置预览:', error);
   }
-  setStartupStage('world-manifest', '读取并验证世界 manifest.json');
-
-  const res = await fetch(worldManifestUrl);
-  if (!res.ok) {
-    showStartupFailure(
-      'world-manifest',
-      `无法加载世界 manifest.json (HTTP ${res.status})`,
-    );
-    return;
+  setStartupStage('world-manifest', '读取 Studio 发布包状态与世界清单');
+  const productionRequirement = await loadProductionRuntimeRequirement();
+  requiredProductionScene = productionRequirement.required;
+  if (requiredProductionScene) {
+    manifest = { schema_version: 2, chunk_size_m: 200, chunks: [] };
+  } else {
+    const res = await fetch(worldManifestUrl);
+    if (!res.ok) {
+      showStartupFailure(
+        'world-manifest',
+        `无法加载世界 manifest.json (HTTP ${res.status})`,
+      );
+      return;
+    }
+    manifest = await res.json();
+    if (!manifest.chunks?.length) throw new Error('manifest.json 没有可显示的 chunks');
   }
-  manifest = await res.json();
-  if (!manifest.chunks?.length) throw new Error('manifest.json 没有可显示的 chunks');
   chunkSizeM = manifest.chunk_size_m ?? 200;
   buildChunkIndex();
-  setStartupStage('reconstruction-manifest', '读取可选重建清单与可信度证据');
-  await loadReconManifest();
+  setStartupStage(
+    'reconstruction-manifest',
+    requiredProductionScene
+      ? '读取 Production 3DGS 清单与可信度证据'
+      : '读取可选重建清单与可信度证据',
+  );
+  const reconstructionManifestLoaded = await loadReconManifest();
+  if (requiredProductionScene && !reconstructionManifestLoaded) {
+    throw new Error(
+      'Production scene manifest is required but could not be loaded; verify the release package',
+    );
+  }
   applyFraming(computeFraming(manifest, reconManifest));
-  setStartupStage('reconstruction', '初始化高斯渲染器与点云后备');
+  setStartupStage(
+    'reconstruction',
+    requiredProductionScene
+      ? '初始化 Production full 3DGS 渲染器'
+      : '初始化高斯渲染器与点云后备',
+  );
   await loadReconstructionLayer();
-  const modelPreviewResult = shouldAttemptModelPreview(window.location.search)
+  const modelPreviewResult = requiredProductionScene
+    ? advanceSkippedModelPreview(setStartupStage)
+    : shouldAttemptModelPreview(window.location.search)
     ? await loadModelPreview(
       modelPreviewManifestUrl,
       { onStage: setStartupStage },
@@ -2770,7 +2817,9 @@ async function main() {
     );
     await waitForStartupFallback();
   }
-  const initialPresentation = startupState.fallback_used
+  const initialPresentation = requiredProductionScene
+    ? 'points'
+    : startupState.fallback_used
     ? 'points'
     : selectInitialPresentationMode({
       manifest,
@@ -2799,24 +2848,32 @@ async function main() {
     setPresentationMode('points', { resetCamera: false });
   }
 
-  const xCount = new Set(manifest.chunks.map((chunk) => chunk.x)).size;
-  const yCount = new Set(manifest.chunks.map((chunk) => chunk.y)).size;
-  const onDemand = worldChunkAvailable(manifest, false);
-  loadingText.textContent =
-    `已索引 ${manifest.chunks.length} chunks (${xCount}×${yCount})`
-    + `${onDemand ? '，按需无限扩展已启用' : ''}，启动调度器...`;
+  const worldChunks = manifest.chunks ?? [];
+  const xCount = new Set(worldChunks.map((chunk) => chunk.x)).size;
+  const yCount = new Set(worldChunks.map((chunk) => chunk.y)).size;
+  const onDemand = requiredProductionScene
+    ? false
+    : worldChunkAvailable(manifest, false);
+  loadingText.textContent = requiredProductionScene
+    ? 'Production 3DGS 场景已校验，启动交互...'
+    : `已索引 ${worldChunks.length} chunks (${xCount}×${yCount})`
+      + `${onDemand ? '，按需无限扩展已启用' : ''}，启动调度器...`;
   if (modelPreviewResult.status === 'loaded') {
     loadingText.textContent =
       `已校验合成模型 SHA-256，加载 ${modelPreviewResult.mesh_count} 个 mesh...`;
   }
   const minimapTitle = document.getElementById('minimap-title');
   if (minimapTitle) {
-    minimapTitle.textContent = `Mini-map (${xCount}×${yCount}${onDemand ? ' + on-demand' : ''})`;
+    minimapTitle.textContent = requiredProductionScene
+      ? 'Mini-map (Production 3DGS)'
+      : `Mini-map (${xCount}×${yCount}${onDemand ? ' + on-demand' : ''})`;
   }
 
   // 初始加载相机视野内 chunk
   const initPos = controls.target;
-  if (presentationMode === 'points') updateChunks(initPos.x, initPos.z);
+  if (presentationMode === 'points' && !requiredProductionScene) {
+    updateChunks(initPos.x, initPos.z);
+  }
   if (presentationMode === 'mesh') {
     updateMeshWorldChunks(camera.position.x, camera.position.z);
   }
@@ -2840,14 +2897,16 @@ async function main() {
     };
     check();
   });
-  if (presentationMode === 'points') await waitInit();
+  if (presentationMode === 'points' && !requiredProductionScene) await waitInit();
 
   startupState = completeStartup(
     startupState,
-    modelPreviewStartupCompletion({
-      modelPreviewStatus: modelPreviewResult.status,
-      fallbackUsed: startupState.fallback_used,
-    }),
+    requiredProductionScene
+      ? 'Production 3DGS 场景可交互'
+      : modelPreviewStartupCompletion({
+        modelPreviewStatus: modelPreviewResult.status,
+        fallbackUsed: startupState.fallback_used,
+      }),
   );
   renderStartup();
   document.getElementById('loading').style.display = 'none';
@@ -2946,7 +3005,7 @@ async function main() {
         reconLodLoaded = -1;
         if (presentationMode === 'mesh') {
           updateMeshWorldChunks(camera.position.x, camera.position.z);
-        } else {
+        } else if (!requiredProductionScene) {
           updateChunks(camera.position.x, camera.position.z);
         }
         await updateRecon();
@@ -3113,6 +3172,12 @@ async function main() {
           applyFraming(computeFraming(manifest, reconManifest), false);
         }
         const rendererResult = await loadReconstructionLayer();
+        if (
+          requiredProductionScene
+          && !['spark', 'spark-chunks'].includes(rendererResult.mode)
+        ) {
+          throw new Error('Production scene requires full 3DGS rendering');
+        }
         if (presentationMode !== 'points') {
           viewerCapabilities = createViewerCapabilities(
             presentationMode === 'mesh'
@@ -3150,7 +3215,9 @@ function animate() {
   if (!animate._lastCheck || now - animate._lastCheck > 50) {
     animate._lastCheck = now;
     if (presentationMode === 'points') {
-      updateChunks(camera.position.x, camera.position.z);
+      if (!requiredProductionScene) {
+        updateChunks(camera.position.x, camera.position.z);
+      }
       updateRecon();
     } else if (presentationMode === 'mesh') {
       updateMeshWorldChunks(camera.position.x, camera.position.z);

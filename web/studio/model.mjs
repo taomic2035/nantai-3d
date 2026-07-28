@@ -193,6 +193,79 @@ function deriveTrust(snapshot, geometryUsability, renderFidelity, diagnostics) {
   return 'proxy';
 }
 
+function productionReleaseAccepted(release, realScene) {
+  return release.package_kind === 'production'
+    && release.package_status === 'verified'
+    && release.release_contract === 'production-accepted-at-build'
+    && release.scene_trust_effect === 'none'
+    && realScene.decision === 'accepted-production'
+    && realScene.production_release_allowed === true;
+}
+
+function normalizeRelease(raw, realScene, diagnostics) {
+  const release = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? structuredClone(raw)
+    : {};
+  const kind = release.package_kind;
+  const status = release.package_status;
+
+  if (kind === 'production') {
+    const accepted = productionReleaseAccepted(release, realScene);
+    if (!accepted) {
+      diagnostics.push('Production package receipt and real-scene acceptance disagree');
+      return {
+        release: {
+          ...release,
+          package_kind: 'invalid',
+          package_status: 'invalid',
+          production_runtime_required: false,
+        },
+        realScene: normalizeRealSceneEvidence({}),
+      };
+    }
+    return {
+      release: {
+        ...release,
+        package_kind: 'production',
+        production_runtime_required: true,
+      },
+      realScene,
+    };
+  }
+
+  if (kind === 'preview' && status === 'verified') {
+    return {
+      release: {
+        ...release,
+        package_kind: 'preview',
+        production_runtime_required: false,
+      },
+      realScene,
+    };
+  }
+
+  if (status === 'invalid' || (kind !== null && kind !== undefined)) {
+    return {
+      release: {
+        ...release,
+        package_kind: 'invalid',
+        package_status: 'invalid',
+        production_runtime_required: false,
+      },
+      realScene,
+    };
+  }
+
+  return {
+    release: {
+      ...release,
+      package_kind: 'none',
+      production_runtime_required: false,
+    },
+    realScene,
+  };
+}
+
 export function normalizeSnapshot(raw = {}) {
   const snapshot = structuredClone(raw);
   const diagnostics = [];
@@ -202,6 +275,13 @@ export function normalizeSnapshot(raw = {}) {
     diagnostics.push('adapter state is missing');
   }
   snapshot.real_scene = normalizeRealSceneEvidence(snapshot.real_scene);
+  const normalizedRelease = normalizeRelease(
+    snapshot.release,
+    snapshot.real_scene,
+    diagnostics,
+  );
+  snapshot.release = normalizedRelease.release;
+  snapshot.real_scene = normalizedRelease.realScene;
   const renderFidelity = deriveRenderFidelity(snapshot.reconstruction, diagnostics);
   const geometryUsability = deriveGeometryUsability(snapshot, diagnostics);
   const trust = deriveTrust(snapshot, geometryUsability, renderFidelity, diagnostics);

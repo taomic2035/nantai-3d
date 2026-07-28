@@ -96,6 +96,47 @@ test('real-scene acceptance is normalized without upgrading geometry trust', () 
   assert.equal(model.derived.trust, 'untrusted');
 });
 
+test('Production package state is accepted only with the exact public decision', () => {
+  const raw = baseSnapshot();
+  raw.real_scene = {
+    schema_version: 1,
+    role: 'production-acceptance',
+    decision: 'accepted-production',
+    production_release_allowed: true,
+    stages: [
+      'dataset', 'capture', 'sfm', 'production-training', 'import-integrity',
+      'render-quality', 'viewer-performance', 'human-review', 'release-rights',
+      'metric-alignment',
+    ].map((id) => ({ id, state: 'succeeded' })),
+    reasons: [],
+    report_sha256: 'a'.repeat(64),
+  };
+  raw.release = {
+    package_kind: 'production',
+    package_status: 'verified',
+    release_contract: 'production-accepted-at-build',
+    scene_trust_effect: 'none',
+  };
+
+  const accepted = normalizeSnapshot(raw);
+  assert.equal(accepted.release.package_kind, 'production');
+  assert.equal(accepted.release.production_runtime_required, true);
+  assert.equal(accepted.real_scene.production_release_allowed, true);
+
+  for (const [field, value] of [
+    ['package_status', 'invalid'],
+    ['release_contract', 'modeled-contract-only'],
+    ['scene_trust_effect', 'promoted'],
+  ]) {
+    const changed = structuredClone(raw);
+    changed.release[field] = value;
+    const rejected = normalizeSnapshot(changed);
+    assert.equal(rejected.release.package_kind, 'invalid');
+    assert.equal(rejected.release.production_runtime_required, false);
+    assert.equal(rejected.real_scene.production_release_allowed, false);
+  }
+});
+
 test('declared preview-only provenance cannot be promoted by metric coordinates', () => {
   const raw = baseSnapshot();
   raw.reconstruction.geometry_usability = 'preview-only';

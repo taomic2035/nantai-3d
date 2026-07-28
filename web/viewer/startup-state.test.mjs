@@ -8,6 +8,7 @@ import {
   completeStartup,
   createStartupState,
   failStartup,
+  productionRuntimeRequirement,
   startupViewModel,
 } from './startup-state.mjs';
 
@@ -113,4 +114,31 @@ test('non-model failure never offers an unrelated fallback', () => {
   assert.equal(view.show_fallback, false);
   assert.match(view.heading, /世界清单/);
   assert.throws(() => acceptStartupFallback(state), /fallback/i);
+});
+
+test('Production scene is required only for one exact verified snapshot', () => {
+  const snapshot = {
+    release: {
+      package_kind: 'production',
+      package_status: 'verified',
+      release_contract: 'production-accepted-at-build',
+      scene_trust_effect: 'none',
+    },
+    real_scene: {
+      decision: 'accepted-production',
+      production_release_allowed: true,
+    },
+  };
+  assert.equal(productionRuntimeRequirement(snapshot).required, true);
+  for (const [section, field, value] of [
+    ['release', 'package_status', 'invalid'],
+    ['release', 'release_contract', 'modeled-contract-only'],
+    ['release', 'scene_trust_effect', 'promoted'],
+    ['real_scene', 'decision', 'rejected'],
+    ['real_scene', 'production_release_allowed', false],
+  ]) {
+    const changed = structuredClone(snapshot);
+    changed[section][field] = value;
+    assert.equal(productionRuntimeRequirement(changed).required, false);
+  }
 });

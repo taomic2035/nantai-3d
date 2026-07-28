@@ -323,6 +323,19 @@ function renderProvenance() {
     chip('fidelity', derived.renderFidelity, derived.renderFidelity === 'dc-point-preview' ? 'warning' : 'success'),
     chip('trust effect', release.scene_trust_effect ?? 'none', 'warning'),
   ];
+  if (release.package_kind === 'production') {
+    pieces.push(
+      chip('真实采集', snapshot.real_scene?.stages?.find(
+        (stage) => stage.id === 'capture',
+      )?.state === 'succeeded' ? 'verified' : 'blocked', 'success'),
+      chip('Production 3DGS', snapshot.real_scene?.stages?.find(
+        (stage) => stage.id === 'production-training',
+      )?.state === 'succeeded' ? 'verified' : 'blocked', 'success'),
+      chip('米制对齐', snapshot.real_scene?.stages?.find(
+        (stage) => stage.id === 'metric-alignment',
+      )?.state === 'succeeded' ? 'verified' : 'blocked', 'success'),
+    );
+  }
   byId('provenance-bar').innerHTML = pieces.join('');
 }
 
@@ -347,13 +360,21 @@ function renderTopbar() {
   const releaseBadge = byId('release-badge');
   const releaseVerified = release.package_status === 'verified';
   const releaseInvalid = release.package_status === 'invalid';
-  releaseBadge.textContent = releaseVerified
-    ? '发布包 · 已校验'
+  const productionVerified = releaseVerified
+    && release.package_kind === 'production'
+    && release.production_runtime_required === true;
+  releaseBadge.textContent = productionVerified
+    ? 'Production 包 · 已校验'
+    : releaseVerified && release.package_kind === 'preview'
+      ? '发布包 · 已校验'
     : releaseInvalid ? '发布包 · 校验失败' : '开发工作树 · 未封装';
   releaseBadge.classList.toggle('badge-release-verified', releaseVerified);
   releaseBadge.classList.toggle('badge-release-invalid', releaseInvalid);
-  releaseBadge.title = releaseVerified
-    ? `package ${release.package_content_id} · scene trust effect ${release.scene_trust_effect}`
+  releaseBadge.title = productionVerified
+    ? '真实采集 · Production 3DGS · 米制对齐'
+      + ` · package integrity: verified · scene trust effect: ${release.scene_trust_effect}`
+    : releaseVerified
+      ? `package integrity: verified · scene trust effect: ${release.scene_trust_effect}`
     : release.reason ?? '当前目录没有 Release receipt';
   const modeLabel = serviceCapabilities.mode === 'read-write' ? '可写' : '只读';
   byId('capability-summary').textContent = `服务模式 · ${modeLabel} · ${serviceCapabilities.reason}`;

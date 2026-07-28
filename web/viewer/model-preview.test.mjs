@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
 
 let previewModule;
 try {
@@ -84,6 +85,17 @@ const VALID_LOCAL_TEXTURED_MANIFEST = Object.freeze({
     'no-real-photo-textures',
     'local-preview-only',
   ],
+});
+
+test('verified Production startup disables every synthetic model fallback', async () => {
+  const main = await readFile(new URL('./main.js', import.meta.url), 'utf8');
+  assert.match(main, /requiredProductionScene/);
+  assert.match(main, /productionRuntimeRequirement/);
+  assert.match(
+    main,
+    /requiredProductionScene[\s\S]*advanceSkippedModelPreview/s,
+  );
+  assert.match(main, /Production scene[\s\S]*full 3DGS/i);
 });
 
 test('accepts only an explicitly synthetic preview-only GLB manifest', () => {

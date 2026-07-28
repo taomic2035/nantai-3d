@@ -41,6 +41,14 @@ test('Preview package verification is separate from scene provenance', () => {
   assert.doesNotMatch(app, /package_status[\s\S]{0,120}(?:metric|aligned|real)/i);
 });
 
+test('Production package badge is fail closed and keeps integrity separate', () => {
+  assert.match(app, /Production 包\s*·\s*已校验/);
+  assert.match(app, /发布包\s*·\s*校验失败/);
+  assert.match(app, /真实采集\s*·\s*Production 3DGS\s*·\s*米制对齐/);
+  assert.match(app, /package integrity/);
+  assert.match(app, /scene trust effect/);
+});
+
 test('provenance chips cannot create a horizontal Studio page overflow', () => {
   const rule = css.match(/\.provenance-bar\s*\{[^}]+\}/s)?.[0] ?? '';
   assert.match(rule, /overflow(?:-x)?:\s*hidden/);

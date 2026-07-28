@@ -50,6 +50,23 @@ function assertActive(state) {
   }
 }
 
+export function productionRuntimeRequirement(snapshot = {}) {
+  const release = snapshot.release ?? {};
+  const realScene = snapshot.real_scene ?? {};
+  const required = release.package_kind === 'production'
+    && release.package_status === 'verified'
+    && release.release_contract === 'production-accepted-at-build'
+    && release.scene_trust_effect === 'none'
+    && realScene.decision === 'accepted-production'
+    && realScene.production_release_allowed === true;
+  return Object.freeze({
+    required,
+    reason: required
+      ? 'verified Production package requires its accepted 3DGS scene'
+      : 'snapshot is not an exact verified Production package',
+  });
+}
+
 export function createStartupState() {
   return freezeState({
     status: 'idle',
