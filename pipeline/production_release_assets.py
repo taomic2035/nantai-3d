@@ -4,22 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import stat
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline.durable_io import (
+    BoundDirectory,
+    BoundPathCleanup,
     DurableIOError,
     _is_linklike,
-    capture_real_directory_identity,
+    bind_directory,
+    bound_temporary_directory,
     first_linklike_path,
-    flush_directory,
-    flush_file,
-    matches_real_directory_identity,
-    publish_directory_noreplace,
 )
 from pipeline.production_release_builder import (
     ProductionReleaseBuilderError,
@@ -116,7 +113,11 @@ def _real_absent_output(path: Path) -> Path:
     return output
 
 
-def _copy_stable_regular_file(source: Path, destination: Path) -> str:
+def _copy_stable_regular_file(
+    source: Path,
+    destination_parent: BoundDirectory,
+    destination_name: str,
+) -> str:
     try:
         redirected = first_linklike_path(Path(source.absolute().anchor), source)
         path_before = source.lstat()
@@ -135,17 +136,15 @@ def _copy_stable_regular_file(source: Path, destination: Path) -> str:
 
     digest = hashlib.sha256()
     observed_bytes = 0
-    descriptor = None
+    destination = destination_parent.path / destination_name
     try:
-        descriptor = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o644,
-        )
         with source.open("rb") as source_stream:
             descriptor_before = os.fstat(source_stream.fileno())
-            with os.fdopen(descriptor, "wb") as destination_stream:
-                descriptor = None
+            with destination_parent.create_file(
+                destination_name,
+                mode=0o644,
+            ) as destination_file:
+                destination_stream = destination_file.stream
                 while True:
                     chunk = source_stream.read(_COPY_CHUNK_BYTES)
                     if not chunk:
@@ -161,9 +160,6 @@ def _copy_stable_regular_file(source: Path, destination: Path) -> str:
         raise ProductionReleaseAssetsError(
             "Production candidate archive cannot be copied"
         ) from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
 
     expected = _signature(path_before)
     if (
@@ -280,16 +276,14 @@ def _stable_contract_bytes(path: Path) -> bytes:
     return payload
 
 
-def _write_public_payload(path: Path, payload: bytes) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        0o644,
-    )
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(payload)
-        stream.flush()
-        os.fsync(stream.fileno())
+def _write_public_payload(
+    parent: BoundDirectory,
+    name: str,
+    payload: bytes,
+) -> None:
+    with parent.create_file(name, mode=0o644) as candidate:
+        candidate.stream.write(payload)
+        candidate.flush()
 
 
 def _public_bundle_files(root: Path) -> dict[str, Path]:
@@ -384,12 +378,13 @@ def verify_production_release_assets(
             observed[CHECKSUMS_NAME]
         )
         receipt = load_production_receipt_bytes(receipt_payload)
-        with tempfile.TemporaryDirectory(
+        with bound_temporary_directory(
             prefix="nantai-production-assets-verify-"
         ) as temporary:
             extracted = extract_production_release_archive(
                 archive,
-                Path(temporary) / "runtime",
+                temporary.path / "runtime",
+                _destination_parent=temporary,
             )
             verification = verify_production_release_tree(extracted)
             if (
@@ -483,8 +478,8 @@ def stage_production_release_assets(
     repo = Path(repo_root).expanduser().absolute()
     output = _real_absent_output(Path(output_dir))
     try:
-        output_parent_identity = capture_real_directory_identity(output.parent)
-    except DurableIOError as exc:
+        output_parent = bind_directory(output.parent)
+    except (DurableIOError, OSError) as exc:
         raise ProductionReleaseAssetsError(
             "Production release asset output parent is unavailable"
         ) from exc
@@ -495,16 +490,17 @@ def stage_production_release_assets(
     rebuilt = staging / ".acceptance-rebuild.zip"
     rebuilt_sidecar = rebuilt.with_suffix(f"{rebuilt.suffix}.sha256")
     published = False
+    staging_bound = None
     try:
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
-        ):
-            raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
-            )
-        staging.mkdir(mode=0o700)
-        archive_sha256 = _copy_stable_regular_file(source, candidate)
+        staging_bound = output_parent.create_directory(
+            staging.name,
+            mode=0o700,
+        )
+        archive_sha256 = _copy_stable_regular_file(
+            source,
+            staging_bound,
+            candidate.name,
+        )
         try:
             source_identity_before = (
                 resolve_production_release_source_identity(repo)
@@ -516,6 +512,7 @@ def stage_production_release_assets(
                 version=version,
                 source_commit=source_identity_before.source_commit,
                 tracked_files=source_identity_before.tracked_files,
+                _output_parent=staging_bound,
             )
             source_identity_after = (
                 resolve_production_release_source_identity(repo)
@@ -546,21 +543,15 @@ def stage_production_release_assets(
             raise ProductionReleaseAssetsError(
                 "Production candidate does not match acceptance rebuild"
             )
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
-        ):
-            raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
-            )
-        rebuilt.unlink()
-        rebuilt_sidecar.unlink()
-        with tempfile.TemporaryDirectory(
+        staging_bound.unlink_file(rebuilt.name)
+        staging_bound.unlink_file(rebuilt_sidecar.name)
+        with bound_temporary_directory(
             prefix="nantai-production-assets-"
         ) as temporary:
             extracted = extract_production_release_archive(
                 candidate,
-                Path(temporary) / "runtime",
+                temporary.path / "runtime",
+                _destination_parent=temporary,
             )
             verification_before = verify_production_release_tree(extracted)
             if verification_before.version != version:
@@ -607,14 +598,8 @@ def stage_production_release_assets(
             f"nantai-3d-{verification_before.version}-runtime.zip"
         )
         final_archive = staging / archive_name
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
-        ):
-            raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
-            )
-        os.replace(candidate, final_archive)
+        with staging_bound.open_file(candidate.name) as candidate_file:
+            candidate_file.publish_noreplace(staging_bound, archive_name)
         if (
             stable_regular_file_digest(final_archive).sha256
             != archive_sha256
@@ -623,19 +608,23 @@ def stage_production_release_assets(
                 "Production archive changed during asset staging"
             )
         _write_public_payload(
-            staging / PRODUCTION_RELEASE_NAME,
+            staging_bound,
+            PRODUCTION_RELEASE_NAME,
             receipt_payload,
         )
         _write_public_payload(
-            staging / CHECKSUMS_NAME,
+            staging_bound,
+            CHECKSUMS_NAME,
             checksums_payload,
         )
         _write_public_payload(
-            staging / f"{archive_name}.sha256",
+            staging_bound,
+            f"{archive_name}.sha256",
             f"{archive_sha256}  {archive_name}\n".encode("ascii"),
         )
-        flush_file(final_archive)
-        flush_directory(staging)
+        with staging_bound.open_file(archive_name) as final_file:
+            final_file.flush()
+        staging_bound.flush()
         try:
             staged_verification = verify_production_release_assets(staging)
         except ProductionReleaseAssetsError as exc:
@@ -655,14 +644,7 @@ def stage_production_release_assets(
             raise ProductionReleaseAssetsError(
                 "Production staged release validation failed"
             )
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
-        ):
-            raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
-            )
-        publish_directory_noreplace(staging, output)
+        staging_bound.publish_noreplace(output_parent, output.name)
         published = True
         return ProductionReleaseAssets(
             output_dir=output,
@@ -695,12 +677,17 @@ def stage_production_release_assets(
             f"Production release assets cannot be staged ({state})"
         ) from exc
     finally:
-        if (
-            not published
-            and matches_real_directory_identity(
-                output.parent,
-                output_parent_identity,
+        if staging_bound is not None:
+            staging_bound.close()
+        cleanup_retained = False
+        if not published:
+            cleanup_retained = (
+                output_parent.remove_tree(staging.name)
+                is BoundPathCleanup.RETAINED
             )
-            and not _is_linklike(staging)
-        ):
-            shutil.rmtree(staging, ignore_errors=True)
+        output_parent.close()
+        if cleanup_retained:
+            raise ProductionReleaseAssetsError(
+                "Production release asset staging was retained for "
+                "safety after failure"
+            )

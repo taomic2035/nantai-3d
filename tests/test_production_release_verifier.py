@@ -459,6 +459,30 @@ def test_archive_verifier_accepts_one_bounded_wrapper_root(tmp_path: Path) -> No
     assert report.release_contract == "modeled-contract-only"
 
 
+def test_extraction_mutations_do_not_use_identity_match_as_authority(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    destination = tmp_path / "extracted"
+
+    monkeypatch.setattr(
+        verifier_module,
+        "matches_real_directory_identity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("identity matcher must not authorize mutation")
+        ),
+        raising=False,
+    )
+
+    extracted = extract_production_release_archive(archive, destination)
+
+    assert extracted == destination
+    assert (destination / PRODUCTION_RELEASE_NAME).is_file()
+
+
 @pytest.mark.parametrize(
     ("entries", "message"),
     (

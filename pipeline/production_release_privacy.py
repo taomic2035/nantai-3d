@@ -8,7 +8,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,11 +15,9 @@ from pathlib import Path
 from pipeline.durable_io import (
     DurableIOError,
     _is_linklike,
-    capture_real_directory_identity,
+    bind_directory,
+    bound_temporary_directory,
     first_linklike_path,
-    flush_file,
-    matches_real_directory_identity,
-    publish_file_noreplace,
 )
 from pipeline.production_release_verifier import (
     ProductionReleaseVerification,
@@ -122,47 +119,33 @@ def publish_privacy_report(
             "privacy report parent directory is missing"
         )
     try:
-        parent_identity = capture_real_directory_identity(destination.parent)
-    except DurableIOError as exc:
+        parent = bind_directory(destination.parent)
+    except (DurableIOError, OSError) as exc:
         raise ProductionReleasePrivacyError(
             "privacy report parent directory is unsafe"
         ) from exc
-    temporary = destination.parent / (
-        f".{destination.name}.{uuid.uuid4().hex}.tmp"
-    )
+    temporary_name = f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    candidate = None
+    published = False
     try:
-        if not matches_real_directory_identity(
-            destination.parent,
-            parent_identity,
-        ):
-            raise DurableIOError("privacy report parent changed")
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(privacy_report_bytes(report))
-        flush_file(temporary)
-        if not matches_real_directory_identity(
-            destination.parent,
-            parent_identity,
-        ):
-            raise DurableIOError("privacy report parent changed")
-        publish_file_noreplace(temporary, destination)
+        candidate = parent.create_file(temporary_name)
+        candidate.stream.write(privacy_report_bytes(report))
+        candidate.flush()
+        candidate.publish_noreplace(parent, destination.name)
+        published = True
     except (DurableIOError, FileExistsError, OSError) as exc:
         raise ProductionReleasePrivacyError(
             "privacy report durable publication failed"
         ) from exc
     finally:
-        if matches_real_directory_identity(
-            destination.parent,
-            parent_identity,
-        ):
+        if candidate is not None:
+            candidate.close()
+        if not published:
             try:
-                temporary.unlink(missing_ok=True)
+                parent.unlink_file(temporary_name, missing_ok=True)
             except OSError:
                 pass
+        parent.close()
 
 
 def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -501,12 +484,16 @@ def audit_production_release_privacy(
         )
     if stat.S_ISDIR(source_stat.st_mode):
         return _audit_verified_tree(source, policy_path)
-    with tempfile.TemporaryDirectory(
+    with bound_temporary_directory(
         prefix="nantai-production-privacy-"
     ) as temporary:
-        root = Path(temporary) / "runtime"
+        root = temporary.path / "runtime"
         try:
-            extract_production_release_archive(source, root)
+            extract_production_release_archive(
+                source,
+                root,
+                _destination_parent=temporary,
+            )
         except ProductionReleaseVerificationError as exc:
             raise ProductionReleasePrivacyError(
                 "Production archive verification failed before privacy scan"
