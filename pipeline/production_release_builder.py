@@ -104,13 +104,18 @@ def _git_source_output(
             f"Git source identity {operation} failed"
         ) from exc
     if completed.returncode != 0:
+        cause = subprocess.CalledProcessError(
+            completed.returncode,
+            ["git", *arguments],
+        )
         raise ProductionReleaseBuilderError(
             f"Git source identity {operation} failed"
-        )
+        ) from cause
     if not isinstance(completed.stdout, bytes):
+        cause = TypeError("Git source output is not bytes")
         raise ProductionReleaseBuilderError(
             f"Git source identity {operation} output is not bytes"
-        )
+        ) from cause
     return completed.stdout
 
 
@@ -1222,6 +1227,193 @@ def _runtime_destination(relative: str) -> tuple[str, str] | None:
     return None
 
 
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)()
+    )
+
+
+def _git_tree_blob(
+    repo_root: Path,
+    *,
+    source_commit: str,
+    relative: str,
+) -> str:
+    output = _git_source_output(
+        repo_root,
+        ["ls-tree", "-z", source_commit, "--", relative],
+        "ls-tree",
+    )
+    try:
+        records = output.split(b"\0")
+        if len(records) != 2 or records[1] or not records[0]:
+            raise ValueError("Git tree entry count is invalid")
+        metadata, separator, encoded_path = records[0].partition(b"\t")
+        if not separator:
+            raise ValueError("Git tree entry metadata is invalid")
+        fields = metadata.split(b" ")
+        if len(fields) != 3:
+            raise ValueError("Git tree entry metadata is invalid")
+        mode = fields[0].decode("ascii")
+        object_type = fields[1].decode("ascii")
+        object_id = fields[2].decode("ascii")
+        observed_path = encoded_path.decode("utf-8", "surrogateescape")
+    except (UnicodeError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot ls-tree output cannot be decoded"
+        ) from exc
+    if observed_path != relative:
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot tree path is not exact"
+        )
+    if (
+        mode not in {"100644", "100755"}
+        or object_type != "blob"
+        or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
+    ):
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot entry must be a regular blob mode"
+        )
+    return object_id
+
+
+def _snapshot_directory(root: Path, relative_parent: Path) -> Path:
+    current = root
+    for part in relative_parent.parts:
+        current = current / part
+        try:
+            current.mkdir()
+        except FileExistsError:
+            pass
+        try:
+            observed = current.lstat()
+        except OSError as exc:
+            raise ProductionReleaseBuilderError(
+                "Git source snapshot directory is unavailable"
+            ) from exc
+        if _is_linklike(current) or not stat.S_ISDIR(observed.st_mode):
+            raise ProductionReleaseBuilderError(
+                "Git source snapshot directory must be a real directory"
+            )
+    return current
+
+
+def _stream_git_blob(
+    repo_root: Path,
+    *,
+    object_id: str,
+    destination: Path,
+) -> None:
+    descriptor: int | None = None
+    process = None
+    digest = hashlib.sha256()
+    byte_length = 0
+    try:
+        descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        process = subprocess.Popen(
+            ["git", "cat-file", "blob", object_id],
+            cwd=repo_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if process.stdout is None:
+            raise TypeError("Git blob stdout pipe is unavailable")
+        with process.stdout as source_stream:
+            with os.fdopen(descriptor, "wb") as destination_stream:
+                descriptor = None
+                while True:
+                    chunk = source_stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    byte_length += len(chunk)
+                    destination_stream.write(chunk)
+        returncode = process.wait()
+        if returncode != 0:
+            cause = subprocess.CalledProcessError(
+                returncode,
+                ["git", "cat-file", "blob", object_id],
+            )
+            raise ProductionReleaseBuilderError(
+                "Git source snapshot cat-file blob failed"
+            ) from cause
+    except ProductionReleaseBuilderError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+                process.wait()
+            except OSError:
+                pass
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot cat-file blob failed"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        observed = stable_regular_file_digest(destination)
+    except ReleaseArchiveError as exc:
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot blob validation failed"
+        ) from exc
+    if (
+        observed.byte_length != byte_length
+        or observed.sha256 != digest.hexdigest()
+    ):
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot blob changed during materialization"
+        )
+
+
+def _materialize_runtime_source_snapshot(
+    repo_root: Path,
+    snapshot_root: Path,
+    *,
+    source_commit: str,
+    tracked_files: Iterable[str],
+) -> tuple[SourcePayload, ...]:
+    try:
+        snapshot_stat = snapshot_root.lstat()
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot is unavailable"
+        ) from exc
+    if _is_linklike(snapshot_root) or not stat.S_ISDIR(snapshot_stat.st_mode):
+        raise ProductionReleaseBuilderError(
+            "Git source snapshot must be a real directory"
+        )
+    observed_sources: set[str] = set()
+    for raw in tracked_files:
+        relative = safe_posix_member_path(raw).as_posix()
+        if _runtime_destination(relative) is None:
+            continue
+        if relative in observed_sources:
+            raise ProductionReleaseBuilderError(
+                "Git source snapshot contains a duplicate runtime path"
+            )
+        observed_sources.add(relative)
+        object_id = _git_tree_blob(
+            repo_root,
+            source_commit=source_commit,
+            relative=relative,
+        )
+        relative_path = safe_posix_member_path(relative)
+        _snapshot_directory(snapshot_root, relative_path.parent)
+        _stream_git_blob(
+            repo_root,
+            object_id=object_id,
+            destination=snapshot_root.joinpath(*relative_path.parts),
+        )
+    return _runtime_source_payloads(snapshot_root, tracked_files)
+
+
 def _runtime_source_payloads(
     repo_root: Path,
     tracked_files: Iterable[str],
@@ -1295,25 +1487,19 @@ def _ensure_release_sources_clean(
         "release/production-verify-and-run.md",
         "release/production-runtime-runner.py",
     )
-    completed = subprocess.run(
+    output = _git_source_output(
+        repo_root,
         [
-            "git",
             "status",
             "--porcelain=v1",
+            "-z",
             "--untracked-files=all",
             "--",
             *paths,
         ],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
+        "status",
     )
-    if completed.returncode != 0:
-        raise ProductionReleaseBuilderError(
-            "cannot inspect Production runtime source cleanliness"
-        )
-    if completed.stdout.strip():
+    if output:
         raise ProductionReleaseBuilderError(
             "Production runtime source is dirty"
         )
@@ -1422,25 +1608,60 @@ def build_production_release_archive(
     output = Path(output_path).expanduser().absolute()
     sidecar = output.with_suffix(f"{output.suffix}.sha256")
     staging = output.parent / f".{output.name}.staging"
+    source_snapshot = output.parent / f".{output.name}.sources"
     partial = output.parent / f".{output.name}.partial"
     sidecar_partial = output.parent / f".{sidecar.name}.partial"
-    if not output.parent.is_dir():
+    if not output.parent.is_dir() or _is_linklike(output.parent):
         raise ProductionReleaseBuilderError(
-            "Production output parent directory is missing"
+            "Production output parent directory is missing or unsafe"
         )
-    for path in (output, sidecar, staging, partial, sidecar_partial):
-        if path.exists() or path.is_symlink():
+    for path in (
+        output,
+        sidecar,
+        staging,
+        source_snapshot,
+        partial,
+        sidecar_partial,
+    ):
+        if path.exists() or _is_linklike(path):
             raise ProductionReleaseBuilderError(
                 f"Production output or staging path exists: {path}"
             )
 
-    tracked = tuple(tracked_files)
+    try:
+        tracked = tuple(tracked_files)
+    except TypeError as exc:
+        raise ProductionReleaseBuilderError(
+            "Production source identity tracked files are invalid"
+        ) from exc
+    live_identity = resolve_production_release_source_identity(root)
+    supplied_identity = ProductionReleaseSourceIdentity(
+        source_commit=source_commit,
+        tracked_files=tracked,
+    )
+    if supplied_identity != live_identity:
+        raise ProductionReleaseBuilderError(
+            "Supplied Production source identity is not the exact live identity"
+        )
     _ensure_release_sources_clean(root, tracked)
+    source_snapshot_created = False
     try:
         report_path = load_latest_real_scene_acceptance(acceptance)
         context = derive_production_release_context(report_path)
         scene_sources = resolve_runtime_scene_payloads(context)
-        runtime_sources = _runtime_source_payloads(root, tracked)
+        try:
+            source_snapshot.mkdir(mode=0o700, exist_ok=False)
+            source_snapshot_created = True
+        except OSError as exc:
+            raise ProductionReleaseBuilderError(
+                "Git source snapshot cannot be created"
+            ) from exc
+        runtime_sources = _materialize_runtime_source_snapshot(
+            root,
+            source_snapshot,
+            source_commit=source_commit,
+            tracked_files=tracked,
+        )
         all_sources = (
             *runtime_sources,
             *context.public_files,
@@ -1586,6 +1807,17 @@ def build_production_release_archive(
         ).encode("ascii")
         _write_new_payload(sidecar_partial, sidecar_payload)
 
+        final_identity = resolve_production_release_source_identity(root)
+        if final_identity != live_identity:
+            raise ProductionReleaseBuilderError(
+                "Production source identity changed during release build"
+            )
+        _ensure_release_sources_clean(root, tracked)
+        final_identity = resolve_production_release_source_identity(root)
+        if final_identity != live_identity:
+            raise ProductionReleaseBuilderError(
+                "Production source identity changed during release build"
+            )
         _link_no_replace(sidecar_partial, sidecar)
         try:
             _link_no_replace(partial, output)
@@ -1614,5 +1846,7 @@ def build_production_release_archive(
         ) from exc
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+        if source_snapshot_created:
+            shutil.rmtree(source_snapshot, ignore_errors=True)
         partial.unlink(missing_ok=True)
         sidecar_partial.unlink(missing_ok=True)

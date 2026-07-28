@@ -165,6 +165,29 @@ def test_source_identity_wraps_git_launch_failure(
     assert isinstance(captured.value.__cause__, FileNotFoundError)
 
 
+def test_source_identity_wraps_nonbytes_git_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="private path from invalid runner",
+            stderr="private stderr",
+        )
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="rev-parse",
+    ) as captured:
+        builder_module.resolve_production_release_source_identity(tmp_path)
+
+    assert "private" not in str(captured.value)
+    assert isinstance(captured.value.__cause__, TypeError)
+
+
 @pytest.mark.parametrize(
     "commit",
     (
@@ -929,6 +952,86 @@ def _runtime_repo(root: Path) -> tuple[str, ...]:
     return tuple(sorted(payloads))
 
 
+def _git(repo: Path, *arguments: str, input_bytes: bytes | None = None) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repo,
+        input=input_bytes,
+        check=False,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr.decode(
+        "utf-8", "replace"
+    )
+    return completed.stdout.decode("ascii").strip()
+
+
+def _committed_runtime_repo(
+    root: Path,
+    *,
+    extra_files: dict[str, bytes] | None = None,
+) -> builder_module.ProductionReleaseSourceIdentity:
+    root.mkdir()
+    _runtime_repo(root)
+    for relative, payload in (extra_files or {}).items():
+        _write(root, relative, payload)
+    _git(root, "init", "--quiet")
+    _git(root, "config", "user.email", "tests@example.invalid")
+    _git(root, "config", "user.name", "Production Release Tests")
+    _git(root, "config", "core.autocrlf", "false")
+    _git(root, "config", "core.symlinks", "false")
+    _git(root, "add", "--all", "--")
+    _git(root, "commit", "--quiet", "-m", "fixture")
+    identity = builder_module.resolve_production_release_source_identity(root)
+    assert not _git(
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    return identity
+
+
+def _patch_build_context(
+    monkeypatch,
+    fixture: dict[str, object],
+    context: builder_module.ProductionReleaseContext,
+) -> None:
+    monkeypatch.setattr(
+        builder_module,
+        "load_latest_real_scene_acceptance",
+        lambda _root: fixture["report_path"],
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "derive_production_release_context",
+        lambda _path: context,
+    )
+
+
+def _build_committed_runtime(
+    *,
+    repo: Path,
+    fixture: dict[str, object],
+    identity: builder_module.ProductionReleaseSourceIdentity,
+    output: Path,
+    source_commit: str | None = None,
+    tracked_files: tuple[str, ...] | None = None,
+):
+    return build_production_release_archive(
+        repo_root=repo,
+        acceptance_root=fixture["root"],
+        output_path=output,
+        version="v1.0.0",
+        source_commit=source_commit or identity.source_commit,
+        tracked_files=(
+            identity.tracked_files
+            if tracked_files is None
+            else tracked_files
+        ),
+    )
+
+
 def test_runtime_sources_replace_development_runner(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -944,6 +1047,303 @@ def test_runtime_sources_replace_development_runner(tmp_path: Path) -> None:
     assert not any(row.source_path == repo / "make.py" for row in payloads)
 
 
+@pytest.mark.parametrize("dirty_kind", ("tracked", "untracked"))
+def test_build_rejects_real_dirty_release_owned_source_before_staging(
+    tmp_path: Path,
+    monkeypatch,
+    dirty_kind: str,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    _patch_build_context(monkeypatch, fixture, context)
+    if dirty_kind == "tracked":
+        (repo / "web/viewer/index.html").write_bytes(b"dirty tracked bytes\n")
+    else:
+        _write(repo, "pipeline/untracked_release_source.py", b"dirty\n")
+    output = tmp_path / "runtime.zip"
+
+    with pytest.raises(ProductionReleaseBuilderError, match="dirty"):
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+
+
+@pytest.mark.parametrize("identity_kind", ("commit", "tracked-files"))
+def test_build_rejects_supplied_identity_that_is_not_exact_live_identity(
+    tmp_path: Path,
+    monkeypatch,
+    identity_kind: str,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(
+        repo,
+        extra_files={"notes.txt": b"tracked but not packaged\n"},
+    )
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+    source_commit = (
+        "b" * 40
+        if identity_kind == "commit"
+        else identity.source_commit
+    )
+    tracked_files = (
+        tuple(path for path in identity.tracked_files if path != "notes.txt")
+        if identity_kind == "tracked-files"
+        else identity.tracked_files
+    )
+
+    with pytest.raises(ProductionReleaseBuilderError, match="identity"):
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+            source_commit=source_commit,
+            tracked_files=tracked_files,
+        )
+
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+
+
+def test_build_rejects_dirty_edit_injected_after_initial_clean_check(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    output = tmp_path / "runtime.zip"
+    runtime_runner = repo / "release/production-runtime-runner.py"
+    monkeypatch.setattr(
+        builder_module,
+        "load_latest_real_scene_acceptance",
+        lambda _root: fixture["report_path"],
+    )
+
+    def mutate_after_initial_clean(_path):
+        runtime_runner.write_bytes(b"transient attacker-controlled runner\n")
+        return context
+
+    monkeypatch.setattr(
+        builder_module,
+        "derive_production_release_context",
+        mutate_after_initial_clean,
+    )
+
+    with pytest.raises(ProductionReleaseBuilderError, match="dirty"):
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert runtime_runner.read_bytes() == b"transient attacker-controlled runner\n"
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+
+
+def test_build_rechecks_identity_after_final_cleanliness_check(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(
+        repo,
+        extra_files={"notes.txt": b"initial notes\n"},
+    )
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+    real_clean = builder_module._ensure_release_sources_clean
+    clean_calls = 0
+
+    def advance_head_after_final_clean(repo_root, tracked_files):
+        nonlocal clean_calls
+        clean_calls += 1
+        real_clean(repo_root, tracked_files)
+        if clean_calls == 2:
+            (repo / "notes.txt").write_bytes(b"new clean commit\n")
+            _git(repo, "add", "--", "notes.txt")
+            _git(repo, "commit", "--quiet", "-m", "advance head")
+
+    monkeypatch.setattr(
+        builder_module,
+        "_ensure_release_sources_clean",
+        advance_head_after_final_clean,
+    )
+
+    with pytest.raises(ProductionReleaseBuilderError, match="identity changed"):
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert clean_calls == 2
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+
+
+def test_transient_worktree_edit_cannot_enter_archive_under_original_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+    runtime_runner = repo / "release/production-runtime-runner.py"
+    committed_bytes = runtime_runner.read_bytes()
+    transient_bytes = bytes([committed_bytes[0] ^ 0x01]) + committed_bytes[1:]
+    real_resolver = builder_module._runtime_source_payloads
+    real_copy = builder_module._copy_bound_source
+
+    def resolve_during_transient_edit(source_root, tracked_files):
+        runtime_runner.write_bytes(transient_bytes)
+        return real_resolver(source_root, tracked_files)
+
+    def copy_then_restore(source, destination):
+        try:
+            return real_copy(source, destination)
+        finally:
+            if source.destination_path == "make.py":
+                runtime_runner.write_bytes(committed_bytes)
+
+    monkeypatch.setattr(
+        builder_module,
+        "_copy_bound_source",
+        copy_then_restore,
+    )
+    try:
+        monkeypatch.setattr(
+            builder_module,
+            "_runtime_source_payloads",
+            resolve_during_transient_edit,
+        )
+
+        result = _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+    finally:
+        if runtime_runner.read_bytes() != committed_bytes:
+            runtime_runner.write_bytes(committed_bytes)
+
+    with zipfile.ZipFile(output) as archive:
+        packaged_runner = archive.read("nantai-3d-v1.0.0/make.py")
+        receipt = json.loads(
+            archive.read("nantai-3d-v1.0.0/PRODUCTION-RELEASE.json")
+        )
+    runner_artifact = next(
+        artifact
+        for artifact in receipt["artifacts"]
+        if artifact["path"] == "make.py"
+    )
+    assert result.archive_path == output
+    assert packaged_runner == committed_bytes
+    assert packaged_runner != transient_bytes
+    assert receipt["source"]["git_commit"] == identity.source_commit
+    assert runner_artifact["sha256"] == hashlib.sha256(
+        committed_bytes
+    ).hexdigest()
+
+
+def test_build_rejects_git_tree_symlink_even_if_worktree_path_is_regular(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    _committed_runtime_repo(repo)
+    link_path = repo / "pipeline/runtime_link.py"
+    link_payload = b"runtime-target.py"
+    link_path.write_bytes(link_payload)
+    object_id = _git(repo, "hash-object", "-w", "--stdin", input_bytes=link_payload)
+    _git(
+        repo,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"120000,{object_id},pipeline/runtime_link.py",
+    )
+    _git(repo, "commit", "--quiet", "-m", "track symlink mode")
+    identity = builder_module.resolve_production_release_source_identity(repo)
+    assert not _git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="regular|mode|blob",
+    ):
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+
+
+def test_streaming_git_failure_removes_snapshot_and_partial_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+    real_popen = builder_module.subprocess.Popen
+
+    def fail_git_blob_stream(command, *args, **kwargs):
+        if command[:3] == ["git", "cat-file", "blob"]:
+            raise FileNotFoundError("private git executable path")
+        return real_popen(command, *args, **kwargs)
+
+    monkeypatch.setattr(builder_module.subprocess, "Popen", fail_git_blob_stream)
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="Git.*blob|blob.*failed",
+    ) as captured:
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert "private git executable path" not in str(captured.value)
+    assert isinstance(captured.value.__cause__, FileNotFoundError)
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+    assert not (tmp_path / ".runtime.zip.sources").exists()
+    assert not (tmp_path / ".runtime.zip.staging").exists()
+    assert not (tmp_path / ".runtime.zip.partial").exists()
+
+
 def test_clean_source_gate_tracks_template_not_development_runner(
     tmp_path: Path,
     monkeypatch,
@@ -953,7 +1353,7 @@ def test_clean_source_gate_tracks_template_not_development_runner(
     def fake_run(command, **kwargs):
         observed["command"] = command
         observed.update(kwargs)
-        return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, b"", b"")
 
     monkeypatch.setattr(builder_module.subprocess, "run", fake_run)
 
@@ -971,8 +1371,7 @@ def test_build_is_deterministic_verified_and_no_replace(
 ) -> None:
     fixture, context = _scene_context(tmp_path / "private", monkeypatch)
     repo = tmp_path / "repo"
-    repo.mkdir()
-    tracked = _runtime_repo(repo)
+    identity = _committed_runtime_repo(repo)
     monkeypatch.setattr(
         builder_module,
         "load_latest_real_scene_acceptance",
@@ -982,11 +1381,6 @@ def test_build_is_deterministic_verified_and_no_replace(
         builder_module,
         "derive_production_release_context",
         lambda _path: context,
-    )
-    monkeypatch.setattr(
-        builder_module,
-        "_ensure_release_sources_clean",
-        lambda *_args: None,
     )
     first_path = tmp_path / "one/runtime.zip"
     second_path = tmp_path / "two/runtime.zip"
@@ -998,16 +1392,16 @@ def test_build_is_deterministic_verified_and_no_replace(
         acceptance_root=fixture["root"],
         output_path=first_path,
         version="v1.0.0",
-        source_commit="a" * 40,
-        tracked_files=tracked,
+        source_commit=identity.source_commit,
+        tracked_files=identity.tracked_files,
     )
     second = build_production_release_archive(
         repo_root=repo,
         acceptance_root=fixture["root"],
         output_path=second_path,
         version="v1.0.0",
-        source_commit="a" * 40,
-        tracked_files=tracked,
+        source_commit=identity.source_commit,
+        tracked_files=identity.tracked_files,
     )
 
     assert first.package_content_id == second.package_content_id
@@ -1049,8 +1443,8 @@ def test_build_is_deterministic_verified_and_no_replace(
             acceptance_root=fixture["root"],
             output_path=first_path,
             version="v1.0.0",
-            source_commit="a" * 40,
-            tracked_files=tracked,
+            source_commit=identity.source_commit,
+            tracked_files=identity.tracked_files,
         )
 
 
@@ -1060,8 +1454,7 @@ def test_build_failure_removes_partial_publication(
 ) -> None:
     fixture, context = _scene_context(tmp_path / "private", monkeypatch)
     repo = tmp_path / "repo"
-    repo.mkdir()
-    tracked = _runtime_repo(repo)
+    identity = _committed_runtime_repo(repo)
     output = tmp_path / "runtime.zip"
     monkeypatch.setattr(
         builder_module,
@@ -1075,11 +1468,6 @@ def test_build_failure_removes_partial_publication(
     )
     monkeypatch.setattr(
         builder_module,
-        "_ensure_release_sources_clean",
-        lambda *_args: None,
-    )
-    monkeypatch.setattr(
-        builder_module,
         "verify_production_release_archive",
         lambda _path: (_ for _ in ()).throw(RuntimeError("injected")),
     )
@@ -1090,8 +1478,8 @@ def test_build_failure_removes_partial_publication(
             acceptance_root=fixture["root"],
             output_path=output,
             version="v1.0.0",
-            source_commit="a" * 40,
-            tracked_files=tracked,
+            source_commit=identity.source_commit,
+            tracked_files=identity.tracked_files,
         )
     assert not output.exists()
     assert not output.with_suffix(".zip.sha256").exists()
@@ -1105,8 +1493,7 @@ def test_fresh_runtime_runner_verification_is_repeatable(
 ) -> None:
     fixture, context = _scene_context(tmp_path / "private", monkeypatch)
     repo = tmp_path / "repo"
-    repo.mkdir()
-    tracked = _runtime_repo(repo)
+    identity = _committed_runtime_repo(repo)
     monkeypatch.setattr(
         builder_module,
         "load_latest_real_scene_acceptance",
@@ -1117,19 +1504,14 @@ def test_fresh_runtime_runner_verification_is_repeatable(
         "derive_production_release_context",
         lambda _path: context,
     )
-    monkeypatch.setattr(
-        builder_module,
-        "_ensure_release_sources_clean",
-        lambda *_args: None,
-    )
     archive_path = tmp_path / "runtime.zip"
     build_production_release_archive(
         repo_root=repo,
         acceptance_root=fixture["root"],
         output_path=archive_path,
         version="v1.0.0",
-        source_commit="a" * 40,
-        tracked_files=tracked,
+        source_commit=identity.source_commit,
+        tracked_files=identity.tracked_files,
     )
     extracted = tmp_path / "extracted"
     with zipfile.ZipFile(archive_path) as archive:

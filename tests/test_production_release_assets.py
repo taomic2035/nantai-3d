@@ -46,6 +46,7 @@ from tests.production_release_fixtures import (
     write_modeled_production_archive,
     write_modeled_production_tree,
 )
+from tests.test_production_release_builder import _committed_runtime_repo
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _RELEASE_GUIDE = _REPO_ROOT / "release" / "production-verify-and-run.md"
@@ -982,30 +983,36 @@ def test_stage_rejects_source_identity_change_during_rebuild(
     _assert_not_published(output)
 
 
-def test_stage_rejects_dirty_release_owned_source(
+@pytest.mark.parametrize("dirty_kind", ("tracked", "untracked"))
+def test_stage_rejects_real_dirty_release_owned_source(
     tmp_path: Path,
-    monkeypatch,
+    dirty_kind: str,
 ) -> None:
     """A5: dirty HEAD causes rebuild to fail."""
     source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
     output = tmp_path / "release-assets"
-    _patch_rebuild_raise(
-        monkeypatch,
-        ProductionReleaseBuilderError("source is dirty"),
-    )
+    repo = tmp_path / "repo"
+    _committed_runtime_repo(repo)
+    if dirty_kind == "tracked":
+        (repo / "web/viewer/index.html").write_bytes(b"dirty tracked bytes\n")
+    else:
+        (repo / "pipeline/untracked_release_source.py").write_bytes(b"dirty\n")
 
     with pytest.raises(
         ProductionReleaseAssetsError,
         match="Production acceptance rebuild failed",
     ):
         stage_production_release_assets(
-            **_stage_kwargs(
-                tmp_path,
-                archive=source,
-                policy=policy,
-                output=output,
-            )
+            **{
+                **_stage_kwargs(
+                    tmp_path,
+                    archive=source,
+                    policy=policy,
+                    output=output,
+                ),
+                "repo_root": repo,
+            }
         )
 
     _assert_not_published(output)
