@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import subprocess
+import sys
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -737,7 +739,7 @@ def test_scene_resolver_rejects_unclosed_manifest_payloads(
 def _runtime_repo(root: Path) -> tuple[str, ...]:
     payloads = {
         "LICENSE": b"license\n",
-        "make.py": b"print('make')\n",
+        "make.py": b"raise SystemExit('development runner leaked')\n",
         "pyproject.toml": b"[project]\nname='nantai'\n",
         "pipeline/release_archive.py": (
             Path(builder_module.__file__).with_name(
@@ -762,10 +764,51 @@ def _runtime_repo(root: Path) -> tuple[str, ...]:
         "web/studio/index.html": b"<h1>Studio</h1>\n",
         "web/viewer/index.html": b"<h1>Viewer</h1>\n",
         "release/production-verify-and-run.md": b"# Verify\n",
+        "release/production-runtime-runner.py": (
+            Path(__file__).parents[1]
+            .joinpath("release/production-runtime-runner.py")
+            .read_bytes()
+        ),
     }
     for relative, payload in payloads.items():
         _write(root, relative, payload)
     return tuple(sorted(payloads))
+
+
+def test_runtime_sources_replace_development_runner(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = _runtime_repo(repo)
+
+    payloads = builder_module._runtime_source_payloads(repo, tracked)
+    runner = next(row for row in payloads if row.destination_path == "make.py")
+
+    assert runner.role == "runtime-runner"
+    assert runner.source_path == (
+        repo / "release/production-runtime-runner.py"
+    )
+    assert not any(row.source_path == repo / "make.py" for row in payloads)
+
+
+def test_clean_source_gate_tracks_template_not_development_runner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(builder_module.subprocess, "run", fake_run)
+
+    builder_module._ensure_release_sources_clean(tmp_path, ())
+
+    command = observed["command"]
+    assert "release/production-runtime-runner.py" in command
+    assert "make.py" not in command
+    assert observed["cwd"] == tmp_path
 
 
 def test_build_is_deterministic_verified_and_no_replace(
@@ -822,6 +865,21 @@ def test_build_is_deterministic_verified_and_no_replace(
     )
     with zipfile.ZipFile(first_path) as archive:
         infos = archive.infolist()
+        packaged_runner = archive.read("nantai-3d-v1.0.0/make.py")
+        receipt = json.loads(
+            archive.read("nantai-3d-v1.0.0/PRODUCTION-RELEASE.json")
+        )
+    assert packaged_runner == (
+        repo / "release/production-runtime-runner.py"
+    ).read_bytes()
+    assert b"development runner leaked" not in packaged_runner
+    runner_artifact = next(
+        row for row in receipt["artifacts"] if row["path"] == "make.py"
+    )
+    assert runner_artifact["role"] == "runtime-runner"
+    assert runner_artifact["sha256"] == hashlib.sha256(
+        packaged_runner
+    ).hexdigest()
     assert [info.filename for info in infos] == sorted(
         info.filename for info in infos
     )
@@ -885,3 +943,59 @@ def test_build_failure_removes_partial_publication(
     assert not output.with_suffix(".zip.sha256").exists()
     assert not tuple(tmp_path.glob(".*.staging"))
     assert not tuple(tmp_path.glob(".*.partial"))
+
+
+def test_fresh_runtime_verifier_is_repeatable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = _runtime_repo(repo)
+    monkeypatch.setattr(
+        builder_module,
+        "load_latest_real_scene_acceptance",
+        lambda _root: fixture["report_path"],
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "derive_production_release_context",
+        lambda _path: context,
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "_ensure_release_sources_clean",
+        lambda *_args: None,
+    )
+    archive_path = tmp_path / "runtime.zip"
+    build_production_release_archive(
+        repo_root=repo,
+        acceptance_root=fixture["root"],
+        output_path=archive_path,
+        version="v1.0.0",
+        source_commit="a" * 40,
+        tracked_files=tracked,
+    )
+    extracted = tmp_path / "extracted"
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(extracted)
+    package_root = extracted / "nantai-3d-v1.0.0"
+
+    for _attempt in range(2):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "scripts/verify_production_release.py",
+                ".",
+                "--json",
+            ],
+            cwd=package_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert json.loads(completed.stdout)["valid"] is True
+    assert not tuple(package_root.rglob("__pycache__"))

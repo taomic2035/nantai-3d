@@ -1133,7 +1133,9 @@ def resolve_runtime_scene_payloads(
 def _runtime_destination(relative: str) -> tuple[str, str] | None:
     if relative == "release/production-verify-and-run.md":
         return "VERIFY-AND-RUN.md", "release-guide"
-    if relative in {"LICENSE", "make.py", "pyproject.toml"}:
+    if relative == "release/production-runtime-runner.py":
+        return "make.py", "runtime-runner"
+    if relative in {"LICENSE", "pyproject.toml"}:
         return relative, "runtime-root"
     if relative == "scripts/verify_production_release.py":
         return relative, "offline-verifier"
@@ -1209,13 +1211,13 @@ def _ensure_release_sources_clean(
 ) -> None:
     paths = (
         "LICENSE",
-        "make.py",
         "pyproject.toml",
         "pipeline",
         "scripts/verify_production_release.py",
         "web/studio",
         "web/viewer",
         "release/production-verify-and-run.md",
+        "release/production-runtime-runner.py",
     )
     completed = subprocess.run(
         [
