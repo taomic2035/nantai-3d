@@ -945,7 +945,7 @@ def test_build_failure_removes_partial_publication(
     assert not tuple(tmp_path.glob(".*.partial"))
 
 
-def test_fresh_runtime_verifier_is_repeatable(
+def test_fresh_runtime_runner_verification_is_repeatable(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -986,9 +986,8 @@ def test_fresh_runtime_verifier_is_repeatable(
         completed = subprocess.run(
             [
                 sys.executable,
-                "scripts/verify_production_release.py",
-                ".",
-                "--json",
+                "make.py",
+                "verify",
             ],
             cwd=package_root,
             check=False,
