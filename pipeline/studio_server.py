@@ -58,6 +58,15 @@ from pipeline.preview_release import (
     ReleaseVerificationError,
     verify_release_tree,
 )
+from pipeline.production_release_contract import (
+    PRODUCTION_RELEASE_NAME,
+    load_production_receipt_bytes,
+    load_public_evidence_bytes,
+)
+from pipeline.production_release_verifier import (
+    ProductionReleaseVerificationError,
+    verify_production_release_tree,
+)
 from pipeline.real_scene_acceptance import (
     RealSceneAcceptanceError,
     load_latest_real_scene_acceptance,
@@ -1878,18 +1887,82 @@ def _resolve_asset_payload(assets_root: Path, raw_path: Any) -> Path | None:
 
 def _release_snapshot(root: Path) -> dict[str, Any]:
     manifest_path = root / RELEASE_MANIFEST_NAME
+    production_path = root / PRODUCTION_RELEASE_NAME
     base = {
+        "package_kind": None,
         "version": None,
         "package_status": "not-packaged",
+        "release_contract": None,
         "package_content_id": None,
         "source_commit": None,
         "artifact_count": 0,
         "total_bytes": 0,
         "scene_trust_effect": "none",
-        "reason": f"{RELEASE_MANIFEST_NAME} is absent",
+        "acceptance_report_sha256": None,
+        "scene_identity": None,
+        "gates": [],
+        "reason": (
+            f"{RELEASE_MANIFEST_NAME} and {PRODUCTION_RELEASE_NAME} are absent"
+        ),
     }
-    if not manifest_path.exists() and not manifest_path.is_symlink():
+    preview_present = manifest_path.exists() or manifest_path.is_symlink()
+    production_present = (
+        production_path.exists() or production_path.is_symlink()
+    )
+    if not preview_present and not production_present:
         return base
+    if preview_present and production_present:
+        return {
+            **base,
+            "package_status": "invalid",
+            "reason": "Preview and Production release receipts are ambiguous",
+        }
+    if production_present:
+        try:
+            report = verify_production_release_tree(root)
+            receipt = load_production_receipt_bytes(
+                production_path.read_bytes()
+            )
+            evidence_path = root.joinpath(
+                *PurePosixPath(
+                    receipt["acceptance"]["public_evidence_path"]
+                ).parts
+            )
+            evidence = load_public_evidence_bytes(
+                evidence_path.read_bytes()
+            )
+        except (
+            OSError,
+            ProductionReleaseVerificationError,
+            ValueError,
+        ) as exc:
+            return {
+                **base,
+                "package_kind": "production",
+                "package_status": "invalid",
+                "reason": f"Production release verification failed: {exc}",
+            }
+        return {
+            "package_kind": "production",
+            "version": report.version,
+            "package_status": "verified",
+            "release_contract": (
+                "production-accepted-at-build"
+                if report.release_contract == "production-accepted"
+                else report.release_contract
+            ),
+            "package_content_id": report.package_content_id,
+            "source_commit": report.source_commit,
+            "artifact_count": report.artifact_count,
+            "total_bytes": report.total_bytes,
+            "scene_trust_effect": report.scene_trust_effect,
+            "acceptance_report_sha256": evidence["acceptance"][
+                "report_sha256"
+            ],
+            "scene_identity": evidence["scene"]["scene_identity"],
+            "gates": evidence["acceptance"]["gates"],
+            "reason": None,
+        }
     try:
         report = verify_release_tree(root)
     except (OSError, ReleaseVerificationError) as exc:
@@ -1899,18 +1972,26 @@ def _release_snapshot(root: Path) -> dict[str, Any]:
             "reason": f"release verification failed: {exc}",
         }
     return {
+        "package_kind": "preview",
         "version": report.version,
         "package_status": "verified",
+        "release_contract": "preview-only",
         "package_content_id": report.package_content_id,
         "source_commit": report.source_commit,
         "artifact_count": report.artifact_count,
         "total_bytes": report.total_bytes,
         "scene_trust_effect": report.scene_trust_effect,
+        "acceptance_report_sha256": None,
+        "scene_identity": None,
+        "gates": [],
         "reason": None,
     }
 
 
-def _real_scene_snapshot(root: Path) -> dict[str, Any]:
+def _real_scene_snapshot(
+    root: Path,
+    release: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Project aggregate decisions without exposing private evidence paths."""
 
     def envelope(
@@ -1937,6 +2018,34 @@ def _real_scene_snapshot(root: Path) -> dict[str, Any]:
 
     boundary = root / ".nantai-studio/real-scene"
     if not boundary.exists() and not boundary.is_symlink():
+        if (
+            release is not None
+            and release.get("package_kind") == "production"
+            and release.get("package_status") == "verified"
+            and release.get("release_contract")
+            == "production-accepted-at-build"
+        ):
+            gates = release.get("gates", [])
+            if (
+                isinstance(gates, list)
+                and tuple(row.get("id") for row in gates)
+                == REAL_SCENE_GATE_IDS
+                and all(row.get("state") == "accepted" for row in gates)
+            ):
+                return {
+                    "schema_version": 1,
+                    "role": "production-acceptance",
+                    "decision": "accepted-production",
+                    "production_release_allowed": True,
+                    "stages": [
+                        {"id": row["id"], "state": "succeeded"}
+                        for row in gates
+                    ],
+                    "reasons": [],
+                    "report_sha256": release[
+                        "acceptance_report_sha256"
+                    ],
+                }
         return envelope(
             decision="not-started",
             state="not-started",
@@ -1976,6 +2085,19 @@ def _real_scene_snapshot(root: Path) -> dict[str, Any]:
             )
             or tuple(gate.gate for gate in derived.gates)
             != REAL_SCENE_GATE_IDS
+        ):
+            return invalid
+        if (
+            release is not None
+            and release.get("package_kind") == "production"
+            and release.get("package_status") == "verified"
+            and (
+                release.get("acceptance_report_sha256")
+                != derived.report_sha256
+                or release.get("release_contract")
+                != "production-accepted-at-build"
+                or not derived.production_release_allowed
+            )
         ):
             return invalid
     except (OSError, RealSceneAcceptanceError, ValueError):
@@ -2063,7 +2185,7 @@ def build_project_snapshot(project_root: str | Path) -> dict[str, Any]:
         reconstruction["geometry_usability"] = "preview-only"
     assets = _asset_snapshot(root)
     release = _release_snapshot(root)
-    real_scene = _real_scene_snapshot(root)
+    real_scene = _real_scene_snapshot(root, release)
     world_composition_available = _world_composition_available(root)
     runs = _load_runs(root)
 

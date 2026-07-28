@@ -1244,14 +1244,21 @@ class TestProjectSnapshot:
         snapshot = build_project_snapshot(tmp_path)
 
         assert snapshot["release"] == {
+            "package_kind": None,
             "version": None,
             "package_status": "not-packaged",
+            "release_contract": None,
             "package_content_id": None,
             "source_commit": None,
             "artifact_count": 0,
             "total_bytes": 0,
             "scene_trust_effect": "none",
-            "reason": "RELEASE-MANIFEST.json is absent",
+            "acceptance_report_sha256": None,
+            "scene_identity": None,
+            "gates": [],
+            "reason": (
+                "RELEASE-MANIFEST.json and PRODUCTION-RELEASE.json are absent"
+            ),
         }
 
     def test_verified_release_is_separate_from_scene_trust(self, tmp_path):
@@ -1260,19 +1267,93 @@ class TestProjectSnapshot:
         snapshot = build_project_snapshot(tmp_path)
 
         assert snapshot["release"] == {
+            "package_kind": "preview",
             "version": "v1.0.0-preview.2",
             "package_status": "verified",
+            "release_contract": "preview-only",
             "package_content_id": receipt["package"]["content_id"],
             "source_commit": "a" * 40,
             "artifact_count": len(receipt["artifacts"]),
             "total_bytes": sum(item["bytes"] for item in receipt["artifacts"]),
             "scene_trust_effect": "none",
+            "acceptance_report_sha256": None,
+            "scene_identity": None,
+            "gates": [],
             "reason": None,
         }
         assert snapshot["reconstruction"]["synthetic"] is True
         assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
         assert snapshot["reconstruction"]["artifact"]["immutable"] is False
         assert snapshot["coordinate"]["units"] == "arbitrary"
+
+    def test_verified_production_package_projects_public_acceptance(
+        self,
+        tmp_path,
+    ):
+        from pipeline.production_release_contract import (
+            CHECKSUMS_NAME,
+            PRODUCTION_RELEASE_NAME,
+            build_production_receipt,
+        )
+        from tests.production_release_fixtures import (
+            modeled_artifact_records,
+            modeled_entrypoints,
+            modeled_public_evidence,
+            write_modeled_production_tree,
+        )
+
+        project = tmp_path / "production"
+        write_modeled_production_tree(project)
+        evidence = modeled_public_evidence()
+        evidence["fixture_kind"] = None
+        evidence_bytes = canonical_json_bytes(evidence)
+        (project / "evidence/public-evidence.json").write_bytes(
+            evidence_bytes
+        )
+        artifacts = modeled_artifact_records()
+        for artifact in artifacts:
+            if artifact["path"] == "evidence/public-evidence.json":
+                artifact["bytes"] = len(evidence_bytes)
+                artifact["sha256"] = hashlib.sha256(
+                    evidence_bytes
+                ).hexdigest()
+        receipt = build_production_receipt(
+            version="v1.0.0",
+            source_commit="a" * 40,
+            artifacts=artifacts,
+            protected_roots=("evidence", "pipeline", "scripts", "web"),
+            entrypoints=modeled_entrypoints(),
+            public_evidence=evidence,
+        )
+        receipt_bytes = canonical_json_bytes(receipt)
+        (project / PRODUCTION_RELEASE_NAME).write_bytes(receipt_bytes)
+        rows = [
+            f"{artifact['sha256']}  {artifact['path']}\n"
+            for artifact in receipt["artifacts"]
+        ]
+        rows.append(
+            f"{hashlib.sha256(receipt_bytes).hexdigest()}  "
+            f"{PRODUCTION_RELEASE_NAME}\n"
+        )
+        (project / CHECKSUMS_NAME).write_bytes(
+            "".join(sorted(rows)).encode("ascii")
+        )
+
+        snapshot = build_project_snapshot(project)
+
+        assert snapshot["release"]["package_kind"] == "production"
+        assert snapshot["release"]["package_status"] == "verified"
+        assert (
+            snapshot["release"]["release_contract"]
+            == "production-accepted-at-build"
+        )
+        assert snapshot["release"]["scene_trust_effect"] == "none"
+        assert snapshot["real_scene"]["decision"] == "accepted-production"
+        assert snapshot["real_scene"]["production_release_allowed"] is True
+        assert all(
+            row["state"] == "succeeded"
+            for row in snapshot["real_scene"]["stages"]
+        )
 
     def test_corrupt_release_fails_closed_without_changing_scene_evidence(self, tmp_path):
         _write_preview_release_project(tmp_path)
