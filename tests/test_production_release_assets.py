@@ -1091,7 +1091,8 @@ def test_stage_rejects_acceptance_toctou(
         )
 
     assert str(raised.value).startswith(
-        "Production acceptance rebuild failed;"
+        "Production acceptance rebuild failed: "
+        "acceptance evidence changed during validation;"
     )
     assert raised.value.retained
     _assert_not_published(output)
