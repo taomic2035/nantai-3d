@@ -144,6 +144,28 @@ def _privacy_policy(path: Path, needle: bytes = b"private-needle") -> Path:
     return path
 
 
+def _stage_kwargs(
+    tmp_path: Path,
+    *,
+    archive: Path,
+    policy: Path,
+    output: Path,
+) -> dict[str, object]:
+    return {
+        "repo_root": tmp_path / "repo",
+        "acceptance_root": tmp_path / "accepted",
+        "version": "v1.0.0",
+        "archive_path": archive,
+        "privacy_policy_path": policy,
+        "output_dir": output,
+    }
+
+
+def _assert_not_published(output: Path) -> None:
+    assert not output.exists()
+    assert not tuple(output.parent.glob(f".{output.name}.*.staging"))
+
+
 def _bind_acceptance_rebuild(
     monkeypatch,
     rebuilt_source: Path,
@@ -226,6 +248,30 @@ def _patch_rebuild_raise(monkeypatch, exc: Exception) -> None:
     )
 
 
+def _forbid_acceptance_rebuild(monkeypatch) -> list[str]:
+    calls: list[str] = []
+
+    def _resolve(_repo_root: Path) -> ProductionReleaseSourceIdentity:
+        calls.append("resolve")
+        raise AssertionError("source resolver must not be called")
+
+    def _build(**kwargs) -> ProductionReleaseBuild:
+        calls.append("build")
+        raise AssertionError("release builder must not be called")
+
+    monkeypatch.setattr(
+        assets_module,
+        "resolve_production_release_source_identity",
+        _resolve,
+    )
+    monkeypatch.setattr(
+        assets_module,
+        "build_production_release_archive",
+        _build,
+    )
+    return calls
+
+
 def test_stable_regular_files_equal_compares_all_bytes(
     tmp_path: Path,
 ) -> None:
@@ -245,24 +291,25 @@ def test_stage_exports_only_four_verified_public_assets(
     source, receipt = _write_real_contract_archive(tmp_path / "candidate")
     tree = source.parent / "runtime"
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
+    acceptance = tmp_path / "accepted"
     repo = tmp_path / "repo"
-    repo.mkdir()
     output = tmp_path / "release-assets"
     builder_calls = _bind_acceptance_rebuild(monkeypatch, source)
 
     result = stage_production_release_assets(
-        repo_root=repo,
-        acceptance_root=acceptance,
-        version="v1.0.0",
-        archive_path=source,
-        privacy_policy_path=policy,
-        output_dir=output,
+        **_stage_kwargs(
+            tmp_path,
+            archive=source,
+            policy=policy,
+            output=output,
+        )
     )
 
     archive_name = "nantai-3d-v1.0.0-runtime.zip"
-    assert sorted(path.name for path in output.iterdir()) == [
+    output_names = [path.name for path in output.iterdir()]
+    assert len(output_names) == 4
+    assert not any("acceptance-rebuild" in name for name in output_names)
+    assert sorted(output_names) == [
         PRODUCTION_RELEASE_NAME,
         CHECKSUMS_NAME,
         archive_name,
@@ -308,8 +355,6 @@ def test_stage_rejects_private_builder_residue_before_publication(
 ) -> None:
     source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _bind_acceptance_rebuild(monkeypatch, source)
     original_build = assets_module.build_production_release_archive
@@ -335,17 +380,16 @@ def test_stage_rejects_private_builder_residue_before_publication(
         match="staged release validation",
     ) as raised:
         stage_production_release_assets(
-            repo_root=tmp_path,
-            acceptance_root=acceptance,
-            version="v1.0.0",
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
     assert str(raised.value) == "Production staged release validation failed"
-    assert not output.exists()
-    assert not tuple(tmp_path.glob(".release-assets.*.staging"))
+    _assert_not_published(output)
 
 
 @pytest.mark.parametrize(
@@ -363,8 +407,6 @@ def test_stage_rejects_builder_result_identity_mismatch(
 ) -> None:
     source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _bind_acceptance_rebuild(monkeypatch, source)
     original_build = assets_module.build_production_release_archive
@@ -384,15 +426,15 @@ def test_stage_rejects_builder_result_identity_mismatch(
         match="acceptance rebuild",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            acceptance_root=acceptance,
-            version="v1.0.0",
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    _assert_not_published(output)
 
 
 def test_stage_rejects_modeled_contract_fixture(
@@ -403,24 +445,23 @@ def test_stage_rejects_modeled_contract_fixture(
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     _patch_rebuild_match(monkeypatch, source)
+    output = tmp_path / "release-assets"
 
     with pytest.raises(
         ProductionReleaseAssetsError,
         match="modeled contract",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=tmp_path / "release-assets",
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not (tmp_path / "release-assets").exists()
+    _assert_not_published(output)
 
 
 def test_stage_rejects_privacy_findings_without_publication(
@@ -435,67 +476,70 @@ def test_stage_rejects_privacy_findings_without_publication(
         tmp_path / "privacy-policy.json",
         needle=b"<h1>Studio</h1>",
     )
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     _patch_rebuild_match(monkeypatch, source)
+    output = tmp_path / "release-assets"
 
     with pytest.raises(
         ProductionReleaseAssetsError,
         match="privacy audit failed",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=tmp_path / "release-assets",
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not (tmp_path / "release-assets").exists()
+    _assert_not_published(output)
 
 
 def test_stage_never_replaces_existing_output_directory(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    tree = tmp_path / "runtime"
-    _write_real_contract_tree(tree)
-    source = tmp_path / "candidate.zip"
-    write_modeled_production_archive(tree, source)
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
     output = tmp_path / "release-assets"
     output.mkdir()
     sentinel = output / "keep.txt"
-    sentinel.write_text("keep", encoding="ascii")
+    sentinel_bytes = b"keep\x00byte-identical\r\n"
+    sentinel.write_bytes(sentinel_bytes)
+    trust_calls = _forbid_acceptance_rebuild(monkeypatch)
 
     with pytest.raises(
         ProductionReleaseAssetsError,
         match="must be absent",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=tmp_path / "acceptance",
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert sentinel.read_text(encoding="ascii") == "keep"
+    assert trust_calls == []
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert sorted(path.name for path in output.iterdir()) == ["keep.txt"]
+    assert not tuple(output.parent.glob(f".{output.name}.*.staging"))
 
 
 def test_stage_rejects_junction_output_parent(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    tree = tmp_path / "runtime"
-    _write_real_contract_tree(tree)
-    source = tmp_path / "candidate.zip"
-    write_modeled_production_archive(tree, source)
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
     output_parent = tmp_path / "junction-parent"
     output_parent.mkdir()
+    sentinel = output_parent / "keep.bin"
+    sentinel_bytes = b"junction-parent-sentinel\x00"
+    sentinel.write_bytes(sentinel_bytes)
     output = output_parent / "release-assets"
+    trust_calls = _forbid_acceptance_rebuild(monkeypatch)
     original = getattr(Path, "is_junction", lambda self: False)
     monkeypatch.setattr(
         Path,
@@ -509,15 +553,17 @@ def test_stage_rejects_junction_output_parent(
         match="real directory",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=tmp_path / "acceptance",
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    assert trust_calls == []
+    assert sentinel.read_bytes() == sentinel_bytes
+    _assert_not_published(output)
 
 
 def test_verify_rejects_junction_bundle_root(
@@ -529,17 +575,15 @@ def test_verify_rejects_junction_bundle_root(
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _patch_rebuild_match(monkeypatch, source)
     stage_production_release_assets(
-        repo_root=tmp_path,
-        archive_path=source,
-        privacy_policy_path=policy,
-        output_dir=output,
-        acceptance_root=acceptance,
-        version="v1.0.0",
+        **_stage_kwargs(
+            tmp_path,
+            archive=source,
+            policy=policy,
+            output=output,
+        )
     )
     original = getattr(Path, "is_junction", lambda self: False)
     monkeypatch.setattr(
@@ -570,17 +614,15 @@ def test_verify_four_asset_bundle_rejects_mixed_or_extra_bytes(
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _patch_rebuild_match(monkeypatch, source)
     stage_production_release_assets(
-        repo_root=tmp_path,
-        archive_path=source,
-        privacy_policy_path=policy,
-        output_dir=output,
-        acceptance_root=acceptance,
-        version="v1.0.0",
+        **_stage_kwargs(
+            tmp_path,
+            archive=source,
+            policy=policy,
+            output=output,
+        )
     )
     archive_name = "nantai-3d-v1.0.0-runtime.zip"
     targets = {
@@ -763,8 +805,6 @@ def test_stage_rejects_verifier_valid_forged_source_commit(
     assert verify_production_release_archive(rebuilt).valid is True
     assert source.read_bytes() != rebuilt.read_bytes()
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _bind_acceptance_rebuild(monkeypatch, rebuilt)
 
@@ -773,15 +813,15 @@ def test_stage_rejects_verifier_valid_forged_source_commit(
         match="acceptance rebuild|match",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    _assert_not_published(output)
 
 
 @pytest.mark.parametrize(
@@ -817,8 +857,6 @@ def test_stage_rejects_verifier_valid_acceptance_drift(
     assert verify_production_release_archive(rebuilt).valid is True
     assert source.read_bytes() != rebuilt.read_bytes()
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _bind_acceptance_rebuild(monkeypatch, rebuilt)
 
@@ -827,15 +865,15 @@ def test_stage_rejects_verifier_valid_acceptance_drift(
         match="acceptance rebuild|match",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    _assert_not_published(output)
 
 
 def test_stage_rejects_version_drift(
@@ -848,25 +886,25 @@ def test_stage_rejects_version_drift(
         version="v1.0.0",
     )
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _bind_acceptance_rebuild(monkeypatch, source)
+    stage_kwargs = _stage_kwargs(
+        tmp_path,
+        archive=source,
+        policy=policy,
+        output=output,
+    )
+    stage_kwargs["version"] = "v1.0.1"
 
     with pytest.raises(
         ProductionReleaseAssetsError,
         match="version",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=acceptance,
-            version="v1.0.1",
+            **stage_kwargs
         )
 
-    assert not output.exists()
+    _assert_not_published(output)
 
 
 def test_stage_rejects_source_identity_change_during_rebuild(
@@ -874,9 +912,8 @@ def test_stage_rejects_source_identity_change_during_rebuild(
     monkeypatch,
 ) -> None:
     source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
+    assert verify_production_release_archive(source).valid is True
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _bind_acceptance_rebuild(
         monkeypatch,
@@ -884,11 +921,11 @@ def test_stage_rejects_source_identity_change_during_rebuild(
         identities=[
             ProductionReleaseSourceIdentity(
                 source_commit="a" * 40,
-                tracked_files=("LICENSE", "pipeline/runtime.py"),
+                tracked_files=("LICENSE",),
             ),
             ProductionReleaseSourceIdentity(
                 source_commit="b" * 40,
-                tracked_files=("LICENSE", "pipeline/runtime.py"),
+                tracked_files=("LICENSE",),
             ),
         ],
     )
@@ -898,15 +935,15 @@ def test_stage_rejects_source_identity_change_during_rebuild(
         match="source identity changed",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    _assert_not_published(output)
 
 
 def test_stage_rejects_dirty_release_owned_source(
@@ -914,13 +951,8 @@ def test_stage_rejects_dirty_release_owned_source(
     monkeypatch,
 ) -> None:
     """A5: dirty HEAD causes rebuild to fail."""
-    tree = tmp_path / "runtime"
-    _write_real_contract_tree(tree)
-    source = tmp_path / "candidate.zip"
-    write_modeled_production_archive(tree, source)
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _patch_rebuild_raise(
         monkeypatch,
@@ -932,15 +964,15 @@ def test_stage_rejects_dirty_release_owned_source(
         match="Production acceptance rebuild failed",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    _assert_not_published(output)
 
 
 def test_stage_rejects_acceptance_toctou(
@@ -948,33 +980,32 @@ def test_stage_rejects_acceptance_toctou(
     monkeypatch,
 ) -> None:
     """A6: acceptance TOCTOU causes rebuild to fail."""
-    tree = tmp_path / "runtime"
-    _write_real_contract_tree(tree)
-    source = tmp_path / "candidate.zip"
-    write_modeled_production_archive(tree, source)
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
+    assert verify_production_release_archive(source).valid is True
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _patch_rebuild_raise(
         monkeypatch,
-        ProductionReleaseBuilderError("evidence changed after validation"),
+        ProductionReleaseBuilderError(
+            "acceptance evidence changed during validation"
+        ),
     )
 
     with pytest.raises(
         ProductionReleaseAssetsError,
         match="Production acceptance rebuild failed",
-    ):
+    ) as raised:
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    assert str(raised.value) == "Production acceptance rebuild failed"
+    _assert_not_published(output)
 
 
 def test_stage_rejects_candidate_archive_toctou(
@@ -987,8 +1018,6 @@ def test_stage_rejects_candidate_archive_toctou(
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _bind_acceptance_rebuild(monkeypatch, source)
     original_build = assets_module.build_production_release_archive
@@ -1009,15 +1038,15 @@ def test_stage_rejects_candidate_archive_toctou(
         match="acceptance rebuild|match|changed",
     ):
         stage_production_release_assets(
-            repo_root=tmp_path,
-            archive_path=source,
-            privacy_policy_path=policy,
-            output_dir=output,
-            acceptance_root=acceptance,
-            version="v1.0.0",
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
         )
 
-    assert not output.exists()
+    _assert_not_published(output)
 
 
 def test_download_verify_proves_byte_integrity_only(
@@ -1030,17 +1059,15 @@ def test_download_verify_proves_byte_integrity_only(
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    acceptance = tmp_path / "acceptance"
-    acceptance.mkdir()
     output = tmp_path / "release-assets"
     _patch_rebuild_match(monkeypatch, source)
     stage_production_release_assets(
-        repo_root=tmp_path,
-        archive_path=source,
-        privacy_policy_path=policy,
-        output_dir=output,
-        acceptance_root=acceptance,
-        version="v1.0.0",
+        **_stage_kwargs(
+            tmp_path,
+            archive=source,
+            policy=policy,
+            output=output,
+        )
     )
 
     downloaded = tmp_path / "downloaded"
