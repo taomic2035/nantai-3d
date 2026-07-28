@@ -232,6 +232,98 @@ class TestEnv:
             assert make.ENV.get("PATH") == os.environ["PATH"]
 
 
+class TestProductionReleaseTargets:
+    def test_build_production_requires_exact_inputs(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setenv("ACCEPTANCE_ROOT", "private/real-scene")
+        monkeypatch.setenv("VERSION", "v1.0.0")
+        monkeypatch.setenv(
+            "ARCHIVE",
+            "dist/nantai-3d-v1.0.0-runtime.zip",
+        )
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.build_production()
+
+        assert calls == [
+            [
+                make.PY,
+                "scripts/build_production_release.py",
+                "--acceptance-root",
+                "private/real-scene",
+                "--version",
+                "v1.0.0",
+                "--output",
+                "dist/nantai-3d-v1.0.0-runtime.zip",
+            ]
+        ]
+
+    def test_verify_production_uses_exact_archive(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setenv(
+            "ARCHIVE",
+            "dist/nantai-3d-v1.0.0-runtime.zip",
+        )
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.verify_production()
+
+        assert calls == [
+            [
+                make.PY,
+                "scripts/verify_production_release.py",
+                "dist/nantai-3d-v1.0.0-runtime.zip",
+            ]
+        ]
+
+    @pytest.mark.parametrize(
+        ("target", "missing"),
+        (
+            ("build", "ACCEPTANCE_ROOT"),
+            ("build", "VERSION"),
+            ("build", "ARCHIVE"),
+            ("verify", "ARCHIVE"),
+        ),
+    )
+    def test_production_targets_have_no_unsafe_defaults(
+        self,
+        make,
+        monkeypatch,
+        target,
+        missing,
+    ):
+        for name, value in (
+            ("ACCEPTANCE_ROOT", "private/real-scene"),
+            ("VERSION", "v1.0.0"),
+            ("ARCHIVE", "dist/runtime.zip"),
+        ):
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv(missing)
+
+        with pytest.raises(ValueError, match=missing):
+            (
+                make.build_production()
+                if target == "build"
+                else make.verify_production()
+            )
+
+
 class TestServeTarget:
     def test_mounts_explicit_real_scene_import_without_copying_it(
         self,

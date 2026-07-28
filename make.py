@@ -19,6 +19,9 @@
     DELIV=<交付目录>         validate-handoff（默认 HANDOFF-002）
     DIST=<发布目录>           build-preview 输出目录
     ARCHIVE=<ZIP 路径>        build-preview / verify-preview 的精确归档路径
+                            build-production / verify-production 必填
+    ACCEPTANCE_ROOT=<私有验收根>  build-production 必填
+    VERSION=<最终语义版本>     build-production 必填（例如 v1.0.0）
 
 与 Makefile 保持等价的 target 名称；Makefile 仍保留给有 make 的 POSIX 环境。
 例外：doctor / check-capture / inspect-recon / verify-recon-artifacts 目前只有本脚本有，
@@ -253,6 +256,36 @@ def verify_preview() -> None:
     run([PY, "scripts/verify_preview_release.py", _preview_archive()])
 
 
+def _required_environment(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise ValueError(f"{name} is required")
+    return value
+
+
+def build_production() -> None:
+    acceptance_root = _required_environment("ACCEPTANCE_ROOT")
+    version = _required_environment("VERSION")
+    archive = _required_environment("ARCHIVE")
+    run(
+        [
+            PY,
+            "scripts/build_production_release.py",
+            "--acceptance-root",
+            acceptance_root,
+            "--version",
+            version,
+            "--output",
+            archive,
+        ]
+    )
+
+
+def verify_production() -> None:
+    archive = _required_environment("ARCHIVE")
+    run([PY, "scripts/verify_production_release.py", archive])
+
+
 def verify() -> None:
     test()
     assets()
@@ -394,6 +427,8 @@ TARGETS = {
     "serve": serve,
     "build-preview": build_preview,
     "verify-preview": verify_preview,
+    "build-production": build_production,
+    "verify-production": verify_production,
     "verify": verify,
     "clean": clean,
 }
