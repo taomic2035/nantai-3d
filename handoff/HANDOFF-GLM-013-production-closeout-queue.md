@@ -12,6 +12,13 @@
 - J1 `75f9e0c` / K1 `6f16a0c`：原提交只测了 verifier，真实 `fetch()`
   未传 staging，仍会整体读取大型 PLY。Codex 已在 `0f6dc99` 接通 caller、
   文件化 provenance、发布前漂移复验并补回归；以该提交为新基线。
+- L1 `e07658b` 经 Codex fresh review：18 个 streaming/fetch 专项测试通过，
+  Ruff 通过，未发现 P0/P1；可以关闭并继续 M1。
+- M1 当前实现必须补一个组合碰撞反例：
+  `nantai-runtime/web/É.txt` 与 `nantai-runtime/web/e\u0301.txt`。分别维护
+  `NFC` 集合和 `casefold()` 集合仍会错误接受这两个名字；collision key 必须把
+  Unicode normalization 与 case-fold 串联后再比较，并保留合法 NFC UTF-8 名称。
+  修复后再进入 N1，不要等待新的 Codex 回执。
 
 开始前：
 
