@@ -1780,7 +1780,10 @@ def test_build_failure_retains_partial_archive_without_commit_marker(
         lambda _stream: (_ for _ in ()).throw(RuntimeError("injected")),
     )
 
-    with pytest.raises(ProductionReleaseBuilderError, match="injected"):
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="published=.*retained=",
+    ) as raised:
         build_production_release_archive(
             repo_root=repo,
             acceptance_root=fixture["root"],
@@ -1789,6 +1792,7 @@ def test_build_failure_retains_partial_archive_without_commit_marker(
             source_commit=identity.source_commit,
             tracked_files=identity.tracked_files,
         )
+    assert isinstance(raised.value.__cause__, RuntimeError)
     assert output.exists()
     assert not output.with_suffix(".zip.sha256").exists()
 

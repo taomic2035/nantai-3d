@@ -704,7 +704,7 @@ def extract_production_release_archive(
     ) as exc:
         state = tuple(retained)
         raise ProductionReleaseVerificationError(
-            "Production archive verification failed; "
+            f"Production archive verification failed: {exc}; "
             f"published={state}; retained={state}",
             published=state,
             retained=state,

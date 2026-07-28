@@ -559,7 +559,12 @@ def stage_production_release_assets(
         if (
             resolve_production_release_source_identity(repo)
             != source_identity_before
-            or rebuilt_result.archive_path != rebuilt_path
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production source identity changed during acceptance rebuild"
+            )
+        if (
+            rebuilt_result.archive_path != rebuilt_path
             or rebuilt_result.archive_sha256 != archive_sha256
         ):
             raise ProductionReleaseAssetsError(
@@ -632,12 +637,19 @@ def stage_production_release_assets(
             published=published,
             retained=retained,
         ) from exc
+    except ProductionReleaseBuilderError as exc:
+        retained = tuple((*private_names, *public_names))
+        raise ProductionReleaseAssetsError(
+            "Production acceptance rebuild failed; "
+            f"published={tuple(public_names)}; retained={retained}",
+            published=tuple(public_names),
+            retained=retained,
+        ) from exc
     except (
         FileExistsError,
         OSError,
         ProductionReleaseFSError,
         ProductionReleaseMutationError,
-        ProductionReleaseBuilderError,
         ProductionReleasePrivacyError,
         ProductionReleaseVerificationError,
         ReleaseArchiveError,

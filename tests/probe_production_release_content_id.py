@@ -71,11 +71,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     output = Path(args[0])
-    with tempfile.TemporaryDirectory(prefix="nantai-production-contract-") as raw:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="nantai-production-contract-",
+        dir=output.parent,
+    ) as raw:
         tree = Path(raw) / "tree"
         _write_modeled_tree(tree)
         report = verify_production_release_tree(tree)
-    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(f"{report.package_content_id}\n".encode("ascii"))
     return 0
 

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import pipeline.production_release_fs as release_fs
 import pipeline.production_release_verifier as verifier_module
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
@@ -701,7 +702,7 @@ def test_archive_extraction_wraps_stream_failures_after_destination_creation(
         raise failure_type("injected archive stream failure")
 
     monkeypatch.setattr(
-        verifier_module.BoundFile,
+        release_fs.BoundFile,
         "copy_from",
         fail_after_destination_creation,
     )

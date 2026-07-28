@@ -1017,10 +1017,10 @@ def test_stage_rejects_source_identity_change_during_rebuild(
             )
         )
 
-    assert (
-        str(raised.value)
-        == "Production source identity changed during acceptance rebuild"
+    assert str(raised.value).startswith(
+        "Production source identity changed during acceptance rebuild;"
     )
+    assert raised.value.retained
     _assert_not_published(output)
 
 
@@ -1090,7 +1090,10 @@ def test_stage_rejects_acceptance_toctou(
             )
         )
 
-    assert str(raised.value) == "Production acceptance rebuild failed"
+    assert str(raised.value).startswith(
+        "Production acceptance rebuild failed;"
+    )
+    assert raised.value.retained
     _assert_not_published(output)
 
 
@@ -1110,8 +1113,9 @@ def test_stage_rejects_candidate_archive_toctou(
     original_build = assets_module.build_production_release_archive
 
     def _corrupt_during_rebuild(**kwargs) -> ProductionReleaseBuild:
-        candidate_path = kwargs["output_path"].parent / ".candidate.zip"
-        candidate_path.write_bytes(b"corrupted")
+        retained_candidate = source.with_name("candidate-held.zip")
+        source.rename(retained_candidate)
+        source.write_bytes(b"corrupted")
         return original_build(**kwargs)
 
     monkeypatch.setattr(
