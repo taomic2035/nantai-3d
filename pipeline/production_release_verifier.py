@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from pipeline.durable_io import (
-    BoundDirectory,
-    BoundPathCleanup,
     DurableIOError,
     _is_linklike,
-    bind_directory,
-    bound_temporary_directory,
+    capture_real_directory_identity,
     first_linklike_path,
+    matches_real_directory_identity,
 )
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
@@ -353,7 +353,6 @@ def extract_production_release_archive(
     destination: str | Path,
     *,
     limits: ArchiveLimits = PRODUCTION_ARCHIVE_LIMITS,
-    _destination_parent: BoundDirectory | None = None,
 ) -> Path:
     """Extract one inspected archive into a new destination and return its root."""
 
@@ -378,37 +377,38 @@ def extract_production_release_archive(
         raise ProductionReleaseVerificationError(
             "Production release archive is missing or unsafe"
         )
-    owns_target_parent = _destination_parent is None
-    if _destination_parent is not None:
-        target_parent = _destination_parent
-        if target.parent != target_parent.path:
-            raise ProductionReleaseVerificationError(
-                "Production extraction destination is unsafe"
-            )
-    else:
-        try:
-            target_parent = bind_directory(target.parent)
-        except (DurableIOError, OSError) as exc:
-            raise ProductionReleaseVerificationError(
-                "Production extraction destination is unsafe"
-            ) from exc
-    target_bound = None
     try:
-        try:
-            unsafe_target = first_linklike_path(Path(target.anchor), target)
-        except (OSError, ValueError) as exc:
+        target_parent_identity = capture_real_directory_identity(target.parent)
+    except DurableIOError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination is unsafe"
+        ) from exc
+    try:
+        unsafe_target = first_linklike_path(Path(target.anchor), target)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination is unsafe"
+        ) from exc
+    if target.exists() or unsafe_target == target:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination already exists"
+        )
+    if unsafe_target is not None:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination is unsafe"
+        )
+
+    created = False
+    try:
+        if not matches_real_directory_identity(
+            target.parent,
+            target_parent_identity,
+        ):
             raise ProductionReleaseVerificationError(
                 "Production extraction destination is unsafe"
-            ) from exc
-        if target.exists() or unsafe_target == target:
-            raise ProductionReleaseVerificationError(
-                "Production extraction destination already exists"
             )
-        if unsafe_target is not None:
-            raise ProductionReleaseVerificationError(
-                "Production extraction destination is unsafe"
-            )
-        target_bound = target_parent.create_directory(target.name)
+        target.mkdir(parents=False, exist_ok=False)
+        created = True
         with zipfile.ZipFile(source) as archive:
             inspected = inspect_zip_members(archive, limits)
             infos = {info.filename: info for info in archive.infolist()}
@@ -433,39 +433,25 @@ def extract_production_release_archive(
                     )
                 relative = PurePosixPath(*member.path.parts[1:])
                 safe_posix_member_path(relative.as_posix())
-                destination_parent = target_bound
-                owned_parent = None
-                if len(relative.parts) > 1:
-                    owned_parent = target_bound.ensure_directories(
-                        list(relative.parts[:-1])
-                    )
-                    destination_parent = owned_parent
                 destination_path = target.joinpath(*relative.parts)
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
                 info = infos[member.path.as_posix()]
                 observed = hashlib.sha256()
                 observed_bytes = 0
-                try:
-                    with archive.open(info, "r") as source_stream:
-                        with destination_parent.create_file(
-                            relative.parts[-1]
-                        ) as destination_file:
-                            destination_stream = destination_file.stream
-                            while True:
-                                chunk = source_stream.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                observed_bytes += len(chunk)
-                                if observed_bytes > member.byte_length:
-                                    _verification_error(
-                                        "Production archive member expanded beyond "
-                                        "declared length"
-                                    )
-                                observed.update(chunk)
-                                destination_stream.write(chunk)
-                            destination_file.flush()
-                finally:
-                    if owned_parent is not None:
-                        owned_parent.close()
+                with archive.open(info, "r") as source_stream:
+                    with destination_path.open("xb") as destination_stream:
+                        while True:
+                            chunk = source_stream.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            observed_bytes += len(chunk)
+                            if observed_bytes > member.byte_length:
+                                _verification_error(
+                                    "Production archive member expanded beyond "
+                                    "declared length"
+                                )
+                            observed.update(chunk)
+                            destination_stream.write(chunk)
                 if observed_bytes != member.byte_length:
                     _verification_error(
                         "Production archive member length disagrees"
@@ -478,21 +464,13 @@ def extract_production_release_archive(
                     _verification_error(
                         "Production archive extracted member changed"
                     )
-        target_bound.close()
-        target_bound = None
         return target
-    except ProductionReleaseVerificationError as original:
-        if target_bound is not None:
-            target_bound.close()
-            target_bound = None
-            if (
-                target_parent.remove_tree(target.name)
-                is BoundPathCleanup.RETAINED
-            ):
-                raise ProductionReleaseVerificationError(
-                    "Production extraction failed and private cleanup was "
-                    "retained for safety"
-                ) from original
+    except ProductionReleaseVerificationError:
+        if created and matches_real_directory_identity(
+            target.parent,
+            target_parent_identity,
+        ):
+            shutil.rmtree(target, ignore_errors=True)
         raise
     except (
         ReleaseArchiveError,
@@ -502,27 +480,14 @@ def extract_production_release_archive(
         OSError,
         EOFError,
     ) as exc:
-        cleanup_retained = False
-        if target_bound is not None:
-            target_bound.close()
-            target_bound = None
-            cleanup_retained = (
-                target_parent.remove_tree(target.name)
-                is BoundPathCleanup.RETAINED
-            )
-        if cleanup_retained:
-            raise ProductionReleaseVerificationError(
-                "Production archive verification failed and private cleanup "
-                "was retained for safety"
-            ) from exc
+        if created and matches_real_directory_identity(
+            target.parent,
+            target_parent_identity,
+        ):
+            shutil.rmtree(target, ignore_errors=True)
         raise ProductionReleaseVerificationError(
             f"Production archive verification failed: {exc}"
         ) from exc
-    finally:
-        if target_bound is not None:
-            target_bound.close()
-        if owns_target_parent:
-            target_parent.close()
 
 
 def verify_production_release_archive(
@@ -532,14 +497,13 @@ def verify_production_release_archive(
 ) -> ProductionReleaseVerification:
     """Safely extract and independently verify one Production runtime ZIP."""
 
-    with bound_temporary_directory(
+    with tempfile.TemporaryDirectory(
         prefix="nantai-production-verify-"
     ) as temporary:
-        extraction = temporary.path / "runtime"
+        extraction = Path(temporary) / "runtime"
         extracted = extract_production_release_archive(
             path,
             extraction,
             limits=limits,
-            _destination_parent=temporary,
         )
         return verify_production_release_tree(extracted)

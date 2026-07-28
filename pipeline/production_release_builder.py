@@ -9,7 +9,6 @@ import re
 import shutil
 import stat
 import subprocess
-import uuid
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -18,12 +17,11 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from pipeline.durable_io import (
-    BoundDirectory,
-    BoundPathCleanup,
     DurableIOError,
     _is_linklike,
-    bind_directory,
+    capture_real_directory_identity,
     first_linklike_path,
+    matches_real_directory_identity,
 )
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
@@ -1380,14 +1378,36 @@ def _git_tree_blob(
     return object_id
 
 
+def _snapshot_directory(root: Path, relative_parent: Path) -> Path:
+    current = root
+    for part in relative_parent.parts:
+        current = current / part
+        try:
+            current.mkdir()
+        except FileExistsError:
+            pass
+        try:
+            observed = current.lstat()
+        except OSError as exc:
+            raise ProductionReleaseBuilderError(
+                "Git source snapshot directory is unavailable"
+            ) from exc
+        if _is_linklike(current, observed=observed) or not stat.S_ISDIR(
+            observed.st_mode
+        ):
+            raise ProductionReleaseBuilderError(
+                "Git source snapshot directory must be a real directory"
+            )
+    return current
+
+
 def _stream_git_blob(
     repo_root: Path,
     *,
     object_id: str,
-    destination_parent: BoundDirectory,
-    destination_name: str,
+    destination: Path,
 ) -> None:
-    destination = destination_parent.path / destination_name
+    descriptor: int | None = None
     process = None
     digest = hashlib.sha256()
     byte_length = 0
@@ -1395,6 +1415,11 @@ def _stream_git_blob(
         ["cat-file", "blob", object_id],
     )
     try:
+        descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
         process = subprocess.Popen(
             command,
             cwd=repo_root,
@@ -1406,11 +1431,8 @@ def _stream_git_blob(
         if process.stdout is None:
             raise TypeError("Git blob stdout pipe is unavailable")
         with process.stdout as source_stream:
-            with destination_parent.create_file(
-                destination_name,
-                mode=0o600,
-            ) as destination_file:
-                destination_stream = destination_file.stream
+            with os.fdopen(descriptor, "wb") as destination_stream:
+                descriptor = None
                 while True:
                     chunk = source_stream.read(1024 * 1024)
                     if not chunk:
@@ -1418,7 +1440,6 @@ def _stream_git_blob(
                     digest.update(chunk)
                     byte_length += len(chunk)
                     destination_stream.write(chunk)
-                destination_file.flush()
         returncode = process.wait()
         if returncode != 0:
             cause = subprocess.CalledProcessError(
@@ -1440,6 +1461,9 @@ def _stream_git_blob(
         raise ProductionReleaseBuilderError(
             "Git source snapshot cat-file blob failed"
         ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     try:
         observed = stable_regular_file_digest(destination)
     except ReleaseArchiveError as exc:
@@ -1457,19 +1481,19 @@ def _stream_git_blob(
 
 def _materialize_runtime_source_snapshot(
     repo_root: Path,
-    snapshot_root: BoundDirectory,
+    snapshot_root: Path,
     *,
     source_commit: str,
     tracked_files: Iterable[str],
 ) -> tuple[SourcePayload, ...]:
     try:
-        snapshot_stat = snapshot_root.path.lstat()
+        snapshot_stat = snapshot_root.lstat()
     except OSError as exc:
         raise ProductionReleaseBuilderError(
             "Git source snapshot is unavailable"
         ) from exc
     if _is_linklike(
-        snapshot_root.path,
+        snapshot_root,
         observed=snapshot_stat,
     ) or not stat.S_ISDIR(snapshot_stat.st_mode):
         raise ProductionReleaseBuilderError(
@@ -1491,24 +1515,13 @@ def _materialize_runtime_source_snapshot(
             relative=relative,
         )
         relative_path = safe_posix_member_path(relative)
-        destination_parent = snapshot_root
-        owned_parent = None
-        if relative_path.parent.parts:
-            owned_parent = snapshot_root.ensure_directories(
-                list(relative_path.parent.parts)
-            )
-            destination_parent = owned_parent
-        try:
-            _stream_git_blob(
-                repo_root,
-                object_id=object_id,
-                destination_parent=destination_parent,
-                destination_name=relative_path.name,
-            )
-        finally:
-            if owned_parent is not None:
-                owned_parent.close()
-    return _runtime_source_payloads(snapshot_root.path, tracked_files)
+        _snapshot_directory(snapshot_root, relative_path.parent)
+        _stream_git_blob(
+            repo_root,
+            object_id=object_id,
+            destination=snapshot_root.joinpath(*relative_path.parts),
+        )
+    return _runtime_source_payloads(snapshot_root, tracked_files)
 
 
 def _runtime_source_payloads(
@@ -1602,21 +1615,7 @@ def _ensure_release_sources_clean(
         )
 
 
-def _bound_destination_parent(
-    root: BoundDirectory,
-    destination: Path,
-) -> tuple[BoundDirectory, bool]:
-    relative = destination.relative_to(root.path)
-    if len(relative.parts) == 1:
-        return root, False
-    return root.ensure_directories(list(relative.parts[:-1])), True
-
-
-def _copy_bound_source(
-    source: SourcePayload,
-    destination: Path,
-    destination_root: BoundDirectory,
-) -> None:
+def _copy_bound_source(source: SourcePayload, destination: Path) -> None:
     _require_no_linklike_ancestors(
         source.source_path,
         label="release source path",
@@ -1632,29 +1631,23 @@ def _copy_bound_source(
         raise ProductionReleaseBuilderError(
             f"release source changed before copy: {source.source_path}"
         )
-    destination_parent, owned_parent = _bound_destination_parent(
-        destination_root,
-        destination,
-    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or _is_linklike(destination):
+        raise ProductionReleaseBuilderError(
+            f"release staging destination already exists: {destination}"
+        )
     try:
         with source.source_path.open("rb") as source_stream:
-            with destination_parent.create_file(
-                destination.name,
-            ) as destination_file:
-                destination_stream = destination_file.stream
+            with destination.open("xb") as destination_stream:
                 shutil.copyfileobj(
                     source_stream,
                     destination_stream,
                     length=1024 * 1024,
                 )
-                destination_file.flush()
     except OSError as exc:
         raise ProductionReleaseBuilderError(
             f"release source cannot be staged: {source.source_path}"
         ) from exc
-    finally:
-        if owned_parent:
-            destination_parent.close()
     written = stable_regular_file_digest(destination)
     after = stable_regular_file_digest(
         source.source_path,
@@ -1670,26 +1663,19 @@ def _copy_bound_source(
         )
 
 
-def _write_new_payload(
-    path: Path,
-    payload: bytes,
-    destination_root: BoundDirectory,
-) -> None:
-    destination_parent, owned_parent = _bound_destination_parent(
-        destination_root,
-        path,
-    )
+def _write_new_payload(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or _is_linklike(path):
+        raise ProductionReleaseBuilderError(
+            f"release staging destination already exists: {path}"
+        )
     try:
-        with destination_parent.create_file(path.name) as candidate:
-            candidate.stream.write(payload)
-            candidate.flush()
+        with path.open("xb") as stream:
+            stream.write(payload)
     except OSError as exc:
         raise ProductionReleaseBuilderError(
             f"release payload cannot be staged: {path}"
         ) from exc
-    finally:
-        if owned_parent:
-            destination_parent.close()
 
 
 def _checksum_payload(
@@ -1707,6 +1693,19 @@ def _checksum_payload(
     return "".join(sorted(rows)).encode("ascii")
 
 
+def _link_no_replace(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination)
+    except FileExistsError as exc:
+        raise ProductionReleaseBuilderError(
+            f"Production publication destination exists: {destination}"
+        ) from exc
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            f"Production publication failed: {destination}: {exc}"
+        ) from exc
+
+
 def build_production_release_archive(
     *,
     repo_root: Path,
@@ -1715,7 +1714,6 @@ def build_production_release_archive(
     version: str,
     source_commit: str,
     tracked_files: Iterable[str],
-    _output_parent: BoundDirectory | None = None,
 ) -> ProductionReleaseBuild:
     """Build, verify and no-replace publish one Production runtime archive."""
 
@@ -1723,25 +1721,34 @@ def build_production_release_archive(
     acceptance = Path(acceptance_root).expanduser().absolute()
     output = Path(output_path).expanduser().absolute()
     sidecar = output.with_suffix(f"{output.suffix}.sha256")
-    token = uuid.uuid4().hex
-    staging = output.parent / f".{output.name}.{token}.staging"
-    source_snapshot = output.parent / f".{output.name}.{token}.sources"
-    partial = output.parent / f".{output.name}.{token}.partial"
-    sidecar_partial = output.parent / f".{sidecar.name}.{token}.partial"
-    owns_output_parent = _output_parent is None
-    if _output_parent is not None:
-        output_parent = _output_parent
-        if output.parent != output_parent.path:
-            raise ProductionReleaseBuilderError(
-                "Production output parent directory is missing or unsafe"
-            )
-    else:
-        try:
-            output_parent = bind_directory(output.parent)
-        except (DurableIOError, OSError) as exc:
-            raise ProductionReleaseBuilderError(
-                "Production output parent directory is missing or unsafe"
-            ) from exc
+    staging = output.parent / f".{output.name}.staging"
+    source_snapshot = output.parent / f".{output.name}.sources"
+    partial = output.parent / f".{output.name}.partial"
+    sidecar_partial = output.parent / f".{sidecar.name}.partial"
+    try:
+        output_parent_stat = output.parent.lstat()
+        output_redirected = first_linklike_path(
+            Path(output.anchor),
+            output.parent,
+        )
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(
+            "Production output parent directory is missing or unsafe"
+        ) from exc
+    if (
+        output_redirected is not None
+        or _is_linklike(output.parent, observed=output_parent_stat)
+        or not stat.S_ISDIR(output_parent_stat.st_mode)
+    ):
+        raise ProductionReleaseBuilderError(
+            "Production output parent directory is missing or unsafe"
+        )
+    try:
+        output_parent_identity = capture_real_directory_identity(output.parent)
+    except DurableIOError as exc:
+        raise ProductionReleaseBuilderError(
+            "Production output parent directory is missing or unsafe"
+        ) from exc
     for path in (
         output,
         sidecar,
@@ -1798,24 +1805,21 @@ def build_production_release_archive(
             "Supplied Production source identity is not the exact live identity"
         )
     _ensure_release_sources_clean(root, tracked)
-    source_snapshot_bound = None
-    staging_bound = None
+    source_snapshot_created = False
     try:
         report_path = load_latest_real_scene_acceptance(acceptance)
         context = derive_production_release_context(report_path)
         scene_sources = resolve_runtime_scene_payloads(context)
         try:
-            source_snapshot_bound = output_parent.create_directory(
-                source_snapshot.name,
-                mode=0o700,
-            )
-        except (DurableIOError, OSError) as exc:
+            source_snapshot.mkdir(mode=0o700, exist_ok=False)
+            source_snapshot_created = True
+        except OSError as exc:
             raise ProductionReleaseBuilderError(
                 "Git source snapshot cannot be created"
             ) from exc
         runtime_sources = _materialize_runtime_source_snapshot(
             root,
-            source_snapshot_bound,
+            source_snapshot,
             source_commit=source_commit,
             tracked_files=tracked,
         )
@@ -1865,7 +1869,7 @@ def build_production_release_archive(
             destinations.add(destination)
             folded.add(portable_path_identity(destination))
 
-        staging_bound = output_parent.create_directory(staging.name)
+        staging.mkdir(exist_ok=False)
         for source in sorted(
             all_sources,
             key=lambda row: row.destination_path,
@@ -1877,13 +1881,11 @@ def build_production_release_archive(
                         source.destination_path
                     ).parts
                 ),
-                staging_bound,
             )
         for relative, (_role, payload) in sorted(generated.items()):
             _write_new_payload(
                 staging.joinpath(*safe_posix_member_path(relative).parts),
                 payload,
-                staging_bound,
             )
 
         roles = {
@@ -1923,56 +1925,48 @@ def build_production_release_archive(
         _write_new_payload(
             staging / PRODUCTION_RELEASE_NAME,
             receipt_payload,
-            staging_bound,
         )
         _write_new_payload(
             staging / CHECKSUMS_NAME,
             _checksum_payload(artifacts, receipt_payload),
-            staging_bound,
         )
         verify_production_release_tree(staging)
 
         wrapper = f"nantai-3d-{version}"
-        with output_parent.create_file(partial.name) as partial_file:
-            with zipfile.ZipFile(
-                partial_file.stream,
-                "w",
-                compression=zipfile.ZIP_DEFLATED,
-                compresslevel=9,
-                strict_timestamps=True,
-            ) as archive:
-                staged_files = tuple(
-                    path for path in staging.rglob("*") if path.is_file()
-                )
-                for source in sorted(
-                    staged_files,
-                    key=lambda path: path.relative_to(staging).as_posix(),
-                ):
-                    relative = source.relative_to(staging).as_posix()
-                    info = deterministic_zip_info(f"{wrapper}/{relative}")
-                    info.file_size = source.stat().st_size
-                    with source.open("rb") as source_stream:
-                        with archive.open(
-                            info,
-                            "w",
-                            force_zip64=info.file_size >= zipfile.ZIP64_LIMIT,
-                        ) as archive_stream:
-                            shutil.copyfileobj(
-                                source_stream,
-                                archive_stream,
-                                length=1024 * 1024,
-                            )
-            partial_file.flush()
+        with zipfile.ZipFile(
+            partial,
+            "x",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+            strict_timestamps=True,
+        ) as archive:
+            staged_files = tuple(
+                path for path in staging.rglob("*") if path.is_file()
+            )
+            for source in sorted(
+                staged_files,
+                key=lambda path: path.relative_to(staging).as_posix(),
+            ):
+                relative = source.relative_to(staging).as_posix()
+                info = deterministic_zip_info(f"{wrapper}/{relative}")
+                info.file_size = source.stat().st_size
+                with source.open("rb") as source_stream:
+                    with archive.open(
+                        info,
+                        "w",
+                        force_zip64=info.file_size >= zipfile.ZIP64_LIMIT,
+                    ) as archive_stream:
+                        shutil.copyfileobj(
+                            source_stream,
+                            archive_stream,
+                            length=1024 * 1024,
+                        )
         verify_production_release_archive(partial)
         archive_digest = stable_regular_file_digest(partial)
         sidecar_payload = (
             f"{archive_digest.sha256}  {output.name}\n"
         ).encode("ascii")
-        _write_new_payload(
-            sidecar_partial,
-            sidecar_payload,
-            output_parent,
-        )
+        _write_new_payload(sidecar_partial, sidecar_payload)
 
         final_identity = resolve_production_release_source_identity(root)
         if final_identity != live_identity:
@@ -1985,41 +1979,22 @@ def build_production_release_archive(
             raise ProductionReleaseBuilderError(
                 "Production source identity changed during release build"
             )
-        staging_bound.close()
-        staging_bound = None
-        source_snapshot_bound.close()
-        source_snapshot_bound = None
-        staging_cleanup = output_parent.remove_tree(staging.name)
-        snapshot_cleanup = output_parent.remove_tree(source_snapshot.name)
-        if (
-            staging_cleanup is BoundPathCleanup.RETAINED
-            or snapshot_cleanup is BoundPathCleanup.RETAINED
+        if not matches_real_directory_identity(
+            output.parent,
+            output_parent_identity,
         ):
             raise ProductionReleaseBuilderError(
-                "Production private build residue was retained for safety"
+                "Production output parent changed during release build"
             )
-        sidecar_published = False
+        _link_no_replace(sidecar_partial, sidecar)
         try:
-            with output_parent.open_file(
-                sidecar_partial.name
-            ) as sidecar_candidate:
-                try:
-                    sidecar_candidate.publish_noreplace(
-                        output_parent,
-                        sidecar.name,
-                    )
-                    sidecar_published = True
-                except DurableIOError as exc:
-                    sidecar_published = exc.published
-                    raise
-            with output_parent.open_file(partial.name) as archive_candidate:
-                archive_candidate.publish_noreplace(
-                    output_parent,
-                    output.name,
-                )
+            _link_no_replace(partial, output)
         except Exception:
-            if sidecar_published:
-                output_parent.unlink_file(sidecar.name, missing_ok=True)
+            if matches_real_directory_identity(
+                output.parent,
+                output_parent_identity,
+            ):
+                sidecar.unlink(missing_ok=True)
             raise
         return ProductionReleaseBuild(
             archive_path=output,
@@ -2042,20 +2017,12 @@ def build_production_release_archive(
             f"Production release build failed: {exc}"
         ) from exc
     finally:
-        if staging_bound is not None:
-            staging_bound.close()
-        if source_snapshot_bound is not None:
-            source_snapshot_bound.close()
-        staging_cleanup = output_parent.remove_tree(staging.name)
-        snapshot_cleanup = output_parent.remove_tree(source_snapshot.name)
-        output_parent.unlink_file(partial.name, missing_ok=True)
-        output_parent.unlink_file(sidecar_partial.name, missing_ok=True)
-        if owns_output_parent:
-            output_parent.close()
-        if (
-            staging_cleanup is BoundPathCleanup.RETAINED
-            or snapshot_cleanup is BoundPathCleanup.RETAINED
+        if matches_real_directory_identity(
+            output.parent,
+            output_parent_identity,
         ):
-            raise ProductionReleaseBuilderError(
-                "Production private build residue was retained for safety"
-            )
+            shutil.rmtree(staging, ignore_errors=True)
+            if source_snapshot_created:
+                shutil.rmtree(source_snapshot, ignore_errors=True)
+            partial.unlink(missing_ok=True)
+            sidecar_partial.unlink(missing_ok=True)

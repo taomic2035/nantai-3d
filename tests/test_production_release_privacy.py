@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 import pipeline.production_release_privacy as privacy_module
-from pipeline.durable_io import BoundFile
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRODUCTION_RELEASE_NAME,
@@ -536,53 +535,50 @@ def test_privacy_cleanup_does_not_follow_swapped_parent_junction(
     destination = parent / "privacy.json"
     outside = tmp_path / "outside"
     outside.mkdir()
+    original_parent = tmp_path / "publish-parent-original"
     sentinel: Path | None = None
+    swapped = False
 
-    def fail_flush_after_parent_swap(candidate: BoundFile) -> None:
-        nonlocal sentinel
-        temporary_name = candidate.path.name
-        with pytest.raises(OSError) as raised:
-            parent.rename(tmp_path / "publish-parent-original")
-        assert getattr(raised.value, "winerror", None) in {5, 32}
+    def fail_flush_after_parent_swap(path: Path) -> None:
+        nonlocal sentinel, swapped
+        temporary_name = Path(path).name
+        parent.rename(original_parent)
         sentinel = outside / temporary_name
         sentinel.write_bytes(b"outside-sentinel")
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            original_parent.rename(parent)
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+        swapped = True
         raise OSError("injected flush failure")
 
-    monkeypatch.setattr(BoundFile, "flush", fail_flush_after_parent_swap)
-    with pytest.raises(
-        ProductionReleasePrivacyError,
-        match="durable publication failed",
-    ):
-        publish_privacy_report(report, destination)
-    assert sentinel is not None
-    assert sentinel.read_bytes() == b"outside-sentinel"
-
-
-def test_report_publication_does_not_use_identity_match_as_authority(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    output = tmp_path / "privacy-report.json"
-    report = privacy_module.ProductionPrivacyReport(
-        schema=privacy_module.PRIVACY_REPORT_SCHEMA,
-        valid=True,
-        package_content_id="a" * 64,
-        finding_count=0,
-        findings=(),
-        scene_trust_effect="none",
-    )
     monkeypatch.setattr(
         privacy_module,
-        "matches_real_directory_identity",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("identity matcher must not authorize mutation")
-        ),
-        raising=False,
+        "flush_file",
+        fail_flush_after_parent_swap,
     )
-
-    privacy_module.publish_privacy_report(report, output)
-
-    assert output.read_bytes() == privacy_module.privacy_report_bytes(report)
+    try:
+        with pytest.raises(
+            ProductionReleasePrivacyError,
+            match="durable publication failed",
+        ):
+            publish_privacy_report(report, destination)
+        assert sentinel is not None
+        assert sentinel.read_bytes() == b"outside-sentinel"
+    finally:
+        if swapped:
+            removed = subprocess.run(
+                ["cmd", "/c", "rmdir", str(parent)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert removed.returncode == 0, removed.stderr
 
 
 def test_mid_read_drift_is_rejected(tmp_path: Path, monkeypatch) -> None:

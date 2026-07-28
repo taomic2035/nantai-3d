@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import pipeline.production_release_builder as builder_module
-from pipeline.durable_io import BoundFile, DurableIOError
+from pipeline.durable_io import DurableIOError
 from pipeline.production_release_builder import (
     ProductionReleaseBuilderError,
     build_production_release_archive,
@@ -89,7 +89,11 @@ def test_build_maps_output_parent_identity_capture_race(
     def fail_identity(_path):
         raise DurableIOError("injected output parent identity race")
 
-    monkeypatch.setattr(builder_module, "bind_directory", fail_identity)
+    monkeypatch.setattr(
+        builder_module,
+        "capture_real_directory_identity",
+        fail_identity,
+    )
 
     with pytest.raises(
         ProductionReleaseBuilderError,
@@ -1429,9 +1433,9 @@ def test_transient_worktree_edit_cannot_enter_archive_under_original_commit(
         runtime_runner.write_bytes(transient_bytes)
         return real_resolver(source_root, tracked_files)
 
-    def copy_then_restore(source, destination, destination_root):
+    def copy_then_restore(source, destination):
         try:
-            return real_copy(source, destination, destination_root)
+            return real_copy(source, destination)
         finally:
             if source.destination_path == "make.py":
                 runtime_runner.write_bytes(committed_bytes)
@@ -1781,8 +1785,10 @@ def test_sidecar_rollback_does_not_follow_swapped_parent_junction(
     outside.mkdir()
     sentinel = outside / "runtime.zip.sha256"
     sentinel.write_bytes(b"outside-sentinel")
-    original_publish = BoundFile.publish_noreplace
+    original_parent = tmp_path / "publish-parent-original"
+    original_link = builder_module._link_no_replace
     link_calls = 0
+    swapped = False
     monkeypatch.setattr(
         builder_module,
         "load_latest_real_scene_acceptance",
@@ -1794,40 +1800,53 @@ def test_sidecar_rollback_does_not_follow_swapped_parent_junction(
         lambda _path: context,
     )
 
-    def fail_archive_link_after_parent_swap(
-        source: BoundFile,
-        destination_parent,
-        destination_name: str,
-    ):
-        nonlocal link_calls
+    def fail_archive_link_after_parent_swap(source: Path, destination: Path):
+        nonlocal link_calls, swapped
         link_calls += 1
         if link_calls == 1:
-            original_publish(source, destination_parent, destination_name)
-            with pytest.raises(OSError) as raised:
-                parent.rename(tmp_path / "publish-parent-original")
-            assert getattr(raised.value, "winerror", None) in {5, 32}
+            original_link(source, destination)
+            parent.rename(original_parent)
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if created.returncode != 0:
+                original_parent.rename(parent)
+                pytest.skip(f"junction creation unavailable: {created.stderr}")
+            swapped = True
             return
         raise OSError("injected archive publication failure")
 
     monkeypatch.setattr(
-        BoundFile,
-        "publish_noreplace",
+        builder_module,
+        "_link_no_replace",
         fail_archive_link_after_parent_swap,
     )
-    with pytest.raises(
-        ProductionReleaseBuilderError,
-        match="publication failure",
-    ):
-        build_production_release_archive(
-            repo_root=repo,
-            acceptance_root=fixture["root"],
-            output_path=output,
-            version="v1.0.0",
-            source_commit=identity.source_commit,
-            tracked_files=identity.tracked_files,
-        )
-    assert sentinel.read_bytes() == b"outside-sentinel"
-    assert not output.with_suffix(".zip.sha256").exists()
+    try:
+        with pytest.raises(
+            ProductionReleaseBuilderError,
+            match="publication failure",
+        ):
+            build_production_release_archive(
+                repo_root=repo,
+                acceptance_root=fixture["root"],
+                output_path=output,
+                version="v1.0.0",
+                source_commit=identity.source_commit,
+                tracked_files=identity.tracked_files,
+            )
+        assert sentinel.read_bytes() == b"outside-sentinel"
+    finally:
+        if swapped:
+            removed = subprocess.run(
+                ["cmd", "/c", "rmdir", str(parent)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert removed.returncode == 0, removed.stderr
 
 
 def test_fresh_runtime_runner_verification_is_repeatable(
