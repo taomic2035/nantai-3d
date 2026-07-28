@@ -129,6 +129,8 @@ _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _SOURCE_ROLES = Literal["internal-canary", "production-acceptance"]
 _QUALITY_ROLES = Literal["preview-only", "production"]
 
+_ONE_MIB = 1024 * 1024
+
 
 @dataclass(frozen=True)
 class PlySemanticReport:
@@ -531,6 +533,85 @@ def _read_regular_bytes(
     if not allow_empty and not payload:
         raise RealSceneImportError(f"{label} is empty")
     return payload
+
+
+def _stream_regular_digest(
+    path: Path,
+    *,
+    label: str,
+    allow_empty: bool = False,
+) -> tuple[int, str]:
+    """Stream a regular file in bounded chunks (<= 1 MiB) returning
+    (byte_length, sha256_hex).
+
+    Probes lstat -> open -> fstat before reading, fstat after reading, then
+    path lstat after close, rejecting symlink/junction/non-regular members
+    and any device/inode/mode/size/mtime drift.  Uses ``os.read`` so callers
+    can intercept reads via monkeypatch for mid-read modification tests.
+    """
+
+    candidate = Path(path).expanduser().absolute()
+    try:
+        before_lstat = candidate.lstat()
+    except OSError as exc:
+        raise RealSceneImportError(f"{label} cannot be read") from exc
+    if stat.S_ISLNK(before_lstat.st_mode) or not stat.S_ISREG(
+        before_lstat.st_mode
+    ):
+        raise RealSceneImportError(f"{label} is missing or link-like")
+
+    try:
+        handle = os.open(candidate, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except OSError as exc:
+        raise RealSceneImportError(f"{label} cannot be read") from exc
+    try:
+        fd = handle
+        try:
+            before_fstat = os.fstat(fd)
+        except OSError as exc:
+            raise RealSceneImportError(f"{label} cannot be read") from exc
+        if _stat_signature(before_lstat) != _stat_signature(before_fstat):
+            raise RealSceneImportError(
+                f"{label} changed while being read"
+            )
+
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            while True:
+                chunk = os.read(fd, _ONE_MIB)
+                if not chunk:
+                    break
+                total += len(chunk)
+                digest.update(chunk)
+        except OSError as exc:
+            raise RealSceneImportError(f"{label} cannot be read") from exc
+
+        try:
+            after_fstat = os.fstat(fd)
+        except OSError as exc:
+            raise RealSceneImportError(f"{label} cannot be read") from exc
+        if _stat_signature(before_fstat) != _stat_signature(after_fstat):
+            raise RealSceneImportError(
+                f"{label} changed while being read"
+            )
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    try:
+        after_lstat = candidate.lstat()
+    except OSError as exc:
+        raise RealSceneImportError(f"{label} cannot be read") from exc
+    if _stat_signature(before_lstat) != _stat_signature(after_lstat):
+        raise RealSceneImportError(f"{label} changed while being read")
+
+    if not allow_empty and total == 0:
+        raise RealSceneImportError(f"{label} is empty")
+
+    return total, digest.hexdigest()
 
 
 def _load_canonical_model(
@@ -1125,7 +1206,7 @@ def _regular_output_files(
 def _artifact_bindings(root: Path) -> tuple[ImportArtifactBinding, ...]:
     bindings: list[ImportArtifactBinding] = []
     for path in _regular_output_files(root, exclude_receipt=True):
-        payload = _read_regular_bytes(
+        byte_length, sha256 = _stream_regular_digest(
             path,
             label=f"import artifact {path.name}",
             allow_empty=True,
@@ -1133,8 +1214,8 @@ def _artifact_bindings(root: Path) -> tuple[ImportArtifactBinding, ...]:
         bindings.append(
             ImportArtifactBinding(
                 path=path.relative_to(root).as_posix(),
-                byte_length=len(payload),
-                sha256=hashlib.sha256(payload).hexdigest(),
+                byte_length=byte_length,
+                sha256=sha256,
             )
         )
     return tuple(bindings)
@@ -1334,14 +1415,14 @@ def validate_real_scene_import_receipt(
             "import output file set differs from receipt"
         )
     for binding in receipt.artifacts:
-        payload = _read_regular_bytes(
+        byte_length, sha256 = _stream_regular_digest(
             root / binding.path,
             label=f"bound import artifact {binding.path}",
             allow_empty=True,
         )
         if (
-            len(payload) != binding.byte_length
-            or hashlib.sha256(payload).hexdigest() != binding.sha256
+            byte_length != binding.byte_length
+            or sha256 != binding.sha256
         ):
             raise RealSceneImportError(
                 f"import artifact sha256/size mismatch: {binding.path}"
