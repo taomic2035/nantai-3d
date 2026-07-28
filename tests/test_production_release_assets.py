@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import pipeline.production_release_assets as assets_module
 import scripts.stage_production_release_assets as assets_cli
 import scripts.verify_production_release_assets as verify_assets_cli
 from pipeline.production_release_assets import (
@@ -18,12 +19,18 @@ from pipeline.production_release_assets import (
     stage_production_release_assets,
     verify_production_release_assets,
 )
+from pipeline.production_release_builder import (
+    ProductionReleaseBuilderError,
+)
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRODUCTION_RELEASE_NAME,
     build_production_receipt,
 )
-from pipeline.release_archive import canonical_json_bytes
+from pipeline.release_archive import (
+    canonical_json_bytes,
+    stable_regular_file_digest,
+)
 from tests.production_release_fixtures import (
     modeled_artifact_records,
     modeled_entrypoints,
@@ -97,18 +104,58 @@ def _privacy_policy(path: Path, needle: bytes = b"private-needle") -> Path:
     return path
 
 
-def test_stage_exports_only_four_verified_public_assets(tmp_path: Path) -> None:
+def _patch_rebuild_match(monkeypatch) -> None:
+    """Monkeypatch rebuild to return the candidate's own SHA (positive)."""
+
+    def _fake_rebuild(**kwargs) -> str:
+        candidate = kwargs["output_path"].parent / ".candidate.zip"
+        return stable_regular_file_digest(candidate).sha256
+
+    monkeypatch.setattr(
+        assets_module, "_rebuild_candidate_from_acceptance", _fake_rebuild
+    )
+
+
+def _patch_rebuild_mismatch(monkeypatch) -> None:
+    """Monkeypatch rebuild to return a wrong SHA (negative)."""
+
+    monkeypatch.setattr(
+        assets_module,
+        "_rebuild_candidate_from_acceptance",
+        lambda **kwargs: "0" * 64,
+    )
+
+
+def _patch_rebuild_raise(monkeypatch, exc: Exception) -> None:
+    """Monkeypatch rebuild to raise (dirty HEAD, wrong root, TOCTOU)."""
+
+    def _raise(**kwargs) -> str:
+        raise exc
+
+    monkeypatch.setattr(
+        assets_module, "_rebuild_candidate_from_acceptance", _raise
+    )
+
+
+def test_stage_exports_only_four_verified_public_assets(
+    tmp_path: Path, monkeypatch
+) -> None:
     tree = tmp_path / "runtime"
     receipt = _write_real_contract_tree(tree)
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
     output = tmp_path / "release-assets"
+    _patch_rebuild_match(monkeypatch)
 
     result = stage_production_release_assets(
         archive_path=source,
         privacy_policy_path=policy,
         output_dir=output,
+        acceptance_root=acceptance,
+        version="v1.0.0",
     )
 
     archive_name = "nantai-3d-v1.0.0-runtime.zip"
@@ -138,12 +185,17 @@ def test_stage_exports_only_four_verified_public_assets(tmp_path: Path) -> None:
     assert verification.archive_sha256 == archive_sha
 
 
-def test_stage_rejects_modeled_contract_fixture(tmp_path: Path) -> None:
+def test_stage_rejects_modeled_contract_fixture(
+    tmp_path: Path, monkeypatch
+) -> None:
     tree = tmp_path / "runtime"
     write_modeled_production_tree(tree)
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    _patch_rebuild_match(monkeypatch)
 
     with pytest.raises(
         ProductionReleaseAssetsError,
@@ -153,6 +205,8 @@ def test_stage_rejects_modeled_contract_fixture(tmp_path: Path) -> None:
             archive_path=source,
             privacy_policy_path=policy,
             output_dir=tmp_path / "release-assets",
+            acceptance_root=acceptance,
+            version="v1.0.0",
         )
 
     assert not (tmp_path / "release-assets").exists()
@@ -160,6 +214,7 @@ def test_stage_rejects_modeled_contract_fixture(tmp_path: Path) -> None:
 
 def test_stage_rejects_privacy_findings_without_publication(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     tree = tmp_path / "runtime"
     _write_real_contract_tree(tree)
@@ -169,6 +224,9 @@ def test_stage_rejects_privacy_findings_without_publication(
         tmp_path / "privacy-policy.json",
         needle=b"<h1>Studio</h1>",
     )
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    _patch_rebuild_match(monkeypatch)
 
     with pytest.raises(
         ProductionReleaseAssetsError,
@@ -178,6 +236,8 @@ def test_stage_rejects_privacy_findings_without_publication(
             archive_path=source,
             privacy_policy_path=policy,
             output_dir=tmp_path / "release-assets",
+            acceptance_root=acceptance,
+            version="v1.0.0",
         )
 
     assert not (tmp_path / "release-assets").exists()
@@ -204,6 +264,8 @@ def test_stage_never_replaces_existing_output_directory(
             archive_path=source,
             privacy_policy_path=policy,
             output_dir=output,
+            acceptance_root=tmp_path / "acceptance",
+            version="v1.0.0",
         )
 
     assert sentinel.read_text(encoding="ascii") == "keep"
@@ -237,6 +299,8 @@ def test_stage_rejects_junction_output_parent(
             archive_path=source,
             privacy_policy_path=policy,
             output_dir=output,
+            acceptance_root=tmp_path / "acceptance",
+            version="v1.0.0",
         )
 
     assert not output.exists()
@@ -251,11 +315,16 @@ def test_verify_rejects_junction_bundle_root(
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
     output = tmp_path / "release-assets"
+    _patch_rebuild_match(monkeypatch)
     stage_production_release_assets(
         archive_path=source,
         privacy_policy_path=policy,
         output_dir=output,
+        acceptance_root=acceptance,
+        version="v1.0.0",
     )
     original = getattr(Path, "is_junction", lambda self: False)
     monkeypatch.setattr(
@@ -278,6 +347,7 @@ def test_verify_rejects_junction_bundle_root(
 )
 def test_verify_four_asset_bundle_rejects_mixed_or_extra_bytes(
     tmp_path: Path,
+    monkeypatch,
     mutation: str,
 ) -> None:
     tree = tmp_path / "runtime"
@@ -285,11 +355,16 @@ def test_verify_four_asset_bundle_rejects_mixed_or_extra_bytes(
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
     output = tmp_path / "release-assets"
+    _patch_rebuild_match(monkeypatch)
     stage_production_release_assets(
         archive_path=source,
         privacy_policy_path=policy,
         output_dir=output,
+        acceptance_root=acceptance,
+        version="v1.0.0",
     )
     archive_name = "nantai-3d-v1.0.0-runtime.zip"
     targets = {
@@ -311,6 +386,7 @@ def test_cli_stages_exact_inputs_and_emits_ascii_json(
 ) -> None:
     archive = tmp_path / "candidate.zip"
     policy = tmp_path / "policy.json"
+    acceptance = tmp_path / "acceptance"
     output = tmp_path / "release-assets"
     observed: dict[str, object] = {}
 
@@ -337,6 +413,10 @@ def test_cli_stages_exact_inputs_and_emits_ascii_json(
             str(policy),
             "--output-dir",
             str(output),
+            "--acceptance-root",
+            str(acceptance),
+            "--version",
+            "v1.0.0",
         ]
     )
 
@@ -345,6 +425,8 @@ def test_cli_stages_exact_inputs_and_emits_ascii_json(
         "archive_path": archive,
         "privacy_policy_path": policy,
         "output_dir": output,
+        "acceptance_root": acceptance,
+        "version": "v1.0.0",
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["archive_sha256"] == "a" * 64
@@ -373,6 +455,10 @@ def test_cli_fails_without_partial_success_output(
             str(tmp_path / "policy.json"),
             "--output-dir",
             str(tmp_path / "release-assets"),
+            "--acceptance-root",
+            str(tmp_path / "acceptance"),
+            "--version",
+            "v1.0.0",
         ]
     )
 
@@ -439,6 +525,247 @@ def test_verify_cli_fails_closed(
     assert exit_code == 2
     assert captured.out == ""
     assert "mixed" in captured.err
+
+
+# --- A scheme: rebuild-from-acceptance-root attack matrix (GLM-027) ---
+
+
+def test_stage_rejects_modeled_fixture_with_null_fixture_kind(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A1: modeled fixture改 null must be caught by rebuild mismatch."""
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)  # fixture_kind=None
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _patch_rebuild_mismatch(monkeypatch)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="rebuilt candidate disagrees",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+        )
+
+    assert not output.exists()
+
+
+def test_stage_rejects_version_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A4: VERSION drift causes rebuild SHA mismatch."""
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _patch_rebuild_mismatch(monkeypatch)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="rebuilt candidate disagrees",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+            acceptance_root=acceptance,
+            version="v1.0.1",
+        )
+
+    assert not output.exists()
+
+
+def test_stage_rejects_wrong_acceptance_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A3: wrong acceptance root causes rebuild to fail."""
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _patch_rebuild_raise(
+        monkeypatch,
+        ProductionReleaseBuilderError("acceptance report not found"),
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="cannot be staged",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+        )
+
+    assert not output.exists()
+
+
+def test_stage_rejects_dirty_release_owned_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A5: dirty HEAD causes rebuild to fail."""
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _patch_rebuild_raise(
+        monkeypatch,
+        ProductionReleaseBuilderError("source is dirty"),
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="cannot be staged",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+        )
+
+    assert not output.exists()
+
+
+def test_stage_rejects_acceptance_toctou(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A6: acceptance TOCTOU causes rebuild to fail."""
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _patch_rebuild_raise(
+        monkeypatch,
+        ProductionReleaseBuilderError("evidence changed after validation"),
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="cannot be staged",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+        )
+
+    assert not output.exists()
+
+
+def test_stage_rejects_candidate_archive_toctou(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A7: candidate archive changed during rebuild."""
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    original_sha = stable_regular_file_digest(source).sha256
+
+    def _corrupt_during_rebuild(**kwargs) -> str:
+        candidate_path = kwargs["output_path"].parent / ".candidate.zip"
+        candidate_path.write_bytes(b"corrupted")
+        return original_sha
+
+    monkeypatch.setattr(
+        assets_module,
+        "_rebuild_candidate_from_acceptance",
+        _corrupt_during_rebuild,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="rebuilt candidate disagrees",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+        )
+
+    assert not output.exists()
+
+
+def test_download_verify_proves_byte_integrity_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A10: verify-production-assets only proves byte integrity, not real gates."""
+    tree = tmp_path / "runtime"
+    receipt = _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _patch_rebuild_match(monkeypatch)
+    stage_production_release_assets(
+        archive_path=source,
+        privacy_policy_path=policy,
+        output_dir=output,
+        acceptance_root=acceptance,
+        version="v1.0.0",
+    )
+
+    downloaded = tmp_path / "downloaded"
+    downloaded.mkdir()
+    for path in output.iterdir():
+        (downloaded / path.name).write_bytes(path.read_bytes())
+
+    verification = verify_production_release_assets(downloaded)
+    assert verification.valid is True
+    assert verification.archive_sha256 == stable_regular_file_digest(
+        downloaded / "nantai-3d-v1.0.0-runtime.zip"
+    ).sha256
+    assert verification.package_content_id == receipt["package"]["content_id"]
+    assert verification.version == "v1.0.0"
+    assert not hasattr(verification, "acceptance_root")
+    assert not hasattr(verification, "production_release_allowed")
 
 
 def _load_runtime_targets() -> set[str]:

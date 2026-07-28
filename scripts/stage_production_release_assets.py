@@ -33,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--acceptance-root", type=Path, required=True)
+    parser.add_argument("--version", required=True)
     return parser
 
 
@@ -43,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
             archive_path=arguments.archive,
             privacy_policy_path=arguments.privacy_policy,
             output_dir=arguments.output_dir,
+            acceptance_root=arguments.acceptance_root,
+            version=arguments.version,
         )
     except (ProductionReleaseAssetsError, OSError) as exc:
         message = str(exc).encode(

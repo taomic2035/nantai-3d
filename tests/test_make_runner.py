@@ -643,6 +643,11 @@ class TestProductionReleaseTargets:
             "RELEASE_DIR",
             "dist/v1.0.0-release-assets",
         )
+        monkeypatch.setenv(
+            "ACCEPTANCE_ROOT",
+            ".nantai-studio/real-scene/accepted",
+        )
+        monkeypatch.setenv("VERSION", "v1.0.0")
         monkeypatch.setattr(
             make,
             "run",
@@ -661,12 +666,22 @@ class TestProductionReleaseTargets:
                 "private/privacy-policy.json",
                 "--output-dir",
                 "dist/v1.0.0-release-assets",
+                "--acceptance-root",
+                ".nantai-studio/real-scene/accepted",
+                "--version",
+                "v1.0.0",
             ]
         ]
 
     @pytest.mark.parametrize(
         "missing",
-        ("ARCHIVE", "PRIVACY_POLICY", "RELEASE_DIR"),
+        (
+            "ARCHIVE",
+            "PRIVACY_POLICY",
+            "RELEASE_DIR",
+            "ACCEPTANCE_ROOT",
+            "VERSION",
+        ),
     )
     def test_stage_production_assets_requires_exact_inputs(
         self,
@@ -678,6 +693,8 @@ class TestProductionReleaseTargets:
             ("ARCHIVE", "dist/build-a.zip"),
             ("PRIVACY_POLICY", "private/privacy-policy.json"),
             ("RELEASE_DIR", "dist/v1.0.0-release-assets"),
+            ("ACCEPTANCE_ROOT", ".nantai-studio/real-scene/accepted"),
+            ("VERSION", "v1.0.0"),
         ):
             monkeypatch.setenv(name, value)
         monkeypatch.delenv(missing)

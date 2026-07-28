@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -16,6 +17,10 @@ from pipeline.durable_io import (
     flush_directory,
     flush_file,
     publish_directory_noreplace,
+)
+from pipeline.production_release_builder import (
+    ProductionReleaseBuilderError,
+    build_production_release_archive,
 )
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
@@ -384,25 +389,106 @@ def verify_production_release_assets(
         ) from exc
 
 
+def _git_output(arguments: list[str], repo_root: Path) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ProductionReleaseAssetsError(
+            "Git source identity cannot be resolved for staging rebuild"
+        )
+    return completed.stdout
+
+
+def _rebuild_candidate_from_acceptance(
+    *,
+    acceptance_root: Path,
+    version: str,
+    repo_root: Path,
+    output_path: Path,
+) -> str:
+    """Rebuild a candidate archive from acceptance root on current HEAD.
+
+    Returns the SHA-256 of the rebuilt archive.  The caller must
+    byte-compare this with the input candidate archive SHA-256.
+    """
+    source_commit = _git_output(
+        ["rev-parse", "--verify", "HEAD"], repo_root
+    ).strip()
+    tracked_files = tuple(
+        relative
+        for relative in _git_output(
+            ["ls-files", "-z"], repo_root
+        ).split("\0")
+        if relative
+    )
+    result = build_production_release_archive(
+        repo_root=repo_root,
+        acceptance_root=acceptance_root,
+        output_path=output_path,
+        version=version,
+        source_commit=source_commit,
+        tracked_files=tracked_files,
+    )
+    return result.archive_sha256
+
+
 def stage_production_release_assets(
     *,
     archive_path: str | Path,
     privacy_policy_path: str | Path,
     output_dir: str | Path,
+    acceptance_root: str | Path,
+    version: str,
+    repo_root: str | Path | None = None,
 ) -> ProductionReleaseAssets:
-    """Verify, privacy-audit and stage exactly four public Release assets."""
+    """Verify, privacy-audit and stage exactly four public Release assets.
 
+    The input candidate archive is byte-compared against a deterministic
+    rebuild from *acceptance_root* + *version* on the current HEAD before
+    any public asset is written.  This closes the self-declared
+    ``fixture_kind`` trust gap identified in GLM-026R P1.
+    """
     source = Path(archive_path).expanduser().absolute()
     policy = Path(privacy_policy_path).expanduser().absolute()
+    acceptance = Path(acceptance_root).expanduser().absolute()
+    repo = (
+        Path(repo_root).expanduser().absolute()
+        if repo_root is not None
+        else Path(__file__).resolve().parents[1]
+    )
     output = _real_absent_output(Path(output_dir))
     staging = output.parent / (
         f".{output.name}.{uuid.uuid4().hex}.staging"
     )
     candidate = staging / ".candidate.zip"
+    rebuilt = staging / ".rebuilt.zip"
     published = False
     try:
         staging.mkdir(mode=0o700)
         archive_sha256 = _copy_stable_regular_file(source, candidate)
+        rebuilt_sha256 = _rebuild_candidate_from_acceptance(
+            acceptance_root=acceptance,
+            version=version,
+            repo_root=repo,
+            output_path=rebuilt,
+        )
+        candidate_digest = stable_regular_file_digest(candidate)
+        if candidate_digest.sha256 != rebuilt_sha256:
+            raise ProductionReleaseAssetsError(
+                "rebuilt candidate disagrees with input archive"
+            )
+        if (
+            stable_regular_file_digest(candidate).sha256
+            != archive_sha256
+        ):
+            raise ProductionReleaseAssetsError(
+                "candidate archive changed during rebuild"
+            )
         with tempfile.TemporaryDirectory(
             prefix="nantai-production-assets-"
         ) as temporary:
@@ -490,6 +576,7 @@ def stage_production_release_assets(
         DurableIOError,
         FileExistsError,
         OSError,
+        ProductionReleaseBuilderError,
         ProductionReleasePrivacyError,
         ProductionReleaseVerificationError,
         ReleaseArchiveError,

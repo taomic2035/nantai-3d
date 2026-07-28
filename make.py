@@ -311,6 +311,8 @@ def stage_production_assets() -> None:
     archive = _required_environment("ARCHIVE")
     policy = _required_environment("PRIVACY_POLICY")
     output_dir = _required_environment("RELEASE_DIR")
+    acceptance_root = _required_environment("ACCEPTANCE_ROOT")
+    version = _required_environment("VERSION")
     run(
         [
             PY,
@@ -321,6 +323,10 @@ def stage_production_assets() -> None:
             policy,
             "--output-dir",
             output_dir,
+            "--acceptance-root",
+            acceptance_root,
+            "--version",
+            version,
         ]
     )
 
