@@ -31,6 +31,12 @@ identity `e4a99cf` 已关闭。Codex `c858f37` 新增最终四件套 fail-closed
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。
 
+2026-07-29 的内部真实照片 canary 已完成
+`fetch → SfM → local Brush train-preview → import → Spark full-3DGS smoke`；精确
+receipt、模型 SHA、可见质量问题和 accept 拒绝边界见
+[Production V1 状态](../docs/production-v1-status.md#2026-07-29-真实照片本地-canary)。
+该结果不具备素材再分发权、不含 CUDA production 训练和米制证据，不能进入 Release。
+
 GLM-007/008 与 P7 recovered-pose Viewer QA 已被 Production V1 主线替代，只在
 Git 历史中用于回归追溯，不再作为当前任务入口。
 

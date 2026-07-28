@@ -1,6 +1,6 @@
 # Production V1 状态与 TODO
 
-更新：2026-07-28（状态以当前 `main` 与机器证据为准）
+更新：2026-07-29（状态以当前 `main` 与机器证据为准）
 
 ## 一句话状态
 
@@ -14,7 +14,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 |---|---|
 | 真实数据 source/rights/receipt | caller 已实现，缺正式素材输入 |
 | fresh COLMAP 与注册质量门 | canary 已实跑，正式素材尚未运行 |
-| 本地 Brush preview | 已实跑，只能 preview-only |
+| 本地 Brush preview | 真实照片 internal canary 已贯通训练与导入，只能 preview-only |
 | 远程 submit/poll/fetch/reconnect | lifecycle receipt、恢复语义与固定演练 registry 已关闭；远程固定演练 job 已通过 |
 | 远程演练真实性边界 | transport-fixture 与 fresh-container evidence 已分层，不把 fixture 当真实 GPU |
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
@@ -22,7 +22,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | production import、acceptance 与 runner 复验 | v3 receipt 绑定 G2/G5；import 与最终 acceptance 均重开原始 runtime、manifest、render、closure 字节 |
 | production runtime evidence | 六 probe/六 executable 已接入 fresh-container 主入口；待真实 GPU fresh accepted 证据 |
 | production result closure | worker/caller 已接通 v2 archive、render decision 与 closure；待真实 GPU 产物 |
-| Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；尚未对真实重建运行，不能签署 production |
+| Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；真实照片 canary 仅完成私有浏览器 smoke，不能签署 production |
 | Production release tooling | runtime closure、脱敏公共证据、确定性 ZIP、独立 verifier、portable path identity、隐私机器审计、最终四件套 no-replace 导出与 Studio/Viewer fail-closed 消费已完成 |
 
 这里的 release tooling ready 只表示代码与 modeled contract 已就绪。发布前
@@ -34,6 +34,36 @@ scene identity，因此仍是 Preview，不是 Production V1。
 五个外部门禁仍明确开放：真实重叠采集、accepted real-photo SfM、non-mock CUDA
 3DGS、实测米制对齐，以及同一 scene identity 的真实浏览器重建 Viewer/human QA。
 它们未全部通过前，状态保持 Preview/unknown，不会生成或发布正式 `v1.0.0`。
+
+## 2026-07-29 真实照片本地 canary
+
+Windows 未启用长路径时，内容寻址 source manifest 和 runner artifact 扫描会在
+`MAX_PATH` 后错误报告文件不存在。`c50c34d` 与 `1d76746` 已分别修复证据物化、
+stage 枚举和稳定哈希；普通 receipt 路径、内容 SHA、write-once 冲突保护与 link
+边界均未放宽。
+
+同一 `nerfstudio-poster-internal-canary` 随后得到以下机器链：
+
+| 阶段 | receipt SHA-256 | 结论 |
+|---|---|---|
+| fetch | `411da5df29a5788cdd89902b185ea3b2266a8a151df8dbfe098c955b26c46082` | completed |
+| SfM | `7bb45ba2cac721fb6e9c79bed06aa038854d927f9502a38952e5b06f9a77c6a4` | completed，96/100 注册 |
+| train-preview | `4f2b60b943a5c4d6040bf669317da7fe5e86e69a52c026b1ceaa042642df84d7` | completed，Brush 0.3.0 / wgpu / 非 CUDA |
+| import | `f89a4ac8c5fce804cdae2c89ed886dace89da4280b40bf2f6aac8d75f621165f` | completed |
+| accept | `76edb1c2ed3582e974a6ff2d97afbb04908b189ecb9c1426e4287d575ebed766` | blocked；没有 train-production prerequisite |
+
+训练 PLY 为 3,192,978 bytes，SHA-256
+`ac86375e0e98e6187097832f64c32ec93f8f84ed2edd4e54ee60d470d04abc74`；
+import 得到 13,523 个 SH degree 3 Gaussian、4 个空间块和 LOD 0/1/2。内置浏览器
+已用 Spark 2.1.0 加载 full 3DGS，HUD 如实显示
+`synthetic=false / preview-only / sfm-local / arbitrary / unaligned`。主体可见，但
+1000-step 本地模型仍明显稀疏、模糊并有漂浮物，因此这只是端到端真实照片 canary，
+不是质量验收，也不是可发布资产。
+
+源数据 `license_status=not-declared`、`redistribution_allowed=false`；全部原始照片、
+训练产物、receipt 与临时 Viewer 副本只保留在忽略的 `.nantai-studio/`，不得进入
+Git 或 Release。正式五门没有因此减少：Production 仍需要权利明确的正式采集、同
+scene 的 production SfM/CUDA 训练、实测米制对齐和 receipt-bound Viewer/human QA。
 
 ## 正式版关键路径
 
@@ -156,6 +186,8 @@ synthetic Blender、mock、stub、本机 Brush 和绿色单测都不能提升正
 
 ## 下一次可见效果
 
-最早可展示的真实效果不是再增加 synthetic 素材，而是取得第一份 verified cloud
-PLY 后完成 production import。届时可以先看“真实但未米制”的受限 Viewer 结果；
-只有控制点对齐和真实 Viewer/human QA 也通过后，才进入 Production V1 候选。
+当前已经可以私下查看本地 Brush 的真实照片 canary，但其稀疏、模糊和漂浮物说明它
+只适合验证链路。下一次有正式版意义的可见效果，是取得权利明确素材对应的 verified
+cloud CUDA PLY 并完成 production import；届时可以先看“真实但未米制”的受限
+Viewer 结果。只有控制点对齐和同一 scene 的 Viewer/human QA 也通过后，才进入
+Production V1 候选。

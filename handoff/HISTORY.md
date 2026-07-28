@@ -135,3 +135,16 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 - 四轮设计原文已压缩为
   [GLM-017/018 closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md)；
   被替代内容仍可从 Git 历史读取。
+
+## 2026-07-29：真实照片本地 Brush canary 贯通
+
+- Codex `c50c34d` 修复 Windows 长路径下 content-addressed source manifest 无法
+  物化的问题；`1d76746` 继续修复 stage artifact 枚举与稳定哈希，并保持普通
+  receipt 相对路径和 link/write-once fail-closed 语义。
+- `nerfstudio-poster-internal-canary` 的 fetch、SfM、train-preview、import 四阶段
+  receipt 全部 completed；本机 Brush 0.3.0 / wgpu 生成 13,523 个 SH3 Gaussian，
+  import 产出 4 chunks 与 LOD 0/1/2，Spark 2.1.0 full-3DGS 浏览器 smoke 通过。
+- 画面仍稀疏、模糊且有漂浮物；source 没有声明再分发权，模型没有 CUDA、米制和
+  production Viewer/human QA。accept 因缺 train-production prerequisite 正确
+  blocked。精确 SHA 与当前正式版差距集中记录在
+  [Production V1 状态](../docs/production-v1-status.md#2026-07-29-真实照片本地-canary)。
