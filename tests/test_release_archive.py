@@ -307,6 +307,22 @@ def test_zip_inspection_rejects_nfc_nfd_collision(tmp_path) -> None:
             inspect_zip_members(archive, ArchiveLimits())
 
 
+def test_zip_inspection_rejects_combined_casefold_normalization_collision(
+    tmp_path,
+) -> None:
+    """Case-folding and normalization must form one collision identity."""
+    upper_nfc_name = "nantai-runtime/web/\xc9.txt"
+    lower_nfd_name = "nantai-runtime/web/e\u0301.txt"
+    archive_path = tmp_path / "casefold-normalization.zip"
+    _write_archive(
+        archive_path,
+        ((upper_nfc_name, b"a"), (lower_nfd_name, b"b")),
+    )
+    with zipfile.ZipFile(archive_path) as archive:
+        with pytest.raises(ReleaseArchiveError, match="collision"):
+            inspect_zip_members(archive, ArchiveLimits())
+
+
 def test_zip_inspection_rejects_illegal_child_of_valid_root(tmp_path) -> None:
     """A valid wrapper root must not exempt an illegal child path."""
     archive_path = tmp_path / "bad-child.zip"

@@ -208,6 +208,7 @@ def inspect_zip_members(
     exact_paths: set[str] = set()
     folded_paths: set[str] = set()
     normalized_paths: set[str] = set()
+    normalized_folded_paths: set[str] = set()
     roots: set[str] = set()
     total_bytes = 0
     regular_count = 0
@@ -222,6 +223,7 @@ def inspect_zip_members(
         canonical = path.as_posix()
         folded = canonical.casefold()
         normalized = unicodedata.normalize("NFC", canonical)
+        normalized_folded = unicodedata.normalize("NFC", normalized.casefold())
         if canonical in exact_paths:
             raise ReleaseArchiveError(f"duplicate release archive member: {canonical}")
         if folded in folded_paths:
@@ -232,9 +234,14 @@ def inspect_zip_members(
             raise ReleaseArchiveError(
                 f"normalization collision in release archive: {canonical}"
             )
+        if normalized_folded in normalized_folded_paths:
+            raise ReleaseArchiveError(
+                f"case-fold/normalization collision in release archive: {canonical}"
+            )
         exact_paths.add(canonical)
         folded_paths.add(folded)
         normalized_paths.add(normalized)
+        normalized_folded_paths.add(normalized_folded)
         roots.add(path.parts[0])
 
         unix_mode = (info.external_attr >> 16) & 0xFFFF
