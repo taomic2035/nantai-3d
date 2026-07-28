@@ -576,7 +576,6 @@ class RealScenePipelineOperations:
                 encoding="ascii",
             )
             executor = RemoteShellExecutor(config)
-            prepared = executor.prepare(bundle)
         except (OSError, ValidationError, RemoteShellExecutionError) as exc:
             return StageExecution(
                 state="blocked",
@@ -584,6 +583,29 @@ class RealScenePipelineOperations:
                 reason=f"remote executor preflight failed: {exc}",
                 evidence_artifacts=_safe_evidence_files(stage_root),
             )
+        try:
+            prepared = executor.prepare(bundle)
+            return self._run_remote_training(
+                executor,
+                prepared,
+                stage_root,
+            )
+        except (OSError, ValidationError, RemoteShellExecutionError) as exc:
+            return StageExecution(
+                state="blocked",
+                artifacts=(),
+                reason=f"remote executor preflight failed: {exc}",
+                evidence_artifacts=_safe_evidence_files(stage_root),
+            )
+        finally:
+            executor.close()
+
+    def _run_remote_training(
+        self,
+        executor: RemoteShellExecutor,
+        prepared: object,
+        stage_root: Path,
+    ) -> StageExecution:
         job_path = stage_root / "remote-job.private.json"
         lifecycle_path = (
             stage_root
@@ -680,8 +702,25 @@ class RealScenePipelineOperations:
                             ),
                             evidence_artifacts=_safe_evidence_files(stage_root),
                         )
+                    remaining = max(
+                        0.0,
+                        deadline - time.monotonic(),
+                    )
+                    if remaining <= 0:
+                        return StageExecution(
+                            state="unknown",
+                            artifacts=(),
+                            reason=(
+                                "remote lifecycle was not bound before "
+                                "timeout; no success was inferred"
+                            ),
+                            evidence_artifacts=_safe_evidence_files(stage_root),
+                        )
                     time.sleep(
-                        self.options.remote_poll_interval_seconds
+                        min(
+                            self.options.remote_poll_interval_seconds,
+                            remaining,
+                        )
                     )
                     continue
                 return StageExecution(
@@ -777,7 +816,23 @@ class RealScenePipelineOperations:
                     reason="remote Splatfacto polling timed out",
                     evidence_artifacts=_safe_evidence_files(stage_root),
                 )
-            time.sleep(self.options.remote_poll_interval_seconds)
+            remaining = max(
+                0.0,
+                deadline - time.monotonic(),
+            )
+            if remaining <= 0:
+                return StageExecution(
+                    state="unknown",
+                    artifacts=(),
+                    reason="remote Splatfacto polling timed out",
+                    evidence_artifacts=_safe_evidence_files(stage_root),
+                )
+            time.sleep(
+                min(
+                    self.options.remote_poll_interval_seconds,
+                    remaining,
+                )
+            )
 
     def _import(
         self,

@@ -19,12 +19,15 @@ from pipeline.real_scene_runner import (
 )
 from pipeline.remote_shell_executor import (
     RemoteContainerLifecycleReceipt,
+    RemoteResultBundleError,
     RemoteShellExecutionError,
     RemoteShellJobRef,
     canonical_container_lifecycle_bytes,
     canonical_remote_shell_job_ref_bytes,
     compute_container_lifecycle_sha256,
     compute_workspace_identity_sha256,
+    publish_remote_container_lifecycle_receipt,
+    publish_remote_shell_job_ref,
 )
 from pipeline.training_executor import ExecutorObservation
 
@@ -351,6 +354,9 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
             assert submitted == job
             raise RemoteShellExecutionError("lifecycle not bound")
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(
         "pipeline.real_scene_operations.RemoteShellExecutor",
         FakeRemoteExecutor,
@@ -459,6 +465,9 @@ def test_existing_remote_job_is_restored_without_resubmit(
             assert measured_job == job
             return lifecycle
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(
         "pipeline.real_scene_operations.RemoteShellExecutor",
         FakeRemoteExecutor,
@@ -521,6 +530,9 @@ def test_initial_lifecycle_binding_is_persisted_before_fetch(
             )
             raise RemoteShellExecutionError("stop after ordering check")
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(
         operations_module,
         "RemoteShellExecutor",
@@ -543,7 +555,7 @@ def test_first_unbound_poll_retries_then_persists_bound_lifecycle(
     )
     lifecycle = _remote_lifecycle(job)
     calls = {"poll": 0, "fetch": 0}
-    monotonic = iter((0.0, 0.1))
+    monotonic = iter((0.0, 0.1, 0.1))
     monkeypatch.setattr(
         operations_module.time,
         "monotonic",
@@ -593,6 +605,9 @@ def test_first_unbound_poll_retries_then_persists_bound_lifecycle(
             )
             raise RemoteShellExecutionError("stop after ordering check")
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(
         operations_module,
         "RemoteShellExecutor",
@@ -625,6 +640,9 @@ def test_remote_job_without_lifecycle_fails_before_remote_methods(
         def prepare(self, measured):
             assert measured == prepared
             return prepared
+
+        def close(self):
+            pass
 
         def __getattr__(self, name):
             if name in calls:
@@ -663,6 +681,9 @@ def test_remote_lifecycle_without_job_is_unknown_without_remote_methods(
         def prepare(self, measured):
             assert measured == prepared
             return prepared
+
+        def close(self):
+            pass
 
         def __getattr__(self, name):
             if name in calls:
@@ -706,6 +727,9 @@ def test_malformed_remote_lifecycle_blocks_restore(
         def restore(self, *_args, **_kwargs):
             raise AssertionError("malformed lifecycle must block restore")
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
 
     execution = operations.execute("train-production", stage_root, ())
@@ -746,6 +770,9 @@ def test_symlink_remote_lifecycle_blocks_restore(
 
         def restore(self, *_args, **_kwargs):
             raise AssertionError("symlink lifecycle must block restore")
+
+        def close(self):
+            pass
 
     monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
 
@@ -798,6 +825,9 @@ def test_lifecycle_publication_error_blocks_fetch(
         def fetch(self, *_args):
             calls["fetch"] += 1
             raise AssertionError("publication error must block fetch")
+
+        def close(self):
+            pass
 
     def fail_publish(source, destination):
         destination = Path(destination)
@@ -892,6 +922,9 @@ def test_persisted_lifecycle_mismatch_blocks_terminal_fetch(
         def fetch(self, *_args):
             calls["fetch"] += 1
             raise AssertionError("mismatch must block fetch")
+
+        def close(self):
+            pass
 
     monkeypatch.setattr(operations_module, "RemoteShellExecutor", FakeRemoteExecutor)
 
@@ -1069,3 +1102,816 @@ def test_accept_stage_publishes_content_addressed_aggregate(
             tmp_path / "real-scene",
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# H1: deadline bounds and explicit executor close
+# ---------------------------------------------------------------------------
+
+
+def test_remote_poll_sleep_never_overshoots_deadline(
+    tmp_path,
+    monkeypatch,
+):
+    """Each poll sleep must be min(interval, max(0, deadline - monotonic()))."""
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+            remote_config_path=tmp_path / "remote.json",
+            remote_poll_interval_seconds=5.0,
+            remote_timeout_seconds=10.0,
+        ),
+    )
+    stage_root = tmp_path / "workspace/stages/train-production/attempt-one"
+    stage_root.mkdir(parents=True)
+    bundle = stage_root / "training-bundle.zip"
+    bundle.write_bytes(b"bundle")
+    prepared = SimpleNamespace(path=bundle)
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: prepared,
+    )
+    config = SimpleNamespace(
+        container_identity="image@sha256:" + "a" * 64,
+        container_runtime="docker",
+        expected_host_key_fingerprint="SHA256:" + "A" * 43,
+    )
+    monkeypatch.setattr(operations, "_remote_config", lambda: config)
+    job = RemoteShellJobRef(
+        job_id="job-one",
+        attempt_id="attempt-one",
+        submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+        request_sha256="b" * 64,
+        training_bundle_sha256="c" * 64,
+        runtime_policy_sha256="e" * 64,
+        config_identity_sha256="d" * 64,
+        remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
+    )
+    lifecycle = _remote_lifecycle(job)
+    monotonic_values = iter(
+        [
+            0.0,
+            0.0,
+            0.0,
+            7.0,
+            7.0,
+        ]
+    )
+    sleeps: list[float] = []
+
+    def fake_monotonic():
+        return next(monotonic_values)
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(operations_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(operations_module.time, "sleep", fake_sleep)
+
+    poll_count = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+            self.close_calls = 0
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            poll_count["n"] += 1
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            if poll_count["n"] <= 2:
+                raise RemoteShellExecutionError("not bound yet")
+            return lifecycle
+
+        def fetch(self, measured, destination):
+            del measured, destination
+            raise RemoteShellExecutionError("stop")
+
+        def close(self):
+            self.close_calls += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert len(sleeps) == 2
+    assert sleeps[0] == 5.0
+    assert sleeps[1] == 3.0
+
+
+def test_train_production_closes_remote_executor_on_success(
+    tmp_path,
+    monkeypatch,
+):
+    """Executor must be closed exactly once on success path."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+    monkeypatch.setattr(
+        operations,
+        "_write_private_model",
+        lambda *_args, **_kwargs: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            return lifecycle
+
+        def fetch(self, measured, destination):
+            del measured, destination
+            return SimpleNamespace(
+                state="succeeded",
+                quality_role="production",
+            )
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "completed"
+    assert close_calls["n"] == 1
+
+
+def test_train_production_closes_remote_executor_on_failure(
+    tmp_path,
+    monkeypatch,
+):
+    """Executor must be closed exactly once on failed training path."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            return ExecutorObservation(
+                state="failed",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=1,
+                stdout_sha256="a" * 64,
+                stderr_sha256="b" * 64,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            return lifecycle
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "failed with exit code 1" in execution.reason
+    assert close_calls["n"] == 1
+
+
+def test_train_production_closes_remote_executor_on_exception(
+    tmp_path,
+    monkeypatch,
+):
+    """Executor must be closed exactly once even if poll raises."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            raise OSError("transport gone")
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            return lifecycle
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert close_calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# H1 Codex review addendum: prepare must be inside try/finally, sleep(0)
+# forbidden when remaining is zero, and close must be parametrised across
+# every return path.
+# ---------------------------------------------------------------------------
+
+
+def _deadline_operations(tmp_path, *, interval=5.0, timeout=10.0):
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+            remote_config_path=tmp_path / "remote.json",
+            remote_poll_interval_seconds=interval,
+            remote_timeout_seconds=timeout,
+        ),
+    )
+    stage_root = tmp_path / "workspace/stages/train-production/attempt-one"
+    stage_root.mkdir(parents=True)
+    bundle = stage_root / "training-bundle.zip"
+    bundle.write_bytes(b"bundle")
+    prepared = SimpleNamespace(path=bundle)
+    return operations, stage_root, prepared
+
+
+def _deadline_config(monkeypatch, operations):
+    config = SimpleNamespace(
+        container_identity="image@sha256:" + "a" * 64,
+        container_runtime="docker",
+        expected_host_key_fingerprint="SHA256:" + "A" * 43,
+    )
+    monkeypatch.setattr(operations, "_remote_config", lambda: config)
+    return config
+
+
+def _deadline_job():
+    return RemoteShellJobRef(
+        job_id="job-one",
+        attempt_id="attempt-one",
+        submitted_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+        request_sha256="b" * 64,
+        training_bundle_sha256="c" * 64,
+        runtime_policy_sha256="e" * 64,
+        config_identity_sha256="d" * 64,
+        remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
+    )
+
+
+def test_prepare_failure_closes_executor(
+    tmp_path,
+    monkeypatch,
+):
+    """prepare() raising must still close executor (addendum #1)."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            raise RemoteShellExecutionError("prepare failed")
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "remote executor preflight failed" in execution.reason
+    assert close_calls["n"] == 1
+
+
+def test_submit_failure_closes_executor(
+    tmp_path,
+    monkeypatch,
+):
+    """submit() raising must still close executor exactly once."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            raise RemoteShellExecutionError("submit failed")
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert "remote submission state is unknown" in execution.reason
+    assert close_calls["n"] == 1
+
+
+def test_restore_failure_closes_executor(
+    tmp_path,
+    monkeypatch,
+):
+    """restore() raising on existing job/lifecycle must close executor."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    publish_remote_shell_job_ref(job, stage_root / "remote-job.private.json")
+    publish_remote_container_lifecycle_receipt(
+        lifecycle,
+        stage_root / "remote-container-lifecycle.private.json",
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            return measured
+
+        def restore(self, measured, job_ref, expected_lifecycle=None):
+            del measured, job_ref, expected_lifecycle
+            raise RemoteShellExecutionError("restore mismatch")
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "remote recovery evidence is invalid" in execution.reason
+    assert close_calls["n"] == 1
+
+
+def test_fetch_result_bundle_error_closes_executor(
+    tmp_path,
+    monkeypatch,
+):
+    """fetch() raising RemoteResultBundleError returns blocked and closes."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+    monkeypatch.setattr(
+        operations,
+        "_write_private_model",
+        lambda *_args, **_kwargs: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            return lifecycle
+
+        def fetch(self, measured, destination):
+            del measured, destination
+            raise RemoteResultBundleError("bundle invalid")
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "remote result failed validation" in execution.reason
+    assert close_calls["n"] == 1
+
+
+def test_fetch_transport_error_closes_executor(
+    tmp_path,
+    monkeypatch,
+):
+    """fetch() raising OSError returns unknown and closes executor."""
+    operations, stage_root, prepared, config, job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    lifecycle = _remote_lifecycle(job)
+    monkeypatch.setattr(
+        operations_module.time,
+        "monotonic",
+        lambda: 0.0,
+    )
+    monkeypatch.setattr(
+        operations_module.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+    monkeypatch.setattr(
+        operations,
+        "_write_private_model",
+        lambda *_args, **_kwargs: None,
+    )
+
+    close_calls = {"n": 0}
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            return lifecycle
+
+        def fetch(self, measured, destination):
+            del measured, destination
+            raise OSError("transport gone")
+
+        def close(self):
+            close_calls["n"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert "remote result closure is unknown" in execution.reason
+    assert close_calls["n"] == 1
+
+
+def test_remote_poll_deadline_crossed_in_lifecycle_binding_does_not_sleep_zero(
+    tmp_path,
+    monkeypatch,
+):
+    """Deadline crossed between >= check and remaining calc must not sleep(0).
+
+    Second monotonic call (for remaining) crosses the deadline; the contract
+    requires returning timeout/unknown without sleeping and without polling
+    again.
+    """
+    operations, stage_root, prepared = _deadline_operations(tmp_path)
+    _deadline_config(monkeypatch, operations)
+    job = _deadline_job()
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: prepared,
+    )
+
+    # deadline = 0.0 + 10.0 = 10.0
+    # poll #1 returns unknown; bound_lifecycle raises.
+    # >= check: 9.0 < 10.0 (not passed).
+    # remaining calc: 11.0 > deadline → remaining = max(0, 10-11) = 0.
+    # Current bug: calls sleep(0) and continues to poll #2.
+    # Fix: remaining <= 0 must return timeout/unknown.
+    monotonic_values = iter([0.0, 9.0, 11.0, 11.0, 11.0])
+    sleeps: list[float] = []
+    poll_count = {"n": 0}
+
+    def fake_monotonic():
+        return next(monotonic_values)
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(operations_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(operations_module.time, "sleep", fake_sleep)
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+            self.close_calls = 0
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            poll_count["n"] += 1
+            return ExecutorObservation(
+                state="unknown",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+                exit_code=0,
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            raise RemoteShellExecutionError("not bound yet")
+
+        def fetch(self, measured, destination):
+            del measured, destination
+            raise RemoteShellExecutionError("stop")
+
+        def close(self):
+            self.close_calls += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert 0 not in sleeps
+    assert poll_count["n"] == 1
+
+
+def test_remote_poll_deadline_crossed_in_main_loop_does_not_sleep_zero(
+    tmp_path,
+    monkeypatch,
+):
+    """Main-loop sleep must not call sleep(0) when remaining drops to zero.
+
+    After a running observation with lifecycle bound, the main loop computes
+    remaining; if monotonic crossed the deadline between the >= check and
+    the remaining calc, the implementation must return timeout/unknown
+    instead of sleeping zero.
+    """
+    operations, stage_root, prepared = _deadline_operations(tmp_path)
+    _deadline_config(monkeypatch, operations)
+    job = _deadline_job()
+    lifecycle = _remote_lifecycle(job)
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: prepared,
+    )
+
+    # deadline = 0.0 + 10.0 = 10.0
+    # poll #1: running; lifecycle bound; observation.state == "running".
+    # main loop >= check: 9.0 < 10.0 (not passed).
+    # remaining calc: 11.0 > deadline → remaining = 0.
+    # Current bug: sleep(0) and continue.
+    monotonic_values = iter([0.0, 9.0, 11.0, 11.0, 11.0])
+    sleeps: list[float] = []
+    poll_count = {"n": 0}
+
+    def fake_monotonic():
+        return next(monotonic_values)
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(operations_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(operations_module.time, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        operations,
+        "_write_private_model",
+        lambda *_args, **_kwargs: None,
+    )
+
+    class FakeRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+            self.close_calls = 0
+
+        def prepare(self, measured):
+            return measured
+
+        def submit(self, measured):
+            return job
+
+        def poll(self, measured):
+            del measured
+            poll_count["n"] += 1
+            return ExecutorObservation(
+                state="running",
+                observed_at_utc=datetime(2026, 7, 26, tzinfo=UTC),
+            )
+
+        def bound_lifecycle_receipt(self, measured):
+            del measured
+            return lifecycle
+
+        def fetch(self, measured, destination):
+            del measured, destination
+            raise RemoteShellExecutionError("stop")
+
+        def close(self):
+            self.close_calls += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        FakeRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "unknown"
+    assert 0 not in sleeps
+    assert poll_count["n"] == 1
