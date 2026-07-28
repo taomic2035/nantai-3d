@@ -477,6 +477,38 @@ class BoundDirectory:
         self.close()
 
 
+def close_bound_capabilities_best_effort(
+    capabilities: Iterable[BoundFile | BoundDirectory | None],
+) -> ProductionReleaseMutationError | None:
+    """Attempt every close and return one complete mutation error, if any."""
+
+    failures: list[Exception] = []
+    published: list[str] = []
+    retained: list[str] = []
+    for capability in capabilities:
+        if capability is None:
+            continue
+        try:
+            capability.close()
+        except Exception as exc:
+            failures.append(exc)
+            if isinstance(exc, ProductionReleaseMutationError):
+                published.extend(exc.published)
+                retained.extend(exc.retained)
+    if not failures:
+        return None
+    error = ProductionReleaseMutationError(
+        "one or more Production release capabilities failed to close",
+        published=tuple(dict.fromkeys(published)),
+        retained=tuple(dict.fromkeys(retained)),
+    )
+    error.__cause__ = ExceptionGroup(
+        "Production release capability close failures",
+        failures,
+    )
+    return error
+
+
 def open_bound_directory(path: str | Path) -> BoundDirectory:
     """Open an existing absolute directory from its anchor component-by-component."""
 

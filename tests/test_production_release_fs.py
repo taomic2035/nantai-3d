@@ -173,6 +173,69 @@ def test_child_name_swap_is_detected_against_held_file(
     assert raised.value.retained == ("payload.bin",)
 
 
+def test_close_bound_capabilities_attempts_every_close_and_merges_state() -> None:
+    calls: list[str] = []
+
+    class CloseProbe:
+        def __init__(
+            self,
+            name: str,
+            error: Exception | None = None,
+        ) -> None:
+            self.name = name
+            self.error = error
+
+        def close(self) -> None:
+            calls.append(self.name)
+            if self.error is not None:
+                raise self.error
+
+    first_error = release_fs.ProductionReleaseMutationError(
+        "first close failed",
+        published=("public/first.bin",),
+        retained=("public/first.bin",),
+    )
+    second_error = release_fs.ProductionReleaseMutationError(
+        "second close failed",
+        published=("public/second.bin",),
+        retained=("private/second.bin",),
+    )
+
+    error = release_fs.close_bound_capabilities_best_effort(
+        (
+            CloseProbe("first", first_error),
+            CloseProbe("middle"),
+            CloseProbe("second", second_error),
+            CloseProbe("last"),
+        )
+    )
+
+    assert calls == ["first", "middle", "second", "last"]
+    assert error is not None
+    assert error.published == ("public/first.bin", "public/second.bin")
+    assert error.retained == ("public/first.bin", "private/second.bin")
+    assert isinstance(error.__cause__, ExceptionGroup)
+    assert error.__cause__.exceptions == (first_error, second_error)
+
+
+def test_close_bound_capabilities_returns_none_when_every_close_succeeds() -> None:
+    calls: list[str] = []
+
+    class CloseProbe:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            calls.append(self.name)
+
+    error = release_fs.close_bound_capabilities_best_effort(
+        (CloseProbe("first"), None, CloseProbe("last"))
+    )
+
+    assert error is None
+    assert calls == ["first", "last"]
+
+
 def test_production_mutation_modules_expose_no_cleanup_or_replace_path() -> None:
     root = Path(__file__).resolve().parents[1]
     modules = (

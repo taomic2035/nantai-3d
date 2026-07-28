@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from pipeline.production_release_fs import (
     BoundFile,
     ProductionReleaseFSError,
     ProductionReleaseMutationError,
+    close_bound_capabilities_best_effort,
     open_bound_directory,
     require_linux_mutation_support,
 )
@@ -98,6 +100,24 @@ class ProductionReleaseBuilderError(ValueError):
         super().__init__(message)
         self.published = published
         self.retained = retained
+
+
+def _validate_output_parent(
+    output_path: Path,
+    output_parent: BoundDirectory,
+) -> None:
+    expected_parent = Path(output_path).parent
+    supplied_parent = Path(output_parent.path).expanduser().absolute()
+    if supplied_parent != expected_parent:
+        raise ProductionReleaseBuilderError(
+            "Production release output parent does not match output path"
+        )
+    try:
+        output_parent.verify_lexical_identity()
+    except Exception as exc:
+        raise ProductionReleaseBuilderError(
+            "Production release output parent capability identity is invalid"
+        ) from exc
 
 
 def _git_provenance_command(arguments: Iterable[str]) -> list[str]:
@@ -1679,6 +1699,8 @@ def build_production_release_archive(
     acceptance = Path(acceptance_root).expanduser().absolute()
     output = Path(output_path).expanduser().absolute()
     sidecar = output.with_suffix(f"{output.suffix}.sha256")
+    if output_parent is not None:
+        _validate_output_parent(output, output_parent)
     for label, boundary in (("source", root), ("acceptance", acceptance)):
         try:
             boundary_stat = boundary.lstat()
@@ -2036,9 +2058,19 @@ def build_production_release_archive(
             retained=retained,
         ) from exc
     finally:
-        if sidecar_bound is not None:
-            sidecar_bound.close()
-        if archive_bound is not None:
-            archive_bound.close()
-        if parent is not None:
-            parent.close()
+        close_error = close_bound_capabilities_best_effort(
+            (sidecar_bound, archive_bound, parent)
+        )
+        if close_error is not None and sys.exception() is None:
+            published = tuple(
+                dict.fromkeys((*public_names, *close_error.published))
+            )
+            retained = tuple(
+                dict.fromkeys((*public_names, *close_error.retained))
+            )
+            raise ProductionReleaseBuilderError(
+                "Production release capabilities failed to close; "
+                f"published={published}; retained={retained}",
+                published=published,
+                retained=retained,
+            ) from close_error

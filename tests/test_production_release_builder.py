@@ -1316,6 +1316,74 @@ def test_build_rejects_real_dirty_release_owned_source_before_staging(
     assert not output.with_suffix(".zip.sha256").exists()
 
 
+def test_output_parent_validation_rejects_lexical_mismatch_before_capability_use(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    output = (tmp_path / "expected" / "runtime.zip").absolute()
+    parent = SimpleNamespace(
+        path=(tmp_path / "wrong").absolute(),
+        verify_lexical_identity=lambda: calls.append("verify"),
+    )
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="output parent.*does not match",
+    ) as raised:
+        builder_module._validate_output_parent(output, parent)
+
+    assert calls == []
+    assert raised.value.published == ()
+    assert raised.value.retained == ()
+
+
+def test_output_parent_validation_checks_matching_capability_identity(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    parent_path = (tmp_path / "expected").absolute()
+    parent = SimpleNamespace(
+        path=parent_path,
+        verify_lexical_identity=lambda: calls.append("verify"),
+    )
+
+    builder_module._validate_output_parent(
+        parent_path / "runtime.zip",
+        parent,
+    )
+
+    assert calls == ["verify"]
+
+
+@LINUX_MUTATION_ONLY
+def test_build_rejects_mismatched_bound_output_parent_before_mutation(
+    tmp_path: Path,
+) -> None:
+    expected_parent = tmp_path / "expected"
+    wrong_parent = tmp_path / "wrong"
+    expected_parent.mkdir()
+    wrong_parent.mkdir()
+    output = expected_parent / "runtime.zip"
+
+    with builder_module.open_bound_directory(wrong_parent) as bound:
+        with pytest.raises(
+            ProductionReleaseBuilderError,
+            match="output parent.*does not match",
+        ):
+            build_production_release_archive(
+                repo_root=tmp_path,
+                acceptance_root=tmp_path,
+                output_path=output,
+                version="v1.0.0",
+                source_commit="a" * 40,
+                tracked_files=(),
+                output_parent=bound,
+            )
+
+    assert not output.exists()
+    assert not (wrong_parent / output.name).exists()
+
+
 @pytest.mark.parametrize("identity_kind", ("commit", "tracked-files"))
 @LINUX_MUTATION_ONLY
 def test_build_rejects_supplied_identity_that_is_not_exact_live_identity(
@@ -1847,6 +1915,106 @@ def test_build_failure_retains_partial_archive_without_commit_marker(
     assert isinstance(raised.value.__cause__, RuntimeError)
     assert output.exists()
     assert not output.with_suffix(".zip.sha256").exists()
+
+
+@LINUX_MUTATION_ONLY
+def test_build_success_close_failure_is_domain_error_and_closes_all_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+    close_calls: list[str] = []
+    original_close = builder_module.BoundFile.close
+
+    def close_with_injected_sidecar_failure(bound) -> None:
+        close_calls.append(bound.name)
+        original_close(bound)
+        if bound.name.endswith(".sha256"):
+            raise builder_module.ProductionReleaseMutationError(
+                "injected sidecar close failure",
+                published=(bound.name,),
+                retained=(bound.name,),
+            )
+
+    monkeypatch.setattr(
+        builder_module.BoundFile,
+        "close",
+        close_with_injected_sidecar_failure,
+    )
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="capabilities failed to close",
+    ) as raised:
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert close_calls[-2:] == ["runtime.zip.sha256", "runtime.zip"]
+    assert raised.value.published == ("runtime.zip", "runtime.zip.sha256")
+    assert raised.value.retained == ("runtime.zip", "runtime.zip.sha256")
+    assert isinstance(
+        raised.value.__cause__,
+        builder_module.ProductionReleaseMutationError,
+    )
+
+
+@LINUX_MUTATION_ONLY
+def test_build_body_error_wins_over_close_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    _patch_build_context(monkeypatch, fixture, context)
+    output = tmp_path / "runtime.zip"
+    body_error = RuntimeError("injected body failure")
+    monkeypatch.setattr(
+        builder_module,
+        "verify_production_release_archive_stream",
+        lambda _stream: (_ for _ in ()).throw(body_error),
+    )
+    close_calls: list[str] = []
+    original_close = builder_module.BoundFile.close
+
+    def close_with_injected_archive_failure(bound) -> None:
+        close_calls.append(bound.name)
+        original_close(bound)
+        raise builder_module.ProductionReleaseMutationError(
+            "injected archive close failure",
+            published=(bound.name,),
+            retained=(bound.name,),
+        )
+
+    monkeypatch.setattr(
+        builder_module.BoundFile,
+        "close",
+        close_with_injected_archive_failure,
+    )
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="injected body failure",
+    ) as raised:
+        _build_committed_runtime(
+            repo=repo,
+            fixture=fixture,
+            identity=identity,
+            output=output,
+        )
+
+    assert close_calls[-1:] == ["runtime.zip"]
+    assert raised.value.__cause__ is body_error
+    assert raised.value.published == ("runtime.zip",)
+    assert raised.value.retained == ("runtime.zip",)
 
 
 @LINUX_MUTATION_ONLY

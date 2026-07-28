@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import pipeline.production_release_assets as assets_module
+import pipeline.production_release_fs as release_fs
 import scripts.stage_production_release_assets as assets_cli
 import scripts.verify_production_release_assets as verify_assets_cli
 from pipeline.production_release_assets import (
@@ -210,6 +211,9 @@ def _bind_acceptance_rebuild(
     def _build(**kwargs) -> ProductionReleaseBuild:
         builder_calls.append(kwargs)
         output_path = kwargs["output_path"]
+        output_parent = kwargs["output_parent"]
+        assert output_parent.path == output_path.parent
+        output_parent.verify_lexical_identity()
         shutil.copyfile(rebuilt_source, output_path)
         digest = stable_regular_file_digest(output_path)
         output_path.with_suffix(f"{output_path.suffix}.sha256").write_text(
@@ -432,6 +436,116 @@ def test_stage_exports_only_four_verified_public_assets(
     assert verification.valid is True
     assert verification.package_content_id == receipt["package"]["content_id"]
     assert verification.archive_sha256 == archive_sha
+
+
+@LINUX_MUTATION_ONLY
+def test_stage_success_close_failure_is_domain_error_and_closes_all_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    output = tmp_path / "release-assets"
+    _bind_acceptance_rebuild(monkeypatch, source)
+    close_calls: list[str] = []
+    original_close = release_fs.BoundFile.close
+
+    def close_with_injected_receipt_failure(bound) -> None:
+        close_calls.append(bound.name)
+        original_close(bound)
+        if bound.name == PRODUCTION_RELEASE_NAME:
+            relative = f"{output.name}/{bound.name}"
+            raise release_fs.ProductionReleaseMutationError(
+                "injected receipt close failure",
+                published=(relative,),
+                retained=(relative,),
+            )
+
+    monkeypatch.setattr(
+        release_fs.BoundFile,
+        "close",
+        close_with_injected_receipt_failure,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="capabilities failed to close",
+    ) as raised:
+        stage_production_release_assets(
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
+        )
+
+    assert close_calls[-5:] == [
+        PRODUCTION_RELEASE_NAME,
+        CHECKSUMS_NAME,
+        "nantai-3d-v1.0.0-runtime.zip.sha256",
+        "nantai-3d-v1.0.0-runtime.zip",
+        "candidate-snapshot.zip",
+    ]
+    assert raised.value.published[0] == output.name
+    assert raised.value.retained
+    assert isinstance(
+        raised.value.__cause__,
+        release_fs.ProductionReleaseMutationError,
+    )
+
+
+@LINUX_MUTATION_ONLY
+def test_stage_body_error_wins_over_close_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    output = tmp_path / "release-assets"
+    body_error = assets_module.ProductionReleaseVerificationError(
+        "injected verification failure"
+    )
+    monkeypatch.setattr(
+        assets_module,
+        "verify_production_release_archive_stream",
+        lambda _stream: (_ for _ in ()).throw(body_error),
+    )
+    close_calls: list[str] = []
+    original_close = release_fs.BoundFile.close
+
+    def close_with_injected_snapshot_failure(bound) -> None:
+        close_calls.append(bound.name)
+        original_close(bound)
+        raise release_fs.ProductionReleaseMutationError(
+            "injected snapshot close failure",
+            published=(bound.name,),
+            retained=(bound.name,),
+        )
+
+    monkeypatch.setattr(
+        release_fs.BoundFile,
+        "close",
+        close_with_injected_snapshot_failure,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="cannot be staged",
+    ) as raised:
+        stage_production_release_assets(
+            **_stage_kwargs(
+                tmp_path,
+                archive=source,
+                policy=policy,
+                output=output,
+            )
+        )
+
+    assert close_calls[-1:] == ["candidate-snapshot.zip"]
+    assert raised.value.__cause__ is body_error
+    assert raised.value.published == ()
+    assert raised.value.retained
 
 
 @pytest.mark.parametrize(

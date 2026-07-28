@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import sys
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from pipeline.production_release_fs import (
     BoundDirectory,
     ProductionReleaseFSError,
     ProductionReleaseMutationError,
+    close_bound_capabilities_best_effort,
     open_bound_directory,
     require_linux_mutation_support,
 )
@@ -778,11 +780,30 @@ def stage_production_release_assets(
             retained=retained,
         ) from exc
     finally:
-        for held in reversed(held_files):
-            held.close()
-        if public_dir is not None:
-            public_dir.close()
-        if rebuild_dir is not None:
-            rebuild_dir.close()
-        if parent is not None:
-            parent.close()
+        close_error = close_bound_capabilities_best_effort(
+            (
+                *reversed(held_files),
+                public_dir,
+                rebuild_dir,
+                parent,
+            )
+        )
+        if close_error is not None and sys.exception() is None:
+            published = tuple(
+                dict.fromkeys((*public_names, *close_error.published))
+            )
+            retained = tuple(
+                dict.fromkeys(
+                    (
+                        *private_names,
+                        *public_names,
+                        *close_error.retained,
+                    )
+                )
+            )
+            raise ProductionReleaseAssetsError(
+                "Production release capabilities failed to close; "
+                f"published={published}; retained={retained}",
+                published=published,
+                retained=retained,
+            ) from close_error
