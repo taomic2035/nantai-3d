@@ -22,27 +22,27 @@ from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from pipeline.release_archive import (
+    canonical_json_bytes,
+    deterministic_zip_info,
+    safe_posix_member_path,
+    stable_regular_file_digest,
+)
+
 PREVIEW_RELEASE_SCHEMA = "nantai.preview-release.v1"
 PREVIEW_LAYOUT = "nantai.preview-runtime.v1"
 RELEASE_MANIFEST_NAME = "RELEASE-MANIFEST.json"
 CHECKSUMS_NAME = "SHA256SUMS.txt"
 INPUT_LOCK_SCHEMA = "nantai.preview-release-input-lock.v1"
 PRIVATE_MESH_REASON = "private-mesh-bundles-not-in-preview2"
-ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _VERSION_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$")
-_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _RUNTIME_MUTABLE_ROOTS = frozenset({
     ".venv",
     "nantai_infinite_village.egg-info",
 })
-_WINDOWS_RESERVED = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{index}" for index in range(1, 10)}
-    | {f"LPT{index}" for index in range(1, 10)}
-)
 _PREVIEW_SCENE_TRUST = {
     "synthetic": True,
     "geometry_usability": "preview-only",
@@ -81,53 +81,8 @@ class ReleaseBuild:
     gaussian_count: int
 
 
-def canonical_json_bytes(payload: Any) -> bytes:
-    """Serialize canonical UTF-8 JSON with LF and one trailing newline."""
-    return (
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-    ).encode("utf-8")
-
-
-def safe_posix_member_path(value: str) -> PurePosixPath:
-    """Return one unambiguous relative POSIX path or fail closed."""
-    if not isinstance(value, str) or not value:
-        raise ValueError("release member path must be a non-empty string")
-    if "\\" in value:
-        raise ValueError("release member path must not contain backslashes")
-    if value.startswith("/") or value.startswith("//") or _DRIVE_RE.match(value):
-        raise ValueError("release member path must be relative")
-    if "//" in value:
-        raise ValueError("release member path must not contain empty components")
-
-    raw_parts = value.split("/")
-    if any(part in {"", ".", ".."} for part in raw_parts):
-        raise ValueError("release member path contains an unsafe component")
-    for part in raw_parts:
-        if part.endswith((".", " ")):
-            raise ValueError("release member path has a Windows-ambiguous suffix")
-        stem = part.split(".", 1)[0].upper()
-        if stem in _WINDOWS_RESERVED:
-            raise ValueError("release member path uses a Windows reserved name")
-
-    path = PurePosixPath(*raw_parts)
-    if path.is_absolute() or path.as_posix() != value:
-        raise ValueError("release member path is not canonical POSIX")
-    return path
-
-
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return stable_regular_file_digest(path).sha256
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -748,11 +703,7 @@ def _checksum_bytes(
 
 
 def _zip_info(path: str) -> zipfile.ZipInfo:
-    info = zipfile.ZipInfo(path, date_time=ZIP_EPOCH)
-    info.compress_type = zipfile.ZIP_DEFLATED
-    info.create_system = 3
-    info.external_attr = (stat.S_IFREG | 0o644) << 16
-    return info
+    return deterministic_zip_info(path)
 
 
 def build_release_archive(
