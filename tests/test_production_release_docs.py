@@ -93,6 +93,8 @@ def test_ci_has_three_os_production_contract_and_content_id_compare_jobs() -> No
     assert "modeled-contract-not-real-release" in matrix_job
     assert "tests/probe_production_release_content_id.py" in matrix_job
     assert "--noconftest" in matrix_job
+    for dependency in ("numpy==", "pydantic==", "plyfile=="):
+        assert dependency in matrix_job
     for test_path in (
         "tests/test_release_archive.py",
         "tests/test_production_release_contract.py",

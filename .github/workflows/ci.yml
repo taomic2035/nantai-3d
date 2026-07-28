@@ -247,8 +247,13 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install focused test harness
-        run: python -m pip install "pytest==9.0.3"
+      - name: Install focused test harness and CLI import dependencies
+        run: |
+          python -m pip install \
+            "pytest==9.0.3" \
+            "numpy==2.3.5" \
+            "pydantic==2.13.4" \
+            "plyfile==1.1.4"
 
       - name: Test standard-library Production release contracts
         run: |
