@@ -25,9 +25,14 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；尚未对真实重建运行，不能签署 production |
 | Production release tooling | runtime closure、脱敏公共证据、确定性 ZIP、独立 verifier、portable path identity、隐私机器审计、最终四件套 no-replace 导出与 Studio/Viewer fail-closed 消费已完成 |
 
-这里的 release tooling ready 只表示代码与 modeled contract 已就绪。正式素材、真实 GPU
-3DGS、实测控制点和真实浏览器 QA 仍是外部门禁；它们未在同一 scene identity 通过前，
-不会生成或发布正式 `v1.0.0`。
+这里的 release tooling ready 只表示代码与 modeled contract 已就绪。发布前
+`staging` 会从私有 acceptance root 做 `acceptance rebuild`，并要求重建 ZIP 与输入
+候选逐字节一致，之后才可做隐私审计和四件套整理；发布后的 `download verifier`
+只复验已授权的下载字节与内部合同，不会重开或重做私有验收。
+
+五个外部门禁仍明确开放：真实重叠采集、accepted real-photo SfM、non-mock CUDA
+3DGS、实测米制对齐，以及同一 scene identity 的真实浏览器重建 Viewer/human QA。
+它们未全部通过前，状态保持 Preview/unknown，不会生成或发布正式 `v1.0.0`。
 
 ## 正式版关键路径
 

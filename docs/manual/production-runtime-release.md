@@ -79,15 +79,23 @@ Windows/POSIX 私有绝对路径、symlink、非 regular file、额外文件或�
 ## 整理最终公开资产
 
 三平台 clean-room 浏览器 QA 和人工复核通过后，从已验证候选 ZIP 生成一个全新目录。
-`stage-production-assets` 会再次独立验证候选包、重新执行隐私审计、拒绝 modeled fixture，
-并且只发布四个最终公开资产：
+`stage-production-assets` 会在当前精确 HEAD 从 `ACCEPTANCE_ROOT` + `VERSION`
+重新打开 real acceptance，并在与候选构建相同的 pinned builder environment 中做
+deterministic acceptance rebuild。它把重建产物与输入候选逐字节比对；只有完全一致
+才继续隐私审计，并且只发布四个最终公开资产：
 
 ```powershell
+$env:ACCEPTANCE_ROOT = (Resolve-Path .nantai-studio\real-scene\accepted).Path
+$env:VERSION = "v1.0.0"
 $env:ARCHIVE = (Resolve-Path .nantai-studio\releases\v1.0.0\build-a.zip).Path
 $env:PRIVACY_POLICY = (Resolve-Path .nantai-studio\private\privacy-policy.json).Path
 $env:RELEASE_DIR = (Join-Path $PWD ".nantai-studio\releases\v1.0.0\public-assets")
 python make.py stage-production-assets
 ```
+
+候选构建和 staging rebuild 必须使用同一 pinned environment，因为不同 zlib 实现或
+版本生成的 ZIP bytes 不是可移植身份。跨平台身份仍由 package content ID 加上每个
+artifact 的 SHA-256/字节数集合确定，不能用跨环境 ZIP 逐字节相等替代。
 
 `RELEASE_DIR` 必须不存在，命令不会覆盖旧目录。成功目录精确包含：
 
@@ -113,7 +121,9 @@ python make.py verify-production-assets
 该命令要求目录精确包含四个 regular non-link 文件，验证 archive sidecar，独立解压
 并复验 ZIP，再逐字节比较外置与包内的 `PRODUCTION-RELEASE.json`、
 `SHA256SUMS.txt`。版本、package content ID、公开文件名或任意一项不一致都会拒绝，
-modeled fixture 也不能通过。
+modeled fixture 也不能通过。`verify-production-assets` 只证明下载的四个文件与已经
+授权的字节和内部合同一致；它不重新打开 `ACCEPTANCE_ROOT` 中的 acceptance，也不
+重新证明真实 CUDA、米制对齐、Viewer QA 或人工复核。
 
 ## 解压与运行
 

@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANUAL = ROOT / "docs/manual/production-runtime-release.md"
+STATUS = ROOT / "docs/production-v1-status.md"
+RUNTIME_GUIDE = ROOT / "release/production-verify-and-run.md"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 PROBE = ROOT / "tests/probe_production_release_content_id.py"
 
@@ -97,10 +99,45 @@ def test_manual_separates_repository_and_extracted_runtime_commands() -> None:
         assert maintenance_target not in runtime_section
 
 
+def test_manual_distinguishes_acceptance_staging_from_download_verification() -> None:
+    manual = _read(MANUAL)
+    staging = manual.split("## 整理最终公开资产", 1)[1].split(
+        "## 解压与运行",
+        1,
+    )[0]
+    stage_command = staging.index("python make.py stage-production-assets")
+
+    assert staging.index("$env:ACCEPTANCE_ROOT") < stage_command
+    assert staging.index("$env:VERSION") < stage_command
+    assert re.search(
+        r"stage-production-assets.*重新打开.*(?:real acceptance|真实 acceptance)",
+        staging,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert re.search(r"候选.*逐字节.*(?:一致|比对)", staging, re.DOTALL)
+    assert re.search(
+        r"verify-production-assets.*不.*重新打开.*acceptance",
+        staging,
+        re.IGNORECASE | re.DOTALL,
+    )
+
+
+def test_downloaded_runtime_guide_limits_the_offline_verifier_claim() -> None:
+    guide = _read(RUNTIME_GUIDE)
+
+    for required in (
+        "byte-integrity-verified",
+        "does not reopen",
+        "ACCEPTANCE_ROOT",
+        "re-prove real CUDA",
+    ):
+        assert required in guide
+
+
 def test_readme_and_status_keep_one_concise_authoritative_release_entry() -> None:
     readme = _read(ROOT / "README.md")
     docs_index = _read(ROOT / "docs/README.md")
-    status = _read(ROOT / "docs/production-v1-status.md")
+    status = _read(STATUS)
     manual_link = "docs/manual/production-runtime-release.md"
 
     assert manual_link in readme
@@ -111,6 +148,8 @@ def test_readme_and_status_keep_one_concise_authoritative_release_entry() -> Non
     assert "真实 GPU" in status
     assert "实测控制点" in status
     assert "真实浏览器" in status
+    for release_boundary in ("acceptance rebuild", "staging", "download verifier"):
+        assert release_boundary in status
 
 
 def test_ci_has_three_os_production_contract_and_content_id_compare_jobs() -> None:
