@@ -137,28 +137,58 @@ def test_manual_separates_repository_and_extracted_runtime_commands() -> None:
 def test_manual_build_example_creates_the_archive_parent_before_building() -> None:
     manual = _read(MANUAL)
     build = manual.split("## 构建", 1)[1].split(
-        "## 独立验证下载字节",
+        "## 独立验证候选字节",
         1,
     )[0]
     create_parent = "New-Item -ItemType Directory -Force dist | Out-Null"
-    archive_assignment = (
-        '$env:ARCHIVE = (Join-Path $PWD "dist\\nantai-3d-v1.0.0.zip")'
+    candidate_assignment = (
+        '$candidate = (Join-Path $PWD "dist\\nantai-3d-v1.0.0-candidate.zip")'
     )
+    archive_assignment = "$env:ARCHIVE = $candidate"
 
     assert create_parent in build
+    assert candidate_assignment in build
     assert archive_assignment in build
-    assert build.index(create_parent) < build.index(archive_assignment)
+    assert build.index(create_parent) < build.index(candidate_assignment)
+    assert build.index(candidate_assignment) < build.index(archive_assignment)
     assert build.index(archive_assignment) < build.index(
         "python make.py build-production"
     )
 
 
-def test_manual_download_verification_uses_the_staged_archive_name() -> None:
+def test_manual_reuses_one_private_candidate_through_staging() -> None:
     manual = _read(MANUAL)
-    downloaded_archive = manual.split("## 独立验证下载字节", 1)[1].split(
+    build = manual.split("## 构建", 1)[1].split(
+        "## 独立验证候选字节",
+        1,
+    )[0]
+    verification = manual.split("## 独立验证候选字节", 1)[1].split(
         "## 隐私机器审计",
         1,
     )[0]
+    privacy = manual.split("## 隐私机器审计", 1)[1].split(
+        "## 整理最终公开资产",
+        1,
+    )[0]
+    staging = manual.split("## 整理最终公开资产", 1)[1].split(
+        "候选构建和 staging rebuild",
+        1,
+    )[0]
+
+    assert (
+        '$candidate = (Join-Path $PWD "dist\\nantai-3d-v1.0.0-candidate.zip")'
+        in build
+    )
+    for section in (build, verification, privacy, staging):
+        assert "$env:ARCHIVE = $candidate" in section
+    assert "$candidate =" not in verification
+    assert "$candidate =" not in privacy
+    assert "$candidate =" not in staging
+
+
+def test_manual_separates_private_candidate_from_downloaded_canonical_name() -> None:
+    manual = _read(MANUAL)
+    pre_publication = manual.split("成功目录精确包含：", 1)[0]
     public_assets = manual.split("成功目录精确包含：", 1)[1].split(
         "```",
         2,
@@ -166,11 +196,14 @@ def test_manual_download_verification_uses_the_staged_archive_name() -> None:
     canonical_archive = "nantai-3d-v1.0.0-runtime.zip"
 
     assert canonical_archive in public_assets
-    assert (
-        f"$env:ARCHIVE = (Resolve-Path .\\{canonical_archive}).Path"
-        in downloaded_archive
+    assert re.search(
+        rf"下载.*canonical.*`{re.escape(canonical_archive)}`",
+        manual,
+        re.IGNORECASE | re.DOTALL,
     )
-    assert "nantai-3d-v1.0.0.zip" not in downloaded_archive
+    assert canonical_archive not in pre_publication
+    assert "candidate" in pre_publication
+    assert re.search(r"候选.*(?:不得|不会).*上传", manual, re.DOTALL)
 
 
 def test_manual_distinguishes_acceptance_staging_from_download_verification() -> None:

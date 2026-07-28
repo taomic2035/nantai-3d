@@ -17,6 +17,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from pipeline.durable_io import (
+    DurableIOError,
     _is_linklike,
     capture_real_directory_identity,
     first_linklike_path,
@@ -1717,7 +1718,12 @@ def build_production_release_archive(
         raise ProductionReleaseBuilderError(
             "Production output parent directory is missing or unsafe"
         )
-    output_parent_identity = capture_real_directory_identity(output.parent)
+    try:
+        output_parent_identity = capture_real_directory_identity(output.parent)
+    except DurableIOError as exc:
+        raise ProductionReleaseBuilderError(
+            "Production output parent directory is missing or unsafe"
+        ) from exc
     for path in (
         output,
         sidecar,

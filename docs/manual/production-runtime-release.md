@@ -36,20 +36,22 @@ verify-production-assets
 $env:ACCEPTANCE_ROOT = (Resolve-Path .nantai-studio\real-scene\accepted).Path
 $env:VERSION = "v1.0.0"
 New-Item -ItemType Directory -Force dist | Out-Null
-$env:ARCHIVE = (Join-Path $PWD "dist\nantai-3d-v1.0.0.zip")
+$candidate = (Join-Path $PWD "dist\nantai-3d-v1.0.0-candidate.zip")
+$env:ARCHIVE = $candidate
 python make.py build-production
 ```
 
 `build-production` 会重新打开并验证私有 acceptance，投影脱敏的公开证据，计算 runtime
-scene closure，再以 no-replace 方式生成确定性 ZIP。已有目标不会被覆盖。
+scene closure，再以 no-replace 方式生成确定性 ZIP。已有目标不会被覆盖。`$candidate`
+是本次发布事务唯一的私有候选路径；候选名不是最终公开文件名，不得直接上传。
 
-## 独立验证下载字节
+## 独立验证候选字节
 
-发布前先验证构建产物；从 Release 下载后还必须对下载到本机的实际字节再次运行同一
-`verify-production`，不能用网页显示的哈希或构建机上的旧文件代替：
+发布前先验证刚构建的同一候选字节，不能换用相似文件名、网页显示的哈希或构建机上的
+旧文件：
 
 ```powershell
-$env:ARCHIVE = (Resolve-Path .\nantai-3d-v1.0.0-runtime.zip).Path
+$env:ARCHIVE = $candidate
 python make.py verify-production
 ```
 
@@ -64,7 +66,7 @@ SHA-256/字节数、`SHA256SUMS.txt`、公共证据、scene manifest 与
 必须位于公开包之外：
 
 ```powershell
-$env:ARCHIVE = (Resolve-Path .\nantai-3d-v1.0.0.zip).Path
+$env:ARCHIVE = $candidate
 $env:PRIVACY_POLICY = (Resolve-Path .nantai-studio\private\privacy-policy.json).Path
 $env:PRIVACY_REPORT = (Join-Path $PWD ".nantai-studio\verification\privacy-v1.0.0.json")
 python make.py audit-production-privacy
@@ -88,7 +90,7 @@ pinned builder environment 中做 deterministic acceptance rebuild。它把重�
 ```powershell
 $env:ACCEPTANCE_ROOT = (Resolve-Path .nantai-studio\real-scene\accepted).Path
 $env:VERSION = "v1.0.0"
-$env:ARCHIVE = (Resolve-Path .nantai-studio\releases\v1.0.0\build-a.zip).Path
+$env:ARCHIVE = $candidate
 $env:PRIVACY_POLICY = (Resolve-Path .nantai-studio\private\privacy-policy.json).Path
 $env:RELEASE_DIR = (Join-Path $PWD ".nantai-studio\releases\v1.0.0\public-assets")
 python make.py stage-production-assets
@@ -112,7 +114,9 @@ SHA256SUMS.txt
 工作区，不进入公开目录。这个步骤只收拢已验收字节，不替代双构建一致性、三平台
 浏览器 QA、人工复核或 GitHub 下载后复验。
 
-发布后把四个 GitHub 资产下载到同一个全新目录，再整体复验：
+发布后把四个 GitHub 资产下载到同一个全新目录，再整体复验。此时下载的 canonical
+archive 名称是 `nantai-3d-v1.0.0-runtime.zip`；它由 staging 生成，与私有
+`$candidate` 的候选名称明确分离：
 
 ```powershell
 $env:RELEASE_DIR = (Resolve-Path .\downloaded-v1.0.0-assets).Path

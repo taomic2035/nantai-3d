@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import pipeline.production_release_builder as builder_module
+from pipeline.durable_io import DurableIOError
 from pipeline.production_release_builder import (
     ProductionReleaseBuilderError,
     build_production_release_archive,
@@ -76,6 +77,40 @@ GATES = (
     "release-rights",
     "metric-alignment",
 )
+
+
+def test_build_maps_output_parent_identity_capture_race(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A raced output parent is a builder-domain failure before publication."""
+    output = tmp_path / "runtime.zip"
+
+    def fail_identity(_path):
+        raise DurableIOError("injected output parent identity race")
+
+    monkeypatch.setattr(
+        builder_module,
+        "capture_real_directory_identity",
+        fail_identity,
+    )
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="output parent directory.*unsafe",
+    ) as raised:
+        build_production_release_archive(
+            repo_root=tmp_path,
+            acceptance_root=tmp_path,
+            output_path=output,
+            version="v1.0.0",
+            source_commit="0" * 40,
+            tracked_files=(),
+        )
+
+    assert isinstance(raised.value.__cause__, DurableIOError)
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
 
 
 def test_source_identity_resolves_exact_head_and_tracked_files(

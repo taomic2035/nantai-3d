@@ -620,45 +620,39 @@ def test_archive_extraction_rejects_illegal_path_and_leaves_no_destination(
     assert not destination.exists()
 
 
-def test_archive_extraction_rejects_truncated_zip_and_cleans_destination(
+@pytest.mark.parametrize("failure_type", (EOFError, NotImplementedError))
+def test_archive_extraction_wraps_stream_failures_after_destination_creation(
     tmp_path: Path,
+    monkeypatch,
+    failure_type: type[Exception],
 ) -> None:
-    """Truncated ZIP (EOFError) must fail closed and remove destination."""
+    """Stream failures after mkdir retain their cause and clean owned output."""
     root, _receipt = _tree(tmp_path)
     archive = tmp_path / "runtime.zip"
     write_modeled_production_archive(root, archive)
-    payload = bytearray(archive.read_bytes())
-    truncated = payload[: len(payload) // 2]
-    archive.write_bytes(truncated)
+    parent = tmp_path / "extract-parent"
+    parent.mkdir()
+    sentinel = parent / "keep.txt"
+    sentinel.write_text("parent identity sentinel", encoding="utf-8")
+    destination = parent / "extracted"
 
-    destination = tmp_path / "extracted"
-    with pytest.raises(ProductionReleaseVerificationError):
-        extract_production_release_archive(archive, destination)
-    assert not destination.exists()
+    def fail_after_destination_creation(_path):
+        assert destination.is_dir()
+        raise failure_type("injected archive stream failure")
 
-
-def test_archive_extraction_rejects_unsupported_compression_and_cleans_destination(
-    tmp_path: Path,
-) -> None:
-    """Unsupported compression method must fail closed and remove destination."""
-    archive_path = tmp_path / "unsupported.zip"
-    with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.writestr(
-            deterministic_zip_info("nantai-runtime/placeholder.txt"),
-            b"placeholder",
-        )
-    payload = bytearray(archive_path.read_bytes())
-    local_sig = b"PK\x03\x04"
-    central_sig = b"PK\x01\x02"
-    local_index = payload.index(local_sig)
-    payload[local_index + 8 : local_index + 10] = (99).to_bytes(2, "little")
-    central_index = payload.index(central_sig)
-    payload[central_index + 10 : central_index + 12] = (99).to_bytes(
-        2, "little"
+    monkeypatch.setattr(
+        verifier_module.zipfile,
+        "ZipFile",
+        fail_after_destination_creation,
     )
-    archive_path.write_bytes(payload)
 
-    destination = tmp_path / "extracted"
-    with pytest.raises(ProductionReleaseVerificationError):
-        extract_production_release_archive(archive_path, destination)
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="archive verification failed",
+    ) as raised:
+        extract_production_release_archive(archive, destination)
+
+    assert isinstance(raised.value.__cause__, failure_type)
     assert not destination.exists()
+    assert sentinel.read_text(encoding="utf-8") == "parent identity sentinel"
+    assert parent.is_dir()
