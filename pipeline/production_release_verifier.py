@@ -696,6 +696,18 @@ def extract_production_release_archive(
                     )
                     for relative in sorted(reader.files())
                 )
+                extraction_nodes: set[str] = set()
+                for relative, _info, _byte_length in members:
+                    for depth in range(1, len(relative.parts) + 1):
+                        node = "/".join(relative.parts[:depth])
+                        if node in extraction_nodes:
+                            continue
+                        if len(extraction_nodes) >= limits.maximum_members:
+                            raise ProductionReleaseVerificationError(
+                                "Production extraction node count exceeds "
+                                "its maximum"
+                            )
+                        extraction_nodes.add(node)
                 with open_bound_directory(target.parent) as parent:
                     try:
                         root = parent.create_directory(

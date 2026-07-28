@@ -923,6 +923,124 @@ def test_archive_extraction_rejects_path_budget_before_mutation(
     sys.platform != "linux",
     reason="append-only extraction is Linux-only",
 )
+def test_archive_extraction_counts_deep_implicit_parents_before_mutation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive = tmp_path / "deep.zip"
+    with zipfile.ZipFile(archive, "w") as zip_handle:
+        zip_handle.writestr(
+            deterministic_zip_info("wrapper/a/b/c/member.bin"),
+            b"x",
+        )
+    monkeypatch.setattr(
+        verifier_module,
+        "_verify_reader",
+        lambda *_args, **_kwargs: object(),
+    )
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="node count",
+    ):
+        extract_production_release_archive(
+            archive,
+            destination,
+            limits=ArchiveLimits(maximum_members=3),
+        )
+
+    assert not destination.exists()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
+def test_archive_extraction_deduplicates_shared_but_counts_distinct_parents(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive = tmp_path / "parents.zip"
+    with zipfile.ZipFile(archive, "w") as zip_handle:
+        for relative in (
+            "wrapper/shared/a.bin",
+            "wrapper/shared/b.bin",
+            "wrapper/distinct/c.bin",
+        ):
+            zip_handle.writestr(
+                deterministic_zip_info(relative),
+                b"x",
+            )
+    monkeypatch.setattr(
+        verifier_module,
+        "_verify_reader",
+        lambda *_args, **_kwargs: object(),
+    )
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="node count",
+    ):
+        extract_production_release_archive(
+            archive,
+            destination,
+            limits=ArchiveLimits(maximum_members=4),
+        )
+
+    assert not destination.exists()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
+def test_archive_extraction_counts_one_shared_parent_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive = tmp_path / "shared.zip"
+    with zipfile.ZipFile(archive, "w") as zip_handle:
+        for relative in (
+            "wrapper/shared/a.bin",
+            "wrapper/shared/b.bin",
+        ):
+            zip_handle.writestr(
+                deterministic_zip_info(relative),
+                b"x",
+            )
+    verification = object()
+    monkeypatch.setattr(
+        verifier_module,
+        "_verify_reader",
+        lambda *_args, **_kwargs: verification,
+    )
+    monkeypatch.setattr(
+        verifier_module,
+        "verify_production_release_tree",
+        lambda *_args, **_kwargs: verification,
+    )
+    destination = tmp_path / "extracted"
+
+    observed = extract_production_release_archive(
+        archive,
+        destination,
+        limits=ArchiveLimits(maximum_members=3),
+    )
+
+    assert observed == destination
+    assert (destination / "shared/a.bin").read_bytes() == b"x"
+    assert (destination / "shared/b.bin").read_bytes() == b"x"
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
 def test_archive_extraction_rejects_invalid_contract_before_mutation(
     tmp_path: Path,
 ) -> None:
