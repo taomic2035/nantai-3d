@@ -770,6 +770,71 @@ class TestProductionReleaseTargets:
             )
 
 
+class TestProductionReleaseExitCodePropagation:
+    """Production targets must propagate subprocess non-zero exit codes."""
+
+    @pytest.mark.parametrize(
+        ("target", "env_vars"),
+        (
+            (
+                "build_production",
+                {
+                    "ACCEPTANCE_ROOT": "private/real-scene",
+                    "VERSION": "v1.0.0",
+                    "ARCHIVE": "dist/runtime.zip",
+                },
+            ),
+            (
+                "verify_production",
+                {"ARCHIVE": "dist/runtime.zip"},
+            ),
+            (
+                "audit_production_privacy",
+                {
+                    "ARCHIVE": "dist/runtime.zip",
+                    "PRIVACY_POLICY": "private/policy.json",
+                    "PRIVACY_REPORT": "reports/report.json",
+                },
+            ),
+            (
+                "stage_production_assets",
+                {
+                    "ARCHIVE": "dist/build-a.zip",
+                    "PRIVACY_POLICY": "private/policy.json",
+                    "RELEASE_DIR": "dist/release-assets",
+                    "ACCEPTANCE_ROOT": "private/accepted",
+                    "VERSION": "v1.0.0",
+                },
+            ),
+            (
+                "verify_production_assets",
+                {"RELEASE_DIR": "dist/release-assets"},
+            ),
+        ),
+    )
+    def test_target_propagates_non_zero_exit_code(
+        self,
+        make,
+        monkeypatch,
+        target,
+        env_vars,
+    ):
+        for name, value in env_vars.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                SystemExit(42)
+            ),
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            getattr(make, target)()
+
+        assert exc_info.value.code == 42
+
+
 class TestServeTarget:
     def test_mounts_explicit_real_scene_import_without_copying_it(
         self,
