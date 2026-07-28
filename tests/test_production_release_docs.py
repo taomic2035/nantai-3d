@@ -114,11 +114,46 @@ def test_manual_distinguishes_acceptance_staging_from_download_verification() ->
         staging,
         re.IGNORECASE | re.DOTALL,
     )
-    assert re.search(r"候选.*逐字节.*(?:一致|比对)", staging, re.DOTALL)
+    assert re.search(r"当前精确\s+HEAD", staging)
+    assert re.search(r"deterministic\s+acceptance rebuild", staging)
     assert re.search(
-        r"verify-production-assets.*不.*重新打开.*acceptance",
+        r"与候选构建(?:相同|一致).*pinned builder environment",
         staging,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"重建产物.*输入候选.*逐字节比对.*完全一致"
+        r".*隐私审计.*只发布四个最终公开资产",
+        staging,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"不同 zlib.*ZIP bytes.*不是可移植身份",
+        staging,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"跨平台身份.*package content ID.*每个"
+        r".*artifact.*SHA-256/字节数集合",
+        staging,
+        re.DOTALL,
+    )
+
+    download_verification = staging.split("发布后把四个 GitHub 资产", 1)[1]
+    assert re.search(
+        r"verify-production-assets.*只证明.*授权的字节.*内部合同",
+        download_verification,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"不重新打开.*acceptance",
+        download_verification,
         re.IGNORECASE | re.DOTALL,
+    )
+    assert re.search(
+        r"不\s*重新证明.*真实 CUDA.*米制对齐.*Viewer QA.*人工复核",
+        download_verification,
+        re.DOTALL,
     )
 
 
@@ -132,6 +167,24 @@ def test_downloaded_runtime_guide_limits_the_offline_verifier_claim() -> None:
         "re-prove real CUDA",
     ):
         assert required in guide
+
+    assert re.search(r"exact\s+source commit", guide)
+    assert re.search(
+        r"downloaded verifier does not reopen that private root",
+        guide,
+        re.IGNORECASE,
+    )
+    assert re.search(
+        r"does not reopen.*re-prove real CUDA.*metric alignment"
+        r".*Viewer QA.*human review",
+        guide,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert re.search(
+        r"runtime runner does not accept.*private scene import override",
+        guide,
+        re.IGNORECASE | re.DOTALL,
+    )
 
 
 def test_readme_and_status_keep_one_concise_authoritative_release_entry() -> None:
@@ -150,6 +203,41 @@ def test_readme_and_status_keep_one_concise_authoritative_release_entry() -> Non
     assert "真实浏览器" in status
     for release_boundary in ("acceptance rebuild", "staging", "download verifier"):
         assert release_boundary in status
+
+
+def test_status_keeps_all_five_real_scene_gates_open_for_one_identity() -> None:
+    status = _read(STATUS)
+    summary = status.split("## 一句话状态", 1)[1].split(
+        "## 已完成的必要基础",
+        1,
+    )[0]
+    gate_match = re.search(
+        r"五个外部门禁仍明确开放：(?P<gates>.*?)(?:\n\n|\Z)",
+        status,
+        re.DOTALL,
+    )
+
+    assert gate_match is not None
+    gates = gate_match.group("gates")
+    for required_gate in (
+        "真实重叠采集",
+        "accepted real-photo SfM",
+        "实测米制对齐",
+    ):
+        assert required_gate in gates
+    assert re.search(r"non-mock CUDA\s+3DGS", gates)
+    assert re.search(
+        r"同一 scene identity.*真实浏览器重建 Viewer/human QA",
+        gates,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"它们未全部通过前.*Preview/unknown"
+        r".*不会生成或发布正式 `v1\.0\.0`",
+        gates,
+        re.DOTALL,
+    )
+    assert re.search(r"仍是\s+Preview，不是\s+Production V1", summary)
 
 
 def test_ci_has_three_os_production_contract_and_content_id_compare_jobs() -> None:
