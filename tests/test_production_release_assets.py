@@ -9,7 +9,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -451,14 +451,14 @@ def test_stage_success_close_failure_is_domain_error_and_closes_all_files(
     original_close = release_fs.BoundFile.close
 
     def close_with_injected_receipt_failure(bound) -> None:
-        close_calls.append(bound.name)
+        component = PurePosixPath(bound.name).name
+        close_calls.append(component)
         original_close(bound)
-        if bound.name == PRODUCTION_RELEASE_NAME:
-            relative = f"{output.name}/{bound.name}"
+        if component == PRODUCTION_RELEASE_NAME:
             raise release_fs.ProductionReleaseMutationError(
                 "injected receipt close failure",
-                published=(relative,),
-                retained=(relative,),
+                published=(bound.name,),
+                retained=(bound.name,),
             )
 
     monkeypatch.setattr(
@@ -515,7 +515,7 @@ def test_stage_body_error_wins_over_close_failure(
     original_close = release_fs.BoundFile.close
 
     def close_with_injected_snapshot_failure(bound) -> None:
-        close_calls.append(bound.name)
+        close_calls.append(PurePosixPath(bound.name).name)
         original_close(bound)
         raise release_fs.ProductionReleaseMutationError(
             "injected snapshot close failure",
