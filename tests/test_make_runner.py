@@ -435,6 +435,7 @@ class TestRealSceneDispatch:
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+            timeout=30,
         )
         assert proc.returncode == 2
         assert proc.stderr == ""
