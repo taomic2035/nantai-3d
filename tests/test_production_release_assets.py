@@ -1102,18 +1102,20 @@ def test_stage_rejects_candidate_archive_toctou(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """A7: candidate archive changed during rebuild."""
+    """A7: path replacement cannot change the already-held candidate inode."""
     tree = tmp_path / "runtime"
     _write_real_contract_tree(tree)
     source = tmp_path / "candidate.zip"
     write_modeled_production_archive(tree, source)
     policy = _privacy_policy(tmp_path / "privacy-policy.json")
     output = tmp_path / "release-assets"
-    _bind_acceptance_rebuild(monkeypatch, source)
+    original_bytes = source.read_bytes()
+    original_sha = hashlib.sha256(original_bytes).hexdigest()
+    retained_candidate = source.with_name("candidate-held.zip")
+    _bind_acceptance_rebuild(monkeypatch, retained_candidate)
     original_build = assets_module.build_production_release_archive
 
-    def _corrupt_during_rebuild(**kwargs) -> ProductionReleaseBuild:
-        retained_candidate = source.with_name("candidate-held.zip")
+    def _replace_name_during_rebuild(**kwargs) -> ProductionReleaseBuild:
         source.rename(retained_candidate)
         source.write_bytes(b"corrupted")
         return original_build(**kwargs)
@@ -1121,23 +1123,21 @@ def test_stage_rejects_candidate_archive_toctou(
     monkeypatch.setattr(
         assets_module,
         "build_production_release_archive",
-        _corrupt_during_rebuild,
+        _replace_name_during_rebuild,
     )
 
-    with pytest.raises(
-        ProductionReleaseAssetsError,
-        match="acceptance rebuild|match|changed",
-    ):
-        stage_production_release_assets(
-            **_stage_kwargs(
-                tmp_path,
-                archive=source,
-                policy=policy,
-                output=output,
-            )
+    result = stage_production_release_assets(
+        **_stage_kwargs(
+            tmp_path,
+            archive=source,
+            policy=policy,
+            output=output,
         )
+    )
 
-    _assert_not_published(output)
+    assert result.archive_sha256 == original_sha
+    assert result.archive_path.read_bytes() == original_bytes
+    assert source.read_bytes() == b"corrupted"
 
 
 @LINUX_MUTATION_ONLY

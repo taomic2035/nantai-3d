@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     ) as raw:
         tree = Path(raw) / "tree"
         _write_modeled_tree(tree)
-        report = verify_production_release_tree(tree)
+        report = verify_production_release_tree(tree.resolve(strict=True))
     output.write_bytes(f"{report.package_content_id}\n".encode("ascii"))
     return 0
 

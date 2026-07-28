@@ -526,11 +526,7 @@ def stage_production_release_assets(
                 "Production candidate identities disagree"
             )
         descriptor_after = os.fstat(source_stream.fileno())
-        source_after = source.lstat()
-        if (
-            _signature(source_before) != _signature(descriptor_after)
-            or _signature(source_before) != _signature(source_after)
-        ):
+        if _signature(source_before) != _signature(descriptor_after):
             raise ProductionReleaseAssetsError(
                 "Production candidate archive changed during validation"
             )
@@ -640,7 +636,7 @@ def stage_production_release_assets(
     except ProductionReleaseBuilderError as exc:
         retained = tuple((*private_names, *public_names))
         raise ProductionReleaseAssetsError(
-            "Production acceptance rebuild failed; "
+            f"Production acceptance rebuild failed: {exc}; "
             f"published={tuple(public_names)}; retained={retained}",
             published=tuple(public_names),
             retained=retained,

@@ -1993,7 +1993,7 @@ def build_production_release_archive(
     except Exception as exc:
         retained = tuple(public_names)
         raise ProductionReleaseBuilderError(
-            "Production release build failed; "
+            f"Production release build failed: {exc}; "
             f"published={tuple(public_names)}; retained={retained}",
             published=tuple(public_names),
             retained=retained,

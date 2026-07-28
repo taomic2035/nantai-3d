@@ -1782,7 +1782,7 @@ def test_build_failure_retains_partial_archive_without_commit_marker(
 
     with pytest.raises(
         ProductionReleaseBuilderError,
-        match="published=.*retained=",
+        match="injected.*published=.*retained=",
     ) as raised:
         build_production_release_archive(
             repo_root=repo,
