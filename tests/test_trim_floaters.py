@@ -148,6 +148,8 @@ class TestMainConfirm:
         assert manifest.exists()
         captured = capsys.readouterr().out
         assert "已写出" in captured
+        assert "PLY 自身的 nantai_meta 已内嵌" in captured
+        assert "只在上面这份 sidecar" not in captured
 
     def test_confirm_drops_outliers_keeps_core(
             self, clustered_ply, tmp_path):

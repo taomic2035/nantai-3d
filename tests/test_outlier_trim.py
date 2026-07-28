@@ -364,6 +364,19 @@ class TestLossyEditIsRecordedInPlyBytes:
         # 可回溯到完整 sidecar
         assert edit["trim_id"]
 
+    def test_sidecar_disclosure_agrees_with_embedded_ply_lineage(
+            self, clustered_scene, tmp_path):
+        out = tmp_path / "t.ply"
+        trim_scene(clustered_scene, out,
+                   rules=[OccupancyRule(voxel_size=5.0, min_occupancy=2)], confirm=True)
+
+        manifest = json.loads(
+            (tmp_path / f"t.ply{TRIM_MANIFEST_SUFFIX}").read_text(encoding="utf-8"))
+        disclosure = manifest["known_limitation"]
+        assert "PLY 自身的 nantai_meta 已内嵌" in disclosure
+        assert "只记录在这份 sidecar" not in disclosure
+        assert "不含剔除记录" not in disclosure
+
     def test_untrimmed_ply_records_nothing(self, clustered_scene, tmp_path):
         """没剔过就不该凭空多出记录 (空列表 == 没有记录)。"""
         p = tmp_path / "plain.ply"

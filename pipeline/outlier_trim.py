@@ -44,13 +44,14 @@ opacity              **无效**     **100.00%** (→ 1328x877x700, 几乎没动)
 上述 canary 的 ``units == "unknown"`` —— 所以那里的 "5" **不是 5 米**, 而是"5 个未经验证的
 场景单位"; 把它叫米就是无证据的声称。manifest 如实记 ``threshold_units``, units 未知时告警。
 
-已知局限 (**必读**)
-------------------
-剔除记录只在 **sidecar manifest** (``<out>.ply.trim_manifest.json``) 里, **产物 ply 自身的
-``nantai_meta`` 不记录本次剔除** —— 只读 ply 的下游**无法**得知它被剔过。根因: 在 ply 元数据
-里记录剔除需要改 ``gaussian_scene`` 的元数据 schema, 超出本模块的改动范围。缓解: manifest
-用 sha256 与产物 ply 的**实际字节**绑定 (``output.sha256``), 消费者可验证"这份 manifest 描述
-的正是这个 ply"。**这仍是一个真实的 provenance 缺口**, 修复需要 schema 变更。
+Lineage 存储边界 (**必读**)
+---------------------------
+产物 PLY 自身的 ``nantai_meta.lossy_edits`` 已内嵌本次剔除摘要，所以复制、改名或交给
+``prepare_import`` 后，下游只读 PLY 也能知道它被怎样剔过。sidecar manifest
+(``<out>.ply.trim_manifest.json``) 仍保存逐规则分位数、完整告警等详细报告，并用
+``output.sha256`` 绑定产物实际字节。已知局限是：忽略 ``nantai_meta`` 的第三方 PLY
+消费者仍看不到 lineage；只复制 PLY 而不复制 sidecar 时也会丢失详细统计，但不会丢失
+内嵌的有损编辑摘要。
 """
 from __future__ import annotations
 
@@ -498,9 +499,10 @@ def trim_scene(
         },
         "warnings": report.warnings,
         "known_limitation": (
-            "本次剔除只记录在这份 sidecar manifest 里; 产物 ply 的 nantai_meta 元数据"
-            "不含剔除记录, 只读 ply 的下游无法得知它被剔过。output.sha256 与产物"
-            "实际字节绑定, 可验证本 manifest 描述的正是该 ply。"),
+            "PLY 自身的 nantai_meta 已内嵌有损编辑摘要; sidecar 保存逐规则分位数、"
+            "完整告警等详细报告，并由 output.sha256 绑定实际 PLY 字节。忽略 "
+            "nantai_meta 的第三方消费者仍看不到 lineage；只复制 PLY 不复制 "
+            "sidecar 时会丢失详细统计，但不会丢失内嵌摘要。"),
     }
     # newline="\n": 与 registration/recon_manifest/chunks.json 惯例统一, 跨平台字节可复现。
     manifest_path.write_text(

@@ -10,7 +10,7 @@
 故本工具:
   1. **没有默认阈值** —— 不给判据就什么都不剔。工具不替你决定丢掉你 20% 的重建。
   2. **默认 dry-run** —— 先让你看见自己数据上的真实代价, 加 --confirm 才真的写。
-  3. 写出时留下 sidecar manifest, 如实记录丢了多少、按什么规则丢的 (有损可回溯)。
+  3. 写出时把有损摘要内嵌进 PLY, 并留下含完整统计的 sidecar manifest。
 
 判据怎么选 (实测见 pipeline/outlier_trim.py 模块 docstring):
   - occupancy 在真实数据上最有效; opacity 在那份数据上是**反向信号** (丢 44% 的高斯而
@@ -148,8 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     if report.written:
         print(f"\n[已写出] {report.output_path}")
         print(f"[剔除记录] {report.manifest_path}")
-        print("注意: 剔除记录只在上面这份 sidecar manifest 里 —— 产物 ply 自身的元数据"
-              "不含剔除记录, 只读 ply 的下游无法得知它被剔过。")
+        print("lineage: PLY 自身的 nantai_meta 已内嵌有损编辑摘要；上面的 sidecar "
+              "保存完整统计并以 output.sha256 绑定 PLY。")
     else:
         print(f"\n[dry-run] 未写任何文件。以上是 {args.output} 若落盘的真实取舍。")
         print("确认要丢掉上面这些高斯? 加 --confirm 重跑。")

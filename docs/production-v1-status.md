@@ -60,10 +60,24 @@ import 得到 13,523 个 SH degree 3 Gaussian、4 个空间块和 LOD 0/1/2。�
 1000-step 本地模型仍明显稀疏、模糊并有漂浮物，因此这只是端到端真实照片 canary，
 不是质量验收，也不是可发布资产。
 
+同一 SfM、同一种子继续训练到 5000 step 后得到 42,530 个 Gaussian，但原始 bounds
+被大尺度离群点扩张到 `88.7 x 96.0 x 75.2` 任意单位。私有浏览器在完全相同的相机、
+LOD2 与缩放下完成三个视角 A/B：保留 37,373 个 Gaussian 的最优试验
+(`occupancy >= 10` 且 `max_scale <= 1`) 比 1000-step 更有结构，但空洞、黑色颗粒和
+漂浮薄片在三个视角都仍明显；追加 `opacity >= 0.05` 没有实质改善。结论是停止继续用
+阈值“修”这份 canary，不把任一派生物提升或发布，下一次画质投入转向权利明确的重叠
+采集和 CUDA 训练。A/B 页面、PLY、截图和有损 sidecar 全部只在忽略的
+`.nantai-studio/` 中。
+
 源数据 `license_status=not-declared`、`redistribution_allowed=false`；全部原始照片、
 训练产物、receipt 与临时 Viewer 副本只保留在忽略的 `.nantai-studio/`，不得进入
 Git 或 Release。正式五门没有因此减少：Production 仍需要权利明确的正式采集、同
 scene 的 production SfM/CUDA 训练、实测米制对齐和 receipt-bound Viewer/human QA。
+
+上述长路径修复、机器链与状态文档对应的精确提交
+[`bf50be2`](https://github.com/taomic2035/nantai-3d/commit/bf50be261cb7f7210f28da7c71924b0aaee875c7)
+已通过 [GitHub Actions run 30399588079](https://github.com/taomic2035/nantai-3d/actions/runs/30399588079)
+全部 14 个 job。
 
 ## 正式版关键路径
 
