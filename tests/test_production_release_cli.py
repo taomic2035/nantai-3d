@@ -46,6 +46,21 @@ def test_isolated_cli_emits_ascii_json_for_valid_archive(tmp_path: Path) -> None
     completed.stdout.encode("ascii")
 
 
+def test_isolated_cli_emits_ascii_json_for_valid_tree(tmp_path: Path) -> None:
+    tree = tmp_path / "runtime"
+    write_modeled_production_tree(tree)
+    script = Path(__file__).parents[1] / "scripts/verify_production_release.py"
+
+    completed = _run_isolated(script, tree)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["valid"] is True
+    assert report["package_integrity"] == "verified"
+    assert report["release_contract"] == "modeled-contract-only"
+    completed.stdout.encode("ascii")
+
+
 def test_isolated_cli_fails_cleanly_without_partial_extraction(
     tmp_path: Path,
 ) -> None:
