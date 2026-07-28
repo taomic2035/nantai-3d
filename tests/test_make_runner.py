@@ -634,6 +634,8 @@ class TestProductionReleaseTargets:
         monkeypatch,
     ):
         calls = []
+        monkeypatch.setenv("ACCEPTANCE_ROOT", "private/real-scene")
+        monkeypatch.setenv("VERSION", "v1.0.0")
         monkeypatch.setenv("ARCHIVE", "dist/build-a.zip")
         monkeypatch.setenv(
             "PRIVACY_POLICY",
@@ -643,11 +645,6 @@ class TestProductionReleaseTargets:
             "RELEASE_DIR",
             "dist/v1.0.0-release-assets",
         )
-        monkeypatch.setenv(
-            "ACCEPTANCE_ROOT",
-            ".nantai-studio/real-scene/accepted",
-        )
-        monkeypatch.setenv("VERSION", "v1.0.0")
         monkeypatch.setattr(
             make,
             "run",
@@ -660,27 +657,27 @@ class TestProductionReleaseTargets:
             [
                 make.PY,
                 "scripts/stage_production_release_assets.py",
+                "--acceptance-root",
+                "private/real-scene",
+                "--version",
+                "v1.0.0",
                 "--archive",
                 "dist/build-a.zip",
                 "--privacy-policy",
                 "private/privacy-policy.json",
                 "--output-dir",
                 "dist/v1.0.0-release-assets",
-                "--acceptance-root",
-                ".nantai-studio/real-scene/accepted",
-                "--version",
-                "v1.0.0",
             ]
         ]
 
     @pytest.mark.parametrize(
         "missing",
         (
+            "ACCEPTANCE_ROOT",
+            "VERSION",
             "ARCHIVE",
             "PRIVACY_POLICY",
             "RELEASE_DIR",
-            "ACCEPTANCE_ROOT",
-            "VERSION",
         ),
     )
     def test_stage_production_assets_requires_exact_inputs(
@@ -690,11 +687,11 @@ class TestProductionReleaseTargets:
         missing,
     ):
         for name, value in (
+            ("ACCEPTANCE_ROOT", "private/real-scene"),
+            ("VERSION", "v1.0.0"),
             ("ARCHIVE", "dist/build-a.zip"),
             ("PRIVACY_POLICY", "private/privacy-policy.json"),
             ("RELEASE_DIR", "dist/v1.0.0-release-assets"),
-            ("ACCEPTANCE_ROOT", ".nantai-studio/real-scene/accepted"),
-            ("VERSION", "v1.0.0"),
         ):
             monkeypatch.setenv(name, value)
         monkeypatch.delenv(missing)
@@ -708,6 +705,8 @@ class TestProductionReleaseTargets:
         monkeypatch,
     ):
         calls = []
+        monkeypatch.delenv("ACCEPTANCE_ROOT", raising=False)
+        monkeypatch.delenv("VERSION", raising=False)
         monkeypatch.setenv(
             "RELEASE_DIR",
             "downloads/v1.0.0-release-assets",

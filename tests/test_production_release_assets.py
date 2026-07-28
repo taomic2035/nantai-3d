@@ -680,11 +680,12 @@ def test_cli_stages_exact_inputs_and_emits_ascii_json(
 
     assert exit_code == 0
     assert observed == {
+        "repo_root": assets_cli._REPO_ROOT,
+        "acceptance_root": acceptance,
+        "version": "v1.0.0",
         "archive_path": archive,
         "privacy_policy_path": policy,
         "output_dir": output,
-        "acceptance_root": acceptance,
-        "version": "v1.0.0",
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["archive_sha256"] == "a" * 64
@@ -724,6 +725,35 @@ def test_cli_fails_without_partial_success_output(
     assert exit_code == 2
     assert captured.out == ""
     assert "blocked" in captured.err
+
+
+@pytest.mark.parametrize(
+    "missing_flag",
+    ("--acceptance-root", "--version"),
+)
+def test_cli_requires_acceptance_root_and_version(
+    tmp_path: Path,
+    missing_flag: str,
+) -> None:
+    arguments = [
+        "--archive",
+        str(tmp_path / "candidate.zip"),
+        "--privacy-policy",
+        str(tmp_path / "policy.json"),
+        "--output-dir",
+        str(tmp_path / "release-assets"),
+        "--acceptance-root",
+        str(tmp_path / "acceptance"),
+        "--version",
+        "v1.0.0",
+    ]
+    index = arguments.index(missing_flag)
+    del arguments[index : index + 2]
+
+    with pytest.raises(SystemExit) as exc_info:
+        assets_cli.main(arguments)
+
+    assert exc_info.value.code == 2
 
 
 def test_verify_cli_emits_ascii_json(

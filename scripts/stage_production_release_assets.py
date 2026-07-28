@@ -42,11 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         result = stage_production_release_assets(
+            repo_root=_REPO_ROOT,
+            acceptance_root=arguments.acceptance_root,
+            version=arguments.version,
             archive_path=arguments.archive,
             privacy_policy_path=arguments.privacy_policy,
             output_dir=arguments.output_dir,
-            acceptance_root=arguments.acceptance_root,
-            version=arguments.version,
         )
     except (ProductionReleaseAssetsError, OSError) as exc:
         message = str(exc).encode(

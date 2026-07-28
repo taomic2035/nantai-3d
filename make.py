@@ -308,25 +308,25 @@ def audit_production_privacy() -> None:
 
 
 def stage_production_assets() -> None:
+    acceptance_root = _required_environment("ACCEPTANCE_ROOT")
+    version = _required_environment("VERSION")
     archive = _required_environment("ARCHIVE")
     policy = _required_environment("PRIVACY_POLICY")
     output_dir = _required_environment("RELEASE_DIR")
-    acceptance_root = _required_environment("ACCEPTANCE_ROOT")
-    version = _required_environment("VERSION")
     run(
         [
             PY,
             "scripts/stage_production_release_assets.py",
+            "--acceptance-root",
+            acceptance_root,
+            "--version",
+            version,
             "--archive",
             archive,
             "--privacy-policy",
             policy,
             "--output-dir",
             output_dir,
-            "--acceptance-root",
-            acceptance_root,
-            "--version",
-            version,
         ]
     )
 
