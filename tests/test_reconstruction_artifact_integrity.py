@@ -88,6 +88,48 @@ def _write_ply(path: Path, point_count: int, attributes: list[str]) -> bytes:
     return payload
 
 
+_LOSSY_EDIT = {
+    "operation": "outlier_trim",
+    "lossy": True,
+    "rules": [{"kind": "max_scale", "threshold": 1.0}],
+    "threshold_units": "arbitrary",
+    "points_before": 10,
+    "points_after": 8,
+    "dropped": 2,
+    "trim_id": "trim-test-integrity",
+}
+
+
+def _bind_full_lossy_lineage(
+    manifest_path: Path,
+    manifest: dict,
+    *,
+    manifest_edits: object = (_LOSSY_EDIT,),
+) -> None:
+    full_path = manifest_path.parent / manifest["full_3dgs"]
+    payload = full_path.read_bytes()
+    metadata = json.dumps(
+        {"schema_version": 2, "lossy_edits": [_LOSSY_EDIT]},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    payload = payload.replace(
+        b"format ascii 1.0\n",
+        b"format ascii 1.0\ncomment nantai_meta=" + metadata + b"\n",
+        1,
+    )
+    full_path.write_bytes(payload)
+    descriptor = manifest["artifacts"]["full_3dgs"]
+    descriptor["sha256"] = _sha256_bytes(payload)
+    descriptor["bytes"] = len(payload)
+    if manifest_edits is not None:
+        manifest["lossy_edits"] = list(manifest_edits)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), "utf-8"
+    )
+
+
 def _make_clean_manifest(
     recon_dir: Path,
     *,
@@ -330,6 +372,53 @@ def test_clean_manifest_verifies_all_artifacts(tmp_path: Path) -> None:
     # geometry_usability is preserved as-declared, never promoted.
     assert report.geometry_usability == "preview-proxy"
     assert report.chunks_report is None
+
+
+def test_matching_lossy_lineage_is_verified_and_reported(tmp_path: Path) -> None:
+    manifest_path, manifest = _make_clean_manifest(tmp_path / "recon")
+    _bind_full_lossy_lineage(manifest_path, manifest)
+
+    report = verify_recon_artifacts(manifest_path)
+
+    assert report.contradictions == []
+    assert report.lossy_edits == [_LOSSY_EDIT]
+
+
+def test_trimmed_ply_without_manifest_lineage_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manifest_path, manifest = _make_clean_manifest(tmp_path / "recon")
+    _bind_full_lossy_lineage(
+        manifest_path,
+        manifest,
+        manifest_edits=None,
+    )
+
+    report = verify_recon_artifacts(manifest_path)
+
+    assert any(
+        "lossy_edits" in contradiction and "missing" in contradiction
+        for contradiction in report.contradictions
+    )
+
+
+def test_manifest_and_ply_lossy_lineage_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manifest_path, manifest = _make_clean_manifest(tmp_path / "recon")
+    changed = {**_LOSSY_EDIT, "threshold_units": "meters"}
+    _bind_full_lossy_lineage(
+        manifest_path,
+        manifest,
+        manifest_edits=[changed],
+    )
+
+    report = verify_recon_artifacts(manifest_path)
+
+    assert any(
+        "lossy_edits" in contradiction and "differs" in contradiction
+        for contradiction in report.contradictions
+    )
 
 
 def test_clean_manifest_with_chunks_verifies_chunk_paths(tmp_path: Path) -> None:

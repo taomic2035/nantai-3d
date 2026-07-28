@@ -44,6 +44,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pipeline.lossy_lineage import reconcile_lossy_edits
 from pipeline.spatial_chunk import verify_chunks_integrity
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,7 @@ class IntegrityReport(BaseModel):
     contradictions: list[str] = Field(default_factory=list)
     trust_preserved: bool = True
     geometry_usability: str | None = None
+    lossy_edits: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +558,7 @@ def verify_recon_artifacts(manifest_path: Path) -> IntegrityReport:
     path_safety_violations: list[PathSafetyViolation] = []
     seen_paths: dict[str, str] = {}  # path -> first artifact_key
     duplicate_paths: list[str] = []
+    full_3dgs_path: Path | None = None
 
     for key, entry in _iter_artifact_entries(artifacts):
         declared_path = entry.get("path")
@@ -611,6 +614,8 @@ def verify_recon_artifacts(manifest_path: Path) -> IntegrityReport:
             duplicate_paths.append(declared_path)
         else:
             seen_paths[declared_path] = key
+        if key == "full_3dgs":
+            full_3dgs_path = resolved
 
         # SHA + size verification.
         declared_sha = entry.get("sha256")
@@ -716,6 +721,14 @@ def verify_recon_artifacts(manifest_path: Path) -> IntegrityReport:
 
     # Trust preservation: detect contradictions, never promote.
     contradictions = _check_metric_contradictions(manifest)
+    lossy_edits: list[dict[str, Any]] = []
+    if full_3dgs_path is not None:
+        lossy_edits, lineage_error = reconcile_lossy_edits(
+            manifest,
+            full_3dgs_path,
+        )
+        if lineage_error is not None:
+            contradictions.append(lineage_error)
     provenance = manifest.get("provenance") or {}
     if not isinstance(provenance, dict):
         provenance = {}
@@ -737,4 +750,5 @@ def verify_recon_artifacts(manifest_path: Path) -> IntegrityReport:
         contradictions=contradictions,
         trust_preserved=True,
         geometry_usability=geometry_usability,
+        lossy_edits=lossy_edits,
     )

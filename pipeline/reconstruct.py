@@ -847,6 +847,10 @@ def reconstruct(photos_dir: str | Path = "photos",
         # 照 bounds 取景, 相机会停在几百米外, 裁剪面/雾/网格也全被拉到无意义的尺度。
         # 附加而非替代: 不隐藏任何几何, 落在 core 外的点照常渲染 (详见 _core_bounds)。
         "core_bounds": core_bounds(merged.xyz, DEFAULT_CORE_AXIS_PERCENTILE),
+        # Canonical lightweight disclosure.  Production acceptance reopens the
+        # full PLY and requires exact semantic equality with
+        # nantai_meta.lossy_edits; this copy alone never establishes trust.
+        "lossy_edits": merged.lossy_edits,
         "spatial_parameters": {
             "frame_id": reg.target_frame.frame_id,
             "units": reg.target_frame.units.value,

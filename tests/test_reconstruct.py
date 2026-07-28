@@ -260,6 +260,50 @@ class TestImportEngine:
                         dedup_voxel=0.0)
         assert m["gaussian_count"] == 800
 
+    def test_manifest_preserves_lossy_edits_from_imported_ply(
+        self, photos_dir, tmp_path
+    ):
+        edit = {
+            "operation": "outlier_trim",
+            "lossy": True,
+            "rules": [{"kind": "max_scale", "threshold": 1.0}],
+            "threshold_units": "meters",
+            "points_before": 3,
+            "points_after": 2,
+            "dropped": 1,
+            "trim_id": "trim-test-lineage",
+        }
+        source = tmp_path / "trimmed.ply"
+        GaussianScene(
+            [[0, 0, 0], [1, 0, 0]],
+            [[0.2, 0.3, 0.4], [0.5, 0.6, 0.7]],
+            frame_id="mock-local",
+            units="meters",
+            lossy_edits=[edit],
+        ).save_ply(source, flavor="3dgs")
+
+        manifest = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            reg_engine="mock",
+            splat_map=[
+                SplatInput(
+                    session_id="video_vid_A",
+                    path=str(source),
+                    source_frame=_mock_source_frame(),
+                )
+            ],
+            dedup_voxel=0.0,
+        )
+
+        assert manifest["lossy_edits"] == [edit]
+        persisted = json.loads(
+            (tmp_path / "web/recon_manifest.json").read_text(encoding="utf-8")
+        )
+        assert persisted["lossy_edits"] == [edit]
+
     def test_import_into_aligned_world_is_metric_aligned(self, photos_dir, tmp_path):
         # The full measured path: a NON-synthetic sfm registration aligned to
         # world-enu, then a real external 3DGS imported through a Sim3 into that
