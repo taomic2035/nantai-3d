@@ -21,7 +21,10 @@ from pipeline.real_dataset import (  # noqa: E402
 from pipeline.real_scene_runner import (  # noqa: E402
     RealSceneBlockedError,
     RealSceneRunOptions,
+    RealSceneStatusError,
+    canonical_snapshot_bytes,
     run_real_scene,
+    snapshot_real_scene_stages,
 )
 from pipeline.recon_schema import GeoAnchor  # noqa: E402
 from pipeline.remote_shell_executor import (  # noqa: E402
@@ -40,6 +43,7 @@ _TARGETS = (
     "import",
     "accept",
     "serve",
+    "status",
     "all",
 )
 
@@ -116,6 +120,46 @@ def _validate_runtime_inputs(args, source) -> None:
         raise ValueError("train-production requires --remote-config")
 
 
+def _run_status(args) -> int:
+    try:
+        if args.source is None:
+            raise ValueError("status requires --source")
+        if args.workspace is None:
+            raise ValueError("status requires --workspace")
+        if args.run_id is None:
+            raise ValueError("status requires --run-id")
+        irrelevant = (
+            args.media_root,
+            args.rights,
+            args.policy,
+            args.control_points,
+            args.geo_origin,
+            args.remote_config,
+            args.preflight_report,
+            args.viewer_policy,
+            args.viewer_report,
+            args.human_review_policy,
+            args.human_visual_review,
+            args.chunk_size,
+        )
+        if any(value is not None for value in irrelevant) or args.resume or args.retry:
+            raise ValueError(
+                "status accepts only --source, --workspace and --run-id"
+            )
+        snapshot = snapshot_real_scene_stages(
+            args.source,
+            workspace_base=args.workspace,
+            run_id=args.run_id,
+        )
+    except (DatasetEvidenceError, RealSceneStatusError, ValueError):
+        print("real-scene status invalid", file=sys.stderr)
+        return 1
+    print(canonical_snapshot_bytes(snapshot).decode("ascii"), end="")
+    if snapshot.state == "accepted-from-authoritative-decision":
+        return 0
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -166,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
                 end="",
             )
             return 0 if report.status == "ready" else 2
+        if args.target == "status":
+            return _run_status(args)
         if args.source is None:
             raise ValueError(
                 f"{args.target} requires --source"

@@ -19,17 +19,22 @@ from pipeline.real_scene_runner import (
     RealSceneRunner,
     RealSceneRunOptions,
     RealSceneSourceIdentity,
+    RealSceneStatusError,
     StageArtifactBinding,
     StageExecution,
+    StagePrerequisiteBinding,
     StageReceipt,
+    canonical_snapshot_bytes,
     canonical_stage_receipt_bytes,
     resolve_latest_production_import,
     run_real_scene,
+    snapshot_real_scene_stages,
 )
 
 
 class _Operations:
-    def __init__(self):
+    def __init__(self, *, role="internal-canary"):
+        self.role = role
         self.calls: list[str] = []
         self.states: dict[str, tuple[str, str | None]] = {}
         self.alignment_rms_m: dict[str, float | None] = {}
@@ -54,6 +59,26 @@ class _Operations:
         stage_root.mkdir(parents=True, exist_ok=True)
         artifact = stage_root / "artifact.bin"
         artifact.write_bytes(f"{stage}-bytes".encode("ascii"))
+        if stage == "accept":
+            payload = (
+                json.dumps(
+                    {
+                        "role": self.role,
+                        "schema": "fixture-acceptance",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("ascii")
+            digest = hashlib.sha256(payload).hexdigest()
+            acceptance = stage_root / f"real-scene-acceptance-{digest}.json"
+            acceptance.write_bytes(payload)
+            return StageExecution(
+                state="completed",
+                artifacts=(artifact, acceptance),
+                alignment_rms_m=self.alignment_rms_m.get(stage),
+            )
         return StageExecution(
             state="completed",
             artifacts=(artifact,),
@@ -68,7 +93,7 @@ def _runner(
     control_points=None,
     now=None,
 ):
-    operations = _Operations()
+    operations = _Operations(role=role)
     runner = RealSceneRunner(
         source=RealSceneSourceIdentity(
             dataset_id="poster",
@@ -185,7 +210,29 @@ def test_resume_byte_tamper_records_blocked_revalidation_receipt(tmp_path):
     assert operations.calls.count("fetch") == 2
 
 
-def test_resume_revalidates_transitive_prerequisite_bytes(tmp_path):
+def _patch_fixture_acceptance(monkeypatch):
+    def validate(path):
+        payload = json.loads(path.read_text(encoding="ascii"))
+        role = payload["role"]
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        return SimpleNamespace(
+            source_role=role,
+            report_sha256=digest,
+            production_release_allowed=role == "production-acceptance",
+            canary_accepted=role == "internal-canary",
+        )
+
+    monkeypatch.setattr(
+        "pipeline.real_scene_acceptance.validate_real_scene_acceptance",
+        validate,
+    )
+
+
+def test_resume_revalidates_transitive_prerequisite_bytes(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_fixture_acceptance(monkeypatch)
     runner, _operations = _runner(tmp_path)
     runner.run("all")
     fetch_receipt = runner.run("fetch")
@@ -203,7 +250,11 @@ def test_resume_revalidates_transitive_prerequisite_bytes(tmp_path):
     )
 
 
-def test_internal_canary_all_uses_preview_not_production(tmp_path):
+def test_internal_canary_all_uses_preview_not_production(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_fixture_acceptance(monkeypatch)
     runner, operations = _runner(tmp_path)
 
     receipt = runner.run("all")
@@ -593,3 +644,521 @@ def test_latest_production_import_resolver_rejects_artifact_tamper(
 def test_run_options_reject_invalid_chunk_size(chunk_size):
     with pytest.raises(ValueError, match="chunk_size"):
         RealSceneRunOptions(chunk_size=chunk_size)
+
+
+# ---------------------------------------------------------------------------
+# snapshot_stages / snapshot_real_scene_stages tests
+# ---------------------------------------------------------------------------
+
+
+class _SnapshotOperations:
+    def execute(self, stage, stage_root, prerequisite_receipts):
+        del stage_root, prerequisite_receipts
+        raise AssertionError(f"snapshot executed {stage}")
+
+
+def _snapshot_runner(
+    tmp_path,
+    *,
+    role="internal-canary",
+    run_id="default",
+):
+    runner = RealSceneRunner(
+        source=RealSceneSourceIdentity(
+            dataset_id="poster",
+            role=role,
+            source_sha256="a" * 64,
+        ),
+        workspace_base=tmp_path / "real-scene",
+        operations=_SnapshotOperations(),
+    )
+    return runner
+
+
+def _publish_completed_receipt(
+    runner,
+    stage,
+    *,
+    attempt_id,
+    artifacts,
+    prerequisites=(),
+    created_at=None,
+    alignment_rms_m=None,
+):
+    """Write a canonical completed StageReceipt with real artifact bindings."""
+    if created_at is None:
+        created_at = datetime(2026, 7, 27, tzinfo=UTC)
+    bindings = tuple(
+        StageArtifactBinding(
+            path=artifact.relative_to(runner.workspace).as_posix(),
+            byte_length=artifact.stat().st_size,
+            sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        )
+        for artifact in artifacts
+    )
+    receipt = StageReceipt(
+        dataset_id=runner.source.dataset_id,
+        source_sha256=runner.source.source_sha256,
+        stage=stage,
+        attempt_id=attempt_id,
+        created_at_utc=created_at,
+        status="completed",
+        prerequisites=prerequisites,
+        outputs=bindings,
+        alignment_rms_m=alignment_rms_m,
+    )
+    payload = canonical_stage_receipt_bytes(receipt)
+    directory = runner.receipt_root / stage
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{hashlib.sha256(payload).hexdigest()}.json"
+    path.write_bytes(payload)
+    return path, hashlib.sha256(payload).hexdigest()
+
+
+def _publish_blocked_receipt(
+    runner,
+    stage,
+    *,
+    attempt_id,
+    reason,
+    evidence_artifacts=(),
+    created_at=None,
+):
+    if created_at is None:
+        created_at = datetime(2026, 7, 27, tzinfo=UTC)
+    evidence = tuple(
+        StageArtifactBinding(
+            path=artifact.relative_to(runner.workspace).as_posix(),
+            byte_length=artifact.stat().st_size,
+            sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        )
+        for artifact in evidence_artifacts
+    )
+    receipt = StageReceipt(
+        dataset_id=runner.source.dataset_id,
+        source_sha256=runner.source.source_sha256,
+        stage=stage,
+        attempt_id=attempt_id,
+        created_at_utc=created_at,
+        status="blocked",
+        prerequisites=(),
+        evidence=evidence,
+        outputs=(),
+        reason=reason,
+    )
+    payload = canonical_stage_receipt_bytes(receipt)
+    directory = runner.receipt_root / stage
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{hashlib.sha256(payload).hexdigest()}.json"
+    path.write_bytes(payload)
+    return path, hashlib.sha256(payload).hexdigest()
+
+
+def _publish_unknown_receipt(
+    runner,
+    stage,
+    *,
+    attempt_id,
+    reason,
+    evidence_artifacts=(),
+    created_at=None,
+):
+    if created_at is None:
+        created_at = datetime(2026, 7, 27, tzinfo=UTC)
+    evidence = tuple(
+        StageArtifactBinding(
+            path=artifact.relative_to(runner.workspace).as_posix(),
+            byte_length=artifact.stat().st_size,
+            sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        )
+        for artifact in evidence_artifacts
+    )
+    receipt = StageReceipt(
+        dataset_id=runner.source.dataset_id,
+        source_sha256=runner.source.source_sha256,
+        stage=stage,
+        attempt_id=attempt_id,
+        created_at_utc=created_at,
+        status="unknown",
+        prerequisites=(),
+        evidence=evidence,
+        outputs=(),
+        reason=reason,
+    )
+    payload = canonical_stage_receipt_bytes(receipt)
+    directory = runner.receipt_root / stage
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{hashlib.sha256(payload).hexdigest()}.json"
+    path.write_bytes(payload)
+    return path, hashlib.sha256(payload).hexdigest()
+
+
+def _make_artifact(runner, stage, attempt_id, name="artifact.bin"):
+    stage_root = runner.workspace / "stages" / stage / attempt_id
+    stage_root.mkdir(parents=True, exist_ok=True)
+    artifact = stage_root / name
+    artifact.write_bytes(f"{stage}-{attempt_id}".encode("ascii"))
+    return artifact
+
+
+def _build_completed_chain(
+    runner,
+    *,
+    up_to="accept",
+    monkeypatch=None,
+    acceptance_allowed=True,
+):
+    """Build a completed receipt chain up to a given stage."""
+    stages_canary = ("fetch", "sfm", "train-preview", "import", "accept")
+    stages_prod = ("fetch", "sfm", "train-production", "import", "accept")
+    chain = (
+        stages_prod
+        if runner.source.role == "production-acceptance"
+        else stages_canary
+    )
+    limit = chain.index(up_to) + 1 if up_to in chain else len(chain)
+    prev = None
+    for stage in chain[:limit]:
+        artifacts = [_make_artifact(runner, stage, f"attempt-{stage}")]
+        prereqs = ()
+        if prev is not None:
+            prereqs = (
+                StagePrerequisiteBinding(
+                    stage=prev[0],
+                    receipt_sha256=prev[1],
+                ),
+            )
+        if stage == "accept":
+            acceptance_path, acceptance_sha = _make_acceptance_report(
+                runner,
+                monkeypatch=monkeypatch,
+                allowed=acceptance_allowed,
+            )
+            artifacts.append(acceptance_path)
+        alignment_rms_m = None
+        if (
+            stage == "import"
+            and runner.source.role == "production-acceptance"
+        ):
+            alignment_rms_m = 0.1
+            if monkeypatch is not None:
+                monkeypatch.setattr(
+                    runner,
+                    "_verify_production_import_output",
+                    lambda **_kwargs: 0.1,
+                )
+        _, digest = _publish_completed_receipt(
+            runner,
+            stage,
+            attempt_id=f"attempt-{stage}",
+            artifacts=artifacts,
+            prerequisites=prereqs,
+            alignment_rms_m=alignment_rms_m,
+        )
+        prev = (stage, digest)
+    return prev
+
+
+def _make_acceptance_report(
+    runner,
+    *,
+    monkeypatch=None,
+    allowed=True,
+):
+    """Create a fake acceptance report file and patch the validator."""
+    stage_root = runner.workspace / "stages/accept/attempt-accept"
+    stage_root.mkdir(parents=True, exist_ok=True)
+    payload = b'{"schema":"fixture-acceptance"}\n'
+    digest = hashlib.sha256(payload).hexdigest()
+    report_path = stage_root / f"real-scene-acceptance-{digest}.json"
+    report_path.write_bytes(payload)
+    if monkeypatch is not None:
+        decision = SimpleNamespace(
+            source_role=runner.source.role,
+            report_sha256=digest,
+            production_release_allowed=allowed,
+            canary_accepted=allowed,
+        )
+        monkeypatch.setattr(
+            "pipeline.real_scene_acceptance.validate_real_scene_acceptance",
+            lambda path: decision,
+        )
+    return report_path, digest
+
+
+def test_snapshot_missing_all_stages(tmp_path):
+    runner = _snapshot_runner(tmp_path)
+    runner.receipt_root.mkdir(parents=True, exist_ok=True)
+
+    snapshot = runner.snapshot_stages(run_id="default")
+
+    assert snapshot.state == "blocked"
+    assert len(snapshot.stages) == 5
+    assert snapshot.stages[0].status == "missing"
+    assert snapshot.earliest_blocker.stage == "fetch"
+    assert snapshot.earliest_blocker.reason_code == "receipt-missing"
+    assert snapshot.acceptance.decision == "not-reached"
+    assert snapshot.run_id == "default"
+
+
+def test_snapshot_partial_completed(tmp_path):
+    runner = _snapshot_runner(tmp_path)
+    _build_completed_chain(runner, up_to="sfm")
+
+    snapshot = runner.snapshot_stages(run_id="default")
+
+    assert snapshot.state == "blocked"
+    assert snapshot.stages[0].status == "completed"
+    assert snapshot.stages[1].status == "completed"
+    assert snapshot.stages[2].status == "missing"
+    assert snapshot.earliest_blocker.stage == "train-preview"
+
+
+def test_snapshot_blocked_stage_reports_earliest(tmp_path):
+    runner = _snapshot_runner(tmp_path)
+    _build_completed_chain(runner, up_to="fetch")
+    evidence = _make_artifact(runner, "sfm", "attempt-sfm", "failure.json")
+    _publish_blocked_receipt(
+        runner,
+        "sfm",
+        attempt_id="attempt-sfm",
+        reason="registration quality rejected",
+        evidence_artifacts=(evidence,),
+    )
+
+    snapshot = runner.snapshot_stages(run_id="default")
+
+    assert snapshot.state == "blocked"
+    assert snapshot.stages[1].status == "blocked"
+    assert snapshot.stages[1].reason_code == "stage-blocked"
+    assert snapshot.earliest_blocker.stage == "sfm"
+    payload = canonical_snapshot_bytes(snapshot).decode("ascii")
+    assert "registration quality rejected" not in payload
+
+
+def test_snapshot_unknown_stage(tmp_path):
+    runner = _snapshot_runner(tmp_path)
+    _build_completed_chain(runner, up_to="fetch")
+    evidence = _make_artifact(runner, "sfm", "attempt-sfm", "probe.json")
+    _publish_unknown_receipt(
+        runner,
+        "sfm",
+        attempt_id="attempt-sfm",
+        reason="remote host unreachable",
+        evidence_artifacts=(evidence,),
+    )
+
+    snapshot = runner.snapshot_stages(run_id="default")
+
+    assert snapshot.stages[1].status == "unknown"
+    assert snapshot.stages[1].reason_code == "stage-unknown"
+    assert snapshot.earliest_blocker.stage == "sfm"
+
+
+def test_snapshot_completed_revalidate_prerequisite_chain(tmp_path):
+    runner = _snapshot_runner(tmp_path)
+    _build_completed_chain(runner, up_to="sfm")
+    sfm_dir = runner.receipt_root / "sfm"
+    receipt_path = next(sfm_dir.glob("*.json"))
+    receipt = StageReceipt.model_validate_json(receipt_path.read_bytes())
+    drifted = receipt.model_copy(
+        update={
+            "prerequisites": (
+                StagePrerequisiteBinding(
+                    stage="fetch",
+                    receipt_sha256="b" * 64,
+                ),
+            )
+        }
+    )
+    payload = canonical_stage_receipt_bytes(drifted)
+    receipt_path.unlink()
+    sfm_dir.joinpath(
+        f"{hashlib.sha256(payload).hexdigest()}.json"
+    ).write_bytes(payload)
+
+    with pytest.raises(RealSceneStatusError):
+        runner.snapshot_stages(run_id="default")
+
+
+def test_snapshot_completed_revalidate_artifact_bindings(tmp_path):
+    runner = _snapshot_runner(tmp_path)
+    _build_completed_chain(runner, up_to="sfm")
+    fetch_dir = runner.receipt_root / "fetch"
+    receipt_path = next(fetch_dir.glob("*.json"))
+    receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+    artifact = runner.workspace / receipt["outputs"][0]["path"]
+    artifact.write_bytes(b"tampered")
+
+    with pytest.raises(RealSceneStatusError):
+        runner.snapshot_stages(run_id="default")
+
+
+def test_snapshot_import_completed_validates_import_receipt(tmp_path, monkeypatch):
+    runner = _snapshot_runner(tmp_path, role="production-acceptance")
+    _build_completed_chain(
+        runner,
+        up_to="import",
+        monkeypatch=monkeypatch,
+    )
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "_verify_production_import_output",
+        lambda **kwargs: calls.append(kwargs) or 0.1,
+    )
+
+    snapshot = runner.snapshot_stages(run_id="default")
+
+    assert snapshot.stages[3].status == "completed"
+    assert snapshot.acceptance.decision == "not-reached"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("role", ["production-acceptance", "internal-canary"])
+def test_snapshot_accept_completed_allowed(tmp_path, monkeypatch, role):
+    runner = _snapshot_runner(tmp_path, role=role)
+    _build_completed_chain(
+        runner,
+        up_to="accept",
+        monkeypatch=monkeypatch,
+        acceptance_allowed=True,
+    )
+
+    snapshot = runner.snapshot_stages(run_id="default")
+
+    assert snapshot.state == "accepted-from-authoritative-decision"
+    assert snapshot.acceptance.decision == "allowed-from-authoritative-decision"
+    assert snapshot.acceptance.acceptance_source == "real-scene-acceptance"
+    assert snapshot.acceptance.acceptance_report_sha256 is not None
+    assert snapshot.earliest_blocker is None
+    assert all(s.status == "completed" for s in snapshot.stages)
+
+
+def test_snapshot_accept_completed_but_validator_contradicts(tmp_path, monkeypatch):
+    runner = _snapshot_runner(tmp_path)
+    _build_completed_chain(
+        runner,
+        up_to="accept",
+        monkeypatch=monkeypatch,
+        acceptance_allowed=False,
+    )
+
+    with pytest.raises(RealSceneStatusError):
+        runner.snapshot_stages(run_id="default")
+
+
+def test_snapshot_foreign_receipt_or_toctou(tmp_path):
+    runner = _snapshot_runner(tmp_path)
+    runner.receipt_root.mkdir(parents=True, exist_ok=True)
+    foreign_dir = runner.receipt_root / "fetch"
+    foreign_dir.mkdir(parents=True, exist_ok=True)
+    artifact = _make_artifact(
+        runner,
+        "fetch",
+        "attempt-foreign",
+    )
+    foreign = StageReceipt(
+        dataset_id="other-dataset",
+        source_sha256="b" * 64,
+        stage="fetch",
+        attempt_id="attempt-foreign",
+        created_at_utc=datetime(2026, 7, 27, tzinfo=UTC),
+        status="completed",
+        prerequisites=(),
+        outputs=(
+            StageArtifactBinding(
+                path=artifact.relative_to(
+                    runner.workspace
+                ).as_posix(),
+                byte_length=artifact.stat().st_size,
+                sha256=hashlib.sha256(
+                    artifact.read_bytes()
+                ).hexdigest(),
+            ),
+        ),
+    )
+    payload = canonical_stage_receipt_bytes(foreign)
+    foreign_dir.joinpath(
+        f"{hashlib.sha256(payload).hexdigest()}.json"
+    ).write_bytes(payload)
+
+    with pytest.raises(RealSceneStatusError):
+        runner.snapshot_stages(run_id="default")
+
+
+def test_snapshot_deterministic_bytes(tmp_path, monkeypatch):
+    runner = _snapshot_runner(tmp_path)
+    _build_completed_chain(runner, up_to="sfm")
+
+    first = runner.snapshot_stages(run_id="default")
+    second = runner.snapshot_stages(run_id="default")
+
+    assert canonical_snapshot_bytes(first) == canonical_snapshot_bytes(second)
+    assert first.report_sha256 == second.report_sha256
+
+
+def test_snapshot_public_helper_rejects_linklike_source(tmp_path):
+    source = HfDatasetSource(
+        schema="nantai.real-dataset-source.v1",
+        dataset_id="poster",
+        role="internal-canary",
+        source_kind="hf-dataset",
+        repository="owner/repo",
+        repository_revision="4" * 40,
+        subtree="poster",
+        capture_subtree="poster/images",
+        declared_file_count=1,
+        declared_total_bytes=5,
+        license_status="not-declared",
+        redistribution_allowed=False,
+        release_inclusion_allowed=False,
+    )
+    real_source = tmp_path / "source.json"
+    real_source.write_bytes(canonical_model_bytes(source))
+    link = tmp_path / "source-link.json"
+    try:
+        link.symlink_to(real_source)
+    except OSError:
+        pytest.skip("source symlink creation is unavailable")
+
+    with pytest.raises(RealSceneStatusError):
+        snapshot_real_scene_stages(
+            link,
+            workspace_base=tmp_path / "workspace",
+            run_id="canary-001",
+        )
+
+
+def test_snapshot_public_helper_rejects_linklike_workspace(tmp_path):
+    source = HfDatasetSource(
+        schema="nantai.real-dataset-source.v1",
+        dataset_id="poster",
+        role="internal-canary",
+        source_kind="hf-dataset",
+        repository="owner/repo",
+        repository_revision="4" * 40,
+        subtree="poster",
+        capture_subtree="poster/images",
+        declared_file_count=1,
+        declared_total_bytes=5,
+        license_status="not-declared",
+        redistribution_allowed=False,
+        release_inclusion_allowed=False,
+    )
+    source_path = tmp_path / "source.json"
+    source_path.write_bytes(canonical_model_bytes(source))
+    real_workspace = tmp_path / "real-workspace"
+    real_workspace.mkdir()
+    link = tmp_path / "workspace-link"
+    try:
+        link.symlink_to(real_workspace, target_is_directory=True)
+    except OSError:
+        pytest.skip("workspace symlink creation is unavailable")
+
+    with pytest.raises(RealSceneStatusError):
+        snapshot_real_scene_stages(
+            source_path,
+            workspace_base=link,
+            run_id="canary-001",
+        )

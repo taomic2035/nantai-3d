@@ -225,6 +225,215 @@ class RealSceneOperations(Protocol):
     ) -> StageExecution: ...
 
 
+# ---------------------------------------------------------------------------
+# Snapshot schema (read-only status, no side effects)
+# ---------------------------------------------------------------------------
+
+
+SnapshotStageName = Literal[
+    "fetch",
+    "sfm",
+    "train-preview",
+    "train-production",
+    "import",
+    "accept",
+]
+SnapshotStageStatus = Literal["missing", "blocked", "unknown", "completed"]
+SnapshotReasonCode = Literal[
+    "receipt-missing",
+    "stage-blocked",
+    "stage-unknown",
+]
+SnapshotState = Literal[
+    "blocked",
+    "accepted-from-authoritative-decision",
+]
+SnapshotAcceptanceDecision = Literal[
+    "not-reached",
+    "allowed-from-authoritative-decision",
+]
+
+
+class SnapshotSourceIdentity(FrozenModel):
+    dataset_id: str = Field(pattern=_ID_PATTERN)
+    role: SourceRole
+    source_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+
+class SnapshotStageEntry(FrozenModel):
+    stage: SnapshotStageName
+    status: SnapshotStageStatus
+    receipt_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    reason_code: SnapshotReasonCode | None = None
+
+    @model_validator(mode="after")
+    def _consistency(self) -> SnapshotStageEntry:
+        if self.status == "missing":
+            if self.receipt_sha256 is not None or self.reason_code != "receipt-missing":
+                raise ValueError("missing stage must have receipt-missing reason")
+        elif self.status == "blocked":
+            if self.receipt_sha256 is None or self.reason_code != "stage-blocked":
+                raise ValueError("blocked stage must have stage-blocked reason")
+        elif self.status == "unknown":
+            if self.receipt_sha256 is None or self.reason_code != "stage-unknown":
+                raise ValueError("unknown stage must have stage-unknown reason")
+        elif self.status == "completed":
+            if self.receipt_sha256 is None or self.reason_code is not None:
+                raise ValueError("completed stage must have sha and no reason")
+        return self
+
+
+class SnapshotEarliestBlocker(FrozenModel):
+    stage: SnapshotStageName
+    reason_code: SnapshotReasonCode
+
+
+class SnapshotAcceptanceSummary(FrozenModel):
+    decision: SnapshotAcceptanceDecision
+    acceptance_source: Literal["real-scene-acceptance", "none"] = "none"
+    acceptance_report_sha256: str | None = Field(
+        default=None, pattern=_SHA256_PATTERN
+    )
+
+    @model_validator(mode="after")
+    def _consistency(self) -> SnapshotAcceptanceSummary:
+        if self.decision == "not-reached":
+            if self.acceptance_source != "none":
+                raise ValueError("not-reached requires acceptance_source=none")
+            if self.acceptance_report_sha256 is not None:
+                raise ValueError("not-reached forbids acceptance_report_sha256")
+        elif self.decision == "allowed-from-authoritative-decision":
+            if self.acceptance_source != "real-scene-acceptance":
+                raise ValueError("allowed requires acceptance_source=real-scene-acceptance")
+            if self.acceptance_report_sha256 is None:
+                raise ValueError("allowed requires acceptance_report_sha256")
+        return self
+
+
+class RealSceneStageSnapshot(FrozenModel):
+    schema_id: Literal["nantai.real-scene-status.v1"] = Field(
+        default="nantai.real-scene-status.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    state: SnapshotState
+    source: SnapshotSourceIdentity
+    run_id: str = Field(pattern=_ID_PATTERN)
+    stages: tuple[SnapshotStageEntry, ...]
+    earliest_blocker: SnapshotEarliestBlocker | None = None
+    acceptance: SnapshotAcceptanceSummary
+    report_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _consistency(self) -> RealSceneStageSnapshot:
+        if len(self.stages) != 5:
+            raise ValueError("snapshot must have exactly 5 stages")
+        training: SnapshotStageName = (
+            "train-production"
+            if self.source.role == "production-acceptance"
+            else "train-preview"
+        )
+        expected = (
+            "fetch",
+            "sfm",
+            training,
+            "import",
+            "accept",
+        )
+        actual = tuple(entry.stage for entry in self.stages)
+        if actual != expected:
+            raise ValueError("snapshot stages must match the role chain")
+        first_incomplete = next(
+            (
+                entry
+                for entry in self.stages
+                if entry.status != "completed"
+            ),
+            None,
+        )
+        if self.state == "accepted-from-authoritative-decision":
+            if any(entry.status != "completed" for entry in self.stages):
+                raise ValueError(
+                    "accepted state requires all stages completed"
+                )
+            if self.acceptance.decision != "allowed-from-authoritative-decision":
+                raise ValueError("accepted state requires acceptance allowed")
+            if self.earliest_blocker is not None:
+                raise ValueError("accepted state forbids earliest_blocker")
+        else:
+            if first_incomplete is None or self.earliest_blocker is None:
+                raise ValueError("blocked state requires an incomplete stage")
+            if (
+                self.earliest_blocker.stage != first_incomplete.stage
+                or self.earliest_blocker.reason_code
+                != first_incomplete.reason_code
+            ):
+                raise ValueError(
+                    "earliest_blocker must match the first incomplete stage"
+                )
+            if self.acceptance.decision != "not-reached":
+                raise ValueError("blocked state requires not-reached acceptance")
+        if _compute_snapshot_sha256(self) != self.report_sha256:
+            raise ValueError("snapshot report_sha256 does not match its content")
+        return self
+
+
+class RealSceneStatusError(ValueError):
+    """The real-scene status snapshot is invalid or cannot be derived."""
+
+
+class _InspectionOnlyOperations:
+    """Operations stub that proves snapshot never executes a stage."""
+
+    def execute(
+        self,
+        stage: StageName,
+        stage_root: Path,
+        prerequisite_receipts: tuple[StageReceipt, ...],
+    ) -> StageExecution:
+        raise AssertionError(
+            f"snapshot must not execute stage {stage}"
+        )
+
+
+def _is_linklike(path: Path, result: os.stat_result | None = None) -> bool:
+    """Return true for symlinks, junctions, and Windows reparse points."""
+
+    try:
+        observed = result if result is not None else path.lstat()
+    except OSError:
+        return path.is_symlink()
+    attributes = int(getattr(observed, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    return (
+        stat.S_ISLNK(observed.st_mode)
+        or bool(attributes & reparse_flag)
+        or bool(getattr(path, "is_junction", lambda: False)())
+    )
+
+
+def _require_real_directory(path: Path) -> None:
+    """Reject an existing directory reached through a link-like component."""
+
+    try:
+        observed = path.lstat()
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError:
+        return
+    except (OSError, RuntimeError) as exc:
+        raise RealSceneStatusError(
+            "real-scene status directory is unavailable"
+        ) from exc
+    if (
+        _is_linklike(path, observed)
+        or not stat.S_ISDIR(observed.st_mode)
+        or resolved != path.absolute()
+    ):
+        raise RealSceneStatusError(
+            "real-scene status directory is link-like"
+        )
+
+
 def canonical_stage_receipt_bytes(receipt: StageReceipt) -> bytes:
     return (
         json.dumps(
@@ -254,13 +463,22 @@ def _hash_artifact(
     *,
     workspace: Path,
 ) -> StageArtifactBinding:
+    workspace = workspace.absolute()
+    path = path.absolute()
     try:
-        relative = path.absolute().relative_to(workspace).as_posix()
+        relative = path.relative_to(workspace).as_posix()
     except ValueError as exc:
         raise DatasetEvidenceError("stage artifact escaped the real-scene workspace") from exc
     try:
+        workspace_real = workspace.resolve(strict=True)
+        resolved_before = path.resolve(strict=True)
+        resolved_before.relative_to(workspace_real)
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        if (
+            _is_linklike(path, before)
+            or not stat.S_ISREG(before.st_mode)
+            or resolved_before != path
+        ):
             raise DatasetEvidenceError(f"stage artifact is missing or link-like: {relative}")
         digest = hashlib.sha256()
         measured = 0
@@ -269,11 +487,15 @@ def _hash_artifact(
                 measured += len(chunk)
                 digest.update(chunk)
         after = path.lstat()
+        resolved_after = path.resolve(strict=True)
     except DatasetEvidenceError:
         raise
-    except OSError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise DatasetEvidenceError(f"stage artifact cannot be read: {relative}") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or resolved_before != resolved_after
+    ):
         raise DatasetEvidenceError(f"stage artifact changed while hashing: {relative}")
     return StageArtifactBinding(
         path=relative,
@@ -647,7 +869,68 @@ class RealSceneRunner:
                 ),
                 claimed_alignment_rms_m=receipt.alignment_rms_m,
             )
+        if receipt.stage == "accept":
+            self._verify_acceptance_output(receipt)
         return receipt
+
+    def _verify_acceptance_output(self, receipt: StageReceipt) -> None:
+        """Reopen the bound acceptance report and re-derive the decision.
+
+        Accept completed receipts must bind exactly one
+        ``real-scene-acceptance-<64hex>.json`` output.  The filename's
+        SHA must match the bound SHA, and the authoritative validator
+        must return a role-appropriate ``allowed`` decision.
+        """
+        acceptance_name = re.compile(
+            r"^real-scene-acceptance-[0-9a-f]{64}\.json$"
+        )
+        matches = tuple(
+            binding for binding in receipt.outputs
+            if acceptance_name.fullmatch(PurePosixPath(binding.path).name)
+        )
+        if len(matches) != 1:
+            raise DatasetEvidenceError(
+                "accept stage must bind exactly one real-scene-acceptance report"
+            )
+        binding = matches[0]
+        acceptance_path = self.workspace.joinpath(
+            *PurePosixPath(binding.path).parts
+        )
+        if (
+            PurePosixPath(binding.path).name
+            != f"real-scene-acceptance-{binding.sha256}.json"
+        ):
+            raise DatasetEvidenceError(
+                "acceptance report filename differs from its sha256"
+            )
+        from pipeline.real_scene_acceptance import (
+            RealSceneAcceptanceError,
+            validate_real_scene_acceptance,
+        )
+
+        try:
+            decision = validate_real_scene_acceptance(acceptance_path)
+        except (OSError, RealSceneAcceptanceError, ValueError) as exc:
+            raise DatasetEvidenceError(
+                "acceptance report revalidation failed"
+            ) from exc
+        if decision.source_role != self.source.role:
+            raise DatasetEvidenceError(
+                "acceptance decision source_role disagrees with source"
+            )
+        if decision.report_sha256 != binding.sha256:
+            raise DatasetEvidenceError(
+                "acceptance decision report_sha256 disagrees with binding"
+            )
+        allowed = (
+            decision.production_release_allowed
+            if self.source.role == "production-acceptance"
+            else decision.canary_accepted
+        )
+        if not allowed:
+            raise DatasetEvidenceError(
+                "acceptance validator did not allow the source role"
+            )
 
     def _verify_artifact_bindings(
         self,
@@ -977,6 +1260,194 @@ class RealSceneRunner:
             retry=retry,
         )
 
+    def snapshot_stages(self, *, run_id: str) -> RealSceneStageSnapshot:
+        """Return a read-only 5-stage status snapshot without side effects.
+
+        Walks the journal for each stage in the role-specific 5-stage chain
+        (serve excluded).  Completed stages are revalidated via
+        ``_verify_completed``; blocked/unknown stages re-check receipt
+        canonical bytes and evidence artifact bindings.  Accept completed
+        stages are revalidated through ``validate_real_scene_acceptance``.
+        Any source/receipt/artifact/TOCTOU invalid raises
+        ``RealSceneStatusError``.
+        """
+        if re.fullmatch(_ID_PATTERN, run_id) is None:
+            raise RealSceneStatusError("run_id must be a safe portable identifier")
+
+        training: StageName = (
+            "train-production"
+            if self.source.role == "production-acceptance"
+            else "train-preview"
+        )
+        chain: tuple[StageName, ...] = (
+            "fetch",
+            "sfm",
+            training,
+            "import",
+            "accept",
+        )
+        for directory in (
+            self.workspace,
+            self.receipt_root,
+            *(
+                self.receipt_root / stage
+                for stage in chain
+            ),
+        ):
+            _require_real_directory(directory)
+        entries: list[SnapshotStageEntry] = []
+        earliest: SnapshotEarliestBlocker | None = None
+        acceptance_report_sha: str | None = None
+        for stage in chain:
+            try:
+                latest = self._latest(stage)
+            except (
+                DatasetEvidenceError,
+                OSError,
+                RuntimeError,
+                ValueError,
+            ) as exc:
+                raise RealSceneStatusError(
+                    "real-scene stage journal is invalid"
+                ) from exc
+            if latest is None:
+                entry = SnapshotStageEntry(
+                    stage=stage,  # type: ignore[arg-type]
+                    status="missing",
+                    reason_code="receipt-missing",
+                )
+                if earliest is None:
+                    earliest = SnapshotEarliestBlocker(
+                        stage=stage,  # type: ignore[arg-type]
+                        reason_code="receipt-missing",
+                    )
+                entries.append(entry)
+                continue
+            receipt, digest = latest
+            if receipt.status == "blocked":
+                try:
+                    self._verify_artifact_bindings(receipt.evidence)
+                except (DatasetEvidenceError, OSError, ValueError) as exc:
+                    raise RealSceneStatusError(
+                        "blocked stage evidence is invalid"
+                    ) from exc
+                entry = SnapshotStageEntry(
+                    stage=stage,  # type: ignore[arg-type]
+                    status="blocked",
+                    receipt_sha256=digest,
+                    reason_code="stage-blocked",
+                )
+                if earliest is None:
+                    earliest = SnapshotEarliestBlocker(
+                        stage=stage,  # type: ignore[arg-type]
+                        reason_code="stage-blocked",
+                    )
+                entries.append(entry)
+                continue
+            if receipt.status == "unknown":
+                try:
+                    self._verify_artifact_bindings(receipt.evidence)
+                except (DatasetEvidenceError, OSError, ValueError) as exc:
+                    raise RealSceneStatusError(
+                        "unknown stage evidence is invalid"
+                    ) from exc
+                entry = SnapshotStageEntry(
+                    stage=stage,  # type: ignore[arg-type]
+                    status="unknown",
+                    receipt_sha256=digest,
+                    reason_code="stage-unknown",
+                )
+                if earliest is None:
+                    earliest = SnapshotEarliestBlocker(
+                        stage=stage,  # type: ignore[arg-type]
+                        reason_code="stage-unknown",
+                    )
+                entries.append(entry)
+                continue
+            try:
+                self._verify_completed(receipt)
+            except (
+                DatasetEvidenceError,
+                RealSceneBlockedError,
+            ) as exc:
+                raise RealSceneStatusError(
+                    f"{stage} completed receipt is invalid"
+                ) from exc
+            if stage == "accept":
+                acceptance_report_sha = self._snapshot_acceptance_sha(receipt)
+            entries.append(
+                SnapshotStageEntry(
+                    stage=stage,  # type: ignore[arg-type]
+                    status="completed",
+                    receipt_sha256=digest,
+                )
+            )
+        all_completed = all(
+            entry.status == "completed" for entry in entries
+        )
+        if all_completed and acceptance_report_sha is not None:
+            state: SnapshotState = "accepted-from-authoritative-decision"
+            acceptance = SnapshotAcceptanceSummary(
+                decision="allowed-from-authoritative-decision",
+                acceptance_source="real-scene-acceptance",
+                acceptance_report_sha256=acceptance_report_sha,
+            )
+            blocker: SnapshotEarliestBlocker | None = None
+        else:
+            state = "blocked"
+            acceptance = SnapshotAcceptanceSummary(decision="not-reached")
+            blocker = earliest
+        signing_payload: dict[str, object] = {
+            "schema": "nantai.real-scene-status.v1",
+            "state": state,
+            "source": self.source.model_dump(mode="json"),
+            "run_id": run_id,
+            "stages": [
+                entry.model_dump(mode="json", by_alias=True)
+                for entry in entries
+            ],
+            "earliest_blocker": (
+                blocker.model_dump(mode="json", by_alias=True)
+                if blocker is not None
+                else None
+            ),
+            "acceptance": acceptance.model_dump(mode="json", by_alias=True),
+        }
+        report_sha = hashlib.sha256(
+            _canonical_json_bytes(signing_payload)
+        ).hexdigest()
+        snapshot = RealSceneStageSnapshot(
+            state=state,
+            source=SnapshotSourceIdentity(
+                dataset_id=self.source.dataset_id,
+                role=self.source.role,
+                source_sha256=self.source.source_sha256,
+            ),
+            run_id=run_id,
+            stages=tuple(entries),
+            earliest_blocker=blocker,
+            acceptance=acceptance,
+            report_sha256=report_sha,
+        )
+        if _compute_snapshot_sha256(snapshot) != report_sha:
+            raise RealSceneStatusError("snapshot sha256 round-trip failed")
+        return snapshot
+
+    def _snapshot_acceptance_sha(self, receipt: StageReceipt) -> str:
+        """Return the bound acceptance report SHA for a completed accept stage."""
+        acceptance_name = re.compile(
+            r"^real-scene-acceptance-[0-9a-f]{64}\.json$"
+        )
+        matches = tuple(
+            binding for binding in receipt.outputs
+            if acceptance_name.fullmatch(PurePosixPath(binding.path).name)
+        )
+        if len(matches) != 1:
+            raise RealSceneStatusError(
+                "accept stage must bind exactly one acceptance report"
+            )
+        return matches[0].sha256
+
 
 def run_real_scene(
     source_path: Path,
@@ -1012,3 +1483,80 @@ def run_real_scene(
         geo_origin=options.geo_origin,
     )
     return runner.run(target, resume=resume, retry=retry)
+
+
+def _canonical_json_bytes(payload: object) -> bytes:
+    import json
+
+    return (
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+
+
+def canonical_snapshot_bytes(snapshot: RealSceneStageSnapshot) -> bytes:
+    """Canonical JSON bytes of a status snapshot (including ``report_sha256``)."""
+    return _canonical_json_bytes(
+        snapshot.model_dump(mode="json", by_alias=True)
+    )
+
+
+def _compute_snapshot_sha256(snapshot: RealSceneStageSnapshot) -> str:
+    payload = snapshot.model_dump(mode="json", by_alias=True)
+    payload.pop("report_sha256", None)
+    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
+
+def snapshot_real_scene_stages(
+    source_path: Path,
+    *,
+    workspace_base: Path,
+    run_id: str,
+) -> RealSceneStageSnapshot:
+    """Read-only 5-stage status snapshot for one source-bound real-scene run.
+
+    Loads the source, derives its canonical SHA, constructs a runner with
+    an ``_InspectionOnlyOperations`` stub (so any accidental stage
+    execution raises ``AssertionError``), and returns the snapshot.
+    No network, no training, no publish, no side effects.
+    """
+    source_file = Path(source_path).expanduser().absolute()
+    try:
+        before = source_file.lstat()
+        if _is_linklike(source_file, before) or not stat.S_ISREG(
+            before.st_mode
+        ):
+            raise RealSceneStatusError(
+                "real-scene status source is link-like"
+            )
+        source = load_real_dataset_source(source_file)
+        after = source_file.lstat()
+    except RealSceneStatusError:
+        raise
+    except (DatasetEvidenceError, OSError, RuntimeError, ValueError) as exc:
+        raise RealSceneStatusError(
+            "real-scene status source is invalid"
+        ) from exc
+    if _stat_signature(before) != _stat_signature(after):
+        raise RealSceneStatusError(
+            "real-scene status source changed while read"
+        )
+    source_sha256 = hashlib.sha256(canonical_model_bytes(source)).hexdigest()
+    workspace = Path(workspace_base).expanduser().absolute()
+    _require_real_directory(workspace)
+    runner = RealSceneRunner(
+        source=RealSceneSourceIdentity(
+            dataset_id=source.dataset_id,
+            role=source.role,
+            source_sha256=source_sha256,
+        ),
+        workspace_base=workspace / run_id,
+        operations=_InspectionOnlyOperations(),
+    )
+    return runner.snapshot_stages(run_id=run_id)

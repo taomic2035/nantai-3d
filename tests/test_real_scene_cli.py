@@ -290,3 +290,83 @@ def test_cli_rejects_invalid_geo_origin(tmp_path, value, capsys):
         == 2
     )
     assert "geo-origin" in capsys.readouterr().err
+
+
+def test_cli_status_rejects_extra_arguments(tmp_path, capsys):
+    cli = _load_cli()
+    source = tmp_path / "source.json"
+    _hf_source(source)
+
+    result = cli.main(
+        [
+            "status",
+            "--source",
+            str(source),
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--run-id",
+            "canary-001",
+            "--media-root",
+            str(tmp_path / "media"),
+        ]
+    )
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "real-scene status invalid" in captured.err
+
+
+def test_cli_status_missing_workspace_returns_invalid(tmp_path, capsys):
+    cli = _load_cli()
+    source = tmp_path / "source.json"
+    _hf_source(source)
+
+    result = cli.main(
+        [
+            "status",
+            "--source",
+            str(source),
+            "--run-id",
+            "canary-001",
+        ]
+    )
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "real-scene status invalid" in captured.err
+
+
+def test_cli_status_missing_journal_returns_canonical_blocked_snapshot(
+    tmp_path,
+    capsys,
+):
+    cli = _load_cli()
+    source = tmp_path / "source.json"
+    workspace = tmp_path / "workspace"
+    _hf_source(source)
+
+    result = cli.main(
+        [
+            "status",
+            "--source",
+            str(source),
+            "--workspace",
+            str(workspace),
+            "--run-id",
+            "canary-001",
+        ]
+    )
+
+    assert result == 2
+    captured = capsys.readouterr()
+    payload = __import__("json").loads(captured.out)
+    assert captured.err == ""
+    assert payload["schema"] == "nantai.real-scene-status.v1"
+    assert payload["state"] == "blocked"
+    assert payload["earliest_blocker"] == {
+        "reason_code": "receipt-missing",
+        "stage": "fetch",
+    }
+    assert not workspace.exists()

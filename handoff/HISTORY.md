@@ -112,3 +112,19 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 - 014 的隐私/path identity/exact-HEAD 安全背景已被上述实现和最新 CI 吸收；详细原文
   留在 Git 历史。GLM 活动入口切换为 015，聚焦四件套对抗审计和 runtime 自包含，
   不重开 H1–N1。
+
+## 2026-07-28：runtime runner 与 real-scene status
+
+- GLM-015/016 完成公开 runtime runner、下载字节复验、clean-room 与跨平台复核；
+  旧详细工单不再是执行入口。
+- GLM-017 的第一版 readiness 方案错误混合训练前 external-input 与下游 stage
+  证据；Codex review 后改为 source/workspace/run-bound 的只读 journal snapshot。
+- GLM-018 最终只检查 `fetch → sfm → role-train → import → accept`：completed
+  receipt 会重开 prerequisite、artifact、production import 与权威 acceptance。
+  状态命令不联网、不训练、不写文件，也不回显私有路径或原始失败原因。
+- `serve` 被排除出 acceptance readiness：当前 runner 把它列为 stage，但实际
+  operations 永远返回 blocked，且常驻服务不自然对应 completed receipt。该冲突转入
+  GLM-019 独立设计审计。
+- 四轮设计原文已压缩为
+  [GLM-017/018 closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md)；
+  被替代内容仍可从 Git 历史读取。

@@ -5,9 +5,8 @@
 
 ## 当前真实场景主线
 
-1. [GLM Production runtime runner 独立复核](HANDOFF-GLM-016-production-runtime-runner-review.md) —
-   当前唯一执行入口：公开 runner 对抗审计、builder 字节绑定、clean-room 复验和
-   exact-HEAD 三平台 CI；不重开已关闭的 A1–N1/015
+1. [Real-scene status closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md) —
+   当前实现入口：source-bound 五阶段只读状态、权威 acceptance 重验和固定错误边界
 2. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
 3. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
 4. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
@@ -22,8 +21,9 @@ E1 candidate `b71e5de` 与 Codex closure `ab0c7dc` 已推送；P0-CI registry �
 Codex `70a965e` 关闭。H1–K1 已完成；`0f6dc99` 补齐真实 fetch caller 的 bounded
 streaming，L1 `e07658b`、M1 `945f3f7` + `4b3d3de`、N1 `86ab506` 与 portable
 identity `e4a99cf` 已关闭。Codex `c858f37` 新增最终四件套 fail-closed 导出与
-下载整体复验，GLM-015 已由 `18e2189` 关闭；当前 GLM 入口见
-[HANDOFF-GLM-016](HANDOFF-GLM-016-production-runtime-runner-review.md)。
+下载整体复验，GLM-015/016 已关闭。GLM-017/018 把 runner journal 状态收敛为
+五阶段只读 snapshot；下一项是审计 `serve` 作为常驻动作却被列为 durable stage
+的语义冲突。
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。

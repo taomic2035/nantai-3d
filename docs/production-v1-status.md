@@ -50,9 +50,10 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 远程 runtime/caller 的 A1–K1、P0-CI 与 L1–N1 均已关闭：真实 fetch 使用 bounded
 streaming，archive/receipt/tree/builder 共享 portable Unicode path identity，最终
 ZIP 可执行 no-secret-echo 的分块隐私机器审计，并以四件套原子导出/整体复验。GLM
-当前只执行
-[`HANDOFF-GLM-015`](../handoff/HANDOFF-GLM-015-production-release-assets-review.md)
-的最终资产、跨平台与 runtime 自包含复核；不得重新实现已关闭工单。
+最终资产、跨平台与 runtime 自包含复核已经关闭。当前 repo-local 主线是
+[`GLM-017/018 real-scene status`](../handoff/FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md)：
+从 source/workspace/run identity 只读重开五阶段 journal，并在 `accept` 阶段重新
+调用权威 acceptance validator。下一项是 GLM-019 的 `serve` stage 语义审计。
 
 这些仍只证明 repo-local 生产链合同。没有真实 GPU fresh accepted runtime、正式素材、
 实测控制点和真实 Viewer/human QA 时，状态保持 modeled-unverified，不能签署
