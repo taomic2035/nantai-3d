@@ -212,6 +212,8 @@ def _config(tmp_path) -> RemoteShellExecutorConfig:
         remote_root="/srv/nantai-jobs",
         remote_repo_root="/srv/nantai-3d",
         container_identity=container_identity,
+        remote_worker_python="/usr/bin/python3",
+        expected_worker_python_sha256="f" * 64,
         expected_worker_sha256="d" * 64,
         expected_worker_version="1.0.0",
         expected_checker_config_sha256="e" * 64,
@@ -306,12 +308,16 @@ def _readiness_response(
     **updates,
 ) -> subprocess.CompletedProcess:
     payload = {
-        "schema": "nantai.remote-readiness-evidence.v1",
-        "checker_version": "nantai.remote-readiness-checker.v1",
+        "schema": "nantai.remote-readiness-evidence.v2",
+        "checker_version": "nantai.remote-readiness-checker.v2",
         "checker_config_sha256": "e" * 64,
         "container_runtime": config.container_runtime,
         "container_runtime_version": "Docker version 28.0.0",
         "container_identity": config.container_identity,
+        "worker_python": config.remote_worker_python,
+        "worker_python_sha256": (
+            config.expected_worker_python_sha256
+        ),
         "worker_sha256": config.expected_worker_sha256,
         "worker_version": config.expected_worker_version,
         **updates,
@@ -366,6 +372,39 @@ def test_submit_uses_strict_host_key_no_shell_and_redacts_key(
     audit = "\n".join(" ".join(argv) for argv in executor.command_audit)
     assert str(executor.config.private_key_path) not in audit
     assert "<redacted-private-key>" in audit
+
+
+def test_submit_uses_preflight_bound_absolute_worker_python(
+    tmp_path,
+    monkeypatch,
+):
+    executor, runner, prepared = _prepared_executor(tmp_path, monkeypatch)
+    worker = (
+        f"{executor.config.remote_repo_root}/"
+        "cloud/remote_training_worker.py"
+    )
+
+    job = executor.submit(prepared)
+    runner.responses.append(
+        _lifecycle_response(_lifecycle_receipt(job)),
+    )
+    runner.responses.append(
+        _status_response(_running_status(job)),
+    )
+    assert executor.poll(job).state == "running"
+
+    worker_commands = [
+        argv[-1]
+        for argv, _kwargs in runner.calls
+        if worker in argv[-1]
+    ]
+    assert len(worker_commands) == 4
+    assert all(
+        command.startswith(
+            executor.config.remote_worker_python + " "
+        )
+        for command in worker_commands
+    )
 
 
 def test_submit_uploads_bound_runtime_policy_before_worker_start(
@@ -635,6 +674,19 @@ def test_config_rejects_controls_and_host_fingerprint_mismatch(tmp_path):
     )
     with pytest.raises(RemoteShellExecutionError, match="fingerprint"):
         RemoteShellExecutor(bad)
+
+    with pytest.raises(ValidationError, match="remote_worker_python"):
+        RemoteShellExecutorConfig.model_validate(
+            {
+                **config.model_dump(),
+                "remote_worker_python": "python3",
+            }
+        )
+    legacy = config.model_dump()
+    legacy.pop("remote_worker_python")
+    legacy.pop("expected_worker_python_sha256")
+    with pytest.raises(ValidationError):
+        RemoteShellExecutorConfig.model_validate(legacy)
 
 
 def _write_result_archive(
@@ -2354,6 +2406,24 @@ def test_fetch_interrupted_cleans_staging(tmp_path, monkeypatch):
 
 
 class TestRemoteShellPreflight:
+    def test_v1_readiness_evidence_is_not_accepted_for_submit(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        payload = json.loads(_readiness_response(config).stdout)
+        payload["schema"] = "nantai.remote-readiness-evidence.v1"
+        payload["checker_version"] = (
+            "nantai.remote-readiness-checker.v1"
+        )
+        payload.pop("worker_python")
+        payload.pop("worker_python_sha256")
+
+        with pytest.raises(ValidationError):
+            remote_module.RemoteReadinessEvidence.model_validate(
+                payload
+            )
+
     def test_strict_remote_config_loader_rejects_duplicate_keys(
         self,
         tmp_path,
@@ -3065,12 +3135,41 @@ class TestRemoteShellPreflight:
         assert report.checker_config_sha256 == "e" * 64
         assert report.measured_container_identity == config.container_identity
         assert report.worker_binary_sha256 == "d" * 64
+        assert report.worker_python == config.remote_worker_python
+        assert (
+            report.worker_python_sha256
+            == config.expected_worker_python_sha256
+        )
         assert report.worker_version == "1.0.0"
         assert report.failure_reason is None
         assert len(runner.calls) == 1
         assert runner.calls[0][0][-1] == (
             "nantai-remote-readiness-checker"
         )
+
+    def test_probe_remote_rejects_worker_python_mismatch(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        runner = _Runner()
+        runner.responses.append(
+            _readiness_response(
+                config,
+                worker_python="/opt/unbound/python3",
+            )
+        )
+
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+
+        assert report.status == "failed"
+        assert report.failure_code == "remote-worker-mismatch"
+        assert report.worker_binary_verified is False
 
     def test_remote_probe_rejects_local_input_drift(self, tmp_path):
         config = _config(tmp_path)

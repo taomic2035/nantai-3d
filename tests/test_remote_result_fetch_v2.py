@@ -119,6 +119,8 @@ def _v2_config(tmp_path: Path) -> RemoteShellExecutorConfig:
         remote_root="/srv/nantai-jobs",
         remote_repo_root="/srv/nantai-3d",
         container_identity=_CONTAINER,
+        remote_worker_python="/usr/bin/python3",
+        expected_worker_python_sha256="f" * 64,
         expected_worker_sha256=_sha(b"worker"),
         expected_worker_version="1.0.0",
         expected_checker_config_sha256="e" * 64,

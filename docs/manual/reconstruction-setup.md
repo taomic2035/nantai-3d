@@ -120,7 +120,8 @@ registration 阈值没有默认值；示例值必须按本次采集和正式验�
 - `docker` 或 `podman`；
 - 带 digest 的不可变 CUDA container identity；
 - operator 内容锁定的 `remote_target_sha256`；
-- 远端 readiness config SHA、worker 文件 SHA 和稳定 worker version。
+- 远端 readiness config SHA、worker 文件 SHA、稳定 worker version；
+- 运行 worker 的绝对、非符号链接 Python 路径及该 executable 的 SHA。
 - 一份 canonical `production-runtime-policy.v1` 的绝对私有路径及其
   `content_sha256`。
 
@@ -149,12 +150,19 @@ sudo install -m 0755 cloud/remote_readiness_checker.py \
 key 排序、末尾换行的 canonical JSON，且只含以下字段：
 
 ```json
-{"container_identity":"registry.example/nantai@sha256:<64-hex>","container_runtime":"docker","schema":"nantai.remote-readiness-config.v1","worker_path":"/srv/nantai-3d/cloud/remote_training_worker.py","worker_python":"/usr/bin/python3"}
+{"container_identity":"registry.example/nantai@sha256:<64-hex>","container_runtime":"docker","schema":"nantai.remote-readiness-config.v1","worker_path":"/srv/nantai-3d/cloud/remote_training_worker.py","worker_python":"/usr/bin/python3.11"}
 ```
 
+`worker_python` 必须填写 `readlink -f "$(command -v python3)"` 得到的绝对真实文件；
+不能填写符号链接或裸 `python3`。
+
 先在远端直接运行一次，取得输出中的 `checker_config_sha256`、`worker_sha256` 和
-`worker_version`，再把三者作为 `expected_checker_config_sha256`、
-`expected_worker_sha256`、`expected_worker_version` 写入本地私有 remote config。
+`worker_version`，以及 `worker_python`、`worker_python_sha256`。再把它们分别作为
+`expected_checker_config_sha256`、`expected_worker_sha256`、
+`expected_worker_version`、`remote_worker_python`、
+`expected_worker_python_sha256` 写入本地私有 remote config。v1 readiness
+evidence/preflight report 和缺少这两个解释器字段的旧 remote config 不再允许正式
+submit，必须用 v2 checker fresh 重建。
 随后在本机执行：
 
 ```powershell
@@ -175,8 +183,8 @@ bundle 和任何远端副作用之前重新打开 canonical report，要求 `sta
 report/config identity、SSH/SCP/私钥/known-hosts 当前内容 SHA，并重新打开 runtime
 policy；本地 bundle 构建完成后还会立即重跑一次固定的只读远端 checker，要求
 checker config、container digest、runtime version、worker SHA/version 与报告一致，
-然后才允许远端 `init`。任一项漂移都拒绝 submit。因此 preflight report 不能代替
-提交时复验。
+并使用报告绑定的绝对 Python executable 执行 worker，然后才允许远端 `init`。任一
+项漂移都拒绝 submit。因此 preflight report 不能代替提交时复验。
 
 remote config 还必须包含：
 

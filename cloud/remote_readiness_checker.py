@@ -25,7 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-CHECKER_VERSION = "nantai.remote-readiness-checker.v1"
+CHECKER_VERSION = "nantai.remote-readiness-checker.v2"
 DEFAULT_CONFIG = Path("/etc/nantai/remote-readiness.json")
 _MAX_CONFIG_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024
@@ -322,6 +322,7 @@ def collect_remote_readiness(
     identity = config["container_identity"]
     worker_path = Path(config["worker_path"])
     worker_python = config["worker_python"]
+    worker_python_path = Path(worker_python)
 
     runtime_resolved = which(runtime)
     if not runtime_resolved:
@@ -344,6 +345,11 @@ def collect_remote_readiness(
         checker_path,
         label="checker executable",
         maximum_bytes=_MAX_WORKER_BYTES,
+    )
+    worker_python_bytes, worker_python_signature = _stable_bytes(
+        worker_python_path,
+        label="worker Python executable",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
     )
 
     runtime_version = _safe_text(
@@ -413,6 +419,18 @@ def collect_remote_readiness(
         raise RemoteReadinessCheckError(
             "remote worker changed during probe"
         )
+    worker_python_after, worker_python_after_sig = _stable_bytes(
+        worker_python_path,
+        label="worker Python executable",
+        maximum_bytes=_MAX_RUNTIME_BYTES,
+    )
+    if (
+        worker_python_bytes != worker_python_after
+        or worker_python_signature != worker_python_after_sig
+    ):
+        raise RemoteReadinessCheckError(
+            "worker Python executable changed during probe"
+        )
 
     runtime_after, runtime_after_sig = _stable_bytes(
         runtime_path,
@@ -458,7 +476,7 @@ def collect_remote_readiness(
         )
 
     return {
-        "schema": "nantai.remote-readiness-evidence.v1",
+        "schema": "nantai.remote-readiness-evidence.v2",
         "checker_version": CHECKER_VERSION,
         "checker_config_sha256": hashlib.sha256(
             config_bytes
@@ -468,6 +486,10 @@ def collect_remote_readiness(
         "container_identity": identity,
         "worker_sha256": hashlib.sha256(
             worker_bytes
+        ).hexdigest(),
+        "worker_python": str(worker_python_path),
+        "worker_python_sha256": hashlib.sha256(
+            worker_python_bytes
         ).hexdigest(),
         "worker_version": worker_version,
     }
@@ -482,6 +504,8 @@ def canonical_evidence_bytes(evidence: dict[str, Any]) -> bytes:
         "container_runtime_version",
         "container_identity",
         "worker_sha256",
+        "worker_python",
+        "worker_python_sha256",
         "worker_version",
     }
     if set(evidence) != expected:

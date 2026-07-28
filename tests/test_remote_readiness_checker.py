@@ -151,8 +151,8 @@ def test_checker_measures_runtime_image_and_worker_identity(tmp_path):
     )
 
     assert evidence == {
-        "schema": "nantai.remote-readiness-evidence.v1",
-        "checker_version": "nantai.remote-readiness-checker.v1",
+        "schema": "nantai.remote-readiness-evidence.v2",
+        "checker_version": "nantai.remote-readiness-checker.v2",
         "checker_config_sha256": hashlib.sha256(
             config_bytes
         ).hexdigest(),
@@ -161,6 +161,10 @@ def test_checker_measures_runtime_image_and_worker_identity(tmp_path):
         "container_identity": CONTAINER_IDENTITY,
         "worker_sha256": hashlib.sha256(
             worker.read_bytes()
+        ).hexdigest(),
+        "worker_python": str(Path(sys.executable)),
+        "worker_python_sha256": hashlib.sha256(
+            Path(sys.executable).read_bytes()
         ).hexdigest(),
         "worker_version": "1.0.0",
     }
@@ -476,6 +480,92 @@ def test_checker_fails_when_runtime_binary_is_symlink(tmp_path):
             ),
             which=_which_factory(symlink_path),
         )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="creating symlinks on Windows requires admin privileges",
+)
+def test_checker_rejects_symlinked_worker_python(tmp_path):
+    config, _worker, config_bytes, runtime_bin = _write_config(tmp_path)
+    parsed = json.loads(config_bytes)
+    worker_python_link = tmp_path / "worker-python"
+    worker_python_link.symlink_to(Path(sys.executable))
+    parsed["worker_python"] = str(worker_python_link)
+    config.write_bytes(
+        (
+            json.dumps(
+                parsed,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("ascii")
+    )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="worker Python executable must be a regular file",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=lambda *_args, **_kwargs: pytest.fail(
+                "symlinked worker Python must fail before probes"
+            ),
+            which=_which_factory(runtime_bin),
+        )
+
+
+def test_checker_rejects_worker_python_replacement_during_probe(
+    tmp_path,
+):
+    config, worker, config_bytes, runtime_bin = _write_config(tmp_path)
+    parsed = json.loads(config_bytes)
+    worker_python = tmp_path / "python3.11"
+    worker_python.write_bytes(b"worker-python-v1\n")
+    parsed["worker_python"] = str(worker_python)
+    config.write_bytes(
+        (
+            json.dumps(
+                parsed,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("ascii")
+    )
+    replaced = False
+
+    def run(argv, **kwargs):
+        nonlocal replaced
+        del kwargs
+        if _is_worker(argv, worker):
+            replacement = tmp_path / "worker-python-v2"
+            replacement.write_bytes(b"worker-python-v2\n")
+            replacement.replace(worker_python)
+            replaced = True
+            return subprocess.CompletedProcess(
+                argv, 0, b"1.0.0\n", b""
+            )
+        return _golden_run(
+            argv,
+            runtime_bin=runtime_bin,
+            worker=worker,
+        )
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="worker Python executable changed during probe",
+    ):
+        checker.collect_remote_readiness(
+            config,
+            run_command=run,
+            which=_which_factory(runtime_bin),
+        )
+
+    assert replaced is True
 
 
 def test_checker_fails_when_runtime_binary_replaced_during_probe(tmp_path):

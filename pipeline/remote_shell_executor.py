@@ -309,6 +309,10 @@ class RemoteShellExecutorConfig(FrozenModel):
     remote_repo_root: str
     container_identity: str = Field(pattern=_CONTAINER_PATTERN)
     container_runtime: Literal["docker", "podman"] = "docker"
+    remote_worker_python: str
+    expected_worker_python_sha256: str = Field(
+        pattern=_SHA256_PATTERN,
+    )
     expected_worker_sha256: str = Field(pattern=_SHA256_PATTERN)
     expected_worker_version: str = Field(
         min_length=1,
@@ -366,6 +370,10 @@ class RemoteShellExecutorConfig(FrozenModel):
         _safe_remote_root(
             self.remote_repo_root,
             label="remote_repo_root",
+        )
+        _safe_remote_root(
+            self.remote_worker_python,
+            label="remote_worker_python",
         )
         local_paths = (
             self.ssh_binary,
@@ -459,8 +467,8 @@ class RemoteShellPreflightReport(FrozenModel):
     or unfiltered stderr.
     """
 
-    schema_id: Literal["nantai.remote-shell-preflight.v1"] = Field(
-        default="nantai.remote-shell-preflight.v1",
+    schema_id: Literal["nantai.remote-shell-preflight.v2"] = Field(
+        default="nantai.remote-shell-preflight.v2",
         alias="schema",
         serialization_alias="schema",
     )
@@ -506,7 +514,7 @@ class RemoteShellPreflightReport(FrozenModel):
 
     # Remote read-only capability check results (None when not probed).
     checker_version: (
-        Literal["nantai.remote-readiness-checker.v1"] | None
+        Literal["nantai.remote-readiness-checker.v2"] | None
     ) = None
     expected_checker_config_sha256: str = Field(
         pattern=_SHA256_PATTERN,
@@ -527,6 +535,14 @@ class RemoteShellPreflightReport(FrozenModel):
     container_runtime_verified: bool | None = None
     container_image_verified: bool | None = None
     worker_binary_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    worker_python: str | None = Field(
+        default=None,
+        min_length=1,
+    )
+    worker_python_sha256: str | None = Field(
         default=None,
         pattern=_SHA256_PATTERN,
     )
@@ -573,7 +589,7 @@ class RemoteShellPreflightReport(FrozenModel):
                 and self.private_key_sha256 is not None
                 and self.known_hosts_sha256 is not None
                 and self.checker_version
-                == "nantai.remote-readiness-checker.v1"
+                == "nantai.remote-readiness-checker.v2"
                 and self.checker_config_sha256
                 == self.expected_checker_config_sha256
                 and self.container_runtime_version is not None
@@ -582,6 +598,8 @@ class RemoteShellPreflightReport(FrozenModel):
                 and self.container_runtime_verified is True
                 and self.container_image_verified is True
                 and self.worker_binary_sha256 is not None
+                and self.worker_python is not None
+                and self.worker_python_sha256 is not None
                 and self.worker_version is not None
                 and self.worker_binary_verified is True
             ):
@@ -617,12 +635,12 @@ class RemoteShellPreflightReport(FrozenModel):
 
 
 class RemoteReadinessEvidence(FrozenModel):
-    schema_id: Literal["nantai.remote-readiness-evidence.v1"] = Field(
-        default="nantai.remote-readiness-evidence.v1",
+    schema_id: Literal["nantai.remote-readiness-evidence.v2"] = Field(
+        default="nantai.remote-readiness-evidence.v2",
         alias="schema",
         serialization_alias="schema",
     )
-    checker_version: Literal["nantai.remote-readiness-checker.v1"]
+    checker_version: Literal["nantai.remote-readiness-checker.v2"]
     checker_config_sha256: str = Field(pattern=_SHA256_PATTERN)
     container_runtime: Literal["docker", "podman"]
     container_runtime_version: str = Field(
@@ -631,6 +649,8 @@ class RemoteReadinessEvidence(FrozenModel):
     )
     container_identity: str = Field(pattern=_CONTAINER_PATTERN)
     worker_sha256: str = Field(pattern=_SHA256_PATTERN)
+    worker_python: str = Field(min_length=1)
+    worker_python_sha256: str = Field(pattern=_SHA256_PATTERN)
     worker_version: str = Field(
         min_length=1,
         max_length=128,
@@ -1354,6 +1374,17 @@ def validate_remote_shell_preflight_for_config(
             raise RemoteShellExecutionError(
                 f"remote preflight report {field} differs"
             )
+    if report.worker_python != config.remote_worker_python:
+        raise RemoteShellExecutionError(
+            "remote preflight report worker Python differs"
+        )
+    if (
+        report.worker_python_sha256
+        != config.expected_worker_python_sha256
+    ):
+        raise RemoteShellExecutionError(
+            "remote preflight report worker Python sha256 differs"
+        )
     local_inputs = (
         ("ssh_binary_sha256", config.ssh_binary, "ssh binary"),
         ("scp_binary_sha256", config.scp_binary, "scp binary"),
@@ -3551,7 +3582,7 @@ class RemoteShellExecutor:
         ).hexdigest()
         init = self._ssh(
             [
-                "python3",
+                self.config.remote_worker_python,
                 worker,
                 "init",
                 "--job-dir",
@@ -3591,7 +3622,7 @@ class RemoteShellExecutor:
         self._require_zero(upload, phase="training bundle upload")
         start = self._ssh(
             [
-                "python3",
+                self.config.remote_worker_python,
                 worker,
                 "start",
                 "--detach",
@@ -3742,7 +3773,7 @@ class RemoteShellExecutor:
         )
         completed = self._ssh(
             [
-                "python3",
+                self.config.remote_worker_python,
                 worker,
                 "lifecycle",
                 "--job-dir",
@@ -3866,7 +3897,7 @@ class RemoteShellExecutor:
         try:
             completed = self._ssh(
                 [
-                    "python3",
+                    self.config.remote_worker_python,
                     worker,
                     "status",
                     "--job-dir",
@@ -4579,6 +4610,10 @@ def _probe_remote_capabilities(
             evidence.worker_sha256 == config.expected_worker_sha256
             and evidence.worker_version
             == config.expected_worker_version
+            and evidence.worker_python
+            == config.remote_worker_python
+            and evidence.worker_python_sha256
+            == config.expected_worker_python_sha256
         )
         checker_config_verified = (
             evidence.checker_config_sha256
@@ -4924,6 +4959,18 @@ def run_remote_shell_preflight(
             and remote_outcome.evidence is not None
             else None
         ),
+        worker_python=(
+            remote_outcome.evidence.worker_python
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
+        worker_python_sha256=(
+            remote_outcome.evidence.worker_python_sha256
+            if remote_outcome is not None
+            and remote_outcome.evidence is not None
+            else None
+        ),
         worker_version=(
             remote_outcome.evidence.worker_version
             if remote_outcome is not None
@@ -4992,6 +5039,8 @@ def revalidate_remote_shell_preflight_for_submit(
         "container_runtime_verified",
         "container_image_verified",
         "worker_binary_sha256",
+        "worker_python",
+        "worker_python_sha256",
         "worker_version",
         "worker_binary_verified",
     )
