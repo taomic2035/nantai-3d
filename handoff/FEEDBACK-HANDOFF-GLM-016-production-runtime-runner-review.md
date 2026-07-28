@@ -187,3 +187,30 @@ REVIEW-CODEX-038 要求的 §7 cold-start test 已由 Codex `bb3b99a` 补齐
 （`test_fresh_runtime_runner_verification_is_repeatable`），用 `make.py verify`
 而非直接调用 `scripts/verify_production_release.py`。R3 的独立 clean-room probe
 进一步验证了 `help`/`bogus`/SHA 绑定。REVIEW-CODEX-038 闭环。
+
+## HISTORY.md 压缩建议
+
+以下两段建议 Codex 在接受本 feedback 后追加到 `handoff/HISTORY.md` 末尾，
+GLM 不直接修改 HISTORY.md：
+
+```markdown
+## 2026-07-28：GLM-015 最终资产安全复核
+
+- R1 四件套 stage/download verifier 对抗审计 10/10 PASS；R2 发现 release guide
+  `make.py studio` → `serve` 修复（Codex `c887546`）；R3 三平台 CI 全绿。
+- Codex `c858f37` 新增四件套 fail-closed 导出与下载复验；junction/symlink 拒绝
+  由 `b13ee06` 补齐。
+- GLM feedback `18e2189`；REVIEW-CODEX-038 指出 §7 cold-start test 缺失。
+
+## 2026-07-28：GLM-016 runtime runner 自包含闭环
+
+- Codex `f7b5a87`/`59b52b4`/`96d1ca8`/`bb3b99a` 实现独立 runtime runner
+  （`release/production-runtime-runner.py`），只暴露 `help/verify/serve`，
+  仓库 `make.py` 不入包。
+- REVIEW-CODEX-038 §7 cold-start test 由 `bb3b99a` 补齐。
+- GLM-016 R1/R2/R3 全 PASS；R4 发现 `Path.is_junction` 在 Python 3.11 上
+  AttributeError，`2f5e550` 修复三个 junction 测试用 `getattr` fallback。
+- runtime 自包含缺陷闭环；`scene_trust_effect=none` 不变。
+```
+
+015/016 原文保留在 Git 历史，压缩后只保留上述摘要。
