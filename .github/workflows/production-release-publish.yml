@@ -259,15 +259,24 @@ jobs:
           marker = (
               f"Workflow transaction: {run_id}-{run_attempt}@{source_sha}"
           )
+          expected_name = f"Nantai 3D {version}"
+          expected_body = (
+              "This release was staged by the official Nantai "
+              "production workflow from the protected private "
+              f"staging environment at source commit {source_sha}.\n\n"
+              "The downloaded verifier confirms internal consistency "
+              "of the four-file bundle and package content ID "
+              f"{expected_content_id}. It does not independently prove "
+              "source authenticity, private acceptance, rights, real "
+              "reconstruction, measured alignment, or Viewer QA.\n\n"
+              f"{marker}\n"
+          )
           release_endpoint = f"repos/{repository}/releases"
           release_by_tag_endpoint = (
               f"{release_endpoint}/tags/{version}"
           )
           tag_get_endpoint = (
               f"repos/{repository}/git/ref/tags/{version}"
-          )
-          tag_delete_endpoint = (
-              f"repos/{repository}/git/refs/tags/{version}"
           )
           release_id = None
           created_tag = False
@@ -323,7 +332,10 @@ jobs:
                   or release.get("tag_name") != version
                   or release.get("target_commitish") != source_sha
                   or release.get("draft") is not draft
-                  or marker not in release.get("body", "")
+                  or release.get("name") != expected_name
+                  or release.get("prerelease") is not False
+                  or not isinstance(release.get("body"), str)
+                  or release.get("body") != expected_body
               ):
                   raise PublicationError(
                       "Release transaction identity changed"
@@ -344,58 +356,19 @@ jobs:
               return release
 
 
-          def _cleanup():
-              release_deleted = False
-              release_missing = False
+          def _report_retained_state():
               if isinstance(release_id, int) and release_id > 0:
-                  try:
-                      current = _api_json(
-                          f"{release_endpoint}/{release_id}",
-                          allow_not_found=True,
-                      )
-                      if current is None:
-                          release_missing = True
-                      else:
-                          _validate_release(current, draft=True)
-                          _assert_tag()
-                          deleted = _api_result(
-                              "--method",
-                              "DELETE",
-                              f"{release_endpoint}/{release_id}",
-                          )
-                          release_deleted = deleted.returncode == 0
-                  except (PublicationError, OSError):
-                      pass
-              if not created_tag:
-                  return
-              if not (
-                  release_id is None
-                  or release_deleted
-                  or release_missing
-              ):
-                  return
-              try:
-                  tag = _api_json(
-                      tag_get_endpoint,
-                      allow_not_found=True,
+                  print(
+                      "Transaction resources for numeric release ID "
+                      f"{release_id} were retained for manual cleanup",
+                      file=sys.stderr,
                   )
-                  same_tag = (
-                      isinstance(tag, dict)
-                      and isinstance(tag.get("object"), dict)
-                      and tag["object"].get("sha") == source_sha
+              elif created_tag:
+                  print(
+                      "The workflow-created tag was retained for manual "
+                      "cleanup",
+                      file=sys.stderr,
                   )
-                  tag_release = _api_json(
-                      release_by_tag_endpoint,
-                      allow_not_found=True,
-                  )
-                  if same_tag and tag_release is None:
-                      _api_result(
-                          "--method",
-                          "DELETE",
-                          tag_delete_endpoint,
-                      )
-              except (PublicationError, OSError):
-                  pass
 
 
           def _compare_files(left, right):
@@ -500,17 +473,6 @@ jobs:
                       "Release appeared during creation"
                   )
 
-              body = (
-                  "This release was staged by the official Nantai "
-                  "production workflow from the protected private "
-                  f"staging environment at source commit {source_sha}.\n\n"
-                  "The downloaded verifier confirms internal consistency "
-                  "of the four-file bundle and package content ID "
-                  f"{expected_content_id}. It does not independently prove "
-                  "source authenticity, private acceptance, rights, real "
-                  "reconstruction, measured alignment, or Viewer QA.\n\n"
-                  f"{marker}\n"
-              )
               release = _api_json(
                   "--method",
                   "POST",
@@ -520,9 +482,9 @@ jobs:
                   "-f",
                   f"target_commitish={source_sha}",
                   "-f",
-                  f"name=Nantai 3D {version}",
+                  f"name={expected_name}",
                   "-f",
-                  f"body={body}",
+                  f"body={expected_body}",
                   "-F",
                   "draft=true",
                   "-F",
@@ -541,7 +503,7 @@ jobs:
               release_id = release["id"]
               _validate_release(release, draft=True)
 
-              uploaded_ids = set()
+              uploaded_assets = {}
               for name in asset_names:
                   _assert_transaction(draft=True)
                   encoded_name = urllib.parse.quote(
@@ -551,13 +513,11 @@ jobs:
                   asset = _api_json(
                       "--method",
                       "POST",
-                      "--hostname",
-                      "uploads.github.com",
                       "-H",
                       "Content-Type: application/octet-stream",
                       "--input",
                       str(bundle_dir / name),
-                      f"repos/{repository}/releases/"
+                      f"https://uploads.github.com/repos/{repository}/releases/"
                       f"{release_id}/assets?name={encoded_name}",
                   )
                   if (
@@ -565,12 +525,13 @@ jobs:
                       or not isinstance(asset.get("id"), int)
                       or asset["id"] <= 0
                       or asset.get("name") != name
-                      or asset["id"] in uploaded_ids
+                      or name in uploaded_assets
+                      or asset["id"] in uploaded_assets.values()
                   ):
                       raise PublicationError(
                           "Uploaded asset identity is invalid"
                       )
-                  uploaded_ids.add(asset["id"])
+                  uploaded_assets[name] = asset["id"]
 
               _assert_transaction(draft=True)
               assets = _api_json(
@@ -597,7 +558,7 @@ jobs:
                       )
                   assets_by_name[asset["name"]] = asset["id"]
                   asset_ids.add(asset["id"])
-              if set(assets_by_name) != set(asset_names):
+              if assets_by_name != uploaded_assets:
                   raise PublicationError(
                       "Release asset allowlist changed"
                   )
@@ -646,7 +607,8 @@ jobs:
                       "Downloaded verifier returned invalid JSON"
                   ) from exc
               if (
-                  result.get("package_content_id")
+                  not isinstance(result, dict)
+                  or result.get("package_content_id")
                   != expected_content_id
                   or re.fullmatch(
                       r"[0-9a-f]{64}",
@@ -677,7 +639,7 @@ jobs:
               _publish()
           except (OSError, PublicationError):
               if not published:
-                  _cleanup()
+                  _report_retained_state()
               print(
                   "Production release transaction failed",
                   file=sys.stderr,

@@ -4,8 +4,11 @@ import json
 import os
 import re
 import runpy
+import shutil
+import socketserver
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import unquote
@@ -234,7 +237,7 @@ def test_public_job_reverifies_the_exact_artifact_before_release_transaction() -
     )
 
 
-def test_release_is_draft_verified_then_published_with_failure_cleanup() -> None:
+def test_release_is_draft_verified_then_published_without_failure_mutation() -> None:
     workflow = _workflow()
     public_runs = "\n".join(_run_blocks(workflow["jobs"]["public_publish"]))
     transaction = _transaction_code()
@@ -264,6 +267,11 @@ def test_release_is_draft_verified_then_published_with_failure_cleanup() -> None
     assert "PRODUCTION-RELEASE.json" in transaction
     assert "SHA256SUMS.txt" in transaction
     assert 'f"{release_endpoint}/{release_id}"' in transaction
+    assert "--hostname" not in transaction
+    assert (
+        'f"https://uploads.github.com/repos/{repository}/releases/"'
+        in transaction
+    )
     assert 'f"{release_id}/assets?name={encoded_name}"' in transaction
     assert (
         'f"repos/{repository}/releases/assets/{asset_id}"'
@@ -285,24 +293,91 @@ def test_release_is_draft_verified_then_published_with_failure_cleanup() -> None
     assert 'release.get("tag_name") != version' in transaction
     assert 'release.get("target_commitish") != source_sha' in transaction
     assert 'release.get("draft") is not draft' in transaction
-    assert "marker not in release.get(\"body\", \"\")" in transaction
+    assert 'release.get("name") != expected_name' in transaction
+    assert 'release.get("prerelease") is not False' in transaction
+    assert 'not isinstance(release.get("body"), str)' in transaction
+    assert 'release.get("body") != expected_body' in transaction
     assert (
         'f"Workflow transaction: {run_id}-{run_attempt}@{source_sha}"'
         in transaction
     )
     assert transaction.count("_assert_transaction(draft=True)") >= 4
     assert "_assert_transaction(draft=False)" in transaction
-    assert "set(assets_by_name) != set(asset_names)" in transaction
-    assert "release_deleted" in transaction
-    assert "same_tag and tag_release is None" in transaction
-    cleanup = transaction[
-        transaction.index("def _cleanup():"):
-        transaction.index("def _compare_files(")
-    ]
-    owned = cleanup.index("_validate_release(current, draft=True)")
-    tag_guard = cleanup.index("_assert_tag()", owned)
-    release_delete = cleanup.index('"DELETE"', tag_guard)
-    assert owned < tag_guard < release_delete
+    assert "assets_by_name != uploaded_assets" in transaction
+    assert "not isinstance(result, dict)" in transaction
+    assert '"DELETE"' not in transaction
+    assert "retained for manual cleanup" in transaction
+
+
+def test_real_gh_parses_full_upload_url_as_uploads_host(
+    tmp_path: Path,
+) -> None:
+    gh = shutil.which("gh")
+    if gh is None:
+        pytest.skip("GitHub CLI is unavailable")
+    captured: list[bytes] = []
+
+    class CaptureProxy(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            request = self.request.recv(4096)
+            captured.append(request.split(b"\r\n", 1)[0])
+            self.request.sendall(
+                b"HTTP/1.1 502 Bad Gateway\r\n"
+                b"Content-Length: 0\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+
+    with socketserver.TCPServer(
+        ("127.0.0.1", 0),
+        CaptureProxy,
+    ) as proxy:
+        proxy.timeout = 10
+        host, port = proxy.server_address
+        proxy_url = f"http://{host}:{port}"
+        thread = threading.Thread(
+            target=proxy.handle_request,
+            daemon=True,
+        )
+        thread.start()
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "ALL_PROXY": "",
+                "GH_DEBUG": "api",
+                "GH_TOKEN": "invalid-test-token",
+                "HTTP_PROXY": proxy_url,
+                "HTTPS_PROXY": proxy_url,
+                "NO_PROXY": "",
+                "all_proxy": "",
+                "http_proxy": proxy_url,
+                "https_proxy": proxy_url,
+                "no_proxy": "",
+            }
+        )
+        endpoint = (
+            "https://uploads.github.com/repos/test/repo/releases/"
+            "101/assets?name=asset.zip"
+        )
+
+        completed = subprocess.run(
+            [
+                gh,
+                "api",
+                "--method",
+                "POST",
+                "--input",
+                os.devnull,
+                endpoint,
+            ],
+            check=False,
+            capture_output=True,
+            env=environment,
+            timeout=15,
+        )
+        thread.join(timeout=12)
+
+    assert completed.returncode != 0
+    assert captured == [b"CONNECT uploads.github.com:443 HTTP/1.1"]
 
 
 @pytest.mark.parametrize(
@@ -311,19 +386,32 @@ def test_release_is_draft_verified_then_published_with_failure_cleanup() -> None
         ("upload", 1, 0),
         ("download", 6, 4),
         ("publish", 10, 4),
+        ("happy", None, 4),
     ),
 )
-def test_numeric_transaction_rejects_same_tag_release_replacement(
+def test_numeric_transaction_executable_state_machine(
     tmp_path: Path,
     capsys,
     replacement_phase: str,
-    numeric_get_trigger: int,
+    numeric_get_trigger: int | None,
     expected_uploads: int,
 ) -> None:
     version = "v1.2.3"
     source_sha = "a" * 40
     content_id = "b" * 64
     marker = f"Workflow transaction: 123-2@{source_sha}"
+    expected_name = f"Nantai 3D {version}"
+    expected_body = (
+        "This release was staged by the official Nantai "
+        "production workflow from the protected private "
+        f"staging environment at source commit {source_sha}.\n\n"
+        "The downloaded verifier confirms internal consistency "
+        "of the four-file bundle and package content ID "
+        f"{content_id}. It does not independently prove "
+        "source authenticity, private acceptance, rights, real "
+        "reconstruction, measured alignment, or Viewer QA.\n\n"
+        f"{marker}\n"
+    )
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     archive_name = f"nantai-3d-{version}-runtime.zip"
@@ -352,7 +440,9 @@ def test_numeric_transaction_rejects_same_tag_release_replacement(
         "tag_name": version,
         "target_commitish": source_sha,
         "draft": True,
-        "body": marker,
+        "name": expected_name,
+        "prerelease": False,
+        "body": expected_body,
     }
     replacement = {
         "id": 202,
@@ -393,7 +483,11 @@ def test_numeric_transaction_rejects_same_tag_release_replacement(
         endpoints = [
             value
             for value in arguments
-            if isinstance(value, str) and value.startswith("repos/")
+            if isinstance(value, str)
+            and (
+                value.startswith("repos/")
+                or value.startswith("https://uploads.github.com/repos/")
+            )
         ]
         assert endpoints
         endpoint = endpoints[-1]
@@ -412,7 +506,8 @@ def test_numeric_transaction_rejects_same_tag_release_replacement(
         if (
             method == "POST"
             and endpoint.startswith(
-                "repos/test/repo/releases/101/assets?name="
+                "https://uploads.github.com/repos/test/repo/"
+                "releases/101/assets?name="
             )
         ):
             name = unquote(endpoint.partition("?name=")[2])
@@ -442,7 +537,10 @@ def test_numeric_transaction_rejects_same_tag_release_replacement(
                 returncode=1,
                 stderr=b"gh: HTTP 404\n",
             )
-        if endpoint == "repos/test/repo/releases/101":
+        if method == "PATCH" and endpoint == "repos/test/repo/releases/101":
+            original_release["draft"] = False
+            return completed(command, original_release)
+        if method == "GET" and endpoint == "repos/test/repo/releases/101":
             if state["replacement_created"]:
                 return completed(
                     command,
@@ -450,7 +548,10 @@ def test_numeric_transaction_rejects_same_tag_release_replacement(
                     stderr=b"gh: HTTP 404\n",
                 )
             state["numeric_gets"] += 1
-            if state["numeric_gets"] == numeric_get_trigger:
+            if (
+                numeric_get_trigger is not None
+                and state["numeric_gets"] == numeric_get_trigger
+            ):
                 state["replacement_created"] = True
                 return completed(
                     command,
@@ -499,11 +600,17 @@ def test_numeric_transaction_rejects_same_tag_release_replacement(
             [str(script), str(bundle), str(downloaded)],
         ),
         patch("subprocess.run", side_effect=fake_run),
-        pytest.raises(SystemExit) as captured,
     ):
-        runpy.run_path(str(script), run_name="__main__")
+        if replacement_phase == "happy":
+            runpy.run_path(str(script), run_name="__main__")
+            captured = None
+        else:
+            with pytest.raises(SystemExit) as raised:
+                runpy.run_path(str(script), run_name="__main__")
+            captured = raised.value
 
-    assert captured.value.code == 1
+    if captured is not None:
+        assert captured.code == 1
     assert mutations[:2] == [
         ("POST", "repos/test/repo/git/refs"),
         ("POST", "repos/test/repo/releases"),
@@ -514,8 +621,38 @@ def test_numeric_transaction_rejects_same_tag_release_replacement(
         if method == "POST" and "/assets?name=" in endpoint
     ]
     assert len(upload_mutations) == expected_uploads
-    assert not any(method in {"PATCH", "DELETE"} for method, _ in mutations)
+    assert not any(method == "DELETE" for method, _ in mutations)
+    patches = [
+        endpoint
+        for method, endpoint in mutations
+        if method == "PATCH"
+    ]
+    assert patches == (
+        ["repos/test/repo/releases/101"]
+        if replacement_phase == "happy"
+        else []
+    )
     assert not any("/202" in endpoint for _method, endpoint in api_calls)
-    assert state["replacement_created"] is True
-    assert state["verifier_called"] is (replacement_phase == "publish")
-    assert "Production release transaction failed" in capsys.readouterr().err
+    assert state["replacement_created"] is (
+        replacement_phase != "happy"
+    )
+    assert state["verifier_called"] is (
+        replacement_phase in {"publish", "happy"}
+    )
+    stderr = capsys.readouterr().err
+    if replacement_phase == "happy":
+        assert stderr == ""
+        assert {
+            path.name for path in downloaded.iterdir()
+        } == set(asset_names)
+        numeric_downloads = [
+            endpoint
+            for method, endpoint in api_calls
+            if method == "GET"
+            and endpoint.startswith(
+                "repos/test/repo/releases/assets/"
+            )
+        ]
+        assert len(numeric_downloads) == 4
+    else:
+        assert "Production release transaction failed" in stderr
