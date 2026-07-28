@@ -24,6 +24,9 @@ class DurableIOError(OSError):
         self.published = published
 
 
+DirectoryIdentity = tuple[int, int, int]
+
+
 def _is_linklike(
     path: Path,
     *,
@@ -90,6 +93,37 @@ def first_linklike_path(
         if _is_linklike(candidate, observed=observed):
             return candidate
     return None
+
+
+def capture_real_directory_identity(path: str | Path) -> DirectoryIdentity:
+    """Capture one non-redirected directory namespace identity."""
+
+    directory = Path(path).absolute()
+    try:
+        redirected = first_linklike_path(Path(directory.anchor), directory)
+        observed = directory.lstat()
+    except (OSError, ValueError) as exc:
+        raise DurableIOError("directory identity cannot be captured") from exc
+    if (
+        redirected is not None
+        or _is_linklike(directory, observed=observed)
+        or not stat.S_ISDIR(observed.st_mode)
+    ):
+        raise DurableIOError("directory identity cannot be captured")
+    return observed.st_dev, observed.st_ino, observed.st_mode
+
+
+def matches_real_directory_identity(
+    path: str | Path,
+    expected: DirectoryIdentity,
+) -> bool:
+    """Return whether *path* is still the same non-redirected directory."""
+
+    directory = Path(path).absolute()
+    try:
+        return capture_real_directory_identity(directory) == expected
+    except DurableIOError:
+        return False
 
 
 def _paths_are_siblings(source: Path, destination: Path) -> None:

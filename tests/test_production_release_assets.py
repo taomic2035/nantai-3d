@@ -4,9 +4,11 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import stat
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -674,6 +676,72 @@ def test_verify_bundle_rejects_reparse_root_ancestor(
         match="missing or unsafe",
     ):
         verify_production_release_assets(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_stage_cleanup_does_not_follow_swapped_parent_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "candidate.zip"
+    source.write_bytes(b"candidate")
+    policy = tmp_path / "policy.json"
+    policy.write_bytes(b"{}")
+    parent = tmp_path / "publish-parent"
+    parent.mkdir()
+    output = parent / "release-assets"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_parent = tmp_path / "publish-parent-original"
+    sentinel: Path | None = None
+    swapped = False
+
+    def fail_copy_after_parent_swap(_source: Path, destination: Path) -> str:
+        nonlocal sentinel, swapped
+        staging_name = destination.parent.name
+        parent.rename(original_parent)
+        outside_staging = outside / staging_name
+        outside_staging.mkdir()
+        sentinel = outside_staging / "sentinel.bin"
+        sentinel.write_bytes(b"outside-sentinel")
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            original_parent.rename(parent)
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+        swapped = True
+        raise ProductionReleaseAssetsError("injected copy failure")
+
+    monkeypatch.setattr(
+        assets_module,
+        "_copy_stable_regular_file",
+        fail_copy_after_parent_swap,
+    )
+    try:
+        with pytest.raises(ProductionReleaseAssetsError, match="injected"):
+            stage_production_release_assets(
+                **_stage_kwargs(
+                    tmp_path,
+                    archive=source,
+                    policy=policy,
+                    output=output,
+                )
+            )
+        assert sentinel is not None
+        assert sentinel.read_bytes() == b"outside-sentinel"
+    finally:
+        if swapped:
+            removed = subprocess.run(
+                ["cmd", "/c", "rmdir", str(parent)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert removed.returncode == 0, removed.stderr
 
 
 def test_verify_rejects_junction_bundle_root(

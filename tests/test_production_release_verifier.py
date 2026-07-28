@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import pipeline.production_release_verifier as verifier_module
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRODUCTION_RELEASE_NAME,
@@ -382,6 +383,69 @@ def test_release_entrypoints_reject_real_windows_junction_ancestor(
             text=True,
         )
         assert removed.returncode == 0, removed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+@pytest.mark.parametrize(
+    "failure",
+    (
+        ProductionReleaseVerificationError("injected verification failure"),
+        EOFError("injected archive failure"),
+    ),
+)
+def test_extraction_cleanup_does_not_follow_swapped_parent_junction(
+    tmp_path: Path,
+    monkeypatch,
+    failure: Exception,
+) -> None:
+    archive = tmp_path / "runtime.zip"
+    with zipfile.ZipFile(archive, "w") as stream:
+        stream.writestr("nantai-runtime/file.txt", b"payload")
+    parent = tmp_path / "extract-parent"
+    parent.mkdir()
+    target = parent / "runtime"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_target = outside / target.name
+    outside_target.mkdir()
+    sentinel = outside_target / "sentinel.bin"
+    sentinel.write_bytes(b"outside-sentinel")
+    original_parent = tmp_path / "extract-parent-original"
+    swapped = False
+
+    def fail_after_parent_swap(*_args, **_kwargs):
+        nonlocal swapped
+        parent.rename(original_parent)
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            original_parent.rename(parent)
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+        swapped = True
+        raise failure
+
+    monkeypatch.setattr(
+        verifier_module,
+        "inspect_zip_members",
+        fail_after_parent_swap,
+    )
+    try:
+        with pytest.raises(ProductionReleaseVerificationError):
+            extract_production_release_archive(archive, target)
+        assert sentinel.read_bytes() == b"outside-sentinel"
+    finally:
+        if swapped:
+            removed = subprocess.run(
+                ["cmd", "/c", "rmdir", str(parent)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert removed.returncode == 0, removed.stderr
 
 
 def test_archive_verifier_accepts_one_bounded_wrapper_root(tmp_path: Path) -> None:

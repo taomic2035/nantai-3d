@@ -14,9 +14,11 @@ from pathlib import Path
 from pipeline.durable_io import (
     DurableIOError,
     _is_linklike,
+    capture_real_directory_identity,
     first_linklike_path,
     flush_directory,
     flush_file,
+    matches_real_directory_identity,
     publish_directory_noreplace,
 )
 from pipeline.production_release_builder import (
@@ -480,6 +482,12 @@ def stage_production_release_assets(
     acceptance = Path(acceptance_root).expanduser().absolute()
     repo = Path(repo_root).expanduser().absolute()
     output = _real_absent_output(Path(output_dir))
+    try:
+        output_parent_identity = capture_real_directory_identity(output.parent)
+    except DurableIOError as exc:
+        raise ProductionReleaseAssetsError(
+            "Production release asset output parent is unavailable"
+        ) from exc
     staging = output.parent / (
         f".{output.name}.{uuid.uuid4().hex}.staging"
     )
@@ -488,6 +496,13 @@ def stage_production_release_assets(
     rebuilt_sidecar = rebuilt.with_suffix(f"{rebuilt.suffix}.sha256")
     published = False
     try:
+        if not matches_real_directory_identity(
+            output.parent,
+            output_parent_identity,
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production release asset output parent changed"
+            )
         staging.mkdir(mode=0o700)
         archive_sha256 = _copy_stable_regular_file(source, candidate)
         try:
@@ -530,6 +545,13 @@ def stage_production_release_assets(
         ):
             raise ProductionReleaseAssetsError(
                 "Production candidate does not match acceptance rebuild"
+            )
+        if not matches_real_directory_identity(
+            output.parent,
+            output_parent_identity,
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production release asset output parent changed"
             )
         rebuilt.unlink()
         rebuilt_sidecar.unlink()
@@ -585,6 +607,13 @@ def stage_production_release_assets(
             f"nantai-3d-{verification_before.version}-runtime.zip"
         )
         final_archive = staging / archive_name
+        if not matches_real_directory_identity(
+            output.parent,
+            output_parent_identity,
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production release asset output parent changed"
+            )
         os.replace(candidate, final_archive)
         if (
             stable_regular_file_digest(final_archive).sha256
@@ -626,6 +655,13 @@ def stage_production_release_assets(
             raise ProductionReleaseAssetsError(
                 "Production staged release validation failed"
             )
+        if not matches_real_directory_identity(
+            output.parent,
+            output_parent_identity,
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production release asset output parent changed"
+            )
         publish_directory_noreplace(staging, output)
         published = True
         return ProductionReleaseAssets(
@@ -659,5 +695,12 @@ def stage_production_release_assets(
             f"Production release assets cannot be staged ({state})"
         ) from exc
     finally:
-        if not published and not _is_linklike(staging):
+        if (
+            not published
+            and matches_real_directory_identity(
+                output.parent,
+                output_parent_identity,
+            )
+            and not _is_linklike(staging)
+        ):
             shutil.rmtree(staging, ignore_errors=True)

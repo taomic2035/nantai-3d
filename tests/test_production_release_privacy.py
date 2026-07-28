@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from pipeline.production_release_privacy import (
     ProductionReleasePrivacyError,
     audit_production_release_privacy,
     privacy_report_bytes,
+    publish_privacy_report,
 )
 from pipeline.release_archive import canonical_json_bytes
 from tests.production_release_fixtures import (
@@ -402,6 +404,67 @@ def test_reparse_target_ancestor_is_rejected_before_privacy_scan(
         match="unsafe|verification failed before",
     ):
         audit_production_release_privacy(target, policy)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_privacy_cleanup_does_not_follow_swapped_parent_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tree = tmp_path / "runtime"
+    write_modeled_production_tree(tree)
+    policy = tmp_path / "policy.json"
+    _write_policy(policy, b"private-canonical-needle")
+    report = audit_production_release_privacy(tree, policy)
+    parent = tmp_path / "publish-parent"
+    parent.mkdir()
+    destination = parent / "privacy.json"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_parent = tmp_path / "publish-parent-original"
+    sentinel: Path | None = None
+    swapped = False
+
+    def fail_flush_after_parent_swap(path: Path) -> None:
+        nonlocal sentinel, swapped
+        temporary_name = Path(path).name
+        parent.rename(original_parent)
+        sentinel = outside / temporary_name
+        sentinel.write_bytes(b"outside-sentinel")
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            original_parent.rename(parent)
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+        swapped = True
+        raise OSError("injected flush failure")
+
+    monkeypatch.setattr(
+        privacy_module,
+        "flush_file",
+        fail_flush_after_parent_swap,
+    )
+    try:
+        with pytest.raises(
+            ProductionReleasePrivacyError,
+            match="durable publication failed",
+        ):
+            publish_privacy_report(report, destination)
+        assert sentinel is not None
+        assert sentinel.read_bytes() == b"outside-sentinel"
+    finally:
+        if swapped:
+            removed = subprocess.run(
+                ["cmd", "/c", "rmdir", str(parent)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert removed.returncode == 0, removed.stderr
 
 
 def test_mid_read_drift_is_rejected(tmp_path: Path, monkeypatch) -> None:

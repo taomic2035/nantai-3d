@@ -1617,6 +1617,85 @@ def test_build_failure_removes_partial_publication(
     assert not tuple(tmp_path.glob(".*.partial"))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_sidecar_rollback_does_not_follow_swapped_parent_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    identity = _committed_runtime_repo(repo)
+    parent = tmp_path / "publish-parent"
+    parent.mkdir()
+    output = parent / "runtime.zip"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "runtime.zip.sha256"
+    sentinel.write_bytes(b"outside-sentinel")
+    original_parent = tmp_path / "publish-parent-original"
+    original_link = builder_module._link_no_replace
+    link_calls = 0
+    swapped = False
+    monkeypatch.setattr(
+        builder_module,
+        "load_latest_real_scene_acceptance",
+        lambda _root: fixture["report_path"],
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "derive_production_release_context",
+        lambda _path: context,
+    )
+
+    def fail_archive_link_after_parent_swap(source: Path, destination: Path):
+        nonlocal link_calls, swapped
+        link_calls += 1
+        if link_calls == 1:
+            original_link(source, destination)
+            parent.rename(original_parent)
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if created.returncode != 0:
+                original_parent.rename(parent)
+                pytest.skip(f"junction creation unavailable: {created.stderr}")
+            swapped = True
+            return
+        raise OSError("injected archive publication failure")
+
+    monkeypatch.setattr(
+        builder_module,
+        "_link_no_replace",
+        fail_archive_link_after_parent_swap,
+    )
+    try:
+        with pytest.raises(
+            ProductionReleaseBuilderError,
+            match="publication failure",
+        ):
+            build_production_release_archive(
+                repo_root=repo,
+                acceptance_root=fixture["root"],
+                output_path=output,
+                version="v1.0.0",
+                source_commit=identity.source_commit,
+                tracked_files=identity.tracked_files,
+            )
+        assert sentinel.read_bytes() == b"outside-sentinel"
+    finally:
+        if swapped:
+            removed = subprocess.run(
+                ["cmd", "/c", "rmdir", str(parent)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert removed.returncode == 0, removed.stderr
+
+
 def test_fresh_runtime_runner_verification_is_repeatable(
     tmp_path: Path,
     monkeypatch,

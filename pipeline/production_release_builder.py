@@ -16,7 +16,12 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.durable_io import (
+    _is_linklike,
+    capture_real_directory_identity,
+    first_linklike_path,
+    matches_real_directory_identity,
+)
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRIVATE_EVIDENCE_OMITTED,
@@ -105,27 +110,6 @@ def _preflight_real_tree(root: Path, *, label: str) -> None:
         raise
     except OSError as exc:
         raise ProductionReleaseBuilderError(f"{label} is unsafe") from exc
-
-
-def _directory_identity(value: os.stat_result) -> tuple[int, int, int]:
-    return value.st_dev, value.st_ino, value.st_mode
-
-
-def _same_real_directory(
-    path: Path,
-    expected_identity: tuple[int, int, int],
-) -> bool:
-    try:
-        redirected = first_linklike_path(Path(path.absolute().anchor), path)
-        observed = path.lstat()
-    except (OSError, ValueError):
-        return False
-    return (
-        redirected is None
-        and not _is_linklike(path, observed=observed)
-        and stat.S_ISDIR(observed.st_mode)
-        and _directory_identity(observed) == expected_identity
-    )
 
 
 @dataclass(frozen=True)
@@ -1733,7 +1717,7 @@ def build_production_release_archive(
         raise ProductionReleaseBuilderError(
             "Production output parent directory is missing or unsafe"
         )
-    output_parent_identity = _directory_identity(output_parent_stat)
+    output_parent_identity = capture_real_directory_identity(output.parent)
     for path in (
         output,
         sidecar,
@@ -1964,7 +1948,7 @@ def build_production_release_archive(
             raise ProductionReleaseBuilderError(
                 "Production source identity changed during release build"
             )
-        if not _same_real_directory(
+        if not matches_real_directory_identity(
             output.parent,
             output_parent_identity,
         ):
@@ -1975,7 +1959,11 @@ def build_production_release_archive(
         try:
             _link_no_replace(partial, output)
         except Exception:
-            sidecar.unlink(missing_ok=True)
+            if matches_real_directory_identity(
+                output.parent,
+                output_parent_identity,
+            ):
+                sidecar.unlink(missing_ok=True)
             raise
         return ProductionReleaseBuild(
             archive_path=output,
@@ -1998,7 +1986,10 @@ def build_production_release_archive(
             f"Production release build failed: {exc}"
         ) from exc
     finally:
-        if _same_real_directory(output.parent, output_parent_identity):
+        if matches_real_directory_identity(
+            output.parent,
+            output_parent_identity,
+        ):
             shutil.rmtree(staging, ignore_errors=True)
             if source_snapshot_created:
                 shutil.rmtree(source_snapshot, ignore_errors=True)

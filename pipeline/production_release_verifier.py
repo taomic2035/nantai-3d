@@ -11,7 +11,13 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.durable_io import (
+    DurableIOError,
+    _is_linklike,
+    capture_real_directory_identity,
+    first_linklike_path,
+    matches_real_directory_identity,
+)
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRODUCTION_RELEASE_NAME,
@@ -350,8 +356,8 @@ def extract_production_release_archive(
 ) -> Path:
     """Extract one inspected archive into a new destination and return its root."""
 
-    source = Path(archive_path)
-    target = Path(destination)
+    source = Path(archive_path).absolute()
+    target = Path(destination).absolute()
     try:
         redirected_source = first_linklike_path(
             Path(source.absolute().anchor),
@@ -372,6 +378,12 @@ def extract_production_release_archive(
             "Production release archive is missing or unsafe"
         )
     try:
+        target_parent_identity = capture_real_directory_identity(target.parent)
+    except DurableIOError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination is unsafe"
+        ) from exc
+    try:
         unsafe_target = first_linklike_path(Path(target.anchor), target)
     except (OSError, ValueError) as exc:
         raise ProductionReleaseVerificationError(
@@ -388,6 +400,13 @@ def extract_production_release_archive(
 
     created = False
     try:
+        if not matches_real_directory_identity(
+            target.parent,
+            target_parent_identity,
+        ):
+            raise ProductionReleaseVerificationError(
+                "Production extraction destination is unsafe"
+            )
         target.mkdir(parents=False, exist_ok=False)
         created = True
         with zipfile.ZipFile(source) as archive:
@@ -447,7 +466,10 @@ def extract_production_release_archive(
                     )
         return target
     except ProductionReleaseVerificationError:
-        if created:
+        if created and matches_real_directory_identity(
+            target.parent,
+            target_parent_identity,
+        ):
             shutil.rmtree(target, ignore_errors=True)
         raise
     except (
@@ -458,7 +480,10 @@ def extract_production_release_archive(
         OSError,
         EOFError,
     ) as exc:
-        if created:
+        if created and matches_real_directory_identity(
+            target.parent,
+            target_parent_identity,
+        ):
             shutil.rmtree(target, ignore_errors=True)
         raise ProductionReleaseVerificationError(
             f"Production archive verification failed: {exc}"

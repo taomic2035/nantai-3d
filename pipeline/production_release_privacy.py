@@ -16,8 +16,10 @@ from pathlib import Path
 from pipeline.durable_io import (
     DurableIOError,
     _is_linklike,
+    capture_real_directory_identity,
     first_linklike_path,
     flush_file,
+    matches_real_directory_identity,
     publish_file_noreplace,
 )
 from pipeline.production_release_verifier import (
@@ -119,10 +121,21 @@ def publish_privacy_report(
         raise ProductionReleasePrivacyError(
             "privacy report parent directory is missing"
         )
+    try:
+        parent_identity = capture_real_directory_identity(destination.parent)
+    except DurableIOError as exc:
+        raise ProductionReleasePrivacyError(
+            "privacy report parent directory is unsafe"
+        ) from exc
     temporary = destination.parent / (
         f".{destination.name}.{uuid.uuid4().hex}.tmp"
     )
     try:
+        if not matches_real_directory_identity(
+            destination.parent,
+            parent_identity,
+        ):
+            raise DurableIOError("privacy report parent changed")
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -131,15 +144,25 @@ def publish_privacy_report(
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(privacy_report_bytes(report))
         flush_file(temporary)
+        if not matches_real_directory_identity(
+            destination.parent,
+            parent_identity,
+        ):
+            raise DurableIOError("privacy report parent changed")
         publish_file_noreplace(temporary, destination)
     except (DurableIOError, FileExistsError, OSError) as exc:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise ProductionReleasePrivacyError(
             "privacy report durable publication failed"
         ) from exc
+    finally:
+        if matches_real_directory_identity(
+            destination.parent,
+            parent_identity,
+        ):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:

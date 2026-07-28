@@ -208,6 +208,42 @@ def test_path_chain_checks_protected_root_itself(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_directory_identity_recheck_rejects_parent_swap_to_junction(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    identity = durable_io.capture_real_directory_identity(parent)
+    original = tmp_path / "parent-original"
+    parent.rename(original)
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        original.rename(parent)
+        pytest.skip(f"junction creation unavailable: {created.stderr}")
+    try:
+        assert (
+            durable_io.matches_real_directory_identity(parent, identity)
+            is False
+        )
+    finally:
+        removed = subprocess.run(
+            ["cmd", "/c", "rmdir", str(parent)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert removed.returncode == 0, removed.stderr
+        original.rename(parent)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
 def test_linklike_detects_real_windows_junction_without_is_junction(
     tmp_path: Path,
     monkeypatch,
