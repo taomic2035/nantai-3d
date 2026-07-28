@@ -69,6 +69,13 @@ LOD2 与缩放下完成三个视角 A/B：保留 37,373 个 Gaussian 的最优�
 采集和 CUDA 训练。A/B 页面、PLY、截图和有损 sidecar 全部只在忽略的
 `.nantai-studio/` 中。
 
+对实际送入 Brush 的 90 张帧运行现有采集预检后，59 张低于启发式清晰度阈值
+`80.0`（65.56%），Laplacian 方差中位数仅 `60.38`、p10 为 `26.55`；全部图像为
+2.07 MP，且没有 GPS。预检不能测量图间重叠，也不能替代 SfM，但它把这批输入判为
+`unlikely`，并明确建议重拍时提高快门、补光或降低移动速度。这与三视角 A/B 中
+“训练更久得到更多结构，同时仍有大量颗粒与空洞”的结果一致；因此正式采集必须先
+解决清晰度和重叠覆盖，不能把额外训练步数当作输入质量的替代品。
+
 源数据 `license_status=not-declared`、`redistribution_allowed=false`；全部原始照片、
 训练产物、receipt 与临时 Viewer 副本只保留在忽略的 `.nantai-studio/`，不得进入
 Git 或 Release。正式五门没有因此减少：Production 仍需要权利明确的正式采集、同
