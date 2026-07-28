@@ -79,6 +79,41 @@ def test_manual_states_privacy_and_hash_limits_without_promoting_reality() -> No
     assert re.search(r"不得.*v1\.0\.0", manual)
 
 
+def test_manual_hash_boundary_requires_an_external_trust_anchor() -> None:
+    manual = _read(MANUAL)
+    hash_boundary = manual.split("## 哈希与现实边界", 1)[1].split(
+        "## 发布清单",
+        1,
+    )[0]
+
+    assert re.search(
+        r"内容哈希只能证明.*当前字节.*给定摘要一致",
+        hash_boundary,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"只有.*摘要或签名.*来自可信外部来源"
+        r".*才能\s*证明下载字节.*锁定的字节一致",
+        hash_boundary,
+        re.DOTALL,
+    )
+    for unproven_boundary in (
+        "不证明素材权利",
+        "不证明发布者来源或真实性",
+        "不证明 staging 已执行",
+        "不证明外部授权",
+        "不证明场景对应物理现实",
+    ):
+        assert unproven_boundary in hash_boundary
+    assert re.search(r"不声称.*签名.*存在", hash_boundary, re.DOTALL)
+    assert "内容哈希证明“当前字节与被签署字节一致”" not in hash_boundary
+    assert not re.search(
+        r"内容哈希证明.*(?:签名|签署).*字节一致",
+        hash_boundary,
+        re.DOTALL,
+    )
+
+
 def test_manual_separates_repository_and_extracted_runtime_commands() -> None:
     manual = _read(MANUAL)
     assert "仓库维护命令" in manual
