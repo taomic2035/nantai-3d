@@ -130,6 +130,122 @@ def _production_fixture(tmp_path, monkeypatch):
     return operations, stage_root, prepared, config, job
 
 
+def test_train_production_preserves_drifted_public_config_and_blocks_executor(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, _prepared, _config, _job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    public_config = stage_root / "remote-executor-public-config.json"
+    drifted = b'{"tampered":true}\n'
+    public_config.write_bytes(drifted)
+    constructor_calls = {"n": 0}
+
+    class UnexpectedRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+            constructor_calls["n"] += 1
+            raise RemoteShellExecutionError("executor must not be constructed")
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        UnexpectedRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "remote executor preflight failed" in execution.reason
+    assert public_config.read_bytes() == drifted
+    assert constructor_calls["n"] == 0
+
+
+def test_train_production_rejects_symlinked_public_config_without_overwrite(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, _prepared, _config, _job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    victim = tmp_path / "outside-stage.json"
+    victim.write_bytes(b"preserve-me\n")
+    public_config = stage_root / "remote-executor-public-config.json"
+    try:
+        public_config.symlink_to(victim)
+    except OSError:
+        pytest.skip("filesystem does not permit symlink creation")
+    constructor_calls = {"n": 0}
+
+    class UnexpectedRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+            constructor_calls["n"] += 1
+            raise RemoteShellExecutionError("executor must not be constructed")
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        UnexpectedRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "remote executor preflight failed" in execution.reason
+    assert victim.read_bytes() == b"preserve-me\n"
+    assert public_config.is_symlink()
+    assert constructor_calls["n"] == 0
+
+
+def test_train_production_reuses_exact_public_config_without_rewriting(
+    tmp_path,
+    monkeypatch,
+):
+    operations, stage_root, _prepared, _config, _job = _production_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    public_config = stage_root / "remote-executor-public-config.json"
+    expected = (
+        '{"container_identity":"image@sha256:'
+        + "a" * 64
+        + '","container_runtime":"docker",'
+        '"expected_host_key_fingerprint":"SHA256:'
+        + "A" * 43
+        + '"}\n'
+    ).encode("ascii")
+    public_config.write_bytes(expected)
+    calls = {"construct": 0, "close": 0}
+
+    class MatchingRemoteExecutor:
+        def __init__(self, measured):
+            del measured
+            calls["construct"] += 1
+
+        def prepare(self, measured):
+            del measured
+            raise RemoteShellExecutionError("focused test stop")
+
+        def close(self):
+            calls["close"] += 1
+
+    monkeypatch.setattr(
+        operations_module,
+        "RemoteShellExecutor",
+        MatchingRemoteExecutor,
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert public_config.read_bytes() == expected
+    assert calls == {"construct": 1, "close": 1}
+
+
 def test_hf_fetch_receipt_binds_downloaded_payload_bytes(
     tmp_path,
     monkeypatch,

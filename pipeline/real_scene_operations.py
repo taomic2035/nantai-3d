@@ -11,12 +11,14 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from pipeline.durable_io import DurableIOError, publish_file_noreplace
 from pipeline.local_brush_executor import (
     LocalBrushExecutionError,
     LocalBrushExecutor,
@@ -94,6 +96,7 @@ from pipeline.training_provenance import TrainingConfig
 _ROOT = Path(__file__).resolve().parent.parent
 _CANARY_POLICY = _ROOT / "config/real-scene/poster-registration-policy.json"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_MAX_REMOTE_PUBLIC_CONFIG_BYTES = 4 * 1024
 
 
 class PreparedCaptureEvidence(BaseModel):
@@ -156,6 +159,164 @@ def _safe_evidence_files(root: Path) -> tuple[Path, ...]:
         return _regular_files(root)
     except RealSceneCaptureError:
         return ()
+
+
+def _file_identity(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)()
+    )
+
+
+def _verify_matching_immutable_file(
+    path: Path,
+    expected: bytes,
+) -> None:
+    descriptor = -1
+    try:
+        before = path.lstat()
+        if (
+            _is_linklike(path)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size != len(expected)
+            or before.st_size > _MAX_REMOTE_PUBLIC_CONFIG_BYTES
+        ):
+            raise RemoteShellExecutionError(
+                "remote executor public config is not immutable"
+            )
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or _file_identity(descriptor_before) != _file_identity(before)
+        ):
+            raise RemoteShellExecutionError(
+                "remote executor public config changed before read"
+            )
+        chunks: list[bytes] = []
+        measured = 0
+        while measured <= _MAX_REMOTE_PUBLIC_CONFIG_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(
+                    4096,
+                    _MAX_REMOTE_PUBLIC_CONFIG_BYTES + 1 - measured,
+                ),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            measured += len(chunk)
+        actual = b"".join(chunks)
+        descriptor_after = os.fstat(descriptor)
+        after = path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote executor public config cannot be verified"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if (
+        len(actual) > _MAX_REMOTE_PUBLIC_CONFIG_BYTES
+        or _file_identity(before) != _file_identity(descriptor_before)
+        or _file_identity(descriptor_before)
+        != _file_identity(descriptor_after)
+        or _file_identity(descriptor_after) != _file_identity(after)
+        or actual != expected
+    ):
+        raise RemoteShellExecutionError(
+            "remote executor public config changed or does not match"
+        )
+
+
+def _publish_matching_immutable_file(
+    path: Path,
+    payload: bytes,
+) -> None:
+    if len(payload) > _MAX_REMOTE_PUBLIC_CONFIG_BYTES:
+        raise RemoteShellExecutionError(
+            "remote executor public config exceeds its maximum size"
+        )
+    parent = path.parent
+    try:
+        parent_state = parent.lstat()
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote executor public config parent is unavailable"
+        ) from exc
+    if (
+        _is_linklike(parent)
+        or not stat.S_ISDIR(parent_state.st_mode)
+    ):
+        raise RemoteShellExecutionError(
+            "remote executor public config parent must be a real directory"
+        )
+
+    descriptor = -1
+    staging = ""
+    try:
+        descriptor, staging = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".staging",
+            dir=parent,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            publish_file_noreplace(staging, path)
+            staging = ""
+        except FileExistsError:
+            _verify_matching_immutable_file(path, payload)
+        else:
+            _verify_matching_immutable_file(path, payload)
+    except RemoteShellExecutionError:
+        raise
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RemoteShellExecutionError(
+            f"remote executor public config cannot be published ({state})"
+        ) from exc
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote executor public config cannot be published"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if staging:
+            try:
+                Path(staging).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _stage_root_for(
@@ -565,15 +726,18 @@ class RealScenePipelineOperations:
                 "container_runtime": config.container_runtime,
                 "expected_host_key_fingerprint": (config.expected_host_key_fingerprint),
             }
-            (stage_root / "remote-executor-public-config.json").write_text(
+            public_config_bytes = (
                 json.dumps(
                     public_config,
                     ensure_ascii=True,
                     separators=(",", ":"),
                     sort_keys=True,
                 )
-                + "\n",
-                encoding="ascii",
+                + "\n"
+            ).encode("ascii")
+            _publish_matching_immutable_file(
+                stage_root / "remote-executor-public-config.json",
+                public_config_bytes,
             )
             executor = RemoteShellExecutor(config)
         except (OSError, ValidationError, RemoteShellExecutionError) as exc:
