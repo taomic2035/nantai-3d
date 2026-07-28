@@ -23,10 +23,11 @@ from pipeline.release_archive import (
 )
 
 
-def _zip_payload() -> bytes:
+def _zip_payload(*, member_count: int = 1) -> bytes:
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
-        archive.writestr("payload.txt", b"payload")
+        for index in range(member_count):
+            archive.writestr(f"payload-{index}.txt", b"payload")
     return stream.getvalue()
 
 
@@ -34,8 +35,9 @@ def _forged_eocd(
     *,
     declared_entries: int | None = None,
     declared_central_bytes: int | None = None,
+    actual_entries: int = 1,
 ) -> io.BytesIO:
-    payload = bytearray(_zip_payload())
+    payload = bytearray(_zip_payload(member_count=actual_entries))
     eocd = payload.rfind(b"PK\x05\x06")
     assert eocd >= 0
     if declared_entries is not None:
@@ -54,10 +56,22 @@ def _forged_eocd(
     return io.BytesIO(payload)
 
 
-def _forged_zip64(*, declared_entries: int) -> io.BytesIO:
-    payload = bytearray(_zip_payload())
+def _forged_zip64(
+    *,
+    declared_entries: int,
+    actual_entries: int = 1,
+) -> io.BytesIO:
+    payload = bytearray(_zip_payload(member_count=actual_entries))
     eocd_offset = payload.rfind(b"PK\x05\x06")
     assert eocd_offset >= 0
+    central_bytes = int.from_bytes(
+        payload[eocd_offset + 12 : eocd_offset + 16],
+        "little",
+    )
+    central_offset = int.from_bytes(
+        payload[eocd_offset + 16 : eocd_offset + 20],
+        "little",
+    )
     eocd = bytearray(payload[eocd_offset:])
     eocd[8:12] = b"\xff\xff\xff\xff"
     eocd[12:20] = b"\xff\xff\xff\xff\xff\xff\xff\xff"
@@ -71,8 +85,8 @@ def _forged_zip64(*, declared_entries: int) -> io.BytesIO:
         0,
         declared_entries,
         declared_entries,
-        1,
-        0,
+        central_bytes,
+        central_offset,
     )
     locator = struct.pack(
         "<4sLQL",
@@ -116,6 +130,56 @@ def test_zip_preflight_reads_zip64_declared_count() -> None:
         preflight_zip_central_directory(
             stream,
             limits=ArchiveLimits(maximum_members=1),
+        )
+
+
+def test_zip_preflight_rejects_eocd_underdeclared_actual_count() -> None:
+    stream = _forged_eocd(
+        declared_entries=1,
+        actual_entries=3,
+    )
+
+    with pytest.raises(ReleaseArchiveError, match="member count"):
+        preflight_zip_central_directory(
+            stream,
+            limits=ArchiveLimits(maximum_members=1),
+        )
+
+
+def test_zip_preflight_rejects_zip64_underdeclared_actual_count() -> None:
+    stream = _forged_zip64(
+        declared_entries=1,
+        actual_entries=3,
+    )
+
+    with pytest.raises(ReleaseArchiveError, match="member count"):
+        preflight_zip_central_directory(
+            stream,
+            limits=ArchiveLimits(maximum_members=1),
+        )
+
+
+@pytest.mark.parametrize("corruption", ("signature", "length"))
+def test_zip_preflight_rejects_malformed_central_record(
+    corruption: str,
+) -> None:
+    payload = bytearray(_zip_payload())
+    eocd_offset = payload.rfind(b"PK\x05\x06")
+    central_offset = int.from_bytes(
+        payload[eocd_offset + 16 : eocd_offset + 20],
+        "little",
+    )
+    if corruption == "signature":
+        payload[central_offset : central_offset + 4] = b"NOPE"
+    else:
+        payload[central_offset + 28 : central_offset + 30] = (
+            0xFFFF
+        ).to_bytes(2, "little")
+
+    with pytest.raises(ReleaseArchiveError, match="central directory"):
+        preflight_zip_central_directory(
+            io.BytesIO(payload),
+            limits=ArchiveLimits(),
         )
 
 

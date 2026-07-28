@@ -29,6 +29,8 @@ _EOCD_FIXED_BYTES = 22
 _MAXIMUM_ZIP_COMMENT_BYTES = 65_535
 _ZIP64_LOCATOR_BYTES = 20
 _ZIP64_EOCD_FIXED_BYTES = 56
+_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
+_CENTRAL_DIRECTORY_FIXED_BYTES = 46
 
 
 class ReleaseArchiveError(ValueError):
@@ -118,6 +120,8 @@ def preflight_zip_central_directory(
                 "multi-disk release archives are forbidden"
             )
 
+        eocd_offset = archive_bytes - tail_bytes + eocd_index
+        central_end = eocd_offset
         needs_zip64 = (
             disk_entries == 0xFFFF
             or total_entries == 0xFFFF
@@ -125,7 +129,6 @@ def preflight_zip_central_directory(
             or central_offset == 0xFFFFFFFF
         )
         if needs_zip64:
-            eocd_offset = archive_bytes - tail_bytes + eocd_index
             locator_offset = eocd_offset - _ZIP64_LOCATOR_BYTES
             if locator_offset < 0:
                 raise ReleaseArchiveError(
@@ -151,7 +154,17 @@ def preflight_zip_central_directory(
                 raise ReleaseArchiveError(
                     "release archive ZIP64 locator is invalid"
                 )
-            stream.seek(zip64_offset)
+            zip64_physical_offset = (
+                locator_offset - _ZIP64_EOCD_FIXED_BYTES
+            )
+            if (
+                zip64_physical_offset < 0
+                or zip64_offset > zip64_physical_offset
+            ):
+                raise ReleaseArchiveError(
+                    "release archive ZIP64 end record is invalid"
+                )
+            stream.seek(zip64_physical_offset)
             zip64_record = stream.read(_ZIP64_EOCD_FIXED_BYTES)
             if len(zip64_record) != _ZIP64_EOCD_FIXED_BYTES:
                 raise ReleaseArchiveError(
@@ -167,11 +180,11 @@ def preflight_zip_central_directory(
                 zip64_disk_entries,
                 total_entries,
                 central_bytes,
-                _central_offset,
+                central_offset,
             ) = struct.unpack("<4sQ2H2L4Q", zip64_record)
             if (
                 zip64_signature != _ZIP64_EOCD_SIGNATURE
-                or zip64_record_bytes < 44
+                or zip64_record_bytes != 44
                 or zip64_disk != 0
                 or zip64_central_disk != 0
                 or zip64_disk_entries != total_entries
@@ -179,6 +192,7 @@ def preflight_zip_central_directory(
                 raise ReleaseArchiveError(
                     "release archive ZIP64 end record is invalid"
                 )
+            central_end = zip64_physical_offset
         elif disk_entries != total_entries:
             raise ReleaseArchiveError(
                 "release archive member count is inconsistent"
@@ -195,6 +209,49 @@ def preflight_zip_central_directory(
         if central_bytes > archive_bytes:
             raise ReleaseArchiveError(
                 "release archive central directory is invalid"
+            )
+
+        central_start = central_end - central_bytes
+        if central_start < 0 or central_offset > central_start:
+            raise ReleaseArchiveError(
+                "release archive central directory is invalid"
+            )
+        stream.seek(central_start)
+        remaining = central_bytes
+        actual_entries = 0
+        while remaining:
+            if remaining < _CENTRAL_DIRECTORY_FIXED_BYTES:
+                raise ReleaseArchiveError(
+                    "release archive central directory is truncated"
+                )
+            header = stream.read(_CENTRAL_DIRECTORY_FIXED_BYTES)
+            if len(header) != _CENTRAL_DIRECTORY_FIXED_BYTES:
+                raise ReleaseArchiveError(
+                    "release archive central directory is truncated"
+                )
+            fields = struct.unpack("<4s6H3L5H2L", header)
+            if fields[0] != _CENTRAL_DIRECTORY_SIGNATURE:
+                raise ReleaseArchiveError(
+                    "release archive central directory record is invalid"
+                )
+            variable_bytes = fields[10] + fields[11] + fields[12]
+            record_bytes = (
+                _CENTRAL_DIRECTORY_FIXED_BYTES + variable_bytes
+            )
+            if record_bytes > remaining:
+                raise ReleaseArchiveError(
+                    "release archive central directory record is truncated"
+                )
+            actual_entries += 1
+            if actual_entries > limits.maximum_members:
+                raise ReleaseArchiveError(
+                    "release archive member count exceeds its maximum"
+                )
+            stream.seek(variable_bytes, os.SEEK_CUR)
+            remaining -= record_bytes
+        if actual_entries != total_entries:
+            raise ReleaseArchiveError(
+                "release archive member count is inconsistent"
             )
     except ReleaseArchiveError as exc:
         failure = exc

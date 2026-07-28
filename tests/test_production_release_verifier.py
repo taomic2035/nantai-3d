@@ -668,6 +668,34 @@ def test_archive_stream_preflight_rejects_before_zipfile_construction(
         )
 
 
+def test_archive_stream_preflight_counts_actual_central_records_before_zipfile(
+    monkeypatch,
+) -> None:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        for index in range(3):
+            archive.writestr(f"payload-{index}.txt", b"payload")
+    payload = bytearray(stream.getvalue())
+    eocd_offset = payload.rfind(b"PK\x05\x06")
+    payload[eocd_offset + 8 : eocd_offset + 12] = (
+        b"\x01\x00\x01\x00"
+    )
+    forged = io.BytesIO(payload)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("ZipFile construction must not start")
+
+    monkeypatch.setattr(verifier_module.zipfile, "ZipFile", forbidden)
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="member count",
+    ):
+        verify_production_release_archive_stream(
+            forged,
+            limits=ArchiveLimits(maximum_members=1),
+        )
+
+
 def test_tree_receipt_limits_fail_before_directory_walk(
     tmp_path: Path,
     monkeypatch,
