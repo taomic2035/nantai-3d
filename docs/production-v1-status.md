@@ -23,6 +23,11 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | production runtime evidence | 六 probe/六 executable 已接入 fresh-container 主入口；待真实 GPU fresh accepted 证据 |
 | production result closure | worker/caller 已接通 v2 archive、render decision 与 closure；待真实 GPU 产物 |
 | Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；尚未对真实重建运行，不能签署 production |
+| Production release tooling | runtime closure、脱敏公共证据、确定性 ZIP、独立 verifier、Studio/Viewer fail-closed 消费已完成 |
+
+这里的 release tooling ready 只表示代码与 modeled contract 已就绪。正式素材、真实 GPU
+3DGS、实测控制点和真实浏览器 QA 仍是外部门禁；它们未在同一 scene identity 通过前，
+不会生成或发布正式 `v1.0.0`。
 
 ## 正式版关键路径
 

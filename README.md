@@ -51,17 +51,11 @@ Linux/macOS 将虚拟环境路径替换为 `.venv/bin/python`。
 
 ### 正式版真实链路进度
 
-2026-07-26 内部真实图片 canary 已完成固定数据校验、fresh COLMAP 4.1.0
-配准（96/100）和本机 Brush 管线试跑；损坏恢复与远程状态未知演练也已留下不可变
-receipt。完整证据、SHA 和未完成项见
-[Production V1 真实黄金链路 canary 报告](docs/verification/2026-07-26-real-golden-path-canary.md)。
-当前关键路径与责任分工见
-[Production V1 状态与 TODO](docs/production-v1-status.md)。
-
-这仍不是正式场景：数据是 `internal-only`，坐标是
-`sfm-local / arbitrary / unaligned`，Brush 是 `preview-only`。真实 CUDA
-Splatfacto、导入/画质/浏览器验收、商用权利素材和实测控制点尚未完成，因此
-`production_release_allowed=false`。
+Production runtime 的确定性封装、独立验证和 Studio/Viewer fail-closed 消费入口已
+就绪，但正式素材、真实 CUDA 3DGS、实测控制点和真实浏览器 QA 尚未在同一 scene
+identity 闭环，因此当前仍是 Preview。发布操作见
+[Production Runtime 发布手册](docs/manual/production-runtime-release.md)，实时缺口与
+TODO 见 [Production V1 状态](docs/production-v1-status.md)。
 
 ## 真实场景工作流
 
@@ -93,6 +87,7 @@ git diff --check
 ## 文档
 
 - [Preview2 下载、独立校验与运行](docs/releases/1.0-preview.2.md)
+- [Production Runtime 发布手册](docs/manual/production-runtime-release.md)
 - [真实重建端到端手册](docs/manual/reconstruction-setup.md)
 - [真实数据与 Sim3/ENU 契约（完整源码仓库）](https://github.com/taomic2035/nantai-3d/blob/v1.0.0-preview.2/docs/real-data-workflow.md)
 - [Production V1 真实黄金链路 canary 证据](docs/verification/2026-07-26-real-golden-path-canary.md)

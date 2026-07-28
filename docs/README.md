@@ -1,8 +1,9 @@
 # 文档入口
 
-首次使用只需要下面四份文档：
+核心文档：
 
 - [Preview2 下载、独立校验与运行](releases/1.0-preview.2.md)
+- [Production Runtime 发布手册](manual/production-runtime-release.md)
 - [真实重建端到端手册](manual/reconstruction-setup.md)
 - [Production V1 状态与 TODO](production-v1-status.md)
 - [真实数据与 Sim3/ENU 契约](real-data-workflow.md)
