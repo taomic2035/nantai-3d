@@ -97,6 +97,24 @@ test_train_production_closes_remote_executor_on_exception
 用 `try/finally` 或等价的显式生命周期包围 executor 的完整使用范围。不得改 remote
 schema、receipt 状态语义或 retry/new-attempt 规则。
 
+### Codex review addendum（2026-07-28，提交前必须关闭）
+
+当前工作树版本的四个新增测试虽通过，但尚未满足上面的 H1 合同：
+
+1. `executor.prepare(bundle)` 仍在 `try/finally: close()` 外；构造成功后 prepare
+   抛出 `RemoteShellExecutionError` 会直接返回而不显式关闭 executor。必须让
+   `finally` 覆盖从 prepare 开始的完整使用范围。
+2. remaining 在前一次 deadline 判断后可能降为 `0`，当前实现仍调用
+   `time.sleep(0)`；合同要求 remaining 为零时直接返回对应 timeout/unknown，不再
+   调用 sleep，也不能在 deadline 后开始下一次 poll。
+3. 当前 close 测试只覆盖 success、failed 和 poll exception；补参数化行为测试，
+   至少逐项证明 prepare、submit、restore、poll、fetch 的 blocked/unknown/exception
+   返回均恰好显式 close 一次，且不依赖 `__del__`。
+4. deadline 测试必须新增“第二次 monotonic 跨过 deadline”的 case，同时断言
+   `sleep_calls` 不包含 `0`，并断言 deadline 后没有额外 `poll()`。
+
+不要仅把测试名称改成合同文字；先让这些新增 case 在当前实现上真实 RED，再修 GREEN。
+
 ```powershell
 python -m pytest -q tests/test_real_scene_operations.py -k "deadline or closes_remote_executor"
 python -m pytest -q tests/test_real_scene_operations.py
