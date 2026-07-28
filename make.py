@@ -62,6 +62,7 @@ REAL_SCENE_TARGETS = frozenset(
         "train-production",
         "import",
         "accept",
+        "status",
         "serve",
         "all",
     }
@@ -433,15 +434,17 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
         source = options.pop("SOURCE", None)
         if source is None:
             raise ValueError("real-scene requires exactly one SOURCE=")
-    if target == "serve":
-        if mode != "real-scene":
+    if target in {"status", "serve"}:
+        if target == "serve" and mode != "real-scene":
             raise ValueError("real-canary cannot serve a production import")
+        if target == "status" and mode != "real-scene":
+            raise ValueError("real-canary status has no make caller contract")
         unsupported = sorted(
             set(options) - {"WORKSPACE", "RUN_ID"}
         )
         if unsupported:
             raise ValueError(
-                "real-scene serve rejects stage-only options: "
+                f"{mode} {target} rejects stage-only options: "
                 + ", ".join(unsupported)
             )
         missing = sorted(
@@ -451,7 +454,7 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
         )
         if missing:
             raise ValueError(
-                "real-scene serve requires "
+                f"{mode} {target} requires "
                 + ", ".join(f"{name}=" for name in missing)
             )
     if _real_boolean("RESUME", options.get("RESUME", "0")) and _real_boolean(

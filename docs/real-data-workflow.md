@@ -74,9 +74,19 @@ operator 按采集规模与正式验收目标确认，不能为了让失败数�
 GPS-only 的米级结果不能冒充该精度。所有私有媒体、EXIF/GPS、rights receipt、
 控制点、SSH 配置和训练产物都留在 ignored `.nantai-studio/` 或 operator 私有路径。
 
+`status` 是 source/workspace/run-bound 的只读快照入口，不联网、不训练、不写
+receipt；未达到 authoritative acceptance 时返回码为 2：
+
+```bash
+.venv/bin/python make.py real-scene \
+  SOURCE=.nantai-studio/private/production-site-a/production-source.json \
+  WORKSPACE=.nantai-studio/real-scene \
+  RUN_ID=production-site-a status
+```
+
 `serve` 不是 journal stage，也不会产生“服务已验收”receipt。完成 `accept` 后，用
-source/workspace/run identity 启动只读 Studio；入口会重新验证五阶段 authoritative
-acceptance、最新 production import 及其 source SHA，然后才挂载到 loopback：
+相同 identity 启动只读 Studio；入口会重新验证五阶段 authoritative acceptance、
+最新 production import 及其 source SHA，然后才挂载到 loopback：
 
 ```bash
 .venv/bin/python make.py real-scene \

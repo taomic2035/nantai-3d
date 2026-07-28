@@ -6,7 +6,8 @@
 ## 当前真实场景主线
 
 1. [Real-scene status closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md) —
-   当前实现入口：source-bound 五阶段只读状态、权威 acceptance 重验和固定错误边界
+   当前入口：`make.py real-scene ... status`；执行 source-bound 五阶段只读状态、
+   权威 acceptance 重验和固定错误边界
 2. [Real-scene serve closure](FEEDBACK-HANDOFF-GLM-019-real-scene-serve-semantics.md) —
    `all` 结束于 accept；serve 只读重验后以前台 loopback Studio 启动，不写 receipt
 3. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)

@@ -122,6 +122,8 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 - GLM-018 最终只检查 `fetch → sfm → role-train → import → accept`：completed
   receipt 会重开 prerequisite、artifact、production import 与权威 acceptance。
   状态命令不联网、不训练、不写文件，也不回显私有路径或原始失败原因。
+  Codex 随后补齐遗漏的 `make.py real-scene ... status` 统一入口，并在调用
+  subprocess 前拒绝 stage-only 参数、缺失 identity 和未定义的 canary caller。
 - GLM-019 关闭 `serve` 语义冲突：durable chain 固定为
   `fetch → sfm → role-train → import → accept`，`all` 如实结束于 accept；real-scene
   `serve` 改为只读重验 authoritative acceptance 与 production import、交叉核对

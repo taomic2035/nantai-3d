@@ -384,7 +384,17 @@ receipt 白名单中 `web/` 下的 manifest、PLY 和 chunks；训练输入、�
 私有文件不会被映射。挂载字节在启动后变化时资源与 Studio 状态都会 fail closed，也
 不会回落到仓库 demo。
 
-只做人工浏览、不生成验收证据时，使用同一个 source/workspace/run identity 启动：
+先用同一个 source/workspace/run identity 只读检查五阶段状态；命令不联网、不训练、
+不写 receipt，未达到 authoritative acceptance 时返回码为 2：
+
+```powershell
+python make.py real-scene `
+  "SOURCE=$source" `
+  "WORKSPACE=$workspace" `
+  "RUN_ID=$runId" status
+```
+
+只做人工浏览、不生成验收证据时，再用同一 identity 启动：
 
 ```powershell
 python make.py real-scene `

@@ -1,5 +1,10 @@
 # Production V1 Real Reconstruction Golden Path Implementation Plan
 
+> **Archive notice (2026-07-28):** this checklist is preserved for regression
+> traceability and is not the current execution queue. Use
+> [`docs/production-v1-status.md`](../../production-v1-status.md) for achieved
+> scope, remaining external gates and the current next actions.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build one repeatable, fail-closed real-image reconstruction path from a

@@ -231,6 +231,117 @@ class TestRealSceneDispatch:
             ]
         ]
 
+    def test_real_scene_status_accepts_only_source_workspace_and_run_id(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        assert (
+            make.main(
+                [
+                    "make.py",
+                    "real-scene",
+                    "SOURCE=private/source.json",
+                    "WORKSPACE=.nantai-studio/real-scene",
+                    "RUN_ID=production-001",
+                    "status",
+                ]
+            )
+            == 0
+        )
+        assert calls == [
+            [
+                make.PY,
+                "-m",
+                "scripts.real_scene",
+                "status",
+                "--source",
+                "private/source.json",
+                "--run-id",
+                "production-001",
+                "--workspace",
+                ".nantai-studio/real-scene",
+            ]
+        ]
+
+    @pytest.mark.parametrize(
+        "args",
+        (
+            [
+                "real-scene",
+                "SOURCE=private/source.json",
+                "WORKSPACE=.nantai-studio/real-scene",
+                "RUN_ID=production-001",
+                "CONTROL_POINTS=private/points.json",
+                "status",
+            ],
+            [
+                "real-scene",
+                "SOURCE=private/source.json",
+                "RUN_ID=production-001",
+                "status",
+            ],
+            [
+                "real-scene",
+                "SOURCE=private/source.json",
+                "WORKSPACE=.nantai-studio/real-scene",
+                "status",
+            ],
+        ),
+    )
+    def test_real_scene_status_rejects_stage_only_or_incomplete_identity(
+        self,
+        make,
+        monkeypatch,
+        capsys,
+        args,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        assert make.main(["make.py", *args]) == 2
+        assert calls == []
+        assert "status" in capsys.readouterr().err
+
+    def test_real_canary_status_requires_an_explicit_caller_contract(
+        self,
+        make,
+        monkeypatch,
+        capsys,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        assert (
+            make.main(
+                [
+                    "make.py",
+                    "real-canary",
+                    "WORKSPACE=.nantai-studio/real-scene",
+                    "RUN_ID=canary-001",
+                    "status",
+                ]
+            )
+            == 2
+        )
+        assert calls == []
+        assert "status" in capsys.readouterr().err
+
     @pytest.mark.parametrize(
         "args",
         (

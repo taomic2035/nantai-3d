@@ -108,6 +108,7 @@ def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
     assert "不能手写或任意挑选三机位" in manual
     assert "python make.py real-scene" in manual
     assert '"WORKSPACE=$workspace"' in manual
+    assert '"RUN_ID=$runId" status' in manual
     assert '"RUN_ID=$runId" serve' in manual
     assert "authoritative acceptance" in manual
     assert "不写 stage" in manual
