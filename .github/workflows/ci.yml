@@ -257,29 +257,29 @@ jobs:
             "loguru==0.7.3" \
             "pywin32==311; sys_platform == 'win32'"
 
-        - name: Test cross-platform read-only Production contracts
-          run: |
-            python -m pytest -q --noconftest -m "not production_mutation" \
-              tests/test_release_archive.py \
-              tests/test_production_release_contract.py \
-              tests/test_production_release_fs.py \
-              tests/test_production_release_verifier.py \
-              tests/test_production_release_cli.py \
-              tests/test_production_release_privacy.py \
+      - name: Test cross-platform read-only Production contracts
+        run: |
+          python -m pytest -q --noconftest -m "not production_mutation" \
+            tests/test_release_archive.py \
+            tests/test_production_release_contract.py \
+            tests/test_production_release_fs.py \
+            tests/test_production_release_verifier.py \
+            tests/test_production_release_cli.py \
+            tests/test_production_release_privacy.py \
             tests/test_production_release_assets.py \
             tests/test_production_release_docs.py \
-              tests/test_production_runtime_runner.py \
-              tests/test_production_release_builder.py
+            tests/test_production_runtime_runner.py \
+            tests/test_production_release_builder.py
 
-        - name: Test private Linux append-only Production mutations
-          if: matrix.os == 'ubuntu-latest'
-          run: |
-            python -m pytest -q --noconftest -m production_mutation \
-              tests/test_production_release_fs.py \
-              tests/test_production_release_verifier.py \
-              tests/test_production_release_privacy.py \
-              tests/test_production_release_assets.py \
-              tests/test_production_release_builder.py
+      - name: Test private Linux append-only Production mutations
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python -m pytest -q --noconftest -m production_mutation \
+            tests/test_production_release_fs.py \
+            tests/test_production_release_verifier.py \
+            tests/test_production_release_privacy.py \
+            tests/test_production_release_assets.py \
+            tests/test_production_release_builder.py
 
       - name: Probe modeled package content ID
         run: |
