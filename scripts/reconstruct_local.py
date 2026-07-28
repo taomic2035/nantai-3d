@@ -236,8 +236,18 @@ def _materialize_source_manifest(
         "materialized_at_utc": datetime.now(UTC).isoformat(),
     }
     report_path = ws / f"source_manifest_{manifest_sha}.json"
-    if report_path.is_file():
-        existing = json.loads(report_path.read_text(encoding="utf-8"))
+    io_path = report_path
+    if os.name == "nt":
+        absolute = str(report_path.absolute())
+        if absolute.startswith("\\\\?\\"):
+            pass
+        elif absolute.startswith("\\\\"):
+            absolute = "\\\\?\\UNC\\" + absolute.lstrip("\\")
+        else:
+            absolute = "\\\\?\\" + absolute
+        io_path = Path(absolute)
+    if io_path.is_file():
+        existing = json.loads(io_path.read_text(encoding="utf-8"))
         if existing.get("manifest_sha256") != manifest_sha:
             raise SystemExit(
                 f"source manifest 冲突: {report_path} 已存在但 manifest_sha256 不匹配 "
@@ -245,7 +255,7 @@ def _materialize_source_manifest(
                 f"拒绝覆盖审计凭证")
     else:
         blob = json.dumps(report, sort_keys=True, ensure_ascii=False, indent=2)
-        report_path.write_text(blob, encoding="utf-8")
+        io_path.write_text(blob, encoding="utf-8")
     return manifest_sha
 
 

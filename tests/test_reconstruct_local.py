@@ -1683,6 +1683,64 @@ class TestSourceManifestMaterialization:
     def _manifest_files(self, ws: Path) -> list[Path]:
         return sorted(ws.glob("source_manifest_*.json"))
 
+    @staticmethod
+    def _windows_long_manifest_path(
+        tmp_path: Path,
+        manifest: dict,
+        caller_argv: list[str],
+        colmap_bin_sha: str,
+    ) -> tuple[Path, Path]:
+        """Build the real failure shape: safe workspace, >MAX_PATH report."""
+        payload = {
+            **manifest,
+            "caller_argv": caller_argv,
+            "colmap_binary_sha256": colmap_bin_sha,
+        }
+        manifest_sha = rl._digest(payload)
+        desired_workspace_length = 210
+        padding = desired_workspace_length - len(str(tmp_path.resolve())) - 1
+        assert 1 <= padding <= 255
+        ws = tmp_path / ("w" * padding)
+        ws.mkdir()
+        report_path = ws / f"source_manifest_{manifest_sha}.json"
+        assert len(str(ws.resolve())) == desired_workspace_length
+        assert len(str(report_path.resolve())) > 260
+        return ws, report_path
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH regression")
+    def test_source_manifest_supports_windows_long_path(self, tmp_path):
+        """Content-addressed evidence must survive legacy Windows MAX_PATH."""
+        manifest = {"mode": "precomputed", "source_root": "fixture"}
+        caller_argv = ["reconstruct_local.py", "--precomputed-colmap", "fixture"]
+        colmap_bin_sha = "1" * 64
+        ws, report_path = self._windows_long_manifest_path(
+            tmp_path, manifest, caller_argv, colmap_bin_sha)
+
+        manifest_sha = rl._materialize_source_manifest(
+            ws, manifest, caller_argv, colmap_bin_sha)
+
+        extended_path = Path("\\\\?\\" + str(report_path.resolve()))
+        report = json.loads(extended_path.read_text(encoding="utf-8"))
+        assert report["manifest_sha256"] == manifest_sha
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH regression")
+    def test_windows_long_manifest_conflict_fails_closed(self, tmp_path):
+        """A long-path conflict remains write-once and is never overwritten."""
+        manifest = {"mode": "precomputed", "source_root": "fixture"}
+        caller_argv = ["reconstruct_local.py", "--precomputed-colmap", "fixture"]
+        colmap_bin_sha = "2" * 64
+        ws, report_path = self._windows_long_manifest_path(
+            tmp_path, manifest, caller_argv, colmap_bin_sha)
+        extended_path = Path("\\\\?\\" + str(report_path.resolve()))
+        original = json.dumps({"manifest_sha256": "0" * 64})
+        extended_path.write_text(original, encoding="utf-8")
+
+        with pytest.raises(SystemExit, match="冲突|conflict|manifest"):
+            rl._materialize_source_manifest(
+                ws, manifest, caller_argv, colmap_bin_sha)
+
+        assert extended_path.read_text(encoding="utf-8") == original
+
     def test_source_manifest_file_written(self, env, tmp_path, photos_dir):
         call, fake, ws, _ = env
         precomp = tmp_path / "precomp"
