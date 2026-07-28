@@ -24,10 +24,72 @@ class DurableIOError(OSError):
         self.published = published
 
 
-def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
-    )
+def _is_linklike(
+    path: Path,
+    *,
+    observed: os.stat_result | None = None,
+) -> bool:
+    """Return whether *path* is a symlink or Windows reparse redirect.
+
+    ``Path.is_junction`` is unavailable before Python 3.12, so the
+    ``st_file_attributes`` check is the portable Windows trust boundary.
+    ``lstat`` errors other than absence intentionally propagate for callers to
+    map fail closed.  A junction-probe race is itself treated as link-like.
+    """
+
+    if observed is None:
+        try:
+            current = path.lstat()
+        except FileNotFoundError:
+            return False
+    else:
+        current = observed
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or int(getattr(current, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is None:
+        return False
+    try:
+        return bool(is_junction())
+    except OSError:
+        return True
+
+
+def first_linklike_path(
+    protected_root: str | Path,
+    leaf: str | Path,
+) -> Path | None:
+    """Return the first link-like existing path from root through leaf.
+
+    Paths are normalized lexically with ``absolute``; this deliberately never
+    calls ``resolve`` because resolution would traverse the redirect before it
+    can be rejected.  Missing components are allowed for fresh destinations.
+    Other ``lstat`` errors propagate so trust-boundary callers fail closed.
+    """
+
+    root = Path(protected_root).absolute()
+    target = Path(leaf).absolute()
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("leaf must remain below the protected root") from exc
+    current = root
+    candidates = [root]
+    for part in relative.parts:
+        current = current / part
+        candidates.append(current)
+    for candidate in candidates:
+        try:
+            observed = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if _is_linklike(candidate, observed=observed):
+            return candidate
+    return None
 
 
 def _paths_are_siblings(source: Path, destination: Path) -> None:
@@ -50,7 +112,7 @@ def _source_kind(path: Path, *, directory: bool) -> None:
     except OSError as exc:
         raise DurableIOError("durable publication source is unavailable") from exc
     expected = stat.S_ISDIR if directory else stat.S_ISREG
-    if _is_linklike(path) or not expected(current.st_mode):
+    if _is_linklike(path, observed=current) or not expected(current.st_mode):
         kind = "directory" if directory else "regular file"
         raise DurableIOError(
             f"durable publication source must be a real {kind}"

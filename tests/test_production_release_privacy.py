@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -319,6 +320,40 @@ def test_junction_is_rejected_before_privacy_scan(
     )
     policy = tmp_path / "private-policy.json"
     _write_policy(policy, b"private-canonical-needle")
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="verification failed before",
+    ):
+        audit_production_release_privacy(root, policy)
+
+
+def test_reparse_root_is_rejected_before_privacy_scan_without_is_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "runtime"
+    write_modeled_production_tree(root)
+    policy = tmp_path / "private-policy.json"
+    _write_policy(policy, b"private-canonical-needle")
+    observed = root.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == root:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
 
     with pytest.raises(
         ProductionReleasePrivacyError,

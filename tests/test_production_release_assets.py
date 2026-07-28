@@ -6,8 +6,10 @@ import importlib.util
 import json
 import re
 import shutil
+import stat
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -565,6 +567,43 @@ def test_stage_rejects_junction_output_parent(
     assert trust_calls == []
     assert sentinel.read_bytes() == sentinel_bytes
     _assert_not_published(output)
+
+
+def test_stage_rejects_reparse_output_parent_without_is_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_parent = tmp_path / "reparse-parent"
+    output_parent.mkdir()
+    output = output_parent / "release-assets"
+    observed = output_parent.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == output_parent:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x400,
+                ),
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="real directory",
+    ):
+        assets_module._real_absent_output(output)
 
 
 def test_verify_rejects_junction_bundle_root(

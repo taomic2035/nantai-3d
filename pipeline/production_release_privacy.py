@@ -15,6 +15,8 @@ from pathlib import Path
 
 from pipeline.durable_io import (
     DurableIOError,
+    _is_linklike,
+    first_linklike_path,
     flush_file,
     publish_file_noreplace,
 )
@@ -103,11 +105,17 @@ def publish_privacy_report(
     """Durably publish one canonical report without replacing prior evidence."""
 
     destination = Path(output).absolute()
-    if destination.exists() or destination.is_symlink():
+    try:
+        redirected = first_linklike_path(Path(destination.anchor), destination)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleasePrivacyError(
+            "privacy report destination is unsafe"
+        ) from exc
+    if destination.exists() or redirected == destination:
         raise ProductionReleasePrivacyError(
             "privacy report destination already exists"
         )
-    if not destination.parent.is_dir():
+    if redirected is not None or not destination.parent.is_dir():
         raise ProductionReleasePrivacyError(
             "privacy report parent directory is missing"
         )
@@ -151,7 +159,9 @@ def _stable_policy_bytes(path: Path) -> bytes:
         raise ProductionReleasePrivacyError(
             "privacy policy is unavailable"
         ) from exc
-    if stat.S_ISLNK(path_before.st_mode) or not stat.S_ISREG(path_before.st_mode):
+    if _is_linklike(path, observed=path_before) or not stat.S_ISREG(
+        path_before.st_mode
+    ):
         raise ProductionReleasePrivacyError(
             "privacy policy must be a regular non-link file"
         )
@@ -244,12 +254,6 @@ def _load_policy(path: Path) -> _PrivacyPolicy:
     return _PrivacyPolicy(needles=tuple(needles))
 
 
-def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
-    )
-
-
 def _release_files(root: Path) -> tuple[tuple[str, Path], ...]:
     observed: list[tuple[str, Path]] = []
     for current, directories, names in os.walk(root, followlinks=False):
@@ -257,39 +261,36 @@ def _release_files(root: Path) -> tuple[tuple[str, Path], ...]:
         for name in tuple(directories):
             candidate = current_path / name
             relative = candidate.relative_to(root).as_posix()
-            if _is_linklike(candidate):
-                raise ProductionReleasePrivacyError(
-                    f"unsafe release directory: {relative}"
-                )
             try:
-                mode = candidate.lstat().st_mode
+                candidate_stat = candidate.lstat()
             except OSError as exc:
                 raise ProductionReleasePrivacyError(
                     "release directory is unavailable"
                 ) from exc
-            if not stat.S_ISDIR(mode):
+            if _is_linklike(candidate, observed=candidate_stat):
+                raise ProductionReleasePrivacyError(
+                    f"unsafe release directory: {relative}"
+                )
+            if not stat.S_ISDIR(candidate_stat.st_mode):
                 raise ProductionReleasePrivacyError(
                     f"unsafe release directory: {relative}"
                 )
         for name in names:
             candidate = current_path / name
-            if _is_linklike(candidate):
-                relative = safe_posix_member_path(
-                    candidate.relative_to(root).as_posix()
-                ).as_posix()
-                raise ProductionReleasePrivacyError(
-                    f"unsafe release file: {relative}"
-                )
             try:
                 relative = safe_posix_member_path(
                     candidate.relative_to(root).as_posix()
                 ).as_posix()
-                mode = candidate.lstat().st_mode
+                candidate_stat = candidate.lstat()
             except (OSError, ReleaseArchiveError) as exc:
                 raise ProductionReleasePrivacyError(
                     "release file is unavailable or unsafe"
                 ) from exc
-            if not stat.S_ISREG(mode):
+            if _is_linklike(candidate, observed=candidate_stat):
+                raise ProductionReleasePrivacyError(
+                    f"unsafe release file: {relative}"
+                )
+            if not stat.S_ISREG(candidate_stat.st_mode):
                 raise ProductionReleasePrivacyError(
                     f"unsafe release file: {relative}"
                 )
@@ -329,7 +330,9 @@ def _scan_file(
         raise ProductionReleasePrivacyError(
             f"release file became unavailable: {relative}"
         ) from exc
-    if stat.S_ISLNK(path_before.st_mode) or not stat.S_ISREG(path_before.st_mode):
+    if _is_linklike(path, observed=path_before) or not stat.S_ISREG(
+        path_before.st_mode
+    ):
         raise ProductionReleasePrivacyError(
             f"release file became unsafe: {relative}"
         )
@@ -394,15 +397,21 @@ def _audit_verified_tree(
         raise ProductionReleasePrivacyError(
             "Production release verification failed before privacy scan"
         ) from exc
+    policy_path = policy_path.expanduser().absolute()
+    root = root.expanduser().absolute()
     try:
-        if policy_path.resolve().is_relative_to(root.resolve()):
-            raise ProductionReleasePrivacyError(
-                "privacy policy must remain outside the public release"
-            )
-    except OSError as exc:
+        redirected = first_linklike_path(
+            Path(policy_path.anchor),
+            policy_path,
+        )
+    except (OSError, ValueError) as exc:
         raise ProductionReleasePrivacyError(
-            "privacy policy location cannot be resolved"
+            "privacy policy location is unsafe"
         ) from exc
+    if redirected is not None or policy_path.is_relative_to(root):
+        raise ProductionReleasePrivacyError(
+            "privacy policy must remain outside the public release"
+        )
     policy = _load_policy(policy_path)
 
     findings: set[PrivacyFinding] = set()

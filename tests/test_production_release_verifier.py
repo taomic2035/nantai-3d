@@ -3,9 +3,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import stat
+import subprocess
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -171,6 +174,82 @@ def test_tree_verifier_rejects_junction(
 
     with pytest.raises(ProductionReleaseVerificationError, match="symlink"):
         verify_production_release_tree(root)
+
+
+def test_tree_verifier_rejects_reparse_root_without_is_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    observed = root.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == root:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x400,
+                ),
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="missing or unsafe",
+    ):
+        verify_production_release_tree(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_tree_verifier_rejects_real_windows_junction_before_walk(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_bytes(b"must not be walked")
+    junction = root / "web/viewer/junction"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {created.stderr}")
+    try:
+        monkeypatch.setattr(
+            Path,
+            "is_junction",
+            lambda _path: False,
+            raising=False,
+        )
+
+        with pytest.raises(
+            ProductionReleaseVerificationError,
+            match="symlink",
+        ):
+            verify_production_release_tree(root)
+    finally:
+        removed = subprocess.run(
+            ["cmd", "/c", "rmdir", str(junction)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert removed.returncode == 0, removed.stderr
 
 
 def test_archive_verifier_accepts_one_bounded_wrapper_root(tmp_path: Path) -> None:

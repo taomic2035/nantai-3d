@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRIVATE_EVIDENCE_OMITTED,
@@ -211,7 +212,9 @@ def _safe_regular_payload(
         raise ProductionReleaseBuilderError(
             f"release evidence is unavailable: {source}"
         ) from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+    if _is_linklike(source, observed=before) or not stat.S_ISREG(
+        before.st_mode
+    ):
         raise ProductionReleaseBuilderError(
             f"release evidence must be a regular non-link file: {source}"
         )
@@ -256,6 +259,16 @@ def _reference_payload(
 ) -> bytes:
     relative = safe_posix_member_path(reference.path)
     path = root.joinpath(*relative.parts)
+    try:
+        redirected = first_linklike_path(root, path)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(
+            f"release evidence path is unsafe: {reference.path}"
+        ) from exc
+    if redirected is not None:
+        raise ProductionReleaseBuilderError(
+            f"release evidence path is unsafe: {reference.path}"
+        )
     payload, observed = _safe_regular_payload(
         path,
         maximum_bytes=reference.byte_length,
@@ -334,7 +347,18 @@ def _load_import_receipt(
 ) -> tuple[RealSceneImportReceipt, Path]:
     import_relative = safe_posix_member_path(report.import_root.path)
     import_root = root.joinpath(*import_relative.parts)
-    if import_root.is_symlink() or not import_root.is_dir():
+    try:
+        import_stat = import_root.lstat()
+        redirected = first_linklike_path(root, import_root)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(
+            "Production import root is unavailable or unsafe"
+        ) from exc
+    if (
+        redirected is not None
+        or _is_linklike(import_root, observed=import_stat)
+        or not stat.S_ISDIR(import_stat.st_mode)
+    ):
         raise ProductionReleaseBuilderError(
             "Production import root is unavailable or unsafe"
         )
@@ -545,7 +569,18 @@ def derive_production_release_context(
 
     report_path = Path(acceptance_report_path).expanduser().absolute()
     root = report_path.parent
-    if root.is_symlink() or not root.is_dir():
+    try:
+        root_stat = root.lstat()
+        redirected = first_linklike_path(Path(root.anchor), report_path)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(
+            "Production acceptance root is unavailable or unsafe"
+        ) from exc
+    if (
+        redirected is not None
+        or _is_linklike(root, observed=root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
         raise ProductionReleaseBuilderError(
             "Production acceptance root is unavailable or unsafe"
         )
@@ -1227,12 +1262,6 @@ def _runtime_destination(relative: str) -> tuple[str, str] | None:
     return None
 
 
-def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
-    )
-
-
 def _git_tree_blob(
     repo_root: Path,
     *,
@@ -1291,7 +1320,9 @@ def _snapshot_directory(root: Path, relative_parent: Path) -> Path:
             raise ProductionReleaseBuilderError(
                 "Git source snapshot directory is unavailable"
             ) from exc
-        if _is_linklike(current) or not stat.S_ISDIR(observed.st_mode):
+        if _is_linklike(current, observed=observed) or not stat.S_ISDIR(
+            observed.st_mode
+        ):
             raise ProductionReleaseBuilderError(
                 "Git source snapshot directory must be a real directory"
             )
@@ -1385,7 +1416,10 @@ def _materialize_runtime_source_snapshot(
         raise ProductionReleaseBuilderError(
             "Git source snapshot is unavailable"
         ) from exc
-    if _is_linklike(snapshot_root) or not stat.S_ISDIR(snapshot_stat.st_mode):
+    if _is_linklike(
+        snapshot_root,
+        observed=snapshot_stat,
+    ) or not stat.S_ISDIR(snapshot_stat.st_mode):
         raise ProductionReleaseBuilderError(
             "Git source snapshot must be a real directory"
         )
@@ -1518,7 +1552,7 @@ def _copy_bound_source(source: SourcePayload, destination: Path) -> None:
             f"release source changed before copy: {source.source_path}"
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() or destination.is_symlink():
+    if destination.exists() or _is_linklike(destination):
         raise ProductionReleaseBuilderError(
             f"release staging destination already exists: {destination}"
         )
@@ -1551,7 +1585,7 @@ def _copy_bound_source(source: SourcePayload, destination: Path) -> None:
 
 def _write_new_payload(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or path.is_symlink():
+    if path.exists() or _is_linklike(path):
         raise ProductionReleaseBuilderError(
             f"release staging destination already exists: {path}"
         )
@@ -1611,7 +1645,21 @@ def build_production_release_archive(
     source_snapshot = output.parent / f".{output.name}.sources"
     partial = output.parent / f".{output.name}.partial"
     sidecar_partial = output.parent / f".{sidecar.name}.partial"
-    if not output.parent.is_dir() or _is_linklike(output.parent):
+    try:
+        output_parent_stat = output.parent.lstat()
+        output_redirected = first_linklike_path(
+            Path(output.anchor),
+            output.parent,
+        )
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(
+            "Production output parent directory is missing or unsafe"
+        ) from exc
+    if (
+        output_redirected is not None
+        or _is_linklike(output.parent, observed=output_parent_stat)
+        or not stat.S_ISDIR(output_parent_stat.st_mode)
+    ):
         raise ProductionReleaseBuilderError(
             "Production output parent directory is missing or unsafe"
         )
@@ -1623,9 +1671,36 @@ def build_production_release_archive(
         partial,
         sidecar_partial,
     ):
-        if path.exists() or _is_linklike(path):
+        try:
+            path_exists = path.exists()
+            path_linklike = _is_linklike(path)
+        except OSError as exc:
+            raise ProductionReleaseBuilderError(
+                f"Production output or staging path is unsafe: {path}"
+            ) from exc
+        if path_exists or path_linklike:
             raise ProductionReleaseBuilderError(
                 f"Production output or staging path exists: {path}"
+            )
+
+    for label, boundary in (
+        ("source", root),
+        ("acceptance", acceptance),
+    ):
+        try:
+            boundary_stat = boundary.lstat()
+            redirected = first_linklike_path(Path(boundary.anchor), boundary)
+        except (OSError, ValueError) as exc:
+            raise ProductionReleaseBuilderError(
+                f"Production {label} root is missing or unsafe"
+            ) from exc
+        if (
+            redirected is not None
+            or _is_linklike(boundary, observed=boundary_stat)
+            or not stat.S_ISDIR(boundary_stat.st_mode)
+        ):
+            raise ProductionReleaseBuilderError(
+                f"Production {label} root is missing or unsafe"
             )
 
     try:

@@ -11,6 +11,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRODUCTION_RELEASE_NAME,
@@ -55,21 +56,12 @@ def _verification_error(message: str, exc: Exception | None = None) -> None:
     raise ProductionReleaseVerificationError(message) from exc
 
 
-def _path_has_symlink(root: Path, relative: PurePosixPath) -> bool:
-    current = root
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            return True
-    return False
-
-
 def _stable_payload(path: Path, *, maximum_bytes: int) -> bytes:
     try:
         before = path.lstat()
     except OSError as exc:
         _verification_error(f"release file is unavailable: {path}", exc)
-    if stat.S_ISLNK(before.st_mode):
+    if _is_linklike(path, observed=before):
         _verification_error(f"symlink release file is forbidden: {path}")
     if not stat.S_ISREG(before.st_mode):
         _verification_error(f"release file must be regular: {path}")
@@ -102,12 +94,6 @@ def _stable_payload(path: Path, *, maximum_bytes: int) -> bytes:
     return payload
 
 
-def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
-    )
-
-
 def _release_files(root: Path) -> set[str]:
     files: set[str] = set()
     folded: set[str] = set()
@@ -116,18 +102,18 @@ def _release_files(root: Path) -> set[str]:
         for directory in tuple(directories):
             candidate = current_path / directory
             relative = candidate.relative_to(root).as_posix()
-            if _is_linklike(candidate):
-                _verification_error(
-                    f"symlink release path is forbidden: {relative}"
-                )
             try:
-                mode = candidate.lstat().st_mode
+                observed = candidate.lstat()
             except OSError as exc:
                 _verification_error(
                     f"release path is unavailable: {relative}",
                     exc,
                 )
-            if not stat.S_ISDIR(mode):
+            if _is_linklike(candidate, observed=observed):
+                _verification_error(
+                    f"symlink release path is forbidden: {relative}"
+                )
+            if not stat.S_ISDIR(observed.st_mode):
                 _verification_error(
                     f"release path must be a directory: {relative}"
                 )
@@ -136,18 +122,18 @@ def _release_files(root: Path) -> set[str]:
             relative = safe_posix_member_path(
                 candidate.relative_to(root).as_posix()
             ).as_posix()
-            if _is_linklike(candidate):
-                _verification_error(
-                    f"symlink release file is forbidden: {relative}"
-                )
             try:
-                mode = candidate.lstat().st_mode
+                observed = candidate.lstat()
             except OSError as exc:
                 _verification_error(
                     f"release file is unavailable: {relative}",
                     exc,
                 )
-            if not stat.S_ISREG(mode):
+            if _is_linklike(candidate, observed=observed):
+                _verification_error(
+                    f"symlink release file is forbidden: {relative}"
+                )
+            if not stat.S_ISREG(observed.st_mode):
                 _verification_error(
                     f"release file must be regular: {relative}"
                 )
@@ -179,9 +165,14 @@ def _expected_checksum_bytes(
 
 def _artifact_path(root: Path, relative: str) -> Path:
     member = safe_posix_member_path(relative)
-    if _path_has_symlink(root, member):
+    path = root.joinpath(*member.parts)
+    try:
+        redirected = first_linklike_path(root, path)
+    except (OSError, ValueError) as exc:
+        _verification_error(f"artifact path is unavailable: {relative}", exc)
+    if redirected is not None:
         _verification_error(f"symlink artifact is forbidden: {relative}")
-    return root.joinpath(*member.parts)
+    return path
 
 
 def verify_production_release_tree(
@@ -189,8 +180,15 @@ def verify_production_release_tree(
 ) -> ProductionReleaseVerification:
     """Verify one extracted Production runtime without promoting scene trust."""
 
-    project_root = Path(root)
-    if project_root.is_symlink() or not project_root.is_dir():
+    project_root = Path(root).absolute()
+    try:
+        root_stat = project_root.lstat()
+        unsafe_root = _is_linklike(project_root, observed=root_stat)
+    except OSError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production release tree is missing or unsafe"
+        ) from exc
+    if unsafe_root or not stat.S_ISDIR(root_stat.st_mode):
         raise ProductionReleaseVerificationError(
             "Production release tree is missing or unsafe"
         )
@@ -346,13 +344,30 @@ def extract_production_release_archive(
 
     source = Path(archive_path)
     target = Path(destination)
-    if source.is_symlink() or not source.is_file():
+    try:
+        source_stat = source.lstat()
+        unsafe_source = _is_linklike(source, observed=source_stat)
+    except OSError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production release archive is missing or unsafe"
+        ) from exc
+    if unsafe_source or not stat.S_ISREG(source_stat.st_mode):
         raise ProductionReleaseVerificationError(
             "Production release archive is missing or unsafe"
         )
-    if target.exists() or target.is_symlink():
+    try:
+        unsafe_target = first_linklike_path(Path(target.anchor), target)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination is unsafe"
+        ) from exc
+    if target.exists() or unsafe_target == target:
         raise ProductionReleaseVerificationError(
             "Production extraction destination already exists"
+        )
+    if unsafe_target is not None:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination is unsafe"
         )
 
     created = False

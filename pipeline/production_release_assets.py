@@ -13,6 +13,8 @@ from pathlib import Path
 
 from pipeline.durable_io import (
     DurableIOError,
+    _is_linklike,
+    first_linklike_path,
     flush_directory,
     flush_file,
     publish_directory_noreplace,
@@ -62,12 +64,6 @@ class ProductionReleaseAssets:
     scene_trust_effect: str
 
 
-def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
-    )
-
-
 @dataclass(frozen=True)
 class ProductionReleaseAssetsVerification:
     valid: bool
@@ -91,21 +87,26 @@ def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
 
 def _real_absent_output(path: Path) -> Path:
     output = Path(path).expanduser().absolute()
-    if output.exists() or _is_linklike(output):
+    try:
+        redirected = first_linklike_path(Path(output.anchor), output)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseAssetsError(
+            "Production release asset output parent is unavailable"
+        ) from exc
+    if output.exists() or redirected == output:
         raise ProductionReleaseAssetsError(
             "Production release asset output directory must be absent"
         )
     try:
         parent_stat = output.parent.lstat()
-        parent_real = output.parent.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+    except OSError as exc:
         raise ProductionReleaseAssetsError(
             "Production release asset output parent is unavailable"
         ) from exc
     if (
-        _is_linklike(output.parent)
+        redirected is not None
+        or _is_linklike(output.parent, observed=parent_stat)
         or not stat.S_ISDIR(parent_stat.st_mode)
-        or parent_real != output.parent
     ):
         raise ProductionReleaseAssetsError(
             "Production release asset output parent must be a real directory"
@@ -120,7 +121,7 @@ def _copy_stable_regular_file(source: Path, destination: Path) -> str:
         raise ProductionReleaseAssetsError(
             "Production candidate archive is unavailable"
         ) from exc
-    if stat.S_ISLNK(path_before.st_mode) or not stat.S_ISREG(
+    if _is_linklike(source, observed=path_before) or not stat.S_ISREG(
         path_before.st_mode
     ):
         raise ProductionReleaseAssetsError(
@@ -185,9 +186,9 @@ def _stable_regular_files_equal(left: Path, right: Path) -> bool:
         left_path_before = left.lstat()
         right_path_before = right.lstat()
         if (
-            stat.S_ISLNK(left_path_before.st_mode)
+            _is_linklike(left, observed=left_path_before)
             or not stat.S_ISREG(left_path_before.st_mode)
-            or stat.S_ISLNK(right_path_before.st_mode)
+            or _is_linklike(right, observed=right_path_before)
             or not stat.S_ISREG(right_path_before.st_mode)
         ):
             raise ProductionReleaseAssetsError(
@@ -243,7 +244,7 @@ def _stable_contract_bytes(path: Path) -> bytes:
             "Production public contract is unavailable"
         ) from exc
     if (
-        stat.S_ISLNK(path_before.st_mode)
+        _is_linklike(path, observed=path_before)
         or not stat.S_ISREG(path_before.st_mode)
         or path_before.st_size > _MAXIMUM_PUBLIC_CONTRACT_BYTES
     ):
@@ -305,7 +306,7 @@ def _public_bundle_files(root: Path) -> dict[str, Path]:
             raise ProductionReleaseAssetsError(
                 "Production release asset is unavailable"
             ) from exc
-        if _is_linklike(candidate) or not stat.S_ISREG(
+        if _is_linklike(candidate, observed=current) or not stat.S_ISREG(
             current.st_mode
         ):
             raise ProductionReleaseAssetsError(

@@ -740,6 +740,43 @@ def test_acceptance_projection_rejects_evidence_changed_after_validation(
         derive_production_release_context(fixture["report_path"])
 
 
+def test_acceptance_projection_rejects_reparse_root_without_is_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _modeled_acceptance_tree(tmp_path)
+    _patch_outer_validators(monkeypatch, fixture)
+    root = fixture["root"]
+    observed = root.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == root:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x400,
+                ),
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="root is unavailable or unsafe",
+    ):
+        derive_production_release_context(fixture["report_path"])
+
+
 def _resign_import_fixture(
     fixture: dict[str, object],
     payloads: dict[str, bytes],
