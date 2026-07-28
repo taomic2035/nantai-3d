@@ -1,7 +1,7 @@
 # Production Runtime Runner Design
 
 Date: 2026-07-28
-Status: user-approved direction A; written specification pending final review
+Status: approved by user on 2026-07-28
 
 ## Problem
 
