@@ -3,106 +3,455 @@ name: production-release-publish
 on:
   workflow_dispatch:
     inputs:
-      archive_url:
-        description: "URL of the verified candidate ZIP"
-        required: true
-      package_content_id:
-        description: "Expected package content ID (64 hex)"
-        required: true
-      expected_sha256:
-        description: "Expected archive SHA-256"
-        required: true
       version:
-        description: "Release version (e.g. v1.0.0)"
+        description: "Release version (for example v1.0.0)"
         required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: production-release-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    environment: production
-    timeout-minutes: 15
+  private_stage:
+    name: Build and stage private production candidate
+    runs-on: [self-hosted, linux, x64, nantai-production-release]
+    environment: production-private
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ inputs.version }}
+    outputs:
+      package_content_id: ${{ steps.verify_bundle.outputs.package_content_id }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
-      - name: Download candidate archive
+      - name: Install exact checked-out repository
         run: |
-          mkdir -p "$RUNNER_TEMP/candidate"
-          curl -L -o "$RUNNER_TEMP/candidate/nantai-3d-${{ inputs.version }}-runtime.zip" \
-            "${{ inputs.archive_url }}"
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -e .
 
-      - name: Verify archive bytes
+      - name: Preflight private staging environment
         env:
-          ARCHIVE: ${{ runner.temp }}/candidate/nantai-3d-${{ inputs.version }}-runtime.zip
-        run: |
-          actual_sha=$(sha256sum "$ARCHIVE" | cut -d' ' -f1)
-          echo "actual_sha=$actual_sha"
-          echo "expected_sha=${{ inputs.expected_sha256 }}"
-          if [ "$actual_sha" != "${{ inputs.expected_sha256 }}" ]; then
-            echo "SHA mismatch" >&2
-            exit 1
-          fi
-
-      - name: Stage production assets
-        env:
-          ARCHIVE: ${{ runner.temp }}/candidate/nantai-3d-${{ inputs.version }}-runtime.zip
-          PRIVACY_POLICY: ${{ secrets.PRIVACY_POLICY_PATH }}
-          RELEASE_DIR: ${{ runner.temp }}/release-assets
           ACCEPTANCE_ROOT: ${{ secrets.ACCEPTANCE_ROOT_PATH }}
-          VERSION: ${{ inputs.version }}
+          PRIVACY_POLICY: ${{ secrets.PRIVACY_POLICY_PATH }}
         run: |
-          python make.py stage-production-assets
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid production release version" >&2
+            exit 1
+          fi
+          if (( ${#VERSION} > 64 )) || ! git check-ref-format "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "Production release version is not a valid bounded tag" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "Checkout does not match the workflow source commit" >&2
+            exit 1
+          fi
+          if [[ "$ACCEPTANCE_ROOT" != /* ]] || [[ ! -d "$ACCEPTANCE_ROOT" ]] || [[ -L "$ACCEPTANCE_ROOT" ]]; then
+            echo "Private acceptance directory is unavailable or unsafe" >&2
+            exit 1
+          fi
+          if [[ "$PRIVACY_POLICY" != /* ]] || [[ ! -f "$PRIVACY_POLICY" ]] || [[ -L "$PRIVACY_POLICY" ]]; then
+            echo "Private privacy policy is unavailable or unsafe" >&2
+            exit 1
+          fi
+          python -c "import pipeline.production_release_assets, pipeline.production_release_builder"
 
-      - name: Verify staged assets
+      - name: Build candidate from private acceptance
         env:
-          RELEASE_DIR: ${{ runner.temp }}/release-assets
+          ACCEPTANCE_ROOT: ${{ secrets.ACCEPTANCE_ROOT_PATH }}
+          CANDIDATE: ${{ runner.temp }}/candidate/nantai-production-candidate.zip
         run: |
-          python make.py verify-production-assets
+          set -euo pipefail
+          mkdir -p -- "$(dirname "$CANDIDATE")"
+          python scripts/build_production_release.py \
+            --acceptance-root "$ACCEPTANCE_ROOT" \
+            --version "$VERSION" \
+            --output "$CANDIDATE"
 
-      - name: Assert package content ID
+      - name: Stage acceptance-bound public bundle
         env:
-          RELEASE_DIR: ${{ runner.temp }}/release-assets
+          ACCEPTANCE_ROOT: ${{ secrets.ACCEPTANCE_ROOT_PATH }}
+          PRIVACY_POLICY: ${{ secrets.PRIVACY_POLICY_PATH }}
+          CANDIDATE: ${{ runner.temp }}/candidate/nantai-production-candidate.zip
+          RELEASE_DIR: ${{ runner.temp }}/production-release-assets
+          STAGE_JSON: ${{ runner.temp }}/production-stage.json
         run: |
-          result=$(python make.py verify-production-assets 2>&1)
-          actual_id=$(echo "$result" | python -c "import sys,json; print(json.load(sys.stdin)['package_content_id'])")
-          echo "actual_id=$actual_id"
-          echo "expected_id=${{ inputs.package_content_id }}"
-          if [ "$actual_id" != "${{ inputs.package_content_id }}" ]; then
-            echo "package content ID mismatch" >&2
+          set -euo pipefail
+          python scripts/stage_production_release_assets.py \
+            --acceptance-root "$ACCEPTANCE_ROOT" \
+            --version "$VERSION" \
+            --archive "$CANDIDATE" \
+            --privacy-policy "$PRIVACY_POLICY" \
+            --output-dir "$RELEASE_DIR" \
+            > "$STAGE_JSON"
+
+      - name: Verify and identify the staged bundle
+        id: verify_bundle
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/production-release-assets
+          VERIFY_JSON: ${{ runner.temp }}/production-verify.json
+          VERIFY_FIELDS: ${{ runner.temp }}/production-verify-fields.txt
+        run: |
+          set -euo pipefail
+          python scripts/verify_production_release_assets.py "$RELEASE_DIR" > "$VERIFY_JSON"
+          python - "$VERIFY_JSON" <<'PY' > "$VERIFY_FIELDS"
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              result = json.load(stream)
+          print(result["package_content_id"], result["archive_sha256"])
+          PY
+          read -r content_id archive_sha < "$VERIFY_FIELDS"
+          if [[ ! "$content_id" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Verifier returned an invalid package content ID" >&2
+            exit 1
+          fi
+          if [[ ! "$archive_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Verifier returned an invalid archive SHA-256" >&2
+            exit 1
+          fi
+          archive="$RELEASE_DIR/nantai-3d-${VERSION}-runtime.zip"
+          actual_archive_sha="$(sha256sum "$archive" | cut -d' ' -f1)"
+          if [[ "$actual_archive_sha" != "$archive_sha" ]]; then
+            echo "Staged archive digest changed after verification" >&2
+            exit 1
+          fi
+          printf 'package_content_id=%s\n' "$content_id" >> "$GITHUB_OUTPUT"
+
+      - name: Upload exact public bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nantai-production-release
+          retention-days: 2
+          if-no-files-found: error
+          include-hidden-files: false
+          path: |
+            ${{ runner.temp }}/production-release-assets/nantai-3d-${{ env.VERSION }}-runtime.zip
+            ${{ runner.temp }}/production-release-assets/nantai-3d-${{ env.VERSION }}-runtime.zip.sha256
+            ${{ runner.temp }}/production-release-assets/PRODUCTION-RELEASE.json
+            ${{ runner.temp }}/production-release-assets/SHA256SUMS.txt
+
+  public_publish:
+    name: Verify and transactionally publish public bundle
+    needs: private_stage
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ inputs.version }}
+      EXPECTED_CONTENT_ID: ${{ needs.private_stage.outputs.package_content_id }}
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install exact checked-out repository
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -e .
+
+      - name: Download fixed private-stage artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nantai-production-release
+          path: ${{ runner.temp }}/production-release-assets
+
+      - name: Re-verify staged public bytes
+        env:
+          BUNDLE_DIR: ${{ runner.temp }}/production-release-assets
+          VERIFY_JSON: ${{ runner.temp }}/public-verify.json
+          VERIFY_FIELDS: ${{ runner.temp }}/public-verify-fields.txt
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid production release version" >&2
+            exit 1
+          fi
+          if (( ${#VERSION} > 64 )) || ! git check-ref-format "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "Production release version is not a valid bounded tag" >&2
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_CONTENT_ID" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Private staging returned an invalid package content ID" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "Checkout does not match the workflow source commit" >&2
+            exit 1
+          fi
+          python scripts/verify_production_release_assets.py "$BUNDLE_DIR" > "$VERIFY_JSON"
+          python - "$VERIFY_JSON" <<'PY' > "$VERIFY_FIELDS"
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              result = json.load(stream)
+          print(result["package_content_id"], result["archive_sha256"])
+          PY
+          read -r content_id archive_sha < "$VERIFY_FIELDS"
+          if [[ ! "$content_id" =~ ^[0-9a-f]{64}$ ]] || [[ "$content_id" != "$EXPECTED_CONTENT_ID" ]]; then
+            echo "Public artifact package content ID mismatch" >&2
+            exit 1
+          fi
+          if [[ ! "$archive_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Public artifact archive SHA-256 is invalid" >&2
             exit 1
           fi
 
-      - name: Create tag and release
+      - name: Create draft, verify download, and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNDLE_DIR: ${{ runner.temp }}/production-release-assets
+          DOWNLOADED_DIR: ${{ runner.temp }}/downloaded-release-assets
+          DOWNLOADED_JSON: ${{ runner.temp }}/downloaded-verify.json
+          DOWNLOADED_FIELDS: ${{ runner.temp }}/downloaded-verify-fields.txt
+          RELEASE_NOTES: ${{ runner.temp }}/production-release-notes.md
+          TAG_CREATE_JSON: ${{ runner.temp }}/created-production-tag.json
+          RELEASE_CREATE_JSON: ${{ runner.temp }}/created-production-release.json
+          CLEANUP_RELEASE_JSON: ${{ runner.temp }}/cleanup-production-release.json
         run: |
-          git tag "${{ inputs.version }}" -m "Production release ${{ inputs.version }} (content_id=${{ inputs.package_content_id }})"
-          git push origin "${{ inputs.version }}"
-          gh release create "${{ inputs.version }}" \
-            "$RUNNER_TEMP/release-assets/nantai-3d-${{ inputs.version }}-runtime.zip" \
-            "$RUNNER_TEMP/release-assets/nantai-3d-${{ inputs.version }}-runtime.zip.sha256" \
-            "$RUNNER_TEMP/release-assets/PRODUCTION-RELEASE.json" \
-            "$RUNNER_TEMP/release-assets/SHA256SUMS.txt" \
-            --title "Nantai 3D ${{ inputs.version }}" \
-            --notes "Production release with verified acceptance root. Package content ID: ${{ inputs.package_content_id }}" \
-            --latest
+          set -euo pipefail
 
-      - name: Re-download and re-verify
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/downloaded"
-          gh release download "${{ inputs.version }}" \
-            --dir "$RUNNER_TEMP/downloaded" \
-            --clobber
-          RELEASE_DIR="$RUNNER_TEMP/downloaded" python make.py verify-production-assets
+          assert_absent() {
+            local label="$1"
+            local endpoint="$2"
+            local error_file="$RUNNER_TEMP/${label}-preflight-error.txt"
+            if gh api "$endpoint" >/dev/null 2>"$error_file"; then
+              echo "A release or tag already exists; refusing to modify it" >&2
+              return 1
+            fi
+            if ! grep -q "HTTP 404" "$error_file"; then
+              echo "Unable to prove that the release and tag are absent" >&2
+              return 1
+            fi
+            rm -f -- "$error_file"
+          }
+
+          assert_absent "release" "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION"
+          assert_absent "tag" "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION"
+
+          archive_name="nantai-3d-${VERSION}-runtime.zip"
+          asset_names=(
+            "$archive_name"
+            "$archive_name.sha256"
+            "PRODUCTION-RELEASE.json"
+            "SHA256SUMS.txt"
+          )
+          for name in "${asset_names[@]}"; do
+            if [[ ! -f "$BUNDLE_DIR/$name" ]] || [[ -L "$BUNDLE_DIR/$name" ]]; then
+              echo "Public artifact allowlist is incomplete or unsafe" >&2
+              exit 1
+            fi
+          done
+
+          cat > "$RELEASE_NOTES" <<EOF
+          This release was staged by the official Nantai production workflow from the
+          protected private staging environment at source commit $GITHUB_SHA.
+
+          The downloaded verifier confirms internal consistency of the four-file bundle
+          and package content ID $EXPECTED_CONTENT_ID. It does not independently prove
+          source authenticity, private acceptance, rights, real reconstruction, measured
+          alignment, or Viewer QA.
+
+          Workflow transaction: $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT
+          EOF
+
+          transaction_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          created_tag=0
+          release_id=""
+
+          release_is_owned_draft() {
+            python - "$1" "$2" "$VERSION" "$transaction_id" <<'PY'
+          import json
+          import sys
+
+          path, expected_id, version, transaction_id = sys.argv[1:]
+          with open(path, encoding="utf-8") as stream:
+              release = json.load(stream)
+          marker = f"Workflow transaction: {transaction_id}"
+          if (
+              str(release.get("id")) != expected_id
+              or release.get("tag_name") != version
+              or release.get("draft") is not True
+              or marker not in release.get("body", "")
+          ):
+              raise SystemExit(1)
+          PY
+          }
+
+          cleanup_created_release() {
+            local status=$?
+            set +e
+            if [[ "$status" -eq 0 ]]; then
+              exit 0
+            fi
+
+            local release_owned=0
+            if [[ -n "$release_id" ]] \
+              && gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$CLEANUP_RELEASE_JSON" 2>/dev/null \
+              && release_is_owned_draft "$CLEANUP_RELEASE_JSON" "$release_id"; then
+              release_owned=1
+            elif gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
+              > "$CLEANUP_RELEASE_JSON" 2>/dev/null; then
+              local discovered_release_id
+              discovered_release_id="$(
+                python - "$CLEANUP_RELEASE_JSON" <<'PY'
+              import json
+              import sys
+
+              with open(sys.argv[1], encoding="utf-8") as stream:
+                  print(json.load(stream)["id"])
+              PY
+              )"
+              if [[ "$discovered_release_id" =~ ^[0-9]+$ ]] \
+                && release_is_owned_draft \
+                  "$CLEANUP_RELEASE_JSON" "$discovered_release_id"; then
+                release_id="$discovered_release_id"
+                release_owned=1
+              fi
+            fi
+
+            if [[ "$release_owned" -eq 1 ]]; then
+              if gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/releases/$release_id"; then
+                local tag_sha_after_release_delete
+                tag_sha_after_release_delete="$(
+                  gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" \
+                    --jq '.object.sha' 2>/dev/null
+                )"
+                if [[ "$created_tag" -eq 1 \
+                  && "$tag_sha_after_release_delete" == "$GITHUB_SHA" ]]; then
+                  gh api --method DELETE \
+                    "repos/$GITHUB_REPOSITORY/git/refs/tags/$VERSION" \
+                    || echo "Failed to clean up the workflow-created tag" >&2
+                fi
+              else
+                echo "Failed to clean up the identity-checked draft release" >&2
+              fi
+            elif [[ "$created_tag" -eq 1 ]]; then
+              local current_tag_sha
+              current_tag_sha="$(
+                gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" \
+                  --jq '.object.sha' 2>/dev/null
+              )"
+              local release_error="$RUNNER_TEMP/cleanup-release-absence-error.txt"
+              if [[ "$current_tag_sha" == "$GITHUB_SHA" ]] \
+                && ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
+                >/dev/null 2>"$release_error" \
+                && grep -q "HTTP 404" "$release_error"; then
+                gh api --method DELETE \
+                  "repos/$GITHUB_REPOSITORY/git/refs/tags/$VERSION" \
+                  || echo "Failed to clean up the workflow-created temporary tag" >&2
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_created_release EXIT
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$VERSION" \
+            -f sha="$GITHUB_SHA" > "$TAG_CREATE_JSON"
+          created_tag=1
+          created_tag_sha="$(
+            python - "$TAG_CREATE_JSON" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              print(json.load(stream)["object"]["sha"])
+          PY
+          )"
+          if [[ "$created_tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "Created tag does not resolve to the workflow source commit" >&2
+            exit 1
+          fi
+
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --verify-tag \
+            --title "Nantai 3D $VERSION" \
+            --notes-file "$RELEASE_NOTES" \
+            --draft \
+            --latest=false
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" > "$RELEASE_CREATE_JSON"
+          release_id="$(
+            python - "$RELEASE_CREATE_JSON" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              print(json.load(stream)["id"])
+          PY
+          )"
+          if [[ ! "$release_id" =~ ^[0-9]+$ ]] \
+            || ! release_is_owned_draft "$RELEASE_CREATE_JSON" "$release_id"; then
+            echo "Created draft release identity is invalid" >&2
+            exit 1
+          fi
+
+          gh release upload "$VERSION" \
+            "$BUNDLE_DIR/$archive_name" \
+            "$BUNDLE_DIR/$archive_name.sha256" \
+            "$BUNDLE_DIR/PRODUCTION-RELEASE.json" \
+            "$BUNDLE_DIR/SHA256SUMS.txt"
+
+          mkdir -p -- "$DOWNLOADED_DIR"
+          gh release download "$VERSION" \
+            --dir "$DOWNLOADED_DIR"
+
+          for name in "${asset_names[@]}"; do
+            source="$BUNDLE_DIR/$name"
+            downloaded="$DOWNLOADED_DIR/$name"
+            cmp -- "$source" "$downloaded"
+          done
+
+          python scripts/verify_production_release_assets.py \
+            "$DOWNLOADED_DIR" > "$DOWNLOADED_JSON"
+          python - "$DOWNLOADED_JSON" <<'PY' > "$DOWNLOADED_FIELDS"
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              result = json.load(stream)
+          print(result["package_content_id"], result["archive_sha256"])
+          PY
+          read -r downloaded_id downloaded_archive_sha < "$DOWNLOADED_FIELDS"
+          if [[ ! "$downloaded_id" =~ ^[0-9a-f]{64}$ ]] || [[ "$downloaded_id" != "$EXPECTED_CONTENT_ID" ]]; then
+            echo "Downloaded draft package content ID mismatch" >&2
+            exit 1
+          fi
+          if [[ ! "$downloaded_archive_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Downloaded draft archive SHA-256 is invalid" >&2
+            exit 1
+          fi
+
+          gh release edit "$VERSION" --draft=false --latest
+          trap - EXIT
