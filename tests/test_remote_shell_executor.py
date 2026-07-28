@@ -1860,6 +1860,93 @@ def _verify_base_archive(path: Path, **overrides):
     return verify_remote_result_bundle(path, **kwargs)
 
 
+def _swap_archive_when_reopened_by_path(
+    monkeypatch,
+    *,
+    target: Path,
+    replacement: Path,
+) -> dict[str, bool]:
+    original_zip_file = remote_module.zipfile.ZipFile
+    observed = {"path_reopen": False}
+
+    def swap_then_open(file, *args, **kwargs):
+        if (
+            not observed["path_reopen"]
+            and isinstance(file, (str, bytes, os.PathLike))
+            and Path(file).absolute() == target.absolute()
+        ):
+            os.replace(replacement, target)
+            observed["path_reopen"] = True
+        return original_zip_file(file, *args, **kwargs)
+
+    monkeypatch.setattr(remote_module.zipfile, "ZipFile", swap_then_open)
+    return observed
+
+
+def test_result_bundle_parses_the_same_file_handle_that_was_hashed(
+    tmp_path,
+    monkeypatch,
+):
+    original = tmp_path / "original.zip"
+    replacement = tmp_path / "replacement.zip"
+    original_members = {
+        **_BASE_MEMBERS_BY_PATH,
+        "training.log": b"original log\n",
+    }
+    replacement_members = {
+        **_BASE_MEMBERS_BY_PATH,
+        "training.log": b"replacement log\n",
+    }
+    _build_tamper_archive(original, members_by_path=original_members)
+    _build_tamper_archive(replacement, members_by_path=replacement_members)
+    expected_sha256 = _sha(original.read_bytes())
+    observed = _swap_archive_when_reopened_by_path(
+        monkeypatch,
+        target=original,
+        replacement=replacement,
+    )
+
+    verified = _verify_base_archive(original)
+
+    assert observed["path_reopen"] is False
+    assert verified.bundle_sha256 == expected_sha256
+    assert verified.member_bytes["training.log"] == b"original log\n"
+
+
+def test_result_schema_probe_parses_the_same_file_handle_that_was_hashed(
+    tmp_path,
+    monkeypatch,
+):
+    import zipfile
+
+    original = tmp_path / "original-schema.zip"
+    replacement = tmp_path / "replacement-schema.zip"
+    with zipfile.ZipFile(original, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "result-bundle-manifest.json",
+            b'{"schema":"nantai.remote-result-bundle.v1"}',
+        )
+    with zipfile.ZipFile(
+        replacement,
+        "w",
+        compression=zipfile.ZIP_STORED,
+    ) as archive:
+        archive.writestr(
+            "result-bundle-manifest.json",
+            b'{"schema":"nantai.remote-result-bundle.v2"}',
+        )
+    observed = _swap_archive_when_reopened_by_path(
+        monkeypatch,
+        target=original,
+        replacement=replacement,
+    )
+
+    schema = remote_module.inspect_remote_result_bundle_schema(original)
+
+    assert observed["path_reopen"] is False
+    assert schema == "nantai.remote-result-bundle.v1"
+
+
 def test_result_bundle_rejects_member_content_drift(tmp_path):
     """Member bytes drift from manifest sha256 must fail closed.
 

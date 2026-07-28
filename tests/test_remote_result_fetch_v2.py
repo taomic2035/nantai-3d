@@ -12,6 +12,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ from pipeline.remote_shell_executor import (
     canonical_remote_shell_job_ref_bytes,
     compute_container_lifecycle_sha256,
     compute_workspace_identity_sha256,
+    verify_production_remote_result_bundle,
 )
 
 _T0 = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
@@ -350,6 +352,61 @@ def _v2_scenario(
 # ---------------------------------------------------------------------------
 # Test 1: success — eight import contract files materialized
 # ---------------------------------------------------------------------------
+
+def test_v2_verifier_parses_the_same_file_handle_that_was_hashed(
+    tmp_path,
+    monkeypatch,
+):
+    original_root = tmp_path / "original"
+    replacement_root = tmp_path / "replacement"
+    original_root.mkdir()
+    replacement_root.mkdir()
+    original = _v2_scenario(original_root, monkeypatch)
+    replacement = _v2_scenario(replacement_root, monkeypatch)
+    assert original.job.attempt_id != replacement.job.attempt_id
+    original_zip_file = remote_module.zipfile.ZipFile
+    observed = {"path_reopen": False}
+
+    def swap_then_open(file, *args, **kwargs):
+        if (
+            not observed["path_reopen"]
+            and isinstance(file, (str, bytes, os.PathLike))
+            and Path(file).absolute() == original.archive.absolute()
+        ):
+            os.replace(replacement.archive, original.archive)
+            observed["path_reopen"] = True
+        return original_zip_file(file, *args, **kwargs)
+
+    monkeypatch.setattr(remote_module.zipfile, "ZipFile", swap_then_open)
+
+    verified = verify_production_remote_result_bundle(
+        original.archive,
+        expected_job_id=original.job.job_id,
+        expected_attempt_id=original.job.attempt_id,
+        expected_request_sha256=original.job.request_sha256,
+        expected_training_bundle_sha256=(
+            original.job.training_bundle_sha256
+        ),
+        expected_container_instance_id=(
+            original.measurement.environment.container_instance_id
+        ),
+        expected_container_identity=(
+            original.measurement.environment.observed_container_identity
+        ),
+        expected_remote_target_sha256=(
+            original.measurement.remote_target_sha256
+        ),
+        expected_durable_job_ref_sha256=(
+            original.measurement.durable_job_ref_sha256
+        ),
+        expected_workspace_identity_sha256=(
+            original.measurement.workspace_identity_sha256
+        ),
+    )
+
+    assert observed["path_reopen"] is False
+    assert verified.bundle_sha256 == original.archive_sha256
+
 
 _EIGHT_CONTRACT_FILES = (
     "result-bundle-manifest.json",

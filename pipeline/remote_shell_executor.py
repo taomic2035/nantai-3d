@@ -21,11 +21,12 @@ import subprocess
 import tempfile
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import BinaryIO, Literal
 
 from pydantic import (
     BaseModel,
@@ -1897,14 +1898,23 @@ def _stat_signature(
     )
 
 
-def _stable_file_sha(
+@dataclass(frozen=True)
+class _BoundHashedFile:
+    stream: BinaryIO
+    byte_length: int
+    sha256: str
+
+
+@contextmanager
+def _open_bound_hashed_file(
     path: Path,
     *,
     label: str,
     max_bytes: int,
     allow_empty: bool = False,
-) -> tuple[int, str]:
+) -> Iterator[_BoundHashedFile]:
     descriptor = -1
+    stream: BinaryIO | None = None
     try:
         redirected = first_linklike_path(Path(path.anchor), path)
         if redirected is not None:
@@ -1954,6 +1964,22 @@ def _stable_file_sha(
             digest.update(chunk)
         descriptor_after = os.fstat(descriptor)
         after = path.lstat()
+        if (
+            _stat_signature(before) != _stat_signature(after)
+            or _stat_signature(descriptor_before)
+            != _stat_signature(descriptor_after)
+            or _open_file_identity_signature(before)
+            != _open_file_identity_signature(descriptor_before)
+            or _open_file_identity_signature(descriptor_after)
+            != _open_file_identity_signature(after)
+            or measured != before.st_size
+        ):
+            raise RemoteResultBundleError(
+                f"{label} changed while being read"
+            )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = -1
     except RemoteResultBundleError:
         raise
     except (OSError, ValueError) as exc:
@@ -1964,18 +1990,81 @@ def _stable_file_sha(
                 os.close(descriptor)
             except OSError:
                 pass
-    if (
-        _stat_signature(before) != _stat_signature(after)
-        or _stat_signature(descriptor_before)
-        != _stat_signature(descriptor_after)
-        or _open_file_identity_signature(before)
-        != _open_file_identity_signature(descriptor_before)
-        or _open_file_identity_signature(descriptor_after)
-        != _open_file_identity_signature(after)
-        or measured != before.st_size
-    ):
-        raise RemoteResultBundleError(f"{label} changed while being read")
-    return measured, digest.hexdigest()
+
+    body_failed = False
+    close_error: RemoteResultBundleError | None = None
+    try:
+        yield _BoundHashedFile(
+            stream=stream,
+            byte_length=measured,
+            sha256=digest.hexdigest(),
+        )
+    except BaseException:
+        body_failed = True
+        raise
+    finally:
+        try:
+            redirected = first_linklike_path(Path(path.anchor), path)
+            descriptor_final = os.fstat(stream.fileno())
+            final = path.lstat()
+            if (
+                redirected is not None
+                or _stat_signature(before) != _stat_signature(final)
+                or _stat_signature(descriptor_before)
+                != _stat_signature(descriptor_final)
+                or _open_file_identity_signature(descriptor_final)
+                != _open_file_identity_signature(final)
+            ):
+                close_error = RemoteResultBundleError(
+                    f"{label} changed while being read"
+                )
+        except (OSError, ValueError) as exc:
+            close_error = RemoteResultBundleError(
+                f"{label} changed while being read"
+            )
+            close_error.__cause__ = exc
+        try:
+            stream.close()
+        except OSError as exc:
+            if close_error is None:
+                close_error = RemoteResultBundleError(
+                    f"{label} cannot be closed"
+                )
+                close_error.__cause__ = exc
+        if close_error is not None and not body_failed:
+            raise close_error
+
+
+def _stable_file_sha(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    allow_empty: bool = False,
+) -> tuple[int, str]:
+    with _open_bound_hashed_file(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+        allow_empty=allow_empty,
+    ) as bound:
+        return bound.byte_length, bound.sha256
+
+
+@contextmanager
+def _open_bound_zip_archive(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+) -> Iterator[tuple[zipfile.ZipFile, int, str]]:
+    with _open_bound_hashed_file(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+    ) as bound:
+        with zipfile.ZipFile(bound.stream, "r") as archive:
+            yield archive, bound.byte_length, bound.sha256
 
 
 def _zip_info(name: str) -> zipfile.ZipInfo:
@@ -2684,14 +2773,13 @@ def verify_production_remote_result_bundle(
 ) -> VerifiedRemoteResultBundle:
     """Verify a result-bundle v2 archive without trusting its manifest."""
     archive_path = Path(path).expanduser().absolute()
-    archive_size, archive_sha = _stable_file_sha(
-        archive_path,
-        label="production result bundle",
-        max_bytes=max_archive_bytes,
-    )
     large_member_paths: dict[str, Path] = {}
     try:
-        with zipfile.ZipFile(archive_path, "r") as archive:
+        with _open_bound_zip_archive(
+            archive_path,
+            label="production result bundle",
+            max_bytes=max_archive_bytes,
+        ) as (archive, archive_size, archive_sha):
             infos = archive.infolist()
             names = tuple(info.filename for info in infos)
             if len(names) != len(set(names)):
@@ -2867,13 +2955,12 @@ def inspect_remote_result_bundle_schema(
 ]:
     """Read only the bounded stored manifest to select the strict verifier."""
     archive_path = Path(path).expanduser().absolute()
-    _stable_file_sha(
-        archive_path,
-        label="remote result bundle schema probe",
-        max_bytes=max_archive_bytes,
-    )
     try:
-        with zipfile.ZipFile(archive_path, "r") as archive:
+        with _open_bound_zip_archive(
+            archive_path,
+            label="remote result bundle schema probe",
+            max_bytes=max_archive_bytes,
+        ) as (archive, _, _):
             info = archive.getinfo("result-bundle-manifest.json")
             mode = info.external_attr >> 16
             if (
@@ -2923,14 +3010,13 @@ def verify_remote_result_bundle(
     staging_dir: Path | None = None,
 ) -> VerifiedRemoteResultBundle:
     archive_path = Path(path).expanduser().absolute()
-    archive_size, archive_sha = _stable_file_sha(
-        archive_path,
-        label="remote result bundle",
-        max_bytes=max_archive_bytes,
-    )
     large_member_paths: dict[str, Path] = {}
     try:
-        with zipfile.ZipFile(archive_path, "r") as archive:
+        with _open_bound_zip_archive(
+            archive_path,
+            label="remote result bundle",
+            max_bytes=max_archive_bytes,
+        ) as (archive, archive_size, archive_sha):
             infos = archive.infolist()
             names = tuple(info.filename for info in infos)
             if len(names) != len(set(names)):
