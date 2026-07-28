@@ -636,11 +636,41 @@ def extract_production_release_archive(
         )
 
     retained: list[str] = []
+
+    def signature(
+        value: os.stat_result,
+    ) -> tuple[int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+        )
+
     try:
         with source.open("rb") as source_stream:
             descriptor_before = os.fstat(source_stream.fileno())
             with zipfile.ZipFile(source_stream) as archive:
                 reader = _ArchiveReader(archive, limits=limits)
+                source_verification = _verify_reader(
+                    reader,
+                    limits=limits,
+                )
+                descriptor_after_preflight = os.fstat(
+                    source_stream.fileno()
+                )
+                source_after_preflight = source.lstat()
+                if (
+                    signature(source_stat) != signature(descriptor_before)
+                    or signature(source_stat)
+                    != signature(descriptor_after_preflight)
+                    or signature(source_stat)
+                    != signature(source_after_preflight)
+                ):
+                    raise ProductionReleaseVerificationError(
+                        "Production archive changed during preflight"
+                    )
                 members = tuple(
                     (
                         safe_posix_member_path(relative),
@@ -730,37 +760,54 @@ def extract_production_release_archive(
                             for opened_directory in reversed(directory_stack):
                                 opened_directory.close()
                         root.fsync()
-                    parent.fsync()
+                        parent.fsync()
+                        parent.verify_lexical_identity()
+                        parent.verify_child_identity(target.name, root)
+                        root.verify_lexical_identity()
+                        tree_verification = verify_production_release_tree(
+                            target,
+                            limits=limits,
+                        )
+                        parent.verify_lexical_identity()
+                        parent.verify_child_identity(target.name, root)
+                        root.verify_lexical_identity()
+                        if tree_verification != source_verification:
+                            state = tuple(retained)
+                            raise ProductionReleaseVerificationError(
+                                "Production source and extracted tree "
+                                "verification disagree; "
+                                f"published={state}; retained={state}",
+                                published=state,
+                                retained=state,
+                            )
             descriptor_after = os.fstat(source_stream.fileno())
         source_after = source.lstat()
-        def signature(
-            value: os.stat_result,
-        ) -> tuple[int, int, int, int, int]:
-            return (
-                value.st_dev,
-                value.st_ino,
-                value.st_mode,
-                value.st_size,
-                value.st_mtime_ns,
-            )
         if (
             signature(source_stat) != signature(descriptor_before)
             or signature(source_stat) != signature(descriptor_after)
             or signature(source_stat) != signature(source_after)
         ):
             raise ProductionReleaseVerificationError(
-                "Production archive changed during extraction",
+                "Production archive changed during extraction; "
+                f"published={tuple(retained)}; retained={tuple(retained)}",
                 published=tuple(retained),
                 retained=tuple(retained),
             )
         return target
-    except ProductionReleaseVerificationError:
-        raise
+    except ProductionReleaseVerificationError as exc:
+        if not retained or (exc.published and exc.retained):
+            raise
+        state = tuple(retained)
+        raise ProductionReleaseVerificationError(
+            f"{exc}; published={state}; retained={state}",
+            published=state,
+            retained=state,
+        ) from exc
     except ProductionReleaseMutationError as exc:
         published = tuple(retained) + exc.published
         residue = tuple(retained) + exc.retained
         raise ProductionReleaseVerificationError(
-            "Production archive extraction failed; "
+            f"Production archive extraction failed: {exc}; "
             f"published={published}; retained={residue}",
             published=published,
             retained=residue,

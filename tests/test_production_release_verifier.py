@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -723,6 +724,142 @@ def test_archive_extraction_rejects_path_budget_before_mutation(
             limits=ArchiveLimits(maximum_path_components=2),
         )
     assert not destination.exists()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
+def test_archive_extraction_rejects_invalid_contract_before_mutation(
+    tmp_path: Path,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    (root / "web/viewer/index.html").write_bytes(b"tampered")
+    archive = tmp_path / "invalid-contract.zip"
+    write_modeled_production_archive(root, archive)
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="changed protected artifact",
+    ):
+        extract_production_release_archive(archive, destination)
+
+    assert not destination.exists()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
+def test_archive_extraction_detects_target_name_swap_at_final_seal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    destination = tmp_path / "extracted"
+    moved = tmp_path / "held-extracted"
+    original = release_fs.BoundDirectory.verify_child_identity
+
+    def swap_before_identity(self, name, child):
+        if name == destination.name and destination.exists():
+            destination.rename(moved)
+            destination.mkdir()
+        return original(self, name, child)
+
+    monkeypatch.setattr(
+        release_fs.BoundDirectory,
+        "verify_child_identity",
+        swap_before_identity,
+    )
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="identity.*published=.*retained=",
+    ) as raised:
+        extract_production_release_archive(archive, destination)
+
+    assert raised.value.published
+    assert raised.value.retained
+    assert moved.is_dir()
+    assert destination.is_dir()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
+def test_archive_extraction_rehashes_tree_after_member_rewrite(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    destination = tmp_path / "extracted"
+    original = verifier_module.verify_production_release_tree
+
+    def rewrite_then_verify(target, *, limits):
+        rewritten = (
+            Path(target) / "web/viewer/index.html"
+        )
+        original_bytes = rewritten.read_bytes()
+        rewritten.write_bytes(b"X" + original_bytes[1:])
+        return original(target, limits=limits)
+
+    monkeypatch.setattr(
+        verifier_module,
+        "verify_production_release_tree",
+        rewrite_then_verify,
+    )
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="changed protected artifact.*published=.*retained=",
+    ) as raised:
+        extract_production_release_archive(archive, destination)
+
+    assert raised.value.published
+    assert raised.value.retained
+    assert destination.exists()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
+def test_archive_extraction_rejects_source_tree_verification_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    destination = tmp_path / "extracted"
+    original = verifier_module.verify_production_release_tree
+
+    def mismatched_verify(target, *, limits):
+        verified = original(target, limits=limits)
+        return replace(verified, package_content_id="0" * 64)
+
+    monkeypatch.setattr(
+        verifier_module,
+        "verify_production_release_tree",
+        mismatched_verify,
+    )
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="source.*tree.*published=.*retained=",
+    ) as raised:
+        extract_production_release_archive(archive, destination)
+
+    assert raised.value.published
+    assert raised.value.retained
+    assert destination.exists()
 
 
 @pytest.mark.production_mutation
