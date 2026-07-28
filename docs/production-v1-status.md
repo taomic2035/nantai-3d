@@ -23,7 +23,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | production runtime evidence | 六 probe/六 executable 已接入 fresh-container 主入口；待真实 GPU fresh accepted 证据 |
 | production result closure | worker/caller 已接通 v2 archive、render decision 与 closure；待真实 GPU 产物 |
 | Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；尚未对真实重建运行，不能签署 production |
-| Production release tooling | runtime closure、脱敏公共证据、确定性 ZIP、独立 verifier、Studio/Viewer fail-closed 消费已完成 |
+| Production release tooling | runtime closure、脱敏公共证据、确定性 ZIP、独立 verifier、portable path identity、隐私机器审计与 Studio/Viewer fail-closed 消费已完成 |
 
 这里的 release tooling ready 只表示代码与 modeled contract 已就绪。正式素材、真实 GPU
 3DGS、实测控制点和真实浏览器 QA 仍是外部门禁；它们未在同一 scene identity 通过前，
@@ -45,28 +45,17 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 
 ## 当前最高价值 TODO
 
-### P0 — GLM：云 GPU 信任链
+### P0 — Repo-local Production 安全闭包
 
-按
-[`HANDOFF-GLM-013`](../handoff/HANDOFF-GLM-013-production-closeout-queue.md)
-连续执行，不等待新的口头分配：
+远程 runtime/caller 的 A1–K1、P0-CI 与 L1–N1 均已关闭：真实 fetch 使用 bounded
+streaming，archive/receipt/tree/builder 共享 portable Unicode path identity，最终
+ZIP 可执行 no-secret-echo 的分块隐私机器审计。GLM 当前只执行
+[`HANDOFF-GLM-014`](../handoff/HANDOFF-GLM-014-production-security-review.md)
+的独立安全复核与 exact-HEAD CI 证据检查；不得重新实现已关闭工单。
 
-1. `P0-CI`：已由 Codex `70a965e` 关闭，专项 `12 passed`；
-2. `F1` 代码门：Codex `0d6c9e7` 已接通同一 lifecycle container 的固定六探针
-   entrypoint；非 accepted、身份/TOCTOU 漂移或 publication collision 均无法进入训练。
-   仍缺获批真实 GPU 上的 fresh accepted 机器证据；
-3. `G1` 已由 Codex `1727f8f` + `92b76b5` 关闭：clearance evidence 不提前占用
-   training result boundary；worker 以 no-replace 方式物化 runtime 三件套与
-   container ID，产出 result-bundle v2；caller 复验后派生 render decision 与
-   production closure；
-4. `H1 → I1 → J1 → K1` 已关闭；Codex `0f6dc99` 补齐真实 fetch caller 的
-   bounded streaming、file-backed provenance 与发布前漂移复验；
-5. **当前 GLM `L1 → M1 → N1`**：大型 render/log fetch 边界、跨平台 archive
-   路径硬化和不回显秘密的 Production 隐私机器审计。
-
-A1–K1 与 P0-CI 的 repo-local 代码门已关闭，不再重做。GLM 立即连续执行
-`L1 → M1 → N1`，每项独立提交并 push；真实 GPU 运行前状态仍是
-modeled-unverified，不能签署 Production V1。
+这些仍只证明 repo-local 生产链合同。没有真实 GPU fresh accepted runtime、正式素材、
+实测控制点和真实 Viewer/human QA 时，状态保持 modeled-unverified，不能签署
+Production V1。
 
 ### P0 — 外部输入：正式素材与测量
 

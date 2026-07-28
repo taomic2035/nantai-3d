@@ -1089,13 +1089,17 @@ contains only the three acceptance screenshots already allowlisted.
 
 ```powershell
 python scripts/verify_production_release.py .nantai-studio/releases/v1.0.0/build-a.zip --json
-python -c "import zipfile; z=zipfile.ZipFile(r'.nantai-studio/releases/v1.0.0/build-a.zip'); print('\n'.join(z.namelist()))"
+$env:ARCHIVE = (Resolve-Path .nantai-studio/releases/v1.0.0/build-a.zip).Path
+$env:PRIVACY_POLICY = (Resolve-Path .nantai-studio/private/privacy-policy.json).Path
+$env:PRIVACY_REPORT = (Join-Path $PWD ".nantai-studio/verification/privacy-v1.0.0.json")
+python make.py audit-production-privacy
 ```
 
-Search extracted bytes for private absolute path prefixes, operator identity,
-SSH target/key names and control-point coordinate field names. Any hit blocks
-release and requires fixing the projector/allowlist; never delete evidence from
-the private acceptance to make the scan pass.
+The canonical privacy report must have `valid=true`, zero findings and the same
+package content ID as the independent verifier. Any private needle, absolute
+filesystem path, credential/private-key marker, unverified file, symlink,
+non-regular file or read drift blocks release. Never delete evidence from the
+private acceptance to make the public scan pass; fix the projector/allowlist.
 
 - [ ] **Step 5: Promote version/docs only after real QA**
 

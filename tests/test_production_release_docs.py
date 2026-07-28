@@ -33,8 +33,11 @@ def test_manual_owns_the_exact_production_build_verify_and_run_path() -> None:
         "$env:ACCEPTANCE_ROOT",
         "$env:VERSION",
         "$env:ARCHIVE",
+        "$env:PRIVACY_POLICY",
+        "$env:PRIVACY_REPORT",
         "python make.py build-production",
         "python make.py verify-production",
+        "python make.py audit-production-privacy",
         "python make.py serve",
         "PRODUCTION-RELEASE.json",
         "evidence/public-evidence.json",
@@ -93,13 +96,20 @@ def test_ci_has_three_os_production_contract_and_content_id_compare_jobs() -> No
     assert "modeled-contract-not-real-release" in matrix_job
     assert "tests/probe_production_release_content_id.py" in matrix_job
     assert "--noconftest" in matrix_job
-    for dependency in ("numpy==", "pydantic==", "plyfile==", "loguru=="):
+    for dependency in (
+        "numpy==",
+        "pydantic==",
+        "plyfile==",
+        "loguru==",
+        "pywin32==",
+    ):
         assert dependency in matrix_job
     for test_path in (
         "tests/test_release_archive.py",
         "tests/test_production_release_contract.py",
         "tests/test_production_release_verifier.py",
         "tests/test_production_release_cli.py",
+        "tests/test_production_release_privacy.py",
     ):
         assert test_path in matrix_job
     assert "actions/upload-artifact@v4" in matrix_job

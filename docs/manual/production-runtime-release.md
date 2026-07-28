@@ -41,6 +41,26 @@ python make.py verify-production
 SHA-256/字节数、`SHA256SUMS.txt`、公共证据、scene manifest 与
 `PRODUCTION-RELEASE.json` 的内容绑定。任一不一致都拒绝运行。
 
+## 隐私机器审计
+
+独立验证通过后，必须使用保存在私有工作区、由操作者维护的 canonical needle policy
+扫描最终 ZIP。policy 的 needle 是至少 8 bytes 的 canonical base64；policy 和报告都
+必须位于公开包之外：
+
+```powershell
+$env:ARCHIVE = (Resolve-Path .\nantai-3d-v1.0.0.zip).Path
+$env:PRIVACY_POLICY = (Resolve-Path .nantai-studio\private\privacy-policy.json).Path
+$env:PRIVACY_REPORT = (Join-Path $PWD ".nantai-studio\verification\privacy-v1.0.0.json")
+python make.py audit-production-privacy
+```
+
+审计器会先复验 Production 包、以不超过 1 MiB 的分块扫描所有公开文件，再复验一次
+包身份；跨块 private needle、PEM/private-key marker、明确 credential assignment、
+Windows/POSIX 私有绝对路径、symlink、非 regular file、额外文件或读取漂移都会阻止
+发布。报告只含类别、公开相对路径、数量和 package content ID，不回显秘密；报告本身
+也不提升 scene trust。`valid=true` 且报告中的 package content ID 与独立 verifier
+一致，才可继续。
+
 ## 解压与运行
 
 复验成功后解压到空目录，在包根安装并启动：
@@ -89,9 +109,10 @@ console、帧时间、内存、空洞、漂浮物、遮挡与视角相关颜色�
 2. `production_release_allowed=true` 且权利允许公开分发；
 3. `build-production` 在干净输出路径成功；
 4. 构建机与下载后的 ZIP 都通过 `verify-production`；
-5. 解压包在真实浏览器完成冷启动和交互 QA；
-6. Release 只上传最终 ZIP、checksum 与精简说明；
-7. 最后才创建正式 tag，并再次确认没有私有或中间产物。
+5. 最终 ZIP 通过 `audit-production-privacy`，报告 package content ID 一致；
+6. 解压包在真实浏览器完成冷启动和交互 QA；
+7. Release 只上传最终 ZIP、checksum 与精简说明；
+8. 最后才创建正式 tag，并再次确认没有私有或中间产物。
 
 更早的采集、训练、对齐和 Viewer 证据生成步骤见
 [真实重建端到端手册](reconstruction-setup.md)，当前缺口见

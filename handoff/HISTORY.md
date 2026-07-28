@@ -91,3 +91,15 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
   file-backed PLY provenance 和发布前漂移复验。
 - 旧 H1–K1 详细工单由 Git 历史保存；活动队列切换为 GLM-013 的大型 render/log、
   跨平台 archive path 与 Production 隐私机器审计。
+
+## 2026-07-28：L1–N1 与 portable release identity 关闭
+
+- L1 `e07658b` 补齐大型 render/log 的真实 fetch 边界；Codex fresh review 的
+  18 个 streaming/fetch 专项通过。
+- M1 `945f3f7` 完成基础 archive path 硬化；Codex `4b3d3de` 补上大小写与 Unicode
+  normalization 组合碰撞。
+- N1 `86ab506` 增加 verified-first、分块、no-secret-echo、durable no-replace 的
+  Production 隐私机器审计；`8efd304` 将其加入三平台 focused CI。
+- `e4a99cf` 把 portable path identity 继续贯穿 receipt、protected roots、builder
+  destinations 与 extracted tree verifier。GLM-013 结束，活动入口切换为 GLM-014
+  独立安全复核。
