@@ -209,6 +209,8 @@ _MAX_LIFECYCLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024
 _DEFAULT_MAX_MEMBER_BYTES = 12 * 1024 * 1024 * 1024
 _DEFAULT_MAX_LOG_BYTES = 64 * 1024 * 1024
+_ONE_MIB = 1024 * 1024
+_STREAMING_MEMBER_THRESHOLD = _ONE_MIB
 _BOUND_LOG_MEMBERS = frozenset(
     {"training.log", "worker.stdout.log", "worker.stderr.log"}
 )
@@ -765,6 +767,15 @@ class VerifiedRemoteResultBundle:
         RemoteResultBundleManifest | ProductionResultBundleManifestV2
     )
     member_bytes: dict[str, bytes]
+    large_member_paths: dict[str, Path]
+
+    def member_bytes_for(self, name: str) -> bytes:
+        """Return member bytes, reading from staging for large members."""
+        if name in self.member_bytes:
+            return self.member_bytes[name]
+        if name in self.large_member_paths:
+            return self.large_member_paths[name].read_bytes()
+        raise KeyError(name)
 
 
 @dataclass(frozen=True)
@@ -2234,6 +2245,83 @@ def build_production_remote_result_bundle(
     )
 
 
+def _cleanup_staging_files(
+    large_member_paths: dict[str, Path],
+) -> None:
+    """Remove all staging files created during streaming verification."""
+    for staging_path in large_member_paths.values():
+        try:
+            staging_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _stream_zip_member_to_staging(
+    archive: zipfile.ZipFile,
+    member_path: str,
+    expected_sha256: str,
+    expected_byte_length: int,
+    staging_path: Path,
+    *,
+    max_member_bytes: int,
+    label: str,
+) -> None:
+    """Stream a ZIP member to a staging file in bounded chunks (<= 1 MiB).
+
+    Verifies SHA-256 and byte length during streaming.  The staging file is
+    created atomically (O_CREAT|O_EXCL) and fsync'd.  On any failure the
+    staging file is unlinked and ``RemoteResultBundleError`` is raised.
+    """
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    total = 0
+    descriptor = os.open(
+        staging_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as out_stream:
+            descriptor = -1
+            with archive.open(member_path) as source:
+                while True:
+                    chunk = source.read(_ONE_MIB)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_member_bytes:
+                        raise RemoteResultBundleError(
+                            f"{label} member exceeds size limit: "
+                            f"{member_path}"
+                        )
+                    digest.update(chunk)
+                    out_stream.write(chunk)
+            if total != expected_byte_length:
+                raise RemoteResultBundleError(
+                    f"{label} member sha256/size mismatch: {member_path}"
+                )
+            if digest.hexdigest() != expected_sha256:
+                raise RemoteResultBundleError(
+                    f"{label} member sha256/size mismatch: {member_path}"
+                )
+            out_stream.flush()
+            os.fsync(out_stream.fileno())
+    except RemoteResultBundleError:
+        staging_path.unlink(missing_ok=True)
+        raise
+    except (OSError, UnicodeError, zipfile.BadZipFile) as exc:
+        staging_path.unlink(missing_ok=True)
+        raise RemoteResultBundleError(
+            f"{label} member streaming failed: {member_path}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def verify_production_remote_result_bundle(
     path: Path,
     *,
@@ -2249,6 +2337,7 @@ def verify_production_remote_result_bundle(
     max_archive_bytes: int = _DEFAULT_MAX_ARCHIVE_BYTES,
     max_member_bytes: int = _DEFAULT_MAX_MEMBER_BYTES,
     max_log_bytes: int = _DEFAULT_MAX_LOG_BYTES,
+    staging_dir: Path | None = None,
 ) -> VerifiedRemoteResultBundle:
     """Verify a result-bundle v2 archive without trusting its manifest."""
     archive_path = Path(path).expanduser().absolute()
@@ -2257,6 +2346,7 @@ def verify_production_remote_result_bundle(
         label="production result bundle",
         max_bytes=max_archive_bytes,
     )
+    large_member_paths: dict[str, Path] = {}
     try:
         with zipfile.ZipFile(archive_path, "r") as archive:
             infos = archive.infolist()
@@ -2338,63 +2428,86 @@ def verify_production_remote_result_bundle(
                 )
             member_bytes: dict[str, bytes] = {}
             for member in manifest.members:
-                payload = archive.read(member.path)
                 if (
-                    len(payload) != member.byte_length
-                    or hashlib.sha256(payload).hexdigest()
-                    != member.sha256
+                    staging_dir is not None
+                    and member.byte_length > _STREAMING_MEMBER_THRESHOLD
                 ):
-                    raise RemoteResultBundleError(
-                        "production member sha256/size mismatch: "
-                        f"{member.path}"
+                    staging_path = staging_dir / member.path
+                    _stream_zip_member_to_staging(
+                        archive,
+                        member.path,
+                        member.sha256,
+                        member.byte_length,
+                        staging_path,
+                        max_member_bytes=max_member_bytes,
+                        label="production",
                     )
-                member_bytes[member.path] = payload
+                    large_member_paths[member.path] = staging_path
+                else:
+                    payload = archive.read(member.path)
+                    if (
+                        len(payload) != member.byte_length
+                        or hashlib.sha256(payload).hexdigest()
+                        != member.sha256
+                    ):
+                        raise RemoteResultBundleError(
+                            "production member sha256/size mismatch: "
+                            f"{member.path}"
+                        )
+                    member_bytes[member.path] = payload
     except RemoteResultBundleError:
+        _cleanup_staging_files(large_member_paths)
         raise
     except (OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+        _cleanup_staging_files(large_member_paths)
         raise RemoteResultBundleError(
             "production result bundle validation failed"
         ) from exc
-    if (
-        member_bytes["container-id.txt"]
-        != (expected_container_instance_id + "\n").encode("ascii")
-        or member_bytes["container-identity.txt"]
-        != (expected_container_identity + "\n").encode("ascii")
-    ):
-        raise RemoteResultBundleError(
-            "production result container identity bytes mismatch"
+    try:
+        if (
+            member_bytes["container-id.txt"]
+            != (expected_container_instance_id + "\n").encode("ascii")
+            or member_bytes["container-identity.txt"]
+            != (expected_container_identity + "\n").encode("ascii")
+        ):
+            raise RemoteResultBundleError(
+                "production result container identity bytes mismatch"
+            )
+        _verify_production_runtime_members(
+            member_bytes,
+            expected_container_instance_id=expected_container_instance_id,
+            expected_container_identity=expected_container_identity,
+            expected_remote_target_sha256=expected_remote_target_sha256,
+            expected_durable_job_ref_sha256=(
+                expected_durable_job_ref_sha256
+            ),
+            expected_workspace_identity_sha256=(
+                expected_workspace_identity_sha256
+            ),
         )
-    _verify_production_runtime_members(
-        member_bytes,
-        expected_container_instance_id=expected_container_instance_id,
-        expected_container_identity=expected_container_identity,
-        expected_remote_target_sha256=expected_remote_target_sha256,
-        expected_durable_job_ref_sha256=(
-            expected_durable_job_ref_sha256
-        ),
-        expected_workspace_identity_sha256=(
-            expected_workspace_identity_sha256
-        ),
-    )
-    _validate_evaluation_member_contract(
-        {member.path: member for member in manifest.members},
-        member_bytes,
-        container_identity=expected_container_identity,
-        additional_fixed_members=frozenset(
-            {
-                "container-id.txt",
-                "production-runtime/decision.json",
-                "production-runtime/measurement.json",
-                "production-runtime/policy.json",
-            }
-        ),
-    )
+        _validate_evaluation_member_contract(
+            {member.path: member for member in manifest.members},
+            member_bytes,
+            container_identity=expected_container_identity,
+            additional_fixed_members=frozenset(
+                {
+                    "container-id.txt",
+                    "production-runtime/decision.json",
+                    "production-runtime/measurement.json",
+                    "production-runtime/policy.json",
+                }
+            ),
+        )
+    except RemoteResultBundleError:
+        _cleanup_staging_files(large_member_paths)
+        raise
     return VerifiedRemoteResultBundle(
         path=archive_path,
         bundle_sha256=archive_sha,
         byte_length=archive_size,
         manifest=manifest,
         member_bytes=member_bytes,
+        large_member_paths=large_member_paths,
     )
 
 
@@ -2461,6 +2574,7 @@ def verify_remote_result_bundle(
     max_archive_bytes: int = _DEFAULT_MAX_ARCHIVE_BYTES,
     max_member_bytes: int = _DEFAULT_MAX_MEMBER_BYTES,
     max_log_bytes: int = _DEFAULT_MAX_LOG_BYTES,
+    staging_dir: Path | None = None,
 ) -> VerifiedRemoteResultBundle:
     archive_path = Path(path).expanduser().absolute()
     archive_size, archive_sha = _stable_file_sha(
@@ -2468,6 +2582,7 @@ def verify_remote_result_bundle(
         label="remote result bundle",
         max_bytes=max_archive_bytes,
     )
+    large_member_paths: dict[str, Path] = {}
     try:
         with zipfile.ZipFile(archive_path, "r") as archive:
             infos = archive.infolist()
@@ -2579,39 +2694,67 @@ def verify_remote_result_bundle(
                 )
             member_bytes: dict[str, bytes] = {}
             for member in manifest.members:
-                payload = archive.read(member.path)
                 if (
-                    len(payload) != member.byte_length
-                    or hashlib.sha256(payload).hexdigest() != member.sha256
+                    staging_dir is not None
+                    and member.byte_length > _STREAMING_MEMBER_THRESHOLD
                 ):
-                    raise RemoteResultBundleError(
-                        f"result member sha256/size mismatch: {member.path}"
+                    staging_path = staging_dir / member.path
+                    _stream_zip_member_to_staging(
+                        archive,
+                        member.path,
+                        member.sha256,
+                        member.byte_length,
+                        staging_path,
+                        max_member_bytes=max_member_bytes,
+                        label="result",
                     )
-                member_bytes[member.path] = payload
+                    large_member_paths[member.path] = staging_path
+                else:
+                    payload = archive.read(member.path)
+                    if (
+                        len(payload) != member.byte_length
+                        or hashlib.sha256(payload).hexdigest()
+                        != member.sha256
+                    ):
+                        raise RemoteResultBundleError(
+                            f"result member sha256/size mismatch: "
+                            f"{member.path}"
+                        )
+                    member_bytes[member.path] = payload
     except RemoteResultBundleError:
+        _cleanup_staging_files(large_member_paths)
         raise
     except (OSError, UnicodeError, ValueError, zipfile.BadZipFile) as exc:
+        _cleanup_staging_files(large_member_paths)
         raise RemoteResultBundleError(
             "remote result bundle validation failed"
         ) from exc
-    expected_container_bytes = (
-        expected_container_identity + "\n"
-    ).encode("ascii")
-    if member_bytes["container-identity.txt"] != expected_container_bytes:
-        raise RemoteResultBundleError(
-            "result container identity bytes mismatch"
+    try:
+        expected_container_bytes = (
+            expected_container_identity + "\n"
+        ).encode("ascii")
+        if (
+            member_bytes["container-identity.txt"]
+            != expected_container_bytes
+        ):
+            raise RemoteResultBundleError(
+                "result container identity bytes mismatch"
+            )
+        _validate_evaluation_member_contract(
+            {member.path: member for member in manifest.members},
+            member_bytes,
+            container_identity=expected_container_identity,
         )
-    _validate_evaluation_member_contract(
-        {member.path: member for member in manifest.members},
-        member_bytes,
-        container_identity=expected_container_identity,
-    )
+    except RemoteResultBundleError:
+        _cleanup_staging_files(large_member_paths)
+        raise
     return VerifiedRemoteResultBundle(
         path=archive_path,
         bundle_sha256=archive_sha,
         byte_length=archive_size,
         manifest=manifest,
         member_bytes=member_bytes,
+        large_member_paths=large_member_paths,
     )
 
 
