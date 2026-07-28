@@ -39,6 +39,7 @@ from cloud.validate_dataparser_transform import (
     DataparserTransformError,
     validate_dataparser_transform,
 )
+from pipeline.durable_io import first_linklike_path
 from pipeline.production_runtime_evidence import (
     ProductionRuntimeDecision,
     ProductionRuntimeEvidenceError,
@@ -1195,7 +1196,16 @@ def load_remote_shell_executor_config(
         raise RemoteShellExecutionError(
             "remote executor config path must be absolute"
         )
+    descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(config_path.anchor),
+            config_path,
+        )
+        if redirected is not None:
+            raise RemoteShellExecutionError(
+                "remote executor config path is redirected or link-like"
+            )
         before = config_path.lstat()
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
             before.st_mode
@@ -1207,16 +1217,57 @@ def load_remote_shell_executor_config(
             raise RemoteShellExecutionError(
                 "remote executor config size is invalid"
             )
-        payload = config_path.read_bytes()
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(config_path, flags)
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or _open_file_identity_signature(descriptor_before)
+            != _open_file_identity_signature(before)
+        ):
+            raise RemoteShellExecutionError(
+                "remote executor config changed while read"
+            )
+        chunks: list[bytes] = []
+        measured = 0
+        while measured <= _ONE_MIB:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _ONE_MIB + 1 - measured),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            measured += len(chunk)
+        payload = b"".join(chunks)
+        descriptor_after = os.fstat(descriptor)
         after = config_path.lstat()
     except RemoteShellExecutionError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise RemoteShellExecutionError(
             "remote executor config cannot be read"
         ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     if (
-        _stat_signature(before) != _stat_signature(after)
+        not payload
+        or len(payload) > _ONE_MIB
+        or _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _open_file_identity_signature(before)
+        != _open_file_identity_signature(descriptor_before)
+        or _open_file_identity_signature(descriptor_after)
+        != _open_file_identity_signature(after)
         or len(payload) != before.st_size
     ):
         raise RemoteShellExecutionError(

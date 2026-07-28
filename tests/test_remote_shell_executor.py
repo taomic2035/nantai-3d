@@ -2450,6 +2450,111 @@ class TestRemoteShellPreflight:
         ):
             remote_module.load_remote_shell_executor_config(path)
 
+    def test_remote_config_loader_rejects_redirected_ancestor(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        real_parent = tmp_path / "real-private"
+        real_parent.mkdir()
+        path = real_parent / "remote-config.json"
+        path.write_bytes(remote_module._canonical_model_bytes(config))
+        redirected_parent = tmp_path / "redirected-private"
+        if os.name == "nt":
+            created = subprocess.run(
+                [
+                    "cmd",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(redirected_parent),
+                    str(real_parent),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if created.returncode != 0:
+                pytest.skip(
+                    f"junction creation unavailable: {created.stderr}"
+                )
+        else:
+            redirected_parent.symlink_to(
+                real_parent,
+                target_is_directory=True,
+            )
+        try:
+            with pytest.raises(
+                RemoteShellExecutionError,
+                match="redirected|link-like|real path",
+            ):
+                remote_module.load_remote_shell_executor_config(
+                    redirected_parent / path.name
+                )
+        finally:
+            if os.name == "nt":
+                os.rmdir(redirected_parent)
+            else:
+                redirected_parent.unlink()
+
+    def test_remote_config_loader_rejects_replacement_before_open(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        config = _config(tmp_path)
+        path = tmp_path / "remote-config.json"
+        path.write_bytes(remote_module._canonical_model_bytes(config))
+        replacement = tmp_path / "replacement.json"
+        replacement.write_bytes(
+            remote_module._canonical_model_bytes(
+                config.model_copy(update={"port": config.port + 1})
+            )
+        )
+        actual_open = os.open
+        swapped = False
+
+        def swap_before_open(candidate, flags, *args, **kwargs):
+            nonlocal swapped
+            if Path(candidate) == path and not swapped:
+                os.replace(replacement, path)
+                swapped = True
+            return actual_open(candidate, flags, *args, **kwargs)
+
+        monkeypatch.setattr(remote_module.os, "open", swap_before_open)
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="changed while read",
+        ):
+            remote_module.load_remote_shell_executor_config(path)
+
+        assert swapped is True
+
+    def test_remote_config_loader_streams_bounded_chunks(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        config = _config(tmp_path)
+        path = tmp_path / "remote-config.json"
+        path.write_bytes(remote_module._canonical_model_bytes(config))
+        actual_read = os.read
+        requested_sizes: list[int] = []
+
+        def observe_read(descriptor: int, size: int) -> bytes:
+            requested_sizes.append(size)
+            return actual_read(descriptor, size)
+
+        monkeypatch.setattr(remote_module.os, "read", observe_read)
+
+        assert (
+            remote_module.load_remote_shell_executor_config(path)
+            == config
+        )
+        assert requested_sizes
+        assert max(requested_sizes) <= 64 * 1024
+
     def test_preflight_publication_flush_failure_leaves_no_final(
         self,
         tmp_path,
