@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,9 @@ from tests.production_release_fixtures import (
     write_modeled_production_archive,
     write_modeled_production_tree,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_RELEASE_GUIDE = _REPO_ROOT / "release" / "production-verify-and-run.md"
 
 
 def _write_real_contract_tree(root: Path) -> dict[str, object]:
@@ -204,6 +209,67 @@ def test_stage_never_replaces_existing_output_directory(
     assert sentinel.read_text(encoding="ascii") == "keep"
 
 
+def test_stage_rejects_junction_output_parent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    output_parent = tmp_path / "junction-parent"
+    output_parent.mkdir()
+    output = output_parent / "release-assets"
+    original = Path.is_junction
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda path: path == output_parent or original(path),
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="real directory",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+        )
+
+    assert not output.exists()
+
+
+def test_verify_rejects_junction_bundle_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    output = tmp_path / "release-assets"
+    stage_production_release_assets(
+        archive_path=source,
+        privacy_policy_path=policy,
+        output_dir=output,
+    )
+    original = Path.is_junction
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda path: path == output or original(path),
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="missing or unsafe",
+    ):
+        verify_production_release_assets(output)
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("extra", "sidecar", "receipt", "checksums"),
@@ -371,3 +437,30 @@ def test_verify_cli_fails_closed(
     assert exit_code == 2
     assert captured.out == ""
     assert "mixed" in captured.err
+
+
+def _load_make_targets() -> set[str]:
+    spec = importlib.util.spec_from_file_location(
+        "make_runner", _REPO_ROOT / "make.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return set(module.TARGETS)
+
+
+def test_release_guide_make_py_targets_exist() -> None:
+    """Every make.py target in the bundled release guide must be a real target."""
+
+    guide = _RELEASE_GUIDE.read_text(encoding="utf-8")
+    targets = _load_make_targets()
+    referenced = set(re.findall(r"make\.py\s+(\S+)", guide))
+    assert referenced, "release guide must reference at least one make.py target"
+    unknown = referenced - targets
+    assert not unknown, f"release guide references unknown make.py targets: {unknown}"
+
+
+def test_release_guide_references_bundled_offline_verifier() -> None:
+    """The release guide must direct users to the bundled offline verifier."""
+
+    guide = _RELEASE_GUIDE.read_text(encoding="utf-8")
+    assert "scripts/verify_production_release.py" in guide

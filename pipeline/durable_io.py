@@ -24,6 +24,12 @@ class DurableIOError(OSError):
         self.published = published
 
 
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)()
+    )
+
+
 def _paths_are_siblings(source: Path, destination: Path) -> None:
     if source.parent != destination.parent:
         raise DurableIOError(
@@ -32,7 +38,7 @@ def _paths_are_siblings(source: Path, destination: Path) -> None:
 
 
 def _destination_must_be_absent(destination: Path) -> None:
-    if destination.exists() or destination.is_symlink():
+    if destination.exists() or _is_linklike(destination):
         raise FileExistsError(
             f"durable publication destination already exists: {destination.name}"
         )
@@ -44,7 +50,7 @@ def _source_kind(path: Path, *, directory: bool) -> None:
     except OSError as exc:
         raise DurableIOError("durable publication source is unavailable") from exc
     expected = stat.S_ISDIR if directory else stat.S_ISREG
-    if stat.S_ISLNK(current.st_mode) or not expected(current.st_mode):
+    if _is_linklike(path) or not expected(current.st_mode):
         kind = "directory" if directory else "regular file"
         raise DurableIOError(
             f"durable publication source must be a real {kind}"

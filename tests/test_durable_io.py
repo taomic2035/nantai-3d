@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from pipeline.durable_io import (
+    DurableIOError,
     atomic_replace,
     publish_directory_noreplace,
     publish_file_noreplace,
@@ -46,3 +47,28 @@ def test_publish_directory_noreplace_moves_complete_tree(tmp_path: Path) -> None
 
     assert (destination / "training-job.zip").read_bytes() == b"complete"
     assert not source.exists()
+
+
+def test_publish_directory_noreplace_rejects_junction_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / ".bundle.staging"
+    destination = tmp_path / "bundle"
+    source.mkdir()
+    (source / "training-job.zip").write_bytes(b"complete")
+    original = Path.is_junction
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda path: path == source or original(path),
+    )
+
+    with pytest.raises(
+        DurableIOError,
+        match="real directory",
+    ):
+        publish_directory_noreplace(source, destination)
+
+    assert source.is_dir()
+    assert not destination.exists()

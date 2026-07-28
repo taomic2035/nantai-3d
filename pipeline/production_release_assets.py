@@ -57,6 +57,12 @@ class ProductionReleaseAssets:
     scene_trust_effect: str
 
 
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)()
+    )
+
+
 @dataclass(frozen=True)
 class ProductionReleaseAssetsVerification:
     valid: bool
@@ -80,7 +86,7 @@ def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
 
 def _real_absent_output(path: Path) -> Path:
     output = Path(path).expanduser().absolute()
-    if output.exists() or output.is_symlink():
+    if output.exists() or _is_linklike(output):
         raise ProductionReleaseAssetsError(
             "Production release asset output directory must be absent"
         )
@@ -92,7 +98,7 @@ def _real_absent_output(path: Path) -> Path:
             "Production release asset output parent is unavailable"
         ) from exc
     if (
-        output.parent.is_symlink()
+        _is_linklike(output.parent)
         or not stat.S_ISDIR(parent_stat.st_mode)
         or parent_real != output.parent
     ):
@@ -221,7 +227,7 @@ def _write_public_payload(path: Path, payload: bytes) -> None:
 
 
 def _public_bundle_files(root: Path) -> dict[str, Path]:
-    if root.is_symlink() or not root.is_dir():
+    if _is_linklike(root) or not root.is_dir():
         raise ProductionReleaseAssetsError(
             "Production release asset directory is missing or unsafe"
         )
@@ -239,7 +245,7 @@ def _public_bundle_files(root: Path) -> dict[str, Path]:
             raise ProductionReleaseAssetsError(
                 "Production release asset is unavailable"
             ) from exc
-        if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(
+        if _is_linklike(candidate) or not stat.S_ISREG(
             current.st_mode
         ):
             raise ProductionReleaseAssetsError(
@@ -499,5 +505,5 @@ def stage_production_release_assets(
             f"Production release assets cannot be staged ({state})"
         ) from exc
     finally:
-        if not published:
+        if not published and not _is_linklike(staging):
             shutil.rmtree(staging, ignore_errors=True)
