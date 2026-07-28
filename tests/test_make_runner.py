@@ -2,7 +2,9 @@
 
 make.py 是 Windows 上替代 GNU make 的主入口（README 推荐用法）。
 覆盖 target 分发逻辑、UTF-8 子进程环境、clean 目录删除。
-不真跑子进程命令（用 monkeypatch 替换 TARGETS 函数）。
+多数 dispatch 测试用 monkeypatch 替换 TARGETS 函数；少量 operator
+black-box 测试用 sys.executable 真跑只读/阻断子进程以覆盖 end-to-end
+caller 合同。
 """
 
 import importlib.util
@@ -462,6 +464,44 @@ class TestRealSceneDispatch:
         assert payload["acceptance"]["decision"] == "not-reached"
         assert payload["acceptance"]["acceptance_source"] == "none"
         assert payload["acceptance"]["acceptance_report_sha256"] is None
+        assert not workspace.exists()
+
+    def test_real_scene_serve_black_box_rejects_pre_accept_before_studio(
+        self,
+        tmp_path,
+    ):
+        """跨平台 black-box: make.py real-scene serve 对空 workspace 在 Studio 前阻断。
+
+        用 sys.executable 从仓库根调用 make.py，证明 serve 在 snapshot 未达到
+        authoritative acceptance 时 exit 2、stderr 固定 ASCII、不启动 Studio、
+        不创建 workspace。只证明 pre-accept 阻断，不证明真实场景。
+        """
+        repo_root = Path(__file__).resolve().parent.parent
+        workspace = tmp_path / "absent-workspace"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "make.py"),
+                "real-scene",
+                "SOURCE=config/real-scene/nerfstudio-poster.json",
+                f"WORKSPACE={workspace}",
+                "RUN_ID=read-only-probe",
+                "serve",
+            ],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 2
+        assert proc.stderr == "real-scene serve not accepted\n"
+        for forbidden in (
+            "127.0.0.1:8000",
+            "localhost:8000",
+            "accepted-from-authoritative-decision",
+            "studio_server.main",
+        ):
+            assert forbidden not in proc.stdout
         assert not workspace.exists()
 
 
