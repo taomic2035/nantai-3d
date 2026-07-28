@@ -560,6 +560,36 @@ def test_stage_rejects_modeled_fixture_with_null_fixture_kind(
     assert not output.exists()
 
 
+def test_stage_rejects_source_commit_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A2: candidate archive re-signed with wrong source_commit."""
+    tree = tmp_path / "runtime"
+    _write_real_contract_tree(tree)
+    source = tmp_path / "candidate.zip"
+    write_modeled_production_archive(tree, source)
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _patch_rebuild_mismatch(monkeypatch)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="rebuilt candidate disagrees",
+    ):
+        stage_production_release_assets(
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+        )
+
+    assert not output.exists()
+
+
 def test_stage_rejects_version_drift(
     tmp_path: Path,
     monkeypatch,
