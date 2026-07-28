@@ -484,6 +484,98 @@ def test_executor_rejects_runtime_policy_remote_target_mismatch(
     assert runner.calls == []
 
 
+def test_runtime_policy_loader_rejects_redirected_ancestor(tmp_path):
+    config, policy = _config_with_runtime_policy(tmp_path)
+    real_parent = tmp_path / "real-policy"
+    real_parent.mkdir()
+    path = real_parent / "production-runtime-policy.json"
+    path.write_bytes(canonical_production_runtime_policy_bytes(policy))
+    config = config.model_copy(update={"runtime_policy_path": path})
+    redirected_parent = tmp_path / "redirected-policy"
+    if os.name == "nt":
+        created = subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(redirected_parent),
+                str(real_parent),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+    else:
+        redirected_parent.symlink_to(
+            real_parent,
+            target_is_directory=True,
+        )
+    redirected = config.model_copy(
+        update={"runtime_policy_path": redirected_parent / path.name}
+    )
+    try:
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="redirected|link-like|real path",
+        ):
+            remote_module._load_bound_runtime_policy(redirected)
+    finally:
+        if os.name == "nt":
+            os.rmdir(redirected_parent)
+        else:
+            redirected_parent.unlink()
+
+
+def test_runtime_policy_loader_rejects_replacement_before_open(
+    tmp_path,
+    monkeypatch,
+):
+    config, policy = _config_with_runtime_policy(tmp_path)
+    replacement = tmp_path / "replacement-policy.json"
+    replacement.write_bytes(canonical_production_runtime_policy_bytes(policy))
+    actual_open = os.open
+    swapped = False
+
+    def swap_before_open(candidate, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(candidate) == config.runtime_policy_path and not swapped:
+            os.replace(replacement, config.runtime_policy_path)
+            swapped = True
+        return actual_open(candidate, flags, *args, **kwargs)
+
+    monkeypatch.setattr(remote_module.os, "open", swap_before_open)
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="changed while read",
+    ):
+        remote_module._load_bound_runtime_policy(config)
+
+    assert swapped is True
+
+
+def test_runtime_policy_loader_streams_bounded_chunks(
+    tmp_path,
+    monkeypatch,
+):
+    config, policy = _config_with_runtime_policy(tmp_path)
+    actual_read = os.read
+    requested_sizes: list[int] = []
+
+    def observe_read(descriptor: int, size: int) -> bytes:
+        requested_sizes.append(size)
+        return actual_read(descriptor, size)
+
+    monkeypatch.setattr(remote_module.os, "read", observe_read)
+
+    assert remote_module._load_bound_runtime_policy(config) == policy
+    assert requested_sizes
+    assert max(requested_sizes) <= 64 * 1024
+
+
 def test_submit_revalidates_runtime_policy_before_transport(
     tmp_path,
     monkeypatch,
