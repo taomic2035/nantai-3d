@@ -933,7 +933,7 @@ def test_stage_rejects_source_identity_change_during_rebuild(
     with pytest.raises(
         ProductionReleaseAssetsError,
         match="source identity changed",
-    ):
+    ) as raised:
         stage_production_release_assets(
             **_stage_kwargs(
                 tmp_path,
@@ -943,6 +943,10 @@ def test_stage_rejects_source_identity_change_during_rebuild(
             )
         )
 
+    assert (
+        str(raised.value)
+        == "Production source identity changed during acceptance rebuild"
+    )
     _assert_not_published(output)
 
 
