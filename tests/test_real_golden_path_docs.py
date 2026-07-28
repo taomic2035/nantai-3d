@@ -85,6 +85,10 @@ def test_real_canary_docs_do_not_promote_internal_evidence() -> None:
     assert 'readlink -f "$(command -v python3)"' in manual
     assert "`PYTHON_BIN` 固定为该次实测通过的 Python 绝对路径" in manual
     assert "不会再从 `PATH` 重新解析裸" in manual
+    assert "python -m pipeline.production_runtime_policy" in manual
+    assert "nantai.production-runtime-policy-input.v1" in manual
+    assert "exact commit、固定 probe-set、entrypoint 与 worker" in manual
+    assert "producer 输出不是 accepted runtime evidence" in manual
     assert "production-acceptance" in workflow
     assert "rights receipt" in workflow
     assert "python -m pipeline.production_capture_inputs" in workflow

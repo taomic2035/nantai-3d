@@ -112,6 +112,35 @@ python -m pipeline.production_capture_inputs `
 registration 阈值没有默认值；示例值必须按本次采集和正式验收目标确认，不得为过门
 而降低。
 
+### 3.5.1 生成私有 runtime allow-policy
+
+不要手写最终 `production-runtime-policy.v1`。先在仓库外准备一份 canonical
+`nantai.production-runtime-policy-input.v1`，只填写经 operator/基础设施负责人核准的
+外部事实：remote target SHA、不可变 container digest、目标 GPU UUID/最低显存、
+CUDA/Python/Nerfstudio 版本、`ns-train` schema/必需选项，以及 container runtime、
+`nvidia-smi`、Python、`ns-train` 的 executable SHA。示意结构如下；所有尖括号必须
+替换为真实值，不能使用重复字符或测试占位 SHA：
+
+```json
+{"expected_container_identity":"registry.example/nantai@sha256:<64-hex>","expected_container_runtime_sha256":"<64-hex>","expected_cuda_runtime_version":"12.8","expected_gpu_uuid":"GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx","expected_nerfstudio_version":"1.1.5","expected_nvidia_smi_sha256":"<64-hex>","expected_python_sha256":"<64-hex>","expected_python_version":"3.11.9","expected_remote_target_sha256":"<64-hex>","expected_training_cli_schema_sha256":"<64-hex>","expected_training_cli_sha256":"<64-hex>","min_gpu_memory_mib":16384,"required_training_cli_options":["--data","--output-dir"],"schema":"nantai.production-runtime-policy-input.v1"}
+```
+
+从将要部署的干净 checkout 运行：
+
+```powershell
+python -m pipeline.production_runtime_policy `
+  --repo-root C:/absolute/clean/nantai `
+  --operator-input C:/absolute/private/runtime-policy-input.json `
+  --output C:/absolute/private/production-runtime-policy.json
+```
+
+producer 会从同一干净 checkout 自动绑定
+exact commit、固定 probe-set、entrypoint 与 worker 的已提交字节 SHA；输出使用私有
+权限、canonical bytes 和 no-replace 发布。把命令输出的 `content_sha256` 及绝对输出
+路径写入 remote config。producer 输出不是 accepted runtime evidence：它只是后续
+fresh measurement 的 allow-policy，仍必须由 3.6 节的 readiness、真实 GPU
+container clearance 和 derived decision 逐项实测。
+
 正式生产训练需要 operator-owned remote config。它至少绑定：
 
 - 安全的 SSH alias、绝对私钥路径；
@@ -195,10 +224,10 @@ remote config 还必须包含：
 这里的 policy 必须显式绑定 exact commit、远端目标身份 SHA、固定 probe-set SHA、
 不可变 container identity、预期 GPU UUID/显存、CUDA/Python/Nerfstudio 版本、
 `ns-train` CLI schema 及六个 executable SHA。没有来自获批镜像与目标 GPU 的真实值时
-不得填写重复字符占位值。executor 会在任何 SSH 副作用前重新打开并验证 canonical
-policy；worker 会在创建容器前再次验证同一 `content_sha256`，并把它写入 job spec、
-status 和 lifecycle v2。policy 缺失、被替换或与 container/worker identity 不一致时
-训练不可达。
+不得填写重复字符占位值；按 3.5.1 节用 producer 生成，不要手算仓库归属字段。
+executor 会在任何 SSH 副作用前重新打开并验证 canonical policy；worker 会在创建
+容器前再次验证同一 `content_sha256`，并把它写入 job spec、status 和 lifecycle v2。
+policy 缺失、被替换或与 container/worker identity 不一致时训练不可达。
 
 固定 probe-set SHA 由代码推导，不能手写：
 

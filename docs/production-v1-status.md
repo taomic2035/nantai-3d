@@ -16,6 +16,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | fresh COLMAP 与注册质量门 | canary 已实跑，正式素材尚未运行 |
 | 本地 Brush preview | 真实照片 internal canary 已贯通训练与导入，只能 preview-only |
 | 远程 submit/poll/fetch/reconnect | lifecycle receipt、恢复语义与固定演练 registry 已关闭；远程固定演练 job 已通过 |
+| runtime allow-policy producer | 已有无网络、no-replace producer，从 operator 核准事实与干净 exact commit 确定性生成私有 policy；它不产生 accepted runtime evidence |
 | 远程 readiness | v2 checker/report 将 worker Python 的绝对真实路径与 executable SHA 纳入 config/report；`preflight-remote` 在 SSH 前复验 canonical runtime policy 及 config 绑定并检测 policy 漂移；`train-production` 强制消费同一份 ready report，在 bundle 前复核 config identity、本地输入 SHA 与 runtime policy，并在首个远端 mutation 前重跑只读 checker，拒绝 runtime/image/worker/interpreter 漂移 |
 | 远程演练真实性边界 | transport-fixture 与 fresh-container evidence 已分层，不把 fixture 当真实 GPU |
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
