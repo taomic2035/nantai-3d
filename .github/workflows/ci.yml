@@ -252,7 +252,7 @@ jobs:
 
       - name: Test standard-library Production release contracts
         run: |
-          python -m pytest -q \
+          python -m pytest -q --noconftest \
             tests/test_release_archive.py \
             tests/test_production_release_contract.py \
             tests/test_production_release_verifier.py \
