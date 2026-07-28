@@ -3,16 +3,30 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import shutil
 import stat
+import subprocess
+import zipfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from pipeline.production_release_contract import (
+    CHECKSUMS_NAME,
     PRIVATE_EVIDENCE_OMITTED,
+    PRODUCTION_ENTRYPOINTS,
     PRODUCTION_GATE_IDS,
+    PRODUCTION_RELEASE_NAME,
+    build_production_receipt,
     validate_public_evidence,
+)
+from pipeline.production_release_verifier import (
+    verify_production_release_archive,
+    verify_production_release_tree,
 )
 from pipeline.production_training_closure import (
     ProductionTrainingClosureError,
@@ -32,6 +46,7 @@ from pipeline.real_scene_acceptance import (
     canonical_human_review_bytes,
     canonical_human_review_policy_bytes,
     canonical_real_scene_acceptance_bytes,
+    load_latest_real_scene_acceptance,
     validate_human_visual_review,
     validate_real_scene_acceptance,
 )
@@ -43,6 +58,7 @@ from pipeline.real_scene_import import (
 from pipeline.release_archive import (
     ReleaseArchiveError,
     canonical_json_bytes,
+    deterministic_zip_info,
     safe_posix_member_path,
     stable_regular_file_digest,
 )
@@ -81,6 +97,17 @@ class ProductionReleaseContext:
     public_evidence: dict[str, object]
     public_files: tuple[SourcePayload, ...]
     redacted_human_review: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ProductionReleaseBuild:
+    archive_path: Path
+    archive_sha256: str
+    package_content_id: str
+    artifact_count: int
+    total_bytes: int
+    scene_identity: str
+    acceptance_report_sha256: str
 
 
 @dataclass(frozen=True)
@@ -835,3 +862,678 @@ def derive_production_release_context(
         ),
         redacted_human_review=redacted_human_review,
     )
+
+
+def _strict_json(payload: bytes, *, label: str) -> object:
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ProductionReleaseBuilderError(
+                    f"{label} contains duplicate JSON keys"
+                )
+            value[key] = item
+        return value
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=unique_pairs,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON value: {value}")
+            ),
+        )
+    except ProductionReleaseBuilderError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(
+            f"{label} is invalid JSON"
+        ) from exc
+
+
+def _record_scene_reference(
+    references: dict[str, tuple[int, str]],
+    *,
+    base: str,
+    relative: object,
+    byte_length: object,
+    sha256: object,
+) -> None:
+    if (
+        not isinstance(relative, str)
+        or isinstance(byte_length, bool)
+        or not isinstance(byte_length, int)
+        or byte_length < 0
+        or not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise ProductionReleaseBuilderError(
+            "scene manifest artifact reference is malformed"
+        )
+    try:
+        safe_relative = safe_posix_member_path(relative).as_posix()
+        source = safe_posix_member_path(
+            f"{base}/{safe_relative}"
+        ).as_posix()
+    except ReleaseArchiveError as exc:
+        raise ProductionReleaseBuilderError(
+            "scene manifest artifact path is unsafe"
+        ) from exc
+    identity = (byte_length, sha256)
+    previous = references.get(source)
+    if previous is not None and previous != identity:
+        raise ProductionReleaseBuilderError(
+            f"duplicate scene destination has conflicting identity: {source}"
+        )
+    references[source] = identity
+
+
+def _manifest_references(
+    value: object,
+    references: dict[str, tuple[int, str]],
+) -> None:
+    if isinstance(value, dict):
+        for path_key in ("path", "manifest"):
+            if (
+                path_key in value
+                and "sha256" in value
+                and ("bytes" in value or "size_bytes" in value)
+            ):
+                _record_scene_reference(
+                    references,
+                    base="web",
+                    relative=value[path_key],
+                    byte_length=value.get(
+                        "bytes",
+                        value.get("size_bytes"),
+                    ),
+                    sha256=value["sha256"],
+                )
+        for child in value.values():
+            _manifest_references(child, references)
+    elif isinstance(value, list):
+        for child in value:
+            _manifest_references(child, references)
+
+
+def _chunk_references(
+    value: object,
+    references: dict[str, tuple[int, str]],
+) -> None:
+    if isinstance(value, dict):
+        if (
+            "file" in value
+            and "sha256" in value
+            and "size_bytes" in value
+        ):
+            _record_scene_reference(
+                references,
+                base="web/chunks",
+                relative=value["file"],
+                byte_length=value["size_bytes"],
+                sha256=value["sha256"],
+            )
+        if (
+            "ply_file" in value
+            and "sha256" in value
+            and "size_bytes" in value
+        ):
+            _record_scene_reference(
+                references,
+                base="web/chunks",
+                relative=value["ply_file"],
+                byte_length=value["size_bytes"],
+                sha256=value["sha256"],
+            )
+        for child in value.values():
+            _chunk_references(child, references)
+    elif isinstance(value, list):
+        for child in value:
+            _chunk_references(child, references)
+
+
+def resolve_runtime_scene_payloads(
+    context: ProductionReleaseContext,
+) -> tuple[SourcePayload, ...]:
+    """Resolve only receipt-bound, manifest-reachable runtime scene bytes."""
+
+    receipt = context.import_receipt
+    import_root = context.import_root
+    bindings = {
+        artifact.path: artifact
+        for artifact in receipt.artifacts
+    }
+    required = (
+        receipt.manifest_path,
+        receipt.chunks_manifest_path,
+    )
+    if any(path not in bindings for path in required):
+        raise ProductionReleaseBuilderError(
+            "scene manifest or chunks manifest binding is missing"
+        )
+
+    references: dict[str, tuple[int, str]] = {}
+    manifest_binding = bindings[receipt.manifest_path]
+    chunks_binding = bindings[receipt.chunks_manifest_path]
+    references[receipt.manifest_path] = (
+        manifest_binding.byte_length,
+        manifest_binding.sha256,
+    )
+    references[receipt.chunks_manifest_path] = (
+        chunks_binding.byte_length,
+        chunks_binding.sha256,
+    )
+    manifest_payload, _manifest_observed = _safe_regular_payload(
+        import_root.joinpath(
+            *safe_posix_member_path(receipt.manifest_path).parts
+        ),
+        maximum_bytes=manifest_binding.byte_length,
+    )
+    chunks_payload, _chunks_observed = _safe_regular_payload(
+        import_root.joinpath(
+            *safe_posix_member_path(receipt.chunks_manifest_path).parts
+        ),
+        maximum_bytes=chunks_binding.byte_length,
+    )
+    if (
+        len(manifest_payload) != manifest_binding.byte_length
+        or hashlib.sha256(manifest_payload).hexdigest()
+        != manifest_binding.sha256
+        or len(chunks_payload) != chunks_binding.byte_length
+        or hashlib.sha256(chunks_payload).hexdigest()
+        != chunks_binding.sha256
+    ):
+        raise ProductionReleaseBuilderError(
+            "scene manifest bytes drifted from the import receipt"
+        )
+    _manifest_references(
+        _strict_json(manifest_payload, label="scene manifest"),
+        references,
+    )
+    _chunk_references(
+        _strict_json(chunks_payload, label="chunks manifest"),
+        references,
+    )
+
+    payloads: list[SourcePayload] = []
+    destinations: set[str] = set()
+    folded_destinations: set[str] = set()
+    for relative, (expected_bytes, expected_sha) in sorted(
+        references.items()
+    ):
+        binding = bindings.get(relative)
+        if (
+            binding is None
+            or binding.byte_length != expected_bytes
+            or binding.sha256 != expected_sha
+        ):
+            raise ProductionReleaseBuilderError(
+                f"scene payload is absent or disagrees with import receipt: {relative}"
+            )
+        if not relative.startswith("web/"):
+            raise ProductionReleaseBuilderError(
+                f"scene payload is outside the import web root: {relative}"
+            )
+        destination = safe_posix_member_path(
+            "web/data/recon/" + relative.removeprefix("web/")
+        ).as_posix()
+        if (
+            destination in destinations
+            or destination.casefold() in folded_destinations
+        ):
+            raise ProductionReleaseBuilderError(
+                f"duplicate mapped scene destination: {destination}"
+            )
+        source = import_root.joinpath(
+            *safe_posix_member_path(relative).parts
+        )
+        digest = stable_regular_file_digest(
+            source,
+            maximum_bytes=expected_bytes,
+        )
+        if (
+            digest.byte_length != expected_bytes
+            or digest.sha256 != expected_sha
+        ):
+            raise ProductionReleaseBuilderError(
+                f"scene payload bytes changed: {relative}"
+            )
+        destinations.add(destination)
+        folded_destinations.add(destination.casefold())
+        payloads.append(
+            SourcePayload(
+                source_path=source,
+                destination_path=destination,
+                role=(
+                    "scene-manifest"
+                    if relative == receipt.manifest_path
+                    else "scene-runtime"
+                ),
+                byte_length=expected_bytes,
+                sha256=expected_sha,
+            )
+        )
+    for payload in payloads:
+        observed = stable_regular_file_digest(
+            payload.source_path,
+            maximum_bytes=payload.byte_length,
+        )
+        if (
+            observed.byte_length != payload.byte_length
+            or observed.sha256 != payload.sha256
+        ):
+            raise ProductionReleaseBuilderError(
+                f"scene payload changed after resolution: {payload.source_path}"
+            )
+    return tuple(payloads)
+
+
+def _runtime_destination(relative: str) -> tuple[str, str] | None:
+    if relative == "release/production-verify-and-run.md":
+        return "VERIFY-AND-RUN.md", "release-guide"
+    if relative in {"LICENSE", "make.py", "pyproject.toml"}:
+        return relative, "runtime-root"
+    if relative == "scripts/verify_production_release.py":
+        return relative, "offline-verifier"
+    if relative.startswith("pipeline/") and relative.endswith(".py"):
+        return relative, "runtime-code"
+    if relative.startswith(("web/studio/", "web/viewer/")):
+        return relative, "web-runtime"
+    return None
+
+
+def _runtime_source_payloads(
+    repo_root: Path,
+    tracked_files: Iterable[str],
+) -> tuple[SourcePayload, ...]:
+    rows: list[SourcePayload] = []
+    destinations: set[str] = set()
+    folded: set[str] = set()
+    for raw in sorted(set(tracked_files)):
+        relative = safe_posix_member_path(raw).as_posix()
+        mapped = _runtime_destination(relative)
+        if mapped is None:
+            continue
+        destination, role = mapped
+        if (
+            destination in destinations
+            or destination.casefold() in folded
+        ):
+            raise ProductionReleaseBuilderError(
+                f"duplicate runtime destination: {destination}"
+            )
+        source = repo_root.joinpath(
+            *safe_posix_member_path(relative).parts
+        )
+        try:
+            digest = stable_regular_file_digest(source)
+        except ReleaseArchiveError as exc:
+            raise ProductionReleaseBuilderError(
+                f"tracked runtime source is unavailable: {relative}"
+            ) from exc
+        destinations.add(destination)
+        folded.add(destination.casefold())
+        rows.append(
+            SourcePayload(
+                source_path=source,
+                destination_path=destination,
+                role=role,
+                byte_length=digest.byte_length,
+                sha256=digest.sha256,
+            )
+        )
+    required = {
+        "LICENSE",
+        "make.py",
+        "pyproject.toml",
+        "VERIFY-AND-RUN.md",
+        "scripts/verify_production_release.py",
+    }
+    if not required <= {row.destination_path for row in rows}:
+        raise ProductionReleaseBuilderError(
+            "tracked Production runtime allowlist is incomplete"
+        )
+    for prefix in ("pipeline/", "web/studio/", "web/viewer/"):
+        if not any(row.destination_path.startswith(prefix) for row in rows):
+            raise ProductionReleaseBuilderError(
+                f"tracked Production runtime is missing {prefix}"
+            )
+    return tuple(sorted(rows, key=lambda row: row.destination_path))
+
+
+def _ensure_release_sources_clean(
+    repo_root: Path,
+    _tracked_files: Iterable[str],
+) -> None:
+    paths = (
+        "LICENSE",
+        "make.py",
+        "pyproject.toml",
+        "pipeline",
+        "scripts/verify_production_release.py",
+        "web/studio",
+        "web/viewer",
+        "release/production-verify-and-run.md",
+    )
+    completed = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            *paths,
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ProductionReleaseBuilderError(
+            "cannot inspect Production runtime source cleanliness"
+        )
+    if completed.stdout.strip():
+        raise ProductionReleaseBuilderError(
+            "Production runtime source is dirty"
+        )
+
+
+def _copy_bound_source(source: SourcePayload, destination: Path) -> None:
+    before = stable_regular_file_digest(
+        source.source_path,
+        maximum_bytes=source.byte_length,
+    )
+    if (
+        before.byte_length != source.byte_length
+        or before.sha256 != source.sha256
+    ):
+        raise ProductionReleaseBuilderError(
+            f"release source changed before copy: {source.source_path}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        raise ProductionReleaseBuilderError(
+            f"release staging destination already exists: {destination}"
+        )
+    try:
+        with source.source_path.open("rb") as source_stream:
+            with destination.open("xb") as destination_stream:
+                shutil.copyfileobj(
+                    source_stream,
+                    destination_stream,
+                    length=1024 * 1024,
+                )
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            f"release source cannot be staged: {source.source_path}"
+        ) from exc
+    written = stable_regular_file_digest(destination)
+    after = stable_regular_file_digest(
+        source.source_path,
+        maximum_bytes=source.byte_length,
+    )
+    if (
+        written.byte_length != source.byte_length
+        or written.sha256 != source.sha256
+        or after != before
+    ):
+        raise ProductionReleaseBuilderError(
+            f"release source changed during copy: {source.source_path}"
+        )
+
+
+def _write_new_payload(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise ProductionReleaseBuilderError(
+            f"release staging destination already exists: {path}"
+        )
+    try:
+        with path.open("xb") as stream:
+            stream.write(payload)
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            f"release payload cannot be staged: {path}"
+        ) from exc
+
+
+def _checksum_payload(
+    artifacts: list[dict[str, object]],
+    receipt_payload: bytes,
+) -> bytes:
+    rows = [
+        f"{artifact['sha256']}  {artifact['path']}\n"
+        for artifact in artifacts
+    ]
+    rows.append(
+        f"{hashlib.sha256(receipt_payload).hexdigest()}  "
+        f"{PRODUCTION_RELEASE_NAME}\n"
+    )
+    return "".join(sorted(rows)).encode("ascii")
+
+
+def _link_no_replace(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination)
+    except FileExistsError as exc:
+        raise ProductionReleaseBuilderError(
+            f"Production publication destination exists: {destination}"
+        ) from exc
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            f"Production publication failed: {destination}: {exc}"
+        ) from exc
+
+
+def build_production_release_archive(
+    *,
+    repo_root: Path,
+    acceptance_root: Path,
+    output_path: Path,
+    version: str,
+    source_commit: str,
+    tracked_files: Iterable[str],
+) -> ProductionReleaseBuild:
+    """Build, verify and no-replace publish one Production runtime archive."""
+
+    root = Path(repo_root).expanduser().absolute()
+    acceptance = Path(acceptance_root).expanduser().absolute()
+    output = Path(output_path).expanduser().absolute()
+    sidecar = output.with_suffix(f"{output.suffix}.sha256")
+    staging = output.parent / f".{output.name}.staging"
+    partial = output.parent / f".{output.name}.partial"
+    sidecar_partial = output.parent / f".{sidecar.name}.partial"
+    if not output.parent.is_dir():
+        raise ProductionReleaseBuilderError(
+            "Production output parent directory is missing"
+        )
+    for path in (output, sidecar, staging, partial, sidecar_partial):
+        if path.exists() or path.is_symlink():
+            raise ProductionReleaseBuilderError(
+                f"Production output or staging path exists: {path}"
+            )
+
+    tracked = tuple(tracked_files)
+    _ensure_release_sources_clean(root, tracked)
+    try:
+        report_path = load_latest_real_scene_acceptance(acceptance)
+        context = derive_production_release_context(report_path)
+        scene_sources = resolve_runtime_scene_payloads(context)
+        runtime_sources = _runtime_source_payloads(root, tracked)
+        all_sources = (
+            *runtime_sources,
+            *context.public_files,
+            *scene_sources,
+        )
+        destinations: set[str] = set()
+        folded: set[str] = set()
+        for source in all_sources:
+            destination = safe_posix_member_path(
+                source.destination_path
+            ).as_posix()
+            if (
+                destination in destinations
+                or destination.casefold() in folded
+            ):
+                raise ProductionReleaseBuilderError(
+                    f"duplicate release destination: {destination}"
+                )
+            destinations.add(destination)
+            folded.add(destination.casefold())
+
+        generated = {
+            "evidence/public-evidence.json": (
+                "public-evidence",
+                canonical_json_bytes(context.public_evidence),
+            ),
+            "evidence/acceptance-decision.json": (
+                "acceptance-decision",
+                canonical_model_bytes(context.decision),
+            ),
+            "evidence/human-review/receipt.json": (
+                "human-review-receipt",
+                canonical_json_bytes(context.redacted_human_review),
+            ),
+        }
+        for destination in generated:
+            if (
+                destination in destinations
+                or destination.casefold() in folded
+            ):
+                raise ProductionReleaseBuilderError(
+                    f"duplicate generated destination: {destination}"
+                )
+            destinations.add(destination)
+            folded.add(destination.casefold())
+
+        staging.mkdir(exist_ok=False)
+        for source in sorted(
+            all_sources,
+            key=lambda row: row.destination_path,
+        ):
+            _copy_bound_source(
+                source,
+                staging.joinpath(
+                    *safe_posix_member_path(
+                        source.destination_path
+                    ).parts
+                ),
+            )
+        for relative, (_role, payload) in sorted(generated.items()):
+            _write_new_payload(
+                staging.joinpath(*safe_posix_member_path(relative).parts),
+                payload,
+            )
+
+        roles = {
+            source.destination_path: source.role
+            for source in all_sources
+        }
+        roles.update(
+            {
+                relative: role
+                for relative, (role, _payload) in generated.items()
+            }
+        )
+        artifacts: list[dict[str, object]] = []
+        for relative, role in sorted(roles.items()):
+            digest = stable_regular_file_digest(
+                staging.joinpath(
+                    *safe_posix_member_path(relative).parts
+                )
+            )
+            artifacts.append(
+                {
+                    "path": relative,
+                    "role": role,
+                    "bytes": digest.byte_length,
+                    "sha256": digest.sha256,
+                }
+            )
+        receipt = build_production_receipt(
+            version=version,
+            source_commit=source_commit,
+            artifacts=artifacts,
+            protected_roots=("evidence", "pipeline", "scripts", "web"),
+            entrypoints=PRODUCTION_ENTRYPOINTS,
+            public_evidence=context.public_evidence,
+        )
+        receipt_payload = canonical_json_bytes(receipt)
+        _write_new_payload(
+            staging / PRODUCTION_RELEASE_NAME,
+            receipt_payload,
+        )
+        _write_new_payload(
+            staging / CHECKSUMS_NAME,
+            _checksum_payload(artifacts, receipt_payload),
+        )
+        verify_production_release_tree(staging)
+
+        wrapper = f"nantai-3d-{version}"
+        with zipfile.ZipFile(
+            partial,
+            "x",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+            strict_timestamps=True,
+        ) as archive:
+            staged_files = tuple(
+                path for path in staging.rglob("*") if path.is_file()
+            )
+            for source in sorted(
+                staged_files,
+                key=lambda path: path.relative_to(staging).as_posix(),
+            ):
+                relative = source.relative_to(staging).as_posix()
+                info = deterministic_zip_info(f"{wrapper}/{relative}")
+                info.file_size = source.stat().st_size
+                with source.open("rb") as source_stream:
+                    with archive.open(
+                        info,
+                        "w",
+                        force_zip64=info.file_size >= zipfile.ZIP64_LIMIT,
+                    ) as archive_stream:
+                        shutil.copyfileobj(
+                            source_stream,
+                            archive_stream,
+                            length=1024 * 1024,
+                        )
+        verify_production_release_archive(partial)
+        archive_digest = stable_regular_file_digest(partial)
+        sidecar_payload = (
+            f"{archive_digest.sha256}  {output.name}\n"
+        ).encode("ascii")
+        _write_new_payload(sidecar_partial, sidecar_payload)
+
+        _link_no_replace(sidecar_partial, sidecar)
+        try:
+            _link_no_replace(partial, output)
+        except Exception:
+            sidecar.unlink(missing_ok=True)
+            raise
+        return ProductionReleaseBuild(
+            archive_path=output,
+            archive_sha256=archive_digest.sha256,
+            package_content_id=str(receipt["package"]["content_id"]),
+            artifact_count=len(artifacts),
+            total_bytes=sum(
+                int(artifact["bytes"])
+                for artifact in artifacts
+            ),
+            scene_identity=str(
+                context.public_evidence["scene"]["scene_identity"]
+            ),
+            acceptance_report_sha256=context.report_sha256,
+        )
+    except ProductionReleaseBuilderError:
+        raise
+    except Exception as exc:
+        raise ProductionReleaseBuilderError(
+            f"Production release build failed: {exc}"
+        ) from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        partial.unlink(missing_ok=True)
+        sidecar_partial.unlink(missing_ok=True)

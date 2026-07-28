@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import stat
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -9,7 +12,9 @@ import pytest
 import pipeline.production_release_builder as builder_module
 from pipeline.production_release_builder import (
     ProductionReleaseBuilderError,
+    build_production_release_archive,
     derive_production_release_context,
+    resolve_runtime_scene_payloads,
 )
 from pipeline.production_training_closure import (
     ProductionTrainingClosure,
@@ -192,7 +197,7 @@ def _import_receipt(root: Path) -> RealSceneImportReceipt:
 
 def _modeled_acceptance_tree(tmp_path: Path) -> dict[str, object]:
     root = tmp_path / "acceptance"
-    root.mkdir()
+    root.mkdir(parents=True)
     receipt = _import_receipt(root)
     rights = CaptureRightsReceipt(
         schema="nantai.capture-rights-receipt.v1",
@@ -554,3 +559,329 @@ def test_acceptance_projection_rejects_evidence_changed_after_validation(
         match="changed|SHA|length",
     ):
         derive_production_release_context(fixture["report_path"])
+
+
+def _resign_import_fixture(
+    fixture: dict[str, object],
+    payloads: dict[str, bytes],
+) -> None:
+    import_root = fixture["root"] / "imported"
+    existing = {
+        artifact.path: artifact
+        for artifact in fixture["import_receipt"].artifacts
+    }
+    for relative, payload in payloads.items():
+        _write(import_root, relative, payload)
+        existing[relative] = ImportArtifactBinding(
+            path=relative,
+            byte_length=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+    receipt = fixture["import_receipt"].model_copy(
+        update={
+            "artifacts": tuple(
+                existing[path] for path in sorted(existing)
+            )
+        }
+    )
+    receipt_payload = canonical_model_bytes(receipt)
+    _write(import_root, "import-receipt.json", receipt_payload)
+    report = fixture["report"].model_copy(
+        update={
+            "import_receipt": _reference(
+                fixture["root"],
+                "imported/import-receipt.json",
+            )
+        }
+    )
+    fixture["report_path"].write_bytes(
+        canonical_real_scene_acceptance_bytes(report)
+    )
+    fixture["report"] = report
+    fixture["import_receipt"] = receipt
+    fixture["decision"] = fixture["decision"].model_copy(
+        update={
+            "report_sha256": hashlib.sha256(
+                fixture["report_path"].read_bytes()
+            ).hexdigest()
+        }
+    )
+
+
+def _scene_context(
+    tmp_path: Path,
+    monkeypatch,
+):
+    fixture = _modeled_acceptance_tree(tmp_path)
+    full = b"full-3dgs\n"
+    chunk = b"chunk\n"
+    chunks = canonical_json_bytes(
+        {
+            "chunks": [
+                {
+                    "payloads": {
+                        "2": {
+                            "file": "chunk-0.ply",
+                            "sha256": hashlib.sha256(chunk).hexdigest(),
+                            "size_bytes": len(chunk),
+                        }
+                    }
+                }
+            ]
+        }
+    )
+    manifest = canonical_json_bytes(
+        {
+            "artifacts": {
+                "full_3dgs": {
+                    "path": "scene.ply",
+                    "sha256": hashlib.sha256(full).hexdigest(),
+                    "bytes": len(full),
+                },
+                "chunks": {
+                    "manifest": "chunks/chunks.json",
+                    "sha256": hashlib.sha256(chunks).hexdigest(),
+                    "bytes": len(chunks),
+                },
+            }
+        }
+    )
+    _resign_import_fixture(
+        fixture,
+        {
+            "web/recon_manifest.json": manifest,
+            "web/chunks/chunks.json": chunks,
+            "web/chunks/chunk-0.ply": chunk,
+            "web/scene.ply": full,
+            "web/unreferenced.bin": b"private-unreferenced\n",
+        },
+    )
+    _patch_outer_validators(monkeypatch, fixture)
+    context = derive_production_release_context(
+        fixture["report_path"]
+    )
+    return fixture, context
+
+
+def test_scene_resolver_maps_only_manifest_bound_runtime_payloads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _fixture, context = _scene_context(tmp_path, monkeypatch)
+
+    payloads = resolve_runtime_scene_payloads(context)
+
+    assert tuple(row.destination_path for row in payloads) == (
+        "web/data/recon/chunks/chunk-0.ply",
+        "web/data/recon/chunks/chunks.json",
+        "web/data/recon/recon_manifest.json",
+        "web/data/recon/scene.ply",
+    )
+    serialized = "\n".join(row.destination_path for row in payloads)
+    for forbidden in (
+        "source.ply",
+        "normalized.ply",
+        "control-points",
+        "registration",
+        "training",
+        "unreferenced",
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize("failure", ("escape", "missing", "drift", "duplicate"))
+def test_scene_resolver_rejects_unclosed_manifest_payloads(
+    tmp_path: Path,
+    monkeypatch,
+    failure: str,
+) -> None:
+    fixture, context = _scene_context(tmp_path, monkeypatch)
+    manifest_path = fixture["root"] / "imported/web/recon_manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    full = manifest["artifacts"]["full_3dgs"]
+    if failure == "escape":
+        full["path"] = "../source.ply"
+    elif failure == "missing":
+        full["path"] = "missing.ply"
+    elif failure == "drift":
+        (fixture["root"] / "imported/web/scene.ply").write_bytes(b"changed\n")
+    else:
+        manifest["artifacts"]["duplicate"] = dict(full)
+        manifest["artifacts"]["duplicate"]["sha256"] = "f" * 64
+    if failure != "drift":
+        changed = canonical_json_bytes(manifest)
+        manifest_path.write_bytes(changed)
+        artifacts = []
+        for artifact in context.import_receipt.artifacts:
+            if artifact.path == "web/recon_manifest.json":
+                artifact = artifact.model_copy(
+                    update={
+                        "byte_length": len(changed),
+                        "sha256": hashlib.sha256(changed).hexdigest(),
+                    }
+                )
+            artifacts.append(artifact)
+        context = context.__class__(
+            **{
+                **context.__dict__,
+                "import_receipt": context.import_receipt.model_copy(
+                    update={"artifacts": tuple(artifacts)}
+                ),
+            }
+        )
+
+    with pytest.raises(ProductionReleaseBuilderError):
+        resolve_runtime_scene_payloads(context)
+
+
+def _runtime_repo(root: Path) -> tuple[str, ...]:
+    payloads = {
+        "LICENSE": b"license\n",
+        "make.py": b"print('make')\n",
+        "pyproject.toml": b"[project]\nname='nantai'\n",
+        "pipeline/release_archive.py": (
+            Path(builder_module.__file__).with_name(
+                "release_archive.py"
+            ).read_bytes()
+        ),
+        "pipeline/production_release_contract.py": (
+            Path(builder_module.__file__).with_name(
+                "production_release_contract.py"
+            ).read_bytes()
+        ),
+        "pipeline/production_release_verifier.py": (
+            Path(builder_module.__file__).with_name(
+                "production_release_verifier.py"
+            ).read_bytes()
+        ),
+        "scripts/verify_production_release.py": (
+            Path(__file__).parents[1]
+            .joinpath("scripts/verify_production_release.py")
+            .read_bytes()
+        ),
+        "web/studio/index.html": b"<h1>Studio</h1>\n",
+        "web/viewer/index.html": b"<h1>Viewer</h1>\n",
+        "release/production-verify-and-run.md": b"# Verify\n",
+    }
+    for relative, payload in payloads.items():
+        _write(root, relative, payload)
+    return tuple(sorted(payloads))
+
+
+def test_build_is_deterministic_verified_and_no_replace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = _runtime_repo(repo)
+    monkeypatch.setattr(
+        builder_module,
+        "load_latest_real_scene_acceptance",
+        lambda _root: fixture["report_path"],
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "derive_production_release_context",
+        lambda _path: context,
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "_ensure_release_sources_clean",
+        lambda *_args: None,
+    )
+    first_path = tmp_path / "one/runtime.zip"
+    second_path = tmp_path / "two/runtime.zip"
+    first_path.parent.mkdir()
+    second_path.parent.mkdir()
+
+    first = build_production_release_archive(
+        repo_root=repo,
+        acceptance_root=fixture["root"],
+        output_path=first_path,
+        version="v1.0.0",
+        source_commit="a" * 40,
+        tracked_files=tracked,
+    )
+    second = build_production_release_archive(
+        repo_root=repo,
+        acceptance_root=fixture["root"],
+        output_path=second_path,
+        version="v1.0.0",
+        source_commit="a" * 40,
+        tracked_files=tracked,
+    )
+
+    assert first.package_content_id == second.package_content_id
+    assert first.archive_sha256 == second.archive_sha256
+    assert first_path.read_bytes() == second_path.read_bytes()
+    assert (
+        first_path.with_suffix(".zip.sha256").read_text(encoding="ascii")
+        == second_path.with_suffix(".zip.sha256").read_text(encoding="ascii")
+    )
+    with zipfile.ZipFile(first_path) as archive:
+        infos = archive.infolist()
+    assert [info.filename for info in infos] == sorted(
+        info.filename for info in infos
+    )
+    assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in infos)
+    assert all(
+        stat.S_IFMT(info.external_attr >> 16) == stat.S_IFREG
+        for info in infos
+    )
+
+    with pytest.raises(ProductionReleaseBuilderError, match="exists"):
+        build_production_release_archive(
+            repo_root=repo,
+            acceptance_root=fixture["root"],
+            output_path=first_path,
+            version="v1.0.0",
+            source_commit="a" * 40,
+            tracked_files=tracked,
+        )
+
+
+def test_build_failure_removes_partial_publication(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = _runtime_repo(repo)
+    output = tmp_path / "runtime.zip"
+    monkeypatch.setattr(
+        builder_module,
+        "load_latest_real_scene_acceptance",
+        lambda _root: fixture["report_path"],
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "derive_production_release_context",
+        lambda _path: context,
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "_ensure_release_sources_clean",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "verify_production_release_archive",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("injected")),
+    )
+
+    with pytest.raises(ProductionReleaseBuilderError, match="injected"):
+        build_production_release_archive(
+            repo_root=repo,
+            acceptance_root=fixture["root"],
+            output_path=output,
+            version="v1.0.0",
+            source_commit="a" * 40,
+            tracked_files=tracked,
+        )
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()
+    assert not tuple(tmp_path.glob(".*.staging"))
+    assert not tuple(tmp_path.glob(".*.partial"))
