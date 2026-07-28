@@ -62,6 +62,22 @@ def _runner(tmp_path: Path, operations) -> RealSceneRunner:
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH regression")
+def test_regular_files_inspects_windows_long_path_members(tmp_path):
+    """Stage evidence enumeration must preserve normal semantic paths."""
+    desired_root_length = 210
+    padding = desired_root_length - len(str(tmp_path.resolve())) - 1
+    assert 1 <= padding <= 255
+    root = tmp_path / ("w" * padding)
+    root.mkdir()
+    report = root / ("source_manifest_" + "a" * 64 + ".json")
+    assert len(str(report.resolve())) > 260
+    extended_report = Path("\\\\?\\" + str(report.resolve()))
+    extended_report.write_bytes(b"evidence")
+
+    assert operations_module._regular_files(root) == (report,)
+
+
 def _remote_lifecycle(job: RemoteShellJobRef, *, container_id="a" * 64):
     workspace_sha = compute_workspace_identity_sha256(
         job_id=job.job_id,

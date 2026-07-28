@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import pipeline.real_scene_runner as runner_module
 from pipeline.real_dataset import (
     DatasetEvidenceError,
     HfDatasetSource,
@@ -30,6 +32,28 @@ from pipeline.real_scene_runner import (
     run_real_scene,
     snapshot_real_scene_stages,
 )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH regression")
+def test_hash_artifact_supports_windows_long_path(tmp_path):
+    """Long-path evidence keeps its normal workspace-relative receipt path."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    desired_parent_length = 210
+    padding = desired_parent_length - len(str(workspace.resolve())) - 1
+    assert 1 <= padding <= 255
+    parent = workspace / ("w" * padding)
+    parent.mkdir()
+    artifact = parent / ("source_manifest_" + "a" * 64 + ".json")
+    assert len(str(artifact.resolve())) > 260
+    extended_artifact = Path("\\\\?\\" + str(artifact.resolve()))
+    extended_artifact.write_bytes(b"evidence")
+
+    binding = runner_module._hash_artifact(artifact, workspace=workspace)
+
+    assert binding.path == artifact.relative_to(workspace).as_posix()
+    assert binding.byte_length == 8
+    assert binding.sha256 == hashlib.sha256(b"evidence").hexdigest()
 
 
 class _Operations:

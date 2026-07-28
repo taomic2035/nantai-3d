@@ -411,6 +411,18 @@ def _is_linklike(path: Path, result: os.stat_result | None = None) -> bool:
     )
 
 
+def _inspection_path(path: Path) -> Path:
+    """Use Win32 extended syntax for I/O without changing receipt paths."""
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute.lstrip("\\"))
+    return Path("\\\\?\\" + absolute)
+
+
 def _require_real_directory(path: Path) -> None:
     """Reject an existing directory reached through a link-like component."""
 
@@ -468,25 +480,27 @@ def _hash_artifact(
         relative = path.relative_to(workspace).as_posix()
     except ValueError as exc:
         raise DatasetEvidenceError("stage artifact escaped the real-scene workspace") from exc
+    inspected_workspace = _inspection_path(workspace)
+    inspected_path = _inspection_path(path)
     try:
-        workspace_real = workspace.resolve(strict=True)
-        resolved_before = path.resolve(strict=True)
+        workspace_real = inspected_workspace.resolve(strict=True)
+        resolved_before = inspected_path.resolve(strict=True)
         resolved_before.relative_to(workspace_real)
-        before = path.lstat()
+        before = inspected_path.lstat()
         if (
-            _is_linklike(path, before)
+            _is_linklike(inspected_path, before)
             or not stat.S_ISREG(before.st_mode)
-            or resolved_before != path
+            or resolved_before != inspected_path
         ):
             raise DatasetEvidenceError(f"stage artifact is missing or link-like: {relative}")
         digest = hashlib.sha256()
         measured = 0
-        with path.open("rb") as stream:
+        with inspected_path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 measured += len(chunk)
                 digest.update(chunk)
-        after = path.lstat()
-        resolved_after = path.resolve(strict=True)
+        after = inspected_path.lstat()
+        resolved_after = inspected_path.resolve(strict=True)
     except DatasetEvidenceError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:

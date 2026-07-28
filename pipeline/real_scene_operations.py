@@ -123,11 +123,24 @@ class PreparedCaptureEvidence(BaseModel):
     capture_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
 
 
+def _inspection_path(path: Path) -> Path:
+    """Use Win32 extended syntax for I/O without changing semantic paths."""
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute.lstrip("\\"))
+    return Path("\\\\?\\" + absolute)
+
+
 def _regular_files(root: Path) -> tuple[Path, ...]:
-    if not root.exists():
+    inspection_root = _inspection_path(root)
+    if not inspection_root.exists():
         return ()
     try:
-        root_mode = root.lstat().st_mode
+        root_mode = inspection_root.lstat().st_mode
     except OSError as exc:
         raise RealSceneCaptureError("stage artifact boundary cannot be inspected") from exc
     if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
@@ -138,20 +151,21 @@ def _regular_files(root: Path) -> tuple[Path, ...]:
         raise RealSceneCaptureError("stage artifact boundary cannot be enumerated") from error
 
     for directory, directory_names, file_names in os.walk(
-        root,
+        inspection_root,
         followlinks=False,
         onerror=scan_error,
     ):
-        parent = Path(directory)
+        inspection_parent = Path(directory)
         for name in [*directory_names, *file_names]:
-            candidate = parent / name
+            inspected = inspection_parent / name
             try:
-                mode = candidate.lstat().st_mode
+                mode = inspected.lstat().st_mode
             except OSError as exc:
                 raise RealSceneCaptureError("stage artifact member cannot be inspected") from exc
             if stat.S_ISLNK(mode):
                 raise RealSceneCaptureError("stage artifact boundary contains a link")
             if stat.S_ISREG(mode):
+                candidate = root / inspected.relative_to(inspection_root)
                 files.append(candidate)
             elif not stat.S_ISDIR(mode):
                 raise RealSceneCaptureError("stage artifact boundary contains a non-regular member")
