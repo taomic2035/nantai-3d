@@ -2116,10 +2116,20 @@ def _load_real_scene_acceptance(
 
 def validate_real_scene_acceptance(
     report_path: Path,
+    *,
+    expected_import_receipt_sha256: str | None = None,
 ) -> AcceptanceDecision:
     """Reopen all real-scene evidence and derive the only trusted decision."""
 
     report, payload, root = _load_real_scene_acceptance(report_path)
+    if (
+        expected_import_receipt_sha256 is not None
+        and report.import_receipt.sha256
+        != expected_import_receipt_sha256
+    ):
+        raise RealSceneAcceptanceError(
+            "acceptance report differs from the expected import receipt"
+        )
     first_payloads = _preflight_acceptance_references(report, root)
     try:
         evidence = _validate_acceptance_evidence(

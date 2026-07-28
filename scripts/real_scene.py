@@ -23,6 +23,7 @@ from pipeline.real_scene_runner import (  # noqa: E402
     RealSceneRunOptions,
     RealSceneStatusError,
     canonical_snapshot_bytes,
+    resolve_latest_production_import,
     run_real_scene,
     snapshot_real_scene_stages,
 )
@@ -107,11 +108,11 @@ def _validate_runtime_inputs(args, source) -> None:
             raise ValueError("local-capture requires --media-root and --rights")
         if args.policy is None:
             raise ValueError("local-capture requires an explicit --policy")
-        if args.target in {"import", "accept", "serve", "all"} and (
+        if args.target in {"import", "accept", "all"} and (
             args.control_points is None or args.geo_origin is None
         ):
             raise ValueError(
-                "production import/accept/serve requires --control-points and --geo-origin"
+                "production import/accept requires --control-points and --geo-origin"
             )
     needs_remote = args.target == "train-production" or (
         args.target == "all" and isinstance(source, LocalCaptureSource)
@@ -158,6 +159,101 @@ def _run_status(args) -> int:
     if snapshot.state == "accepted-from-authoritative-decision":
         return 0
     return 2
+
+
+def _run_serve(args) -> int:
+    try:
+        if args.source is None or args.workspace is None or args.run_id is None:
+            raise ValueError("missing serve identity")
+        irrelevant = (
+            args.media_root,
+            args.rights,
+            args.policy,
+            args.control_points,
+            args.geo_origin,
+            args.remote_config,
+            args.preflight_report,
+            args.viewer_policy,
+            args.viewer_report,
+            args.human_review_policy,
+            args.human_visual_review,
+            args.chunk_size,
+        )
+        if (
+            any(value is not None for value in irrelevant)
+            or args.resume
+            or args.retry
+        ):
+            raise ValueError("unexpected serve argument")
+        snapshot = snapshot_real_scene_stages(
+            args.source,
+            workspace_base=args.workspace,
+            run_id=args.run_id,
+        )
+    except (
+        DatasetEvidenceError,
+        RealSceneStatusError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ):
+        print("real-scene serve invalid", file=sys.stderr)
+        return 1
+    if snapshot.state != "accepted-from-authoritative-decision":
+        print("real-scene serve not accepted", file=sys.stderr)
+        return 2
+    if snapshot.source.role != "production-acceptance":
+        print("real-scene serve invalid", file=sys.stderr)
+        return 1
+    try:
+        resolved = resolve_latest_production_import(
+            Path(args.source).expanduser().absolute(),
+            workspace_base=Path(args.workspace).expanduser().absolute(),
+            run_id=args.run_id,
+        )
+        import_entries = tuple(
+            stage
+            for stage in snapshot.stages
+            if stage.stage == "import"
+        )
+        if (
+            len(import_entries) != 1
+            or import_entries[0].receipt_sha256 is None
+            or resolved.stage_receipt_sha256
+            != import_entries[0].receipt_sha256
+        ):
+            raise RealSceneBlockedError(
+                "serve import differs from the accepted stage chain"
+            )
+        if resolved.source_sha256 != snapshot.source.source_sha256:
+            raise RealSceneBlockedError(
+                "serve source changed between acceptance and import resolution"
+            )
+    except (
+        DatasetEvidenceError,
+        RealSceneBlockedError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ):
+        print("real-scene serve invalid", file=sys.stderr)
+        return 1
+    from pipeline import studio_server
+
+    try:
+        return studio_server.main(
+            [
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--real-scene-import-root",
+                str(resolved.import_root),
+            ]
+        )
+    except (OSError, RuntimeError, ValueError):
+        print("real-scene serve invalid", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report.status == "ready" else 2
         if args.target == "status":
             return _run_status(args)
+        if args.target == "serve":
+            return _run_serve(args)
         if args.source is None:
             raise ValueError(
                 f"{args.target} requires --source"

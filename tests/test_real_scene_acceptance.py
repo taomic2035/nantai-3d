@@ -941,6 +941,40 @@ def test_production_acceptance_requires_rights_metric_and_every_gate(
         assert gate in decision.failed_gates
 
 
+def test_acceptance_validator_binds_expected_import_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    _root, path, report = _acceptance_report(
+        tmp_path,
+        role="production-acceptance",
+    )
+    monkeypatch.setattr(
+        acceptance_module,
+        "_validate_acceptance_evidence",
+        lambda *_args, **_kwargs: _accepted_evidence(
+            role="production-acceptance"
+        ),
+    )
+
+    decision = validate_real_scene_acceptance(
+        path,
+        expected_import_receipt_sha256=(
+            report.import_receipt.sha256
+        ),
+    )
+    assert decision.production_release_allowed is True
+
+    with pytest.raises(
+        RealSceneAcceptanceError,
+        match="expected import receipt",
+    ):
+        validate_real_scene_acceptance(
+            path,
+            expected_import_receipt_sha256="f" * 64,
+        )
+
+
 def test_aggregate_reopens_original_production_runtime_evidence(
     tmp_path,
     monkeypatch,

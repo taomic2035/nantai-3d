@@ -7,10 +7,12 @@
 
 1. [Real-scene status closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md) —
    当前实现入口：source-bound 五阶段只读状态、权威 acceptance 重验和固定错误边界
-2. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
-3. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
-4. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
-5. [Roaming graph producer（P2）](HANDOFF-GLM-009-roaming-graph-producer.md)
+2. [Real-scene serve closure](FEEDBACK-HANDOFF-GLM-019-real-scene-serve-semantics.md) —
+   `all` 结束于 accept；serve 只读重验后以前台 loopback Studio 启动，不写 receipt
+3. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
+4. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
+5. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
+6. [Roaming graph producer（P2）](HANDOFF-GLM-009-roaming-graph-producer.md)
 
 Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cfb`
 关闭；P1-4A 由 `42df736` 关闭，P1-4B 的测量 / policy / decision 分层由
@@ -22,8 +24,8 @@ Codex `70a965e` 关闭。H1–K1 已完成；`0f6dc99` 补齐真实 fetch caller
 streaming，L1 `e07658b`、M1 `945f3f7` + `4b3d3de`、N1 `86ab506` 与 portable
 identity `e4a99cf` 已关闭。Codex `c858f37` 新增最终四件套 fail-closed 导出与
 下载整体复验，GLM-015/016 已关闭。GLM-017/018 把 runner journal 状态收敛为
-五阶段只读 snapshot；下一项是审计 `serve` 作为常驻动作却被列为 durable stage
-的语义冲突。
+五阶段只读 snapshot；GLM-019 已关闭常驻 `serve` 被误列为 durable stage 的语义
+冲突，并提供 acceptance-bound 的 real-scene Studio 启动入口。
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。

@@ -384,10 +384,19 @@ receipt 白名单中 `web/` 下的 manifest、PLY 和 chunks；训练输入、�
 私有文件不会被映射。挂载字节在启动后变化时资源与 Studio 状态都会 fail closed，也
 不会回落到仓库 demo。
 
-只做人工浏览、不生成验收证据时，仍可设置
-`REAL_SCENE_IMPORT_ROOT="$run\imported"` 后运行 `python make.py serve`；其底层参数是
-`pipeline.studio_server --real-scene-import-root "$run\imported"`。正式证据必须使用
-上面的 `pipeline.viewer_session`，避免操作者拼接错 scene 或端口。
+只做人工浏览、不生成验收证据时，使用同一个 source/workspace/run identity 启动：
+
+```powershell
+python make.py real-scene `
+  "SOURCE=$source" `
+  "WORKSPACE=$workspace" `
+  "RUN_ID=$runId" serve
+```
+
+该入口先只读重验五阶段 authoritative acceptance，再解析并复验最新 production
+import，交叉核对 source SHA 后以前台方式启动 loopback Studio。它不写 stage
+receipt，也不代表 Viewer QA 已通过。正式证据必须使用上面的
+`pipeline.viewer_session`，避免把人工浏览误当成可签署证据。
 
 `output`、`decision` 和固定截图路径必须尚不存在；碰撞会拒绝，不会覆盖。采集器在
 启动浏览器前复核 camera-set v2 的 scene manifest SHA，并把

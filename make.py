@@ -433,6 +433,27 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
         source = options.pop("SOURCE", None)
         if source is None:
             raise ValueError("real-scene requires exactly one SOURCE=")
+    if target == "serve":
+        if mode != "real-scene":
+            raise ValueError("real-canary cannot serve a production import")
+        unsupported = sorted(
+            set(options) - {"WORKSPACE", "RUN_ID"}
+        )
+        if unsupported:
+            raise ValueError(
+                "real-scene serve rejects stage-only options: "
+                + ", ".join(unsupported)
+            )
+        missing = sorted(
+            name
+            for name in ("WORKSPACE", "RUN_ID")
+            if name not in options
+        )
+        if missing:
+            raise ValueError(
+                "real-scene serve requires "
+                + ", ".join(f"{name}=" for name in missing)
+            )
     if _real_boolean("RESUME", options.get("RESUME", "0")) and _real_boolean(
         "RETRY", options.get("RETRY", "0")
     ):

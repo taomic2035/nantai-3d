@@ -122,9 +122,14 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 - GLM-018 最终只检查 `fetch → sfm → role-train → import → accept`：completed
   receipt 会重开 prerequisite、artifact、production import 与权威 acceptance。
   状态命令不联网、不训练、不写文件，也不回显私有路径或原始失败原因。
-- `serve` 被排除出 acceptance readiness：当前 runner 把它列为 stage，但实际
-  operations 永远返回 blocked，且常驻服务不自然对应 completed receipt。该冲突转入
-  GLM-019 独立设计审计。
+- GLM-019 关闭 `serve` 语义冲突：durable chain 固定为
+  `fetch → sfm → role-train → import → accept`，`all` 如实结束于 accept；real-scene
+  `serve` 改为只读重验 authoritative acceptance 与 production import、交叉核对
+  source/import receipt SHA 后以前台 loopback Studio 启动。snapshot 同时要求五个
+  最新 completed receipt 构成同一 prerequisite SHA 链，拒绝把旧 accept 与新 import
+  混配；acceptance report 内引用的 import-receipt SHA 还必须等于 accept
+  StageReceipt prerequisite 所绑定 import 输出。serve 不写 StageReceipt，也不替代
+  Viewer QA。
 - 四轮设计原文已压缩为
   [GLM-017/018 closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md)；
   被替代内容仍可从 Git 历史读取。

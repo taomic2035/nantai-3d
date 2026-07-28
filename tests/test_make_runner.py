@@ -191,6 +191,86 @@ class TestRealSceneDispatch:
         assert command[command.index("--geo-origin") + 1] == ("31.2,121.5,4.0")
         assert command[command.index("--chunk-size") + 1] == "37.5"
 
+    def test_real_scene_serve_accepts_only_source_workspace_and_run_id(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        assert (
+            make.main(
+                [
+                    "make.py",
+                    "real-scene",
+                    "SOURCE=private/source.json",
+                    "WORKSPACE=.nantai-studio/real-scene",
+                    "RUN_ID=production-001",
+                    "serve",
+                ]
+            )
+            == 0
+        )
+        assert calls == [
+            [
+                make.PY,
+                "-m",
+                "scripts.real_scene",
+                "serve",
+                "--source",
+                "private/source.json",
+                "--run-id",
+                "production-001",
+                "--workspace",
+                ".nantai-studio/real-scene",
+            ]
+        ]
+
+    @pytest.mark.parametrize(
+        "args",
+        (
+            [
+                "real-scene",
+                "SOURCE=private/source.json",
+                "WORKSPACE=.nantai-studio/real-scene",
+                "RUN_ID=production-001",
+                "CONTROL_POINTS=private/points.json",
+                "serve",
+            ],
+            [
+                "real-canary",
+                "WORKSPACE=.nantai-studio/real-scene",
+                "RUN_ID=canary-001",
+                "serve",
+            ],
+            [
+                "real-scene",
+                "SOURCE=private/source.json",
+                "WORKSPACE=.nantai-studio/real-scene",
+                "serve",
+            ],
+            [
+                "real-scene",
+                "SOURCE=private/source.json",
+                "RUN_ID=production-001",
+                "serve",
+            ],
+        ),
+    )
+    def test_real_scene_serve_rejects_stage_only_or_canary_inputs(
+        self,
+        make,
+        capsys,
+        args,
+    ):
+        assert make.main(["make.py", *args]) == 2
+        assert "serve" in capsys.readouterr().err
+
     @pytest.mark.parametrize(
         "args",
         [

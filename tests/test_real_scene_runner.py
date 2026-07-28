@@ -40,7 +40,6 @@ class _Operations:
         self.alignment_rms_m: dict[str, float | None] = {}
 
     def execute(self, stage, stage_root, prerequisite_receipts):
-        del prerequisite_receipts
         self.calls.append(stage)
         state, reason = self.states.get(stage, ("completed", None))
         if state != "completed":
@@ -59,10 +58,28 @@ class _Operations:
         stage_root.mkdir(parents=True, exist_ok=True)
         artifact = stage_root / "artifact.bin"
         artifact.write_bytes(f"{stage}-bytes".encode("ascii"))
+        artifacts = (artifact,)
+        if stage == "import":
+            import_receipt = stage_root / "import-receipt.json"
+            import_receipt.write_text(
+                '{"schema":"fixture-import"}\n',
+                encoding="ascii",
+            )
+            artifacts = (artifact, import_receipt)
         if stage == "accept":
+            assert len(prerequisite_receipts) == 1
+            import_bindings = tuple(
+                output
+                for output in prerequisite_receipts[0].outputs
+                if Path(output.path).name == "import-receipt.json"
+            )
+            assert len(import_bindings) == 1
             payload = (
                 json.dumps(
                     {
+                        "import_receipt_sha256": (
+                            import_bindings[0].sha256
+                        ),
                         "role": self.role,
                         "schema": "fixture-acceptance",
                     },
@@ -81,7 +98,7 @@ class _Operations:
             )
         return StageExecution(
             state="completed",
-            artifacts=(artifact,),
+            artifacts=artifacts,
             alignment_rms_m=self.alignment_rms_m.get(stage),
         )
 
@@ -211,9 +228,17 @@ def test_resume_byte_tamper_records_blocked_revalidation_receipt(tmp_path):
 
 
 def _patch_fixture_acceptance(monkeypatch):
-    def validate(path):
+    def validate(
+        path,
+        *,
+        expected_import_receipt_sha256=None,
+    ):
         payload = json.loads(path.read_text(encoding="ascii"))
         role = payload["role"]
+        assert (
+            payload["import_receipt_sha256"]
+            == expected_import_receipt_sha256
+        )
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         return SimpleNamespace(
             source_role=role,
@@ -240,9 +265,9 @@ def test_resume_revalidates_transitive_prerequisite_bytes(
     artifact.write_bytes(b"x")
 
     with pytest.raises(RealSceneBlockedError, match="revalidation failed"):
-        runner.run("serve", resume=True)
+        runner.run("accept", resume=True)
 
-    receipts = tuple((runner.receipt_root / "serve").glob("*.json"))
+    receipts = tuple((runner.receipt_root / "accept").glob("*.json"))
     assert len(receipts) == 2
     assert any(
         json.loads(path.read_text(encoding="ascii"))["status"] == "blocked"
@@ -259,9 +284,106 @@ def test_internal_canary_all_uses_preview_not_production(
 
     receipt = runner.run("all")
 
-    assert receipt.stage == "serve"
+    assert receipt.stage == "accept"
     assert "train-preview" in operations.calls
     assert "train-production" not in operations.calls
+    assert "serve" not in operations.calls
+    assert not (runner.receipt_root / "serve").exists()
+
+
+def test_production_all_stops_at_authoritative_accept(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_fixture_acceptance(monkeypatch)
+    control_points = _control_points(tmp_path / "control-points.json")
+    runner, operations = _runner(
+        tmp_path,
+        role="production-acceptance",
+        control_points=control_points,
+    )
+    operations.alignment_rms_m["import"] = 0.1
+    monkeypatch.setattr(
+        runner,
+        "_verify_production_import_output",
+        lambda **_kwargs: 0.1,
+    )
+
+    receipt = runner.run("all")
+
+    assert receipt.stage == "accept"
+    assert operations.calls == [
+        "fetch",
+        "sfm",
+        "train-production",
+        "import",
+        "accept",
+    ]
+    assert not (runner.receipt_root / "serve").exists()
+
+
+def test_serve_is_not_a_durable_runner_stage(tmp_path):
+    runner, operations = _runner(tmp_path)
+
+    with pytest.raises(RealSceneBlockedError, match="unknown real-scene target"):
+        runner.run("serve")
+
+    assert operations.calls == []
+    assert not (runner.receipt_root / "serve").exists()
+
+
+def test_snapshot_ignores_legacy_serve_receipt_directory(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_fixture_acceptance(monkeypatch)
+    runner, _operations = _runner(tmp_path)
+    runner.run("all")
+    legacy = runner.receipt_root / "serve"
+    legacy.mkdir()
+    (legacy / "legacy.json").write_text(
+        '{"legacy":true}\n',
+        encoding="ascii",
+    )
+
+    snapshot = runner.snapshot_stages(run_id="canary-001")
+
+    assert snapshot.state == "accepted-from-authoritative-decision"
+    assert tuple(stage.stage for stage in snapshot.stages) == (
+        "fetch",
+        "sfm",
+        "train-preview",
+        "import",
+        "accept",
+    )
+
+
+def test_snapshot_rejects_latest_completed_receipts_from_different_chains(
+    tmp_path,
+    monkeypatch,
+):
+    _patch_fixture_acceptance(monkeypatch)
+    runner, _operations = _runner(tmp_path)
+    runner.run("all")
+    latest_import = runner._latest("import")
+    assert latest_import is not None
+    receipt, _digest = latest_import
+    runner._write_receipt(
+        receipt.model_copy(
+            update={
+                "attempt_id": "attempt-newer-unaccepted-import",
+                "created_at_utc": (
+                    receipt.created_at_utc + timedelta(seconds=1)
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(
+        RealSceneStatusError,
+        match="coherent chain",
+    ):
+        runner.snapshot_stages(run_id="canary-001")
 
 
 def test_internal_canary_import_prefers_existing_production_training(tmp_path):
@@ -819,7 +941,18 @@ def _build_completed_chain(
     limit = chain.index(up_to) + 1 if up_to in chain else len(chain)
     prev = None
     for stage in chain[:limit]:
-        artifacts = [_make_artifact(runner, stage, f"attempt-{stage}")]
+        artifacts = [
+            _make_artifact(
+                runner,
+                stage,
+                f"attempt-{stage}",
+                name=(
+                    "import-receipt.json"
+                    if stage == "import"
+                    else "artifact.bin"
+                ),
+            )
+        ]
         prereqs = ()
         if prev is not None:
             prereqs = (
@@ -831,6 +964,12 @@ def _build_completed_chain(
         if stage == "accept":
             acceptance_path, acceptance_sha = _make_acceptance_report(
                 runner,
+                import_receipt_sha256=hashlib.sha256(
+                    (
+                        runner.workspace
+                        / "stages/import/attempt-import/import-receipt.json"
+                    ).read_bytes()
+                ).hexdigest(),
                 monkeypatch=monkeypatch,
                 allowed=acceptance_allowed,
             )
@@ -862,13 +1001,24 @@ def _build_completed_chain(
 def _make_acceptance_report(
     runner,
     *,
+    import_receipt_sha256,
     monkeypatch=None,
     allowed=True,
 ):
     """Create a fake acceptance report file and patch the validator."""
     stage_root = runner.workspace / "stages/accept/attempt-accept"
     stage_root.mkdir(parents=True, exist_ok=True)
-    payload = b'{"schema":"fixture-acceptance"}\n'
+    payload = (
+        json.dumps(
+            {
+                "import_receipt_sha256": import_receipt_sha256,
+                "schema": "fixture-acceptance",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
     digest = hashlib.sha256(payload).hexdigest()
     report_path = stage_root / f"real-scene-acceptance-{digest}.json"
     report_path.write_bytes(payload)
@@ -881,7 +1031,18 @@ def _make_acceptance_report(
         )
         monkeypatch.setattr(
             "pipeline.real_scene_acceptance.validate_real_scene_acceptance",
-            lambda path: decision,
+            lambda path, *, expected_import_receipt_sha256=None: (
+                decision
+                if (
+                    json.loads(path.read_text(encoding="ascii"))[
+                        "import_receipt_sha256"
+                    ]
+                    == expected_import_receipt_sha256
+                )
+                else pytest.fail(
+                    "acceptance/import receipt binding differs"
+                )
+            ),
         )
     return report_path, digest
 
@@ -1160,5 +1321,43 @@ def test_snapshot_public_helper_rejects_linklike_workspace(tmp_path):
         snapshot_real_scene_stages(
             source_path,
             workspace_base=link,
+            run_id="canary-001",
+        )
+
+
+def test_snapshot_rejects_workspace_below_linklike_ancestor(tmp_path):
+    source = HfDatasetSource(
+        schema="nantai.real-dataset-source.v1",
+        dataset_id="poster",
+        role="internal-canary",
+        source_kind="hf-dataset",
+        repository="owner/repo",
+        repository_revision="4" * 40,
+        subtree="poster",
+        capture_subtree="poster/images",
+        declared_file_count=1,
+        declared_total_bytes=5,
+        license_status="not-declared",
+        redistribution_allowed=False,
+        release_inclusion_allowed=False,
+    )
+    source_path = tmp_path / "source.json"
+    source_path.write_bytes(canonical_model_bytes(source))
+    real_parent = tmp_path / "real-parent"
+    workspace = real_parent / "workspace"
+    workspace.mkdir(parents=True)
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(
+            real_parent,
+            target_is_directory=True,
+        )
+    except OSError:
+        pytest.skip("ancestor symlink creation is unavailable")
+
+    with pytest.raises(RealSceneStatusError, match="link-like"):
+        snapshot_real_scene_stages(
+            source_path,
+            workspace_base=linked_parent / "workspace",
             run_id="canary-001",
         )

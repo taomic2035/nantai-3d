@@ -69,10 +69,23 @@ operator 按采集规模与正式验收目标确认，不能为了让失败数�
   RUN_ID=production-site-a train-production
 ```
 
-生产 `import/accept/serve` 还必须提供 `CONTROL_POINTS=` 和 `GEO_ORIGIN=`。runner
+生产 `import/accept` 还必须提供 `CONTROL_POINTS=` 和 `GEO_ORIGIN=`。runner
 要求至少四个非共面 measured 控制点，并以 RMS ≤ 0.25 m 作为 Production V1 门；
 GPS-only 的米级结果不能冒充该精度。所有私有媒体、EXIF/GPS、rights receipt、
 控制点、SSH 配置和训练产物都留在 ignored `.nantai-studio/` 或 operator 私有路径。
+
+`serve` 不是 journal stage，也不会产生“服务已验收”receipt。完成 `accept` 后，用
+source/workspace/run identity 启动只读 Studio；入口会重新验证五阶段 authoritative
+acceptance、最新 production import 及其 source SHA，然后才挂载到 loopback：
+
+```bash
+.venv/bin/python make.py real-scene \
+  SOURCE=.nantai-studio/private/production-site-a/production-source.json \
+  WORKSPACE=.nantai-studio/real-scene \
+  RUN_ID=production-site-a serve
+```
+
+该动作只证明被接受的 import 可以被安全挂载，不替代真实 Viewer/human QA。
 
 当前内部真实 canary 的精确结果与未决 CUDA blocker 见
 [2026-07-26 real golden-path canary](verification/2026-07-26-real-golden-path-canary.md)。

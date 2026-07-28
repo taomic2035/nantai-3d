@@ -106,8 +106,11 @@ def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
     assert "nantai.viewer-camera-set.v2" in manual
     assert "registered-camera-maximin-v1" in manual
     assert "不能手写或任意挑选三机位" in manual
-    assert "REAL_SCENE_IMPORT_ROOT" in manual
-    assert "--real-scene-import-root" in manual
+    assert "python make.py real-scene" in manual
+    assert '"WORKSPACE=$workspace"' in manual
+    assert '"RUN_ID=$runId" serve' in manual
+    assert "authoritative acceptance" in manual
+    assert "不写 stage" in manual
     assert "receipt 白名单" in manual
     assert "python -m pipeline.viewer_session" in manual
     assert "--human-review-policy-output" in manual

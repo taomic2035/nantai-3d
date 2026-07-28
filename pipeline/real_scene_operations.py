@@ -1449,5 +1449,5 @@ class RealScenePipelineOperations:
         return StageExecution(
             state="blocked",
             artifacts=(),
-            reason=f"{stage} integration is not available before its task",
+            reason="unsupported durable real-scene stage",
         )

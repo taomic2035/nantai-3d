@@ -51,7 +51,6 @@ StageName = Literal[
     "train-production",
     "import",
     "accept",
-    "serve",
 ]
 StageState = Literal["completed", "blocked", "unknown"]
 SourceRole = Literal["internal-canary", "production-acceptance"]
@@ -721,13 +720,15 @@ class RealSceneRunner:
             return "train-preview"
         if stage == "accept":
             return "import"
-        return "accept"
+        raise RealSceneBlockedError(
+            "unknown durable real-scene stage"
+        )
 
     def _all_stages(self) -> tuple[StageName, ...]:
         training: StageName = (
             "train-production" if self.source.role == "production-acceptance" else "train-preview"
         )
-        return ("fetch", "sfm", training, "import", "accept", "serve")
+        return ("fetch", "sfm", training, "import", "accept")
 
     def _latest(self, stage: StageName) -> tuple[StageReceipt, str] | None:
         directory = self.receipt_root / stage
@@ -908,8 +909,48 @@ class RealSceneRunner:
             validate_real_scene_acceptance,
         )
 
+        if (
+            len(receipt.prerequisites) != 1
+            or receipt.prerequisites[0].stage != "import"
+        ):
+            raise DatasetEvidenceError(
+                "accept stage must bind exactly one import receipt"
+            )
+        import_stage_path = (
+            self.receipt_root
+            / "import"
+            / f"{receipt.prerequisites[0].receipt_sha256}.json"
+        )
         try:
-            decision = validate_real_scene_acceptance(acceptance_path)
+            import_stage_receipt, import_stage_sha = _read_receipt(
+                import_stage_path
+            )
+            if (
+                import_stage_sha
+                != receipt.prerequisites[0].receipt_sha256
+                or import_stage_receipt.stage != "import"
+            ):
+                raise DatasetEvidenceError(
+                    "accept import prerequisite identity mismatch"
+                )
+            import_receipts = tuple(
+                output
+                for output in import_stage_receipt.outputs
+                if PurePosixPath(output.path).name
+                == "import-receipt.json"
+            )
+            if len(import_receipts) != 1:
+                raise DatasetEvidenceError(
+                    "import stage must bind exactly one import receipt output"
+                )
+            decision = validate_real_scene_acceptance(
+                acceptance_path,
+                expected_import_receipt_sha256=(
+                    import_receipts[0].sha256
+                ),
+            )
+        except DatasetEvidenceError:
+            raise
         except (OSError, RealSceneAcceptanceError, ValueError) as exc:
             raise DatasetEvidenceError(
                 "acceptance report revalidation failed"
@@ -1249,10 +1290,9 @@ class RealSceneRunner:
             "train-production",
             "import",
             "accept",
-            "serve",
         }:
             raise RealSceneBlockedError(f"unknown real-scene target: {target}")
-        if target in {"import", "accept", "serve"} and self.source.role == "production-acceptance":
+        if target in {"import", "accept"} and self.source.role == "production-acceptance":
             self._preflight_control_points()
         return self._run_stage(
             target,  # type: ignore[arg-type]
@@ -1296,6 +1336,7 @@ class RealSceneRunner:
         ):
             _require_real_directory(directory)
         entries: list[SnapshotStageEntry] = []
+        completed_receipts: list[tuple[StageReceipt, str]] = []
         earliest: SnapshotEarliestBlocker | None = None
         acceptance_report_sha: str | None = None
         for stage in chain:
@@ -1375,6 +1416,7 @@ class RealSceneRunner:
                 ) from exc
             if stage == "accept":
                 acceptance_report_sha = self._snapshot_acceptance_sha(receipt)
+            completed_receipts.append((receipt, digest))
             entries.append(
                 SnapshotStageEntry(
                     stage=stage,  # type: ignore[arg-type]
@@ -1385,6 +1427,24 @@ class RealSceneRunner:
         all_completed = all(
             entry.status == "completed" for entry in entries
         )
+        if all_completed:
+            for index, (receipt, _digest) in enumerate(
+                completed_receipts
+            ):
+                expected_prerequisites = (
+                    ()
+                    if index == 0
+                    else (
+                        StagePrerequisiteBinding(
+                            stage=completed_receipts[index - 1][0].stage,
+                            receipt_sha256=completed_receipts[index - 1][1],
+                        ),
+                    )
+                )
+                if receipt.prerequisites != expected_prerequisites:
+                    raise RealSceneStatusError(
+                        "latest completed stages do not form a coherent chain"
+                    )
         if all_completed and acceptance_report_sha is not None:
             state: SnapshotState = "accepted-from-authoritative-decision"
             acceptance = SnapshotAcceptanceSummary(

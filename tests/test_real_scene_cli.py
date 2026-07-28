@@ -268,6 +268,365 @@ def test_cli_requires_private_runtime_inputs_for_local_capture(
     assert "media-root" in capsys.readouterr().err
 
 
+def test_cli_serve_revalidates_acceptance_and_import_before_loopback_studio(
+    tmp_path,
+    monkeypatch,
+):
+    cli = _load_cli()
+    source = tmp_path / "source.json"
+    workspace = tmp_path / "workspace"
+    import_root = tmp_path / "accepted-import"
+    source.write_text("{}\n", encoding="ascii")
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "snapshot_real_scene_stages",
+        lambda source_path, *, workspace_base, run_id: (
+            calls.append(
+                ("snapshot", source_path, workspace_base, run_id)
+            )
+            or SimpleNamespace(
+                state="accepted-from-authoritative-decision",
+                source=SimpleNamespace(
+                    role="production-acceptance",
+                    source_sha256="a" * 64,
+                ),
+                stages=(
+                    SimpleNamespace(
+                        stage="import",
+                        receipt_sha256="c" * 64,
+                    ),
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_latest_production_import",
+        lambda source_path, *, workspace_base, run_id: (
+            calls.append(
+                ("resolve", source_path, workspace_base, run_id)
+            )
+            or SimpleNamespace(
+                import_root=import_root,
+                source_sha256="a" * 64,
+                stage_receipt_sha256="c" * 64,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "pipeline.studio_server.main",
+        lambda argv: calls.append(("studio", argv)) or 0,
+    )
+
+    result = cli.main(
+        [
+            "serve",
+            "--source",
+            str(source),
+            "--workspace",
+            str(workspace),
+            "--run-id",
+            "production-001",
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        ("snapshot", source, workspace, "production-001"),
+        ("resolve", source, workspace, "production-001"),
+        (
+            "studio",
+            [
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--real-scene-import-root",
+                str(import_root),
+            ],
+        ),
+    ]
+
+
+def test_cli_serve_blocks_before_resolve_when_acceptance_is_not_authoritative(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    cli = _load_cli()
+    source = tmp_path / "source.json"
+    workspace = tmp_path / "workspace"
+    source.write_text("{}\n", encoding="ascii")
+    monkeypatch.setattr(
+        cli,
+        "snapshot_real_scene_stages",
+        lambda *_args, **_kwargs: SimpleNamespace(state="blocked"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_latest_production_import",
+        lambda *_args, **_kwargs: pytest.fail(
+            "blocked acceptance must not resolve an import"
+        ),
+    )
+    monkeypatch.setattr(
+        "pipeline.studio_server.main",
+        lambda _argv: pytest.fail(
+            "blocked acceptance must not start Studio"
+        ),
+    )
+
+    result = cli.main(
+        [
+            "serve",
+            "--source",
+            str(source),
+            "--workspace",
+            str(workspace),
+            "--run-id",
+            "production-001",
+        ]
+    )
+
+    assert result == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "real-scene serve not accepted\n"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    (
+        ["--control-points", "points.json"],
+        ["--media-root", "capture"],
+        ["--remote-config", "remote.json"],
+        ["--resume"],
+        ["--retry"],
+    ),
+)
+def test_cli_serve_rejects_stage_only_arguments(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    extra,
+):
+    cli = _load_cli()
+    monkeypatch.setattr(
+        cli,
+        "snapshot_real_scene_stages",
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid serve arguments must fail before journal inspection"
+        ),
+    )
+
+    result = cli.main(
+        [
+            "serve",
+            "--source",
+            str(tmp_path / "source.json"),
+            "--workspace",
+            str(tmp_path / "workspace"),
+            "--run-id",
+            "production-001",
+            *extra,
+        ]
+    )
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "real-scene serve invalid\n"
+
+
+@pytest.mark.parametrize("missing", ("source", "workspace", "run-id"))
+def test_cli_serve_requires_complete_identity(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    missing,
+):
+    cli = _load_cli()
+    arguments = {
+        "source": str(tmp_path / "source.json"),
+        "workspace": str(tmp_path / "workspace"),
+        "run-id": "production-001",
+    }
+    argv = ["serve"]
+    for name, value in arguments.items():
+        if name != missing:
+            argv.extend((f"--{name}", value))
+    monkeypatch.setattr(
+        cli,
+        "snapshot_real_scene_stages",
+        lambda *_args, **_kwargs: pytest.fail(
+            "incomplete identity must fail before journal inspection"
+        ),
+    )
+
+    assert cli.main(argv) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "real-scene serve invalid\n"
+
+
+def test_cli_serve_rejects_canary_acceptance_without_resolving_import(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    cli = _load_cli()
+    monkeypatch.setattr(
+        cli,
+        "snapshot_real_scene_stages",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="accepted-from-authoritative-decision",
+            source=SimpleNamespace(
+                role="internal-canary",
+                source_sha256="a" * 64,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_latest_production_import",
+        lambda *_args, **_kwargs: pytest.fail(
+            "canary acceptance must not resolve a production import"
+        ),
+    )
+
+    result = cli.main(
+        [
+            "serve",
+            "--source",
+            str(tmp_path / "source.json"),
+            "--workspace",
+            str(tmp_path / "workspace"),
+            "--run-id",
+            "canary-001",
+        ]
+    )
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "real-scene serve invalid\n"
+
+
+def test_cli_serve_rejects_source_identity_change_before_studio(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    cli = _load_cli()
+    monkeypatch.setattr(
+        cli,
+        "snapshot_real_scene_stages",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="accepted-from-authoritative-decision",
+            source=SimpleNamespace(
+                role="production-acceptance",
+                source_sha256="a" * 64,
+            ),
+            stages=(
+                SimpleNamespace(
+                    stage="import",
+                    receipt_sha256="c" * 64,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_latest_production_import",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            import_root=tmp_path / "import",
+            source_sha256="b" * 64,
+            stage_receipt_sha256="c" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        "pipeline.studio_server.main",
+        lambda _argv: pytest.fail(
+            "source identity mismatch must block Studio"
+        ),
+    )
+
+    result = cli.main(
+        [
+            "serve",
+            "--source",
+            str(tmp_path / "source.json"),
+            "--workspace",
+            str(tmp_path / "workspace"),
+            "--run-id",
+            "production-001",
+        ]
+    )
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "real-scene serve invalid\n"
+
+
+def test_cli_serve_rejects_import_outside_accepted_stage_chain(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    cli = _load_cli()
+    monkeypatch.setattr(
+        cli,
+        "snapshot_real_scene_stages",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state="accepted-from-authoritative-decision",
+            source=SimpleNamespace(
+                role="production-acceptance",
+                source_sha256="a" * 64,
+            ),
+            stages=(
+                SimpleNamespace(
+                    stage="import",
+                    receipt_sha256="c" * 64,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_latest_production_import",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            import_root=tmp_path / "import",
+            source_sha256="a" * 64,
+            stage_receipt_sha256="d" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        "pipeline.studio_server.main",
+        lambda _argv: pytest.fail(
+            "unaccepted import must not start Studio"
+        ),
+    )
+
+    result = cli.main(
+        [
+            "serve",
+            "--source",
+            str(tmp_path / "source.json"),
+            "--workspace",
+            str(tmp_path / "workspace"),
+            "--run-id",
+            "production-001",
+        ]
+    )
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "real-scene serve invalid\n"
+
+
 @pytest.mark.parametrize(
     "value",
     ["31.2,121.5", "nan,121.5,4", "91,121.5,4"],
