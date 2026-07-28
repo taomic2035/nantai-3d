@@ -131,9 +131,15 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
     files: set[str] = set()
     folded: set[str] = set()
     total_bytes = 0
+    observed_members = 0
     for current, directories, names in os.walk(root, followlinks=False):
         current_path = Path(current)
         for directory in tuple(directories):
+            observed_members += 1
+            if observed_members > limits.maximum_members:
+                _verification_error(
+                    "release tree member count exceeds its maximum"
+                )
             candidate = current_path / directory
             relative = candidate.relative_to(root).as_posix()
             _require_path_budget(relative, limits=limits)
@@ -153,6 +159,11 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
                     f"release path must be a directory: {relative}"
                 )
         for name in names:
+            observed_members += 1
+            if observed_members > limits.maximum_members:
+                _verification_error(
+                    "release tree member count exceeds its maximum"
+                )
             candidate = current_path / name
             relative = safe_posix_member_path(
                 candidate.relative_to(root).as_posix()
@@ -181,10 +192,6 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
                 )
             folded.add(identity)
             files.add(relative)
-            if len(files) > limits.maximum_members:
-                _verification_error(
-                    "release tree member count exceeds its maximum"
-                )
             if observed.st_size > limits.maximum_member_bytes:
                 _verification_error(
                     f"release tree member exceeds its maximum: {relative}"

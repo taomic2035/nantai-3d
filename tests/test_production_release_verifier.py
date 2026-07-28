@@ -657,6 +657,27 @@ def test_tree_receipt_limits_fail_before_directory_walk(
         )
 
 
+def test_tree_verification_counts_empty_directories_as_members(
+    tmp_path: Path,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    for index in range(4):
+        (root / f"empty-{index}").mkdir()
+    file_count = sum(
+        len(names)
+        for _current, _directories, names in os.walk(root)
+    )
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="member count",
+    ):
+        verify_production_release_tree(
+            root,
+            limits=ArchiveLimits(maximum_members=file_count),
+        )
+
+
 @pytest.mark.production_mutation
 @pytest.mark.skipif(
     sys.platform != "linux",

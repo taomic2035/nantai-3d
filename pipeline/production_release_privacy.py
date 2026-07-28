@@ -327,9 +327,15 @@ def _release_files(
 ) -> tuple[tuple[str, Path], ...]:
     observed: list[tuple[str, Path]] = []
     total_bytes = 0
+    observed_members = 0
     for current, directories, names in os.walk(root, followlinks=False):
         current_path = Path(current)
         for name in tuple(directories):
+            observed_members += 1
+            if observed_members > limits.maximum_members:
+                raise ProductionReleasePrivacyError(
+                    "release member count exceeds its maximum"
+                )
             candidate = current_path / name
             relative = candidate.relative_to(root).as_posix()
             try:
@@ -360,6 +366,11 @@ def _release_files(
                     f"unsafe release directory: {relative}"
                 )
         for name in names:
+            observed_members += 1
+            if observed_members > limits.maximum_members:
+                raise ProductionReleasePrivacyError(
+                    "release member count exceeds its maximum"
+                )
             candidate = current_path / name
             try:
                 relative = safe_posix_member_path(
@@ -386,10 +397,6 @@ def _release_files(
             ):
                 raise ProductionReleasePrivacyError(
                     f"release file path exceeds its maximum: {relative}"
-                )
-            if len(observed) > limits.maximum_members:
-                raise ProductionReleasePrivacyError(
-                    "release file count exceeds its maximum"
                 )
             if candidate_stat.st_size > limits.maximum_member_bytes:
                 raise ProductionReleasePrivacyError(

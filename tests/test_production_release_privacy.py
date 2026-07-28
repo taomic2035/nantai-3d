@@ -26,7 +26,7 @@ from pipeline.production_release_privacy import (
     privacy_report_bytes,
     publish_privacy_report,
 )
-from pipeline.release_archive import canonical_json_bytes
+from pipeline.release_archive import ArchiveLimits, canonical_json_bytes
 from tests.production_release_fixtures import (
     write_modeled_production_archive,
     write_modeled_production_tree,
@@ -48,6 +48,25 @@ def _write_policy(path: Path, *needles: bytes) -> None:
             }
         )
     )
+
+
+def test_privacy_tree_walk_counts_empty_directories_as_members(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "release"
+    root.mkdir()
+    (root / "public.txt").write_text("public", encoding="utf-8")
+    for index in range(3):
+        (root / f"empty-{index}").mkdir()
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="member count",
+    ):
+        privacy_module._release_files(
+            root,
+            limits=ArchiveLimits(maximum_members=1),
+        )
 
 
 def _replace_protected_payload(
