@@ -7,7 +7,7 @@ operator evidence.
 
 ```powershell
 python scripts/verify_production_release.py . --json
-python make.py studio
+python make.py serve
 ```
 
 Open the Studio URL printed by the second command. The accepted scene manifest
