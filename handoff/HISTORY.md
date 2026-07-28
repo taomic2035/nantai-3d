@@ -103,3 +103,12 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
 - `e4a99cf` 把 portable path identity 继续贯穿 receipt、protected roots、builder
   destinations 与 extracted tree verifier。GLM-013 结束，活动入口切换为 GLM-014
   独立安全复核。
+
+## 2026-07-28：最终四件套与 GLM-015
+
+- Codex `c858f37` 补齐 Production 最终四件套的 privacy-gated no-replace 导出、
+  standalone receipt/checksum 绑定与下载整体复验；modeled fixture 不能进入正式
+  资产目录。
+- 014 的隐私/path identity/exact-HEAD 安全背景已被上述实现和最新 CI 吸收；详细原文
+  留在 Git 历史。GLM 活动入口切换为 015，聚焦四件套对抗审计和 runtime 自包含，
+  不重开 H1–N1。

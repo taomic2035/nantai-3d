@@ -5,9 +5,9 @@
 
 ## 当前真实场景主线
 
-1. [GLM 当前安全复核](HANDOFF-GLM-014-production-security-review.md) — 唯一执行
-   入口：隐私审计器、portable path identity 与 exact-HEAD CI 的独立复核；不重开
-   已关闭的 A1–N1
+1. [GLM 最终资产安全复核](HANDOFF-GLM-015-production-release-assets-review.md) —
+   唯一执行入口：四件套 stage/download verifier、跨平台边界与 Production runtime
+   自包含审计；不重开已关闭的 A1–N1
 2. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
 3. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
 4. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
@@ -21,8 +21,9 @@ result bundle v2 与最终身份 closure 由 `5a0ca09` 关闭。B1/C1/D1/E1 已�
 E1 candidate `b71e5de` 与 Codex closure `ab0c7dc` 已推送；P0-CI registry 漂移由
 Codex `70a965e` 关闭。H1–K1 已完成；`0f6dc99` 补齐真实 fetch caller 的 bounded
 streaming，L1 `e07658b`、M1 `945f3f7` + `4b3d3de`、N1 `86ab506` 与 portable
-identity `e4a99cf` 已关闭。当前只做独立安全复核与 exact-HEAD CI，入口见
-[HANDOFF-GLM-014](HANDOFF-GLM-014-production-security-review.md)。
+identity `e4a99cf` 已关闭。Codex `c858f37` 新增最终四件套 fail-closed 导出与
+下载整体复验；当前 GLM 入口见
+[HANDOFF-GLM-015](HANDOFF-GLM-015-production-release-assets-review.md)。
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。
