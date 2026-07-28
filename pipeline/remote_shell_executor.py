@@ -1904,7 +1904,13 @@ def _stable_file_sha(
     max_bytes: int,
     allow_empty: bool = False,
 ) -> tuple[int, str]:
+    descriptor = -1
     try:
+        redirected = first_linklike_path(Path(path.anchor), path)
+        if redirected is not None:
+            raise RemoteResultBundleError(
+                f"{label} is redirected or link-like"
+            )
         before = path.lstat()
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
             raise RemoteResultBundleError(f"{label} is missing or link-like")
@@ -1916,18 +1922,58 @@ def _stable_file_sha(
             raise RemoteResultBundleError(
                 f"{label} size is outside the allowed range"
             )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or _open_file_identity_signature(descriptor_before)
+            != _open_file_identity_signature(before)
+        ):
+            raise RemoteResultBundleError(
+                f"{label} changed while being read"
+            )
         digest = hashlib.sha256()
         measured = 0
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-                measured += len(chunk)
+        while measured <= max_bytes:
+            chunk = os.read(
+                descriptor,
+                min(_ONE_MIB, max_bytes + 1 - measured),
+            )
+            if not chunk:
+                break
+            measured += len(chunk)
+            if measured > max_bytes:
+                raise RemoteResultBundleError(
+                    f"{label} size is outside the allowed range"
+                )
+            digest.update(chunk)
+        descriptor_after = os.fstat(descriptor)
         after = path.lstat()
     except RemoteResultBundleError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise RemoteResultBundleError(f"{label} cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _open_file_identity_signature(before)
+        != _open_file_identity_signature(descriptor_before)
+        or _open_file_identity_signature(descriptor_after)
+        != _open_file_identity_signature(after)
+        or measured != before.st_size
+    ):
         raise RemoteResultBundleError(f"{label} changed while being read")
     return measured, digest.hexdigest()
 

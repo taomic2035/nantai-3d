@@ -576,6 +576,114 @@ def test_runtime_policy_loader_streams_bounded_chunks(
     assert max(requested_sizes) <= 64 * 1024
 
 
+def test_stable_file_sha_rejects_redirected_ancestor(tmp_path):
+    real_parent = tmp_path / "real-hash-input"
+    real_parent.mkdir()
+    path = real_parent / "payload.bin"
+    path.write_bytes(b"payload")
+    redirected_parent = tmp_path / "redirected-hash-input"
+    if os.name == "nt":
+        created = subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(redirected_parent),
+                str(real_parent),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+    else:
+        redirected_parent.symlink_to(
+            real_parent,
+            target_is_directory=True,
+        )
+    try:
+        with pytest.raises(
+            RemoteResultBundleError,
+            match="redirected|link-like|real path",
+        ):
+            remote_module._stable_file_sha(
+                redirected_parent / path.name,
+                label="hash input",
+                max_bytes=1024,
+            )
+    finally:
+        if os.name == "nt":
+            os.rmdir(redirected_parent)
+        else:
+            redirected_parent.unlink()
+
+
+def test_stable_file_sha_rejects_replacement_before_open(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"original")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"replaced")
+    actual_open = os.open
+    swapped = False
+
+    def swap_before_open(candidate, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(candidate) == path and not swapped:
+            os.replace(replacement, path)
+            swapped = True
+        return actual_open(candidate, flags, *args, **kwargs)
+
+    monkeypatch.setattr(remote_module.os, "open", swap_before_open)
+
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="changed while being read",
+    ):
+        remote_module._stable_file_sha(
+            path,
+            label="hash input",
+            max_bytes=1024,
+        )
+
+    assert swapped is True
+
+
+def test_stable_file_sha_rejects_bytes_beyond_limit_during_read(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"x")
+    actual_read = os.read
+    injected = False
+
+    def oversized_read(descriptor: int, size: int) -> bytes:
+        nonlocal injected
+        if not injected:
+            injected = True
+            return b"x" * size
+        return actual_read(descriptor, size)
+
+    monkeypatch.setattr(remote_module.os, "read", oversized_read)
+
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="size is outside",
+    ):
+        remote_module._stable_file_sha(
+            path,
+            label="hash input",
+            max_bytes=1,
+        )
+
+    assert injected is True
+
+
 def test_submit_revalidates_runtime_policy_before_transport(
     tmp_path,
     monkeypatch,
