@@ -1,9 +1,12 @@
 # Verify and run a Production runtime
 
-This archive is accepted only when the bundled offline verifier succeeds. The
-receipt and public evidence bind the runtime bytes to a private acceptance
-report, but they do not replace the omitted raw capture, control-point or
-operator evidence.
+This archive is byte-integrity-verified when the bundled offline verifier
+succeeds. The receipt and public evidence bind the runtime bytes to a private
+acceptance report that was reopened by the pre-release `stage-production-assets`
+step from `ACCEPTANCE_ROOT`+`VERSION` on the exact HEAD. The download-side
+verifier proves the downloaded bytes match that already-notarized receipt and
+internal contract, and does not itself reopen real CUDA/metric/viewer/human
+checks.
 
 ```powershell
 python make.py verify
