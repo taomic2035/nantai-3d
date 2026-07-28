@@ -4,26 +4,26 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import stat
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO, Protocol
 
-from pipeline.durable_io import (
-    DurableIOError,
-    _is_linklike,
-    capture_real_directory_identity,
-    first_linklike_path,
-    matches_real_directory_identity,
-)
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRODUCTION_RELEASE_NAME,
     ProductionReleaseContractError,
     load_production_receipt_bytes,
     load_public_evidence_bytes,
+)
+from pipeline.production_release_fs import (
+    BoundDirectory,
+    ProductionReleaseFSError,
+    ProductionReleaseMutationError,
+    open_bound_directory,
+    require_linux_mutation_support,
 )
 from pipeline.release_archive import (
     ArchiveLimits,
@@ -40,6 +40,17 @@ _CONTRACT_MAXIMUM_BYTES = 16 * 1024 * 1024
 
 class ProductionReleaseVerificationError(ValueError):
     """Raised when a Production release cannot be independently verified."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        published: tuple[str, ...] = (),
+        retained: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.published = published
+        self.retained = retained
 
 
 @dataclass(frozen=True)
@@ -181,36 +192,184 @@ def _artifact_path(root: Path, relative: str) -> Path:
     return path
 
 
-def verify_production_release_tree(
-    root: str | Path,
-) -> ProductionReleaseVerification:
-    """Verify one extracted Production runtime without promoting scene trust."""
+class _ReleaseReader(Protocol):
+    def files(self) -> set[str]: ...
 
-    project_root = Path(root).absolute()
-    try:
-        redirected = first_linklike_path(
-            Path(project_root.anchor),
-            project_root,
-        )
-        root_stat = project_root.lstat()
-        unsafe_root = _is_linklike(project_root, observed=root_stat)
-    except OSError as exc:
-        raise ProductionReleaseVerificationError(
-            "Production release tree is missing or unsafe"
-        ) from exc
-    if (
-        redirected is not None
-        or unsafe_root
-        or not stat.S_ISDIR(root_stat.st_mode)
-    ):
-        raise ProductionReleaseVerificationError(
-            "Production release tree is missing or unsafe"
+    def payload(self, relative: str, *, maximum_bytes: int) -> bytes: ...
+
+    def digest(
+        self,
+        relative: str,
+        *,
+        maximum_bytes: int | None = None,
+    ) -> tuple[str, int]: ...
+
+
+class _TreeReader:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def files(self) -> set[str]:
+        return _release_files(self.root)
+
+    def payload(self, relative: str, *, maximum_bytes: int) -> bytes:
+        return _stable_payload(
+            _artifact_path(self.root, relative),
+            maximum_bytes=maximum_bytes,
         )
 
-    receipt_path = project_root / PRODUCTION_RELEASE_NAME
+    def digest(
+        self,
+        relative: str,
+        *,
+        maximum_bytes: int | None = None,
+    ) -> tuple[str, int]:
+        try:
+            observed = stable_regular_file_digest(
+                _artifact_path(self.root, relative),
+                maximum_bytes=maximum_bytes,
+            )
+        except ReleaseArchiveError as exc:
+            raise ProductionReleaseVerificationError(
+                f"protected artifact verification failed: {relative}: {exc}"
+            ) from exc
+        return observed.sha256, observed.byte_length
+
+
+class _ArchiveReader:
+    def __init__(
+        self,
+        archive: zipfile.ZipFile,
+        *,
+        limits: ArchiveLimits,
+    ) -> None:
+        inspected = inspect_zip_members(archive, limits)
+        wrappers = {member.path.parts[0] for member in inspected}
+        if len(wrappers) != 1:
+            _verification_error(
+                "Production release archive must contain exactly one root"
+            )
+        self._archive = archive
+        self._infos: dict[str, zipfile.ZipInfo] = {}
+        self._sizes: dict[str, int] = {}
+        for member in inspected:
+            mode = stat.S_IFMT(member.unix_mode)
+            if mode == stat.S_IFDIR:
+                _verification_error(
+                    "Production release archive directory entries are forbidden"
+                )
+            if mode != stat.S_IFREG:
+                _verification_error(
+                    "Production release archive members must be regular"
+                )
+            if len(member.path.parts) < 2:
+                _verification_error(
+                    "Production release archive member lacks wrapper root"
+                )
+            relative = safe_posix_member_path(
+                PurePosixPath(*member.path.parts[1:]).as_posix()
+            ).as_posix()
+            self._infos[relative] = archive.getinfo(member.path.as_posix())
+            self._sizes[relative] = member.byte_length
+
+    def files(self) -> set[str]:
+        return set(self._infos)
+
+    def _stream(self, relative: str) -> BinaryIO:
+        try:
+            info = self._infos[relative]
+        except KeyError as exc:
+            raise ProductionReleaseVerificationError(
+                f"missing protected artifact: {relative}"
+            ) from exc
+        return self._archive.open(info, "r")
+
+    def payload(self, relative: str, *, maximum_bytes: int) -> bytes:
+        declared = self._sizes.get(relative)
+        if declared is None:
+            raise ProductionReleaseVerificationError(
+                f"missing protected artifact: {relative}"
+            )
+        if declared > maximum_bytes:
+            raise ProductionReleaseVerificationError(
+                f"release file exceeds its maximum: {relative}"
+            )
+        try:
+            with self._stream(relative) as stream:
+                payload = stream.read(maximum_bytes + 1)
+                extra = stream.read(1)
+        except (
+            OSError,
+            EOFError,
+            RuntimeError,
+            NotImplementedError,
+            zipfile.BadZipFile,
+        ) as exc:
+            raise ProductionReleaseVerificationError(
+                f"release file cannot be read: {relative}"
+            ) from exc
+        if len(payload) != declared or len(payload) > maximum_bytes or extra:
+            raise ProductionReleaseVerificationError(
+                f"release file changed during read: {relative}"
+            )
+        return payload
+
+    def digest(
+        self,
+        relative: str,
+        *,
+        maximum_bytes: int | None = None,
+    ) -> tuple[str, int]:
+        declared = self._sizes.get(relative)
+        if declared is None:
+            raise ProductionReleaseVerificationError(
+                f"missing protected artifact: {relative}"
+            )
+        if maximum_bytes is not None and declared > maximum_bytes:
+            raise ProductionReleaseVerificationError(
+                f"protected artifact verification failed: {relative}: "
+                "file exceeds its maximum"
+            )
+        digest = hashlib.sha256()
+        observed_bytes = 0
+        try:
+            with self._stream(relative) as stream:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    observed_bytes += len(chunk)
+                    if observed_bytes > declared:
+                        raise ProductionReleaseVerificationError(
+                            "Production archive member expanded beyond "
+                            f"declared length: {relative}"
+                        )
+                    digest.update(chunk)
+        except ProductionReleaseVerificationError:
+            raise
+        except (
+            OSError,
+            EOFError,
+            RuntimeError,
+            NotImplementedError,
+            zipfile.BadZipFile,
+        ) as exc:
+            raise ProductionReleaseVerificationError(
+                f"protected artifact verification failed: {relative}"
+            ) from exc
+        if observed_bytes != declared:
+            raise ProductionReleaseVerificationError(
+                f"Production archive member length disagrees: {relative}"
+            )
+        return digest.hexdigest(), observed_bytes
+
+
+def _verify_reader(reader: _ReleaseReader) -> ProductionReleaseVerification:
+    """Verify one immutable release reader without promoting scene trust."""
+
     try:
-        receipt_payload = _stable_payload(
-            receipt_path,
+        receipt_payload = reader.payload(
+            PRODUCTION_RELEASE_NAME,
             maximum_bytes=_CONTRACT_MAXIMUM_BYTES,
         )
         receipt = load_production_receipt_bytes(receipt_payload)
@@ -222,15 +381,14 @@ def verify_production_release_tree(
         ) from exc
 
     declared_paths = {
-        str(artifact["path"])
-        for artifact in receipt["artifacts"]
+        str(artifact["path"]) for artifact in receipt["artifacts"]
     }
     allowed_paths = declared_paths | {
         PRODUCTION_RELEASE_NAME,
         CHECKSUMS_NAME,
     }
     try:
-        observed_paths = _release_files(project_root)
+        observed_paths = reader.files()
     except ReleaseArchiveError as exc:
         raise ProductionReleaseVerificationError(str(exc)) from exc
     unexpected = sorted(observed_paths - allowed_paths)
@@ -249,29 +407,22 @@ def verify_production_release_tree(
     for raw in receipt["artifacts"]:
         artifact = dict(raw)
         relative = str(artifact["path"])
-        path = _artifact_path(project_root, relative)
-        try:
-            digest = stable_regular_file_digest(
-                path,
-                maximum_bytes=int(artifact["bytes"]),
-            )
-        except ReleaseArchiveError as exc:
-            raise ProductionReleaseVerificationError(
-                f"protected artifact verification failed: {relative}: {exc}"
-            ) from exc
+        digest, byte_length = reader.digest(
+            relative,
+            maximum_bytes=int(artifact["bytes"]),
+        )
         if (
-            digest.byte_length != artifact["bytes"]
-            or digest.sha256 != artifact["sha256"]
+            byte_length != artifact["bytes"]
+            or digest != artifact["sha256"]
         ):
             raise ProductionReleaseVerificationError(
                 f"changed protected artifact: {relative}"
             )
         artifact_by_path[relative] = artifact
-        total_bytes += digest.byte_length
+        total_bytes += byte_length
 
-    checksum_path = project_root / CHECKSUMS_NAME
-    checksum_payload = _stable_payload(
-        checksum_path,
+    checksum_payload = reader.payload(
+        CHECKSUMS_NAME,
         maximum_bytes=_CONTRACT_MAXIMUM_BYTES,
     )
     if checksum_payload != _expected_checksum_bytes(receipt, receipt_payload):
@@ -282,10 +433,9 @@ def verify_production_release_tree(
     acceptance = receipt["acceptance"]
     evidence_relative = str(acceptance["public_evidence_path"])
     evidence_artifact = artifact_by_path[evidence_relative]
-    evidence_path = _artifact_path(project_root, evidence_relative)
     try:
-        evidence_payload = _stable_payload(
-            evidence_path,
+        evidence_payload = reader.payload(
+            evidence_relative,
             maximum_bytes=int(evidence_artifact["bytes"]),
         )
         evidence = load_public_evidence_bytes(evidence_payload)
@@ -320,10 +470,8 @@ def verify_production_release_tree(
         raise ProductionReleaseVerificationError(
             "Production scene manifest and evidence bindings disagree"
         )
-    manifest_digest = stable_regular_file_digest(
-        _artifact_path(project_root, manifest_relative)
-    )
-    if manifest_digest.sha256 != evidence["scene"]["manifest_sha256"]:
+    manifest_sha, _manifest_bytes = reader.digest(manifest_relative)
+    if manifest_sha != evidence["scene"]["manifest_sha256"]:
         raise ProductionReleaseVerificationError(
             "Production scene manifest content disagrees with evidence"
         )
@@ -348,129 +496,268 @@ def verify_production_release_tree(
     )
 
 
+def verify_production_release_tree(
+    root: str | Path,
+) -> ProductionReleaseVerification:
+    """Verify one extracted Production runtime without promoting scene trust."""
+
+    project_root = Path(root).absolute()
+    try:
+        redirected = first_linklike_path(
+            Path(project_root.anchor),
+            project_root,
+        )
+        root_stat = project_root.lstat()
+        unsafe_root = _is_linklike(project_root, observed=root_stat)
+    except OSError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production release tree is missing or unsafe"
+        ) from exc
+    if (
+        redirected is not None
+        or unsafe_root
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        raise ProductionReleaseVerificationError(
+            "Production release tree is missing or unsafe"
+        )
+    return _verify_reader(_TreeReader(project_root))
+
+
 def extract_production_release_archive(
     archive_path: str | Path,
     destination: str | Path,
     *,
     limits: ArchiveLimits = PRODUCTION_ARCHIVE_LIMITS,
 ) -> Path:
-    """Extract one inspected archive into a new destination and return its root."""
+    """Append-only extract on a private Linux builder.
+
+    Once the destination namespace is created, every failure retains it for
+    audit.  This function never removes or replaces a path.
+    """
+
+    try:
+        require_linux_mutation_support()
+    except ProductionReleaseFSError as exc:
+        raise ProductionReleaseVerificationError(str(exc)) from exc
 
     source = Path(archive_path).absolute()
     target = Path(destination).absolute()
-    try:
-        redirected_source = first_linklike_path(
-            Path(source.absolute().anchor),
-            source,
+    if target.parent == target:
+        raise ProductionReleaseVerificationError(
+            "Production extraction destination is unsafe"
         )
+    try:
+        redirected_source = first_linklike_path(Path(source.anchor), source)
         source_stat = source.lstat()
-        unsafe_source = _is_linklike(source, observed=source_stat)
     except (OSError, ValueError) as exc:
         raise ProductionReleaseVerificationError(
             "Production release archive is missing or unsafe"
         ) from exc
     if (
         redirected_source is not None
-        or unsafe_source
+        or _is_linklike(source, observed=source_stat)
         or not stat.S_ISREG(source_stat.st_mode)
     ):
         raise ProductionReleaseVerificationError(
             "Production release archive is missing or unsafe"
         )
-    try:
-        target_parent_identity = capture_real_directory_identity(target.parent)
-    except DurableIOError as exc:
-        raise ProductionReleaseVerificationError(
-            "Production extraction destination is unsafe"
-        ) from exc
-    try:
-        unsafe_target = first_linklike_path(Path(target.anchor), target)
-    except (OSError, ValueError) as exc:
-        raise ProductionReleaseVerificationError(
-            "Production extraction destination is unsafe"
-        ) from exc
-    if target.exists() or unsafe_target == target:
-        raise ProductionReleaseVerificationError(
-            "Production extraction destination already exists"
-        )
-    if unsafe_target is not None:
-        raise ProductionReleaseVerificationError(
-            "Production extraction destination is unsafe"
-        )
 
-    created = False
+    retained: list[str] = []
     try:
-        if not matches_real_directory_identity(
-            target.parent,
-            target_parent_identity,
+        with source.open("rb") as source_stream:
+            descriptor_before = os.fstat(source_stream.fileno())
+            with zipfile.ZipFile(source_stream) as archive:
+                reader = _ArchiveReader(archive, limits=limits)
+                members = tuple(
+                    (
+                        safe_posix_member_path(relative),
+                        reader._infos[relative],
+                        reader._sizes[relative],
+                    )
+                    for relative in sorted(reader.files())
+                )
+                with open_bound_directory(target.parent) as parent:
+                    try:
+                        root = parent.create_directory(
+                            target.name,
+                            mode=0o700,
+                        )
+                    except FileExistsError as exc:
+                        raise ProductionReleaseVerificationError(
+                            "Production extraction destination already exists"
+                        ) from exc
+                    retained.append(target.name)
+                    with root:
+                        directory_parts: list[str] = []
+                        directory_stack: list[BoundDirectory] = []
+                        try:
+                            for relative, info, byte_length in members:
+                                wanted = list(relative.parts[:-1])
+                                common = 0
+                                while (
+                                    common < len(directory_parts)
+                                    and common < len(wanted)
+                                    and directory_parts[common] == wanted[common]
+                                ):
+                                    common += 1
+                                while len(directory_stack) > common:
+                                    directory_stack.pop().close()
+                                    directory_parts.pop()
+                                current = (
+                                    directory_stack[-1]
+                                    if directory_stack
+                                    else root
+                                )
+                                for component in wanted[common:]:
+                                    child = current.create_directory(
+                                        component,
+                                        mode=0o700,
+                                    )
+                                    directory_stack.append(child)
+                                    directory_parts.append(component)
+                                    retained.append(
+                                        f"{target.name}/"
+                                        + "/".join(directory_parts)
+                                    )
+                                    current = child
+                                with archive.open(info, "r") as member_stream:
+                                    with current.create_file(
+                                        relative.name,
+                                        mode=0o600,
+                                    ) as output:
+                                        observed_sha, observed_bytes = (
+                                            output.copy_from(
+                                                member_stream,
+                                                expected_bytes=byte_length,
+                                            )
+                                        )
+                                        output.finish()
+                                        written_sha, written_bytes = (
+                                            output.digest()
+                                        )
+                                        if (
+                                            observed_sha != written_sha
+                                            or observed_bytes != written_bytes
+                                        ):
+                                            raise ProductionReleaseMutationError(
+                                                "Production extracted member "
+                                                "changed; retained",
+                                                published=(
+                                                    relative.as_posix(),
+                                                ),
+                                                retained=(
+                                                    relative.as_posix(),
+                                                ),
+                                            )
+                                current.fsync()
+                                retained.append(
+                                    f"{target.name}/{relative.as_posix()}"
+                                )
+                        finally:
+                            for opened_directory in reversed(directory_stack):
+                                opened_directory.close()
+                        root.fsync()
+                    parent.fsync()
+            descriptor_after = os.fstat(source_stream.fileno())
+        source_after = source.lstat()
+        def signature(
+            value: os.stat_result,
+        ) -> tuple[int, int, int, int, int]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_size,
+                value.st_mtime_ns,
+            )
+        if (
+            signature(source_stat) != signature(descriptor_before)
+            or signature(source_stat) != signature(descriptor_after)
+            or signature(source_stat) != signature(source_after)
         ):
             raise ProductionReleaseVerificationError(
-                "Production extraction destination is unsafe"
+                "Production archive changed during extraction",
+                published=tuple(retained),
+                retained=tuple(retained),
             )
-        target.mkdir(parents=False, exist_ok=False)
-        created = True
-        with zipfile.ZipFile(source) as archive:
-            inspected = inspect_zip_members(archive, limits)
-            infos = {info.filename: info for info in archive.infolist()}
-            wrappers = {member.path.parts[0] for member in inspected}
-            if len(wrappers) != 1:
-                _verification_error(
-                    "Production release archive must contain exactly one root"
-                )
-            for member in inspected:
-                if stat.S_IFMT(member.unix_mode) != stat.S_IFREG:
-                    if stat.S_IFMT(member.unix_mode) == stat.S_IFDIR:
-                        _verification_error(
-                            "Production release archive directory entries "
-                            "are forbidden"
-                        )
-                    _verification_error(
-                        "Production release archive members must be regular"
-                    )
-                if len(member.path.parts) < 2:
-                    _verification_error(
-                        "Production release archive member lacks wrapper root"
-                    )
-                relative = PurePosixPath(*member.path.parts[1:])
-                safe_posix_member_path(relative.as_posix())
-                destination_path = target.joinpath(*relative.parts)
-                destination_path.parent.mkdir(parents=True, exist_ok=True)
-                info = infos[member.path.as_posix()]
-                observed = hashlib.sha256()
-                observed_bytes = 0
-                with archive.open(info, "r") as source_stream:
-                    with destination_path.open("xb") as destination_stream:
-                        while True:
-                            chunk = source_stream.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            observed_bytes += len(chunk)
-                            if observed_bytes > member.byte_length:
-                                _verification_error(
-                                    "Production archive member expanded beyond "
-                                    "declared length"
-                                )
-                            observed.update(chunk)
-                            destination_stream.write(chunk)
-                if observed_bytes != member.byte_length:
-                    _verification_error(
-                        "Production archive member length disagrees"
-                    )
-                written = stable_regular_file_digest(destination_path)
-                if (
-                    written.byte_length != observed_bytes
-                    or written.sha256 != observed.hexdigest()
-                ):
-                    _verification_error(
-                        "Production archive extracted member changed"
-                    )
         return target
     except ProductionReleaseVerificationError:
-        if created and matches_real_directory_identity(
-            target.parent,
-            target_parent_identity,
-        ):
-            shutil.rmtree(target, ignore_errors=True)
+        raise
+    except ProductionReleaseMutationError as exc:
+        published = tuple(retained) + exc.published
+        residue = tuple(retained) + exc.retained
+        raise ProductionReleaseVerificationError(
+            "Production archive extraction failed; "
+            f"published={published}; retained={residue}",
+            published=published,
+            retained=residue,
+        ) from exc
+    except (
+        ReleaseArchiveError,
+        zipfile.BadZipFile,
+        RuntimeError,
+        NotImplementedError,
+        ProductionReleaseFSError,
+        OSError,
+        EOFError,
+    ) as exc:
+        state = tuple(retained)
+        raise ProductionReleaseVerificationError(
+            "Production archive verification failed; "
+            f"published={state}; retained={state}",
+            published=state,
+            retained=state,
+        ) from exc
+
+
+def verify_production_release_archive(
+    path: str | Path,
+    *,
+    limits: ArchiveLimits = PRODUCTION_ARCHIVE_LIMITS,
+) -> ProductionReleaseVerification:
+    """Stream and independently verify one Production runtime ZIP."""
+
+    source = Path(path).absolute()
+    try:
+        redirected = first_linklike_path(Path(source.anchor), source)
+        before = source.lstat()
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseVerificationError(
+            "Production release archive is missing or unsafe"
+        ) from exc
+    if (
+        redirected is not None
+        or _is_linklike(source, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise ProductionReleaseVerificationError(
+            "Production release archive is missing or unsafe"
+        )
+
+    def signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+        )
+
+    try:
+        with source.open("rb") as stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if signature(before) != signature(descriptor_before):
+                raise ProductionReleaseVerificationError(
+                    "Production release archive changed before verification"
+                )
+            with zipfile.ZipFile(stream) as archive:
+                result = _verify_reader(
+                    _ArchiveReader(archive, limits=limits)
+                )
+            descriptor_after = os.fstat(stream.fileno())
+        after = source.lstat()
+    except ProductionReleaseVerificationError:
         raise
     except (
         ReleaseArchiveError,
@@ -480,30 +767,43 @@ def extract_production_release_archive(
         OSError,
         EOFError,
     ) as exc:
-        if created and matches_real_directory_identity(
-            target.parent,
-            target_parent_identity,
-        ):
-            shutil.rmtree(target, ignore_errors=True)
         raise ProductionReleaseVerificationError(
             f"Production archive verification failed: {exc}"
         ) from exc
+    if (
+        signature(before) != signature(descriptor_after)
+        or signature(before) != signature(after)
+    ):
+        raise ProductionReleaseVerificationError(
+            "Production release archive changed during verification"
+        )
+    return result
 
 
-def verify_production_release_archive(
-    path: str | Path,
+def verify_production_release_archive_stream(
+    stream: BinaryIO,
     *,
     limits: ArchiveLimits = PRODUCTION_ARCHIVE_LIMITS,
 ) -> ProductionReleaseVerification:
-    """Safely extract and independently verify one Production runtime ZIP."""
+    """Verify one already-held archive inode without reopening its name."""
 
-    with tempfile.TemporaryDirectory(
-        prefix="nantai-production-verify-"
-    ) as temporary:
-        extraction = Path(temporary) / "runtime"
-        extracted = extract_production_release_archive(
-            path,
-            extraction,
-            limits=limits,
-        )
-        return verify_production_release_tree(extracted)
+    try:
+        previous = stream.tell()
+        stream.seek(0)
+        with zipfile.ZipFile(stream) as archive:
+            result = _verify_reader(_ArchiveReader(archive, limits=limits))
+        stream.seek(previous)
+        return result
+    except ProductionReleaseVerificationError:
+        raise
+    except (
+        ReleaseArchiveError,
+        zipfile.BadZipFile,
+        RuntimeError,
+        NotImplementedError,
+        OSError,
+        EOFError,
+    ) as exc:
+        raise ProductionReleaseVerificationError(
+            f"Production archive verification failed: {exc}"
+        ) from exc

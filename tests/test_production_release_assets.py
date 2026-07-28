@@ -4,11 +4,10 @@ import base64
 import hashlib
 import importlib.util
 import json
-import os
 import re
 import shutil
-import stat
-import subprocess
+import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +50,17 @@ from tests.production_release_fixtures import (
     write_modeled_production_tree,
 )
 from tests.test_production_release_builder import _committed_runtime_repo
+
+
+def _linux_mutation_only(test):
+    marked = pytest.mark.production_mutation(test)
+    return pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="Production release mutation is Linux-only",
+    )(marked)
+
+
+LINUX_MUTATION_ONLY = _linux_mutation_only
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _RELEASE_GUIDE = _REPO_ROOT / "release" / "production-verify-and-run.md"
@@ -290,6 +300,70 @@ def test_stable_regular_files_equal_compares_all_bytes(
     assert assets_module._stable_regular_files_equal(left, right) is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "linux",
+    reason="non-Linux platform contract",
+)
+def test_stage_rejects_non_linux_before_output_creation(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "release-assets"
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="private Linux builder",
+    ):
+        stage_production_release_assets(
+            repo_root=tmp_path,
+            acceptance_root=tmp_path,
+            version="v1.0.0",
+            archive_path=tmp_path / "missing.zip",
+            privacy_policy_path=tmp_path / "missing-policy.json",
+            output_dir=output,
+        )
+
+    assert not output.exists()
+
+
+def test_verify_downloaded_bundle_is_cross_platform_and_read_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive, _receipt = _write_real_contract_archive(tmp_path / "source")
+    runtime = archive.parent / "runtime"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    archive_name = "nantai-3d-v1.0.0-runtime.zip"
+    copied_archive = bundle / archive_name
+    shutil.copyfile(archive, copied_archive)
+    digest = stable_regular_file_digest(copied_archive)
+    (bundle / f"{archive_name}.sha256").write_bytes(
+        f"{digest.sha256}  {archive_name}\n".encode("ascii"),
+    )
+    shutil.copyfile(
+        runtime / PRODUCTION_RELEASE_NAME,
+        bundle / PRODUCTION_RELEASE_NAME,
+    )
+    shutil.copyfile(
+        runtime / CHECKSUMS_NAME,
+        bundle / CHECKSUMS_NAME,
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("bundle verification must remain read-only")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", forbidden)
+    monkeypatch.setattr(
+        assets_module,
+        "extract_production_release_archive",
+        forbidden,
+        raising=False,
+    )
+
+    assert verify_production_release_assets(bundle).valid is True
+
+
+@LINUX_MUTATION_ONLY
 def test_stage_exports_only_four_verified_public_assets(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -347,54 +421,11 @@ def test_stage_exports_only_four_verified_public_assets(
     rebuilt_output = builder_call["output_path"]
     assert isinstance(rebuilt_output, Path)
     assert rebuilt_output.is_absolute()
-    assert rebuilt_output.name == ".acceptance-rebuild.zip"
+    assert rebuilt_output.name == "acceptance-rebuild.zip"
     verification = verify_production_release_assets(output)
     assert verification.valid is True
     assert verification.package_content_id == receipt["package"]["content_id"]
     assert verification.archive_sha256 == archive_sha
-
-
-def test_stage_rejects_private_builder_residue_before_publication(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
-    policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    output = tmp_path / "release-assets"
-    _bind_acceptance_rebuild(monkeypatch, source)
-    original_build = assets_module.build_production_release_archive
-
-    def _build_with_residue(**kwargs) -> ProductionReleaseBuild:
-        result = original_build(**kwargs)
-        private = (
-            kwargs["output_path"].parent
-            / ".acceptance-rebuild.zip.staging"
-        )
-        private.mkdir()
-        (private / "private.txt").write_text("private", encoding="ascii")
-        return result
-
-    monkeypatch.setattr(
-        assets_module,
-        "build_production_release_archive",
-        _build_with_residue,
-    )
-
-    with pytest.raises(
-        ProductionReleaseAssetsError,
-        match="staged release validation",
-    ) as raised:
-        stage_production_release_assets(
-            **_stage_kwargs(
-                tmp_path,
-                archive=source,
-                policy=policy,
-                output=output,
-            )
-        )
-
-    assert str(raised.value) == "Production staged release validation failed"
-    _assert_not_published(output)
 
 
 @pytest.mark.parametrize(
@@ -404,6 +435,7 @@ def test_stage_rejects_private_builder_residue_before_publication(
         ("archive_sha256", "0" * 64),
     ],
 )
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_builder_result_identity_mismatch(
     tmp_path: Path,
     monkeypatch,
@@ -442,6 +474,7 @@ def test_stage_rejects_builder_result_identity_mismatch(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_modeled_contract_fixture(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -469,6 +502,7 @@ def test_stage_rejects_modeled_contract_fixture(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_privacy_findings_without_publication(
     tmp_path: Path,
     monkeypatch,
@@ -500,6 +534,7 @@ def test_stage_rejects_privacy_findings_without_publication(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_never_replaces_existing_output_directory(
     tmp_path: Path,
     monkeypatch,
@@ -530,119 +565,6 @@ def test_stage_never_replaces_existing_output_directory(
     assert sentinel.read_bytes() == sentinel_bytes
     assert sorted(path.name for path in output.iterdir()) == ["keep.txt"]
     assert not tuple(output.parent.glob(f".{output.name}.*.staging"))
-
-
-def test_stage_rejects_junction_output_parent(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
-    policy = _privacy_policy(tmp_path / "privacy-policy.json")
-    output_parent = tmp_path / "junction-parent"
-    output_parent.mkdir()
-    sentinel = output_parent / "keep.bin"
-    sentinel_bytes = b"junction-parent-sentinel\x00"
-    sentinel.write_bytes(sentinel_bytes)
-    output = output_parent / "release-assets"
-    trust_calls = _forbid_acceptance_rebuild(monkeypatch)
-    original = getattr(Path, "is_junction", lambda self: False)
-    monkeypatch.setattr(
-        Path,
-        "is_junction",
-        lambda self: self == output_parent or original(self),
-        raising=False,
-    )
-
-    with pytest.raises(
-        ProductionReleaseAssetsError,
-        match="real directory",
-    ):
-        stage_production_release_assets(
-            **_stage_kwargs(
-                tmp_path,
-                archive=source,
-                policy=policy,
-                output=output,
-            )
-        )
-
-    assert trust_calls == []
-    assert sentinel.read_bytes() == sentinel_bytes
-    _assert_not_published(output)
-
-
-def test_stage_rejects_reparse_output_parent_without_is_junction(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    output_parent = tmp_path / "reparse-parent"
-    output_parent.mkdir()
-    output = output_parent / "release-assets"
-    observed = output_parent.lstat()
-    original_lstat = Path.lstat
-
-    def reparse_lstat(path: Path):
-        if path == output_parent:
-            return SimpleNamespace(
-                st_mode=observed.st_mode,
-                st_file_attributes=getattr(
-                    stat,
-                    "FILE_ATTRIBUTE_REPARSE_POINT",
-                    0x400,
-                ),
-            )
-        return original_lstat(path)
-
-    monkeypatch.setattr(Path, "lstat", reparse_lstat)
-    monkeypatch.setattr(
-        Path,
-        "is_junction",
-        lambda _path: False,
-        raising=False,
-    )
-
-    with pytest.raises(
-        ProductionReleaseAssetsError,
-        match="real directory",
-    ):
-        assets_module._real_absent_output(output)
-
-
-def test_candidate_copy_rejects_reparse_source_ancestor(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    ancestor = tmp_path / "alias"
-    ancestor.mkdir()
-    source = ancestor / "candidate.zip"
-    source.write_bytes(b"candidate")
-    destination = tmp_path / "copy.zip"
-    observed = ancestor.lstat()
-    original_lstat = Path.lstat
-
-    def reparse_lstat(path: Path):
-        if path == ancestor:
-            return SimpleNamespace(
-                st_mode=observed.st_mode,
-                st_file_attributes=0x400,
-            )
-        return original_lstat(path)
-
-    monkeypatch.setattr(Path, "lstat", reparse_lstat)
-    monkeypatch.setattr(
-        Path,
-        "is_junction",
-        lambda _path: False,
-        raising=False,
-    )
-
-    with pytest.raises(
-        ProductionReleaseAssetsError,
-        match="unavailable|unsafe|regular non-link",
-    ):
-        assets_module._copy_stable_regular_file(source, destination)
-
-    assert not destination.exists()
 
 
 def test_verify_bundle_rejects_reparse_root_ancestor(
@@ -678,72 +600,7 @@ def test_verify_bundle_rejects_reparse_root_ancestor(
         verify_production_release_assets(root)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
-def test_stage_cleanup_does_not_follow_swapped_parent_junction(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    source = tmp_path / "candidate.zip"
-    source.write_bytes(b"candidate")
-    policy = tmp_path / "policy.json"
-    policy.write_bytes(b"{}")
-    parent = tmp_path / "publish-parent"
-    parent.mkdir()
-    output = parent / "release-assets"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    original_parent = tmp_path / "publish-parent-original"
-    sentinel: Path | None = None
-    swapped = False
-
-    def fail_copy_after_parent_swap(_source: Path, destination: Path) -> str:
-        nonlocal sentinel, swapped
-        staging_name = destination.parent.name
-        parent.rename(original_parent)
-        outside_staging = outside / staging_name
-        outside_staging.mkdir()
-        sentinel = outside_staging / "sentinel.bin"
-        sentinel.write_bytes(b"outside-sentinel")
-        created = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if created.returncode != 0:
-            original_parent.rename(parent)
-            pytest.skip(f"junction creation unavailable: {created.stderr}")
-        swapped = True
-        raise ProductionReleaseAssetsError("injected copy failure")
-
-    monkeypatch.setattr(
-        assets_module,
-        "_copy_stable_regular_file",
-        fail_copy_after_parent_swap,
-    )
-    try:
-        with pytest.raises(ProductionReleaseAssetsError, match="injected"):
-            stage_production_release_assets(
-                **_stage_kwargs(
-                    tmp_path,
-                    archive=source,
-                    policy=policy,
-                    output=output,
-                )
-            )
-        assert sentinel is not None
-        assert sentinel.read_bytes() == b"outside-sentinel"
-    finally:
-        if swapped:
-            removed = subprocess.run(
-                ["cmd", "/c", "rmdir", str(parent)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            assert removed.returncode == 0, removed.stderr
-
-
+@LINUX_MUTATION_ONLY
 def test_verify_rejects_junction_bundle_root(
     tmp_path: Path,
     monkeypatch,
@@ -782,6 +639,7 @@ def test_verify_rejects_junction_bundle_root(
     "mutation",
     ("extra", "sidecar", "receipt", "checksums"),
 )
+@LINUX_MUTATION_ONLY
 def test_verify_four_asset_bundle_rejects_mixed_or_extra_bytes(
     tmp_path: Path,
     monkeypatch,
@@ -815,6 +673,7 @@ def test_verify_four_asset_bundle_rejects_mixed_or_extra_bytes(
         verify_production_release_assets(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_cli_stages_exact_inputs_and_emits_ascii_json(
     tmp_path: Path,
     monkeypatch,
@@ -872,6 +731,7 @@ def test_cli_stages_exact_inputs_and_emits_ascii_json(
     output.encode("ascii")
 
 
+@LINUX_MUTATION_ONLY
 def test_cli_fails_without_partial_success_output(
     tmp_path: Path,
     monkeypatch,
@@ -998,6 +858,7 @@ def test_verify_cli_fails_closed(
 # --- A scheme: rebuild-from-acceptance-root attack matrix (GLM-027) ---
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_verifier_valid_forged_source_commit(
     tmp_path: Path,
     monkeypatch,
@@ -1048,6 +909,7 @@ def test_stage_rejects_verifier_valid_forged_source_commit(
     ],
     ids=("source-commit", "acceptance-derived-bytes"),
 )
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_verifier_valid_acceptance_drift(
     tmp_path: Path,
     monkeypatch,
@@ -1086,6 +948,7 @@ def test_stage_rejects_verifier_valid_acceptance_drift(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_version_drift(
     tmp_path: Path,
     monkeypatch,
@@ -1117,6 +980,7 @@ def test_stage_rejects_version_drift(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_source_identity_change_during_rebuild(
     tmp_path: Path,
     monkeypatch,
@@ -1161,6 +1025,7 @@ def test_stage_rejects_source_identity_change_during_rebuild(
 
 
 @pytest.mark.parametrize("dirty_kind", ("tracked", "untracked"))
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_real_dirty_release_owned_source(
     tmp_path: Path,
     dirty_kind: str,
@@ -1195,6 +1060,7 @@ def test_stage_rejects_real_dirty_release_owned_source(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_acceptance_toctou(
     tmp_path: Path,
     monkeypatch,
@@ -1228,6 +1094,7 @@ def test_stage_rejects_acceptance_toctou(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_stage_rejects_candidate_archive_toctou(
     tmp_path: Path,
     monkeypatch,
@@ -1269,6 +1136,7 @@ def test_stage_rejects_candidate_archive_toctou(
     _assert_not_published(output)
 
 
+@LINUX_MUTATION_ONLY
 def test_download_verify_proves_byte_integrity_only(
     tmp_path: Path,
     monkeypatch,

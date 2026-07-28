@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import stat
 import subprocess
+import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +24,7 @@ from pipeline.production_release_verifier import (
     ProductionReleaseVerificationError,
     extract_production_release_archive,
     verify_production_release_archive,
+    verify_production_release_archive_stream,
     verify_production_release_tree,
 )
 from pipeline.release_archive import (
@@ -274,9 +278,14 @@ def test_archive_entrypoints_reject_reparse_source_ancestor(
         raising=False,
     )
 
+    extraction_message = (
+        "missing or unsafe"
+        if sys.platform == "linux"
+        else "private Linux builder"
+    )
     with pytest.raises(
         ProductionReleaseVerificationError,
-        match="missing or unsafe",
+        match=extraction_message,
     ):
         extract_production_release_archive(
             archive,
@@ -364,7 +373,7 @@ def test_release_entrypoints_reject_real_windows_junction_ancestor(
             verify_production_release_tree(alias / "runtime")
         with pytest.raises(
             ProductionReleaseVerificationError,
-            match="missing or unsafe",
+            match="private Linux builder",
         ):
             extract_production_release_archive(
                 alias / "runtime.zip",
@@ -590,6 +599,47 @@ def test_archive_verifier_enforces_expansion_limits(
         verify_production_release_archive(archive_path, limits=limits)
 
 
+def test_archive_verifier_does_not_extract_or_create_temporary_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("archive verification must be read-only")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", forbidden)
+    monkeypatch.setattr(
+        verifier_module,
+        "extract_production_release_archive",
+        forbidden,
+    )
+
+    result = verify_production_release_archive(archive)
+
+    assert result.valid is True
+
+
+def test_archive_stream_verifier_does_not_reopen_by_name(
+    tmp_path: Path,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    stream = io.BytesIO(archive.read_bytes())
+    archive.unlink()
+    result = verify_production_release_archive_stream(stream)
+
+    assert result.valid is True
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
 def test_archive_extraction_refuses_existing_destination(tmp_path: Path) -> None:
     root, _receipt = _tree(tmp_path)
     archive = tmp_path / "runtime.zip"
@@ -602,6 +652,11 @@ def test_archive_extraction_refuses_existing_destination(tmp_path: Path) -> None
     assert list(destination.iterdir()) == []
 
 
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
 def test_archive_extraction_rejects_illegal_path_and_leaves_no_destination(
     tmp_path: Path,
 ) -> None:
@@ -620,13 +675,18 @@ def test_archive_extraction_rejects_illegal_path_and_leaves_no_destination(
     assert not destination.exists()
 
 
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="append-only extraction is Linux-only",
+)
 @pytest.mark.parametrize("failure_type", (EOFError, NotImplementedError))
 def test_archive_extraction_wraps_stream_failures_after_destination_creation(
     tmp_path: Path,
     monkeypatch,
     failure_type: type[Exception],
 ) -> None:
-    """Stream failures after mkdir retain their cause and clean owned output."""
+    """Stream failures after mkdir retain their cause and owned residue."""
     root, _receipt = _tree(tmp_path)
     archive = tmp_path / "runtime.zip"
     write_modeled_production_archive(root, archive)
@@ -636,13 +696,13 @@ def test_archive_extraction_wraps_stream_failures_after_destination_creation(
     sentinel.write_text("parent identity sentinel", encoding="utf-8")
     destination = parent / "extracted"
 
-    def fail_after_destination_creation(_path):
+    def fail_after_destination_creation(*_args, **_kwargs):
         assert destination.is_dir()
         raise failure_type("injected archive stream failure")
 
     monkeypatch.setattr(
-        verifier_module.zipfile,
-        "ZipFile",
+        verifier_module.BoundFile,
+        "copy_from",
         fail_after_destination_creation,
     )
 
@@ -653,6 +713,30 @@ def test_archive_extraction_wraps_stream_failures_after_destination_creation(
         extract_production_release_archive(archive, destination)
 
     assert isinstance(raised.value.__cause__, failure_type)
-    assert not destination.exists()
+    assert destination.exists()
+    assert raised.value.retained
     assert sentinel.read_text(encoding="utf-8") == "parent identity sentinel"
     assert parent.is_dir()
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform == "linux",
+    reason="non-Linux platform contract",
+)
+def test_archive_extraction_rejects_non_linux_before_mutation(
+    tmp_path: Path,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="private Linux builder",
+    ):
+        extract_production_release_archive(archive, destination)
+
+    assert not destination.exists()
+    assert verify_production_release_archive(archive).valid is True

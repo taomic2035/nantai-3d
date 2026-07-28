@@ -16,6 +16,12 @@ review.
 Authenticity must come from a trusted release channel and an externally trusted digest
 or signature, if one exists. This guide does not claim that any signature exists.
 
+Production build, staging, report publication, and the repository's safe
+extraction API are private-Linux-builder-only append-only mutations. Downloaded
+archive and four-file verification remain read-only and cross-platform. On
+Windows or macOS, verify the four downloaded files first, extract with the
+platform tool into a new empty directory, then run the bundled `verify` command.
+
 ```powershell
 python make.py verify
 python make.py serve

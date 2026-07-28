@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import stat
@@ -14,13 +15,13 @@ from types import SimpleNamespace
 import pytest
 
 import pipeline.production_release_builder as builder_module
-from pipeline.durable_io import DurableIOError
 from pipeline.production_release_builder import (
     ProductionReleaseBuilderError,
     build_production_release_archive,
     derive_production_release_context,
     resolve_runtime_scene_payloads,
 )
+from pipeline.production_release_contract import CHECKSUMS_NAME
 from pipeline.production_training_closure import (
     ProductionTrainingClosure,
     canonical_production_training_closure_bytes,
@@ -79,38 +80,15 @@ GATES = (
 )
 
 
-def test_build_maps_output_parent_identity_capture_race(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """A raced output parent is a builder-domain failure before publication."""
-    output = tmp_path / "runtime.zip"
+def _linux_mutation_only(test):
+    marked = pytest.mark.production_mutation(test)
+    return pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="Production release mutation is Linux-only",
+    )(marked)
 
-    def fail_identity(_path):
-        raise DurableIOError("injected output parent identity race")
 
-    monkeypatch.setattr(
-        builder_module,
-        "capture_real_directory_identity",
-        fail_identity,
-    )
-
-    with pytest.raises(
-        ProductionReleaseBuilderError,
-        match="output parent directory.*unsafe",
-    ) as raised:
-        build_production_release_archive(
-            repo_root=tmp_path,
-            acceptance_root=tmp_path,
-            output_path=output,
-            version="v1.0.0",
-            source_commit="0" * 40,
-            tracked_files=(),
-        )
-
-    assert isinstance(raised.value.__cause__, DurableIOError)
-    assert not output.exists()
-    assert not output.with_suffix(".zip.sha256").exists()
+LINUX_MUTATION_ONLY = _linux_mutation_only
 
 
 def test_source_identity_resolves_exact_head_and_tracked_files(
@@ -1152,6 +1130,16 @@ def _runtime_repo(root: Path) -> tuple[str, ...]:
                 "production_release_verifier.py"
             ).read_bytes()
         ),
+        "pipeline/production_release_fs.py": (
+            Path(builder_module.__file__).with_name(
+                "production_release_fs.py"
+            ).read_bytes()
+        ),
+        "pipeline/durable_io.py": (
+            Path(builder_module.__file__).with_name(
+                "durable_io.py"
+            ).read_bytes()
+        ),
         "scripts/verify_production_release.py": (
             Path(__file__).parents[1]
             .joinpath("scripts/verify_production_release.py")
@@ -1266,7 +1254,41 @@ def test_runtime_sources_replace_development_runner(tmp_path: Path) -> None:
     assert not any(row.source_path == repo / "make.py" for row in payloads)
 
 
+def test_archive_member_streaming_keeps_open_sources_bounded() -> None:
+    active = 0
+    maximum = 0
+
+    class CountingBytesIO(io.BytesIO):
+        def __enter__(self):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            return self
+
+        def __exit__(self, *_args):
+            nonlocal active
+            active -= 1
+            self.close()
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for index in range(1101):
+            with CountingBytesIO(b"x") as source:
+                builder_module._write_archive_member(
+                    archive,
+                    wrapper="runtime",
+                    relative=f"files/{index:04d}.bin",
+                    source=source,
+                    expected_bytes=1,
+                    expected_sha256=hashlib.sha256(b"x").hexdigest(),
+                )
+
+    assert maximum == 1
+    assert active == 0
+
+
 @pytest.mark.parametrize("dirty_kind", ("tracked", "untracked"))
+@LINUX_MUTATION_ONLY
 def test_build_rejects_real_dirty_release_owned_source_before_staging(
     tmp_path: Path,
     monkeypatch,
@@ -1295,6 +1317,7 @@ def test_build_rejects_real_dirty_release_owned_source_before_staging(
 
 
 @pytest.mark.parametrize("identity_kind", ("commit", "tracked-files"))
+@LINUX_MUTATION_ONLY
 def test_build_rejects_supplied_identity_that_is_not_exact_live_identity(
     tmp_path: Path,
     monkeypatch,
@@ -1333,6 +1356,7 @@ def test_build_rejects_supplied_identity_that_is_not_exact_live_identity(
     assert not output.with_suffix(".zip.sha256").exists()
 
 
+@LINUX_MUTATION_ONLY
 def test_build_rejects_dirty_edit_injected_after_initial_clean_check(
     tmp_path: Path,
     monkeypatch,
@@ -1371,6 +1395,7 @@ def test_build_rejects_dirty_edit_injected_after_initial_clean_check(
     assert not output.with_suffix(".zip.sha256").exists()
 
 
+@LINUX_MUTATION_ONLY
 def test_build_rechecks_identity_after_final_cleanliness_check(
     tmp_path: Path,
     monkeypatch,
@@ -1414,6 +1439,7 @@ def test_build_rechecks_identity_after_final_cleanliness_check(
     assert not output.with_suffix(".zip.sha256").exists()
 
 
+@LINUX_MUTATION_ONLY
 def test_transient_worktree_edit_cannot_enter_archive_under_original_commit(
     tmp_path: Path,
     monkeypatch,
@@ -1426,32 +1452,23 @@ def test_transient_worktree_edit_cannot_enter_archive_under_original_commit(
     runtime_runner = repo / "release/production-runtime-runner.py"
     committed_bytes = runtime_runner.read_bytes()
     transient_bytes = bytes([committed_bytes[0] ^ 0x01]) + committed_bytes[1:]
-    real_resolver = builder_module._runtime_source_payloads
-    real_copy = builder_module._copy_bound_source
+    real_write = builder_module._write_git_archive_member
 
-    def resolve_during_transient_edit(source_root, tracked_files):
-        runtime_runner.write_bytes(transient_bytes)
-        return real_resolver(source_root, tracked_files)
-
-    def copy_then_restore(source, destination):
+    def write_during_transient_edit(*args, **kwargs):
+        if kwargs["destination"] == "make.py":
+            runtime_runner.write_bytes(transient_bytes)
         try:
-            return real_copy(source, destination)
+            return real_write(*args, **kwargs)
         finally:
-            if source.destination_path == "make.py":
+            if kwargs["destination"] == "make.py":
                 runtime_runner.write_bytes(committed_bytes)
 
     monkeypatch.setattr(
         builder_module,
-        "_copy_bound_source",
-        copy_then_restore,
+        "_write_git_archive_member",
+        write_during_transient_edit,
     )
     try:
-        monkeypatch.setattr(
-            builder_module,
-            "_runtime_source_payloads",
-            resolve_during_transient_edit,
-        )
-
         result = _build_committed_runtime(
             repo=repo,
             fixture=fixture,
@@ -1481,6 +1498,7 @@ def test_transient_worktree_edit_cannot_enter_archive_under_original_commit(
     ).hexdigest()
 
 
+@LINUX_MUTATION_ONLY
 def test_build_rejects_git_replacement_commit_before_publication(
     tmp_path: Path,
     monkeypatch,
@@ -1533,6 +1551,7 @@ def test_build_rejects_git_replacement_commit_before_publication(
     assert not output.with_suffix(".zip.sha256").exists()
 
 
+@LINUX_MUTATION_ONLY
 def test_build_rejects_git_tree_symlink_even_if_worktree_path_is_regular(
     tmp_path: Path,
     monkeypatch,
@@ -1577,7 +1596,8 @@ def test_build_rejects_git_tree_symlink_even_if_worktree_path_is_regular(
     assert not output.with_suffix(".zip.sha256").exists()
 
 
-def test_streaming_git_failure_removes_snapshot_and_partial_output(
+@LINUX_MUTATION_ONLY
+def test_streaming_git_failure_retains_partial_archive(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1613,12 +1633,12 @@ def test_streaming_git_failure_removes_snapshot_and_partial_output(
         )
 
     assert "private git executable path" not in str(captured.value)
-    assert isinstance(captured.value.__cause__, FileNotFoundError)
-    assert not output.exists()
+    assert isinstance(captured.value.__cause__, ProductionReleaseBuilderError)
+    assert isinstance(captured.value.__cause__.__cause__, FileNotFoundError)
+    assert output.exists()
     assert not output.with_suffix(".zip.sha256").exists()
-    assert not (tmp_path / ".runtime.zip.sources").exists()
-    assert not (tmp_path / ".runtime.zip.staging").exists()
-    assert not (tmp_path / ".runtime.zip.partial").exists()
+    assert captured.value.published == ("runtime.zip",)
+    assert "runtime.zip" in captured.value.retained
 
 
 def test_clean_source_gate_tracks_template_not_development_runner(
@@ -1648,6 +1668,7 @@ def test_clean_source_gate_tracks_template_not_development_runner(
     assert observed["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
+@LINUX_MUTATION_ONLY
 def test_build_is_deterministic_verified_and_no_replace(
     tmp_path: Path,
     monkeypatch,
@@ -1711,9 +1732,12 @@ def test_build_is_deterministic_verified_and_no_replace(
     assert runner_artifact["sha256"] == hashlib.sha256(
         packaged_runner
     ).hexdigest()
-    assert [info.filename for info in infos] == sorted(
-        info.filename for info in infos
-    )
+    names = [info.filename for info in infos]
+    assert names[:-2] == sorted(names[:-2])
+    assert names[-2:] == [
+        "nantai-3d-v1.0.0/PRODUCTION-RELEASE.json",
+        f"nantai-3d-v1.0.0/{CHECKSUMS_NAME}",
+    ]
     assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in infos)
     assert all(
         stat.S_IFMT(info.external_attr >> 16) == stat.S_IFREG
@@ -1731,7 +1755,8 @@ def test_build_is_deterministic_verified_and_no_replace(
         )
 
 
-def test_build_failure_removes_partial_publication(
+@LINUX_MUTATION_ONLY
+def test_build_failure_retains_partial_archive_without_commit_marker(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1751,8 +1776,8 @@ def test_build_failure_removes_partial_publication(
     )
     monkeypatch.setattr(
         builder_module,
-        "verify_production_release_archive",
-        lambda _path: (_ for _ in ()).throw(RuntimeError("injected")),
+        "verify_production_release_archive_stream",
+        lambda _stream: (_ for _ in ()).throw(RuntimeError("injected")),
     )
 
     with pytest.raises(ProductionReleaseBuilderError, match="injected"):
@@ -1764,91 +1789,11 @@ def test_build_failure_removes_partial_publication(
             source_commit=identity.source_commit,
             tracked_files=identity.tracked_files,
         )
-    assert not output.exists()
+    assert output.exists()
     assert not output.with_suffix(".zip.sha256").exists()
-    assert not tuple(tmp_path.glob(".*.staging"))
-    assert not tuple(tmp_path.glob(".*.partial"))
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
-def test_sidecar_rollback_does_not_follow_swapped_parent_junction(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    fixture, context = _scene_context(tmp_path / "private", monkeypatch)
-    repo = tmp_path / "repo"
-    identity = _committed_runtime_repo(repo)
-    parent = tmp_path / "publish-parent"
-    parent.mkdir()
-    output = parent / "runtime.zip"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    sentinel = outside / "runtime.zip.sha256"
-    sentinel.write_bytes(b"outside-sentinel")
-    original_parent = tmp_path / "publish-parent-original"
-    original_link = builder_module._link_no_replace
-    link_calls = 0
-    swapped = False
-    monkeypatch.setattr(
-        builder_module,
-        "load_latest_real_scene_acceptance",
-        lambda _root: fixture["report_path"],
-    )
-    monkeypatch.setattr(
-        builder_module,
-        "derive_production_release_context",
-        lambda _path: context,
-    )
-
-    def fail_archive_link_after_parent_swap(source: Path, destination: Path):
-        nonlocal link_calls, swapped
-        link_calls += 1
-        if link_calls == 1:
-            original_link(source, destination)
-            parent.rename(original_parent)
-            created = subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if created.returncode != 0:
-                original_parent.rename(parent)
-                pytest.skip(f"junction creation unavailable: {created.stderr}")
-            swapped = True
-            return
-        raise OSError("injected archive publication failure")
-
-    monkeypatch.setattr(
-        builder_module,
-        "_link_no_replace",
-        fail_archive_link_after_parent_swap,
-    )
-    try:
-        with pytest.raises(
-            ProductionReleaseBuilderError,
-            match="publication failure",
-        ):
-            build_production_release_archive(
-                repo_root=repo,
-                acceptance_root=fixture["root"],
-                output_path=output,
-                version="v1.0.0",
-                source_commit=identity.source_commit,
-                tracked_files=identity.tracked_files,
-            )
-        assert sentinel.read_bytes() == b"outside-sentinel"
-    finally:
-        if swapped:
-            removed = subprocess.run(
-                ["cmd", "/c", "rmdir", str(parent)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            assert removed.returncode == 0, removed.stderr
-
-
+@LINUX_MUTATION_ONLY
 def test_fresh_runtime_runner_verification_is_repeatable(
     tmp_path: Path,
     monkeypatch,
@@ -1896,3 +1841,27 @@ def test_fresh_runtime_runner_verification_is_repeatable(
         assert completed.returncode == 0, completed.stderr
         assert json.loads(completed.stdout)["valid"] is True
     assert not tuple(package_root.rglob("__pycache__"))
+@pytest.mark.skipif(
+    sys.platform == "linux",
+    reason="non-Linux platform contract",
+)
+def test_build_rejects_non_linux_before_any_output_creation(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "runtime.zip"
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="private Linux builder",
+    ):
+        build_production_release_archive(
+            repo_root=tmp_path,
+            acceptance_root=tmp_path,
+            output_path=output,
+            version="v1.0.0",
+            source_commit="a" * 40,
+            tracked_files=(),
+        )
+
+    assert not output.exists()
+    assert not output.with_suffix(".zip.sha256").exists()

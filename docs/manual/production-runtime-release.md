@@ -28,21 +28,28 @@ verify-production-assets
 它们负责重验私有 acceptance、构建候选包、隐私审计和最终四件套整理。正式 runtime
 不会携带这些维护入口，也不会携带它们所需的私有策略、控制点或工作区。
 
+Production 的 `build-production`、带报告落盘的隐私审计、`stage-production-assets`
+和仓库内置安全解压都只允许在受控的 **private Linux builder** 上执行。实现从 Linux
+目录描述符逐组件打开并以 `O_NOFOLLOW` / `O_EXCL` 追加写入；一旦创建命名空间，失败
+产物会保留供审计，不会回滚删除。Windows 和 macOS 继续支持只读 ZIP/四件套复验、
+解压后 runtime tree 复验和 Viewer 运行，但不能执行这些 Production mutation。
+
 ## 构建
 
 私有验收根通常位于忽略的 `.nantai-studio/` 工作区。下面三个变量都必须显式提供：
 
-```powershell
-$env:ACCEPTANCE_ROOT = (Resolve-Path .nantai-studio\real-scene\accepted).Path
-$env:VERSION = "v1.0.0"
-New-Item -ItemType Directory -Force dist | Out-Null
-$candidate = (Join-Path $PWD "dist\nantai-3d-v1.0.0-candidate.zip")
-$env:ARCHIVE = $candidate
+```bash
+export ACCEPTANCE_ROOT="$PWD/.nantai-studio/real-scene/accepted"
+export VERSION="v1.0.0"
+mkdir -p dist
+export CANDIDATE="$PWD/dist/nantai-3d-v1.0.0-candidate.zip"
+export ARCHIVE="$CANDIDATE"
 python make.py build-production
 ```
 
 `build-production` 会重新打开并验证私有 acceptance，投影脱敏的公开证据，计算 runtime
-scene closure，再以 no-replace 方式生成确定性 ZIP。已有目标不会被覆盖。`$candidate`
+scene closure，再以 append-only/no-replace 方式生成确定性 ZIP。已有目标不会被覆盖。
+`$CANDIDATE`
 是本次发布事务唯一的私有候选路径；候选名不是最终公开文件名，不得直接上传。
 
 ## 独立验证候选字节
@@ -50,8 +57,8 @@ scene closure，再以 no-replace 方式生成确定性 ZIP。已有目标不会
 发布前先验证刚构建的同一候选字节，不能换用相似文件名、网页显示的哈希或构建机上的
 旧文件：
 
-```powershell
-$env:ARCHIVE = $candidate
+```bash
+export ARCHIVE="$CANDIDATE"
 python make.py verify-production
 ```
 
@@ -65,10 +72,10 @@ SHA-256/字节数、`SHA256SUMS.txt`、公共证据、scene manifest 与
 扫描最终 ZIP。policy 的 needle 是至少 8 bytes 的 canonical base64；policy 和报告都
 必须位于公开包之外：
 
-```powershell
-$env:ARCHIVE = $candidate
-$env:PRIVACY_POLICY = (Resolve-Path .nantai-studio\private\privacy-policy.json).Path
-$env:PRIVACY_REPORT = (Join-Path $PWD ".nantai-studio\verification\privacy-v1.0.0.json")
+```bash
+export ARCHIVE="$CANDIDATE"
+export PRIVACY_POLICY="$PWD/.nantai-studio/private/privacy-policy.json"
+export PRIVACY_REPORT="$PWD/.nantai-studio/verification/privacy-v1.0.0.json"
 python make.py audit-production-privacy
 ```
 
@@ -85,14 +92,14 @@ Windows/POSIX 私有绝对路径、symlink、非 regular file、额外文件或�
 正式发布流程要求运行 `stage-production-assets`；该命令会在当前精确 HEAD 从
 `ACCEPTANCE_ROOT` + `VERSION` 重新打开 real acceptance，并在与候选构建相同的
 pinned builder environment 中做 deterministic acceptance rebuild。它把重建产物与
-输入候选逐字节比对；只有完全一致才继续隐私审计，并且只发布四个最终公开资产：
+输入候选的确定性 SHA-256 比对；只有一致才继续，并且只发布四个最终公开资产：
 
-```powershell
-$env:ACCEPTANCE_ROOT = (Resolve-Path .nantai-studio\real-scene\accepted).Path
-$env:VERSION = "v1.0.0"
-$env:ARCHIVE = $candidate
-$env:PRIVACY_POLICY = (Resolve-Path .nantai-studio\private\privacy-policy.json).Path
-$env:RELEASE_DIR = (Join-Path $PWD ".nantai-studio\releases\v1.0.0\public-assets")
+```bash
+export ACCEPTANCE_ROOT="$PWD/.nantai-studio/real-scene/accepted"
+export VERSION="v1.0.0"
+export ARCHIVE="$CANDIDATE"
+export PRIVACY_POLICY="$PWD/.nantai-studio/private/privacy-policy.json"
+export RELEASE_DIR="$PWD/.nantai-studio/releases/v1.0.0/public-assets"
 python make.py stage-production-assets
 ```
 
@@ -116,15 +123,15 @@ SHA256SUMS.txt
 
 发布后把四个 GitHub 资产下载到同一个全新目录，再整体复验。此时下载的 canonical
 archive 名称是 `nantai-3d-v1.0.0-runtime.zip`；它由 staging 生成，与私有
-`$candidate` 的候选名称明确分离：
+`$CANDIDATE` 的候选名称明确分离：
 
 ```powershell
 $env:RELEASE_DIR = (Resolve-Path .\downloaded-v1.0.0-assets).Path
 python make.py verify-production-assets
 ```
 
-该命令要求目录精确包含四个 regular non-link 文件，验证 archive sidecar，独立解压
-并复验 ZIP，再逐字节比较外置与包内的 `PRODUCTION-RELEASE.json`、
+该命令要求目录精确包含四个 regular non-link 文件，验证 archive sidecar，直接流式
+复验 ZIP（不创建临时解压目录），再逐字节比较外置与包内的 `PRODUCTION-RELEASE.json`、
 `SHA256SUMS.txt`。版本、package content ID、公开文件名或任意一项不一致都会拒绝，
 modeled fixture 也不能通过。`verify-production-assets` 只检查下载得到的四个文件之内
 的内部字节绑定与内部合同是否自洽，并报告其中声明和 source-bound identity。它不能证明发布者来源或真实性，
@@ -139,6 +146,10 @@ modeled fixture 也不能通过。`verify-production-assets` 只检查下载得�
 
 下载后先解压到空目录。包根 `make.py` 是独立的最小 runner，不是源码仓库的开发
 runner。它的解压包命令只有：
+
+仓库内置的 fail-closed 安全解压只在 private Linux builder 上提供。Windows/macOS
+应先对下载四件套运行 `verify-production-assets`，再用平台解压工具解到全新空目录，
+最后在解压根运行 `python make.py verify`；平台解压不能替代前后两次验证。
 
 ```text
 python make.py help

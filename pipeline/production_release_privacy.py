@@ -4,33 +4,33 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
 import stat
-import tempfile
-import uuid
+import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import BinaryIO
 
-from pipeline.durable_io import (
-    DurableIOError,
-    _is_linklike,
-    capture_real_directory_identity,
-    first_linklike_path,
-    flush_file,
-    matches_real_directory_identity,
-    publish_file_noreplace,
+from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.production_release_fs import (
+    ProductionReleaseFSError,
+    open_bound_directory,
+    require_linux_mutation_support,
 )
 from pipeline.production_release_verifier import (
     ProductionReleaseVerification,
     ProductionReleaseVerificationError,
-    extract_production_release_archive,
+    verify_production_release_archive_stream,
     verify_production_release_tree,
 )
 from pipeline.release_archive import (
+    ArchiveLimits,
     ReleaseArchiveError,
     canonical_json_bytes,
+    inspect_zip_members,
     safe_posix_member_path,
 )
 
@@ -72,6 +72,17 @@ _POSIX_ABSOLUTE_PATH = re.compile(
 class ProductionReleasePrivacyError(ValueError):
     """Raised when a Production privacy audit contract cannot be trusted."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        published: tuple[str, ...] = (),
+        retained: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.published = published
+        self.retained = retained
+
 
 @dataclass(frozen=True, order=True)
 class PrivacyFinding:
@@ -104,65 +115,48 @@ def publish_privacy_report(
     report: ProductionPrivacyReport,
     output: str | Path,
 ) -> None:
-    """Durably publish one canonical report without replacing prior evidence."""
+    """Append-only publish one canonical report on a private Linux builder."""
 
     destination = Path(output).absolute()
     try:
-        redirected = first_linklike_path(Path(destination.anchor), destination)
-    except (OSError, ValueError) as exc:
-        raise ProductionReleasePrivacyError(
-            "privacy report destination is unsafe"
-        ) from exc
-    if destination.exists() or redirected == destination:
-        raise ProductionReleasePrivacyError(
-            "privacy report destination already exists"
-        )
-    if redirected is not None or not destination.parent.is_dir():
-        raise ProductionReleasePrivacyError(
-            "privacy report parent directory is missing"
-        )
+        require_linux_mutation_support()
+    except ProductionReleaseFSError as exc:
+        raise ProductionReleasePrivacyError(str(exc)) from exc
+    payload = privacy_report_bytes(report)
+    created = False
     try:
-        parent_identity = capture_real_directory_identity(destination.parent)
-    except DurableIOError as exc:
-        raise ProductionReleasePrivacyError(
-            "privacy report parent directory is unsafe"
-        ) from exc
-    temporary = destination.parent / (
-        f".{destination.name}.{uuid.uuid4().hex}.tmp"
-    )
-    try:
-        if not matches_real_directory_identity(
-            destination.parent,
-            parent_identity,
-        ):
-            raise DurableIOError("privacy report parent changed")
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(privacy_report_bytes(report))
-        flush_file(temporary)
-        if not matches_real_directory_identity(
-            destination.parent,
-            parent_identity,
-        ):
-            raise DurableIOError("privacy report parent changed")
-        publish_file_noreplace(temporary, destination)
-    except (DurableIOError, FileExistsError, OSError) as exc:
-        raise ProductionReleasePrivacyError(
-            "privacy report durable publication failed"
-        ) from exc
-    finally:
-        if matches_real_directory_identity(
-            destination.parent,
-            parent_identity,
-        ):
+        with open_bound_directory(destination.parent) as parent:
             try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+                bound = parent.create_file(destination.name, mode=0o600)
+            except FileExistsError as exc:
+                raise ProductionReleasePrivacyError(
+                    "privacy report destination already exists"
+                ) from exc
+            created = True
+            with bound:
+                bound.write_all(payload)
+                bound.finish()
+                observed_sha, observed_bytes = bound.digest()
+                if (
+                    observed_bytes != len(payload)
+                    or observed_sha != hashlib.sha256(payload).hexdigest()
+                ):
+                    raise ProductionReleasePrivacyError(
+                        "privacy report changed while held; retained",
+                        published=(destination.name,),
+                        retained=(destination.name,),
+                    )
+            parent.fsync()
+    except ProductionReleasePrivacyError:
+        raise
+    except (ProductionReleaseFSError, OSError) as exc:
+        state = (destination.name,) if created else ()
+        raise ProductionReleasePrivacyError(
+            "privacy report publication failed; "
+            f"published={state}; retained={state}",
+            published=state,
+            retained=state,
+        ) from exc
 
 
 def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -362,6 +356,46 @@ def _read_scan_chunk(stream) -> bytes:
     return stream.read(PRIVACY_SCAN_CHUNK_BYTES)
 
 
+def _scan_stream(
+    relative: str,
+    stream,
+    policy: _PrivacyPolicy,
+    *,
+    expected_bytes: int,
+) -> set[PrivacyFinding]:
+    overlap_bytes = max(
+        _BUILTIN_OVERLAP_BYTES,
+        max(len(needle) for needle in policy.needles) - 1,
+    )
+    carry = b""
+    findings: set[PrivacyFinding] = set()
+    observed_bytes = 0
+    while True:
+        chunk = _read_scan_chunk(stream)
+        if not chunk:
+            break
+        if len(chunk) > PRIVACY_SCAN_CHUNK_BYTES:
+            raise ProductionReleasePrivacyError(
+                f"privacy scan chunk exceeded its bound: {relative}"
+            )
+        observed_bytes += len(chunk)
+        if observed_bytes > expected_bytes:
+            raise ProductionReleasePrivacyError(
+                f"release file changed during privacy scan: {relative}"
+            )
+        window = carry + chunk
+        findings.update(
+            PrivacyFinding(category=category, path=relative)
+            for category in _window_categories(window, policy)
+        )
+        carry = window[-overlap_bytes:]
+    if observed_bytes != expected_bytes:
+        raise ProductionReleasePrivacyError(
+            f"release file changed during privacy scan: {relative}"
+        )
+    return findings
+
+
 def _scan_file(
     relative: str,
     path: Path,
@@ -380,13 +414,6 @@ def _scan_file(
             f"release file became unsafe: {relative}"
         )
 
-    overlap_bytes = max(
-        _BUILTIN_OVERLAP_BYTES,
-        max(len(needle) for needle in policy.needles) - 1,
-    )
-    carry = b""
-    findings: set[PrivacyFinding] = set()
-    observed_bytes = 0
     try:
         with path.open("rb") as stream:
             descriptor_before = os.fstat(stream.fileno())
@@ -394,21 +421,12 @@ def _scan_file(
                 raise ProductionReleasePrivacyError(
                     f"release file changed before privacy scan: {relative}"
                 )
-            while True:
-                chunk = _read_scan_chunk(stream)
-                if not chunk:
-                    break
-                if len(chunk) > PRIVACY_SCAN_CHUNK_BYTES:
-                    raise ProductionReleasePrivacyError(
-                        f"privacy scan chunk exceeded its bound: {relative}"
-                    )
-                observed_bytes += len(chunk)
-                window = carry + chunk
-                findings.update(
-                    PrivacyFinding(category=category, path=relative)
-                    for category in _window_categories(window, policy)
-                )
-                carry = window[-overlap_bytes:]
+            findings = _scan_stream(
+                relative,
+                stream,
+                policy,
+                expected_bytes=path_before.st_size,
+            )
             descriptor_after = os.fstat(stream.fileno())
         path_after = path.lstat()
     except ProductionReleasePrivacyError:
@@ -422,7 +440,6 @@ def _scan_file(
     if (
         expected != _signature(descriptor_after)
         or expected != _signature(path_after)
-        or observed_bytes != path_before.st_size
     ):
         raise ProductionReleasePrivacyError(
             f"release file changed during privacy scan: {relative}"
@@ -480,6 +497,129 @@ def _require_same_verification(
         )
 
 
+def audit_production_release_privacy_stream(
+    source_stream: BinaryIO,
+    policy_path: Path,
+) -> ProductionPrivacyReport:
+    """Audit one already-held archive inode without reopening its name."""
+
+    previous = source_stream.tell()
+    try:
+        verification_before = verify_production_release_archive_stream(
+            source_stream
+        )
+    except ProductionReleaseVerificationError as exc:
+        raise ProductionReleasePrivacyError(
+            "Production archive verification failed before privacy scan"
+        ) from exc
+    policy_path = _require_safe_policy_location(policy_path)
+    policy = _load_policy(policy_path)
+    try:
+        findings: set[PrivacyFinding] = set()
+        source_stream.seek(0)
+        with zipfile.ZipFile(source_stream) as archive:
+            inspected = inspect_zip_members(archive, ArchiveLimits())
+            wrappers = {member.path.parts[0] for member in inspected}
+            if len(wrappers) != 1:
+                raise ProductionReleasePrivacyError(
+                    "Production archive wrapper is invalid"
+                )
+            infos = {
+                info.filename: info for info in archive.infolist()
+            }
+            for member in inspected:
+                if (
+                    stat.S_IFMT(member.unix_mode) != stat.S_IFREG
+                    or len(member.path.parts) < 2
+                ):
+                    raise ProductionReleasePrivacyError(
+                        "Production archive member is unsafe"
+                    )
+                relative = safe_posix_member_path(
+                    "/".join(member.path.parts[1:])
+                ).as_posix()
+                with archive.open(
+                    infos[member.path.as_posix()],
+                    "r",
+                ) as member_stream:
+                    findings.update(
+                        _scan_stream(
+                            relative,
+                            member_stream,
+                            policy,
+                            expected_bytes=member.byte_length,
+                        )
+                    )
+    except ProductionReleasePrivacyError:
+        raise
+    except (
+        OSError,
+        EOFError,
+        RuntimeError,
+        NotImplementedError,
+        zipfile.BadZipFile,
+        ReleaseArchiveError,
+    ) as exc:
+        raise ProductionReleasePrivacyError(
+            "Production archive cannot be privacy scanned"
+        ) from exc
+    try:
+        verification_after = verify_production_release_archive_stream(
+            source_stream
+        )
+    except ProductionReleaseVerificationError as exc:
+        raise ProductionReleasePrivacyError(
+            "Production archive verification failed after privacy scan"
+        ) from exc
+    finally:
+        source_stream.seek(previous)
+    _require_same_verification(verification_before, verification_after)
+    ordered = tuple(sorted(findings))
+    return ProductionPrivacyReport(
+        schema=PRIVACY_REPORT_SCHEMA,
+        valid=not ordered,
+        package_content_id=verification_after.package_content_id,
+        finding_count=len(ordered),
+        findings=ordered,
+        scene_trust_effect="none",
+    )
+
+
+def _audit_verified_archive(
+    source: Path,
+    policy_path: Path,
+) -> ProductionPrivacyReport:
+    try:
+        path_before = source.lstat()
+        with source.open("rb") as source_stream:
+            descriptor_before = os.fstat(source_stream.fileno())
+            if _signature(path_before) != _signature(descriptor_before):
+                raise ProductionReleasePrivacyError(
+                    "Production archive changed before privacy scan"
+                )
+            result = audit_production_release_privacy_stream(
+                source_stream,
+                policy_path,
+            )
+            descriptor_after = os.fstat(source_stream.fileno())
+        path_after = source.lstat()
+    except ProductionReleasePrivacyError:
+        raise
+    except OSError as exc:
+        raise ProductionReleasePrivacyError(
+            "Production archive cannot be privacy scanned"
+        ) from exc
+    expected = _signature(path_before)
+    if (
+        expected != _signature(descriptor_after)
+        or expected != _signature(path_after)
+    ):
+        raise ProductionReleasePrivacyError(
+            "Production archive changed during privacy scan"
+        )
+    return result
+
+
 def audit_production_release_privacy(
     target: str | Path,
     policy: str | Path,
@@ -501,14 +641,8 @@ def audit_production_release_privacy(
         )
     if stat.S_ISDIR(source_stat.st_mode):
         return _audit_verified_tree(source, policy_path)
-    with tempfile.TemporaryDirectory(
-        prefix="nantai-production-privacy-"
-    ) as temporary:
-        root = Path(temporary) / "runtime"
-        try:
-            extract_production_release_archive(source, root)
-        except ProductionReleaseVerificationError as exc:
-            raise ProductionReleasePrivacyError(
-                "Production archive verification failed before privacy scan"
-            ) from exc
-        return _audit_verified_tree(root, policy_path)
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise ProductionReleasePrivacyError(
+            "Production privacy target is unavailable or unsafe"
+        )
+    return _audit_verified_archive(source, policy_path)

@@ -32,12 +32,12 @@ def test_manual_owns_the_exact_production_build_verify_and_run_path() -> None:
     for required in (
         "v1.0.0-preview.2",
         "Production V1",
-        "$env:ACCEPTANCE_ROOT",
-        "$env:VERSION",
-        "$env:ARCHIVE",
-        "$env:PRIVACY_POLICY",
-        "$env:PRIVACY_REPORT",
-        "$env:RELEASE_DIR",
+        "export ACCEPTANCE_ROOT",
+        "export VERSION",
+        "export ARCHIVE",
+        "export PRIVACY_POLICY",
+        "export PRIVACY_REPORT",
+        "export RELEASE_DIR",
         "python make.py build-production",
         "python make.py verify-production",
         "python make.py audit-production-privacy",
@@ -131,7 +131,7 @@ def test_manual_separates_repository_and_extracted_runtime_commands() -> None:
         "stage-production-assets",
         "verify-production-assets",
     ):
-        assert maintenance_target not in runtime_section
+            assert f"python make.py {maintenance_target}" not in runtime_section
 
 
 def test_manual_build_example_creates_the_archive_parent_before_building() -> None:
@@ -140,11 +140,11 @@ def test_manual_build_example_creates_the_archive_parent_before_building() -> No
         "## 独立验证候选字节",
         1,
     )[0]
-    create_parent = "New-Item -ItemType Directory -Force dist | Out-Null"
+    create_parent = "mkdir -p dist"
     candidate_assignment = (
-        '$candidate = (Join-Path $PWD "dist\\nantai-3d-v1.0.0-candidate.zip")'
+        'export CANDIDATE="$PWD/dist/nantai-3d-v1.0.0-candidate.zip"'
     )
-    archive_assignment = "$env:ARCHIVE = $candidate"
+    archive_assignment = 'export ARCHIVE="$CANDIDATE"'
 
     assert create_parent in build
     assert candidate_assignment in build
@@ -176,14 +176,14 @@ def test_manual_reuses_one_private_candidate_through_staging() -> None:
     )[0]
 
     assert (
-        '$candidate = (Join-Path $PWD "dist\\nantai-3d-v1.0.0-candidate.zip")'
+        'export CANDIDATE="$PWD/dist/nantai-3d-v1.0.0-candidate.zip"'
         in build
     )
     for section in (build, verification, privacy, staging):
-        assert "$env:ARCHIVE = $candidate" in section
-    assert "$candidate =" not in verification
-    assert "$candidate =" not in privacy
-    assert "$candidate =" not in staging
+        assert 'export ARCHIVE="$CANDIDATE"' in section
+    assert "export CANDIDATE=" not in verification
+    assert "export CANDIDATE=" not in privacy
+    assert "export CANDIDATE=" not in staging
 
 
 def test_manual_separates_private_candidate_from_downloaded_canonical_name() -> None:
@@ -214,8 +214,8 @@ def test_manual_distinguishes_acceptance_staging_from_download_verification() ->
     )[0]
     stage_command = staging.index("python make.py stage-production-assets")
 
-    assert staging.index("$env:ACCEPTANCE_ROOT") < stage_command
-    assert staging.index("$env:VERSION") < stage_command
+    assert staging.index("export ACCEPTANCE_ROOT") < stage_command
+    assert staging.index("export VERSION") < stage_command
     assert re.search(
         r"正式发布流程要求运行.*stage-production-assets",
         staging,
@@ -234,11 +234,11 @@ def test_manual_distinguishes_acceptance_staging_from_download_verification() ->
         re.DOTALL,
     )
     assert re.search(
-        r"重建产物.*输入候选.*逐字节比对.*完全一致"
-        r".*隐私审计.*只发布四个最终公开资产",
+        r"重建产物.*输入候选.*(?:确定性 )?SHA-256 比对",
         staging,
         re.DOTALL,
     )
+    assert "只发布四个最终公开资产" in staging
     assert re.search(
         r"不同 zlib.*ZIP bytes.*不是可移植身份",
         staging,
@@ -418,6 +418,10 @@ def test_ci_has_three_os_production_contract_and_content_id_compare_jobs() -> No
     assert "modeled-contract-not-real-release" in matrix_job
     assert "tests/probe_production_release_content_id.py" in matrix_job
     assert "--noconftest" in matrix_job
+    assert '-m "not production_mutation"' in matrix_job
+    assert "if: matrix.os == 'ubuntu-latest'" in matrix_job
+    assert "-m production_mutation" in matrix_job
+    assert "tests/test_production_release_fs.py" in matrix_job
     for dependency in (
         "numpy==",
         "pydantic==",

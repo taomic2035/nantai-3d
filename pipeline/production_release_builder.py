@@ -6,23 +6,18 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
 from pydantic import ValidationError
 
-from pipeline.durable_io import (
-    DurableIOError,
-    _is_linklike,
-    capture_real_directory_identity,
-    first_linklike_path,
-    matches_real_directory_identity,
-)
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
     PRIVATE_EVIDENCE_OMITTED,
@@ -32,9 +27,16 @@ from pipeline.production_release_contract import (
     build_production_receipt,
     validate_public_evidence,
 )
+from pipeline.production_release_fs import (
+    BoundDirectory,
+    BoundFile,
+    ProductionReleaseFSError,
+    ProductionReleaseMutationError,
+    open_bound_directory,
+    require_linux_mutation_support,
+)
 from pipeline.production_release_verifier import (
-    verify_production_release_archive,
-    verify_production_release_tree,
+    verify_production_release_archive_stream,
 )
 from pipeline.production_training_closure import (
     ProductionTrainingClosureError,
@@ -85,6 +87,17 @@ _MAXIMUM_PUBLIC_SOURCE_BYTES = 4 * 1024 * 1024 * 1024
 
 class ProductionReleaseBuilderError(ValueError):
     """Raised when private acceptance cannot produce a safe public projection."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        published: tuple[str, ...] = (),
+        retained: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.published = published
+        self.retained = retained
 
 
 def _git_provenance_command(arguments: Iterable[str]) -> list[str]:
@@ -245,6 +258,7 @@ class ProductionReleaseBuild:
     total_bytes: int
     scene_identity: str
     acceptance_report_sha256: str
+    retained_private_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1378,152 +1392,6 @@ def _git_tree_blob(
     return object_id
 
 
-def _snapshot_directory(root: Path, relative_parent: Path) -> Path:
-    current = root
-    for part in relative_parent.parts:
-        current = current / part
-        try:
-            current.mkdir()
-        except FileExistsError:
-            pass
-        try:
-            observed = current.lstat()
-        except OSError as exc:
-            raise ProductionReleaseBuilderError(
-                "Git source snapshot directory is unavailable"
-            ) from exc
-        if _is_linklike(current, observed=observed) or not stat.S_ISDIR(
-            observed.st_mode
-        ):
-            raise ProductionReleaseBuilderError(
-                "Git source snapshot directory must be a real directory"
-            )
-    return current
-
-
-def _stream_git_blob(
-    repo_root: Path,
-    *,
-    object_id: str,
-    destination: Path,
-) -> None:
-    descriptor: int | None = None
-    process = None
-    digest = hashlib.sha256()
-    byte_length = 0
-    command = _git_provenance_command(
-        ["cat-file", "blob", object_id],
-    )
-    try:
-        descriptor = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        process = subprocess.Popen(
-            command,
-            cwd=repo_root,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=_git_provenance_environment(),
-        )
-        if process.stdout is None:
-            raise TypeError("Git blob stdout pipe is unavailable")
-        with process.stdout as source_stream:
-            with os.fdopen(descriptor, "wb") as destination_stream:
-                descriptor = None
-                while True:
-                    chunk = source_stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    byte_length += len(chunk)
-                    destination_stream.write(chunk)
-        returncode = process.wait()
-        if returncode != 0:
-            cause = subprocess.CalledProcessError(
-                returncode,
-                command,
-            )
-            raise ProductionReleaseBuilderError(
-                "Git source snapshot cat-file blob failed"
-            ) from cause
-    except ProductionReleaseBuilderError:
-        raise
-    except (OSError, TypeError, ValueError) as exc:
-        if process is not None and process.poll() is None:
-            try:
-                process.kill()
-                process.wait()
-            except OSError:
-                pass
-        raise ProductionReleaseBuilderError(
-            "Git source snapshot cat-file blob failed"
-        ) from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    try:
-        observed = stable_regular_file_digest(destination)
-    except ReleaseArchiveError as exc:
-        raise ProductionReleaseBuilderError(
-            "Git source snapshot blob validation failed"
-        ) from exc
-    if (
-        observed.byte_length != byte_length
-        or observed.sha256 != digest.hexdigest()
-    ):
-        raise ProductionReleaseBuilderError(
-            "Git source snapshot blob changed during materialization"
-        )
-
-
-def _materialize_runtime_source_snapshot(
-    repo_root: Path,
-    snapshot_root: Path,
-    *,
-    source_commit: str,
-    tracked_files: Iterable[str],
-) -> tuple[SourcePayload, ...]:
-    try:
-        snapshot_stat = snapshot_root.lstat()
-    except OSError as exc:
-        raise ProductionReleaseBuilderError(
-            "Git source snapshot is unavailable"
-        ) from exc
-    if _is_linklike(
-        snapshot_root,
-        observed=snapshot_stat,
-    ) or not stat.S_ISDIR(snapshot_stat.st_mode):
-        raise ProductionReleaseBuilderError(
-            "Git source snapshot must be a real directory"
-        )
-    observed_sources: set[str] = set()
-    for raw in tracked_files:
-        relative = safe_posix_member_path(raw).as_posix()
-        if _runtime_destination(relative) is None:
-            continue
-        if relative in observed_sources:
-            raise ProductionReleaseBuilderError(
-                "Git source snapshot contains a duplicate runtime path"
-            )
-        observed_sources.add(relative)
-        object_id = _git_tree_blob(
-            repo_root,
-            source_commit=source_commit,
-            relative=relative,
-        )
-        relative_path = safe_posix_member_path(relative)
-        _snapshot_directory(snapshot_root, relative_path.parent)
-        _stream_git_blob(
-            repo_root,
-            object_id=object_id,
-            destination=snapshot_root.joinpath(*relative_path.parts),
-        )
-    return _runtime_source_payloads(snapshot_root, tracked_files)
-
-
 def _runtime_source_payloads(
     repo_root: Path,
     tracked_files: Iterable[str],
@@ -1570,6 +1438,7 @@ def _runtime_source_payloads(
         "pyproject.toml",
         "VERIFY-AND-RUN.md",
         "scripts/verify_production_release.py",
+        "pipeline/production_release_fs.py",
     }
     if not required <= {row.destination_path for row in rows}:
         raise ProductionReleaseBuilderError(
@@ -1615,69 +1484,6 @@ def _ensure_release_sources_clean(
         )
 
 
-def _copy_bound_source(source: SourcePayload, destination: Path) -> None:
-    _require_no_linklike_ancestors(
-        source.source_path,
-        label="release source path",
-    )
-    before = stable_regular_file_digest(
-        source.source_path,
-        maximum_bytes=source.byte_length,
-    )
-    if (
-        before.byte_length != source.byte_length
-        or before.sha256 != source.sha256
-    ):
-        raise ProductionReleaseBuilderError(
-            f"release source changed before copy: {source.source_path}"
-        )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() or _is_linklike(destination):
-        raise ProductionReleaseBuilderError(
-            f"release staging destination already exists: {destination}"
-        )
-    try:
-        with source.source_path.open("rb") as source_stream:
-            with destination.open("xb") as destination_stream:
-                shutil.copyfileobj(
-                    source_stream,
-                    destination_stream,
-                    length=1024 * 1024,
-                )
-    except OSError as exc:
-        raise ProductionReleaseBuilderError(
-            f"release source cannot be staged: {source.source_path}"
-        ) from exc
-    written = stable_regular_file_digest(destination)
-    after = stable_regular_file_digest(
-        source.source_path,
-        maximum_bytes=source.byte_length,
-    )
-    if (
-        written.byte_length != source.byte_length
-        or written.sha256 != source.sha256
-        or after != before
-    ):
-        raise ProductionReleaseBuilderError(
-            f"release source changed during copy: {source.source_path}"
-        )
-
-
-def _write_new_payload(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or _is_linklike(path):
-        raise ProductionReleaseBuilderError(
-            f"release staging destination already exists: {path}"
-        )
-    try:
-        with path.open("xb") as stream:
-            stream.write(payload)
-    except OSError as exc:
-        raise ProductionReleaseBuilderError(
-            f"release payload cannot be staged: {path}"
-        ) from exc
-
-
 def _checksum_payload(
     artifacts: list[dict[str, object]],
     receipt_payload: bytes,
@@ -1693,17 +1499,152 @@ def _checksum_payload(
     return "".join(sorted(rows)).encode("ascii")
 
 
-def _link_no_replace(source: Path, destination: Path) -> None:
+def _runtime_rows(
+    tracked_files: Iterable[str],
+) -> tuple[tuple[str, str, str], ...]:
+    rows: list[tuple[str, str, str]] = []
+    destinations: set[str] = set()
+    for raw in sorted(set(tracked_files)):
+        relative = safe_posix_member_path(raw).as_posix()
+        mapped = _runtime_destination(relative)
+        if mapped is None:
+            continue
+        destination, role = mapped
+        if destination in destinations:
+            raise ProductionReleaseBuilderError(
+                f"duplicate runtime destination: {destination}"
+            )
+        destinations.add(destination)
+        rows.append((relative, destination, role))
+    required = {
+        "LICENSE",
+        "make.py",
+        "pyproject.toml",
+        "VERIFY-AND-RUN.md",
+        "scripts/verify_production_release.py",
+        "pipeline/production_release_fs.py",
+    }
+    if not required <= destinations:
+        raise ProductionReleaseBuilderError(
+            "tracked Production runtime allowlist is incomplete"
+        )
+    for prefix in ("pipeline/", "web/studio/", "web/viewer/"):
+        if not any(destination.startswith(prefix) for destination in destinations):
+            raise ProductionReleaseBuilderError(
+                f"tracked Production runtime is missing {prefix}"
+            )
+    return tuple(rows)
+
+
+def _write_archive_member(
+    archive: zipfile.ZipFile,
+    *,
+    wrapper: str,
+    relative: str,
+    source: BinaryIO,
+    expected_bytes: int,
+    expected_sha256: str | None = None,
+) -> tuple[str, int]:
+    info = deterministic_zip_info(f"{wrapper}/{relative}")
+    info.file_size = expected_bytes
+    digest = hashlib.sha256()
+    observed_bytes = 0
+    with archive.open(
+        info,
+        "w",
+        force_zip64=expected_bytes >= zipfile.ZIP64_LIMIT,
+    ) as destination:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            observed_bytes += len(chunk)
+            if observed_bytes > expected_bytes:
+                raise ProductionReleaseBuilderError(
+                    f"release source expanded while archiving: {relative}"
+                )
+            digest.update(chunk)
+            destination.write(chunk)
+    observed_sha256 = digest.hexdigest()
+    if (
+        observed_bytes != expected_bytes
+        or (
+            expected_sha256 is not None
+            and observed_sha256 != expected_sha256
+        )
+    ):
+        raise ProductionReleaseBuilderError(
+            f"release source changed while archiving: {relative}"
+        )
+    return observed_sha256, observed_bytes
+
+
+def _git_blob_size(repo_root: Path, object_id: str) -> int:
+    payload = _git_source_output(
+        repo_root,
+        ["cat-file", "-s", object_id],
+        "cat-file size",
+    )
     try:
-        os.link(source, destination)
-    except FileExistsError as exc:
+        value = int(payload.strip().decode("ascii"))
+    except (UnicodeError, ValueError) as exc:
         raise ProductionReleaseBuilderError(
-            f"Production publication destination exists: {destination}"
+            "Git source blob size is invalid"
         ) from exc
-    except OSError as exc:
+    if value < 0 or value > _MAXIMUM_PUBLIC_SOURCE_BYTES:
         raise ProductionReleaseBuilderError(
-            f"Production publication failed: {destination}: {exc}"
+            "Git source blob size exceeds release bound"
+        )
+    return value
+
+
+def _write_git_archive_member(
+    archive: zipfile.ZipFile,
+    *,
+    wrapper: str,
+    repo_root: Path,
+    object_id: str,
+    destination: str,
+    expected_bytes: int,
+) -> tuple[str, int]:
+    command = _git_provenance_command(["cat-file", "blob", object_id])
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_git_provenance_environment(),
+        )
+        if process.stdout is None:
+            raise TypeError("Git blob stdout pipe is unavailable")
+        with process.stdout as source_stream:
+            digest, byte_length = _write_archive_member(
+                archive,
+                wrapper=wrapper,
+                relative=destination,
+                source=source_stream,
+                expected_bytes=expected_bytes,
+            )
+        returncode = process.wait()
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, command)
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        ProductionReleaseFSError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        raise ProductionReleaseBuilderError(
+            "Git source blob streaming failed"
         ) from exc
+    return digest, byte_length
 
 
 def build_production_release_archive(
@@ -1714,65 +1655,25 @@ def build_production_release_archive(
     version: str,
     source_commit: str,
     tracked_files: Iterable[str],
+    output_parent: BoundDirectory | None = None,
 ) -> ProductionReleaseBuild:
-    """Build, verify and no-replace publish one Production runtime archive."""
+    """Append-only build on a private Linux builder.
+
+    The public archive is created directly with ``O_EXCL`` and remains open
+    through verification.  The sidecar is the final commit marker.  Private
+    staging and every partial public object are retained on failure.
+    """
+
+    try:
+        require_linux_mutation_support()
+    except ProductionReleaseFSError as exc:
+        raise ProductionReleaseBuilderError(str(exc)) from exc
 
     root = Path(repo_root).expanduser().absolute()
     acceptance = Path(acceptance_root).expanduser().absolute()
     output = Path(output_path).expanduser().absolute()
     sidecar = output.with_suffix(f"{output.suffix}.sha256")
-    staging = output.parent / f".{output.name}.staging"
-    source_snapshot = output.parent / f".{output.name}.sources"
-    partial = output.parent / f".{output.name}.partial"
-    sidecar_partial = output.parent / f".{sidecar.name}.partial"
-    try:
-        output_parent_stat = output.parent.lstat()
-        output_redirected = first_linklike_path(
-            Path(output.anchor),
-            output.parent,
-        )
-    except (OSError, ValueError) as exc:
-        raise ProductionReleaseBuilderError(
-            "Production output parent directory is missing or unsafe"
-        ) from exc
-    if (
-        output_redirected is not None
-        or _is_linklike(output.parent, observed=output_parent_stat)
-        or not stat.S_ISDIR(output_parent_stat.st_mode)
-    ):
-        raise ProductionReleaseBuilderError(
-            "Production output parent directory is missing or unsafe"
-        )
-    try:
-        output_parent_identity = capture_real_directory_identity(output.parent)
-    except DurableIOError as exc:
-        raise ProductionReleaseBuilderError(
-            "Production output parent directory is missing or unsafe"
-        ) from exc
-    for path in (
-        output,
-        sidecar,
-        staging,
-        source_snapshot,
-        partial,
-        sidecar_partial,
-    ):
-        try:
-            path_exists = path.exists()
-            path_linklike = _is_linklike(path)
-        except OSError as exc:
-            raise ProductionReleaseBuilderError(
-                f"Production output or staging path is unsafe: {path}"
-            ) from exc
-        if path_exists or path_linklike:
-            raise ProductionReleaseBuilderError(
-                f"Production output or staging path exists: {path}"
-            )
-
-    for label, boundary in (
-        ("source", root),
-        ("acceptance", acceptance),
-    ):
+    for label, boundary in (("source", root), ("acceptance", acceptance)):
         try:
             boundary_stat = boundary.lstat()
             redirected = first_linklike_path(Path(boundary.anchor), boundary)
@@ -1788,7 +1689,6 @@ def build_production_release_archive(
             raise ProductionReleaseBuilderError(
                 f"Production {label} root is missing or unsafe"
             )
-
     try:
         tracked = tuple(tracked_files)
     except TypeError as exc:
@@ -1796,233 +1696,312 @@ def build_production_release_archive(
             "Production source identity tracked files are invalid"
         ) from exc
     live_identity = resolve_production_release_source_identity(root)
-    supplied_identity = ProductionReleaseSourceIdentity(
-        source_commit=source_commit,
-        tracked_files=tracked,
-    )
-    if supplied_identity != live_identity:
+    if ProductionReleaseSourceIdentity(source_commit, tracked) != live_identity:
         raise ProductionReleaseBuilderError(
             "Supplied Production source identity is not the exact live identity"
         )
     _ensure_release_sources_clean(root, tracked)
-    source_snapshot_created = False
-    try:
-        report_path = load_latest_real_scene_acceptance(acceptance)
-        context = derive_production_release_context(report_path)
-        scene_sources = resolve_runtime_scene_payloads(context)
-        try:
-            source_snapshot.mkdir(mode=0o700, exist_ok=False)
-            source_snapshot_created = True
-        except OSError as exc:
+    runtime_rows = _runtime_rows(tracked)
+    report_path = load_latest_real_scene_acceptance(acceptance)
+    context = derive_production_release_context(report_path)
+    scene_sources = resolve_runtime_scene_payloads(context)
+    source_rows = (*context.public_files, *scene_sources)
+
+    destinations: set[str] = set()
+    folded: set[str] = set()
+
+    def register_destination(relative: str) -> str:
+        canonical = safe_posix_member_path(relative).as_posix()
+        identity = portable_path_identity(canonical)
+        if canonical in destinations or identity in folded:
             raise ProductionReleaseBuilderError(
-                "Git source snapshot cannot be created"
-            ) from exc
-        runtime_sources = _materialize_runtime_source_snapshot(
-            root,
-            source_snapshot,
-            source_commit=source_commit,
-            tracked_files=tracked,
-        )
-        all_sources = (
-            *runtime_sources,
-            *context.public_files,
-            *scene_sources,
-        )
-        destinations: set[str] = set()
-        folded: set[str] = set()
-        for source in all_sources:
-            destination = safe_posix_member_path(
-                source.destination_path
-            ).as_posix()
-            if (
-                destination in destinations
-                or portable_path_identity(destination) in folded
-            ):
-                raise ProductionReleaseBuilderError(
-                    f"duplicate release destination: {destination}"
-                )
-            destinations.add(destination)
-            folded.add(portable_path_identity(destination))
+                f"duplicate release destination: {canonical}"
+            )
+        destinations.add(canonical)
+        folded.add(identity)
+        return canonical
 
-        generated = {
-            "evidence/public-evidence.json": (
-                "public-evidence",
-                canonical_json_bytes(context.public_evidence),
+    for _relative, destination, _role in runtime_rows:
+        register_destination(destination)
+    for source in source_rows:
+        register_destination(source.destination_path)
+    generated = {
+        "evidence/public-evidence.json": (
+            "public-evidence",
+            canonical_json_bytes(context.public_evidence),
+        ),
+        "evidence/acceptance-decision.json": (
+            "acceptance-decision",
+            canonical_model_bytes(context.decision),
+        ),
+        "evidence/human-review/receipt.json": (
+            "human-review-receipt",
+            canonical_json_bytes(context.redacted_human_review),
+        ),
+    }
+    for relative in generated:
+        register_destination(relative)
+
+    runtime_objects = {
+        destination: (
+            relative,
+            role,
+            object_id,
+            _git_blob_size(root, object_id),
+        )
+        for relative, destination, role in runtime_rows
+        for object_id in (
+            _git_tree_blob(
+                root,
+                source_commit=source_commit,
+                relative=relative,
             ),
-            "evidence/acceptance-decision.json": (
-                "acceptance-decision",
-                canonical_model_bytes(context.decision),
-            ),
-            "evidence/human-review/receipt.json": (
-                "human-review-receipt",
-                canonical_json_bytes(context.redacted_human_review),
-            ),
-        }
-        for destination in generated:
-            if (
-                destination in destinations
-                or portable_path_identity(destination) in folded
-            ):
-                raise ProductionReleaseBuilderError(
-                    f"duplicate generated destination: {destination}"
-                )
-            destinations.add(destination)
-            folded.add(portable_path_identity(destination))
-
-        staging.mkdir(exist_ok=False)
-        for source in sorted(
-            all_sources,
-            key=lambda row: row.destination_path,
-        ):
-            _copy_bound_source(
-                source,
-                staging.joinpath(
-                    *safe_posix_member_path(
-                        source.destination_path
-                    ).parts
-                ),
-            )
-        for relative, (_role, payload) in sorted(generated.items()):
-            _write_new_payload(
-                staging.joinpath(*safe_posix_member_path(relative).parts),
-                payload,
-            )
-
-        roles = {
-            source.destination_path: source.role
-            for source in all_sources
-        }
-        roles.update(
-            {
-                relative: role
-                for relative, (role, _payload) in generated.items()
-            }
         )
-        artifacts: list[dict[str, object]] = []
-        for relative, role in sorted(roles.items()):
-            digest = stable_regular_file_digest(
-                staging.joinpath(
-                    *safe_posix_member_path(relative).parts
-                )
-            )
-            artifacts.append(
-                {
-                    "path": relative,
-                    "role": role,
-                    "bytes": digest.byte_length,
-                    "sha256": digest.sha256,
-                }
-            )
-        receipt = build_production_receipt(
-            version=version,
-            source_commit=source_commit,
-            artifacts=artifacts,
-            protected_roots=("evidence", "pipeline", "scripts", "web"),
-            entrypoints=PRODUCTION_ENTRYPOINTS,
-            public_evidence=context.public_evidence,
+    }
+    parent = None
+    archive_bound: BoundFile | None = None
+    sidecar_bound: BoundFile | None = None
+    public_names: list[str] = []
+    try:
+        parent = (
+            output_parent.duplicate()
+            if output_parent is not None
+            else open_bound_directory(output.parent)
         )
-        receipt_payload = canonical_json_bytes(receipt)
-        _write_new_payload(
-            staging / PRODUCTION_RELEASE_NAME,
-            receipt_payload,
-        )
-        _write_new_payload(
-            staging / CHECKSUMS_NAME,
-            _checksum_payload(artifacts, receipt_payload),
-        )
-        verify_production_release_tree(staging)
-
-        wrapper = f"nantai-3d-{version}"
-        with zipfile.ZipFile(
-            partial,
-            "x",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-            strict_timestamps=True,
-        ) as archive:
-            staged_files = tuple(
-                path for path in staging.rglob("*") if path.is_file()
-            )
-            for source in sorted(
-                staged_files,
-                key=lambda path: path.relative_to(staging).as_posix(),
-            ):
-                relative = source.relative_to(staging).as_posix()
-                info = deterministic_zip_info(f"{wrapper}/{relative}")
-                info.file_size = source.stat().st_size
-                with source.open("rb") as source_stream:
-                    with archive.open(
-                        info,
-                        "w",
-                        force_zip64=info.file_size >= zipfile.ZIP64_LIMIT,
-                    ) as archive_stream:
-                        shutil.copyfileobj(
-                            source_stream,
-                            archive_stream,
-                            length=1024 * 1024,
-                        )
-        verify_production_release_archive(partial)
-        archive_digest = stable_regular_file_digest(partial)
-        sidecar_payload = (
-            f"{archive_digest.sha256}  {output.name}\n"
-        ).encode("ascii")
-        _write_new_payload(sidecar_partial, sidecar_payload)
-
         final_identity = resolve_production_release_source_identity(root)
         if final_identity != live_identity:
             raise ProductionReleaseBuilderError(
                 "Production source identity changed during release build"
             )
         _ensure_release_sources_clean(root, tracked)
-        final_identity = resolve_production_release_source_identity(root)
-        if final_identity != live_identity:
+        if resolve_production_release_source_identity(root) != live_identity:
             raise ProductionReleaseBuilderError(
                 "Production source identity changed during release build"
             )
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
+
+        try:
+            archive_bound = parent.create_file(output.name, mode=0o644)
+        except FileExistsError as exc:
+            raise ProductionReleaseBuilderError(
+                f"Production publication destination exists: {output}"
+            ) from exc
+        public_names.append(output.name)
+        wrapper = f"nantai-3d-{version}"
+        artifacts: list[dict[str, object]] = []
+        with zipfile.ZipFile(
+            archive_bound.stream,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+            strict_timestamps=True,
+        ) as archive:
+            jobs: list[tuple[str, str, object]] = []
+            jobs.extend(
+                (destination, "git", runtime_objects[destination])
+                for destination in runtime_objects
+            )
+            jobs.extend(
+                (source.destination_path, "source", source)
+                for source in source_rows
+            )
+            jobs.extend(
+                (relative, "generated", (role, payload))
+                for relative, (role, payload) in generated.items()
+            )
+            for relative, kind, value in sorted(jobs):
+                if kind == "git":
+                    (
+                        _tracked_relative,
+                        role,
+                        object_id,
+                        expected_bytes,
+                    ) = value
+                    digest, byte_length = _write_git_archive_member(
+                        archive,
+                        wrapper=wrapper,
+                        repo_root=root,
+                        object_id=object_id,
+                        destination=relative,
+                        expected_bytes=expected_bytes,
+                    )
+                elif kind == "source":
+                    source = value
+                    role = source.role
+                    _require_no_linklike_ancestors(
+                        source.source_path,
+                        label="release source path",
+                    )
+                    before = stable_regular_file_digest(
+                        source.source_path,
+                        maximum_bytes=source.byte_length,
+                    )
+                    if (
+                        before.byte_length != source.byte_length
+                        or before.sha256 != source.sha256
+                    ):
+                        raise ProductionReleaseBuilderError(
+                            "release source changed before archiving"
+                        )
+                    with source.source_path.open("rb") as source_stream:
+                        digest, byte_length = _write_archive_member(
+                            archive,
+                            wrapper=wrapper,
+                            relative=relative,
+                            source=source_stream,
+                            expected_bytes=source.byte_length,
+                            expected_sha256=source.sha256,
+                        )
+                    after = stable_regular_file_digest(
+                        source.source_path,
+                        maximum_bytes=source.byte_length,
+                    )
+                    if after != before:
+                        raise ProductionReleaseBuilderError(
+                            "release source changed during archiving"
+                        )
+                else:
+                    role, payload = value
+
+                    digest, byte_length = _write_archive_member(
+                        archive,
+                        wrapper=wrapper,
+                        relative=relative,
+                        source=BytesIO(payload),
+                        expected_bytes=len(payload),
+                        expected_sha256=hashlib.sha256(payload).hexdigest(),
+                    )
+                artifacts.append(
+                    {
+                        "path": relative,
+                        "role": role,
+                        "bytes": byte_length,
+                        "sha256": digest,
+                    }
+                )
+            artifacts.sort(key=lambda row: str(row["path"]))
+            receipt = build_production_receipt(
+                version=version,
+                source_commit=source_commit,
+                artifacts=artifacts,
+                protected_roots=("evidence", "pipeline", "scripts", "web"),
+                entrypoints=PRODUCTION_ENTRYPOINTS,
+                public_evidence=context.public_evidence,
+            )
+            receipt_payload = canonical_json_bytes(receipt)
+            checksum_payload = _checksum_payload(
+                artifacts,
+                receipt_payload,
+            )
+
+            for relative, payload in (
+                (PRODUCTION_RELEASE_NAME, receipt_payload),
+                (CHECKSUMS_NAME, checksum_payload),
+            ):
+                _write_archive_member(
+                    archive,
+                    wrapper=wrapper,
+                    relative=relative,
+                    source=BytesIO(payload),
+                    expected_bytes=len(payload),
+                    expected_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+        archive_bound.finish()
+        archive_sha256, archive_bytes = archive_bound.digest()
+        verification = verify_production_release_archive_stream(
+            archive_bound.stream
+        )
+        if (
+            not verification.valid
+            or verification.version != version
+            or verification.package_content_id
+            != receipt["package"]["content_id"]
+            or archive_bytes <= 0
         ):
             raise ProductionReleaseBuilderError(
-                "Production output parent changed during release build"
+                "Production archive held-handle verification failed"
             )
-        _link_no_replace(sidecar_partial, sidecar)
+        if resolve_production_release_source_identity(root) != live_identity:
+            raise ProductionReleaseBuilderError(
+                "Production source identity changed during release build"
+            )
+        _ensure_release_sources_clean(root, tracked)
+        if resolve_production_release_source_identity(root) != live_identity:
+            raise ProductionReleaseBuilderError(
+                "Production source identity changed during release build"
+            )
+
+        sidecar_payload = (
+            f"{archive_sha256}  {output.name}\n"
+        ).encode("ascii")
         try:
-            _link_no_replace(partial, output)
-        except Exception:
-            if matches_real_directory_identity(
-                output.parent,
-                output_parent_identity,
-            ):
-                sidecar.unlink(missing_ok=True)
-            raise
+            sidecar_bound = parent.create_file(sidecar.name, mode=0o644)
+        except FileExistsError as exc:
+            raise ProductionReleaseBuilderError(
+                f"Production publication destination exists: {sidecar}",
+                published=tuple(public_names),
+                retained=tuple(public_names),
+            ) from exc
+        public_names.append(sidecar.name)
+        sidecar_bound.write_all(sidecar_payload)
+        sidecar_bound.finish()
+        sidecar_sha, sidecar_bytes = sidecar_bound.digest()
+        if (
+            sidecar_bytes != len(sidecar_payload)
+            or sidecar_sha != hashlib.sha256(sidecar_payload).hexdigest()
+        ):
+            raise ProductionReleaseBuilderError(
+                "Production sidecar changed while held"
+            )
+        parent.fsync()
         return ProductionReleaseBuild(
             archive_path=output,
-            archive_sha256=archive_digest.sha256,
+            archive_sha256=archive_sha256,
             package_content_id=str(receipt["package"]["content_id"]),
             artifact_count=len(artifacts),
-            total_bytes=sum(
-                int(artifact["bytes"])
-                for artifact in artifacts
-            ),
+            total_bytes=sum(int(row["bytes"]) for row in artifacts),
             scene_identity=str(
                 context.public_evidence["scene"]["scene_identity"]
             ),
             acceptance_report_sha256=context.report_sha256,
         )
-    except ProductionReleaseBuilderError:
-        raise
-    except Exception as exc:
+    except ProductionReleaseBuilderError as exc:
+        published = exc.published or tuple(public_names)
+        retained = (
+            exc.retained
+            or tuple(public_names)
+        )
         raise ProductionReleaseBuilderError(
-            f"Production release build failed: {exc}"
+            f"{exc}; published={published}; retained={retained}",
+            published=published,
+            retained=tuple(retained),
+        ) from exc
+    except (
+        FileExistsError,
+        OSError,
+        ProductionReleaseFSError,
+        ProductionReleaseMutationError,
+        ReleaseArchiveError,
+        zipfile.BadZipFile,
+    ) as exc:
+        retained = tuple(public_names)
+        raise ProductionReleaseBuilderError(
+            "Production release build failed; "
+            f"published={tuple(public_names)}; retained={retained}",
+            published=tuple(public_names),
+            retained=retained,
+        ) from exc
+    except Exception as exc:
+        retained = tuple(public_names)
+        raise ProductionReleaseBuilderError(
+            "Production release build failed; "
+            f"published={tuple(public_names)}; retained={retained}",
+            published=tuple(public_names),
+            retained=retained,
         ) from exc
     finally:
-        if matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
-        ):
-            shutil.rmtree(staging, ignore_errors=True)
-            if source_snapshot_created:
-                shutil.rmtree(source_snapshot, ignore_errors=True)
-            partial.unlink(missing_ok=True)
-            sidecar_partial.unlink(missing_ok=True)
+        if sidecar_bound is not None:
+            sidecar_bound.close()
+        if archive_bound is not None:
+            archive_bound.close()
+        if parent is not None:
+            parent.close()

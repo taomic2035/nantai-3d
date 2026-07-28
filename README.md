@@ -56,6 +56,8 @@ Production runtime 的确定性封装、独立验证和 Studio/Viewer fail-close
 identity 闭环，因此当前仍是 Preview。发布操作见
 [Production Runtime 发布手册](docs/manual/production-runtime-release.md)，实时缺口与
 TODO 见 [Production V1 状态](docs/production-v1-status.md)。
+正式 build/stage/report/extract mutation 只在 private Linux builder 上执行；
+Windows/macOS 支持下载四件套的只读验证、平台解压后的 runtime 复验和 Viewer。
 
 ## 真实场景工作流
 

@@ -71,6 +71,11 @@ accept StageReceipt 的 import prerequisite 输出一致，不能把各自有效
 实测控制点和真实 Viewer/human QA 时，状态保持 modeled-unverified，不能签署
 Production V1。
 
+Production mutation 的平台边界已经收缩为 private Linux builder：build、stage、
+隐私报告落盘和内置安全解压全部使用 append-only dirfd 能力，失败保留 residue，
+不做按名称回滚。Windows/macOS 仍运行只读 archive/tree/四件套 verifier、content ID
+与 Viewer 合同，不能执行上述 mutation。
+
 ### P0 — 外部输入：正式素材与测量
 
 必须准备同一个 scene identity 的：

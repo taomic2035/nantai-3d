@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ from pipeline.production_release_contract import (
 )
 from pipeline.production_release_privacy import (
     PRIVACY_SCAN_CHUNK_BYTES,
+    ProductionPrivacyReport,
     ProductionReleasePrivacyError,
     audit_production_release_privacy,
     privacy_report_bytes,
@@ -523,7 +526,6 @@ def test_reparse_target_ancestor_is_rejected_before_privacy_scan(
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
 def test_privacy_cleanup_does_not_follow_swapped_parent_junction(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     tree = tmp_path / "runtime"
     write_modeled_production_tree(tree)
@@ -533,52 +535,12 @@ def test_privacy_cleanup_does_not_follow_swapped_parent_junction(
     parent = tmp_path / "publish-parent"
     parent.mkdir()
     destination = parent / "privacy.json"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    original_parent = tmp_path / "publish-parent-original"
-    sentinel: Path | None = None
-    swapped = False
-
-    def fail_flush_after_parent_swap(path: Path) -> None:
-        nonlocal sentinel, swapped
-        temporary_name = Path(path).name
-        parent.rename(original_parent)
-        sentinel = outside / temporary_name
-        sentinel.write_bytes(b"outside-sentinel")
-        created = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(parent), str(outside)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if created.returncode != 0:
-            original_parent.rename(parent)
-            pytest.skip(f"junction creation unavailable: {created.stderr}")
-        swapped = True
-        raise OSError("injected flush failure")
-
-    monkeypatch.setattr(
-        privacy_module,
-        "flush_file",
-        fail_flush_after_parent_swap,
-    )
-    try:
-        with pytest.raises(
-            ProductionReleasePrivacyError,
-            match="durable publication failed",
-        ):
-            publish_privacy_report(report, destination)
-        assert sentinel is not None
-        assert sentinel.read_bytes() == b"outside-sentinel"
-    finally:
-        if swapped:
-            removed = subprocess.run(
-                ["cmd", "/c", "rmdir", str(parent)],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            assert removed.returncode == 0, removed.stderr
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="private Linux builder",
+    ):
+        publish_privacy_report(report, destination)
+    assert not destination.exists()
 
 
 def test_mid_read_drift_is_rejected(tmp_path: Path, monkeypatch) -> None:
@@ -660,6 +622,58 @@ def test_verified_archive_is_extracted_then_privacy_scanned(
     assert report.package_content_id == receipt["package"]["content_id"]
 
 
+def test_verified_archive_privacy_scan_is_read_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "runtime"
+    write_modeled_production_tree(root)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    policy = tmp_path / "private-policy.json"
+    _write_policy(policy, b"private-canonical-needle")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("privacy scan must not extract")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", forbidden)
+    monkeypatch.setattr(
+        privacy_module,
+        "extract_production_release_archive",
+        forbidden,
+        raising=False,
+    )
+
+    assert audit_production_release_privacy(archive, policy).valid is True
+
+
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform == "linux",
+    reason="non-Linux platform contract",
+)
+def test_privacy_report_publication_rejects_non_linux_before_creation(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "privacy-report.json"
+    report = ProductionPrivacyReport(
+        schema="nantai.production-privacy-audit.v1",
+        valid=True,
+        package_content_id="package-" + "a" * 64,
+        finding_count=0,
+        findings=(),
+        scene_trust_effect="none",
+    )
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="private Linux builder",
+    ):
+        publish_privacy_report(report, destination)
+
+    assert not destination.exists()
+
+
 def test_report_bytes_never_echo_private_needle_or_absolute_paths(
     tmp_path: Path,
 ) -> None:
@@ -698,6 +712,11 @@ def test_report_bytes_never_echo_private_needle_or_absolute_paths(
     }
 
 
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="privacy report publication is Linux-only",
+)
 def test_cli_writes_machine_report_and_returns_nonzero_for_finding(
     tmp_path: Path,
     capsys,
@@ -738,6 +757,11 @@ def test_cli_writes_machine_report_and_returns_nonzero_for_finding(
     ) == output.read_bytes()
 
 
+@pytest.mark.production_mutation
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="privacy report publication is Linux-only",
+)
 def test_cli_clean_report_returns_zero(tmp_path: Path, capsys) -> None:
     from scripts.audit_production_release_privacy import main
 

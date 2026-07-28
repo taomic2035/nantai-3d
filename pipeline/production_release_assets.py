@@ -4,23 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import stat
-import tempfile
 import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
-from pipeline.durable_io import (
-    DurableIOError,
-    _is_linklike,
-    capture_real_directory_identity,
-    first_linklike_path,
-    flush_directory,
-    flush_file,
-    matches_real_directory_identity,
-    publish_directory_noreplace,
-)
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.production_release_builder import (
     ProductionReleaseBuilderError,
     build_production_release_archive,
@@ -32,14 +23,21 @@ from pipeline.production_release_contract import (
     ProductionReleaseContractError,
     load_production_receipt_bytes,
 )
+from pipeline.production_release_fs import (
+    BoundDirectory,
+    ProductionReleaseFSError,
+    ProductionReleaseMutationError,
+    open_bound_directory,
+    require_linux_mutation_support,
+)
 from pipeline.production_release_privacy import (
     ProductionReleasePrivacyError,
-    audit_production_release_privacy,
+    audit_production_release_privacy_stream,
 )
 from pipeline.production_release_verifier import (
     ProductionReleaseVerificationError,
-    extract_production_release_archive,
-    verify_production_release_tree,
+    verify_production_release_archive,
+    verify_production_release_archive_stream,
 )
 from pipeline.release_archive import (
     ReleaseArchiveError,
@@ -52,6 +50,17 @@ _COPY_CHUNK_BYTES = 1024 * 1024
 
 class ProductionReleaseAssetsError(ValueError):
     """A final Production public-asset bundle cannot be trusted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        published: tuple[str, ...] = (),
+        retained: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.published = published
+        self.retained = retained
 
 
 @dataclass(frozen=True)
@@ -85,105 +94,6 @@ def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
         value.st_size,
         value.st_mtime_ns,
     )
-
-
-def _real_absent_output(path: Path) -> Path:
-    output = Path(path).expanduser().absolute()
-    try:
-        redirected = first_linklike_path(Path(output.anchor), output)
-    except (OSError, ValueError) as exc:
-        raise ProductionReleaseAssetsError(
-            "Production release asset output parent is unavailable"
-        ) from exc
-    if output.exists() or redirected == output:
-        raise ProductionReleaseAssetsError(
-            "Production release asset output directory must be absent"
-        )
-    try:
-        parent_stat = output.parent.lstat()
-    except OSError as exc:
-        raise ProductionReleaseAssetsError(
-            "Production release asset output parent is unavailable"
-        ) from exc
-    if (
-        redirected is not None
-        or _is_linklike(output.parent, observed=parent_stat)
-        or not stat.S_ISDIR(parent_stat.st_mode)
-    ):
-        raise ProductionReleaseAssetsError(
-            "Production release asset output parent must be a real directory"
-        )
-    return output
-
-
-def _copy_stable_regular_file(source: Path, destination: Path) -> str:
-    try:
-        redirected = first_linklike_path(Path(source.absolute().anchor), source)
-        path_before = source.lstat()
-    except (OSError, ValueError) as exc:
-        raise ProductionReleaseAssetsError(
-            "Production candidate archive is unavailable"
-        ) from exc
-    if (
-        redirected is not None
-        or _is_linklike(source, observed=path_before)
-        or not stat.S_ISREG(path_before.st_mode)
-    ):
-        raise ProductionReleaseAssetsError(
-            "Production candidate archive must be a regular non-link file"
-        )
-
-    digest = hashlib.sha256()
-    observed_bytes = 0
-    descriptor = None
-    try:
-        descriptor = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o644,
-        )
-        with source.open("rb") as source_stream:
-            descriptor_before = os.fstat(source_stream.fileno())
-            with os.fdopen(descriptor, "wb") as destination_stream:
-                descriptor = None
-                while True:
-                    chunk = source_stream.read(_COPY_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    observed_bytes += len(chunk)
-                    digest.update(chunk)
-                    destination_stream.write(chunk)
-                destination_stream.flush()
-                os.fsync(destination_stream.fileno())
-            descriptor_after = os.fstat(source_stream.fileno())
-        path_after = source.lstat()
-    except OSError as exc:
-        raise ProductionReleaseAssetsError(
-            "Production candidate archive cannot be copied"
-        ) from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-
-    expected = _signature(path_before)
-    if (
-        expected != _signature(descriptor_before)
-        or expected != _signature(descriptor_after)
-        or expected != _signature(path_after)
-        or observed_bytes != path_before.st_size
-    ):
-        raise ProductionReleaseAssetsError(
-            "Production candidate archive changed during copy"
-        )
-    copied = stable_regular_file_digest(destination)
-    if (
-        copied.byte_length != observed_bytes
-        or copied.sha256 != digest.hexdigest()
-    ):
-        raise ProductionReleaseAssetsError(
-            "Production candidate archive copy is inconsistent"
-        )
-    return copied.sha256
 
 
 def _stable_regular_files_equal(left: Path, right: Path) -> bool:
@@ -280,16 +190,81 @@ def _stable_contract_bytes(path: Path) -> bytes:
     return payload
 
 
-def _write_public_payload(path: Path, payload: bytes) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        0o644,
-    )
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(payload)
-        stream.flush()
-        os.fsync(stream.fileno())
+def _archive_contract_payloads_stream(
+    source: BinaryIO,
+) -> tuple[bytes, bytes]:
+    previous = source.tell()
+    try:
+        source.seek(0)
+        with zipfile.ZipFile(source) as archive:
+            names = tuple(info.filename for info in archive.infolist())
+
+            def read_contract(name: str) -> bytes:
+                matches = [
+                    candidate
+                    for candidate in names
+                    if candidate.endswith(f"/{name}")
+                ]
+                if len(matches) != 1:
+                    raise ProductionReleaseAssetsError(
+                        "Production archive contract is missing or ambiguous"
+                    )
+                info = archive.getinfo(matches[0])
+                if info.file_size > _MAXIMUM_PUBLIC_CONTRACT_BYTES:
+                    raise ProductionReleaseAssetsError(
+                        "Production archive contract exceeds its maximum"
+                    )
+                with archive.open(info, "r") as stream:
+                    payload = stream.read(
+                        _MAXIMUM_PUBLIC_CONTRACT_BYTES + 1
+                    )
+                    extra = stream.read(1)
+                if len(payload) != info.file_size or extra:
+                    raise ProductionReleaseAssetsError(
+                        "Production archive contract changed during read"
+                    )
+                return payload
+
+            receipt = read_contract(PRODUCTION_RELEASE_NAME)
+            checksums = read_contract(CHECKSUMS_NAME)
+    except ProductionReleaseAssetsError:
+        raise
+    except (OSError, EOFError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ProductionReleaseAssetsError(
+            "Production archive contracts cannot be read"
+        ) from exc
+    finally:
+        source.seek(previous)
+    return receipt, checksums
+
+
+def _archive_contract_payloads(path: Path) -> tuple[bytes, bytes]:
+    try:
+        path_before = path.lstat()
+        with path.open("rb") as source:
+            descriptor_before = os.fstat(source.fileno())
+            if _signature(path_before) != _signature(descriptor_before):
+                raise ProductionReleaseAssetsError(
+                    "Production archive changed before contract read"
+                )
+            result = _archive_contract_payloads_stream(source)
+            descriptor_after = os.fstat(source.fileno())
+        path_after = path.lstat()
+    except ProductionReleaseAssetsError:
+        raise
+    except OSError as exc:
+        raise ProductionReleaseAssetsError(
+            "Production archive contracts cannot be read"
+        ) from exc
+    expected = _signature(path_before)
+    if (
+        expected != _signature(descriptor_after)
+        or expected != _signature(path_after)
+    ):
+        raise ProductionReleaseAssetsError(
+            "Production archive changed during contract read"
+        )
+    return result
 
 
 def _public_bundle_files(root: Path) -> dict[str, Path]:
@@ -384,25 +359,15 @@ def verify_production_release_assets(
             observed[CHECKSUMS_NAME]
         )
         receipt = load_production_receipt_bytes(receipt_payload)
-        with tempfile.TemporaryDirectory(
-            prefix="nantai-production-assets-verify-"
-        ) as temporary:
-            extracted = extract_production_release_archive(
-                archive,
-                Path(temporary) / "runtime",
+        verification = verify_production_release_archive(archive)
+        archive_receipt, archive_checksums = _archive_contract_payloads(archive)
+        if (
+            archive_receipt != receipt_payload
+            or archive_checksums != checksums_payload
+        ):
+            raise ProductionReleaseAssetsError(
+                "standalone Production contracts disagree with the archive"
             )
-            verification = verify_production_release_tree(extracted)
-            if (
-                _stable_contract_bytes(
-                    extracted / PRODUCTION_RELEASE_NAME
-                )
-                != receipt_payload
-                or _stable_contract_bytes(extracted / CHECKSUMS_NAME)
-                != checksums_payload
-            ):
-                raise ProductionReleaseAssetsError(
-                    "standalone Production contracts disagree with the archive"
-                )
         if (
             verification.fixture_kind is not None
             or verification.release_contract != "production-accepted"
@@ -470,237 +435,226 @@ def stage_production_release_assets(
     privacy_policy_path: str | Path,
     output_dir: str | Path,
 ) -> ProductionReleaseAssets:
-    """Verify, privacy-audit and stage exactly four public Release assets.
+    """Append-only stage exactly four public assets on private Linux."""
 
-    The input candidate archive is byte-compared against a deterministic
-    rebuild from *acceptance_root* + *version* on the current HEAD before
-    any public asset is written.  This closes the self-declared
-    ``fixture_kind`` trust gap identified in GLM-026R P1.
-    """
+    try:
+        require_linux_mutation_support()
+    except ProductionReleaseFSError as exc:
+        raise ProductionReleaseAssetsError(str(exc)) from exc
     source = Path(archive_path).expanduser().absolute()
     policy = Path(privacy_policy_path).expanduser().absolute()
     acceptance = Path(acceptance_root).expanduser().absolute()
     repo = Path(repo_root).expanduser().absolute()
-    output = _real_absent_output(Path(output_dir))
+    output = Path(output_dir).expanduser().absolute()
     try:
-        output_parent_identity = capture_real_directory_identity(output.parent)
-    except DurableIOError as exc:
+        redirected = first_linklike_path(Path(source.anchor), source)
+        source_before = source.lstat()
+    except (OSError, ValueError) as exc:
         raise ProductionReleaseAssetsError(
-            "Production release asset output parent is unavailable"
+            "Production candidate archive is unavailable"
         ) from exc
-    staging = output.parent / (
-        f".{output.name}.{uuid.uuid4().hex}.staging"
-    )
-    candidate = staging / ".candidate.zip"
-    rebuilt = staging / ".acceptance-rebuild.zip"
-    rebuilt_sidecar = rebuilt.with_suffix(f"{rebuilt.suffix}.sha256")
-    published = False
+    if (
+        redirected is not None
+        or _is_linklike(source, observed=source_before)
+        or not stat.S_ISREG(source_before.st_mode)
+    ):
+        raise ProductionReleaseAssetsError(
+            "Production candidate archive must be a regular non-link file"
+        )
+    parent: BoundDirectory | None = None
+    rebuild_dir: BoundDirectory | None = None
+    public_dir: BoundDirectory | None = None
+    held_files = []
+    public_names: list[str] = []
+    private_names: list[str] = []
     try:
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
-        ):
+        source_stream = source.open("rb")
+        held_files.append(source_stream)
+        descriptor_before = os.fstat(source_stream.fileno())
+        if _signature(source_before) != _signature(descriptor_before):
             raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
+                "Production candidate archive changed before staging"
             )
-        staging.mkdir(mode=0o700)
-        archive_sha256 = _copy_stable_regular_file(source, candidate)
-        try:
-            source_identity_before = (
-                resolve_production_release_source_identity(repo)
-            )
-            rebuilt_result = build_production_release_archive(
-                repo_root=repo,
-                acceptance_root=acceptance,
-                output_path=rebuilt,
-                version=version,
-                source_commit=source_identity_before.source_commit,
-                tracked_files=source_identity_before.tracked_files,
-            )
-            source_identity_after = (
-                resolve_production_release_source_identity(repo)
-            )
-        except ProductionReleaseBuilderError as exc:
+        archive_digest = hashlib.sha256()
+        archive_bytes = 0
+        while True:
+            chunk = source_stream.read(_COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            archive_bytes += len(chunk)
+            archive_digest.update(chunk)
+        if archive_bytes != source_before.st_size:
             raise ProductionReleaseAssetsError(
-                "Production acceptance rebuild failed"
-            ) from exc
-        if source_identity_after != source_identity_before:
-            raise ProductionReleaseAssetsError(
-                "Production source identity changed during acceptance rebuild"
+                "Production candidate archive changed during staging"
             )
-        if rebuilt_result.archive_path != rebuilt:
+        archive_sha256 = archive_digest.hexdigest()
+        source_stream.seek(0)
+        verification = verify_production_release_archive_stream(source_stream)
+        privacy = audit_production_release_privacy_stream(
+            source_stream,
+            policy,
+        )
+        receipt_payload, checksums_payload = _archive_contract_payloads_stream(
+            source_stream
+        )
+        if verification.version != version:
             raise ProductionReleaseAssetsError(
-                "Production candidate does not match acceptance rebuild"
+                "Production candidate version does not match requested version"
             )
-        try:
-            rebuilt_digest = stable_regular_file_digest(rebuilt)
-        except ReleaseArchiveError as exc:
-            raise ProductionReleaseAssetsError(
-                "Production candidate does not match acceptance rebuild"
-            ) from exc
         if (
-            rebuilt_result.archive_sha256 != rebuilt_digest.sha256
-            or archive_sha256 != rebuilt_result.archive_sha256
-            or not _stable_regular_files_equal(candidate, rebuilt)
+            verification.fixture_kind is not None
+            or verification.release_contract != "production-accepted"
         ):
             raise ProductionReleaseAssetsError(
-                "Production candidate does not match acceptance rebuild"
+                "modeled contract cannot be staged as a Production release"
             )
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
+        if (
+            not privacy.valid
+            or privacy.finding_count != 0
+            or privacy.package_content_id != verification.package_content_id
         ):
             raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
+                "Production privacy audit failed"
             )
-        rebuilt.unlink()
-        rebuilt_sidecar.unlink()
-        with tempfile.TemporaryDirectory(
-            prefix="nantai-production-assets-"
-        ) as temporary:
-            extracted = extract_production_release_archive(
-                candidate,
-                Path(temporary) / "runtime",
+        receipt = load_production_receipt_bytes(receipt_payload)
+        if (
+            receipt["version"] != verification.version
+            or receipt["package"]["content_id"]
+            != verification.package_content_id
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production candidate identities disagree"
             )
-            verification_before = verify_production_release_tree(extracted)
-            if verification_before.version != version:
-                raise ProductionReleaseAssetsError(
-                    "Production candidate version does not match requested "
-                    "version"
-                )
-            if (
-                verification_before.fixture_kind is not None
-                or verification_before.release_contract
-                != "production-accepted"
-            ):
-                raise ProductionReleaseAssetsError(
-                    "modeled contract cannot be staged as a Production release"
-                )
-            privacy = audit_production_release_privacy(
-                extracted,
-                policy,
+        descriptor_after = os.fstat(source_stream.fileno())
+        source_after = source.lstat()
+        if (
+            _signature(source_before) != _signature(descriptor_after)
+            or _signature(source_before) != _signature(source_after)
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production candidate archive changed during validation"
             )
-            if not privacy.valid or privacy.finding_count != 0:
-                raise ProductionReleaseAssetsError(
-                    "Production privacy audit failed"
-                )
-            if (
-                privacy.package_content_id
-                != verification_before.package_content_id
-            ):
-                raise ProductionReleaseAssetsError(
-                    "Production privacy identity disagrees with the package"
-                )
-            receipt_payload = _stable_contract_bytes(
-                extracted / PRODUCTION_RELEASE_NAME
-            )
-            checksums_payload = _stable_contract_bytes(
-                extracted / CHECKSUMS_NAME
-            )
-            verification_after = verify_production_release_tree(extracted)
-            if verification_after != verification_before:
-                raise ProductionReleaseAssetsError(
-                    "Production package identity changed during asset staging"
-                )
 
-        archive_name = (
-            f"nantai-3d-{verification_before.version}-runtime.zip"
-        )
-        final_archive = staging / archive_name
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
-        ):
+        parent = open_bound_directory(output.parent)
+        if parent.entry_exists(output.name):
             raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
+                "Production release asset output directory must be absent"
             )
-        os.replace(candidate, final_archive)
+        source_identity_before = resolve_production_release_source_identity(
+            repo
+        )
+        rebuild_name = f".{output.name}.{uuid.uuid4().hex}.rebuild"
+        rebuild_dir = parent.create_directory(rebuild_name, mode=0o700)
+        private_names.append(rebuild_name)
+        rebuilt_path = rebuild_dir.path / "acceptance-rebuild.zip"
+        rebuilt_result = build_production_release_archive(
+            repo_root=repo,
+            acceptance_root=acceptance,
+            output_path=rebuilt_path,
+            version=version,
+            source_commit=source_identity_before.source_commit,
+            tracked_files=source_identity_before.tracked_files,
+            output_parent=rebuild_dir,
+        )
         if (
-            stable_regular_file_digest(final_archive).sha256
-            != archive_sha256
+            resolve_production_release_source_identity(repo)
+            != source_identity_before
+            or rebuilt_result.archive_path != rebuilt_path
+            or rebuilt_result.archive_sha256 != archive_sha256
         ):
             raise ProductionReleaseAssetsError(
-                "Production archive changed during asset staging"
+                "Production candidate does not match acceptance rebuild"
             )
-        _write_public_payload(
-            staging / PRODUCTION_RELEASE_NAME,
-            receipt_payload,
-        )
-        _write_public_payload(
-            staging / CHECKSUMS_NAME,
-            checksums_payload,
-        )
-        _write_public_payload(
-            staging / f"{archive_name}.sha256",
-            f"{archive_sha256}  {archive_name}\n".encode("ascii"),
-        )
-        flush_file(final_archive)
-        flush_directory(staging)
+
         try:
-            staged_verification = verify_production_release_assets(staging)
-        except ProductionReleaseAssetsError as exc:
+            public_dir = parent.create_directory(output.name, mode=0o755)
+        except FileExistsError as exc:
             raise ProductionReleaseAssetsError(
-                "Production staged release validation failed"
+                "Production release asset output directory must be absent"
             ) from exc
+        public_names.append(output.name)
+        archive_name = f"nantai-3d-{verification.version}-runtime.zip"
+        archive_file = public_dir.create_file(archive_name, mode=0o644)
+        held_files.append(archive_file)
+        source_stream.seek(0)
+        copied_sha, copied_bytes = archive_file.copy_from(
+            source_stream,
+            expected_bytes=archive_bytes,
+        )
+        archive_file.finish()
+        held_sha, held_bytes = archive_file.digest()
         if (
-            not staged_verification.valid
-            or staged_verification.archive_path != final_archive
-            or staged_verification.archive_sha256 != archive_sha256
-            or staged_verification.version != verification_before.version
-            or staged_verification.package_content_id
-            != verification_before.package_content_id
-            or staged_verification.scene_trust_effect
-            != verification_before.scene_trust_effect
+            copied_sha != archive_sha256
+            or held_sha != archive_sha256
+            or copied_bytes != archive_bytes
+            or held_bytes != archive_bytes
         ):
             raise ProductionReleaseAssetsError(
-                "Production staged release validation failed"
+                "Production archive changed during final staging"
             )
-        if not matches_real_directory_identity(
-            output.parent,
-            output_parent_identity,
+        sidecar_payload = (
+            f"{archive_sha256}  {archive_name}\n"
+        ).encode("ascii")
+        for name, payload in (
+            (f"{archive_name}.sha256", sidecar_payload),
+            (CHECKSUMS_NAME, checksums_payload),
+            (PRODUCTION_RELEASE_NAME, receipt_payload),
         ):
-            raise ProductionReleaseAssetsError(
-                "Production release asset output parent changed"
-            )
-        publish_directory_noreplace(staging, output)
-        published = True
+            bound = public_dir.create_file(name, mode=0o644)
+            held_files.append(bound)
+            bound.write_all(payload)
+            bound.finish()
+            digest, byte_length = bound.digest()
+            if (
+                byte_length != len(payload)
+                or digest != hashlib.sha256(payload).hexdigest()
+            ):
+                raise ProductionReleaseAssetsError(
+                    f"Production public asset changed while held: {name}"
+                )
+        public_dir.fsync()
+        parent.fsync()
         return ProductionReleaseAssets(
             output_dir=output,
             archive_path=output / archive_name,
             archive_sha256=archive_sha256,
             receipt_path=output / PRODUCTION_RELEASE_NAME,
             checksums_path=output / CHECKSUMS_NAME,
-            package_content_id=verification_before.package_content_id,
+            package_content_id=verification.package_content_id,
             privacy_valid=True,
             scene_trust_effect="none",
         )
-    except ProductionReleaseAssetsError:
-        raise
+    except ProductionReleaseAssetsError as exc:
+        published = exc.published or tuple(public_names)
+        retained = exc.retained or tuple((*private_names, *public_names))
+        raise ProductionReleaseAssetsError(
+            f"{exc}; published={published}; retained={retained}",
+            published=published,
+            retained=retained,
+        ) from exc
     except (
-        DurableIOError,
         FileExistsError,
         OSError,
+        ProductionReleaseFSError,
+        ProductionReleaseMutationError,
+        ProductionReleaseBuilderError,
         ProductionReleasePrivacyError,
         ProductionReleaseVerificationError,
         ReleaseArchiveError,
     ) as exc:
-        if isinstance(exc, DurableIOError) and exc.published:
-            published = True
-        state = (
-            "published but durability is unconfirmed"
-            if isinstance(exc, DurableIOError) and exc.published
-            else "not published"
-        )
+        retained = tuple((*private_names, *public_names))
         raise ProductionReleaseAssetsError(
-            f"Production release assets cannot be staged ({state})"
+            "Production release assets cannot be staged; "
+            f"published={tuple(public_names)}; retained={retained}",
+            published=tuple(public_names),
+            retained=retained,
         ) from exc
     finally:
-        if (
-            not published
-            and matches_real_directory_identity(
-                output.parent,
-                output_parent_identity,
-            )
-            and not _is_linklike(staging)
-        ):
-            shutil.rmtree(staging, ignore_errors=True)
+        for held in reversed(held_files):
+            held.close()
+        if public_dir is not None:
+            public_dir.close()
+        if rebuild_dir is not None:
+            rebuild_dir.close()
+        if parent is not None:
+            parent.close()
