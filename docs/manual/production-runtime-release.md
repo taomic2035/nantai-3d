@@ -35,6 +35,7 @@ verify-production-assets
 ```powershell
 $env:ACCEPTANCE_ROOT = (Resolve-Path .nantai-studio\real-scene\accepted).Path
 $env:VERSION = "v1.0.0"
+New-Item -ItemType Directory -Force dist | Out-Null
 $env:ARCHIVE = (Join-Path $PWD "dist\nantai-3d-v1.0.0.zip")
 python make.py build-production
 ```
@@ -48,7 +49,7 @@ scene closure，再以 no-replace 方式生成确定性 ZIP。已有目标不会
 `verify-production`，不能用网页显示的哈希或构建机上的旧文件代替：
 
 ```powershell
-$env:ARCHIVE = (Resolve-Path .\nantai-3d-v1.0.0.zip).Path
+$env:ARCHIVE = (Resolve-Path .\nantai-3d-v1.0.0-runtime.zip).Path
 python make.py verify-production
 ```
 
@@ -79,10 +80,10 @@ Windows/POSIX 私有绝对路径、symlink、非 regular file、额外文件或�
 ## 整理最终公开资产
 
 三平台 clean-room 浏览器 QA 和人工复核通过后，从已验证候选 ZIP 生成一个全新目录。
-`stage-production-assets` 会在当前精确 HEAD 从 `ACCEPTANCE_ROOT` + `VERSION`
-重新打开 real acceptance，并在与候选构建相同的 pinned builder environment 中做
-deterministic acceptance rebuild。它把重建产物与输入候选逐字节比对；只有完全一致
-才继续隐私审计，并且只发布四个最终公开资产：
+正式发布流程要求运行 `stage-production-assets`；该命令会在当前精确 HEAD 从
+`ACCEPTANCE_ROOT` + `VERSION` 重新打开 real acceptance，并在与候选构建相同的
+pinned builder environment 中做 deterministic acceptance rebuild。它把重建产物与
+输入候选逐字节比对；只有完全一致才继续隐私审计，并且只发布四个最终公开资产：
 
 ```powershell
 $env:ACCEPTANCE_ROOT = (Resolve-Path .nantai-studio\real-scene\accepted).Path
@@ -121,9 +122,14 @@ python make.py verify-production-assets
 该命令要求目录精确包含四个 regular non-link 文件，验证 archive sidecar，独立解压
 并复验 ZIP，再逐字节比较外置与包内的 `PRODUCTION-RELEASE.json`、
 `SHA256SUMS.txt`。版本、package content ID、公开文件名或任意一项不一致都会拒绝，
-modeled fixture 也不能通过。`verify-production-assets` 只证明下载的四个文件与已经
-授权的字节和内部合同一致；它不重新打开 `ACCEPTANCE_ROOT` 中的 acceptance，也不
-重新证明真实 CUDA、米制对齐、Viewer QA 或人工复核。
+modeled fixture 也不能通过。`verify-production-assets` 只检查下载得到的四个文件之内
+的内部字节绑定与内部合同是否自洽，并报告其中声明和 source-bound identity。它不能证明发布者来源或真实性，
+不能证明 staging 已执行，不能证明私有 acceptance 实际重新打开，也不能证明外部授权；
+不能重新证明真实 CUDA、米制对齐、Viewer QA 或人工复核。它也不重新打开或访问
+`ACCEPTANCE_ROOT` 或任何私有证据。
+
+真实性必须来自可信发布渠道，以及外部可信 digest 或签名（如果存在）；本手册不声称
+存在此类签名。
 
 ## 解压与运行
 

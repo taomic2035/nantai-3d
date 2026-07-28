@@ -1,10 +1,20 @@
 # Verify and run a Production runtime
 
-This archive is byte-integrity-verified when the bundled offline verifier succeeds.
-Its receipt and public evidence bind the runtime bytes to an acceptance report that
-was reopened by the pre-release staging step from ACCEPTANCE_ROOT at the exact
-source commit. This downloaded verifier does not reopen that private root or
-re-prove real CUDA, metric alignment, Viewer QA or human review.
+This archive is byte-integrity-verified only in the internal sense when the bundled
+offline verifier succeeds. The official release process requires pre-release staging
+to reopen ACCEPTANCE_ROOT at the exact source commit and compare the rebuilt package
+with the candidate bytes.
+
+The downloaded verifier checks only the internal byte bindings and internal contracts
+within the supplied four files, and reports their claimed and source-bound identities.
+It does not reopen or access ACCEPTANCE_ROOT or private evidence. It does not prove
+publisher origin or authenticity. It does not prove that staging was executed, does
+not prove that private acceptance was actually reopened, and does not prove external
+authorization. It does not re-prove real CUDA, metric alignment, Viewer QA or human
+review.
+
+Authenticity must come from a trusted release channel and an externally trusted digest
+or signature, if one exists. This guide does not claim that any signature exists.
 
 ```powershell
 python make.py verify

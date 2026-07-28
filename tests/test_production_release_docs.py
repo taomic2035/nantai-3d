@@ -99,6 +99,45 @@ def test_manual_separates_repository_and_extracted_runtime_commands() -> None:
         assert maintenance_target not in runtime_section
 
 
+def test_manual_build_example_creates_the_archive_parent_before_building() -> None:
+    manual = _read(MANUAL)
+    build = manual.split("## 构建", 1)[1].split(
+        "## 独立验证下载字节",
+        1,
+    )[0]
+    create_parent = "New-Item -ItemType Directory -Force dist | Out-Null"
+    archive_assignment = (
+        '$env:ARCHIVE = (Join-Path $PWD "dist\\nantai-3d-v1.0.0.zip")'
+    )
+
+    assert create_parent in build
+    assert archive_assignment in build
+    assert build.index(create_parent) < build.index(archive_assignment)
+    assert build.index(archive_assignment) < build.index(
+        "python make.py build-production"
+    )
+
+
+def test_manual_download_verification_uses_the_staged_archive_name() -> None:
+    manual = _read(MANUAL)
+    downloaded_archive = manual.split("## 独立验证下载字节", 1)[1].split(
+        "## 隐私机器审计",
+        1,
+    )[0]
+    public_assets = manual.split("成功目录精确包含：", 1)[1].split(
+        "```",
+        2,
+    )[1]
+    canonical_archive = "nantai-3d-v1.0.0-runtime.zip"
+
+    assert canonical_archive in public_assets
+    assert (
+        f"$env:ARCHIVE = (Resolve-Path .\\{canonical_archive}).Path"
+        in downloaded_archive
+    )
+    assert "nantai-3d-v1.0.0.zip" not in downloaded_archive
+
+
 def test_manual_distinguishes_acceptance_staging_from_download_verification() -> None:
     manual = _read(MANUAL)
     staging = manual.split("## 整理最终公开资产", 1)[1].split(
@@ -109,6 +148,11 @@ def test_manual_distinguishes_acceptance_staging_from_download_verification() ->
 
     assert staging.index("$env:ACCEPTANCE_ROOT") < stage_command
     assert staging.index("$env:VERSION") < stage_command
+    assert re.search(
+        r"正式发布流程要求运行.*stage-production-assets",
+        staging,
+        re.DOTALL,
+    )
     assert re.search(
         r"stage-production-assets.*重新打开.*(?:real acceptance|真实 acceptance)",
         staging,
@@ -141,20 +185,36 @@ def test_manual_distinguishes_acceptance_staging_from_download_verification() ->
 
     download_verification = staging.split("发布后把四个 GitHub 资产", 1)[1]
     assert re.search(
-        r"verify-production-assets.*只证明.*授权的字节.*内部合同",
+        r"verify-production-assets.*只检查.*四个文件"
+        r".*内部字节绑定.*内部合同",
+        download_verification,
+        re.DOTALL,
+    )
+    for unproven_boundary in (
+        r"不能证明发布者来源或真实性",
+        r"不能证明 staging 已执行",
+        r"不能证明私有 acceptance 实际重新打开",
+        r"不能证明外部授权",
+        r"不能重新证明真实 CUDA、米制对齐、Viewer QA 或人工复核",
+    ):
+        assert re.search(unproven_boundary, download_verification)
+    assert re.search(
+        r"不重新打开或访问.*ACCEPTANCE_ROOT.*私有证据",
         download_verification,
         re.DOTALL,
     )
     assert re.search(
-        r"不重新打开.*acceptance",
+        r"报告.*声明.*source-bound identity",
+        download_verification,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"真实性.*可信发布渠道.*外部可信.*(?:digest|摘要|签名)"
+        r".*如果存在",
         download_verification,
         re.IGNORECASE | re.DOTALL,
     )
-    assert re.search(
-        r"不\s*重新证明.*真实 CUDA.*米制对齐.*Viewer QA.*人工复核",
-        download_verification,
-        re.DOTALL,
-    )
+    assert re.search(r"不声称.*签名", download_verification, re.DOTALL)
 
 
 def test_downloaded_runtime_guide_limits_the_offline_verifier_claim() -> None:
@@ -168,23 +228,44 @@ def test_downloaded_runtime_guide_limits_the_offline_verifier_claim() -> None:
     ):
         assert required in guide
 
-    assert re.search(r"exact\s+source commit", guide)
     assert re.search(
-        r"downloaded verifier does not reopen that private root",
+        r"official release process requires.*pre-release staging"
+        r".*reopen ACCEPTANCE_ROOT.*exact source commit",
+        guide,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert re.search(
+        r"downloaded verifier checks only.*internal byte bindings"
+        r".*internal contracts.*supplied four files",
+        guide,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert re.search(
+        r"does\s+not\s+reopen or access ACCEPTANCE_ROOT or private evidence",
         guide,
         re.IGNORECASE,
     )
+    for unproven_boundary in (
+        r"does\s+not\s+prove\s+publisher origin or authenticity",
+        r"does\s+not\s+prove\s+(?:that\s+)?staging was executed",
+        r"does\s+not\s+prove\s+(?:that\s+)?private acceptance was actually reopened",
+        r"does\s+not\s+prove\s+external\s+authorization",
+        r"does\s+not\s+re-prove real CUDA, metric alignment, Viewer QA or human\s+review",
+    ):
+        assert re.search(unproven_boundary, guide, re.IGNORECASE)
     assert re.search(
-        r"does not reopen.*re-prove real CUDA.*metric alignment"
-        r".*Viewer QA.*human review",
+        r"authenticity must come from a trusted release channel"
+        r".*externally trusted (?:digest|signature)"
+        r".*if one exists",
         guide,
         re.IGNORECASE | re.DOTALL,
     )
     assert re.search(
-        r"runtime runner does not accept.*private scene import override",
+        r"does not claim.*signature exists",
         guide,
         re.IGNORECASE | re.DOTALL,
     )
+    assert "was reopened by the pre-release staging step" not in guide
 
 
 def test_readme_and_status_keep_one_concise_authoritative_release_entry() -> None:
@@ -205,6 +286,27 @@ def test_readme_and_status_keep_one_concise_authoritative_release_entry() -> Non
         assert release_boundary in status
 
 
+def test_status_does_not_promote_download_consistency_to_authorization() -> None:
+    status = _read(STATUS)
+    release_boundary = status.split(
+        "这里的 release tooling ready",
+        1,
+    )[1].split("五个外部门禁仍明确开放", 1)[0]
+
+    assert "已授权" not in release_boundary
+    assert re.search(
+        r"download verifier.*只检查.*内部字节绑定.*内部合同",
+        release_boundary,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"不能证明发布者来源或真实性.*不能证明 staging 已执行"
+        r".*不能证明私有 acceptance 实际重新打开.*不能证明外部授权",
+        release_boundary,
+        re.DOTALL,
+    )
+
+
 def test_status_keeps_all_five_real_scene_gates_open_for_one_identity() -> None:
     status = _read(STATUS)
     summary = status.split("## 一句话状态", 1)[1].split(
@@ -219,15 +321,11 @@ def test_status_keeps_all_five_real_scene_gates_open_for_one_identity() -> None:
 
     assert gate_match is not None
     gates = gate_match.group("gates")
-    for required_gate in (
-        "真实重叠采集",
-        "accepted real-photo SfM",
-        "实测米制对齐",
-    ):
-        assert required_gate in gates
-    assert re.search(r"non-mock CUDA\s+3DGS", gates)
-    assert re.search(
-        r"同一 scene identity.*真实浏览器重建 Viewer/human QA",
+    assert re.fullmatch(
+        r"真实重叠采集、accepted real-photo SfM、non-mock CUDA\s+"
+        r"3DGS、实测米制对齐，以及同一 scene identity 的真实浏览器重建 "
+        r"Viewer/human QA。\s*它们未全部通过前，状态保持 Preview/unknown，"
+        r"不会生成或发布正式 `v1\.0\.0`。",
         gates,
         re.DOTALL,
     )

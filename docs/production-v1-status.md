@@ -28,7 +28,8 @@ scene identity，因此仍是 Preview，不是 Production V1。
 这里的 release tooling ready 只表示代码与 modeled contract 已就绪。发布前
 `staging` 会从私有 acceptance root 做 `acceptance rebuild`，并要求重建 ZIP 与输入
 候选逐字节一致，之后才可做隐私审计和四件套整理；发布后的 `download verifier`
-只复验已授权的下载字节与内部合同，不会重开或重做私有验收。
+只检查所给四个文件的内部字节绑定与内部合同是否自洽。它不能证明发布者来源或真实性，
+不能证明 staging 已执行，不能证明私有 acceptance 实际重新打开，也不能证明外部授权。
 
 五个外部门禁仍明确开放：真实重叠采集、accepted real-photo SfM、non-mock CUDA
 3DGS、实测米制对齐，以及同一 scene identity 的真实浏览器重建 Viewer/human QA。
