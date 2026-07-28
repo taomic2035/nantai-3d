@@ -253,7 +253,8 @@ jobs:
             "pytest==9.0.3" \
             "numpy==2.3.5" \
             "pydantic==2.13.4" \
-            "plyfile==1.1.4"
+            "plyfile==1.1.4" \
+            "loguru==0.7.3"
 
       - name: Test standard-library Production release contracts
         run: |
