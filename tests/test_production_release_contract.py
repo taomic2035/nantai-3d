@@ -108,6 +108,46 @@ def test_public_evidence_rejects_trust_promotion_inputs(
         validate_public_evidence(evidence)
 
 
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    (
+        (("scene", "alignment_rms_m"), 0.30, "alignment RMS"),
+        (("scene", "alignment_rms_m"), -0.01, "alignment RMS"),
+        (("scene", "alignment_rms_m"), float("inf"), "alignment RMS"),
+        (("scene", "gaussian_count"), 99_999, "Gaussian count"),
+        (("scene", "scene_identity"), "not-a-valid-scene-id", "scene identity"),
+        (
+            ("source", "rights", "processing_purposes"),
+            ["not-reconstruction"],
+            "processing purposes",
+        ),
+        (
+            ("source", "rights", "redistribution_allowed"),
+            False,
+            "redistribution",
+        ),
+        (
+            ("source", "rights", "release_inclusion_allowed"),
+            False,
+            "inclusion",
+        ),
+    ),
+)
+def test_public_evidence_rejects_invalid_scene_and_rights_fields(
+    path: tuple[str, ...],
+    value: object,
+    message: str,
+) -> None:
+    evidence = copy.deepcopy(modeled_public_evidence())
+    target = evidence
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    with pytest.raises(ProductionReleaseContractError, match=message):
+        validate_public_evidence(evidence)
+
+
 def test_receipt_rejects_casefold_artifact_collision() -> None:
     artifacts = modeled_artifact_records()
     duplicate = dict(artifacts[0])
