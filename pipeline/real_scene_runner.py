@@ -95,6 +95,7 @@ class RealSceneRunOptions:
     control_points_path: Path | None = None
     geo_origin: tuple[float, float, float] | None = None
     remote_config_path: Path | None = None
+    remote_preflight_report_path: Path | None = None
     viewer_policy_path: Path | None = None
     viewer_report_path: Path | None = None
     human_review_policy_path: Path | None = None

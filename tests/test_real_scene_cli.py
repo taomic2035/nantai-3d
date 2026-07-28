@@ -255,6 +255,69 @@ def test_cli_builds_source_bound_options(tmp_path, monkeypatch, capsys):
     assert '"status":"completed"' in capsys.readouterr().out
 
 
+def test_cli_requires_preflight_report_for_production_training(
+    tmp_path,
+    capsys,
+):
+    cli = _load_cli()
+    source = tmp_path / "source.json"
+    _hf_source(source)
+
+    result = cli.main(
+        [
+            "train-production",
+            "--source",
+            str(source),
+            "--remote-config",
+            str(tmp_path / "remote.json"),
+        ]
+    )
+
+    assert result == 2
+    assert "preflight-report" in capsys.readouterr().err
+
+
+def test_cli_binds_preflight_report_to_production_options(
+    tmp_path,
+    monkeypatch,
+):
+    cli = _load_cli()
+    source = tmp_path / "source.json"
+    _hf_source(source)
+    report = tmp_path / "remote-preflight.json"
+    captured = []
+    monkeypatch.setattr(
+        cli,
+        "run_real_scene",
+        lambda _source, _target, options, **_kwargs: (
+            captured.append(options)
+            or SimpleNamespace(
+                model_dump=lambda **_kwargs: {
+                    "stage": "train-production",
+                    "status": "blocked",
+                }
+            )
+        ),
+    )
+
+    assert (
+        cli.main(
+            [
+                "train-production",
+                "--source",
+                str(source),
+                "--remote-config",
+                str(tmp_path / "remote.json"),
+                "--preflight-report",
+                str(report),
+            ]
+        )
+        == 0
+    )
+
+    assert captured[0].remote_preflight_report_path == report
+
+
 def test_cli_requires_private_runtime_inputs_for_local_capture(
     tmp_path,
     capsys,

@@ -440,6 +440,17 @@ def _real_scene_command(mode: str, tokens: list[str]) -> list[str]:
         source = options.pop("SOURCE", None)
         if source is None:
             raise ValueError("real-scene requires exactly one SOURCE=")
+    if target == "train-production":
+        missing = [
+            name
+            for name in ("REMOTE_CONFIG", "PREFLIGHT_REPORT")
+            if name not in options
+        ]
+        if missing:
+            raise ValueError(
+                "train-production requires "
+                + ", ".join(f"{name}=" for name in missing)
+            )
     if target in {"status", "serve"}:
         if target == "serve" and mode != "real-scene":
             raise ValueError("real-canary cannot serve a production import")

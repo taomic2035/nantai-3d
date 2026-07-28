@@ -50,6 +50,17 @@ def _source() -> HfDatasetSource:
     )
 
 
+@pytest.fixture(autouse=True)
+def _accept_bound_remote_preflight(monkeypatch):
+    """Keep remote lifecycle tests focused past the new caller gate."""
+
+    monkeypatch.setattr(
+        operations_module,
+        "validate_remote_shell_preflight_for_config",
+        lambda _path, _config: SimpleNamespace(status="ready"),
+    )
+
+
 def _runner(tmp_path: Path, operations) -> RealSceneRunner:
     return RealSceneRunner(
         source=RealSceneSourceIdentity(
@@ -113,6 +124,9 @@ def _production_fixture(tmp_path, monkeypatch):
             workspace_base=tmp_path / "real-scene",
             run_id="canary",
             remote_config_path=tmp_path / "remote.json",
+            remote_preflight_report_path=(
+                tmp_path / "remote-preflight.json"
+            ),
             remote_poll_interval_seconds=0.001,
             remote_timeout_seconds=1,
         ),
@@ -144,6 +158,50 @@ def _production_fixture(tmp_path, monkeypatch):
         remote_job_path="/srv/nantai-jobs/job-one/attempt-one",
     )
     return operations, stage_root, prepared, config, job
+
+
+def test_train_production_validates_bound_preflight_before_bundle(
+    tmp_path,
+    monkeypatch,
+):
+    report_path = tmp_path / "remote-preflight.json"
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+            remote_config_path=tmp_path / "remote.json",
+            remote_preflight_report_path=report_path,
+        ),
+    )
+    stage_root = tmp_path / "workspace/stages/train-production/attempt-one"
+    config = SimpleNamespace()
+    monkeypatch.setattr(operations, "_remote_config", lambda: config)
+    calls = []
+
+    def reject_preflight(path, measured):
+        calls.append((path, measured))
+        raise RemoteShellExecutionError("preflight report is not ready")
+
+    monkeypatch.setattr(
+        operations_module,
+        "validate_remote_shell_preflight_for_config",
+        reject_preflight,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        operations,
+        "_build_training_bundle",
+        lambda *_args, **_kwargs: pytest.fail(
+            "bundle must not be built before preflight acceptance"
+        ),
+    )
+
+    execution = operations.execute("train-production", stage_root, ())
+
+    assert execution.state == "blocked"
+    assert "remote executor preflight failed" in execution.reason
+    assert calls == [(report_path, config)]
 
 
 def test_train_production_preserves_drifted_public_config_and_blocks_executor(
@@ -454,6 +512,9 @@ def test_unreachable_remote_training_stays_unknown_with_evidence(
             workspace_base=tmp_path / "real-scene",
             run_id="canary",
             remote_config_path=tmp_path / "remote.json",
+            remote_preflight_report_path=(
+                tmp_path / "remote-preflight.json"
+            ),
             remote_poll_interval_seconds=0.001,
             remote_timeout_seconds=1,
         ),
@@ -549,6 +610,9 @@ def test_existing_remote_job_is_restored_without_resubmit(
             workspace_base=tmp_path / "real-scene",
             run_id="canary",
             remote_config_path=tmp_path / "remote.json",
+            remote_preflight_report_path=(
+                tmp_path / "remote-preflight.json"
+            ),
             remote_poll_interval_seconds=0.001,
             remote_timeout_seconds=1,
         ),
@@ -1286,6 +1350,9 @@ def test_remote_poll_sleep_never_overshoots_deadline(
             workspace_base=tmp_path / "real-scene",
             run_id="canary",
             remote_config_path=tmp_path / "remote.json",
+            remote_preflight_report_path=(
+                tmp_path / "remote-preflight.json"
+            ),
             remote_poll_interval_seconds=5.0,
             remote_timeout_seconds=10.0,
         ),
@@ -1591,6 +1658,9 @@ def _deadline_operations(tmp_path, *, interval=5.0, timeout=10.0):
             workspace_base=tmp_path / "real-scene",
             run_id="canary",
             remote_config_path=tmp_path / "remote.json",
+            remote_preflight_report_path=(
+                tmp_path / "remote-preflight.json"
+            ),
             remote_poll_interval_seconds=interval,
             remote_timeout_seconds=timeout,
         ),

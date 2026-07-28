@@ -116,6 +116,26 @@ class TestRealSceneDispatch:
             ]
         ]
 
+    def test_production_training_requires_preflight_report(
+        self,
+        make,
+        capsys,
+    ):
+        assert (
+            make.main(
+                [
+                    "make.py",
+                    "real-scene",
+                    "SOURCE=C:/private/source.json",
+                    "REMOTE_CONFIG=C:/private/remote.json",
+                    "train-production",
+                ]
+            )
+            == 2
+        )
+
+        assert "PREFLIGHT_REPORT=" in capsys.readouterr().err
+
     def test_real_canary_binds_committed_source_and_subtarget(
         self,
         make,

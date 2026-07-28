@@ -78,6 +78,8 @@ def test_real_canary_docs_do_not_promote_internal_evidence() -> None:
     assert "2026-07-26-real-golden-path-canary.md" in readme
     assert "real-canary" in manual
     assert "train-production" in manual
+    assert "PREFLIGHT_REPORT=/absolute/private/remote-preflight.json" in manual
+    assert "report/config identity" in manual
     assert "production-acceptance" in workflow
     assert "rights receipt" in workflow
     assert "python -m pipeline.production_capture_inputs" in workflow

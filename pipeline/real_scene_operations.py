@@ -89,6 +89,7 @@ from pipeline.remote_shell_executor import (
     load_remote_shell_job_ref,
     publish_remote_container_lifecycle_receipt,
     publish_remote_shell_job_ref,
+    validate_remote_shell_preflight_for_config,
 )
 from pipeline.studio_revisions import (
     CaptureBundleError,
@@ -784,6 +785,26 @@ class RealScenePipelineOperations:
         prerequisites: tuple[StageReceipt, ...],
     ) -> StageExecution:
         try:
+            config = self._remote_config()
+            report_path = (
+                self.options.remote_preflight_report_path
+            )
+            if report_path is None:
+                raise RemoteShellExecutionError(
+                    "production training requires PREFLIGHT_REPORT"
+                )
+            validate_remote_shell_preflight_for_config(
+                report_path,
+                config,
+            )
+        except (OSError, ValidationError, RemoteShellExecutionError) as exc:
+            return StageExecution(
+                state="blocked",
+                artifacts=(),
+                reason=f"remote executor preflight failed: {exc}",
+                evidence_artifacts=_safe_evidence_files(stage_root),
+            )
+        try:
             bundle = self._build_training_bundle(
                 stage_root,
                 prerequisites,
@@ -797,7 +818,6 @@ class RealScenePipelineOperations:
                 evidence_artifacts=_safe_evidence_files(stage_root),
             )
         try:
-            config = self._remote_config()
             stage_root.mkdir(parents=True, exist_ok=True)
             public_config = {
                 "container_identity": config.container_identity,

@@ -2498,6 +2498,223 @@ class TestRemoteShellPreflight:
             revalidated,
         )
 
+    def test_ready_report_loader_and_config_binding_round_trip(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        runner = _Runner()
+        runner.responses.append(_readiness_response(config))
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+        report_path = tmp_path / "preflight.json"
+        remote_module.publish_remote_shell_preflight(
+            report,
+            report_path,
+        )
+
+        loaded = remote_module.load_remote_shell_preflight_report(
+            report_path,
+        )
+        validated = (
+            remote_module.validate_remote_shell_preflight_for_config(
+                report_path,
+                config,
+            )
+        )
+
+        assert loaded == report
+        assert validated == report
+
+    def test_ready_report_rejects_current_local_input_drift(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        runner = _Runner()
+        runner.responses.append(_readiness_response(config))
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+        report_path = tmp_path / "preflight.json"
+        remote_module.publish_remote_shell_preflight(
+            report,
+            report_path,
+        )
+        config.known_hosts_path.write_bytes(
+            config.known_hosts_path.read_bytes() + b"# drift\n"
+        )
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="local input.*differs",
+        ):
+            remote_module.validate_remote_shell_preflight_for_config(
+                report_path,
+                config,
+            )
+
+    def test_ready_report_rejects_runtime_policy_drift(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        runner = _Runner()
+        runner.responses.append(_readiness_response(config))
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+        report_path = tmp_path / "preflight.json"
+        remote_module.publish_remote_shell_preflight(
+            report,
+            report_path,
+        )
+        config.runtime_policy_path.write_bytes(b"{}\n")
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="runtime policy",
+        ):
+            remote_module.validate_remote_shell_preflight_for_config(
+                report_path,
+                config,
+            )
+
+    def test_preflight_report_loader_rejects_duplicate_and_noncanonical_json(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        canonical = canonical_remote_shell_preflight_bytes(report)
+        duplicate = tmp_path / "duplicate.json"
+        duplicate.write_bytes(
+            canonical.replace(
+                b"{",
+                b'{"status":"failed",',
+                1,
+            )
+        )
+        noncanonical = tmp_path / "noncanonical.json"
+        noncanonical.write_text(
+            json.dumps(
+                report.model_dump(mode="json", by_alias=True),
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="ascii",
+        )
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="duplicate",
+        ):
+            remote_module.load_remote_shell_preflight_report(
+                duplicate,
+            )
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="not canonical",
+        ):
+            remote_module.load_remote_shell_preflight_report(
+                noncanonical,
+            )
+
+    def test_preflight_report_loader_rejects_symlink(
+        self,
+        tmp_path,
+    ):
+        config = _config(tmp_path)
+        report = run_remote_shell_preflight(
+            config,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        target = tmp_path / "target.json"
+        target.write_bytes(
+            canonical_remote_shell_preflight_bytes(report)
+        )
+        link = tmp_path / "report.json"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("filesystem does not permit symlink creation")
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="regular file",
+        ):
+            remote_module.load_remote_shell_preflight_report(link)
+
+    def test_preflight_report_rejects_nonready_and_config_replay(
+        self,
+        tmp_path,
+    ):
+        first_root = tmp_path / "first"
+        first_root.mkdir()
+        first = _config(first_root)
+        failed = run_remote_shell_preflight(
+            first,
+            probe_remote=False,
+            now=lambda: _T0,
+        )
+        failed_path = tmp_path / "failed.json"
+        remote_module.publish_remote_shell_preflight(
+            failed,
+            failed_path,
+        )
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="is not ready",
+        ):
+            remote_module.validate_remote_shell_preflight_for_config(
+                failed_path,
+                first,
+            )
+
+        runner = _Runner()
+        runner.responses.append(_readiness_response(first))
+        ready = run_remote_shell_preflight(
+            first,
+            probe_remote=True,
+            run_command=runner,
+            now=lambda: _T0,
+        )
+        ready_path = tmp_path / "ready.json"
+        remote_module.publish_remote_shell_preflight(
+            ready,
+            ready_path,
+        )
+        second_root = tmp_path / "second"
+        second_root.mkdir()
+        second = _config(second_root)
+
+        with pytest.raises(
+            RemoteShellExecutionError,
+            match="config identity differs",
+        ):
+            remote_module.validate_remote_shell_preflight_for_config(
+                ready_path,
+                second,
+            )
+
     def test_report_identity_binds_config_and_local_input_bytes(
         self,
         tmp_path,

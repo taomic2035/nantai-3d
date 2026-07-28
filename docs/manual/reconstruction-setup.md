@@ -124,11 +124,14 @@ registration 阈值没有默认值；示例值必须按本次采集和正式验�
 - 一份 canonical `production-runtime-policy.v1` 的绝对私有路径及其
   `content_sha256`。
 
-配置、私钥和私有主机地址不得提交到仓库。具备这些输入后才运行：
+配置、私钥和私有主机地址不得提交到仓库。先按 3.6 节完成 fresh 体检并取得
+`status=ready` 的报告，再把同一份报告交给正式训练 caller：
 
 ```bash
 .venv/bin/python make.py real-canary RUN_ID=my-real-canary \
-  REMOTE_CONFIG=/absolute/private/remote.json train-production
+  REMOTE_CONFIG=/absolute/private/remote.json \
+  PREFLIGHT_REPORT=/absolute/private/remote-preflight.json \
+  train-production
 ```
 
 ### 3.6 先做无训练副作用的远端体检
@@ -167,8 +170,10 @@ key 排序、末尾换行的 canonical JSON，且只含以下字段：
 `ready` 还要求本地 `runtime_policy_path` 存在、是 canonical policy，且其内容 SHA、
 container/worker/remote-target 绑定与 remote config 完全一致；该检查发生在任何
 SSH probe 之前。policy 缺失返回 `blocked-external-input`，损坏或绑定不符返回
-`failed`，probe 期间发生字节漂移也返回 `failed`。真正 submit 时 executor 仍会
-重新打开 policy，因此 preflight report 不能代替提交时复验。
+`failed`，probe 期间发生字节漂移也返回 `failed`。`train-production` 会在构建
+bundle 和任何远端副作用之前重新打开 canonical report，要求 `status=ready`，复核
+report/config identity、SSH/SCP/私钥/known-hosts 当前内容 SHA，并重新打开 runtime
+policy；任一项漂移都拒绝 submit。因此 preflight report 不能代替提交时复验。
 
 remote config 还必须包含：
 

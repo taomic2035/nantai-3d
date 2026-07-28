@@ -119,6 +119,10 @@ def _validate_runtime_inputs(args, source) -> None:
     )
     if needs_remote and args.remote_config is None:
         raise ValueError("train-production requires --remote-config")
+    if needs_remote and args.preflight_report is None:
+        raise ValueError(
+            "train-production requires --preflight-report"
+        )
 
 
 def _run_status(args) -> int:
@@ -334,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             control_points_path=args.control_points,
             geo_origin=geo_origin,
             remote_config_path=args.remote_config,
+            remote_preflight_report_path=args.preflight_report,
             viewer_policy_path=args.viewer_policy,
             viewer_report_path=args.viewer_report,
             human_review_policy_path=args.human_review_policy,

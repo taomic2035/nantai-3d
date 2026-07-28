@@ -1221,6 +1221,166 @@ def load_remote_shell_executor_config(
     return config
 
 
+def load_remote_shell_preflight_report(
+    path: str | Path,
+) -> RemoteShellPreflightReport:
+    """Load one canonical, bounded, immutable preflight report."""
+
+    report_path = Path(path)
+    if not report_path.is_absolute():
+        raise RemoteShellExecutionError(
+            "remote preflight report path must be absolute"
+        )
+    descriptor = -1
+    try:
+        before = report_path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
+            before.st_mode
+        ):
+            raise RemoteShellExecutionError(
+                "remote preflight report must be a regular file"
+            )
+        if before.st_size <= 0 or before.st_size > _MAX_STATUS_BYTES:
+            raise RemoteShellExecutionError(
+                "remote preflight report size is invalid"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(report_path, flags)
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or _open_file_identity_signature(descriptor_before)
+            != _open_file_identity_signature(before)
+        ):
+            raise RemoteShellExecutionError(
+                "remote preflight report changed while read"
+            )
+        chunks: list[bytes] = []
+        measured = 0
+        while measured <= _MAX_STATUS_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(
+                    64 * 1024,
+                    _MAX_STATUS_BYTES + 1 - measured,
+                ),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            measured += len(chunk)
+        payload = b"".join(chunks)
+        descriptor_after = os.fstat(descriptor)
+        final_path = report_path.lstat()
+    except RemoteShellExecutionError:
+        raise
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote preflight report cannot be read"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if (
+        not payload
+        or len(payload) > _MAX_STATUS_BYTES
+        or _stat_signature(before) != _stat_signature(final_path)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _open_file_identity_signature(before)
+        != _open_file_identity_signature(descriptor_before)
+        or _open_file_identity_signature(descriptor_after)
+        != _open_file_identity_signature(final_path)
+        or len(payload) != before.st_size
+    ):
+        raise RemoteShellExecutionError(
+            "remote preflight report changed while read"
+        )
+    try:
+        raw = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+        if not isinstance(raw, dict):
+            raise ValueError("remote preflight report must be an object")
+        report = RemoteShellPreflightReport.model_validate_json(payload)
+    except (UnicodeError, ValueError) as exc:
+        raise RemoteShellExecutionError(
+            "remote preflight report is invalid or has duplicate keys"
+        ) from exc
+    if payload != canonical_remote_shell_preflight_bytes(report):
+        raise RemoteShellExecutionError(
+            "remote preflight report is not canonical"
+        )
+    return report
+
+
+def validate_remote_shell_preflight_for_config(
+    report_path: str | Path,
+    config: RemoteShellExecutorConfig,
+) -> RemoteShellPreflightReport:
+    """Require a ready report bound to the current config and local inputs."""
+
+    report = load_remote_shell_preflight_report(report_path)
+    if report.status != "ready":
+        raise RemoteShellExecutionError(
+            "remote preflight report is not ready"
+        )
+    if (
+        report.config_identity_sha256
+        != remote_shell_executor_config_sha256(config)
+    ):
+        raise RemoteShellExecutionError(
+            "remote preflight report config identity differs"
+        )
+    for field in (
+        "container_identity",
+        "expected_host_key_fingerprint",
+        "known_host",
+        "port",
+        "remote_root",
+        "remote_repo_root",
+        "container_runtime",
+        "expected_checker_config_sha256",
+    ):
+        if getattr(report, field) != getattr(config, field):
+            raise RemoteShellExecutionError(
+                f"remote preflight report {field} differs"
+            )
+    local_inputs = (
+        ("ssh_binary_sha256", config.ssh_binary, "ssh binary"),
+        ("scp_binary_sha256", config.scp_binary, "scp binary"),
+        (
+            "private_key_sha256",
+            config.private_key_path,
+            "private key",
+        ),
+        (
+            "known_hosts_sha256",
+            config.known_hosts_path,
+            "known hosts",
+        ),
+    )
+    for field, path, label in local_inputs:
+        snapshot = _preflight_input_snapshot(path, label=label)
+        if (
+            snapshot is None
+            or getattr(report, field) != snapshot.sha256
+        ):
+            raise RemoteShellExecutionError(
+                f"remote preflight local input {label} differs"
+            )
+    _load_bound_runtime_policy(config)
+    return report
+
+
 def load_remote_shell_job_ref(
     path: str | Path,
 ) -> RemoteShellJobRef:
