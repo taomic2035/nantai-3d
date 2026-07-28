@@ -6,7 +6,6 @@ import hashlib
 import os
 import shutil
 import stat
-import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ from pipeline.durable_io import (
 from pipeline.production_release_builder import (
     ProductionReleaseBuilderError,
     build_production_release_archive,
+    resolve_production_release_source_identity,
 )
 from pipeline.production_release_contract import (
     CHECKSUMS_NAME,
@@ -178,6 +178,61 @@ def _copy_stable_regular_file(source: Path, destination: Path) -> str:
             "Production candidate archive copy is inconsistent"
         )
     return copied.sha256
+
+
+def _stable_regular_files_equal(left: Path, right: Path) -> bool:
+    try:
+        left_path_before = left.lstat()
+        right_path_before = right.lstat()
+        if (
+            stat.S_ISLNK(left_path_before.st_mode)
+            or not stat.S_ISREG(left_path_before.st_mode)
+            or stat.S_ISLNK(right_path_before.st_mode)
+            or not stat.S_ISREG(right_path_before.st_mode)
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production acceptance byte comparison requires regular "
+                "non-link files"
+            )
+        if left_path_before.st_size != right_path_before.st_size:
+            return False
+
+        equal = True
+        with left.open("rb") as left_stream, right.open("rb") as right_stream:
+            left_descriptor_before = os.fstat(left_stream.fileno())
+            right_descriptor_before = os.fstat(right_stream.fileno())
+            while True:
+                left_chunk = left_stream.read(_COPY_CHUNK_BYTES)
+                right_chunk = right_stream.read(_COPY_CHUNK_BYTES)
+                if left_chunk != right_chunk:
+                    equal = False
+                if not left_chunk and not right_chunk:
+                    break
+            left_descriptor_after = os.fstat(left_stream.fileno())
+            right_descriptor_after = os.fstat(right_stream.fileno())
+        left_path_after = left.lstat()
+        right_path_after = right.lstat()
+    except ProductionReleaseAssetsError:
+        raise
+    except OSError as exc:
+        raise ProductionReleaseAssetsError(
+            "Production acceptance byte comparison failed"
+        ) from exc
+
+    left_expected = _signature(left_path_before)
+    right_expected = _signature(right_path_before)
+    if (
+        left_expected != _signature(left_descriptor_before)
+        or left_expected != _signature(left_descriptor_after)
+        or left_expected != _signature(left_path_after)
+        or right_expected != _signature(right_descriptor_before)
+        or right_expected != _signature(right_descriptor_after)
+        or right_expected != _signature(right_path_after)
+    ):
+        raise ProductionReleaseAssetsError(
+            "Production acceptance byte comparison trust changed during read"
+        )
+    return equal
 
 
 def _stable_contract_bytes(path: Path) -> bytes:
@@ -389,62 +444,14 @@ def verify_production_release_assets(
         ) from exc
 
 
-def _git_output(arguments: list[str], repo_root: Path) -> str:
-    completed = subprocess.run(
-        ["git", *arguments],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise ProductionReleaseAssetsError(
-            "Git source identity cannot be resolved for staging rebuild"
-        )
-    return completed.stdout
-
-
-def _rebuild_candidate_from_acceptance(
-    *,
-    acceptance_root: Path,
-    version: str,
-    repo_root: Path,
-    output_path: Path,
-) -> str:
-    """Rebuild a candidate archive from acceptance root on current HEAD.
-
-    Returns the SHA-256 of the rebuilt archive.  The caller must
-    byte-compare this with the input candidate archive SHA-256.
-    """
-    source_commit = _git_output(
-        ["rev-parse", "--verify", "HEAD"], repo_root
-    ).strip()
-    tracked_files = tuple(
-        relative
-        for relative in _git_output(
-            ["ls-files", "-z"], repo_root
-        ).split("\0")
-        if relative
-    )
-    result = build_production_release_archive(
-        repo_root=repo_root,
-        acceptance_root=acceptance_root,
-        output_path=output_path,
-        version=version,
-        source_commit=source_commit,
-        tracked_files=tracked_files,
-    )
-    return result.archive_sha256
-
-
 def stage_production_release_assets(
     *,
+    repo_root: str | Path,
+    acceptance_root: str | Path,
+    version: str,
     archive_path: str | Path,
     privacy_policy_path: str | Path,
     output_dir: str | Path,
-    acceptance_root: str | Path,
-    version: str,
-    repo_root: str | Path | None = None,
 ) -> ProductionReleaseAssets:
     """Verify, privacy-audit and stage exactly four public Release assets.
 
@@ -456,39 +463,61 @@ def stage_production_release_assets(
     source = Path(archive_path).expanduser().absolute()
     policy = Path(privacy_policy_path).expanduser().absolute()
     acceptance = Path(acceptance_root).expanduser().absolute()
-    repo = (
-        Path(repo_root).expanduser().absolute()
-        if repo_root is not None
-        else Path(__file__).resolve().parents[1]
-    )
+    repo = Path(repo_root).expanduser().absolute()
     output = _real_absent_output(Path(output_dir))
     staging = output.parent / (
         f".{output.name}.{uuid.uuid4().hex}.staging"
     )
     candidate = staging / ".candidate.zip"
-    rebuilt = staging / ".rebuilt.zip"
+    rebuilt = staging / ".acceptance-rebuild.zip"
+    rebuilt_sidecar = rebuilt.with_suffix(f"{rebuilt.suffix}.sha256")
     published = False
     try:
         staging.mkdir(mode=0o700)
         archive_sha256 = _copy_stable_regular_file(source, candidate)
-        rebuilt_sha256 = _rebuild_candidate_from_acceptance(
-            acceptance_root=acceptance,
-            version=version,
-            repo_root=repo,
-            output_path=rebuilt,
-        )
-        candidate_digest = stable_regular_file_digest(candidate)
-        if candidate_digest.sha256 != rebuilt_sha256:
-            raise ProductionReleaseAssetsError(
-                "rebuilt candidate disagrees with input archive"
+        try:
+            source_identity_before = (
+                resolve_production_release_source_identity(repo)
             )
+            rebuilt_result = build_production_release_archive(
+                repo_root=repo,
+                acceptance_root=acceptance,
+                output_path=rebuilt,
+                version=version,
+                source_commit=source_identity_before.source_commit,
+                tracked_files=source_identity_before.tracked_files,
+            )
+            source_identity_after = (
+                resolve_production_release_source_identity(repo)
+            )
+        except ProductionReleaseBuilderError as exc:
+            raise ProductionReleaseAssetsError(
+                "Production acceptance rebuild failed"
+            ) from exc
+        if source_identity_after != source_identity_before:
+            raise ProductionReleaseAssetsError(
+                "Production source identity changed during acceptance rebuild"
+            )
+        if rebuilt_result.archive_path != rebuilt:
+            raise ProductionReleaseAssetsError(
+                "Production candidate does not match acceptance rebuild"
+            )
+        try:
+            rebuilt_digest = stable_regular_file_digest(rebuilt)
+        except ReleaseArchiveError as exc:
+            raise ProductionReleaseAssetsError(
+                "Production candidate does not match acceptance rebuild"
+            ) from exc
         if (
-            stable_regular_file_digest(candidate).sha256
-            != archive_sha256
+            rebuilt_result.archive_sha256 != rebuilt_digest.sha256
+            or archive_sha256 != rebuilt_result.archive_sha256
+            or not _stable_regular_files_equal(candidate, rebuilt)
         ):
             raise ProductionReleaseAssetsError(
-                "candidate archive changed during rebuild"
+                "Production candidate does not match acceptance rebuild"
             )
+        rebuilt.unlink()
+        rebuilt_sidecar.unlink()
         with tempfile.TemporaryDirectory(
             prefix="nantai-production-assets-"
         ) as temporary:
@@ -497,6 +526,11 @@ def stage_production_release_assets(
                 Path(temporary) / "runtime",
             )
             verification_before = verify_production_release_tree(extracted)
+            if verification_before.version != version:
+                raise ProductionReleaseAssetsError(
+                    "Production candidate version does not match requested "
+                    "version"
+                )
             if (
                 verification_before.fixture_kind is not None
                 or verification_before.release_contract
@@ -576,7 +610,6 @@ def stage_production_release_assets(
         DurableIOError,
         FileExistsError,
         OSError,
-        ProductionReleaseBuilderError,
         ProductionReleasePrivacyError,
         ProductionReleaseVerificationError,
         ReleaseArchiveError,
