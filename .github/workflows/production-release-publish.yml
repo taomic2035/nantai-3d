@@ -231,227 +231,457 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUNDLE_DIR: ${{ runner.temp }}/production-release-assets
           DOWNLOADED_DIR: ${{ runner.temp }}/downloaded-release-assets
-          DOWNLOADED_JSON: ${{ runner.temp }}/downloaded-verify.json
-          DOWNLOADED_FIELDS: ${{ runner.temp }}/downloaded-verify-fields.txt
-          RELEASE_NOTES: ${{ runner.temp }}/production-release-notes.md
-          TAG_CREATE_JSON: ${{ runner.temp }}/created-production-tag.json
-          RELEASE_CREATE_JSON: ${{ runner.temp }}/created-production-release.json
-          CLEANUP_RELEASE_JSON: ${{ runner.temp }}/cleanup-production-release.json
         run: |
           set -euo pipefail
+          python - "$BUNDLE_DIR" "$DOWNLOADED_DIR" <<'PY'
+          # BEGIN NUMERIC_RELEASE_TRANSACTION
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import urllib.parse
+          from pathlib import Path
 
-          assert_absent() {
-            local label="$1"
-            local endpoint="$2"
-            local error_file="$RUNNER_TEMP/${label}-preflight-error.txt"
-            if gh api "$endpoint" >/dev/null 2>"$error_file"; then
-              echo "A release or tag already exists; refusing to modify it" >&2
-              return 1
-            fi
-            if ! grep -q "HTTP 404" "$error_file"; then
-              echo "Unable to prove that the release and tag are absent" >&2
-              return 1
-            fi
-            rm -f -- "$error_file"
-          }
 
-          assert_absent "release" "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION"
-          assert_absent "tag" "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION"
+          class PublicationError(RuntimeError):
+              pass
 
-          archive_name="nantai-3d-${VERSION}-runtime.zip"
-          asset_names=(
-            "$archive_name"
-            "$archive_name.sha256"
-            "PRODUCTION-RELEASE.json"
-            "SHA256SUMS.txt"
+
+          bundle_dir = Path(sys.argv[1])
+          downloaded_dir = Path(sys.argv[2])
+          version = os.environ["VERSION"]
+          expected_content_id = os.environ["EXPECTED_CONTENT_ID"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          source_sha = os.environ["GITHUB_SHA"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          run_attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+          marker = (
+              f"Workflow transaction: {run_id}-{run_attempt}@{source_sha}"
           )
-          for name in "${asset_names[@]}"; do
-            if [[ ! -f "$BUNDLE_DIR/$name" ]] || [[ -L "$BUNDLE_DIR/$name" ]]; then
-              echo "Public artifact allowlist is incomplete or unsafe" >&2
-              exit 1
-            fi
-          done
+          release_endpoint = f"repos/{repository}/releases"
+          release_by_tag_endpoint = (
+              f"{release_endpoint}/tags/{version}"
+          )
+          tag_get_endpoint = (
+              f"repos/{repository}/git/ref/tags/{version}"
+          )
+          tag_delete_endpoint = (
+              f"repos/{repository}/git/refs/tags/{version}"
+          )
+          release_id = None
+          created_tag = False
+          published = False
 
-          cat > "$RELEASE_NOTES" <<EOF
-          This release was staged by the official Nantai production workflow from the
-          protected private staging environment at source commit $GITHUB_SHA.
 
-          The downloaded verifier confirms internal consistency of the four-file bundle
-          and package content ID $EXPECTED_CONTENT_ID. It does not independently prove
-          source authenticity, private acceptance, rights, real reconstruction, measured
-          alignment, or Viewer QA.
+          def _api_result(*arguments, output=None):
+              return subprocess.run(
+                  ["gh", "api", *arguments],
+                  check=False,
+                  stdin=subprocess.DEVNULL,
+                  stdout=(
+                      subprocess.PIPE if output is None else output
+                  ),
+                  stderr=subprocess.PIPE,
+              )
 
-          Workflow transaction: $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT
-          EOF
 
-          transaction_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          created_tag=0
-          release_id=""
+          def _api_json(*arguments, allow_not_found=False):
+              result = _api_result(*arguments)
+              if result.returncode != 0:
+                  if (
+                      allow_not_found
+                      and b"HTTP 404" in result.stderr
+                  ):
+                      return None
+                  raise PublicationError("GitHub API request failed")
+              try:
+                  return json.loads(result.stdout)
+              except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                  raise PublicationError(
+                      "GitHub API returned invalid JSON"
+                  ) from exc
 
-          release_is_owned_draft() {
-            python - "$1" "$2" "$VERSION" "$transaction_id" <<'PY'
-          import json
-          import sys
 
-          path, expected_id, version, transaction_id = sys.argv[1:]
-          with open(path, encoding="utf-8") as stream:
-              release = json.load(stream)
-          marker = f"Workflow transaction: {transaction_id}"
-          if (
-              str(release.get("id")) != expected_id
-              or release.get("tag_name") != version
-              or release.get("draft") is not True
-              or marker not in release.get("body", "")
-          ):
+          def _assert_tag():
+              tag = _api_json(tag_get_endpoint)
+              if (
+                  not isinstance(tag, dict)
+                  or not isinstance(tag.get("object"), dict)
+                  or tag["object"].get("sha") != source_sha
+              ):
+                  raise PublicationError(
+                      "Release tag identity changed"
+                  )
+
+
+          def _validate_release(release, *, draft):
+              if (
+                  not isinstance(release, dict)
+                  or not isinstance(release.get("id"), int)
+                  or release["id"] != release_id
+                  or release.get("tag_name") != version
+                  or release.get("target_commitish") != source_sha
+                  or release.get("draft") is not draft
+                  or marker not in release.get("body", "")
+              ):
+                  raise PublicationError(
+                      "Release transaction identity changed"
+                  )
+              return release
+
+
+          def _assert_transaction(*, draft):
+              if not isinstance(release_id, int) or release_id <= 0:
+                  raise PublicationError(
+                      "Release transaction has no numeric identity"
+                  )
+              release = _api_json(
+                  f"{release_endpoint}/{release_id}"
+              )
+              _validate_release(release, draft=draft)
+              _assert_tag()
+              return release
+
+
+          def _cleanup():
+              release_deleted = False
+              release_missing = False
+              if isinstance(release_id, int) and release_id > 0:
+                  try:
+                      current = _api_json(
+                          f"{release_endpoint}/{release_id}",
+                          allow_not_found=True,
+                      )
+                      if current is None:
+                          release_missing = True
+                      else:
+                          _validate_release(current, draft=True)
+                          _assert_tag()
+                          deleted = _api_result(
+                              "--method",
+                              "DELETE",
+                              f"{release_endpoint}/{release_id}",
+                          )
+                          release_deleted = deleted.returncode == 0
+                  except (PublicationError, OSError):
+                      pass
+              if not created_tag:
+                  return
+              if not (
+                  release_id is None
+                  or release_deleted
+                  or release_missing
+              ):
+                  return
+              try:
+                  tag = _api_json(
+                      tag_get_endpoint,
+                      allow_not_found=True,
+                  )
+                  same_tag = (
+                      isinstance(tag, dict)
+                      and isinstance(tag.get("object"), dict)
+                      and tag["object"].get("sha") == source_sha
+                  )
+                  tag_release = _api_json(
+                      release_by_tag_endpoint,
+                      allow_not_found=True,
+                  )
+                  if same_tag and tag_release is None:
+                      _api_result(
+                          "--method",
+                          "DELETE",
+                          tag_delete_endpoint,
+                      )
+              except (PublicationError, OSError):
+                  pass
+
+
+          def _compare_files(left, right):
+              with left.open("rb") as left_stream:
+                  with right.open("rb") as right_stream:
+                      while True:
+                          left_chunk = left_stream.read(1024 * 1024)
+                          right_chunk = right_stream.read(1024 * 1024)
+                          if left_chunk != right_chunk:
+                              raise PublicationError(
+                                  "Downloaded release asset changed"
+                              )
+                          if not left_chunk:
+                              return
+
+
+          def _publish():
+              global release_id, created_tag, published
+              if (
+                  re.fullmatch(
+                      r"v[0-9]+\.[0-9]+\.[0-9]+"
+                      r"(?:-[0-9A-Za-z.-]+)?",
+                      version,
+                  )
+                  is None
+                  or len(version) > 64
+                  or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+                  or re.fullmatch(r"[0-9a-f]{64}", expected_content_id)
+                  is None
+                  or re.fullmatch(
+                      r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+                      repository,
+                  )
+                  is None
+                  or not run_id.isdecimal()
+                  or not run_attempt.isdecimal()
+              ):
+                  raise PublicationError(
+                      "Release transaction inputs are invalid"
+                  )
+
+              archive_name = (
+                  f"nantai-3d-{version}-runtime.zip"
+              )
+              asset_names = (
+                  archive_name,
+                  f"{archive_name}.sha256",
+                  "PRODUCTION-RELEASE.json",
+                  "SHA256SUMS.txt",
+              )
+              for name in asset_names:
+                  source = bundle_dir / name
+                  if not source.is_file() or source.is_symlink():
+                      raise PublicationError(
+                          "Public artifact allowlist is incomplete"
+                      )
+
+              if (
+                  _api_json(
+                      release_by_tag_endpoint,
+                      allow_not_found=True,
+                  )
+                  is not None
+                  or _api_json(
+                      tag_get_endpoint,
+                      allow_not_found=True,
+                  )
+                  is not None
+              ):
+                  raise PublicationError(
+                      "Release or tag already exists"
+                  )
+
+              tag = _api_json(
+                  "--method",
+                  "POST",
+                  f"repos/{repository}/git/refs",
+                  "-f",
+                  f"ref=refs/tags/{version}",
+                  "-f",
+                  f"sha={source_sha}",
+              )
+              created_tag = True
+              if (
+                  not isinstance(tag, dict)
+                  or not isinstance(tag.get("object"), dict)
+                  or tag["object"].get("sha") != source_sha
+              ):
+                  raise PublicationError(
+                      "Created tag identity is invalid"
+                  )
+
+              _assert_tag()
+              if (
+                  _api_json(
+                      release_by_tag_endpoint,
+                      allow_not_found=True,
+                  )
+                  is not None
+              ):
+                  raise PublicationError(
+                      "Release appeared during creation"
+                  )
+
+              body = (
+                  "This release was staged by the official Nantai "
+                  "production workflow from the protected private "
+                  f"staging environment at source commit {source_sha}.\n\n"
+                  "The downloaded verifier confirms internal consistency "
+                  "of the four-file bundle and package content ID "
+                  f"{expected_content_id}. It does not independently prove "
+                  "source authenticity, private acceptance, rights, real "
+                  "reconstruction, measured alignment, or Viewer QA.\n\n"
+                  f"{marker}\n"
+              )
+              release = _api_json(
+                  "--method",
+                  "POST",
+                  release_endpoint,
+                  "-f",
+                  f"tag_name={version}",
+                  "-f",
+                  f"target_commitish={source_sha}",
+                  "-f",
+                  f"name=Nantai 3D {version}",
+                  "-f",
+                  f"body={body}",
+                  "-F",
+                  "draft=true",
+                  "-F",
+                  "prerelease=false",
+                  "-f",
+                  "make_latest=false",
+              )
+              if (
+                  not isinstance(release, dict)
+                  or not isinstance(release.get("id"), int)
+                  or release["id"] <= 0
+              ):
+                  raise PublicationError(
+                      "Created release has no numeric identity"
+                  )
+              release_id = release["id"]
+              _validate_release(release, draft=True)
+
+              uploaded_ids = set()
+              for name in asset_names:
+                  _assert_transaction(draft=True)
+                  encoded_name = urllib.parse.quote(
+                      name,
+                      safe="",
+                  )
+                  asset = _api_json(
+                      "--method",
+                      "POST",
+                      "--hostname",
+                      "uploads.github.com",
+                      "-H",
+                      "Content-Type: application/octet-stream",
+                      "--input",
+                      str(bundle_dir / name),
+                      f"repos/{repository}/releases/"
+                      f"{release_id}/assets?name={encoded_name}",
+                  )
+                  if (
+                      not isinstance(asset, dict)
+                      or not isinstance(asset.get("id"), int)
+                      or asset["id"] <= 0
+                      or asset.get("name") != name
+                      or asset["id"] in uploaded_ids
+                  ):
+                      raise PublicationError(
+                          "Uploaded asset identity is invalid"
+                      )
+                  uploaded_ids.add(asset["id"])
+
+              _assert_transaction(draft=True)
+              assets = _api_json(
+                  f"{release_endpoint}/{release_id}/assets"
+                  "?per_page=100"
+              )
+              if not isinstance(assets, list):
+                  raise PublicationError(
+                      "Release asset inventory is invalid"
+                  )
+              assets_by_name = {}
+              asset_ids = set()
+              for asset in assets:
+                  if (
+                      not isinstance(asset, dict)
+                      or not isinstance(asset.get("id"), int)
+                      or asset["id"] <= 0
+                      or not isinstance(asset.get("name"), str)
+                      or asset["name"] in assets_by_name
+                      or asset["id"] in asset_ids
+                  ):
+                      raise PublicationError(
+                          "Release asset inventory is invalid"
+                      )
+                  assets_by_name[asset["name"]] = asset["id"]
+                  asset_ids.add(asset["id"])
+              if set(assets_by_name) != set(asset_names):
+                  raise PublicationError(
+                      "Release asset allowlist changed"
+                  )
+
+              downloaded_dir.mkdir(parents=True, exist_ok=False)
+              for name in asset_names:
+                  _assert_transaction(draft=True)
+                  asset_id = assets_by_name[name]
+                  destination = downloaded_dir / name
+                  with destination.open("xb") as stream:
+                      result = _api_result(
+                          "-H",
+                          "Accept: application/octet-stream",
+                          f"repos/{repository}/releases/assets/{asset_id}",
+                          output=stream,
+                      )
+                  if result.returncode != 0:
+                      raise PublicationError(
+                          "Release asset download failed"
+                      )
+                  _compare_files(bundle_dir / name, destination)
+
+              verification = subprocess.run(
+                  [
+                      sys.executable,
+                      "scripts/verify_production_release_assets.py",
+                      str(downloaded_dir),
+                  ],
+                  check=False,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+              if verification.returncode != 0:
+                  raise PublicationError(
+                      "Downloaded release verification failed"
+                  )
+              try:
+                  result = json.loads(verification.stdout)
+              except (
+                  TypeError,
+                  UnicodeDecodeError,
+                  json.JSONDecodeError,
+              ) as exc:
+                  raise PublicationError(
+                      "Downloaded verifier returned invalid JSON"
+                  ) from exc
+              if (
+                  result.get("package_content_id")
+                  != expected_content_id
+                  or re.fullmatch(
+                      r"[0-9a-f]{64}",
+                      result.get("archive_sha256", ""),
+                  )
+                  is None
+              ):
+                  raise PublicationError(
+                      "Downloaded release identity is invalid"
+                  )
+
+              _assert_transaction(draft=True)
+              updated = _api_json(
+                  "--method",
+                  "PATCH",
+                  f"{release_endpoint}/{release_id}",
+                  "-F",
+                  "draft=false",
+                  "-f",
+                  "make_latest=true",
+              )
+              _validate_release(updated, draft=False)
+              _assert_transaction(draft=False)
+              published = True
+
+
+          try:
+              _publish()
+          except (OSError, PublicationError):
+              if not published:
+                  _cleanup()
+              print(
+                  "Production release transaction failed",
+                  file=sys.stderr,
+              )
               raise SystemExit(1)
+          # END NUMERIC_RELEASE_TRANSACTION
           PY
-          }
-
-          cleanup_created_release() {
-            local status=$?
-            set +e
-            if [[ "$status" -eq 0 ]]; then
-              exit 0
-            fi
-
-            local release_owned=0
-            if [[ -n "$release_id" ]] \
-              && gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$CLEANUP_RELEASE_JSON" 2>/dev/null \
-              && release_is_owned_draft "$CLEANUP_RELEASE_JSON" "$release_id"; then
-              release_owned=1
-            elif gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
-              > "$CLEANUP_RELEASE_JSON" 2>/dev/null; then
-              local discovered_release_id
-              discovered_release_id="$(
-                python - "$CLEANUP_RELEASE_JSON" <<'PY'
-              import json
-              import sys
-
-              with open(sys.argv[1], encoding="utf-8") as stream:
-                  print(json.load(stream)["id"])
-              PY
-              )"
-              if [[ "$discovered_release_id" =~ ^[0-9]+$ ]] \
-                && release_is_owned_draft \
-                  "$CLEANUP_RELEASE_JSON" "$discovered_release_id"; then
-                release_id="$discovered_release_id"
-                release_owned=1
-              fi
-            fi
-
-            if [[ "$release_owned" -eq 1 ]]; then
-              if gh api --method DELETE \
-                "repos/$GITHUB_REPOSITORY/releases/$release_id"; then
-                local tag_sha_after_release_delete
-                tag_sha_after_release_delete="$(
-                  gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" \
-                    --jq '.object.sha' 2>/dev/null
-                )"
-                if [[ "$created_tag" -eq 1 \
-                  && "$tag_sha_after_release_delete" == "$GITHUB_SHA" ]]; then
-                  gh api --method DELETE \
-                    "repos/$GITHUB_REPOSITORY/git/refs/tags/$VERSION" \
-                    || echo "Failed to clean up the workflow-created tag" >&2
-                fi
-              else
-                echo "Failed to clean up the identity-checked draft release" >&2
-              fi
-            elif [[ "$created_tag" -eq 1 ]]; then
-              local current_tag_sha
-              current_tag_sha="$(
-                gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" \
-                  --jq '.object.sha' 2>/dev/null
-              )"
-              local release_error="$RUNNER_TEMP/cleanup-release-absence-error.txt"
-              if [[ "$current_tag_sha" == "$GITHUB_SHA" ]] \
-                && ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" \
-                >/dev/null 2>"$release_error" \
-                && grep -q "HTTP 404" "$release_error"; then
-                gh api --method DELETE \
-                  "repos/$GITHUB_REPOSITORY/git/refs/tags/$VERSION" \
-                  || echo "Failed to clean up the workflow-created temporary tag" >&2
-              fi
-            fi
-            exit "$status"
-          }
-          trap cleanup_created_release EXIT
-
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-            -f ref="refs/tags/$VERSION" \
-            -f sha="$GITHUB_SHA" > "$TAG_CREATE_JSON"
-          created_tag=1
-          created_tag_sha="$(
-            python - "$TAG_CREATE_JSON" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              print(json.load(stream)["object"]["sha"])
-          PY
-          )"
-          if [[ "$created_tag_sha" != "$GITHUB_SHA" ]]; then
-            echo "Created tag does not resolve to the workflow source commit" >&2
-            exit 1
-          fi
-
-          gh release create "$VERSION" \
-            --target "$GITHUB_SHA" \
-            --verify-tag \
-            --title "Nantai 3D $VERSION" \
-            --notes-file "$RELEASE_NOTES" \
-            --draft \
-            --latest=false
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" > "$RELEASE_CREATE_JSON"
-          release_id="$(
-            python - "$RELEASE_CREATE_JSON" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              print(json.load(stream)["id"])
-          PY
-          )"
-          if [[ ! "$release_id" =~ ^[0-9]+$ ]] \
-            || ! release_is_owned_draft "$RELEASE_CREATE_JSON" "$release_id"; then
-            echo "Created draft release identity is invalid" >&2
-            exit 1
-          fi
-
-          gh release upload "$VERSION" \
-            "$BUNDLE_DIR/$archive_name" \
-            "$BUNDLE_DIR/$archive_name.sha256" \
-            "$BUNDLE_DIR/PRODUCTION-RELEASE.json" \
-            "$BUNDLE_DIR/SHA256SUMS.txt"
-
-          mkdir -p -- "$DOWNLOADED_DIR"
-          gh release download "$VERSION" \
-            --dir "$DOWNLOADED_DIR"
-
-          for name in "${asset_names[@]}"; do
-            source="$BUNDLE_DIR/$name"
-            downloaded="$DOWNLOADED_DIR/$name"
-            cmp -- "$source" "$downloaded"
-          done
-
-          python scripts/verify_production_release_assets.py \
-            "$DOWNLOADED_DIR" > "$DOWNLOADED_JSON"
-          python - "$DOWNLOADED_JSON" <<'PY' > "$DOWNLOADED_FIELDS"
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              result = json.load(stream)
-          print(result["package_content_id"], result["archive_sha256"])
-          PY
-          read -r downloaded_id downloaded_archive_sha < "$DOWNLOADED_FIELDS"
-          if [[ ! "$downloaded_id" =~ ^[0-9a-f]{64}$ ]] || [[ "$downloaded_id" != "$EXPECTED_CONTENT_ID" ]]; then
-            echo "Downloaded draft package content ID mismatch" >&2
-            exit 1
-          fi
-          if [[ ! "$downloaded_archive_sha" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "Downloaded draft archive SHA-256 is invalid" >&2
-            exit 1
-          fi
-
-          gh release edit "$VERSION" --draft=false --latest
-          trap - EXIT

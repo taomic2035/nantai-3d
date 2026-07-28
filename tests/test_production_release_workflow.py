@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import runpy
+import subprocess
+import sys
 from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import unquote
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +49,26 @@ def _action_steps(job: dict, action: str) -> list[dict]:
         and isinstance(step.get("uses"), str)
         and step["uses"].startswith(f"{action}@")
     ]
+
+
+def _transaction_code() -> str:
+    steps = [
+        step
+        for step in _job("public_publish")["steps"]
+        if isinstance(step, dict)
+        and step.get("name") == "Create draft, verify download, and publish"
+    ]
+    assert len(steps) == 1
+    run = steps[0]["run"]
+    match = re.search(
+        r"# BEGIN NUMERIC_RELEASE_TRANSACTION\n"
+        r"(?P<code>.*?)"
+        r"# END NUMERIC_RELEASE_TRANSACTION",
+        run,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return match.group("code")
 
 
 def test_dispatch_accepts_only_a_validated_version_via_environment() -> None:
@@ -186,7 +214,8 @@ def test_public_job_has_no_private_acceptance_or_policy_capability() -> None:
         and "GH_TOKEN" in step["env"]
     ]
     assert len(gh_token_steps) == 1
-    assert "gh release create" in gh_token_steps[0]["run"]
+    assert "# BEGIN NUMERIC_RELEASE_TRANSACTION" in gh_token_steps[0]["run"]
+    assert '["gh", "api", *arguments]' in gh_token_steps[0]["run"]
 
 
 def test_public_job_reverifies_the_exact_artifact_before_release_transaction() -> None:
@@ -201,71 +230,292 @@ def test_public_job_reverifies_the_exact_artifact_before_release_transaction() -
     assert "make.py verify-production-assets" not in runs
     assert re.search(r"\^\[0-9a-f\]\{64\}\$", runs)
     assert runs.index("scripts/verify_production_release_assets.py") < runs.index(
-        "gh release create"
+        "# BEGIN NUMERIC_RELEASE_TRANSACTION"
     )
 
 
 def test_release_is_draft_verified_then_published_with_failure_cleanup() -> None:
     workflow = _workflow()
     public_runs = "\n".join(_run_blocks(workflow["jobs"]["public_publish"]))
+    transaction = _transaction_code()
     all_runs = "\n".join(
         run for job in workflow["jobs"].values() for run in _run_blocks(job)
     )
 
-    create = public_runs.index("gh release create")
-    download = public_runs.index("gh release download", create)
-    downloaded_verify = public_runs.index(
+    create = transaction.index("release = _api_json(")
+    upload = transaction.index("encoded_name = urllib.parse.quote", create)
+    download = transaction.index("destination = downloaded_dir / name", upload)
+    downloaded_verify = transaction.index(
         "scripts/verify_production_release_assets.py",
         download,
     )
-    publish = public_runs.index("gh release edit", downloaded_verify)
-    assert create < download < downloaded_verify < publish
+    publish = transaction.index(
+        'updated = _api_json(',
+        downloaded_verify,
+    )
+    assert create < upload < download < downloaded_verify < publish
 
-    assert "--draft" in public_runs
-    assert "--latest=false" in public_runs
-    assert '--target "$GITHUB_SHA"' in public_runs
-    assert 'gh release upload "$VERSION"' in public_runs
-    assert '"$BUNDLE_DIR/$archive_name"' in public_runs
-    assert '"$BUNDLE_DIR/$archive_name.sha256"' in public_runs
-    assert '"$BUNDLE_DIR/PRODUCTION-RELEASE.json"' in public_runs
-    assert '"$BUNDLE_DIR/SHA256SUMS.txt"' in public_runs
-    assert "--draft=false" in public_runs
-    assert "--latest" in public_runs[publish:]
-    assert "trap " in public_runs
-    assert 'repos/$GITHUB_REPOSITORY/releases/$release_id' in public_runs
-    assert 'repos/$GITHUB_REPOSITORY/git/refs/tags/$VERSION' in public_runs
+    assert "gh release " not in public_runs
+    assert "target_commitish" in transaction
+    assert "make_latest=false" in transaction
+    assert "make_latest=true" in transaction
+    assert "draft=true" in transaction
+    assert "draft=false" in transaction[publish:]
+    assert "PRODUCTION-RELEASE.json" in transaction
+    assert "SHA256SUMS.txt" in transaction
+    assert 'f"{release_endpoint}/{release_id}"' in transaction
+    assert 'f"{release_id}/assets?name={encoded_name}"' in transaction
+    assert (
+        'f"repos/{repository}/releases/assets/{asset_id}"'
+        in transaction
+    )
     assert "gh release delete" not in public_runs
     assert "--cleanup-tag" not in public_runs
     assert "git push" not in all_runs
-    assert "releases/tags/$VERSION" in public_runs
-    assert "git/ref/tags" in public_runs
-    assert 'cmp -- "$source" "$downloaded"' in public_runs
+    assert "release_by_tag_endpoint" in transaction
+    assert "tag_get_endpoint" in transaction
+    assert "_compare_files(bundle_dir / name, destination)" in transaction
     assert workflow["concurrency"]["cancel-in-progress"] == "false"
     assert workflow["concurrency"]["group"] == (
         "production-release-${{ inputs.version }}"
     )
 
-    tag_create = public_runs.index(
-        'gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs"'
+    assert "release_id = release[\"id\"]" in transaction
+    assert "release[\"id\"] != release_id" in transaction
+    assert 'release.get("tag_name") != version' in transaction
+    assert 'release.get("target_commitish") != source_sha' in transaction
+    assert 'release.get("draft") is not draft' in transaction
+    assert "marker not in release.get(\"body\", \"\")" in transaction
+    assert (
+        'f"Workflow transaction: {run_id}-{run_attempt}@{source_sha}"'
+        in transaction
     )
-    release_create = public_runs.index("gh release create")
-    release_identity = public_runs.index('release_id="$(', release_create)
-    upload = public_runs.index("gh release upload", release_identity)
-    assert tag_create < release_create < release_identity < upload
-    assert '--verify-tag' in public_runs[release_create:upload]
-    assert "release_is_owned_draft" in public_runs
-    assert 'release.get("draft") is not True' in public_runs
-    assert 'str(release.get("id")) != expected_id' in public_runs
-    assert 'tag_sha_after_release_delete" == "$GITHUB_SHA"' in public_runs
-    release_delete = public_runs.index(
-        '"repos/$GITHUB_REPOSITORY/releases/$release_id"'
+    assert transaction.count("_assert_transaction(draft=True)") >= 4
+    assert "_assert_transaction(draft=False)" in transaction
+    assert "set(assets_by_name) != set(asset_names)" in transaction
+    assert "release_deleted" in transaction
+    assert "same_tag and tag_release is None" in transaction
+    cleanup = transaction[
+        transaction.index("def _cleanup():"):
+        transaction.index("def _compare_files(")
+    ]
+    owned = cleanup.index("_validate_release(current, draft=True)")
+    tag_guard = cleanup.index("_assert_tag()", owned)
+    release_delete = cleanup.index('"DELETE"', tag_guard)
+    assert owned < tag_guard < release_delete
+
+
+@pytest.mark.parametrize(
+    ("replacement_phase", "numeric_get_trigger", "expected_uploads"),
+    (
+        ("upload", 1, 0),
+        ("download", 6, 4),
+        ("publish", 10, 4),
+    ),
+)
+def test_numeric_transaction_rejects_same_tag_release_replacement(
+    tmp_path: Path,
+    capsys,
+    replacement_phase: str,
+    numeric_get_trigger: int,
+    expected_uploads: int,
+) -> None:
+    version = "v1.2.3"
+    source_sha = "a" * 40
+    content_id = "b" * 64
+    marker = f"Workflow transaction: 123-2@{source_sha}"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    archive_name = f"nantai-3d-{version}-runtime.zip"
+    asset_names = (
+        archive_name,
+        f"{archive_name}.sha256",
+        "PRODUCTION-RELEASE.json",
+        "SHA256SUMS.txt",
     )
-    tag_refetch = public_runs.index(
-        '"repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION"',
-        release_delete,
-    )
-    tag_delete = public_runs.index(
-        '"repos/$GITHUB_REPOSITORY/git/refs/tags/$VERSION"',
-        tag_refetch,
-    )
-    assert release_delete < tag_refetch < tag_delete
+    for index, name in enumerate(asset_names):
+        (bundle / name).write_bytes(f"asset-{index}".encode("ascii"))
+    downloaded = tmp_path / "downloaded"
+    script = tmp_path / "numeric_release_transaction.py"
+    script.write_text(_transaction_code(), encoding="utf-8")
+    mutations: list[tuple[str, str]] = []
+    api_calls: list[tuple[str, str]] = []
+    state = {
+        "tag_created": False,
+        "replacement_created": False,
+        "numeric_gets": 0,
+        "verifier_called": False,
+    }
+    uploaded_assets: dict[str, tuple[int, bytes]] = {}
+    original_release = {
+        "id": 101,
+        "tag_name": version,
+        "target_commitish": source_sha,
+        "draft": True,
+        "body": marker,
+    }
+    replacement = {
+        "id": 202,
+        "tag_name": version,
+        "target_commitish": source_sha,
+        "draft": True,
+        "body": "replacement release outside this transaction",
+    }
+
+    def completed(command, payload=None, *, returncode=0, stderr=b""):
+        stdout = (
+            b""
+            if payload is None
+            else json.dumps(payload).encode("utf-8")
+        )
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout,
+            stderr,
+        )
+
+    def fake_run(command, **_kwargs):
+        if command[0] == sys.executable:
+            state["verifier_called"] = True
+            return completed(
+                command,
+                {
+                    "package_content_id": content_id,
+                    "archive_sha256": "c" * 64,
+                },
+            )
+        assert command[:2] == ["gh", "api"]
+        arguments = command[2:]
+        method = "GET"
+        if "--method" in arguments:
+            method = arguments[arguments.index("--method") + 1]
+        endpoints = [
+            value
+            for value in arguments
+            if isinstance(value, str) and value.startswith("repos/")
+        ]
+        assert endpoints
+        endpoint = endpoints[-1]
+        api_calls.append((method, endpoint))
+        if method != "GET":
+            mutations.append((method, endpoint))
+
+        if method == "POST" and endpoint == "repos/test/repo/git/refs":
+            state["tag_created"] = True
+            return completed(
+                command,
+                {"object": {"sha": source_sha}},
+            )
+        if method == "POST" and endpoint == "repos/test/repo/releases":
+            return completed(command, original_release)
+        if (
+            method == "POST"
+            and endpoint.startswith(
+                "repos/test/repo/releases/101/assets?name="
+            )
+        ):
+            name = unquote(endpoint.partition("?name=")[2])
+            source = Path(arguments[arguments.index("--input") + 1])
+            asset_id = 1000 + len(uploaded_assets)
+            uploaded_assets[name] = (asset_id, source.read_bytes())
+            return completed(
+                command,
+                {"id": asset_id, "name": name},
+            )
+        if endpoint == f"repos/test/repo/git/ref/tags/{version}":
+            if state["tag_created"]:
+                return completed(
+                    command,
+                    {"object": {"sha": source_sha}},
+                )
+            return completed(
+                command,
+                returncode=1,
+                stderr=b"gh: HTTP 404\n",
+            )
+        if endpoint == f"repos/test/repo/releases/tags/{version}":
+            if state["replacement_created"]:
+                return completed(command, replacement)
+            return completed(
+                command,
+                returncode=1,
+                stderr=b"gh: HTTP 404\n",
+            )
+        if endpoint == "repos/test/repo/releases/101":
+            if state["replacement_created"]:
+                return completed(
+                    command,
+                    returncode=1,
+                    stderr=b"gh: HTTP 404\n",
+                )
+            state["numeric_gets"] += 1
+            if state["numeric_gets"] == numeric_get_trigger:
+                state["replacement_created"] = True
+                return completed(
+                    command,
+                    returncode=1,
+                    stderr=b"gh: HTTP 404\n",
+                )
+            return completed(command, original_release)
+        if endpoint == "repos/test/repo/releases/101/assets?per_page=100":
+            return completed(
+                command,
+                [
+                    {"id": asset_id, "name": name}
+                    for name, (asset_id, _payload) in uploaded_assets.items()
+                ],
+            )
+        if endpoint.startswith("repos/test/repo/releases/assets/"):
+            asset_id = int(endpoint.rsplit("/", 1)[1])
+            payload = next(
+                payload
+                for _name, (observed_id, payload) in uploaded_assets.items()
+                if observed_id == asset_id
+            )
+            _kwargs["stdout"].write(payload)
+            return completed(command)
+        if method == "DELETE":
+            return completed(
+                command,
+                returncode=1,
+                stderr=b"unexpected delete",
+            )
+        raise AssertionError((method, endpoint, arguments))
+
+    environment = {
+        "VERSION": version,
+        "EXPECTED_CONTENT_ID": content_id,
+        "GITHUB_REPOSITORY": "test/repo",
+        "GITHUB_SHA": source_sha,
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_RUN_ATTEMPT": "2",
+    }
+    with (
+        patch.dict(os.environ, environment, clear=False),
+        patch.object(
+            sys,
+            "argv",
+            [str(script), str(bundle), str(downloaded)],
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(SystemExit) as captured,
+    ):
+        runpy.run_path(str(script), run_name="__main__")
+
+    assert captured.value.code == 1
+    assert mutations[:2] == [
+        ("POST", "repos/test/repo/git/refs"),
+        ("POST", "repos/test/repo/releases"),
+    ]
+    upload_mutations = [
+        endpoint
+        for method, endpoint in mutations
+        if method == "POST" and "/assets?name=" in endpoint
+    ]
+    assert len(upload_mutations) == expected_uploads
+    assert not any(method in {"PATCH", "DELETE"} for method, _ in mutations)
+    assert not any("/202" in endpoint for _method, endpoint in api_calls)
+    assert state["replacement_created"] is True
+    assert state["verifier_called"] is (replacement_phase == "publish")
+    assert "Production release transaction failed" in capsys.readouterr().err
