@@ -102,6 +102,12 @@ def _stable_payload(path: Path, *, maximum_bytes: int) -> bytes:
     return payload
 
 
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)()
+    )
+
+
 def _release_files(root: Path) -> set[str]:
     files: set[str] = set()
     folded: set[str] = set()
@@ -110,7 +116,7 @@ def _release_files(root: Path) -> set[str]:
         for directory in tuple(directories):
             candidate = current_path / directory
             relative = candidate.relative_to(root).as_posix()
-            if candidate.is_symlink():
+            if _is_linklike(candidate):
                 _verification_error(
                     f"symlink release path is forbidden: {relative}"
                 )
@@ -130,7 +136,7 @@ def _release_files(root: Path) -> set[str]:
             relative = safe_posix_member_path(
                 candidate.relative_to(root).as_posix()
             ).as_posix()
-            if candidate.is_symlink():
+            if _is_linklike(candidate):
                 _verification_error(
                     f"symlink release file is forbidden: {relative}"
                 )

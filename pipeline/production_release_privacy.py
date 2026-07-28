@@ -244,6 +244,12 @@ def _load_policy(path: Path) -> _PrivacyPolicy:
     return _PrivacyPolicy(needles=tuple(needles))
 
 
+def _is_linklike(path: Path) -> bool:
+    return path.is_symlink() or bool(
+        getattr(path, "is_junction", lambda: False)()
+    )
+
+
 def _release_files(root: Path) -> tuple[tuple[str, Path], ...]:
     observed: list[tuple[str, Path]] = []
     for current, directories, names in os.walk(root, followlinks=False):
@@ -251,18 +257,29 @@ def _release_files(root: Path) -> tuple[tuple[str, Path], ...]:
         for name in tuple(directories):
             candidate = current_path / name
             relative = candidate.relative_to(root).as_posix()
+            if _is_linklike(candidate):
+                raise ProductionReleasePrivacyError(
+                    f"unsafe release directory: {relative}"
+                )
             try:
                 mode = candidate.lstat().st_mode
             except OSError as exc:
                 raise ProductionReleasePrivacyError(
                     "release directory is unavailable"
                 ) from exc
-            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            if not stat.S_ISDIR(mode):
                 raise ProductionReleasePrivacyError(
                     f"unsafe release directory: {relative}"
                 )
         for name in names:
             candidate = current_path / name
+            if _is_linklike(candidate):
+                relative = safe_posix_member_path(
+                    candidate.relative_to(root).as_posix()
+                ).as_posix()
+                raise ProductionReleasePrivacyError(
+                    f"unsafe release file: {relative}"
+                )
             try:
                 relative = safe_posix_member_path(
                     candidate.relative_to(root).as_posix()
@@ -272,7 +289,7 @@ def _release_files(root: Path) -> tuple[tuple[str, Path], ...]:
                 raise ProductionReleasePrivacyError(
                     "release file is unavailable or unsafe"
                 ) from exc
-            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            if not stat.S_ISREG(mode):
                 raise ProductionReleasePrivacyError(
                     f"unsafe release file: {relative}"
                 )

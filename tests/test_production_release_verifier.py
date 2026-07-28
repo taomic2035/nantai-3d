@@ -153,6 +153,26 @@ def test_tree_verifier_rejects_symlink(tmp_path: Path) -> None:
         verify_production_release_tree(root)
 
 
+def test_tree_verifier_rejects_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Windows junction (reparse point) must be rejected like a symlink."""
+    root, _receipt = _tree(tmp_path)
+    junction = root / "web/viewer/junction-link.html"
+    junction.mkdir()
+    original = getattr(Path, "is_junction", lambda self: False)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda self: self == junction or original(self),
+        raising=False,
+    )
+
+    with pytest.raises(ProductionReleaseVerificationError, match="symlink"):
+        verify_production_release_tree(root)
+
+
 def test_archive_verifier_accepts_one_bounded_wrapper_root(tmp_path: Path) -> None:
     root, _receipt = _tree(tmp_path)
     archive = tmp_path / "runtime.zip"

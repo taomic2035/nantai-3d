@@ -301,6 +301,32 @@ def test_symlink_is_rejected_before_privacy_scan(tmp_path: Path) -> None:
         audit_production_release_privacy(root, policy)
 
 
+def test_junction_is_rejected_before_privacy_scan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Windows junction (reparse point) must be rejected like a symlink."""
+    root = tmp_path / "runtime"
+    write_modeled_production_tree(root)
+    junction = root / "web/viewer/private-junction"
+    junction.mkdir()
+    original = getattr(Path, "is_junction", lambda self: False)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda self: self == junction or original(self),
+        raising=False,
+    )
+    policy = tmp_path / "private-policy.json"
+    _write_policy(policy, b"private-canonical-needle")
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="verification failed before",
+    ):
+        audit_production_release_privacy(root, policy)
+
+
 def test_mid_read_drift_is_rejected(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "runtime"
     receipt = write_modeled_production_tree(root)
