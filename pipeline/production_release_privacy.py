@@ -33,6 +33,7 @@ from pipeline.release_archive import (
     ReleaseArchiveError,
     canonical_json_bytes,
     inspect_zip_members,
+    preflight_zip_central_directory,
     safe_posix_member_path,
 )
 
@@ -592,6 +593,10 @@ def audit_production_release_privacy_stream(
     try:
         findings: set[PrivacyFinding] = set()
         source_stream.seek(0)
+        preflight_zip_central_directory(
+            source_stream,
+            limits=ArchiveLimits(),
+        )
         with zipfile.ZipFile(source_stream) as archive:
             inspected = inspect_zip_members(archive, ArchiveLimits())
             wrappers = {member.path.parts[0] for member in inspected}

@@ -7,11 +7,13 @@ import json
 import os
 import re
 import stat
+import struct
 import unicodedata
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 _WINDOWS_RESERVED = frozenset(
@@ -20,6 +22,13 @@ _WINDOWS_RESERVED = frozenset(
     | {f"LPT{index}" for index in range(1, 10)}
 )
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_EOCD_FIXED_BYTES = 22
+_MAXIMUM_ZIP_COMMENT_BYTES = 65_535
+_ZIP64_LOCATOR_BYTES = 20
+_ZIP64_EOCD_FIXED_BYTES = 56
 
 
 class ReleaseArchiveError(ValueError):
@@ -40,6 +49,7 @@ class ArchiveLimits:
     maximum_compression_ratio: int = 1_000
     maximum_path_bytes: int = 4_096
     maximum_path_components: int = 64
+    maximum_central_directory_bytes: int = 128 * 1024 * 1024
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -49,9 +59,159 @@ class ArchiveLimits:
             ("maximum_compression_ratio", self.maximum_compression_ratio),
             ("maximum_path_bytes", self.maximum_path_bytes),
             ("maximum_path_components", self.maximum_path_components),
+            (
+                "maximum_central_directory_bytes",
+                self.maximum_central_directory_bytes,
+            ),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ReleaseArchiveError(f"{name} must be a positive integer")
+
+
+def preflight_zip_central_directory(
+    stream: BinaryIO,
+    *,
+    limits: ArchiveLimits,
+) -> None:
+    """Bound declared ZIP metadata before ``ZipFile`` materializes it."""
+
+    try:
+        previous = stream.tell()
+    except (AttributeError, OSError) as exc:
+        raise ReleaseArchiveError(
+            "release archive stream must be seekable"
+        ) from exc
+    failure: Exception | None = None
+    try:
+        stream.seek(0, os.SEEK_END)
+        archive_bytes = stream.tell()
+        tail_bytes = min(
+            archive_bytes,
+            _EOCD_FIXED_BYTES + _MAXIMUM_ZIP_COMMENT_BYTES,
+        )
+        stream.seek(archive_bytes - tail_bytes)
+        tail = stream.read(tail_bytes)
+        eocd_index = tail.rfind(_EOCD_SIGNATURE)
+        if (
+            eocd_index < 0
+            or len(tail) - eocd_index < _EOCD_FIXED_BYTES
+        ):
+            raise ReleaseArchiveError(
+                "release archive end record is missing"
+            )
+        (
+            _signature,
+            disk_number,
+            central_disk,
+            disk_entries,
+            total_entries,
+            central_bytes,
+            central_offset,
+            comment_bytes,
+        ) = struct.unpack_from("<4s4H2LH", tail, eocd_index)
+        if eocd_index + _EOCD_FIXED_BYTES + comment_bytes != len(tail):
+            raise ReleaseArchiveError(
+                "release archive end record is malformed"
+            )
+        if disk_number != 0 or central_disk != 0:
+            raise ReleaseArchiveError(
+                "multi-disk release archives are forbidden"
+            )
+
+        needs_zip64 = (
+            disk_entries == 0xFFFF
+            or total_entries == 0xFFFF
+            or central_bytes == 0xFFFFFFFF
+            or central_offset == 0xFFFFFFFF
+        )
+        if needs_zip64:
+            eocd_offset = archive_bytes - tail_bytes + eocd_index
+            locator_offset = eocd_offset - _ZIP64_LOCATOR_BYTES
+            if locator_offset < 0:
+                raise ReleaseArchiveError(
+                    "release archive ZIP64 locator is missing"
+                )
+            stream.seek(locator_offset)
+            locator = stream.read(_ZIP64_LOCATOR_BYTES)
+            if len(locator) != _ZIP64_LOCATOR_BYTES:
+                raise ReleaseArchiveError(
+                    "release archive ZIP64 locator is truncated"
+                )
+            (
+                locator_signature,
+                locator_disk,
+                zip64_offset,
+                locator_disks,
+            ) = struct.unpack("<4sLQL", locator)
+            if (
+                locator_signature != _ZIP64_LOCATOR_SIGNATURE
+                or locator_disk != 0
+                or locator_disks != 1
+            ):
+                raise ReleaseArchiveError(
+                    "release archive ZIP64 locator is invalid"
+                )
+            stream.seek(zip64_offset)
+            zip64_record = stream.read(_ZIP64_EOCD_FIXED_BYTES)
+            if len(zip64_record) != _ZIP64_EOCD_FIXED_BYTES:
+                raise ReleaseArchiveError(
+                    "release archive ZIP64 end record is truncated"
+                )
+            (
+                zip64_signature,
+                zip64_record_bytes,
+                _creator_version,
+                _required_version,
+                zip64_disk,
+                zip64_central_disk,
+                zip64_disk_entries,
+                total_entries,
+                central_bytes,
+                _central_offset,
+            ) = struct.unpack("<4sQ2H2L4Q", zip64_record)
+            if (
+                zip64_signature != _ZIP64_EOCD_SIGNATURE
+                or zip64_record_bytes < 44
+                or zip64_disk != 0
+                or zip64_central_disk != 0
+                or zip64_disk_entries != total_entries
+            ):
+                raise ReleaseArchiveError(
+                    "release archive ZIP64 end record is invalid"
+                )
+        elif disk_entries != total_entries:
+            raise ReleaseArchiveError(
+                "release archive member count is inconsistent"
+            )
+
+        if total_entries > limits.maximum_members:
+            raise ReleaseArchiveError(
+                "release archive member count exceeds its maximum"
+            )
+        if central_bytes > limits.maximum_central_directory_bytes:
+            raise ReleaseArchiveError(
+                "release archive central directory exceeds its maximum"
+            )
+        if central_bytes > archive_bytes:
+            raise ReleaseArchiveError(
+                "release archive central directory is invalid"
+            )
+    except ReleaseArchiveError as exc:
+        failure = exc
+        raise
+    except (OSError, OverflowError, struct.error) as exc:
+        failure = exc
+        raise ReleaseArchiveError(
+            "release archive central directory cannot be inspected"
+        ) from exc
+    finally:
+        try:
+            stream.seek(previous)
+        except (AttributeError, OSError) as exc:
+            if failure is None:
+                raise ReleaseArchiveError(
+                    "release archive stream position cannot be restored"
+                ) from exc
 
 
 @dataclass(frozen=True)

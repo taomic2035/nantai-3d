@@ -637,6 +637,37 @@ def test_archive_stream_verifier_does_not_reopen_by_name(
     assert result.valid is True
 
 
+@pytest.mark.parametrize(
+    "limits",
+    (
+        ArchiveLimits(maximum_members=1),
+        ArchiveLimits(maximum_central_directory_bytes=1),
+    ),
+)
+def test_archive_stream_preflight_rejects_before_zipfile_construction(
+    tmp_path: Path,
+    monkeypatch,
+    limits: ArchiveLimits,
+) -> None:
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    stream = io.BytesIO(archive.read_bytes())
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("ZipFile construction must not start")
+
+    monkeypatch.setattr(verifier_module.zipfile, "ZipFile", forbidden)
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="maximum",
+    ):
+        verify_production_release_archive_stream(
+            stream,
+            limits=limits,
+        )
+
+
 def test_tree_receipt_limits_fail_before_directory_walk(
     tmp_path: Path,
     monkeypatch,

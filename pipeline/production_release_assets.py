@@ -40,7 +40,9 @@ from pipeline.production_release_verifier import (
     verify_production_release_archive_stream,
 )
 from pipeline.release_archive import (
+    ArchiveLimits,
     ReleaseArchiveError,
+    preflight_zip_central_directory,
     stable_regular_file_digest,
 )
 
@@ -197,6 +199,10 @@ def _archive_contract_payloads_stream(
     previous = source.tell()
     try:
         source.seek(0)
+        preflight_zip_central_directory(
+            source,
+            limits=ArchiveLimits(),
+        )
         with zipfile.ZipFile(source) as archive:
             names = tuple(info.filename for info in archive.infolist())
 
@@ -230,7 +236,13 @@ def _archive_contract_payloads_stream(
             checksums = read_contract(CHECKSUMS_NAME)
     except ProductionReleaseAssetsError:
         raise
-    except (OSError, EOFError, RuntimeError, zipfile.BadZipFile) as exc:
+    except (
+        OSError,
+        EOFError,
+        RuntimeError,
+        zipfile.BadZipFile,
+        ReleaseArchiveError,
+    ) as exc:
         raise ProductionReleaseAssetsError(
             "Production archive contracts cannot be read"
         ) from exc

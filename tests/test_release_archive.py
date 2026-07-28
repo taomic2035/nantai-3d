@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import stat
+import struct
 import warnings
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -15,9 +17,106 @@ from pipeline.release_archive import (
     canonical_json_bytes,
     deterministic_zip_info,
     inspect_zip_members,
+    preflight_zip_central_directory,
     safe_posix_member_path,
     stable_regular_file_digest,
 )
+
+
+def _zip_payload() -> bytes:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr("payload.txt", b"payload")
+    return stream.getvalue()
+
+
+def _forged_eocd(
+    *,
+    declared_entries: int | None = None,
+    declared_central_bytes: int | None = None,
+) -> io.BytesIO:
+    payload = bytearray(_zip_payload())
+    eocd = payload.rfind(b"PK\x05\x06")
+    assert eocd >= 0
+    if declared_entries is not None:
+        payload[eocd + 8 : eocd + 10] = declared_entries.to_bytes(
+            2,
+            "little",
+        )
+        payload[eocd + 10 : eocd + 12] = declared_entries.to_bytes(
+            2,
+            "little",
+        )
+    if declared_central_bytes is not None:
+        payload[eocd + 12 : eocd + 16] = (
+            declared_central_bytes.to_bytes(4, "little")
+        )
+    return io.BytesIO(payload)
+
+
+def _forged_zip64(*, declared_entries: int) -> io.BytesIO:
+    payload = bytearray(_zip_payload())
+    eocd_offset = payload.rfind(b"PK\x05\x06")
+    assert eocd_offset >= 0
+    eocd = bytearray(payload[eocd_offset:])
+    eocd[8:12] = b"\xff\xff\xff\xff"
+    eocd[12:20] = b"\xff\xff\xff\xff\xff\xff\xff\xff"
+    zip64_eocd = struct.pack(
+        "<4sQ2H2L4Q",
+        b"PK\x06\x06",
+        44,
+        45,
+        45,
+        0,
+        0,
+        declared_entries,
+        declared_entries,
+        1,
+        0,
+    )
+    locator = struct.pack(
+        "<4sLQL",
+        b"PK\x06\x07",
+        0,
+        eocd_offset,
+        1,
+    )
+    return io.BytesIO(
+        payload[:eocd_offset] + zip64_eocd + locator + eocd
+    )
+
+
+def test_zip_preflight_rejects_declared_count_and_restores_position() -> None:
+    stream = _forged_eocd(declared_entries=2)
+    stream.seek(3)
+
+    with pytest.raises(ReleaseArchiveError, match="member count"):
+        preflight_zip_central_directory(
+            stream,
+            limits=ArchiveLimits(maximum_members=1),
+        )
+
+    assert stream.tell() == 3
+
+
+def test_zip_preflight_rejects_declared_central_directory_bytes() -> None:
+    stream = _forged_eocd(declared_central_bytes=2)
+
+    with pytest.raises(ReleaseArchiveError, match="central directory"):
+        preflight_zip_central_directory(
+            stream,
+            limits=ArchiveLimits(maximum_central_directory_bytes=1),
+        )
+
+
+def test_zip_preflight_reads_zip64_declared_count() -> None:
+    stream = _forged_zip64(declared_entries=2)
+
+    with pytest.raises(ReleaseArchiveError, match="member count"):
+        preflight_zip_central_directory(
+            stream,
+            limits=ArchiveLimits(maximum_members=1),
+        )
 
 
 def test_canonical_json_bytes_are_sorted_utf8_lf_and_stable() -> None:

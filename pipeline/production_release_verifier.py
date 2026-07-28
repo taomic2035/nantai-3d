@@ -30,6 +30,7 @@ from pipeline.release_archive import (
     ReleaseArchiveError,
     inspect_zip_members,
     portable_path_identity,
+    preflight_zip_central_directory,
     safe_posix_member_path,
     stable_regular_file_digest,
 )
@@ -658,6 +659,10 @@ def extract_production_release_archive(
     try:
         with source.open("rb") as source_stream:
             descriptor_before = os.fstat(source_stream.fileno())
+            preflight_zip_central_directory(
+                source_stream,
+                limits=limits,
+            )
             with zipfile.ZipFile(source_stream) as archive:
                 reader = _ArchiveReader(archive, limits=limits)
                 source_verification = _verify_reader(
@@ -877,6 +882,7 @@ def verify_production_release_archive(
                 raise ProductionReleaseVerificationError(
                     "Production release archive changed before verification"
                 )
+            preflight_zip_central_directory(stream, limits=limits)
             with zipfile.ZipFile(stream) as archive:
                 result = _verify_reader(
                     _ArchiveReader(archive, limits=limits),
@@ -917,6 +923,7 @@ def verify_production_release_archive_stream(
     try:
         previous = stream.tell()
         stream.seek(0)
+        preflight_zip_central_directory(stream, limits=limits)
         with zipfile.ZipFile(stream) as archive:
             result = _verify_reader(
                 _ArchiveReader(archive, limits=limits),
