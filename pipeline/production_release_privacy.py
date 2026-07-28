@@ -175,7 +175,26 @@ def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _require_safe_policy_location(path: Path) -> Path:
+    policy_path = path.expanduser().absolute()
+    try:
+        redirected = first_linklike_path(
+            Path(policy_path.anchor),
+            policy_path,
+        )
+    except (OSError, ValueError) as exc:
+        raise ProductionReleasePrivacyError(
+            "privacy policy location is unsafe"
+        ) from exc
+    if redirected is not None:
+        raise ProductionReleasePrivacyError(
+            "privacy policy location is unsafe"
+        )
+    return policy_path
+
+
 def _stable_policy_bytes(path: Path) -> bytes:
+    path = _require_safe_policy_location(path)
     try:
         path_before = path.lstat()
     except OSError as exc:
@@ -195,6 +214,7 @@ def _stable_policy_bytes(path: Path) -> bytes:
             descriptor_before = os.fstat(stream.fileno())
             payload = stream.read(_MAXIMUM_POLICY_BYTES + 1)
             descriptor_after = os.fstat(stream.fileno())
+        _require_safe_policy_location(path)
         path_after = path.lstat()
     except OSError as exc:
         raise ProductionReleasePrivacyError(
@@ -420,18 +440,9 @@ def _audit_verified_tree(
         raise ProductionReleasePrivacyError(
             "Production release verification failed before privacy scan"
         ) from exc
-    policy_path = policy_path.expanduser().absolute()
+    policy_path = _require_safe_policy_location(policy_path)
     root = root.expanduser().absolute()
-    try:
-        redirected = first_linklike_path(
-            Path(policy_path.anchor),
-            policy_path,
-        )
-    except (OSError, ValueError) as exc:
-        raise ProductionReleasePrivacyError(
-            "privacy policy location is unsafe"
-        ) from exc
-    if redirected is not None or policy_path.is_relative_to(root):
+    if policy_path.is_relative_to(root):
         raise ProductionReleasePrivacyError(
             "privacy policy must remain outside the public release"
         )

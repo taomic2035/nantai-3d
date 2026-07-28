@@ -233,6 +233,120 @@ def test_noncanonical_policy_is_rejected_without_echoing_private_path(
     assert str(policy) not in str(error.value)
 
 
+def test_policy_reader_rejects_reparse_ancestor_before_leaf_access(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ancestor = tmp_path / "operator-private-alias"
+    ancestor.mkdir()
+    policy = ancestor / "policy.json"
+    secret_needle = b"operator-private-needle"
+    _write_policy(policy, secret_needle)
+    observed = ancestor.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == ancestor:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        if path == policy:
+            raise AssertionError(
+                "policy leaf was accessed through reparse ancestor"
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="location is unsafe",
+    ) as captured:
+        privacy_module._stable_policy_bytes(policy)
+
+    message = str(captured.value)
+    assert str(policy) not in message
+    assert secret_needle.decode("ascii") not in message
+
+
+def test_policy_reader_rechecks_ancestors_after_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    policy = tmp_path / "policy.json"
+    _write_policy(policy, b"operator-private-needle")
+    checks = 0
+
+    def redirect_after_read(_root: Path, _leaf: Path):
+        nonlocal checks
+        checks += 1
+        return None if checks == 1 else policy.parent
+
+    monkeypatch.setattr(
+        privacy_module,
+        "first_linklike_path",
+        redirect_after_read,
+    )
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="location is unsafe",
+    ):
+        privacy_module._stable_policy_bytes(policy)
+
+    assert checks == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_policy_junction_ancestor_is_rejected_without_report_publication(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "runtime"
+    write_modeled_production_tree(root)
+    private_source = tmp_path / "operator-private-source"
+    private_source.mkdir()
+    secret_needle = b"operator-private-needle"
+    _write_policy(private_source / "policy.json", secret_needle)
+    alias = tmp_path / "operator-private-alias"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(alias), str(private_source)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {created.stderr}")
+    policy = alias / "policy.json"
+    destination = tmp_path / "privacy-report.json"
+    try:
+        with pytest.raises(
+            ProductionReleasePrivacyError,
+            match="location is unsafe",
+        ) as captured:
+            report = audit_production_release_privacy(root, policy)
+            publish_privacy_report(report, destination)
+
+        message = str(captured.value)
+        assert str(policy) not in message
+        assert secret_needle.decode("ascii") not in message
+        assert not destination.exists()
+    finally:
+        removed = subprocess.run(
+            ["cmd", "/c", "rmdir", str(alias)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert removed.returncode == 0, removed.stderr
+
+
 def test_noncanonical_base64_needle_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
     write_modeled_production_tree(root)
