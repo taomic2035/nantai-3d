@@ -88,14 +88,14 @@ def test_source_identity_resolves_exact_head_and_tracked_files(
         if command[1:] == ["rev-parse", "--verify", "HEAD"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout="a" * 40 + "\n",
-                stderr="",
+                stdout=b"a" * 40 + b"\n",
+                stderr=b"",
             )
         if command[1:] == ["ls-files", "-z", "--"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout="web/z.js\0LICENSE\0web/a.js\0",
-                stderr="",
+                stdout=b"web/z.js\0LICENSE\0web/a.js\0",
+                stderr=b"",
             )
         raise AssertionError(command)
 
@@ -115,6 +115,111 @@ def test_source_identity_resolves_exact_head_and_tracked_files(
         (["git", "rev-parse", "--verify", "HEAD"], tmp_path.absolute()),
         (["git", "ls-files", "-z", "--"], tmp_path.absolute()),
     ]
+
+
+def test_source_identity_hides_nonzero_git_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout=b"private output",
+            stderr=b"private stderr",
+        )
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="rev-parse",
+    ) as captured:
+        builder_module.resolve_production_release_source_identity(tmp_path)
+
+    assert "private" not in str(captured.value)
+
+
+def test_source_identity_wraps_git_launch_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def run(*_args, **_kwargs):
+        raise FileNotFoundError("git executable")
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="rev-parse",
+    ) as captured:
+        builder_module.resolve_production_release_source_identity(tmp_path)
+
+    assert isinstance(captured.value.__cause__, FileNotFoundError)
+
+
+@pytest.mark.parametrize(
+    "commit",
+    (
+        b"A" * 40 + b"\n",
+        b"a" * 39 + b"\n",
+        b"\xff" * 40 + b"\n",
+    ),
+)
+def test_source_identity_rejects_noncanonical_commit_bytes(
+    tmp_path: Path,
+    monkeypatch,
+    commit: bytes,
+) -> None:
+    def run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=commit, stderr=b"")
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    with pytest.raises(ProductionReleaseBuilderError, match="rev-parse"):
+        builder_module.resolve_production_release_source_identity(tmp_path)
+
+
+def test_source_identity_rejects_empty_tracked_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def run(command, **_kwargs):
+        if command[1] == "rev-parse":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"a" * 40 + b"\n",
+                stderr=b"",
+            )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    with pytest.raises(ProductionReleaseBuilderError, match="ls-files"):
+        builder_module.resolve_production_release_source_identity(tmp_path)
+
+
+def test_source_identity_decodes_tracked_path_bytes_reversibly(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def run(command, **_kwargs):
+        if command[1] == "rev-parse":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=b"a" * 40 + b"\n",
+                stderr=b"",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=b"web/\xff.js\0LICENSE\0",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+    identity = builder_module.resolve_production_release_source_identity(tmp_path)
+
+    assert identity.tracked_files == ("LICENSE", "web/\udcff.js")
 
 
 def _reference(root: Path, relative: str) -> AcceptanceEvidenceReference:

@@ -86,17 +86,30 @@ class ProductionReleaseSourceIdentity:
     tracked_files: tuple[str, ...]
 
 
-def _git_source_output(repo_root: Path, arguments: list[str]) -> str:
-    completed = subprocess.run(
-        ["git", *arguments],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _git_source_output(
+    repo_root: Path,
+    arguments: list[str],
+    operation: str,
+) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=repo_root,
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            f"Git source identity {operation} failed"
+        ) from exc
     if completed.returncode != 0:
         raise ProductionReleaseBuilderError(
-            "Git source identity cannot be resolved"
+            f"Git source identity {operation} failed"
+        )
+    if not isinstance(completed.stdout, bytes):
+        raise ProductionReleaseBuilderError(
+            f"Git source identity {operation} output is not bytes"
         )
     return completed.stdout
 
@@ -105,27 +118,36 @@ def resolve_production_release_source_identity(
     repo_root: str | Path,
 ) -> ProductionReleaseSourceIdentity:
     root = Path(repo_root).expanduser().absolute()
-    source_commit = _git_source_output(
-        root,
-        ["rev-parse", "--verify", "HEAD"],
-    ).strip()
+    try:
+        source_commit = _git_source_output(
+            root,
+            ["rev-parse", "--verify", "HEAD"],
+            "rev-parse",
+        ).decode("ascii").strip()
+    except UnicodeError as exc:
+        raise ProductionReleaseBuilderError(
+            "Git source identity rev-parse output cannot be decoded"
+        ) from exc
     if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
         raise ProductionReleaseBuilderError(
-            "Git source commit is not canonical"
+            "Git source identity rev-parse output is not canonical"
         )
+    try:
+        tracked_output = _git_source_output(
+            root,
+            ["ls-files", "-z", "--"],
+            "ls-files",
+        ).decode("utf-8", "surrogateescape")
+    except UnicodeError as exc:
+        raise ProductionReleaseBuilderError(
+            "Git source identity ls-files output cannot be decoded"
+        ) from exc
     tracked_files = tuple(
-        sorted(
-            relative
-            for relative in _git_source_output(
-                root,
-                ["ls-files", "-z", "--"],
-            ).split("\0")
-            if relative
-        )
+        sorted(relative for relative in tracked_output.split("\0") if relative)
     )
     if not tracked_files:
         raise ProductionReleaseBuilderError(
-            "Git tracked source list is empty"
+            "Git source identity ls-files output is empty"
         )
     return ProductionReleaseSourceIdentity(
         source_commit=source_commit,
