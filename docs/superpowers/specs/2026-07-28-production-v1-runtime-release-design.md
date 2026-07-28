@@ -214,7 +214,9 @@ nantai-3d-v1.0.0/
     viewer/
     data/
       recon/
-        production/
+        recon_manifest.json
+        chunks/
+        <receipt-bound scene payloads>
   evidence/
     public-evidence.json
     acceptance-decision.json
@@ -236,6 +238,12 @@ not from a broad filesystem walk. It includes only:
 - any scene-bound roaming/navigation graph accepted for the same identity;
 - the runtime assets needed to render those formats;
 - the minimal public evidence artifacts listed above.
+
+The validated import's `web/` subtree is mapped into the existing
+`web/data/recon/` runtime mount. This preserves the already tested
+`/web/data/recon/recon_manifest.json` Studio/Viewer ABI; the builder records
+both the import-relative source binding and packaged destination binding, so
+the path mapping cannot change scene identity or hide a byte substitution.
 
 Viewer screenshots are included because they are part of the public visual
 acceptance. Their inclusion is permitted only when the source rights contract
