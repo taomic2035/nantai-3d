@@ -21,7 +21,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 米制 alignment 算法输入门 | 重复、非有限、共线/近共面均 fail closed |
 | measurement / policy / decision | 已独立内容寻址 |
 | production import、acceptance 与 runner 复验 | v3 receipt 绑定 G2/G5；import 与最终 acceptance 均重开原始 runtime、manifest、render、closure 字节 |
-| production runtime evidence | 六 probe/六 executable 已接入 fresh-container 主入口；待真实 GPU fresh accepted 证据 |
+| production runtime evidence | 六 probe/六 executable 已接入 fresh-container 主入口；accepted 后 prepared training 的 `PYTHON_BIN` 固定为同次实测通过的解释器，不再从 `PATH` 重解析；待真实 GPU fresh accepted 证据 |
 | production result closure | worker/caller 已接通 v2 archive、render decision 与 closure；待真实 GPU 产物 |
 | Viewer/Studio 与 synthetic QA | Viewer v2 可信采集与 aggregate 消费端已实现；真实照片 canary 仅完成私有浏览器 smoke，不能签署 production |
 | Production release tooling | runtime closure、脱敏公共证据、确定性 ZIP、独立 verifier、portable path identity、隐私机器审计、最终四件套 no-replace 导出与 Studio/Viewer fail-closed 消费已完成 |

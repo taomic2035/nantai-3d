@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -213,7 +214,11 @@ def _invoke(fixture, *, run_command, exec_calls):
         run_command=run_command,
         which=lambda name: str(fixture["executables"].get(name, "")) or None,
         exec_command=lambda executable, argv: exec_calls.append(
-            (executable, tuple(argv))
+            (
+                executable,
+                tuple(argv),
+                os.environ.get("PYTHON_BIN"),
+            )
         ),
         now=lambda: _NOW,
         logical_path=lambda path: f"/fixture/{path.name}",
@@ -222,9 +227,11 @@ def _invoke(fixture, *, run_command, exec_calls):
 
 def test_accepted_clearance_publishes_closed_evidence_before_training(
     tmp_path,
+    monkeypatch,
 ):
     fixture = _fixture(tmp_path)
     exec_calls = []
+    monkeypatch.delenv("PYTHON_BIN", raising=False)
 
     with pytest.raises(
         ProductionRuntimeEntrypointError,
@@ -245,8 +252,10 @@ def test_accepted_clearance_publishes_closed_evidence_before_training(
                 "--prepared-bundle",
                 "/job/training-job.zip",
             ),
+            str(fixture["python"]),
         )
     ]
+    assert "PYTHON_BIN" not in os.environ
     evidence_root = (
         fixture["job_dir"] / "production-runtime"
     )
@@ -265,6 +274,39 @@ def test_accepted_clearance_publishes_closed_evidence_before_training(
     assert (evidence_root / "policy.json").read_bytes() == (
         canonical_production_runtime_policy_bytes(fixture["policy"])
     )
+
+
+def test_accepted_clearance_overrides_and_restores_existing_python_bin(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _fixture(tmp_path)
+    exec_calls = []
+    monkeypatch.setenv("PYTHON_BIN", "/untrusted/python3")
+
+    with pytest.raises(
+        ProductionRuntimeEntrypointError,
+        match="training exec unexpectedly returned",
+    ):
+        _invoke(
+            fixture,
+            run_command=_run_command(fixture["executables"]),
+            exec_calls=exec_calls,
+        )
+
+    assert exec_calls == [
+        (
+            "bash",
+            (
+                "bash",
+                "cloud/train_3dgs_nerfstudio.sh",
+                "--prepared-bundle",
+                "/job/training-job.zip",
+            ),
+            str(fixture["python"]),
+        )
+    ]
+    assert os.environ["PYTHON_BIN"] == "/untrusted/python3"
 
 
 def test_rejected_gpu_identity_never_reaches_training(tmp_path):

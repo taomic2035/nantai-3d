@@ -210,9 +210,11 @@ worker spec 已升级为 v3，status/lifecycle 保持 v2。fresh container 的�
 `cloud/production_runtime_entrypoint.py`：它在同一 container instance 内测量 GPU、
 CUDA、Python、Nerfstudio、`ns-train splatfacto` CLI schema 与六个 executable 的
 前后快照；measurement/policy/decision 以 no-replace 方式耐久发布且重新验证为
-`accepted` 后，才用 `exec` 替换为训练进程。worker 在创建容器前还会校验 entrypoint
-和 host container-runtime 的 policy SHA。旧 attempt 不能补写这些绑定，必须创建
-fresh attempt；代码测试通过也不等于已经取得真实 GPU accepted evidence。
+`accepted` 后，才把 `PYTHON_BIN` 固定为该次实测通过的 Python 绝对路径，并用
+`exec` 替换为训练进程；prepared training 不会再从 `PATH` 重新解析裸
+`python3`。worker 在创建容器前还会校验 entrypoint 和 host container-runtime 的
+policy SHA。旧 attempt 不能补写这些绑定，必须创建 fresh attempt；代码测试通过也
+不等于已经取得真实 GPU accepted evidence。
 
 clearance 三件套先发布到 attempt 根目录的 `production-runtime/`，不会提前创建
 训练脚本要求必须不存在的 `runtime/production-run`。只有训练成功后，worker 才以

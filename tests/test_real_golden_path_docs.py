@@ -83,6 +83,8 @@ def test_real_canary_docs_do_not_promote_internal_evidence() -> None:
     assert "立即重跑一次固定的只读远端 checker" in manual
     assert "expected_worker_python_sha256" in manual
     assert 'readlink -f "$(command -v python3)"' in manual
+    assert "`PYTHON_BIN` 固定为该次实测通过的 Python 绝对路径" in manual
+    assert "不会再从 `PATH` 重新解析裸" in manual
     assert "production-acceptance" in workflow
     assert "rights receipt" in workflow
     assert "python -m pipeline.production_capture_inputs" in workflow

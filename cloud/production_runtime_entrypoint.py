@@ -762,7 +762,15 @@ def run_clearance_and_train(
     )
     if decision.status != "accepted":
         return 78
-    exec_command(training_argv[0], list(training_argv))
+    previous_python_bin = os.environ.get("PYTHON_BIN")
+    os.environ["PYTHON_BIN"] = str(python)
+    try:
+        exec_command(training_argv[0], list(training_argv))
+    finally:
+        if previous_python_bin is None:
+            os.environ.pop("PYTHON_BIN", None)
+        else:
+            os.environ["PYTHON_BIN"] = previous_python_bin
     raise ProductionRuntimeEntrypointError(
         "training exec unexpectedly returned"
     )
