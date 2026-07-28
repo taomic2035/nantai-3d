@@ -323,3 +323,47 @@ def test_archive_extraction_rejects_illegal_path_and_leaves_no_destination(
     with pytest.raises(ProductionReleaseVerificationError, match="reserved"):
         extract_production_release_archive(archive, destination)
     assert not destination.exists()
+
+
+def test_archive_extraction_rejects_truncated_zip_and_cleans_destination(
+    tmp_path: Path,
+) -> None:
+    """Truncated ZIP (EOFError) must fail closed and remove destination."""
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+    payload = bytearray(archive.read_bytes())
+    truncated = payload[: len(payload) // 2]
+    archive.write_bytes(truncated)
+
+    destination = tmp_path / "extracted"
+    with pytest.raises(ProductionReleaseVerificationError):
+        extract_production_release_archive(archive, destination)
+    assert not destination.exists()
+
+
+def test_archive_extraction_rejects_unsupported_compression_and_cleans_destination(
+    tmp_path: Path,
+) -> None:
+    """Unsupported compression method must fail closed and remove destination."""
+    archive_path = tmp_path / "unsupported.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            deterministic_zip_info("nantai-runtime/placeholder.txt"),
+            b"placeholder",
+        )
+    payload = bytearray(archive_path.read_bytes())
+    local_sig = b"PK\x03\x04"
+    central_sig = b"PK\x01\x02"
+    local_index = payload.index(local_sig)
+    payload[local_index + 8 : local_index + 10] = (99).to_bytes(2, "little")
+    central_index = payload.index(central_sig)
+    payload[central_index + 10 : central_index + 12] = (99).to_bytes(
+        2, "little"
+    )
+    archive_path.write_bytes(payload)
+
+    destination = tmp_path / "extracted"
+    with pytest.raises(ProductionReleaseVerificationError):
+        extract_production_release_archive(archive_path, destination)
+    assert not destination.exists()
