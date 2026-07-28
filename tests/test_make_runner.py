@@ -6,8 +6,10 @@ make.py 是 Windows 上替代 GNU make 的主入口（README 推荐用法）。
 """
 
 import importlib.util
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -408,6 +410,58 @@ class TestRealSceneDispatch:
     ):
         assert make.main(["make.py", *args]) == 2
         assert "real-" in capsys.readouterr().err
+
+    def test_real_scene_status_black_box_blocked_snapshot_is_read_only(
+        self,
+        tmp_path,
+    ):
+        """跨平台 black-box: make.py real-scene status 对空 workspace 返回 blocked 快照。
+
+        用 sys.executable 从仓库根调用 make.py，避免 monkeypatch，证明 end-to-end
+        只读 caller 合同。只证明 blocked/read-only caller，不证明真实场景。
+        """
+        repo_root = Path(__file__).resolve().parent.parent
+        workspace = tmp_path / "absent-workspace"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "make.py"),
+                "real-scene",
+                "SOURCE=config/real-scene/nerfstudio-poster.json",
+                f"WORKSPACE={workspace}",
+                "RUN_ID=read-only-probe",
+                "status",
+            ],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 2
+        assert proc.stderr == ""
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        assert lines, "stdout must contain a non-empty canonical JSON line"
+        payload = json.loads(lines[-1])
+        assert payload["schema"] == "nantai.real-scene-status.v1"
+        assert payload["state"] == "blocked"
+        assert payload["source"]["role"] == "internal-canary"
+        assert payload["source"]["dataset_id"] == "nerfstudio-poster-internal-canary"
+        assert payload["run_id"] == "read-only-probe"
+        stages = payload["stages"]
+        assert [entry["stage"] for entry in stages] == [
+            "fetch",
+            "sfm",
+            "train-preview",
+            "import",
+            "accept",
+        ]
+        assert stages[0]["status"] == "missing"
+        assert stages[0]["reason_code"] == "receipt-missing"
+        assert payload["earliest_blocker"]["stage"] == "fetch"
+        assert payload["earliest_blocker"]["reason_code"] == "receipt-missing"
+        assert payload["acceptance"]["decision"] == "not-reached"
+        assert payload["acceptance"]["acceptance_source"] == "none"
+        assert payload["acceptance"]["acceptance_report_sha256"] is None
+        assert not workspace.exists()
 
 
 class TestEnv:
