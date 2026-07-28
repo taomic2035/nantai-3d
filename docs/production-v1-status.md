@@ -48,7 +48,7 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
 ### P0 — GLM：云 GPU 信任链
 
 按
-[`HANDOFF-GLM-012`](../handoff/HANDOFF-GLM-012-active-production-queue.md)
+[`HANDOFF-GLM-013`](../handoff/HANDOFF-GLM-013-production-closeout-queue.md)
 连续执行，不等待新的口头分配：
 
 1. `P0-CI`：已由 Codex `70a965e` 关闭，专项 `12 passed`；
@@ -59,12 +59,13 @@ P3 metric alignment → P4 real Viewer QA → P5 Production V1 签署
    training result boundary；worker 以 no-replace 方式物化 runtime 三件套与
    container ID，产出 result-bundle v2；caller 复验后派生 render decision 与
    production closure；
-4. **当前 GLM `H1 → I1 → J1 → K1`**：poll 不越过 deadline、所有路径关闭
-   executor；大型 PLY receipt 使用 bounded-memory stable digest；result archive
-   流式校验/提取并补齐 v2 fetch 端到端矩阵。
+4. `H1 → I1 → J1 → K1` 已关闭；Codex `0f6dc99` 补齐真实 fetch caller 的
+   bounded streaming、file-backed provenance 与发布前漂移复验；
+5. **当前 GLM `L1 → M1 → N1`**：大型 render/log fetch 边界、跨平台 archive
+   路径硬化和不回显秘密的 Production 隐私机器审计。
 
-A1–G1 与 P0-CI 的 repo-local 代码门已关闭，不再重做。GLM 立即连续执行
-`H1 → I1 → J1 → K1`，每项独立提交并 push；真实 GPU 运行前状态仍是
+A1–K1 与 P0-CI 的 repo-local 代码门已关闭，不再重做。GLM 立即连续执行
+`L1 → M1 → N1`，每项独立提交并 push；真实 GPU 运行前状态仍是
 modeled-unverified，不能签署 Production V1。
 
 ### P0 — 外部输入：正式素材与测量

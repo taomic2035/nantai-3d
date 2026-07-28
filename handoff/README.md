@@ -5,11 +5,9 @@
 
 ## 当前真实场景主线
 
-1. [GLM 当前连续工单](HANDOFF-GLM-012-active-production-queue.md) — 唯一执行入口：
-   `H1 → I1 → J1 → K1` 连续完成；Codex 基线 `c650aa8` 已释放 H1 路径并解锁
-   后两项，当前没有 Codex 阻塞。
-   每项都有独立
-   文件边界、RED/GREEN、提交和停止条件，不再从已关闭的 F1/G1 历史开工
+1. [GLM 当前连续工单](HANDOFF-GLM-013-production-closeout-queue.md) — 唯一执行入口：
+   `L1 → M1 → N1` 连续完成；基线 `0f6dc99`。每项都有独立文件边界、
+   RED/GREEN、提交和停止条件，不再重开已关闭的 F1–K1
 2. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
 3. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
 4. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
@@ -21,11 +19,10 @@ Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cf
 `8693848` 关闭。production runtime evidence 合同由 `cba2a19` 关闭，production
 result bundle v2 与最终身份 closure 由 `5a0ca09` 关闭。B1/C1/D1/E1 已关闭，
 E1 candidate `b71e5de` 与 Codex closure `ab0c7dc` 已推送；P0-CI registry 漂移由
-Codex `70a965e` 关闭。GLM 当前先关闭可独立执行的 H1 deadline/executor-close 与
-I1 bounded-memory import hashing；随后关闭 result-bundle 流式校验/提取与 v2 fetch
-端到端矩阵。active paths、命令与停止条件只看
-[HANDOFF-GLM-012](HANDOFF-GLM-012-active-production-queue.md)。HANDOFF-GLM-011
-仅保留近期 review 背景，不再作为开工单。
+Codex `70a965e` 关闭。H1–K1 已完成；Codex review 在 `0f6dc99` 补齐真实 fetch
+caller 的 bounded streaming。当前继续关闭大型 render/log fetch 边界、跨平台
+archive 路径与隐私机器审计。active paths、命令与停止条件只看
+[HANDOFF-GLM-013](HANDOFF-GLM-013-production-closeout-queue.md)。
 
 真实重建仍需同时取得：真实重叠采集、accepted real-photo SfM、非 mock GPU
 3DGS、实测米制对齐、真实 Viewer QA。缺一项都不能报告“真实场景已完成”。

@@ -81,3 +81,13 @@ Git commit `381f243ebed3bb8dcc0e47608ac1548c55e8c621`；需要逐字段追溯时
   流式摘要、result-bundle 流式校验/提取、production v2 fetch 端到端矩阵。
 - 这些仍是 repo-local 代码门；没有 fresh 云 GPU、正式素材、实测控制点和真实
   Viewer QA 时，状态继续保持 Preview / modeled-unverified。
+
+## 2026-07-28：H1–K1 关闭与发布安全收尾
+
+- H1 `8f97936` 显式关闭 executor 并限制 polling deadline；I1 `536b03e`
+  对大型 import artifact 做稳定分块摘要。
+- J1 `75f9e0c`、K1 `6f16a0c` 的直接 verifier/matrix 测试通过，但 Codex review
+  发现真实 fetch caller 未启用 staging；`0f6dc99` 补齐端到端流式接入、
+  file-backed PLY provenance 和发布前漂移复验。
+- 旧 H1–K1 详细工单由 Git 历史保存；活动队列切换为 GLM-013 的大型 render/log、
+  跨平台 archive path 与 Production 隐私机器审计。
