@@ -246,6 +246,40 @@ def test_train_production_reuses_exact_public_config_without_rewriting(
     assert calls == {"construct": 1, "close": 1}
 
 
+def test_private_model_replace_does_not_modify_hardlink_alias(
+    tmp_path,
+):
+    operations = RealScenePipelineOperations(
+        source=_source(),
+        options=RealSceneRunOptions(
+            workspace_base=tmp_path / "real-scene",
+            run_id="canary",
+        ),
+    )
+    stage_root = tmp_path / "stage"
+    stage_root.mkdir()
+    outside = tmp_path / "outside-stage.json"
+    original = b'{"outside":"preserve"}\n'
+    outside.write_bytes(original)
+    destination = stage_root / "remote-observation.private.json"
+    try:
+        os.link(outside, destination)
+    except OSError:
+        pytest.skip("filesystem does not permit hard-link creation")
+    observation = ExecutorObservation(
+        state="running",
+        observed_at_utc=datetime(2026, 7, 28, tzinfo=UTC),
+    )
+
+    operations._write_private_model(destination, observation)
+
+    assert outside.read_bytes() == original
+    assert destination.read_bytes() == (
+        operations_module.canonical_model_bytes(observation)
+    )
+    assert destination.stat().st_ino != outside.stat().st_ino
+
+
 def test_hf_fetch_receipt_binds_downloaded_payload_bytes(
     tmp_path,
     monkeypatch,

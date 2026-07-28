@@ -18,7 +18,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from pipeline.durable_io import DurableIOError, publish_file_noreplace
+from pipeline.durable_io import (
+    DurableIOError,
+    atomic_replace,
+    publish_file_noreplace,
+)
 from pipeline.local_brush_executor import (
     LocalBrushExecutionError,
     LocalBrushExecutor,
@@ -308,6 +312,63 @@ def _publish_matching_immutable_file(
     except OSError as exc:
         raise RemoteShellExecutionError(
             "remote executor public config cannot be published"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if staging:
+            try:
+                Path(staging).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _replace_private_evidence_file(
+    path: Path,
+    payload: bytes,
+) -> None:
+    parent = path.parent
+    try:
+        parent_state = parent.lstat()
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote private evidence parent is unavailable"
+        ) from exc
+    if (
+        _is_linklike(parent)
+        or not stat.S_ISDIR(parent_state.st_mode)
+    ):
+        raise RemoteShellExecutionError(
+            "remote private evidence parent must be a real directory"
+        )
+
+    descriptor = -1
+    staging = ""
+    try:
+        descriptor, staging = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".staging",
+            dir=parent,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        atomic_replace(staging, path)
+        staging = ""
+    except DurableIOError as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if exc.published
+            else "not published"
+        )
+        raise RemoteShellExecutionError(
+            f"remote private evidence cannot be replaced ({state})"
+        ) from exc
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote private evidence cannot be replaced"
         ) from exc
     finally:
         if descriptor >= 0:
@@ -698,7 +759,10 @@ class RealScenePipelineOperations:
 
     @staticmethod
     def _write_private_model(path: Path, model: BaseModel) -> None:
-        path.write_bytes(canonical_model_bytes(model))
+        _replace_private_evidence_file(
+            path,
+            canonical_model_bytes(model),
+        )
 
     def _train_production(
         self,
