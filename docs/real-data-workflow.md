@@ -332,6 +332,13 @@ fail-closed 判据同源，用于识别外来的/被篡改的/旧版有 bug 的�
 manifest 里记着每个 artifact 的 `sha256`（PLY 摘要）、sidecar `recon_manifest.sha256` 覆盖 manifest
 本身，但**这两个 `inspect_recon` 都不校验**——要查「manifest 自洽但 PLY 被换了」得另跑完整性校验。
 
+若几何经过 `outlier_trim` 等有损处理，新生成的 manifest 还会公开顶层
+`lossy_edits`。正式导入/验收不会单信这个字段：完整性门会重新读取
+`full_3dgs` PLY 的 `nantai_meta.lossy_edits`，要求两边语义完全一致；裁剪过的
+PLY 漏报、字段损坏或值不一致都会作为 contradiction 退出，不能进入 production。
+Viewer/Studio 只把一致后的编辑次数、丢弃点数、`trim_id` 和阈值单位作为披露，
+不会据此提升几何或米制信任。历史上两边都没有有损记录的干净 PLY 仍可读取。
+
 信任根 `recon_manifest.json` / `recon/registration.json` 以 LF 写出（跨 OS 字节可复现）；
 `recon_manifest.sha256` sidecar 可对 manifest 整体做完整性校验/签名。
 

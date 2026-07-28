@@ -52,6 +52,10 @@ from pydantic import ValidationError
 
 from pipeline.assets import AssetRegistry
 from pipeline.gaussian_scene import GaussianScene
+from pipeline.lossy_lineage import (
+    reconcile_lossy_edits,
+    summarize_lossy_edits,
+)
 from pipeline.mock_layout import DEFAULT_ASSETS
 from pipeline.preview_release import (
     RELEASE_MANIFEST_NAME,
@@ -864,6 +868,8 @@ def _reconstruction_snapshot(
         "gaussian_count": 0,
         "lod": [],
         "evidence_status": "missing-manifest",
+        "lossy_edits": [],
+        "lossy_edit_summary": summarize_lossy_edits([]),
     }
     stitch: dict[str, Any] = {
         "sessions": 0,
@@ -973,18 +979,38 @@ def _reconstruction_snapshot(
             reconstruction["evidence_status"] = "invalid-artifact-payload"
             reconstruction["integrity_error"] = "invalid-ply"
         else:
-            reconstruction["artifact"] = measured_artifact
-            reconstruction["attributes"] = properties
-            reconstruction["sh_degree"] = _sh_degree(properties)
-            reconstruction["renderer_capabilities"] = ["dc-color"]
-            if reconstruction["gaussian_count"] == 0:
-                reconstruction["gaussian_count"] = header_count
-            if is_v2:
-                reconstruction["evidence_status"] = "v2-artifact-present"
-            elif manifest:
-                reconstruction["evidence_status"] = "legacy-manifest"
+            lossy_edits, lineage_error = (
+                reconcile_lossy_edits(manifest, full_path)
+                if is_v2 and manifest
+                else ([], None)
+            )
+            if lineage_error is not None:
+                reconstruction["declared_synthetic"] = declared_synthetic
+                reconstruction["synthetic"] = True
+                reconstruction["geometry_usability"] = "preview-only"
+                reconstruction["evidence_status"] = "invalid-lossy-lineage"
+                reconstruction["integrity_error"] = (
+                    "lossy-lineage-mismatch"
+                )
             else:
-                reconstruction["evidence_status"] = "orphan-artifact"
+                reconstruction["artifact"] = measured_artifact
+                reconstruction["attributes"] = properties
+                reconstruction["sh_degree"] = _sh_degree(properties)
+                reconstruction["renderer_capabilities"] = ["dc-color"]
+                reconstruction["lossy_edits"] = lossy_edits
+                reconstruction["lossy_edit_summary"] = (
+                    summarize_lossy_edits(lossy_edits)
+                )
+                if reconstruction["gaussian_count"] == 0:
+                    reconstruction["gaussian_count"] = header_count
+                if is_v2:
+                    reconstruction["evidence_status"] = (
+                        "v2-artifact-present"
+                    )
+                elif manifest:
+                    reconstruction["evidence_status"] = "legacy-manifest"
+                else:
+                    reconstruction["evidence_status"] = "orphan-artifact"
     else:
         # Missing bytes invalidate a non-synthetic declaration for Studio's
         # fail-closed reducer.  Preserve the declaration separately for audit.

@@ -2295,6 +2295,37 @@ async function loadReconManifest(url = reconManifestUrl) {
   }
 }
 
+function lossyEditDisclosure(manifest) {
+  if (!manifest || !Object.hasOwn(manifest, 'lossy_edits')) {
+    return 'not declared';
+  }
+  if (!Array.isArray(manifest.lossy_edits)) {
+    return 'invalid · fail-closed';
+  }
+  const edits = manifest.lossy_edits;
+  if (!edits.every((edit) => edit && typeof edit === 'object' && !Array.isArray(edit))) {
+    return 'invalid · fail-closed';
+  }
+  const trimIds = [...new Set(edits
+    .map((edit) => edit.trim_id)
+    .filter((value) => typeof value === 'string' && value.length > 0))];
+  const units = [...new Set(edits
+    .map((edit) => edit.threshold_units)
+    .filter((value) => typeof value === 'string' && value.length > 0))];
+  const dropped = edits.reduce(
+    (total, edit) => total + (
+      Number.isSafeInteger(edit.dropped) && edit.dropped >= 0 ? edit.dropped : 0
+    ),
+    0,
+  );
+  return [
+    `${edits.length} edit(s)`,
+    `dropped ${dropped}`,
+    `trim ${trimIds.join(', ') || 'none'}`,
+    `units ${units.join(', ') || 'unknown'}`,
+  ].join(' · ');
+}
+
 async function loadProductionRuntimeRequirement() {
   try {
     const response = await fetch(
@@ -2589,6 +2620,7 @@ function updateHUD() {
     'hud-synthetic': provenance.synthetic,
     'hud-frame': `${provenance.frame} / ${provenance.units} / ${provenance.handedness}`,
     'hud-geometry': provenance.geometry_usability,
+    'hud-lossy-edits': lossyEditDisclosure(reconManifest),
     'hud-artifact-fidelity': provenance.artifact_fidelity,
     'hud-viewer-fidelity': provenance.viewer_fidelity,
   };

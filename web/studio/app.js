@@ -176,6 +176,13 @@ function alignInspector() {
 
 function reconstructInspector() {
   const reconstruction = snapshot.reconstruction ?? {};
+  const lossy = reconstruction.lossy_edit_summary ?? {};
+  const lossyDisclosure = [
+    `${lossy.count ?? 0} edit(s)`,
+    `dropped ${lossy.dropped ?? 0}`,
+    `trim ${(lossy.trim_ids ?? []).join(', ') || 'none'}`,
+    `units ${(lossy.threshold_units ?? []).join(', ') || 'unknown'}`,
+  ].join(' · ');
   return `${summaryCard(
     snapshot.derived.renderFidelity === 'dc-point-preview' ? '当前只是 DC point preview' : 'Gaussian Splat renderer contract 可用',
     `UI 依据 artifact attributes 与 viewer capabilities 交叉判定：${snapshot.derived.renderFidelity}。`,
@@ -186,6 +193,7 @@ function reconstructInspector() {
     ['请求引擎', reconstruction.requested_engine], ['实际引擎', reconstruction.actual_engine],
     ['Synthetic', String(reconstruction.synthetic)], ['Gaussian count', reconstruction.gaussian_count ?? 0],
     ['Geometry evidence', reconstruction.geometry_usability ?? 'unknown'],
+    ['Lossy edits', lossyDisclosure],
     ['SH degree', reconstruction.sh_degree ?? '未知'], ['Viewer fidelity', snapshot.derived.renderFidelity],
     ['Artifact', reconstruction.artifact?.uri ?? '无'], ['SHA-256', reconstruction.artifact?.sha256 ?? '无'],
   ])}`;

@@ -31,6 +31,12 @@ test('environment status and HUD values are visible but separate from provenance
   assert.doesNotMatch(provenance, /hud-weather|hud-zoom|environment-status/);
 });
 
+test('lossy geometry lineage is visible in the provenance HUD', () => {
+  assert.match(html, /id="hud-lossy-edits"/);
+  assert.match(main, /lossyEditDisclosure\(reconManifest/);
+  assert.match(main, /'hud-lossy-edits'/);
+});
+
 test('runtime weather is visibly an overlay and never claims relighting', () => {
   assert.match(
     html,

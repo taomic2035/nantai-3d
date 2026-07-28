@@ -197,6 +197,7 @@ def _write_ply(
     *,
     properties: tuple[str, ...] = CORE_PROPERTIES,
     values: dict[str, str | int | float] | None = None,
+    nantai_meta: dict | None = None,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     row_values: dict[str, str | int | float] = {
@@ -204,7 +205,18 @@ def _write_ply(
         "scale": 0.05,
     }
     row_values.update(values or {})
-    lines = ["ply", "format ascii 1.0", "element vertex 1"]
+    lines = ["ply", "format ascii 1.0"]
+    if nantai_meta is not None:
+        lines.append(
+            "comment nantai_meta="
+            + json.dumps(
+                nantai_meta,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    lines.append("element vertex 1")
     lines.extend(f"property float {name}" for name in properties)
     lines.extend(
         [
@@ -244,7 +256,11 @@ def _frame(frame_id: str, *, provenance: str) -> dict:
     }
 
 
-def _write_v2_project(root: Path) -> None:
+def _write_v2_project(
+    root: Path,
+    *,
+    lossy_edits: list[dict] | None = None,
+) -> None:
     (root / "web/studio").mkdir(parents=True)
     (root / "web/studio/index.html").write_text("<h1>Studio</h1>", encoding="utf-8")
     (root / "web/studio/app.mjs").write_text("export const ok = true;", encoding="utf-8")
@@ -256,7 +272,14 @@ def _write_v2_project(root: Path) -> None:
     (root / "photos/orbit/frame_000.jpg").write_bytes(b"frame")
     (root / "photos/photo.jpg").write_bytes(b"photo")
 
-    full = _write_ply(root / "recon/scene_full.ply")
+    full = _write_ply(
+        root / "recon/scene_full.ply",
+        nantai_meta=(
+            {"schema_version": 2, "lossy_edits": lossy_edits}
+            if lossy_edits is not None
+            else None
+        ),
+    )
     lod = _write_ply(root / "web/data/recon/recon_lod0.ply", properties=("x", "y", "z"))
     manifest = {
         "schema_version": 2,
@@ -297,6 +320,8 @@ def _write_v2_project(root: Path) -> None:
             "render_fidelity": "dc-point-preview",
         },
     }
+    if lossy_edits is not None:
+        manifest["lossy_edits"] = lossy_edits
     manifest_path = root / "web/data/recon/recon_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     registration = {
@@ -1489,6 +1514,46 @@ class TestProjectSnapshot:
 
         assert snapshot["reconstruction"]["synthetic"] is False
         assert snapshot["reconstruction"]["geometry_usability"] == "preview-only"
+
+    def test_matching_lossy_lineage_is_exposed_to_studio(self, tmp_path):
+        edit = {
+            "operation": "outlier_trim",
+            "lossy": True,
+            "threshold_units": "meters",
+            "dropped": 12,
+            "trim_id": "trim-studio-visible",
+        }
+        _write_v2_project(tmp_path, lossy_edits=[edit])
+
+        reconstruction = build_project_snapshot(tmp_path)["reconstruction"]
+
+        assert reconstruction["lossy_edits"] == [edit]
+        assert reconstruction["lossy_edit_summary"] == {
+            "count": 1,
+            "dropped": 12,
+            "trim_ids": ["trim-studio-visible"],
+            "threshold_units": ["meters"],
+        }
+
+    def test_lossy_lineage_mismatch_downgrades_studio_fail_closed(self, tmp_path):
+        edit = {
+            "operation": "outlier_trim",
+            "lossy": True,
+            "threshold_units": "meters",
+            "dropped": 12,
+            "trim_id": "trim-studio-visible",
+        }
+        _write_v2_project(tmp_path, lossy_edits=[edit])
+        manifest_path = tmp_path / "web/data/recon/recon_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["lossy_edits"][0]["dropped"] = 11
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        reconstruction = build_project_snapshot(tmp_path)["reconstruction"]
+
+        assert reconstruction["geometry_usability"] == "preview-only"
+        assert reconstruction["evidence_status"] == "invalid-lossy-lineage"
+        assert reconstruction["integrity_error"] == "lossy-lineage-mismatch"
 
     @pytest.mark.parametrize("case", ["missing", "path", "sha256", "bytes"])
     def test_v2_full_artifact_descriptor_must_match_live_payload(self, tmp_path, case):
