@@ -22,6 +22,8 @@
                             build-production / verify-production 必填
     ACCEPTANCE_ROOT=<私有验收根>  build-production 必填
     VERSION=<最终语义版本>     build-production 必填（例如 v1.0.0）
+    PRIVACY_POLICY=<私有策略>  audit-production-privacy 必填
+    PRIVACY_REPORT=<报告路径>  audit-production-privacy 必填
 
 与 Makefile 保持等价的 target 名称；Makefile 仍保留给有 make 的 POSIX 环境。
 例外：doctor / check-capture / inspect-recon / verify-recon-artifacts 目前只有本脚本有，
@@ -286,6 +288,23 @@ def verify_production() -> None:
     run([PY, "scripts/verify_production_release.py", archive])
 
 
+def audit_production_privacy() -> None:
+    archive = _required_environment("ARCHIVE")
+    policy = _required_environment("PRIVACY_POLICY")
+    report = _required_environment("PRIVACY_REPORT")
+    run(
+        [
+            PY,
+            "scripts/audit_production_release_privacy.py",
+            archive,
+            "--policy",
+            policy,
+            "--report",
+            report,
+        ]
+    )
+
+
 def verify() -> None:
     test()
     assets()
@@ -429,6 +448,7 @@ TARGETS = {
     "verify-preview": verify_preview,
     "build-production": build_production,
     "verify-production": verify_production,
+    "audit-production-privacy": audit_production_privacy,
     "verify": verify,
     "clean": clean,
 }

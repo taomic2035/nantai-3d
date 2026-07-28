@@ -292,6 +292,56 @@ class TestProductionReleaseTargets:
             ]
         ]
 
+    def test_audit_production_privacy_uses_exact_inputs(
+        self,
+        make,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setenv("ARCHIVE", "dist/runtime.zip")
+        monkeypatch.setenv("PRIVACY_POLICY", "private/privacy-policy.json")
+        monkeypatch.setenv("PRIVACY_REPORT", "reports/privacy-report.json")
+        monkeypatch.setattr(
+            make,
+            "run",
+            lambda command, **_kwargs: calls.append(command),
+        )
+
+        make.audit_production_privacy()
+
+        assert calls == [
+            [
+                make.PY,
+                "scripts/audit_production_release_privacy.py",
+                "dist/runtime.zip",
+                "--policy",
+                "private/privacy-policy.json",
+                "--report",
+                "reports/privacy-report.json",
+            ]
+        ]
+
+    @pytest.mark.parametrize(
+        "missing",
+        ("ARCHIVE", "PRIVACY_POLICY", "PRIVACY_REPORT"),
+    )
+    def test_audit_production_privacy_requires_exact_inputs(
+        self,
+        make,
+        monkeypatch,
+        missing,
+    ):
+        for name, value in (
+            ("ARCHIVE", "dist/runtime.zip"),
+            ("PRIVACY_POLICY", "private/privacy-policy.json"),
+            ("PRIVACY_REPORT", "reports/privacy-report.json"),
+        ):
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv(missing)
+
+        with pytest.raises(ValueError, match=missing):
+            make.audit_production_privacy()
+
     @pytest.mark.parametrize(
         ("target", "missing"),
         (
