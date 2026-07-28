@@ -6,6 +6,7 @@ import importlib.util
 import json
 import re
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -299,6 +300,99 @@ def test_stage_exports_only_four_verified_public_assets(
     assert verification.valid is True
     assert verification.package_content_id == receipt["package"]["content_id"]
     assert verification.archive_sha256 == archive_sha
+
+
+def test_stage_rejects_private_builder_residue_before_publication(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _bind_acceptance_rebuild(monkeypatch, source)
+    original_build = assets_module.build_production_release_archive
+
+    def _build_with_residue(**kwargs) -> ProductionReleaseBuild:
+        result = original_build(**kwargs)
+        private = (
+            kwargs["output_path"].parent
+            / ".acceptance-rebuild.zip.staging"
+        )
+        private.mkdir()
+        (private / "private.txt").write_text("private", encoding="ascii")
+        return result
+
+    monkeypatch.setattr(
+        assets_module,
+        "build_production_release_archive",
+        _build_with_residue,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="staged release validation",
+    ) as raised:
+        stage_production_release_assets(
+            repo_root=tmp_path,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+        )
+
+    assert str(raised.value) == "Production staged release validation failed"
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".release-assets.*.staging"))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "replacement"),
+    [
+        ("archive_path", Path("unexpected.zip")),
+        ("archive_sha256", "0" * 64),
+    ],
+)
+def test_stage_rejects_builder_result_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+    mutation: str,
+    replacement: object,
+) -> None:
+    source, _receipt = _write_real_contract_archive(tmp_path / "candidate")
+    policy = _privacy_policy(tmp_path / "privacy-policy.json")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    output = tmp_path / "release-assets"
+    _bind_acceptance_rebuild(monkeypatch, source)
+    original_build = assets_module.build_production_release_archive
+
+    def _build_with_wrong_result(**kwargs) -> ProductionReleaseBuild:
+        result = original_build(**kwargs)
+        return replace(result, **{mutation: replacement})
+
+    monkeypatch.setattr(
+        assets_module,
+        "build_production_release_archive",
+        _build_with_wrong_result,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="acceptance rebuild",
+    ):
+        stage_production_release_assets(
+            repo_root=tmp_path,
+            acceptance_root=acceptance,
+            version="v1.0.0",
+            archive_path=source,
+            privacy_policy_path=policy,
+            output_dir=output,
+        )
+
+    assert not output.exists()
 
 
 def test_stage_rejects_modeled_contract_fixture(

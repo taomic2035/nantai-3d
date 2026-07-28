@@ -592,6 +592,25 @@ def stage_production_release_assets(
         )
         flush_file(final_archive)
         flush_directory(staging)
+        try:
+            staged_verification = verify_production_release_assets(staging)
+        except ProductionReleaseAssetsError as exc:
+            raise ProductionReleaseAssetsError(
+                "Production staged release validation failed"
+            ) from exc
+        if (
+            not staged_verification.valid
+            or staged_verification.archive_path != final_archive
+            or staged_verification.archive_sha256 != archive_sha256
+            or staged_verification.version != verification_before.version
+            or staged_verification.package_content_id
+            != verification_before.package_content_id
+            or staged_verification.scene_trust_effect
+            != verification_before.scene_trust_effect
+        ):
+            raise ProductionReleaseAssetsError(
+                "Production staged release validation failed"
+            )
         publish_directory_noreplace(staging, output)
         published = True
         return ProductionReleaseAssets(
