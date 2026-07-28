@@ -394,6 +394,75 @@ def test_fetch_v2_materializes_exact_eight_import_contract_files(
 # ---------------------------------------------------------------------------
 
 
+def test_fetch_v2_streams_large_ply_without_archive_read(
+    tmp_path,
+    monkeypatch,
+):
+    """The real fetch caller must activate bounded streaming for large PLY."""
+    scenario = _v2_scenario(tmp_path, monkeypatch)
+    scenario.runner.responses.append(_lifecycle_response(scenario.lifecycle))
+    scenario.runner.responses.append(_status_response(scenario.status))
+    scenario.runner.download_source = scenario.archive
+    scenario.executor.poll(scenario.job)
+
+    read_members: list[str] = []
+    original_read = zipfile.ZipFile.read
+
+    def tracking_read(self, name, *args, **kwargs):
+        member_name = name if isinstance(name, str) else name.filename
+        read_members.append(member_name)
+        return original_read(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", tracking_read)
+    scenario.runner.responses.append(_lifecycle_response(scenario.lifecycle))
+    destination = tmp_path / "published-streamed-result"
+
+    receipt = scenario.executor.fetch(scenario.job, destination)
+
+    assert receipt.state == "succeeded"
+    assert "point_cloud.ply" not in read_members
+    assert (destination / "point_cloud.ply").read_bytes() == (
+        scenario.result_root / "point_cloud.ply"
+    ).read_bytes()
+
+
+def test_fetch_v2_rejects_streamed_ply_drift_before_publication(
+    tmp_path,
+    monkeypatch,
+):
+    scenario = _v2_scenario(tmp_path, monkeypatch)
+    scenario.runner.responses.append(_lifecycle_response(scenario.lifecycle))
+    scenario.runner.responses.append(_status_response(scenario.status))
+    scenario.runner.download_source = scenario.archive
+    scenario.executor.poll(scenario.job)
+
+    original_verify = scenario.executor._verify_result_semantics
+
+    def verify_then_tamper(verified, context):
+        closure = original_verify(verified, context)
+        verified.large_member_paths["point_cloud.ply"].write_bytes(
+            b"tampered-after-verification"
+        )
+        return closure
+
+    monkeypatch.setattr(
+        scenario.executor,
+        "_verify_result_semantics",
+        verify_then_tamper,
+    )
+    scenario.runner.responses.append(_lifecycle_response(scenario.lifecycle))
+    destination = tmp_path / "published-tampered-result"
+
+    with pytest.raises(
+        RemoteResultBundleError,
+        match="changed before publication",
+    ):
+        scenario.executor.fetch(scenario.job, destination)
+
+    assert not destination.exists()
+    assert not tuple(tmp_path.glob(".*.staging"))
+
+
 def test_fetch_v2_derives_render_decision_and_closure_after_archive_verification(
     tmp_path,
     monkeypatch,

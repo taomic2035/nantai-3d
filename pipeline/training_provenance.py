@@ -361,16 +361,17 @@ def _check_config(
             )
 
 
-def _check_status_and_ply(
+def _check_status_and_ply_identity(
     result: TrainingResult,
-    actual_ply_bytes: bytes,
+    *,
+    actual_ply_sha256: str,
+    actual_ply_size_bytes: int,
 ) -> None:
     state = result.training_status.state
     exit_code = result.training_status.exit_code
     ply_bindings = [
         b for b in result.output_bindings if b.artifact_kind == "trained_ply"
     ]
-    expected_ply_sha = hashlib.sha256(actual_ply_bytes).hexdigest()
 
     if state == "completed":
         if exit_code != 0:
@@ -383,7 +384,7 @@ def _check_status_and_ply(
                 f"completed requires exactly one non-empty trained_ply binding; "
                 f"got {len(non_empty)}"
             )
-        if len(actual_ply_bytes) == 0:
+        if actual_ply_size_bytes == 0:
             raise ValueError("completed run cannot have empty PLY bytes")
         ply = non_empty[0]
         if ply.artifact_sha256 != result.primary_ply_sha256:
@@ -394,17 +395,17 @@ def _check_status_and_ply(
             raise ValueError(
                 "trained_ply binding size != primary_ply_size_bytes"
             )
-        if result.primary_ply_sha256 != expected_ply_sha:
+        if result.primary_ply_sha256 != actual_ply_sha256:
             raise ValueError(
                 f"primary_ply_sha256 mismatch: result claims "
-                f"{result.primary_ply_sha256} but bytes compute "
-                f"{expected_ply_sha}"
+                f"{result.primary_ply_sha256} but verified identity is "
+                f"{actual_ply_sha256}"
             )
-        if result.primary_ply_size_bytes != len(actual_ply_bytes):
+        if result.primary_ply_size_bytes != actual_ply_size_bytes:
             raise ValueError(
                 f"primary_ply_size_bytes mismatch: result claims "
-                f"{result.primary_ply_size_bytes} but bytes are "
-                f"{len(actual_ply_bytes)}"
+                f"{result.primary_ply_size_bytes} but verified size is "
+                f"{actual_ply_size_bytes}"
             )
     else:
         # failed / interrupted
@@ -425,7 +426,7 @@ def _check_status_and_ply(
             raise ValueError(
                 f"{state!r} run primary_ply_size_bytes must be 0"
             )
-        if len(actual_ply_bytes) != 0:
+        if actual_ply_size_bytes != 0:
             raise ValueError(
                 f"{state!r} run actual PLY bytes must be empty"
             )
@@ -562,12 +563,83 @@ def validate_training_provenance(
     Raises ``ValueError`` on any mismatch.  Timestamps (UTC, started<=finished)
     are enforced at schema level.
     """
+    _validate_training_provenance_with_ply_identity(
+        result,
+        request,
+        actual_ply_sha256=hashlib.sha256(actual_ply_bytes).hexdigest(),
+        actual_ply_size_bytes=len(actual_ply_bytes),
+        actual_config_bytes=actual_config_bytes,
+        actual_log_bytes=actual_log_bytes,
+        actual_dataparser_transform_bytes=(
+            actual_dataparser_transform_bytes
+        ),
+        input_bytes_by_path=input_bytes_by_path,
+        policy=policy,
+    )
+
+
+def validate_training_provenance_with_verified_ply_identity(
+    result: TrainingResult,
+    request: TrainingRequest,
+    *,
+    actual_ply_sha256: str,
+    actual_ply_size_bytes: int,
+    actual_config_bytes: bytes,
+    actual_log_bytes: bytes,
+    actual_dataparser_transform_bytes: bytes | None = None,
+    input_bytes_by_path: dict[str, bytes],
+    policy: TrainingDriftPolicy | None = None,
+) -> None:
+    """Validate closure from a PLY identity already re-derived from its bytes.
+
+    This bounded-memory entry point is for callers that hash and size a large
+    PLY while streaming it to protected staging. The caller must not pass a
+    manifest-only or self-reported identity.
+    """
+    if (
+        len(actual_ply_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in actual_ply_sha256)
+    ):
+        raise ValueError("actual_ply_sha256 must be lowercase SHA-256")
+    if actual_ply_size_bytes < 0:
+        raise ValueError("actual_ply_size_bytes must be non-negative")
+    _validate_training_provenance_with_ply_identity(
+        result,
+        request,
+        actual_ply_sha256=actual_ply_sha256,
+        actual_ply_size_bytes=actual_ply_size_bytes,
+        actual_config_bytes=actual_config_bytes,
+        actual_log_bytes=actual_log_bytes,
+        actual_dataparser_transform_bytes=(
+            actual_dataparser_transform_bytes
+        ),
+        input_bytes_by_path=input_bytes_by_path,
+        policy=policy,
+    )
+
+
+def _validate_training_provenance_with_ply_identity(
+    result: TrainingResult,
+    request: TrainingRequest,
+    *,
+    actual_ply_sha256: str,
+    actual_ply_size_bytes: int,
+    actual_config_bytes: bytes,
+    actual_log_bytes: bytes,
+    actual_dataparser_transform_bytes: bytes | None,
+    input_bytes_by_path: dict[str, bytes],
+    policy: TrainingDriftPolicy | None,
+) -> None:
     policy = policy or TrainingDriftPolicy()
     _check_request_binding(result, request)
     _check_input_closure(result, request, input_bytes_by_path)
     _check_trainer(result, request, policy)
     _check_config(result, request, actual_config_bytes, policy)
-    _check_status_and_ply(result, actual_ply_bytes)
+    _check_status_and_ply_identity(
+        result,
+        actual_ply_sha256=actual_ply_sha256,
+        actual_ply_size_bytes=actual_ply_size_bytes,
+    )
     _check_log(result, actual_log_bytes)
     _check_config_output(result, actual_config_bytes)
     _check_dataparser_transform_output(

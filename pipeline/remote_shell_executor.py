@@ -91,7 +91,7 @@ from pipeline.training_provenance import (
     TrainingRequest,
     TrainingResult,
     request_canonical_sha256,
-    validate_training_provenance,
+    validate_training_provenance_with_verified_ply_identity,
 )
 
 
@@ -768,14 +768,6 @@ class VerifiedRemoteResultBundle:
     )
     member_bytes: dict[str, bytes]
     large_member_paths: dict[str, Path]
-
-    def member_bytes_for(self, name: str) -> bytes:
-        """Return member bytes, reading from staging for large members."""
-        if name in self.member_bytes:
-            return self.member_bytes[name]
-        if name in self.large_member_paths:
-            return self.large_member_paths[name].read_bytes()
-        raise KeyError(name)
 
 
 @dataclass(frozen=True)
@@ -1617,6 +1609,23 @@ def _validate_downloaded_evaluation(
             path = root / "result" / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)
+        for name, source in getattr(
+            verified_result,
+            "large_member_paths",
+            {},
+        ).items():
+            if not name.startswith("render-evaluation/renders/"):
+                continue
+            path = root / "result" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with source.open("rb") as input_stream, path.open(
+                "xb"
+            ) as output_stream:
+                shutil.copyfileobj(
+                    input_stream,
+                    output_stream,
+                    length=_ONE_MIB,
+                )
         try:
             return validate_render_evaluation(policy, report, root)
         except RenderEvaluationError as exc:
@@ -2256,6 +2265,44 @@ def _cleanup_staging_files(
             pass
 
 
+def _revalidate_staged_members(
+    verified: VerifiedRemoteResultBundle,
+    *,
+    max_member_bytes: int,
+) -> None:
+    """Reopen streamed members before atomic publication and reject drift."""
+    declared = {
+        member.path: member for member in verified.manifest.members
+    }
+    for name, path in verified.large_member_paths.items():
+        member = declared.get(name)
+        if member is None:
+            raise RemoteResultBundleError(
+                f"staged result member is undeclared: {name}"
+            )
+        measured_size, measured_sha256 = _stable_file_sha(
+            path,
+            label=f"staged result member {name}",
+            max_bytes=max_member_bytes,
+            allow_empty=True,
+        )
+        if (
+            measured_size != member.byte_length
+            or measured_sha256 != member.sha256
+        ):
+            raise RemoteResultBundleError(
+                f"staged result member changed before publication: {name}"
+            )
+
+
+def _should_stream_result_member(path: str, byte_length: int) -> bool:
+    """Stream large binary payloads whose consumers support file-backed data."""
+    return byte_length > _STREAMING_MEMBER_THRESHOLD and (
+        path == "point_cloud.ply"
+        or path.startswith("render-evaluation/renders/")
+    )
+
+
 def _stream_zip_member_to_staging(
     archive: zipfile.ZipFile,
     member_path: str,
@@ -2430,7 +2477,10 @@ def verify_production_remote_result_bundle(
             for member in manifest.members:
                 if (
                     staging_dir is not None
-                    and member.byte_length > _STREAMING_MEMBER_THRESHOLD
+                    and _should_stream_result_member(
+                        member.path,
+                        member.byte_length,
+                    )
                 ):
                     staging_path = staging_dir / member.path
                     _stream_zip_member_to_staging(
@@ -2696,7 +2746,10 @@ def verify_remote_result_bundle(
             for member in manifest.members:
                 if (
                     staging_dir is not None
-                    and member.byte_length > _STREAMING_MEMBER_THRESHOLD
+                    and _should_stream_result_member(
+                        member.path,
+                        member.byte_length,
+                    )
                 ):
                     staging_path = staging_dir / member.path
                     _stream_zip_member_to_staging(
@@ -3753,6 +3806,16 @@ class RemoteShellExecutor:
     ) -> _ProductionClosureInputs | None:
         members = verified_result.member_bytes
         try:
+            ply_member = next(
+                member
+                for member in verified_result.manifest.members
+                if member.path == "point_cloud.ply"
+            )
+        except StopIteration as exc:
+            raise RemoteResultBundleError(
+                "result point cloud identity is missing"
+            ) from exc
+        try:
             request = TrainingRequest.model_validate_json(
                 members["training-request.json"],
             )
@@ -3790,10 +3853,11 @@ class RemoteShellExecutor:
                 f"result dataparser transform is unsafe: {exc}"
             ) from exc
         try:
-            validate_training_provenance(
+            validate_training_provenance_with_verified_ply_identity(
                 result,
                 request,
-                actual_ply_bytes=members["point_cloud.ply"],
+                actual_ply_sha256=ply_member.sha256,
+                actual_ply_size_bytes=ply_member.byte_length,
                 actual_config_bytes=members[
                     "operator-intent-config.yml"
                 ],
@@ -3952,6 +4016,7 @@ class RemoteShellExecutor:
                         self.config.max_result_member_bytes
                     ),
                     max_log_bytes=self.config.max_log_bytes,
+                    staging_dir=staging,
                 )
             else:
                 verified = verify_remote_result_bundle(
@@ -3972,6 +4037,7 @@ class RemoteShellExecutor:
                         self.config.max_result_member_bytes
                     ),
                     max_log_bytes=self.config.max_log_bytes,
+                    staging_dir=staging,
                 )
             if (
                 verified.bundle_sha256
@@ -4088,6 +4154,10 @@ class RemoteShellExecutor:
                         stream.write(payload)
                         stream.flush()
                         os.fsync(stream.fileno())
+            _revalidate_staged_members(
+                verified,
+                max_member_bytes=self.config.max_result_member_bytes,
+            )
             os.replace(staging, destination)
         except (
             OSError,
