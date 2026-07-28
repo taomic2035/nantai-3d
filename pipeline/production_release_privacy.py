@@ -452,9 +452,20 @@ def audit_production_release_privacy(
 ) -> ProductionPrivacyReport:
     """Audit a verified Production tree or ZIP without promoting scene trust."""
 
-    source = Path(target)
+    source = Path(target).expanduser().absolute()
     policy_path = Path(policy)
-    if source.is_dir():
+    try:
+        redirected = first_linklike_path(Path(source.anchor), source)
+        source_stat = source.lstat()
+    except (OSError, ValueError) as exc:
+        raise ProductionReleasePrivacyError(
+            "Production privacy target is unavailable or unsafe"
+        ) from exc
+    if redirected is not None or _is_linklike(source, observed=source_stat):
+        raise ProductionReleasePrivacyError(
+            "Production privacy target is unavailable or unsafe"
+        )
+    if stat.S_ISDIR(source_stat.st_mode):
         return _audit_verified_tree(source, policy_path)
     with tempfile.TemporaryDirectory(
         prefix="nantai-production-privacy-"

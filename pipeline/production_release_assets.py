@@ -116,13 +116,16 @@ def _real_absent_output(path: Path) -> Path:
 
 def _copy_stable_regular_file(source: Path, destination: Path) -> str:
     try:
+        redirected = first_linklike_path(Path(source.absolute().anchor), source)
         path_before = source.lstat()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise ProductionReleaseAssetsError(
             "Production candidate archive is unavailable"
         ) from exc
-    if _is_linklike(source, observed=path_before) or not stat.S_ISREG(
-        path_before.st_mode
+    if (
+        redirected is not None
+        or _is_linklike(source, observed=path_before)
+        or not stat.S_ISREG(path_before.st_mode)
     ):
         raise ProductionReleaseAssetsError(
             "Production candidate archive must be a regular non-link file"
@@ -288,7 +291,18 @@ def _write_public_payload(path: Path, payload: bytes) -> None:
 
 
 def _public_bundle_files(root: Path) -> dict[str, Path]:
-    if _is_linklike(root) or not root.is_dir():
+    try:
+        redirected = first_linklike_path(Path(root.absolute().anchor), root)
+        root_stat = root.lstat()
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseAssetsError(
+            "Production release asset directory is missing or unsafe"
+        ) from exc
+    if (
+        redirected is not None
+        or _is_linklike(root, observed=root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
         raise ProductionReleaseAssetsError(
             "Production release asset directory is missing or unsafe"
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -775,6 +776,98 @@ def test_acceptance_projection_rejects_reparse_root_without_is_junction(
         match="root is unavailable or unsafe",
     ):
         derive_production_release_context(fixture["report_path"])
+
+
+def test_import_tree_rejects_reparse_subtree_before_legacy_validator(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _modeled_acceptance_tree(tmp_path)
+    _patch_outer_validators(monkeypatch, fixture)
+    redirected = fixture["root"] / "imported" / "redirected"
+    redirected.mkdir()
+    observed = redirected.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == redirected:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        return original_lstat(path)
+
+    def legacy_validator_must_not_run(*_args, **_kwargs):
+        raise AssertionError("legacy validator traversed an unsafe import tree")
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "validate_real_scene_import_receipt",
+        legacy_validator_must_not_run,
+    )
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="import root.*unsafe",
+    ):
+        derive_production_release_context(fixture["report_path"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_import_tree_rejects_real_windows_junction_before_legacy_validator(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _modeled_acceptance_tree(tmp_path)
+    _patch_outer_validators(monkeypatch, fixture)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    redirected = fixture["root"] / "imported" / "redirected"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(redirected), str(outside)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {created.stderr}")
+
+    def legacy_validator_must_not_run(*_args, **_kwargs):
+        raise AssertionError("legacy validator traversed an unsafe import tree")
+
+    try:
+        monkeypatch.setattr(
+            Path,
+            "is_junction",
+            lambda _path: False,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            builder_module,
+            "validate_real_scene_import_receipt",
+            legacy_validator_must_not_run,
+        )
+
+        with pytest.raises(
+            ProductionReleaseBuilderError,
+            match="import root.*unsafe",
+        ):
+            derive_production_release_context(fixture["report_path"])
+    finally:
+        removed = subprocess.run(
+            ["cmd", "/c", "rmdir", str(redirected)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert removed.returncode == 0, removed.stderr
 
 
 def _resign_import_fixture(

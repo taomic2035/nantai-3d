@@ -81,6 +81,53 @@ class ProductionReleaseBuilderError(ValueError):
     """Raised when private acceptance cannot produce a safe public projection."""
 
 
+def _require_no_linklike_ancestors(path: Path, *, label: str) -> None:
+    source = Path(path).expanduser().absolute()
+    try:
+        redirected = first_linklike_path(Path(source.anchor), source)
+    except (OSError, ValueError) as exc:
+        raise ProductionReleaseBuilderError(f"{label} is unsafe") from exc
+    if redirected is not None:
+        raise ProductionReleaseBuilderError(f"{label} is unsafe")
+
+
+def _preflight_real_tree(root: Path, *, label: str) -> None:
+    _require_no_linklike_ancestors(root, label=label)
+    try:
+        for current, directories, names in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            for name in (*tuple(directories), *tuple(names)):
+                candidate = current_path / name
+                observed = candidate.lstat()
+                if _is_linklike(candidate, observed=observed):
+                    raise ProductionReleaseBuilderError(f"{label} is unsafe")
+    except ProductionReleaseBuilderError:
+        raise
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(f"{label} is unsafe") from exc
+
+
+def _directory_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode
+
+
+def _same_real_directory(
+    path: Path,
+    expected_identity: tuple[int, int, int],
+) -> bool:
+    try:
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
+        observed = path.lstat()
+    except (OSError, ValueError):
+        return False
+    return (
+        redirected is None
+        and not _is_linklike(path, observed=observed)
+        and stat.S_ISDIR(observed.st_mode)
+        and _directory_identity(observed) == expected_identity
+    )
+
+
 @dataclass(frozen=True)
 class ProductionReleaseSourceIdentity:
     source_commit: str
@@ -124,6 +171,7 @@ def resolve_production_release_source_identity(
     repo_root: str | Path,
 ) -> ProductionReleaseSourceIdentity:
     root = Path(repo_root).expanduser().absolute()
+    _require_no_linklike_ancestors(root, label="Git source root")
     try:
         source_commit = _git_source_output(
             root,
@@ -206,6 +254,7 @@ def _safe_regular_payload(
     maximum_bytes: int = _MAXIMUM_PUBLIC_SOURCE_BYTES,
 ) -> tuple[bytes, _ObservedFile]:
     source = Path(path)
+    _require_no_linklike_ancestors(source, label="release evidence path")
     try:
         before = source.lstat()
     except OSError as exc:
@@ -362,6 +411,7 @@ def _load_import_receipt(
         raise ProductionReleaseBuilderError(
             "Production import root is unavailable or unsafe"
         )
+    _preflight_real_tree(import_root, label="Production import root tree")
     receipt_path = root.joinpath(
         *safe_posix_member_path(report.import_receipt.path).parts
     )
@@ -544,6 +594,10 @@ def _privacy_check(
 
 def _second_pass(observations: list[_ObservedFile]) -> None:
     for expected in observations:
+        _require_no_linklike_ancestors(
+            expected.path,
+            label="release evidence path",
+        )
         try:
             observed = stable_regular_file_digest(
                 expected.path,
@@ -1117,6 +1171,10 @@ def resolve_runtime_scene_payloads(
 
     receipt = context.import_receipt
     import_root = context.import_root
+    _require_no_linklike_ancestors(
+        import_root,
+        label="Production import root",
+    )
     bindings = {
         artifact.path: artifact
         for artifact in receipt.artifacts
@@ -1205,6 +1263,10 @@ def resolve_runtime_scene_payloads(
         source = import_root.joinpath(
             *safe_posix_member_path(relative).parts
         )
+        _require_no_linklike_ancestors(
+            source,
+            label="scene payload path",
+        )
         digest = stable_regular_file_digest(
             source,
             maximum_bytes=expected_bytes,
@@ -1232,6 +1294,10 @@ def resolve_runtime_scene_payloads(
             )
         )
     for payload in payloads:
+        _require_no_linklike_ancestors(
+            payload.source_path,
+            label="scene payload path",
+        )
         observed = stable_regular_file_digest(
             payload.source_path,
             maximum_bytes=payload.byte_length,
@@ -1540,6 +1606,10 @@ def _ensure_release_sources_clean(
 
 
 def _copy_bound_source(source: SourcePayload, destination: Path) -> None:
+    _require_no_linklike_ancestors(
+        source.source_path,
+        label="release source path",
+    )
     before = stable_regular_file_digest(
         source.source_path,
         maximum_bytes=source.byte_length,
@@ -1663,6 +1733,7 @@ def build_production_release_archive(
         raise ProductionReleaseBuilderError(
             "Production output parent directory is missing or unsafe"
         )
+    output_parent_identity = _directory_identity(output_parent_stat)
     for path in (
         output,
         sidecar,
@@ -1893,6 +1964,13 @@ def build_production_release_archive(
             raise ProductionReleaseBuilderError(
                 "Production source identity changed during release build"
             )
+        if not _same_real_directory(
+            output.parent,
+            output_parent_identity,
+        ):
+            raise ProductionReleaseBuilderError(
+                "Production output parent changed during release build"
+            )
         _link_no_replace(sidecar_partial, sidecar)
         try:
             _link_no_replace(partial, output)
@@ -1920,8 +1998,9 @@ def build_production_release_archive(
             f"Production release build failed: {exc}"
         ) from exc
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
-        if source_snapshot_created:
-            shutil.rmtree(source_snapshot, ignore_errors=True)
-        partial.unlink(missing_ok=True)
-        sidecar_partial.unlink(missing_ok=True)
+        if _same_real_directory(output.parent, output_parent_identity):
+            shutil.rmtree(staging, ignore_errors=True)
+            if source_snapshot_created:
+                shutil.rmtree(source_snapshot, ignore_errors=True)
+            partial.unlink(missing_ok=True)
+            sidecar_partial.unlink(missing_ok=True)

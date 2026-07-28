@@ -606,6 +606,76 @@ def test_stage_rejects_reparse_output_parent_without_is_junction(
         assets_module._real_absent_output(output)
 
 
+def test_candidate_copy_rejects_reparse_source_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ancestor = tmp_path / "alias"
+    ancestor.mkdir()
+    source = ancestor / "candidate.zip"
+    source.write_bytes(b"candidate")
+    destination = tmp_path / "copy.zip"
+    observed = ancestor.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == ancestor:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="unavailable|unsafe|regular non-link",
+    ):
+        assets_module._copy_stable_regular_file(source, destination)
+
+    assert not destination.exists()
+
+
+def test_verify_bundle_rejects_reparse_root_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ancestor = tmp_path / "alias"
+    root = ancestor / "release-assets"
+    root.mkdir(parents=True)
+    observed = ancestor.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == ancestor:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="missing or unsafe",
+    ):
+        verify_production_release_assets(root)
+
+
 def test_verify_rejects_junction_bundle_root(
     tmp_path: Path,
     monkeypatch,

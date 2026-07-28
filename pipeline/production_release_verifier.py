@@ -182,13 +182,21 @@ def verify_production_release_tree(
 
     project_root = Path(root).absolute()
     try:
+        redirected = first_linklike_path(
+            Path(project_root.anchor),
+            project_root,
+        )
         root_stat = project_root.lstat()
         unsafe_root = _is_linklike(project_root, observed=root_stat)
     except OSError as exc:
         raise ProductionReleaseVerificationError(
             "Production release tree is missing or unsafe"
         ) from exc
-    if unsafe_root or not stat.S_ISDIR(root_stat.st_mode):
+    if (
+        redirected is not None
+        or unsafe_root
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
         raise ProductionReleaseVerificationError(
             "Production release tree is missing or unsafe"
         )
@@ -345,13 +353,21 @@ def extract_production_release_archive(
     source = Path(archive_path)
     target = Path(destination)
     try:
+        redirected_source = first_linklike_path(
+            Path(source.absolute().anchor),
+            source,
+        )
         source_stat = source.lstat()
         unsafe_source = _is_linklike(source, observed=source_stat)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise ProductionReleaseVerificationError(
             "Production release archive is missing or unsafe"
         ) from exc
-    if unsafe_source or not stat.S_ISREG(source_stat.st_mode):
+    if (
+        redirected_source is not None
+        or unsafe_source
+        or not stat.S_ISREG(source_stat.st_mode)
+    ):
         raise ProductionReleaseVerificationError(
             "Production release archive is missing or unsafe"
         )

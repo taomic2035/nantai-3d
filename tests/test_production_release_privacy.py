@@ -357,9 +357,51 @@ def test_reparse_root_is_rejected_before_privacy_scan_without_is_junction(
 
     with pytest.raises(
         ProductionReleasePrivacyError,
-        match="verification failed before",
+        match="unavailable or unsafe",
     ):
         audit_production_release_privacy(root, policy)
+
+
+@pytest.mark.parametrize("target_kind", ("tree", "archive"))
+def test_reparse_target_ancestor_is_rejected_before_privacy_scan(
+    tmp_path: Path,
+    monkeypatch,
+    target_kind: str,
+) -> None:
+    ancestor = tmp_path / "alias"
+    ancestor.mkdir()
+    tree = ancestor / "runtime"
+    write_modeled_production_tree(tree)
+    target = tree
+    if target_kind == "archive":
+        target = ancestor / "runtime.zip"
+        write_modeled_production_archive(tree, target)
+    policy = tmp_path / "private-policy.json"
+    _write_policy(policy, b"private-canonical-needle")
+    observed = ancestor.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == ancestor:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="unsafe|verification failed before",
+    ):
+        audit_production_release_privacy(target, policy)
 
 
 def test_mid_read_drift_is_rejected(tmp_path: Path, monkeypatch) -> None:

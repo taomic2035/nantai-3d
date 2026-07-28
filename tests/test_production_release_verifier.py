@@ -211,6 +211,83 @@ def test_tree_verifier_rejects_reparse_root_without_is_junction(
         verify_production_release_tree(root)
 
 
+def test_tree_verifier_rejects_reparse_ancestor_without_is_junction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ancestor = tmp_path / "alias"
+    root = ancestor / "runtime"
+    write_modeled_production_tree(root)
+    observed = ancestor.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == ancestor:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="missing or unsafe",
+    ):
+        verify_production_release_tree(root)
+
+
+def test_archive_entrypoints_reject_reparse_source_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ancestor = tmp_path / "alias"
+    tree = tmp_path / "runtime"
+    write_modeled_production_tree(tree)
+    archive = ancestor / "runtime.zip"
+    ancestor.mkdir()
+    write_modeled_production_archive(tree, archive)
+    observed = ancestor.lstat()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        if path == ancestor:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_file_attributes=0x400,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda _path: False,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="missing or unsafe",
+    ):
+        extract_production_release_archive(
+            archive,
+            tmp_path / "extracted",
+        )
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="missing or unsafe",
+    ):
+        verify_production_release_archive(archive)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
 def test_tree_verifier_rejects_real_windows_junction_before_walk(
     tmp_path: Path,
@@ -245,6 +322,61 @@ def test_tree_verifier_rejects_real_windows_junction_before_walk(
     finally:
         removed = subprocess.run(
             ["cmd", "/c", "rmdir", str(junction)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert removed.returncode == 0, removed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_release_entrypoints_reject_real_windows_junction_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    real = tmp_path / "real"
+    tree = real / "runtime"
+    write_modeled_production_tree(tree)
+    archive = real / "runtime.zip"
+    write_modeled_production_archive(tree, archive)
+    alias = tmp_path / "alias"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(alias), str(real)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {created.stderr}")
+    try:
+        monkeypatch.setattr(
+            Path,
+            "is_junction",
+            lambda _path: False,
+            raising=False,
+        )
+
+        with pytest.raises(
+            ProductionReleaseVerificationError,
+            match="missing or unsafe",
+        ):
+            verify_production_release_tree(alias / "runtime")
+        with pytest.raises(
+            ProductionReleaseVerificationError,
+            match="missing or unsafe",
+        ):
+            extract_production_release_archive(
+                alias / "runtime.zip",
+                tmp_path / "extracted",
+            )
+        with pytest.raises(
+            ProductionReleaseVerificationError,
+            match="missing or unsafe",
+        ):
+            verify_production_release_archive(alias / "runtime.zip")
+    finally:
+        removed = subprocess.run(
+            ["cmd", "/c", "rmdir", str(alias)],
             check=False,
             capture_output=True,
             text=True,
