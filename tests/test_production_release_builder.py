@@ -1918,7 +1918,7 @@ def test_build_failure_retains_partial_archive_without_commit_marker(
 
 
 @LINUX_MUTATION_ONLY
-def test_build_success_close_failure_is_domain_error_and_closes_all_files(
+def test_build_close_failure_inside_caller_except_is_not_suppressed(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1946,16 +1946,19 @@ def test_build_success_close_failure_is_domain_error_and_closes_all_files(
         close_with_injected_sidecar_failure,
     )
 
-    with pytest.raises(
-        ProductionReleaseBuilderError,
-        match="capabilities failed to close",
-    ) as raised:
-        _build_committed_runtime(
-            repo=repo,
-            fixture=fixture,
-            identity=identity,
-            output=output,
-        )
+    try:
+        raise LookupError("outer caller error")
+    except LookupError:
+        with pytest.raises(
+            ProductionReleaseBuilderError,
+            match="capabilities failed to close",
+        ) as raised:
+            _build_committed_runtime(
+                repo=repo,
+                fixture=fixture,
+                identity=identity,
+                output=output,
+            )
 
     assert close_calls[-2:] == ["runtime.zip.sha256", "runtime.zip"]
     assert raised.value.published == ("runtime.zip", "runtime.zip.sha256")

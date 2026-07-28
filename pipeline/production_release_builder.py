@@ -8,7 +8,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -1790,6 +1789,7 @@ def build_production_release_archive(
     archive_bound: BoundFile | None = None
     sidecar_bound: BoundFile | None = None
     public_names: list[str] = []
+    body_failed = True
     try:
         parent = (
             output_parent.duplicate()
@@ -2001,7 +2001,7 @@ def build_production_release_archive(
             raise ProductionReleaseBuilderError(
                 "Production release final held-handle seal failed"
             )
-        return ProductionReleaseBuild(
+        result = ProductionReleaseBuild(
             archive_path=output,
             archive_sha256=archive_sha256,
             package_content_id=str(receipt["package"]["content_id"]),
@@ -2012,6 +2012,8 @@ def build_production_release_archive(
             ),
             acceptance_report_sha256=context.report_sha256,
         )
+        body_failed = False
+        return result
     except ProductionReleaseBuilderError as exc:
         published = exc.published or tuple(public_names)
         retained = (
@@ -2061,7 +2063,7 @@ def build_production_release_archive(
         close_error = close_bound_capabilities_best_effort(
             (sidecar_bound, archive_bound, parent)
         )
-        if close_error is not None and sys.exception() is None:
+        if close_error is not None and not body_failed:
             published = tuple(
                 dict.fromkeys((*public_names, *close_error.published))
             )

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-import sys
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -482,6 +481,7 @@ def stage_production_release_assets(
     held_files = []
     public_names: list[str] = []
     private_names: list[str] = []
+    body_failed = True
     try:
         parent = open_bound_directory(output.parent)
         if parent.entry_exists(output.name):
@@ -709,7 +709,7 @@ def stage_production_release_assets(
             raise ProductionReleaseAssetsError(
                 "Production public archive final contracts disagree"
             )
-        return ProductionReleaseAssets(
+        result = ProductionReleaseAssets(
             output_dir=output,
             archive_path=output / archive_name,
             archive_sha256=archive_sha256,
@@ -727,6 +727,8 @@ def stage_production_release_assets(
                 ),
             ),
         )
+        body_failed = False
+        return result
     except ProductionReleaseAssetsError as exc:
         published = exc.published or tuple(public_names)
         retained = exc.retained or tuple((*private_names, *public_names))
@@ -788,7 +790,7 @@ def stage_production_release_assets(
                 parent,
             )
         )
-        if close_error is not None and sys.exception() is None:
+        if close_error is not None and not body_failed:
             published = tuple(
                 dict.fromkeys((*public_names, *close_error.published))
             )

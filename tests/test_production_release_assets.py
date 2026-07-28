@@ -439,7 +439,7 @@ def test_stage_exports_only_four_verified_public_assets(
 
 
 @LINUX_MUTATION_ONLY
-def test_stage_success_close_failure_is_domain_error_and_closes_all_files(
+def test_stage_close_failure_inside_caller_except_is_not_suppressed(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -467,18 +467,21 @@ def test_stage_success_close_failure_is_domain_error_and_closes_all_files(
         close_with_injected_receipt_failure,
     )
 
-    with pytest.raises(
-        ProductionReleaseAssetsError,
-        match="capabilities failed to close",
-    ) as raised:
-        stage_production_release_assets(
-            **_stage_kwargs(
-                tmp_path,
-                archive=source,
-                policy=policy,
-                output=output,
+    try:
+        raise LookupError("outer caller error")
+    except LookupError:
+        with pytest.raises(
+            ProductionReleaseAssetsError,
+            match="capabilities failed to close",
+        ) as raised:
+            stage_production_release_assets(
+                **_stage_kwargs(
+                    tmp_path,
+                    archive=source,
+                    policy=policy,
+                    output=output,
+                )
             )
-        )
 
     assert close_calls[-5:] == [
         PRODUCTION_RELEASE_NAME,
