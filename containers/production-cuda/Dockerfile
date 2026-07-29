@@ -23,11 +23,19 @@ RUN printf '%s  %s\n' \
       -o Acquire::https::Timeout=30 \
       -o APT::Update::Error-Mode=any \
       update \
-    && xargs --no-run-if-empty apt-get \
-      -o Acquire::Retries=5 \
-      -o Acquire::https::Timeout=30 \
-      install -y --no-install-recommends \
-      < /tmp/apt-build.lock \
+    && for apt_attempt in 1 2 3; do \
+      if xargs --no-run-if-empty apt-get \
+        -o Acquire::Retries=5 \
+        -o Acquire::https::Timeout=30 \
+        install -y --no-install-recommends \
+        < /tmp/apt-build.lock; then \
+        break; \
+      fi; \
+      if [[ "${apt_attempt}" -eq 3 ]]; then \
+        exit 123; \
+      fi; \
+      sleep "$((apt_attempt * 10))"; \
+    done \
     && while IFS= read -r binding; do \
       package="${binding%%=*}"; expected="${binding#*=}"; \
       actual="$(dpkg-query -W -f='${Version}' "${package}")"; \
@@ -153,11 +161,19 @@ RUN printf '%s  %s\n' \
       -o Acquire::https::Timeout=30 \
       -o APT::Update::Error-Mode=any \
       update \
-    && xargs --no-run-if-empty apt-get \
-      -o Acquire::Retries=5 \
-      -o Acquire::https::Timeout=30 \
-      install -y --no-install-recommends \
-      < /tmp/apt-runtime.lock \
+    && for apt_attempt in 1 2 3; do \
+      if xargs --no-run-if-empty apt-get \
+        -o Acquire::Retries=5 \
+        -o Acquire::https::Timeout=30 \
+        install -y --no-install-recommends \
+        < /tmp/apt-runtime.lock; then \
+        break; \
+      fi; \
+      if [[ "${apt_attempt}" -eq 3 ]]; then \
+        exit 123; \
+      fi; \
+      sleep "$((apt_attempt * 10))"; \
+    done \
     && while IFS= read -r binding; do \
       package="${binding%%=*}"; expected="${binding#*=}"; \
       actual="$(dpkg-query -W -f='${Version}' "${package}")"; \

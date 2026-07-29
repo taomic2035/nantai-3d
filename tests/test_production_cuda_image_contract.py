@@ -53,6 +53,9 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
     # returns 5xx.
     assert dockerfile.count("Acquire::Retries=5") == 4
     assert dockerfile.count("Acquire::https::Timeout=30") == 4
+    assert dockerfile.count("for apt_attempt in 1 2 3; do") == 2
+    assert dockerfile.count('if [[ "${apt_attempt}" -eq 3 ]]') == 2
+    assert dockerfile.count('sleep "$((apt_attempt * 10))"') == 2
     assert "install -m 0755 /opt/python/bin/python3.11" in dockerfile
     assert "COPY --from=builder /opt/python /opt/python" in dockerfile
     assert (
