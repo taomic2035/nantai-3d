@@ -8,6 +8,7 @@
 - [真实重建端到端手册](manual/reconstruction-setup.md)
 - [Production V1 状态与 TODO](production-v1-status.md)
 - [真实数据与 Sim3/ENU 契约](real-data-workflow.md)
+- [Indoor3Dmapping 真实数据候选审计](verification/2026-07-29-indoor3dmapping-real-data-candidate.md)
 - [Synthetic 设计素材 Releases](releases/synthetic-design-inputs.md)
 
 [Preview1 说明](releases/1.0-preview.md) 是历史版本记录，不是当前安装入口。
