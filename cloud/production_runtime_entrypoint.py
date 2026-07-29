@@ -149,9 +149,23 @@ def fixed_production_probe_set_sha256() -> str:
     ).hexdigest()
 
 
-def _stat_signature(
+def _cross_surface_signature(
     value: os.stat_result,
 ) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+        int(getattr(value, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
     return (
         value.st_dev,
         value.st_ino,
@@ -159,7 +173,27 @@ def _stat_signature(
         value.st_size,
         value.st_mtime_ns,
         value.st_ctime_ns,
+        int(getattr(value, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        0x400,
+    )
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0))
+        & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 def _read_stable(
@@ -171,7 +205,7 @@ def _read_stable(
     try:
         before = path.lstat()
         if (
-            stat.S_ISLNK(before.st_mode)
+            _is_linklike(path, before)
             or not stat.S_ISREG(before.st_mode)
             or before.st_size <= 0
             or before.st_size > maximum_bytes
@@ -179,14 +213,35 @@ def _read_stable(
             raise ProductionRuntimeEntrypointError(
                 f"{label} must be a bounded regular file"
             )
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
         digest_payload = bytearray()
-        with path.open("rb") as stream:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise ProductionRuntimeEntrypointError(
+                    f"{label} changed before read"
+                )
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest_payload.extend(chunk)
                 if len(digest_payload) > maximum_bytes:
                     raise ProductionRuntimeEntrypointError(
                         f"{label} exceeds its byte limit"
                     )
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except ProductionRuntimeEntrypointError:
         raise
@@ -195,7 +250,14 @@ def _read_stable(
             f"{label} cannot be read"
         ) from exc
     if (
-        _stat_signature(before) != _stat_signature(after)
+        _cross_surface_signature(before)
+        != _cross_surface_signature(descriptor_before)
+        or _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
+        or _same_surface_signature(before)
+        != _same_surface_signature(after)
         or len(digest_payload) != before.st_size
     ):
         raise ProductionRuntimeEntrypointError(
@@ -212,7 +274,7 @@ def _snapshot(
     try:
         before = path.lstat()
         if (
-            stat.S_ISLNK(before.st_mode)
+            _is_linklike(path, before)
             or not stat.S_ISREG(before.st_mode)
             or before.st_size <= 0
             or before.st_size > _MAX_EXECUTABLE_BYTES
@@ -220,12 +282,33 @@ def _snapshot(
             raise ProductionRuntimeEntrypointError(
                 "runtime role target must be a bounded regular file"
             )
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
         digest = hashlib.sha256()
         measured = 0
-        with path.open("rb") as stream:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise ProductionRuntimeEntrypointError(
+                    "runtime role target changed before read"
+                )
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
                 measured += len(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except ProductionRuntimeEntrypointError:
         raise
@@ -234,7 +317,14 @@ def _snapshot(
             "runtime role target cannot be read"
         ) from exc
     if (
-        _stat_signature(before) != _stat_signature(after)
+        _cross_surface_signature(before)
+        != _cross_surface_signature(descriptor_before)
+        or _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
+        or _same_surface_signature(before)
+        != _same_surface_signature(after)
         or measured != before.st_size
     ):
         raise ProductionRuntimeEntrypointError(

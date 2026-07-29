@@ -235,24 +235,32 @@ def load_production_runtime_policy_input_bytes(
     return operator_input
 
 
-def _identity_signature(
+def _cross_surface_signature(
     value: os.stat_result,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+        int(getattr(value, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
     return (
         value.st_dev,
         value.st_ino,
         value.st_mode,
         value.st_size,
         value.st_mtime_ns,
-    )
-
-
-def _change_signature(
-    value: os.stat_result,
-) -> tuple[int, int, int, int, int, int]:
-    return (
-        *_identity_signature(value),
         value.st_ctime_ns,
+        int(getattr(value, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
 
 
@@ -305,26 +313,52 @@ def _read_stable_regular_file(
             raise ProductionRuntimePolicyProducerError(
                 f"{label} must be a bounded real regular file"
             )
-        with candidate.open("rb") as stream:
-            opened_before = os.fstat(stream.fileno())
-            payload = stream.read(maximum_bytes + 1)
-            opened_after = os.fstat(stream.fileno())
-        after = candidate.lstat()
     except ProductionRuntimePolicyProducerError:
         raise
     except OSError as exc:
         raise ProductionRuntimePolicyProducerError(
             f"{label} cannot be read"
         ) from exc
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as exc:
+        raise ProductionRuntimePolicyProducerError(
+            f"{label} cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionRuntimePolicyProducerError(
+            f"{label} cannot be read"
+        ) from exc
+    try:
+        with stream:
+            opened_before = os.fstat(stream.fileno())
+            payload = stream.read(maximum_bytes + 1)
+            opened_after = os.fstat(stream.fileno())
+        after = candidate.lstat()
+    except OSError as exc:
+        raise ProductionRuntimePolicyProducerError(
+            f"{label} cannot be read"
+        ) from exc
     if (
         len(payload) > maximum_bytes
-        or _identity_signature(before)
-        != _identity_signature(opened_before)
-        or _identity_signature(opened_after)
-        != _identity_signature(after)
-        or _change_signature(before) != _change_signature(after)
-        or _change_signature(opened_before)
-        != _change_signature(opened_after)
+        or len(payload) != before.st_size
+        or _cross_surface_signature(before)
+        != _cross_surface_signature(opened_before)
+        or _same_surface_signature(opened_before)
+        != _same_surface_signature(opened_after)
+        or _cross_surface_signature(opened_after)
+        != _cross_surface_signature(after)
+        or _same_surface_signature(before)
+        != _same_surface_signature(after)
     ):
         raise ProductionRuntimePolicyProducerError(
             f"{label} changed while read"

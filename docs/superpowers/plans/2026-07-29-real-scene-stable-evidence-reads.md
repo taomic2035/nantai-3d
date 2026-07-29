@@ -195,3 +195,120 @@ Co-Authored-By: Codex GPT-5.6 Sol <noreply@openai.com>
 ```
 
 Push the exact commit SHA to `refs/heads/main` with the one-shot proxy.
+
+### Task 4: Prove runtime and OCI identity gaps
+
+**Files:**
+
+- Modify: `tests/test_production_cuda_image_workflow.py`
+- Modify: `tests/test_production_runtime_entrypoint.py`
+- Modify: `tests/test_production_runtime_policy.py`
+
+- [x] **Step 1: Add OCI reparse RED tests**
+
+Call the real `_read_github_bundle` helper with a valid fixture. Inject the
+Windows reparse bit into path `lstat` and descriptor-after `fstat` independently
+and require a fixed `ProductionCudaOciInspectionError`.
+
+- [x] **Step 2: Add runtime-entrypoint reparse RED tests**
+
+Call `_read_stable` with a small evidence file. A path reparse bit must produce
+`"<label> must be a bounded regular file"`; descriptor-after reparse drift must
+produce `"<label> changed while being read"`.
+
+- [x] **Step 3: Add policy short-read and opening-window RED tests**
+
+Wrap `os.fdopen` so a regular input returns one byte and then EOF while its
+descriptor size remains unchanged. Require:
+
+```python
+with pytest.raises(
+    ProductionRuntimePolicyProducerError,
+    match="changed while read",
+):
+    runtime_policy_producer._read_stable_regular_file(
+        source,
+        label="operator input",
+        maximum_bytes=1024,
+    )
+```
+
+Inject the Windows reparse bit into both descriptor `fstat` calls while path
+`lstat` stays unchanged; require the same rejection.
+
+- [x] **Step 4: Run the six new tests and confirm RED**
+
+Expected failures are missing path/descriptor reparse binding, missing
+path-to-descriptor ctime binding, and accepted short reads.
+
+### Task 5: Close runtime and OCI reads
+
+**Files:**
+
+- Modify: `cloud/inspect_production_cuda_oci.py`
+- Modify: `cloud/production_runtime_entrypoint.py`
+- Modify: `pipeline/production_runtime_policy.py`
+
+- [x] **Step 1: Use complete identities**
+
+Use a cross-surface identity that Windows reports consistently:
+
+```python
+(
+    st_dev,
+    st_ino,
+    stat.S_IFMT(st_mode),
+    st_size,
+    st_mtime_ns,
+    st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT,
+)
+```
+
+Reject a path-level symlink, junction, or reparse point before opening. For
+same-surface path-before/path-after and fd-before/fd-after checks, additionally
+bind the full mode and `st_ctime_ns`; do not compare those two Windows-variant
+fields directly between path and descriptor surfaces.
+
+- [x] **Step 2: Bind every transition**
+
+Compare `path-before → descriptor-before → descriptor-after → path-after`;
+each adjacent transition must preserve the complete identity. Keep fixed error
+messages and never include `OSError` text.
+
+- [x] **Step 3: Reject incomplete reads**
+
+Require `len(payload) == path-before.st_size` for byte-returning helpers and
+preserve existing byte caps.
+
+- [x] **Step 4: Run GREEN tests**
+
+Run the six tests from Task 4 and require all to pass.
+
+### Task 6: Verify and publish the runtime-evidence batch
+
+**Files:**
+
+- Verify: `cloud/inspect_production_cuda_oci.py`
+- Verify: `cloud/production_runtime_entrypoint.py`
+- Verify: `pipeline/production_runtime_policy.py`
+- Verify: `tests/test_production_cuda_image_workflow.py`
+- Verify: `tests/test_production_runtime_entrypoint.py`
+- Verify: `tests/test_production_runtime_policy.py`
+
+- [x] **Step 1: Run all three focused suites**
+
+```powershell
+python -m pytest -q `
+  tests/test_production_cuda_image_workflow.py `
+  tests/test_production_runtime_entrypoint.py `
+  tests/test_production_runtime_policy.py
+```
+
+- [x] **Step 2: Run Ruff and diff-check**
+
+Run Ruff on the six paths and `git diff --check`.
+
+- [x] **Step 3: Commit and push only the seven declared paths**
+
+Use subject `fix: bind production runtime reads to full identities`, the exact
+Codex co-author trailer, and the one-shot push proxy.

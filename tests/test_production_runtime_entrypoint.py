@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import cloud.production_runtime_entrypoint as runtime_entrypoint
 from cloud.production_runtime_entrypoint import (
     ProductionRuntimeEntrypointError,
     fixed_production_probe_set_sha256,
@@ -37,6 +40,81 @@ _OPTIONS = (
     "--scale-factor",
 )
 _NOW = datetime(2026, 7, 28, 1, 2, 3, tzinfo=UTC)
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_read_stable_rejects_path_reparse_point(
+    tmp_path,
+    monkeypatch,
+):
+    evidence = (tmp_path / "evidence.json").absolute()
+    evidence.write_bytes(b'{"evidence":true}\n')
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path):
+        observed = original_lstat(path)
+        return (
+            _stat_with_reparse(observed)
+            if path.absolute() == evidence
+            else observed
+        )
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(
+        ProductionRuntimeEntrypointError,
+        match="evidence must be a bounded regular file",
+    ):
+        runtime_entrypoint._read_stable(
+            evidence,
+            label="evidence",
+            maximum_bytes=1024,
+        )
+
+
+def test_read_stable_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    evidence = tmp_path / "evidence.json"
+    evidence.write_bytes(b'{"evidence":true}\n')
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(runtime_entrypoint.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        ProductionRuntimeEntrypointError,
+        match="evidence changed while being read",
+    ):
+        runtime_entrypoint._read_stable(
+            evidence,
+            label="evidence",
+            maximum_bytes=1024,
+        )
+
+    assert calls == 2
 
 
 def _sha_file(path: Path) -> str:

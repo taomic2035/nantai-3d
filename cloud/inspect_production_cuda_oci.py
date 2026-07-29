@@ -38,6 +38,53 @@ _MAX_ATTESTATION_BYTES = 64 * 1024 * 1024
 _MAX_REFERRERS = 64
 
 
+def _cross_surface_signature(
+    observed: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        observed.st_dev,
+        observed.st_ino,
+        stat.S_IFMT(observed.st_mode),
+        observed.st_size,
+        observed.st_mtime_ns,
+        int(getattr(observed, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    observed: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        observed.st_dev,
+        observed.st_ino,
+        observed.st_mode,
+        observed.st_size,
+        observed.st_mtime_ns,
+        observed.st_ctime_ns,
+        int(getattr(observed, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        0x400,
+    )
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0))
+        & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
 class ProductionCudaOciInspectionError(RuntimeError):
     """OCI evidence is absent, ambiguous or inconsistent."""
 
@@ -244,7 +291,7 @@ def _read_github_bundle(path: Path) -> tuple[bytes, dict[str, Any], bytes]:
     try:
         before = path.lstat()
         if (
-            stat.S_ISLNK(before.st_mode)
+            _is_linklike(path, before)
             or not stat.S_ISREG(before.st_mode)
             or before.st_size <= 1
             or before.st_size > _MAX_ATTESTATION_BYTES
@@ -252,28 +299,48 @@ def _read_github_bundle(path: Path) -> tuple[bytes, dict[str, Any], bytes]:
             raise ProductionCudaOciInspectionError(
                 "GitHub attestation bundle must be a bounded regular file"
             )
-        first = path.read_bytes()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise ProductionCudaOciInspectionError(
+                    "GitHub attestation bundle changed before read"
+                )
+            first = stream.read(_MAX_ATTESTATION_BYTES + 1)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
-        second = path.read_bytes()
+    except ProductionCudaOciInspectionError:
+        raise
     except OSError as exc:
         raise ProductionCudaOciInspectionError(
             "GitHub attestation bundle cannot be read"
         ) from exc
-    first_identity = (
-        before.st_dev,
-        before.st_ino,
-        before.st_mode,
-        before.st_size,
-        before.st_mtime_ns,
-    )
-    second_identity = (
-        after.st_dev,
-        after.st_ino,
-        after.st_mode,
-        after.st_size,
-        after.st_mtime_ns,
-    )
-    if first_identity != second_identity or first != second:
+    if (
+        _cross_surface_signature(before)
+        != _cross_surface_signature(descriptor_before)
+        or _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
+        or _same_surface_signature(before)
+        != _same_surface_signature(after)
+        or len(first) > _MAX_ATTESTATION_BYTES
+        or len(first) != before.st_size
+    ):
         raise ProductionCudaOciInspectionError(
             "GitHub attestation bundle changed while reading"
         )

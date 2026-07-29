@@ -3,11 +3,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
+import cloud.inspect_production_cuda_oci as oci_inspector
 from cloud.inspect_production_cuda_oci import (
     ProductionCudaOciInspectionError,
     inspect_production_cuda_oci,
@@ -19,6 +23,22 @@ CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 IMAGE_NAME = "ghcr.io/taomic2035/nantai-3d-production-cuda"
 SLSA = "https://slsa.dev/provenance/v1"
 SPDX = "https://spdx.dev/Document"
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
 
 
 def _json_bytes(document: dict) -> bytes:
@@ -281,6 +301,56 @@ def test_oci_inspection_binds_shared_buildkit_manifest_and_github_bundle(
         != result["attestations"][1]["attestation_blob_digest"]
     )
     assert result["attestations"][2]["subject_digest"] == root_digest
+
+
+def test_github_attestation_bundle_rejects_path_reparse_point(
+    tmp_path,
+    monkeypatch,
+):
+    _registry, _root_digest, bundle_path = _oci_fixture(tmp_path)
+    bundle_path = bundle_path.absolute()
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path):
+        observed = original_lstat(path)
+        return (
+            _stat_with_reparse(observed)
+            if path.absolute() == bundle_path
+            else observed
+        )
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(
+        ProductionCudaOciInspectionError,
+        match="bounded regular file",
+    ):
+        oci_inspector._read_github_bundle(bundle_path)
+
+
+def test_github_attestation_bundle_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    _registry, _root_digest, bundle_path = _oci_fixture(tmp_path)
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(oci_inspector.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        ProductionCudaOciInspectionError,
+        match="changed while reading",
+    ):
+        oci_inspector._read_github_bundle(bundle_path)
+
+    assert calls == 2
 
 
 def test_oci_inspection_rejects_buildkit_subject_mismatch(

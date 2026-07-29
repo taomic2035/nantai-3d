@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +31,113 @@ from pipeline.production_runtime_policy import (
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def _stat_with_updates(observed, **updates):
+    fields = {
+        "st_dev": observed.st_dev,
+        "st_ino": observed.st_ino,
+        "st_mode": observed.st_mode,
+        "st_size": observed.st_size,
+        "st_mtime_ns": observed.st_mtime_ns,
+        "st_ctime_ns": observed.st_ctime_ns,
+        "st_file_attributes": getattr(
+            observed,
+            "st_file_attributes",
+            0,
+        ),
+    }
+    fields.update(updates)
+    return SimpleNamespace(**fields)
+
+
+def test_stable_policy_read_rejects_short_read(
+    tmp_path,
+    monkeypatch,
+):
+    source = (tmp_path / "operator-input.json").absolute()
+    source.write_bytes(b'{"operator":true}\n')
+    original_fdopen = os.fdopen
+
+    class EarlyEofStream:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def fileno(self):
+            return self._stream.fileno()
+
+        def read(self, _size=-1):
+            return self._stream.read(1)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._stream.__exit__(
+                exc_type,
+                exc_value,
+                traceback,
+            )
+
+    def early_eof_fdopen(descriptor, *args, **kwargs):
+        return EarlyEofStream(
+            original_fdopen(descriptor, *args, **kwargs)
+        )
+
+    monkeypatch.setattr(
+        runtime_policy_producer.os,
+        "fdopen",
+        early_eof_fdopen,
+    )
+
+    with pytest.raises(
+        ProductionRuntimePolicyProducerError,
+        match="changed while read",
+    ):
+        runtime_policy_producer._read_stable_regular_file(
+            source,
+            label="operator input",
+            maximum_bytes=1024,
+        )
+
+
+def test_stable_policy_read_rejects_opening_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    source = (tmp_path / "operator-input.json").absolute()
+    source.write_bytes(b'{"operator":true}\n')
+    original_fstat = os.fstat
+
+    def shifted_fstat(descriptor):
+        observed = original_fstat(descriptor)
+        return _stat_with_updates(
+            observed,
+            st_file_attributes=(
+                int(getattr(observed, "st_file_attributes", 0))
+                | getattr(
+                    stat,
+                    "FILE_ATTRIBUTE_REPARSE_POINT",
+                    0x400,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(
+        runtime_policy_producer.os,
+        "fstat",
+        shifted_fstat,
+    )
+
+    with pytest.raises(
+        ProductionRuntimePolicyProducerError,
+        match="changed while read",
+    ):
+        runtime_policy_producer._read_stable_regular_file(
+            source,
+            label="operator input",
+            maximum_bytes=1024,
+        )
 
 
 def _run(*argv: str, cwd: Path) -> str:
