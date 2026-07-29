@@ -149,6 +149,11 @@ def _run_command(
             "status",
             "--porcelain",
         ):
+            assert args == (
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            )
             stdout = b""
         elif command == str(paths["python"]) and "platform" in " ".join(args):
             stdout = b"3.11.9\n"
@@ -191,6 +196,23 @@ def _run_command(
         )
 
     return run
+
+
+def test_entrypoint_bootstraps_mounted_repo_before_pipeline_imports() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "cloud"
+        / "production_runtime_entrypoint.py"
+    ).read_text(encoding="utf-8")
+
+    root_definition = "ROOT = Path(__file__).resolve().parents[1]"
+    root_insert = "sys.path.insert(0, str(ROOT))"
+    first_pipeline_import = "from pipeline.durable_io import"
+
+    assert root_definition in source
+    assert root_insert in source
+    assert source.index(root_definition) < source.index(root_insert)
+    assert source.index(root_insert) < source.index(first_pipeline_import)
 
 
 def _invoke(fixture, *, run_command, exec_calls):

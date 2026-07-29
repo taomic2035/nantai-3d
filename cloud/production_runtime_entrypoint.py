@@ -25,12 +25,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pipeline.durable_io import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.durable_io import (  # noqa: E402
     DurableIOError,
     flush_file,
     publish_file_noreplace,
 )
-from pipeline.production_runtime_evidence import (
+from pipeline.production_runtime_evidence import (  # noqa: E402
     ExecutableSnapshot,
     ExecutionEnvironmentObservation,
     GpuRuntimeObservation,
@@ -47,7 +51,7 @@ from pipeline.production_runtime_evidence import (
     training_cli_schema_sha256,
     verify_production_runtime_decision,
 )
-from pipeline.remote_shell_executor import (
+from pipeline.remote_shell_executor import (  # noqa: E402
     canonical_container_lifecycle_bytes,
     load_container_lifecycle_receipt,
 )
@@ -536,7 +540,7 @@ def run_clearance_and_train(
             str(git),
             "status",
             "--porcelain",
-            "--untracked-files=no",
+            "--untracked-files=all",
         ],
         run_command=run_command,
         label="clean tree probe",
