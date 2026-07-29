@@ -2185,3 +2185,26 @@ def test_source_payload_change_error_does_not_leak_absolute_path(
     message = str(exc.value)
     assert str(path) not in message
     assert "evidence/viewer/policy.json" in message
+
+
+def test_build_source_archiving_never_reopens_by_name() -> None:
+    """RED->GREEN: source archiving must use os.open, not Path.open.
+
+    build_production_release_archive takes a 'before' digest via
+    stable_regular_file_digest, then reopens the file via Path.open('rb')
+    to stream bytes into the archive.  This is a check-then-reopen: the
+    digest fd is closed, then a new fd is opened by name.  A TOCTOU swap
+    between the two opens would cause the archive to contain different
+    bytes than the digested bytes.
+
+    This is a static contract test because the archiving path is Linux-only
+    (require_linux_mutation_support).  The contract: the source file must
+    not contain 'source_path.open(' or 'source.source_path.open(' patterns
+    in the archiving section of build_production_release_archive.
+    """
+
+    source = Path(builder_module.__file__).read_text(encoding="utf-8")
+    assert "source.source_path.open(" not in source, (
+        "build_production_release_archive reopens source file by name "
+        "after stable_regular_file_digest; use os.open + os.fdopen instead"
+    )

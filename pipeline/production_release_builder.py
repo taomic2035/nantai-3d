@@ -1920,7 +1920,46 @@ def build_production_release_archive(
                         raise ProductionReleaseBuilderError(
                             "release source changed before archiving"
                         )
-                    with source.source_path.open("rb") as source_stream:
+                    source_flags = os.O_RDONLY | getattr(
+                        os, "O_BINARY", 0
+                    ) | getattr(os, "O_NOFOLLOW", 0)
+                    try:
+                        source_descriptor = os.open(
+                            source.source_path,
+                            source_flags,
+                        )
+                    except OSError as exc:
+                        raise ProductionReleaseBuilderError(
+                            "release source cannot be read for archiving"
+                        ) from exc
+                    try:
+                        source_stream = os.fdopen(
+                            source_descriptor, "rb", buffering=0
+                        )
+                    except OSError as exc:
+                        try:
+                            os.close(source_descriptor)
+                        except OSError:
+                            pass
+                        raise ProductionReleaseBuilderError(
+                            "release source cannot be read for archiving"
+                        ) from exc
+                    with source_stream:
+                        source_descriptor_before = os.fstat(
+                            source_stream.fileno()
+                        )
+                        if (
+                            _is_linklike(
+                                source.source_path,
+                                observed=source_descriptor_before,
+                            )
+                            or not stat.S_ISREG(
+                                source_descriptor_before.st_mode
+                            )
+                        ):
+                            raise ProductionReleaseBuilderError(
+                                "release source changed during archiving"
+                            )
                         digest, byte_length = _write_archive_member(
                             archive,
                             wrapper=wrapper,
