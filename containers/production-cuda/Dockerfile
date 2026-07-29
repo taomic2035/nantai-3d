@@ -18,7 +18,11 @@ RUN printf '%s  %s\n' \
       'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-updates main universe multiverse restricted' \
       'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-security main universe multiverse restricted' \
       > /etc/apt/sources.list \
-    && apt-get update \
+    && apt-get \
+      -o Acquire::Retries=5 \
+      -o Acquire::https::Timeout=30 \
+      -o APT::Update::Error-Mode=any \
+      update \
     && xargs --no-run-if-empty apt-get install -y --no-install-recommends \
       < /tmp/apt-build.lock \
     && while IFS= read -r binding; do \
@@ -141,7 +145,11 @@ RUN printf '%s  %s\n' \
       'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-updates main universe multiverse restricted' \
       'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-security main universe multiverse restricted' \
       > /etc/apt/sources.list \
-    && apt-get update \
+    && apt-get \
+      -o Acquire::Retries=5 \
+      -o Acquire::https::Timeout=30 \
+      -o APT::Update::Error-Mode=any \
+      update \
     && xargs --no-run-if-empty apt-get install -y --no-install-recommends \
       < /tmp/apt-runtime.lock \
     && while IFS= read -r binding; do \

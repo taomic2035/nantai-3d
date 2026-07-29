@@ -47,6 +47,9 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
     assert "--no-build-isolation" in dockerfile
     assert "TORCH_CUDA_ARCH_LIST=\"7.5;8.0;8.6;8.9;9.0+PTX\"" in dockerfile
     assert "snapshot.ubuntu.com/ubuntu/20260701T000000Z" in dockerfile
+    assert dockerfile.count("APT::Update::Error-Mode=any") == 2
+    assert dockerfile.count("Acquire::Retries=5") == 2
+    assert dockerfile.count("Acquire::https::Timeout=30") == 2
     assert "install -m 0755 /opt/python/bin/python3.11" in dockerfile
     assert "COPY --from=builder /opt/python /opt/python" in dockerfile
     assert (
