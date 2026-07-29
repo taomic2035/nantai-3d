@@ -74,25 +74,23 @@ def _verification_error(message: str, exc: Exception | None = None) -> None:
     raise ProductionReleaseVerificationError(message) from exc
 
 
-def _stable_payload(path: Path, *, maximum_bytes: int) -> bytes:
+def _stable_payload(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    label: str,
+) -> bytes:
     try:
         before = path.lstat()
     except OSError as exc:
-        _verification_error(f"release file is unavailable: {path}", exc)
+        _verification_error(f"release file is unavailable: {label}", exc)
     if _is_linklike(path, observed=before):
-        _verification_error(f"symlink release file is forbidden: {path}")
+        _verification_error(f"symlink release file is forbidden: {label}")
     if not stat.S_ISREG(before.st_mode):
-        _verification_error(f"release file must be regular: {path}")
+        _verification_error(f"release file must be regular: {label}")
     if before.st_size > maximum_bytes:
-        _verification_error(f"release file exceeds its maximum: {path}")
-    try:
-        with path.open("rb") as stream:
-            descriptor_before = os.fstat(stream.fileno())
-            payload = stream.read(maximum_bytes + 1)
-            descriptor_after = os.fstat(stream.fileno())
-        after = path.lstat()
-    except OSError as exc:
-        _verification_error(f"release file cannot be read: {path}", exc)
+        _verification_error(f"release file exceeds its maximum: {label}")
+
     def signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
         return (
             value.st_dev,
@@ -101,14 +99,52 @@ def _stable_payload(path: Path, *, maximum_bytes: int) -> bytes:
             value.st_size,
             value.st_mtime_ns,
         )
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        _verification_error(f"release file cannot be read: {label}", exc)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        _verification_error(f"release file cannot be read: {label}", exc)
+    with stream:
+        try:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _is_linklike(path, observed=descriptor_before)
+                or not stat.S_ISREG(descriptor_before.st_mode)
+                or signature(before) != signature(descriptor_before)
+            ):
+                _verification_error(
+                    f"release file changed during read: {label}"
+                )
+            payload = stream.read(maximum_bytes + 1)
+            descriptor_after = os.fstat(stream.fileno())
+        except ProductionReleaseVerificationError:
+            raise
+        except OSError as exc:
+            _verification_error(
+                f"release file cannot be read: {label}", exc
+            )
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        _verification_error(
+            f"release file cannot be read: {label}", exc
+        )
     if (
         len(payload) > maximum_bytes
-        or signature(before) != signature(descriptor_before)
         or signature(before) != signature(descriptor_after)
         or signature(before) != signature(after)
         or len(payload) != before.st_size
     ):
-        _verification_error(f"release file changed during read: {path}")
+        _verification_error(f"release file changed during read: {label}")
     return payload
 
 
@@ -128,7 +164,45 @@ def _require_path_budget(
         )
 
 
-def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
+def _verify_scandir_target(
+    path: Path,
+    expected: os.stat_result,
+    *,
+    label: str,
+) -> None:
+    """Re-stat one scandir target and reject identity drift or reparse.
+
+    Without this recheck, a TOCTOU swap between the pre-scan lstat and
+    os.scandir would cause the iterator to follow a reparse point and walk
+    an untrusted tree.  The iterator must already be on the stack so the
+    finally block closes it if this check fails.
+    """
+
+    suffix = f": {label}" if label else ""
+    try:
+        reopened = path.lstat()
+    except OSError as exc:
+        _verification_error(
+            f"release directory is unavailable{suffix}",
+            exc,
+        )
+    if (
+        _is_linklike(path, observed=reopened)
+        or reopened.st_dev != expected.st_dev
+        or reopened.st_ino != expected.st_ino
+        or stat.S_IFMT(reopened.st_mode) != stat.S_IFMT(expected.st_mode)
+    ):
+        _verification_error(
+            f"release directory changed during scan{suffix}",
+        )
+
+
+def _release_files(
+    root: Path,
+    *,
+    limits: ArchiveLimits,
+    root_stat: os.stat_result,
+) -> set[str]:
     files: set[str] = set()
     folded: set[str] = set()
     total_bytes = 0
@@ -136,12 +210,14 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
     stack = []
     try:
         try:
-            stack.append((root, os.scandir(root)))
+            root_iterator = os.scandir(root)
         except OSError as exc:
             _verification_error(
                 "release directory is unavailable",
                 exc,
             )
+        stack.append((root, root_iterator))
+        _verify_scandir_target(root, root_stat, label="")
         while stack:
             current_path, iterator = stack[-1]
             try:
@@ -176,12 +252,14 @@ def _release_files(root: Path, *, limits: ArchiveLimits) -> set[str]:
                 )
             if stat.S_ISDIR(observed.st_mode):
                 try:
-                    stack.append((candidate, os.scandir(candidate)))
+                    child_iterator = os.scandir(candidate)
                 except OSError as exc:
                     _verification_error(
                         f"release path is unavailable: {relative}",
                         exc,
                     )
+                stack.append((candidate, child_iterator))
+                _verify_scandir_target(candidate, observed, label=relative)
                 continue
             if not stat.S_ISREG(observed.st_mode):
                 _verification_error(
@@ -251,17 +329,29 @@ class _ReleaseReader(Protocol):
 
 
 class _TreeReader:
-    def __init__(self, root: Path, *, limits: ArchiveLimits) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        limits: ArchiveLimits,
+        root_stat: os.stat_result,
+    ) -> None:
         self.root = root
         self.limits = limits
+        self.root_stat = root_stat
 
     def files(self) -> set[str]:
-        return _release_files(self.root, limits=self.limits)
+        return _release_files(
+            self.root,
+            limits=self.limits,
+            root_stat=self.root_stat,
+        )
 
     def payload(self, relative: str, *, maximum_bytes: int) -> bytes:
         return _stable_payload(
             _artifact_path(self.root, relative),
             maximum_bytes=maximum_bytes,
+            label=relative,
         )
 
     def digest(
@@ -604,7 +694,7 @@ def verify_production_release_tree(
             "Production release tree is missing or unsafe"
         )
     return _verify_reader(
-        _TreeReader(project_root, limits=limits),
+        _TreeReader(project_root, limits=limits, root_stat=root_stat),
         limits=limits,
     )
 
@@ -662,8 +752,31 @@ def extract_production_release_archive(
         )
 
     try:
-        with source.open("rb") as source_stream:
+        descriptor = os.open(
+            source,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production release archive is missing or unsafe"
+        ) from exc
+    try:
+        source_stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleaseVerificationError(
+            "Production release archive is missing or unsafe"
+        ) from exc
+    try:
+        with source_stream:
             descriptor_before = os.fstat(source_stream.fileno())
+            if signature(source_stat) != signature(descriptor_before):
+                raise ProductionReleaseVerificationError(
+                    "Production release archive changed before extraction"
+                )
             preflight_zip_central_directory(
                 source_stream,
                 limits=limits,
@@ -677,13 +790,10 @@ def extract_production_release_archive(
                 descriptor_after_preflight = os.fstat(
                     source_stream.fileno()
                 )
-                source_after_preflight = source.lstat()
                 if (
                     signature(source_stat) != signature(descriptor_before)
                     or signature(source_stat)
                     != signature(descriptor_after_preflight)
-                    or signature(source_stat)
-                    != signature(source_after_preflight)
                 ):
                     raise ProductionReleaseVerificationError(
                         "Production archive changed during preflight"
@@ -810,11 +920,9 @@ def extract_production_release_archive(
                                 retained=state,
                             )
             descriptor_after = os.fstat(source_stream.fileno())
-        source_after = source.lstat()
         if (
             signature(source_stat) != signature(descriptor_before)
             or signature(source_stat) != signature(descriptor_after)
-            or signature(source_stat) != signature(source_after)
         ):
             raise ProductionReleaseVerificationError(
                 "Production archive changed during extraction; "
@@ -847,12 +955,19 @@ def extract_production_release_archive(
         RuntimeError,
         NotImplementedError,
         ProductionReleaseFSError,
-        OSError,
         EOFError,
     ) as exc:
         state = tuple(retained)
         raise ProductionReleaseVerificationError(
             f"Production archive verification failed: {exc}; "
+            f"published={state}; retained={state}",
+            published=state,
+            retained=state,
+        ) from exc
+    except OSError as exc:
+        state = tuple(retained)
+        raise ProductionReleaseVerificationError(
+            f"Production archive verification failed; "
             f"published={state}; retained={state}",
             published=state,
             retained=state,
@@ -893,7 +1008,26 @@ def verify_production_release_archive(
         )
 
     try:
-        with source.open("rb") as stream:
+        descriptor = os.open(
+            source,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production release archive is missing or unsafe"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleaseVerificationError(
+            "Production release archive is missing or unsafe"
+        ) from exc
+    try:
+        with stream:
             descriptor_before = os.fstat(stream.fileno())
             if signature(before) != signature(descriptor_before):
                 raise ProductionReleaseVerificationError(
@@ -906,7 +1040,6 @@ def verify_production_release_archive(
                     limits=limits,
                 )
             descriptor_after = os.fstat(stream.fileno())
-        after = source.lstat()
     except ProductionReleaseVerificationError:
         raise
     except (
@@ -914,16 +1047,16 @@ def verify_production_release_archive(
         zipfile.BadZipFile,
         RuntimeError,
         NotImplementedError,
-        OSError,
         EOFError,
     ) as exc:
         raise ProductionReleaseVerificationError(
             f"Production archive verification failed: {exc}"
         ) from exc
-    if (
-        signature(before) != signature(descriptor_after)
-        or signature(before) != signature(after)
-    ):
+    except OSError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production archive verification failed"
+        ) from exc
+    if signature(before) != signature(descriptor_after):
         raise ProductionReleaseVerificationError(
             "Production release archive changed during verification"
         )
@@ -955,9 +1088,12 @@ def verify_production_release_archive_stream(
         zipfile.BadZipFile,
         RuntimeError,
         NotImplementedError,
-        OSError,
         EOFError,
     ) as exc:
         raise ProductionReleaseVerificationError(
             f"Production archive verification failed: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise ProductionReleaseVerificationError(
+            "Production archive verification failed"
         ) from exc

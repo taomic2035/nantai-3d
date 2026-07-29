@@ -300,6 +300,127 @@ def test_archive_entrypoints_reject_reparse_source_ancestor(
         verify_production_release_archive(archive)
 
 
+def test_tree_verifier_rejects_scandir_toctou_root_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Post-scan lstat must detect root identity swap between lstat and scandir.
+
+    The root is checked by verify_production_release_tree, then _release_files
+    opens it via os.scandir by name.  Without a post-scan identity recheck, a
+    TOCTOU swap to a reparse point would cause scandir to follow the redirect
+    and walk an untrusted tree.
+    """
+
+    root, _receipt = _tree(tmp_path)
+
+    scandir_called = False
+    original_lstat = Path.lstat
+    original_scandir = os.scandir
+
+    def swapping_lstat(path):
+        result = original_lstat(path)
+        if path == root and scandir_called:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    def tracking_scandir(path, *args, **kwargs):
+        nonlocal scandir_called
+        if path == root:
+            scandir_called = True
+        return original_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="release directory changed during scan",
+    ):
+        verify_production_release_tree(root)
+
+
+def test_tree_verifier_rejects_scandir_toctou_subdirectory_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Post-scan lstat must detect subdirectory identity swap after scandir.
+
+    Each subdirectory is lstat'd, then opened via os.scandir by name.  Without
+    a post-scan identity recheck, a TOCTOU swap to a reparse point between
+    lstat and scandir would cause the iterator to follow the redirect.
+    """
+
+    root, _receipt = _tree(tmp_path)
+    sub = root / "web/viewer"
+
+    sub_scandir_called = False
+    original_lstat = Path.lstat
+    original_scandir = os.scandir
+
+    def swapping_lstat(path):
+        result = original_lstat(path)
+        if path == sub and sub_scandir_called:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    def tracking_scandir(path, *args, **kwargs):
+        nonlocal sub_scandir_called
+        if path == sub:
+            sub_scandir_called = True
+        return original_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="release directory changed during scan",
+    ):
+        verify_production_release_tree(root)
+
+
+def test_tree_verifier_payload_errors_do_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Contract: _stable_payload error messages must not echo absolute paths."""
+
+    root, _receipt = _tree(tmp_path)
+    receipt_path = root / PRODUCTION_RELEASE_NAME
+
+    original_os_open = os.open
+
+    def failing_os_open(path, *args, **kwargs):
+        if Path(path) == receipt_path:
+            raise OSError("injected")
+        return original_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_os_open)
+
+    with pytest.raises(
+        ProductionReleaseVerificationError,
+        match="release file cannot be read",
+    ) as exc:
+        verify_production_release_tree(root)
+
+    message = str(exc.value)
+    assert str(receipt_path) not in message
+    assert str(receipt_path.parent) not in message
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
 def test_tree_verifier_rejects_real_windows_junction_before_walk(
     tmp_path: Path,
@@ -782,6 +903,7 @@ def test_tree_walk_stops_streaming_at_member_cap(
         verifier_module._release_files(
             root,
             limits=ArchiveLimits(maximum_members=3),
+            root_stat=root.lstat(),
         )
 
     assert yielded == 4
@@ -821,7 +943,11 @@ def test_tree_walk_fails_closed_on_scandir_iteration_error(
         ProductionReleaseVerificationError,
         match="unavailable",
     ):
-        verifier_module._release_files(root, limits=ArchiveLimits())
+        verifier_module._release_files(
+            root,
+            limits=ArchiveLimits(),
+            root_stat=root.lstat(),
+        )
 
     assert closed is True
 
@@ -846,7 +972,11 @@ def test_tree_walk_fails_closed_on_lstat_error(
         ProductionReleaseVerificationError,
         match="unavailable",
     ):
-        verifier_module._release_files(root, limits=ArchiveLimits())
+        verifier_module._release_files(
+            root,
+            limits=ArchiveLimits(),
+            root_stat=root.lstat(),
+        )
 
 
 @pytest.mark.production_mutation
@@ -1237,3 +1367,305 @@ def test_archive_extraction_rejects_non_linux_before_mutation(
 
     assert not destination.exists()
     assert verify_production_release_archive(archive).valid is True
+
+
+# ---------------------------------------------------------------------------
+# GLM-046: check-then-reopen and absolute-path-leak boundary matrix.
+# These tests start RED and go GREEN after the minimal fix in
+# production_release_verifier.py.  They cover:
+#   - _stable_payload must open via os.open + os.fstat (single handle),
+#     not Path.lstat + Path.open (check-then-reopen).
+#   - _stable_payload errors must not echo absolute paths.
+#   - verify_production_release_archive must open via os.open, not Path.open.
+#   - No name-based lstat after the controlled read.
+# stable_regular_file_digest (release_archive.py) has the same gap but is
+# out of scope for GLM-046.
+# ---------------------------------------------------------------------------
+
+
+def test_stable_payload_does_not_reopen_receipt_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED→GREEN: _stable_payload must use os.open, not Path.open.
+
+    Only receipt and checksums are checked because they are opened exclusively
+    by _stable_payload.  Artifact files (including evidence) are also opened
+    by stable_regular_file_digest (release_archive.py) which is out of scope.
+    """
+
+    root, _receipt = _tree(tmp_path)
+    opened_names: list[str] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self.is_relative_to(root) and args and "rb" in args:
+            opened_names.append(self.relative_to(root).as_posix())
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    verify_production_release_tree(root)
+
+    payload_names = {
+        name
+        for name in opened_names
+        if name in {PRODUCTION_RELEASE_NAME, CHECKSUMS_NAME}
+    }
+    assert not payload_names, (
+        f"Path.open called for payload files (should use os.open): "
+        f"{sorted(payload_names)}"
+    )
+
+
+def test_stable_payload_errors_must_not_leak_absolute_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED→GREEN: _stable_payload errors must use relative, not absolute."""
+
+    root, _receipt = _tree(tmp_path)
+    original_fstat = os.fstat
+    call_count = {"n": 0}
+
+    def drift_fstat(fd):
+        result = original_fstat(fd)
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_mode=result.st_mode,
+                st_size=result.st_size + 1,
+                st_mtime_ns=result.st_mtime_ns,
+                st_file_attributes=getattr(
+                    result, "st_file_attributes", 0
+                ),
+            )
+        return result
+
+    monkeypatch.setattr(os, "fstat", drift_fstat)
+    with pytest.raises(ProductionReleaseVerificationError) as exc:
+        verify_production_release_tree(root)
+    message = str(exc.value)
+    assert str(root) not in message
+    assert str(tmp_path) not in message
+
+
+def test_archive_verifier_does_not_reopen_archive_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED→GREEN: verify_production_release_archive must use os.open."""
+
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == archive:
+            opened.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    result = verify_production_release_archive(archive)
+
+    assert result.valid is True
+    assert not opened, "Path.open was called for the archive"
+
+
+def test_archive_verifier_does_not_lstat_archive_after_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED→GREEN: no name-based lstat after the controlled read."""
+
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+
+    lstat_after_open: list[Path] = []
+    original_lstat = Path.lstat
+    opened = {"done": False}
+
+    def tracking_lstat(self):
+        if self == archive and opened["done"]:
+            lstat_after_open.append(self)
+        return original_lstat(self)
+
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        result = original_open(self, *args, **kwargs)
+        if self == archive:
+            opened["done"] = True
+        return result
+
+    monkeypatch.setattr(Path, "lstat", tracking_lstat)
+    monkeypatch.setattr(Path, "open", tracking_open)
+    result = verify_production_release_archive(archive)
+
+    assert result.valid is True
+    assert not lstat_after_open, "source.lstat called after read"
+
+
+# ---------------------------------------------------------------------------
+# GLM-046 (continued): extract_production_release_archive check-then-reopen
+# and OSError absolute-path-leak gaps.  These tests start RED and go GREEN
+# after the minimal fix.  They are cross-platform: require_linux_mutation_support
+# and open_bound_directory are stubbed so the open path is exercised without
+# performing real mutation.
+# ---------------------------------------------------------------------------
+
+
+def _stub_mutation_gates(monkeypatch) -> None:
+    """Stub the Linux-only gates so the open path runs on any platform."""
+    monkeypatch.setattr(
+        verifier_module,
+        "require_linux_mutation_support",
+        lambda: None,
+    )
+
+    def fail_bound_directory(*_args, **_kwargs):
+        raise release_fs.ProductionReleaseFSError(
+            "open_bound_directory stubbed for non-mutating test"
+        )
+
+    monkeypatch.setattr(
+        verifier_module,
+        "open_bound_directory",
+        fail_bound_directory,
+    )
+
+
+def test_extraction_does_not_reopen_archive_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: extract_production_release_archive must use os.open, not Path.open."""
+    _stub_mutation_gates(monkeypatch)
+
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == archive:
+            opened.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    with pytest.raises(ProductionReleaseVerificationError):
+        extract_production_release_archive(archive, tmp_path / "extracted")
+
+    assert not opened, "Path.open was called for the source archive"
+
+
+def test_extraction_does_not_lstat_archive_after_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: no name-based lstat for the source after the controlled open."""
+    _stub_mutation_gates(monkeypatch)
+
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+
+    lstat_after_open: list[Path] = []
+    open_seen = {"done": False}
+    original_lstat = Path.lstat
+    original_path_open = Path.open
+    original_os_open = os.open
+
+    def tracking_lstat(self):
+        if self == archive and open_seen["done"]:
+            lstat_after_open.append(self)
+        return original_lstat(self)
+
+    def tracking_path_open(self, *args, **kwargs):
+        result = original_path_open(self, *args, **kwargs)
+        if self == archive:
+            open_seen["done"] = True
+        return result
+
+    def tracking_os_open(path, *args, **kwargs):
+        result = original_os_open(path, *args, **kwargs)
+        if isinstance(path, (str, Path)) and Path(path) == archive:
+            open_seen["done"] = True
+        return result
+
+    monkeypatch.setattr(Path, "lstat", tracking_lstat)
+    monkeypatch.setattr(Path, "open", tracking_path_open)
+    monkeypatch.setattr(os, "open", tracking_os_open)
+
+    with pytest.raises(ProductionReleaseVerificationError):
+        extract_production_release_archive(archive, tmp_path / "extracted")
+
+    assert not lstat_after_open, "source.lstat called after open"
+
+
+def test_extraction_errors_must_not_leak_absolute_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: OSError messages must not echo absolute paths."""
+    _stub_mutation_gates(monkeypatch)
+
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+
+    secret = str(tmp_path / "secret" / "leaked.txt")
+    injected = OSError(13, "Permission denied", secret)
+
+    def failing_preflight(*_args, **_kwargs):
+        raise injected
+
+    monkeypatch.setattr(
+        verifier_module,
+        "preflight_zip_central_directory",
+        failing_preflight,
+    )
+
+    with pytest.raises(ProductionReleaseVerificationError) as exc:
+        extract_production_release_archive(archive, tmp_path / "extracted")
+
+    message = str(exc.value)
+    assert str(injected) not in message, "OSError message leaked into error"
+    assert "leaked.txt" not in message, "absolute path component leaked"
+
+
+def test_archive_verifier_errors_must_not_leak_absolute_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: verify_production_release_archive OSError must not leak paths."""
+    root, _receipt = _tree(tmp_path)
+    archive = tmp_path / "runtime.zip"
+    write_modeled_production_archive(root, archive)
+
+    secret = str(tmp_path / "secret" / "leaked.txt")
+    injected = OSError(13, "Permission denied", secret)
+
+    def failing_preflight(*_args, **_kwargs):
+        raise injected
+
+    monkeypatch.setattr(
+        verifier_module,
+        "preflight_zip_central_directory",
+        failing_preflight,
+    )
+
+    with pytest.raises(ProductionReleaseVerificationError) as exc:
+        verify_production_release_archive(archive)
+
+    message = str(exc.value)
+    assert str(injected) not in message, "OSError message leaked into error"
+    assert "leaked.txt" not in message, "absolute path component leaked"
