@@ -421,6 +421,13 @@ def test_worker_container_entrypoint_gates_training_in_same_instance(
     )
     assert checker_index < separator_index < training_index
     assert create[training_index - 1] == "/bin/bash"
+    workspace_pythonpath_index = create.index("PYTHONPATH=/workspace")
+    assert create[workspace_pythonpath_index - 1] == "--env"
+    assert all(
+        not value.startswith("PYTHONPATH=")
+        or value == "PYTHONPATH=/workspace"
+        for value in create
+    )
 
 
 def test_worker_rejects_unbound_clearance_entrypoint_before_create(

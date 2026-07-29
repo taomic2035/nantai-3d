@@ -527,6 +527,8 @@ def _create_container_argv(
         "--workdir",
         "/workspace",
         "--env",
+        "PYTHONPATH=/workspace",
+        "--env",
         "WORK=/job/runtime",
         container_identity,
         "python",
