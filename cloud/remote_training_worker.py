@@ -115,6 +115,26 @@ def _stat_signature(
     )
 
 
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX.
+
+    Permission bits in ``st_mode`` can differ between ``lstat`` and
+    ``fstat`` on Windows (e.g. executables), so only the file type bits
+    are compared.  ``st_ctime_ns`` is also omitted because Windows
+    reports creation time for ``lstat`` but metadata-change time for
+    ``fstat``.
+    """
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
 def _real_directory(path: Path, *, label: str) -> None:
     try:
         redirected = first_linklike_path(Path(path.anchor), path)
@@ -201,43 +221,117 @@ def _publish_container_id(path: Path, container_id: str) -> None:
 
 
 def _read_stable(path: Path, *, max_bytes: int, label: str) -> bytes:
+    descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise RemoteWorkerError(f"{label} is missing or link-like")
-        if before.st_size <= 0 or before.st_size > max_bytes:
-            raise RemoteWorkerError(f"{label} size is outside allowed range")
-        with path.open("rb") as stream:
+    except OSError as exc:
+        raise RemoteWorkerError(f"{label} cannot be read") from exc
+    except ValueError as exc:
+        raise RemoteWorkerError(f"{label} cannot be read") from exc
+    if (
+        redirected is not None
+        or stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise RemoteWorkerError(f"{label} is missing or link-like")
+    if before.st_size <= 0 or before.st_size > max_bytes:
+        raise RemoteWorkerError(f"{label} size is outside allowed range")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RemoteWorkerError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RemoteWorkerError(f"{label} cannot be read") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise RemoteWorkerError(f"{label} changed before read")
             raw = stream.read(max_bytes + 1)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except RemoteWorkerError:
         raise
     except OSError as exc:
         raise RemoteWorkerError(f"{label} cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or len(raw) > max_bytes
+    ):
         raise RemoteWorkerError(f"{label} changed while being read")
-    if len(raw) > max_bytes:
-        raise RemoteWorkerError(f"{label} size is outside allowed range")
     return raw
 
 
 def _hash_stable(path: Path, *, label: str) -> tuple[int, str]:
+    descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise RemoteWorkerError(f"{label} is missing or link-like")
-        digest = hashlib.sha256()
-        measured = 0
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+    except OSError as exc:
+        raise RemoteWorkerError(f"{label} cannot be hashed") from exc
+    except ValueError as exc:
+        raise RemoteWorkerError(f"{label} cannot be hashed") from exc
+    if (
+        redirected is not None
+        or stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise RemoteWorkerError(f"{label} is missing or link-like")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RemoteWorkerError(f"{label} cannot be hashed") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RemoteWorkerError(f"{label} cannot be hashed") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise RemoteWorkerError(f"{label} changed before hash")
+            digest = hashlib.sha256()
+            measured = 0
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
                 measured += len(chunk)
                 digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except RemoteWorkerError:
         raise
     except OSError as exc:
         raise RemoteWorkerError(f"{label} cannot be hashed") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+    ):
         raise RemoteWorkerError(f"{label} changed while being hashed")
     return measured, digest.hexdigest()
 

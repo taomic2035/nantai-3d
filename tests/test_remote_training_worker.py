@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
 import subprocess
@@ -790,16 +789,24 @@ def test_stable_reader_rejects_growth_beyond_bound_before_allocation(
 ):
     path = tmp_path / "bounded.json"
     path.write_bytes(b"x")
-    original_open = Path.open
+    original_fdopen = os.fdopen
 
-    def growing_open(target, mode="r", *args, **kwargs):
-        if target == path and mode == "rb":
-            return io.BytesIO(b"x" * 1025)
-        return original_open(target, mode, *args, **kwargs)
+    def growing_fdopen(fd, mode="r", *args, **kwargs):
+        stream = original_fdopen(fd, mode, *args, **kwargs)
+        original_read = stream.read
 
-    monkeypatch.setattr(Path, "open", growing_open)
+        def fake_read(size=-1):
+            data = original_read(size)
+            if len(data) < size:
+                return data + b"x" * (size - len(data) + 1)
+            return data
 
-    with pytest.raises(RemoteWorkerError, match="size"):
+        stream.read = fake_read
+        return stream
+
+    monkeypatch.setattr(os, "fdopen", growing_fdopen)
+
+    with pytest.raises(RemoteWorkerError, match="changed"):
         worker._read_stable(path, max_bytes=1024, label="bounded test")
 
 
@@ -2087,3 +2094,68 @@ def test_worker_cleanup_observation_failure_never_rewrites_terminal_status(
     assert status.state == "succeeded"
     assert rm_calls == 1
     assert not (job_dir / "cleanup-observation.json").exists()
+
+
+# ============================================================
+# RED → GREEN: ancestor reparse / junction bypass
+# ============================================================
+
+
+def test_read_stable_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _read_stable must reject a reparse-point ancestor."""
+    target = tmp_path / "spec.json"
+    target.write_bytes(b'{"valid":true}')
+
+    sentinel = tmp_path / "ancestor-reparse"
+    original = worker.first_linklike_path
+
+    def fake_first_linklike_path(root, leaf):
+        if Path(leaf) == target:
+            return sentinel
+        return original(root, leaf)
+
+    monkeypatch.setattr(
+        worker,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RemoteWorkerError,
+        match="missing or link-like|regular|redirected|unsafe",
+    ):
+        worker._read_stable(
+            target, max_bytes=1024, label="test-spec"
+        )
+
+
+def test_hash_stable_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _hash_stable must reject a reparse-point ancestor."""
+    target = tmp_path / "bundle.bin"
+    target.write_bytes(b"training-bundle")
+
+    sentinel = tmp_path / "ancestor-reparse"
+    original = worker.first_linklike_path
+
+    def fake_first_linklike_path(root, leaf):
+        if Path(leaf) == target:
+            return sentinel
+        return original(root, leaf)
+
+    monkeypatch.setattr(
+        worker,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RemoteWorkerError,
+        match="missing or link-like|regular|redirected|unsafe",
+    ):
+        worker._hash_stable(target, label="test-bundle")
