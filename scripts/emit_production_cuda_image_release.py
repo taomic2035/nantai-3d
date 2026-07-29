@@ -147,15 +147,18 @@ def _read_stable_regular_file(
 
 def _parse_attestation(value: str) -> OciAttestationBinding:
     parts = value.split(",")
-    if len(parts) != 3 or any(not part for part in parts):
+    if len(parts) != 5 or any(not part for part in parts):
         raise argparse.ArgumentTypeError(
-            "attestation must be role,predicate-type,sha256:digest"
+            "attestation must be role,predicate-type,"
+            "manifest-digest,predicate-blob-digest,subject-digest"
         )
     try:
         return OciAttestationBinding(
             role=parts[0],
             predicate_type=parts[1],
             manifest_digest=parts[2],
+            predicate_blob_digest=parts[3],
+            subject_digest=parts[4],
         )
     except ValueError as exc:
         raise argparse.ArgumentTypeError(

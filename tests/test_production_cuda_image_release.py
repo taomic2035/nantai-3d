@@ -94,21 +94,34 @@ def _valid_probe(
 
 
 def _attestations() -> tuple[OciAttestationBinding, ...]:
+    image_digest = f"sha256:{_digest('published-image')}"
+    platform_digest = f"sha256:{_digest('amd64-manifest')}"
+    buildkit_manifest = f"sha256:{_digest('buildkit-attestations')}"
     return (
         OciAttestationBinding(
             role="buildkit-provenance",
             predicate_type="https://slsa.dev/provenance/v1",
-            manifest_digest=f"sha256:{_digest('buildkit-provenance')}",
+            manifest_digest=buildkit_manifest,
+            predicate_blob_digest=(
+                f"sha256:{_digest('buildkit-provenance')}"
+            ),
+            subject_digest=platform_digest,
         ),
         OciAttestationBinding(
             role="buildkit-sbom",
             predicate_type="https://spdx.dev/Document",
-            manifest_digest=f"sha256:{_digest('buildkit-sbom')}",
+            manifest_digest=buildkit_manifest,
+            predicate_blob_digest=f"sha256:{_digest('buildkit-sbom')}",
+            subject_digest=platform_digest,
         ),
         OciAttestationBinding(
             role="github-build-provenance",
             predicate_type="https://slsa.dev/provenance/v1",
             manifest_digest=f"sha256:{_digest('github-provenance')}",
+            predicate_blob_digest=(
+                f"sha256:{_digest('github-provenance-predicate')}"
+            ),
+            subject_digest=image_digest,
         ),
     )
 
@@ -452,47 +465,86 @@ def _producer_fixture(tmp_path: Path) -> tuple[list[str], Path]:
         "--workflow-run-attempt",
         "1",
     ]
-    for role, predicate, attestation_digest in (
+    platform_digest = f"sha256:{_digest('amd64-manifest')}"
+    buildkit_manifest = f"sha256:{_digest('buildkit-attestations')}"
+    for (
+        role,
+        predicate,
+        manifest_digest,
+        predicate_blob_digest,
+        subject_digest,
+    ) in (
         (
             "buildkit-provenance",
             "https://slsa.dev/provenance/v1",
+            buildkit_manifest,
             f"sha256:{_digest('buildkit-provenance')}",
+            platform_digest,
         ),
         (
             "buildkit-sbom",
             "https://spdx.dev/Document",
+            buildkit_manifest,
             f"sha256:{_digest('buildkit-sbom')}",
+            platform_digest,
         ),
         (
             "github-build-provenance",
             "https://slsa.dev/provenance/v1",
             f"sha256:{_digest('github-provenance')}",
+            f"sha256:{_digest('github-provenance-predicate')}",
+            image_digest,
         ),
     ):
         argv.extend(
             [
                 "--attestation",
-                f"{role},{predicate},{attestation_digest}",
+                (
+                    f"{role},{predicate},{manifest_digest},"
+                    f"{predicate_blob_digest},{subject_digest}"
+                ),
             ]
         )
     argv.extend(["--output", str(output)])
     return argv, output
 
 
-def test_release_requires_distinct_attestation_manifests() -> None:
+def test_release_allows_buildkit_predicates_in_one_manifest() -> None:
+    probe = _valid_probe()
+    release = ProductionCudaImageRelease.create(
+        source_commit="0123456789abcdef0123456789abcdef01234567",
+        image_name="ghcr.io/taomic2035/nantai-3d-production-cuda",
+        image_digest=f"sha256:{_digest('published-image')}",
+        platform_manifest_digest=f"sha256:{_digest('amd64-manifest')}",
+        dockerfile_sha256=_digest("dockerfile"),
+        requirements_lock_sha256=_digest("requirements-lock"),
+        image_probe=probe,
+        workflow_repository="taomic2035/nantai-3d",
+        workflow_run_id=304_131_516_67,
+        workflow_run_attempt=1,
+        attestations=_attestations(),
+    )
+
+    assert (
+        release.attestations[0].manifest_digest
+        == release.attestations[1].manifest_digest
+    )
+
+
+def test_release_requires_distinct_predicate_blobs() -> None:
     probe = _valid_probe()
     attestations = list(_attestations())
     attestations[0] = attestations[0].model_copy(
         update={
-            "manifest_digest": (
-                attestations[1].manifest_digest
+            "predicate_blob_digest": (
+                attestations[1].predicate_blob_digest
             )
         }
     )
 
     with pytest.raises(
         ValueError,
-        match="attestation manifest digests must be distinct",
+        match="attestation predicate blob digests must be distinct",
     ):
         ProductionCudaImageRelease.create(
             source_commit=(
@@ -512,6 +564,23 @@ def test_release_requires_distinct_attestation_manifests() -> None:
             workflow_run_id=304_131_516_67,
             workflow_run_attempt=1,
             attestations=tuple(attestations),
+        )
+
+
+def test_release_rejects_attestation_subject_mismatch() -> None:
+    document = _canonical_dict(
+        canonical_production_cuda_image_release_bytes(_valid_release())
+    )
+    document["attestations"][0]["subject_digest"] = (
+        document["image_digest"]
+    )
+
+    with pytest.raises(
+        ProductionCudaImageReleaseError,
+        match="subject",
+    ):
+        load_production_cuda_image_release_bytes(
+            _canonical_payload(document)
         )
 
 
