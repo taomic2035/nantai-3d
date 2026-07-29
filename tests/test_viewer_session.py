@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -404,3 +405,192 @@ def test_session_rejects_evidence_paths_outside_evidence_root(
 
     with pytest.raises(ViewerSessionError, match="evidence root"):
         run_production_viewer_session(options)
+
+
+# ============================================================
+# RED → GREEN: launch preflight link/reparse and error privacy
+# ============================================================
+
+
+def test_require_regular_file_rejects_symlink(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    target = tmp_path / "real.json"
+    target.write_text("{}\n", encoding="utf-8")
+    link = tmp_path / "link.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    with pytest.raises(ViewerSessionError, match="regular file"):
+        session_module._require_regular_file(link, label="test")
+
+
+def test_require_absent_rejects_symlink(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    target = tmp_path / "real.json"
+    target.write_text("{}\n", encoding="utf-8")
+    link = tmp_path / "link.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    with pytest.raises(ViewerSessionError, match="already exists"):
+        session_module._require_absent(link, label="test")
+
+
+def test_validated_options_rejects_symlinked_project_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    real_project = tmp_path / "real-project"
+    real_project.mkdir()
+    (real_project / "scripts").mkdir(parents=True)
+    (real_project / "scripts/capture_viewer_acceptance.mjs").write_text(
+        "// capture\n", encoding="utf-8"
+    )
+    link_project = tmp_path / "link-project"
+    try:
+        link_project.symlink_to(real_project, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    options = _options(tmp_path)
+    options = replace(options, project_root=link_project)
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        lambda *_args, **_kwargs: pytest.fail(
+            "server must remain unreachable"
+        ),
+    )
+
+    with pytest.raises(ViewerSessionError, match="regular director"):
+        run_production_viewer_session(options)
+
+
+def test_validated_options_rejects_symlinked_policy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    real_policy = options.policy_path.parent / "real-policy.json"
+    real_policy.write_text("{}\n", encoding="utf-8")
+    link_policy = options.policy_path.parent / "link-policy.json"
+    try:
+        link_policy.symlink_to(real_policy)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+    options = replace(options, policy_path=link_policy)
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        lambda *_args, **_kwargs: pytest.fail(
+            "server must remain unreachable"
+        ),
+    )
+
+    with pytest.raises(ViewerSessionError, match="regular file"):
+        run_production_viewer_session(options)
+
+
+def test_validated_options_rejects_symlinked_node_executable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    options = _options(tmp_path)
+    real_node = tmp_path / "real-node.exe"
+    real_node.write_bytes(b"node")
+    link_node = tmp_path / "link-node.exe"
+    try:
+        link_node.symlink_to(real_node)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+    options = replace(options, node_executable=link_node)
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        lambda *_args, **_kwargs: pytest.fail(
+            "server must remain unreachable"
+        ),
+    )
+
+    with pytest.raises(ViewerSessionError, match="regular file"):
+        run_production_viewer_session(options)
+
+
+def test_studio_server_error_does_not_leak_exception_text(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+
+    secret_message = "SECRET_PATH_C:\\users\\admin\\private"
+
+    def _fail(*_args, **_kwargs):
+        raise OSError(secret_message)
+
+    monkeypatch.setattr(session_module, "make_server", _fail)
+
+    with pytest.raises(ViewerSessionError, match="could not start") as exc_info:
+        run_production_viewer_session(options)
+
+    assert secret_message not in str(exc_info.value)
+
+
+def test_human_review_error_does_not_leak_exception_text(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    human_policy_output = (
+        options.evidence_root / "review/human-review-policy.json"
+    )
+    options = replace(
+        options,
+        human_review_policy_output_path=human_policy_output,
+    )
+    server = _FakeServer()
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    secret_message = "SECRET_PATH_C:\\users\\admin\\private"
+
+    def _fail(**_kwargs):
+        raise session_module.HumanReviewInputError(secret_message)
+
+    monkeypatch.setattr(
+        session_module,
+        "materialize_human_review_policy",
+        _fail,
+    )
+
+    with pytest.raises(
+        ViewerSessionError, match="could not be materialized"
+    ) as exc_info:
+        run_production_viewer_session(options)
+
+    assert secret_message not in str(exc_info.value)

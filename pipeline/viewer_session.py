@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -22,23 +23,35 @@ class ViewerSessionError(ValueError):
 
 
 def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
-    )
+    try:
+        observed = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 def _require_regular_file(path: Path, *, label: str) -> Path:
     candidate = Path(path).expanduser().absolute()
     try:
-        resolved = candidate.resolve(strict=True)
+        observed = candidate.lstat()
     except (OSError, RuntimeError) as exc:
         raise ViewerSessionError(
             f"{label} must be an existing regular file"
         ) from exc
     if (
         _is_linklike(candidate)
-        or not candidate.is_file()
-        or resolved != candidate
+        or not stat.S_ISREG(observed.st_mode)
     ):
         raise ViewerSessionError(
             f"{label} must be an existing regular file"
@@ -48,9 +61,11 @@ def _require_regular_file(path: Path, *, label: str) -> Path:
 
 def _require_absent(path: Path, *, label: str) -> Path:
     candidate = Path(path).expanduser().absolute()
-    if candidate.exists() or _is_linklike(candidate):
-        raise ViewerSessionError(f"{label} already exists")
-    return candidate
+    try:
+        candidate.lstat()
+    except FileNotFoundError:
+        return candidate
+    raise ViewerSessionError(f"{label} already exists")
 
 
 def _require_below_evidence_root(
@@ -99,12 +114,15 @@ def _validated_options(
         (evidence_root, "evidence root"),
     ):
         try:
-            resolved = path.resolve(strict=True)
+            observed = path.lstat()
         except (OSError, RuntimeError) as exc:
             raise ViewerSessionError(
                 f"{label} must be an existing regular directory"
             ) from exc
-        if _is_linklike(path) or not path.is_dir() or resolved != path:
+        if (
+            _is_linklike(path)
+            or not stat.S_ISDIR(observed.st_mode)
+        ):
             raise ViewerSessionError(
                 f"{label} must be an existing regular directory"
             )
@@ -247,7 +265,7 @@ def run_production_viewer_session(
         )
     except (OSError, ValueError) as exc:
         raise ViewerSessionError(
-            f"verified Studio server could not start: {exc}"
+            "verified Studio server could not start"
         ) from exc
     host, port = server.server_address[:2]
     if host != "127.0.0.1" or not isinstance(port, int) or port <= 0:
@@ -309,7 +327,7 @@ def run_production_viewer_session(
         except HumanReviewInputError as exc:
             raise ViewerSessionError(
                 "Viewer capture completed but its human review policy "
-                f"could not be materialized: {exc}"
+                "could not be materialized"
             ) from exc
     return return_code
 
