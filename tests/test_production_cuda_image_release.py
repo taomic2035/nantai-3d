@@ -102,7 +102,7 @@ def _attestations() -> tuple[OciAttestationBinding, ...]:
             role="buildkit-provenance",
             predicate_type="https://slsa.dev/provenance/v1",
             manifest_digest=buildkit_manifest,
-            predicate_blob_digest=(
+            attestation_blob_digest=(
                 f"sha256:{_digest('buildkit-provenance')}"
             ),
             subject_digest=platform_digest,
@@ -111,14 +111,14 @@ def _attestations() -> tuple[OciAttestationBinding, ...]:
             role="buildkit-sbom",
             predicate_type="https://spdx.dev/Document",
             manifest_digest=buildkit_manifest,
-            predicate_blob_digest=f"sha256:{_digest('buildkit-sbom')}",
+            attestation_blob_digest=f"sha256:{_digest('buildkit-sbom')}",
             subject_digest=platform_digest,
         ),
         OciAttestationBinding(
             role="github-build-provenance",
             predicate_type="https://slsa.dev/provenance/v1",
             manifest_digest=f"sha256:{_digest('github-provenance')}",
-            predicate_blob_digest=(
+            attestation_blob_digest=(
                 f"sha256:{_digest('github-provenance-predicate')}"
             ),
             subject_digest=image_digest,
@@ -471,7 +471,7 @@ def _producer_fixture(tmp_path: Path) -> tuple[list[str], Path]:
         role,
         predicate,
         manifest_digest,
-        predicate_blob_digest,
+        attestation_blob_digest,
         subject_digest,
     ) in (
         (
@@ -501,7 +501,7 @@ def _producer_fixture(tmp_path: Path) -> tuple[list[str], Path]:
                 "--attestation",
                 (
                     f"{role},{predicate},{manifest_digest},"
-                    f"{predicate_blob_digest},{subject_digest}"
+                    f"{attestation_blob_digest},{subject_digest}"
                 ),
             ]
         )
@@ -531,20 +531,20 @@ def test_release_allows_buildkit_predicates_in_one_manifest() -> None:
     )
 
 
-def test_release_requires_distinct_predicate_blobs() -> None:
+def test_release_requires_distinct_attestation_blobs() -> None:
     probe = _valid_probe()
     attestations = list(_attestations())
     attestations[0] = attestations[0].model_copy(
         update={
-            "predicate_blob_digest": (
-                attestations[1].predicate_blob_digest
+            "attestation_blob_digest": (
+                attestations[1].attestation_blob_digest
             )
         }
     )
 
     with pytest.raises(
         ValueError,
-        match="attestation predicate blob digests must be distinct",
+        match="attestation blob digests must be distinct",
     ):
         ProductionCudaImageRelease.create(
             source_commit=(

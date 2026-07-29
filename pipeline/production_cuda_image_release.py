@@ -247,12 +247,12 @@ class OciAttestationBinding(FrozenModel):
         "https://slsa.dev/provenance/v1",
     ]
     manifest_digest: str = Field(pattern=_DIGEST_PATTERN)
-    predicate_blob_digest: str = Field(pattern=_DIGEST_PATTERN)
+    attestation_blob_digest: str = Field(pattern=_DIGEST_PATTERN)
     subject_digest: str = Field(pattern=_DIGEST_PATTERN)
 
     _digests_are_not_dummy = field_validator(
         "manifest_digest",
-        "predicate_blob_digest",
+        "attestation_blob_digest",
         "subject_digest",
     )(_reject_uniform_identity)
 
@@ -342,10 +342,10 @@ class ProductionCudaImageRelease(FrozenModel):
         ):
             raise ValueError("attestation role set or order is invalid")
         if len(
-            {item.predicate_blob_digest for item in self.attestations}
+            {item.attestation_blob_digest for item in self.attestations}
         ) != len(self.attestations):
             raise ValueError(
-                "attestation predicate blob digests must be distinct"
+                "attestation blob digests must be distinct"
             )
         for item in self.attestations:
             expected_subject = (

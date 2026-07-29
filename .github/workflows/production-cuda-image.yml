@@ -1,0 +1,327 @@
+name: production-cuda-image
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-cuda-image-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, inspect, attest, and publish Production CUDA image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nantai-3d-production-cuda
+      PLATFORM: linux/amd64
+    steps:
+      - name: Checkout exact main source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind ephemeral paths to the runner temp directory
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_TEMP" != /* ]] || [[ "$RUNNER_TEMP" == *$'\n'* ]]; then
+            echo "Runner temp directory is not a safe absolute path" >&2
+            exit 1
+          fi
+          {
+            printf 'PYTHON=%s/production-cuda-venv/bin/python\n' "$RUNNER_TEMP"
+            printf 'PROBE_JSON=%s/production-cuda-image-probe.json\n' "$RUNNER_TEMP"
+            printf 'OCI_JSON=%s/production-cuda-oci-inspection.json\n' "$RUNNER_TEMP"
+            printf 'RELEASE_JSON=%s/production-cuda-image-release.json\n' "$RUNNER_TEMP"
+            printf 'VERIFICATION_JSON=%s/production-cuda-image-verification.json\n' "$RUNNER_TEMP"
+          } >> "$GITHUB_ENV"
+
+      - name: Create isolated validation environment
+        run: |
+          set -euo pipefail
+          python3 -m venv "${PYTHON%/bin/python}"
+          "$PYTHON" -m pip install --disable-pip-version-check \
+            "dockerfile-parse==2.0.1" \
+            "pydantic==2.13.4" \
+            "pytest==9.0.3" \
+            "PyYAML==6.0.3"
+
+      - name: Fail closed outside exact clean main source
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Production CUDA publication requires refs/heads/main" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "Checked-out source differs from workflow source SHA" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "Checked-out source is not clean" >&2
+            exit 1
+          fi
+          "$PYTHON" -m pytest -q --noconftest \
+            tests/test_production_cuda_runtime_lock.py \
+            tests/test_production_cuda_image_release.py \
+            tests/test_production_cuda_image_probe.py \
+            tests/test_production_cuda_image_contract.py \
+            tests/test_production_cuda_image_workflow.py
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Build and push immutable candidate
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: containers/production-cuda/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            SOURCE_COMMIT=${{ github.sha }}
+          sbom: true
+          provenance: mode=max,version=v1
+
+      - name: Probe exact digest without network or GPU claim
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Build output did not return a canonical digest" >&2
+            exit 1
+          fi
+          mkdir -p -- "$RUNNER_TEMP/production-cuda-evidence"
+          docker pull "${IMAGE_NAME}@${IMAGE_DIGEST}"
+          docker run --rm \
+            --platform "$PLATFORM" \
+            --network none \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/production-cuda-evidence,dst=/evidence" \
+            "${IMAGE_NAME}@${IMAGE_DIGEST}" \
+            python -I /workspace/cloud/probe_production_cuda_image.py \
+              --runtime-lock /opt/nantai/runtime-lock.json \
+              --output /evidence/production-cuda-image-probe.json
+          install -m 0444 \
+            "$RUNNER_TEMP/production-cuda-evidence/production-cuda-image-probe.json" \
+            "$PROBE_JSON"
+
+      - name: Attest exact image digest
+        id: attest_image
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+          show-summary: false
+
+      - name: Inspect OCI manifests, blobs, predicates, and subjects
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          GITHUB_ATTESTATION_BUNDLE: ${{ steps.attest_image.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if "$PYTHON" -I cloud/inspect_production_cuda_oci.py \
+              --image-name "$IMAGE_NAME" \
+              --image-digest "$IMAGE_DIGEST" \
+              --github-attestation-bundle "$GITHUB_ATTESTATION_BUNDLE" \
+              --output "$OCI_JSON"; then
+              break
+            fi
+            if [[ "$attempt" -eq 5 ]]; then
+              echo "OCI evidence did not become complete within the bounded retry window" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 2))"
+          done
+          test -s "$OCI_JSON"
+
+      - name: Emit content-addressed detached image receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mapfile -t oci_fields < <(
+            "$PYTHON" - "$OCI_JSON" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="ascii") as stream:
+              document = json.load(stream)
+          if document.get("schema") != "nantai.production-cuda-oci-inspection.v1":
+              raise SystemExit("unexpected OCI inspection schema")
+          print(document["platform_manifest_digest"])
+          for item in document["attestations"]:
+              print(",".join(
+                  (
+                      item["role"],
+                      item["predicate_type"],
+                      item["manifest_digest"],
+                      item["attestation_blob_digest"],
+                      item["subject_digest"],
+                  )
+              ))
+          PY
+          )
+          if [[ "${#oci_fields[@]}" -ne 4 ]]; then
+            echo "OCI inspection did not return the exact receipt field set" >&2
+            exit 1
+          fi
+          "$PYTHON" -I scripts/emit_production_cuda_image_release.py \
+            --runtime-lock containers/production-cuda/runtime-lock.json \
+            --probe "$PROBE_JSON" \
+            --source-commit "$GITHUB_SHA" \
+            --image-name "$IMAGE_NAME" \
+            --image-digest "$IMAGE_DIGEST" \
+            --platform-manifest-digest "${oci_fields[0]}" \
+            --dockerfile containers/production-cuda/Dockerfile \
+            --requirements-lock containers/production-cuda/requirements.lock \
+            --workflow-repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --attestation "${oci_fields[1]}" \
+            --attestation "${oci_fields[2]}" \
+            --attestation "${oci_fields[3]}" \
+            --output "$RELEASE_JSON"
+
+      - name: Attest exact detached receipt bytes
+        id: attest_receipt
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: ${{ runner.temp }}/production-cuda-image-release.json
+          show-summary: false
+
+      - name: Verify registry and repository attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image_verify="$RUNNER_TEMP/github-image-attestation-verify.json"
+          receipt_verify="$RUNNER_TEMP/github-receipt-attestation-verify.json"
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/production-cuda-image.yml"
+          gh attestation verify \
+            "oci://${IMAGE_NAME}@${IMAGE_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle-from-oci \
+            --deny-self-hosted-runners \
+            --signer-workflow "$signer_workflow" \
+            --signer-digest "$GITHUB_SHA" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref "refs/heads/main" \
+            --format json > "$image_verify"
+          gh attestation verify \
+            "$RELEASE_JSON" \
+            --repo "$GITHUB_REPOSITORY" \
+            --deny-self-hosted-runners \
+            --signer-workflow "$signer_workflow" \
+            --signer-digest "$GITHUB_SHA" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref "refs/heads/main" \
+            --format json > "$receipt_verify"
+          "$PYTHON" - \
+            "$RELEASE_JSON" \
+            "$OCI_JSON" \
+            "$image_verify" \
+            "$receipt_verify" \
+            "$VERIFICATION_JSON" <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+
+          release_path, oci_path, image_path, receipt_path, output_path = (
+              sys.argv[1:]
+          )
+
+          def read_json(path):
+              payload = open(path, "rb").read()
+              if not payload or len(payload) > 64 * 1024 * 1024:
+                  raise SystemExit("verification input is empty or oversized")
+              document = json.loads(payload)
+              if not isinstance(document, (dict, list)) or not document:
+                  raise SystemExit("verification input is not a nonempty JSON document")
+              return payload, document
+
+          release_payload, release = read_json(release_path)
+          oci_payload, oci = read_json(oci_path)
+          image_payload, _image = read_json(image_path)
+          receipt_payload, _receipt = read_json(receipt_path)
+          if release["image_digest"] != oci["image_digest"]:
+              raise SystemExit("receipt and OCI inspection digest differ")
+          if release["source_commit"] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("receipt source commit differs")
+          verification = {
+              "schema": "nantai.production-cuda-image-verification.v1",
+              "github_image_attestation_verified": True,
+              "github_image_verification_sha256": hashlib.sha256(
+                  image_payload
+              ).hexdigest(),
+              "github_receipt_attestation_verified": True,
+              "github_receipt_verification_sha256": hashlib.sha256(
+                  receipt_payload
+              ).hexdigest(),
+              "image_identity": (
+                  f'{release["image_name"]}@{release["image_digest"]}'
+              ),
+              "oci_inspection_sha256": hashlib.sha256(
+                  oci_payload
+              ).hexdigest(),
+              "release_file_sha256": hashlib.sha256(
+                  release_payload
+              ).hexdigest(),
+              "release_id": release["release_id"],
+          }
+          payload = (
+              json.dumps(
+                  verification,
+                  allow_nan=False,
+                  ensure_ascii=True,
+                  separators=(",", ":"),
+                  sort_keys=True,
+              )
+              + "\n"
+          ).encode("ascii")
+          descriptor = os.open(
+              output_path,
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+              0o444,
+          )
+          with os.fdopen(descriptor, "wb") as stream:
+              stream.write(payload)
+              stream.flush()
+              os.fsync(stream.fileno())
+          if open(output_path, "rb").read() != payload:
+              raise SystemExit("verification output differs after publication")
+          PY
+
+      - name: Upload final receipt and verification only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-cuda-image-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          include-hidden-files: false
+          path: |
+            ${{ runner.temp }}/production-cuda-image-release.json
+            ${{ runner.temp }}/production-cuda-image-verification.json

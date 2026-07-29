@@ -253,6 +253,7 @@ jobs:
             "pytest==9.0.3" \
             "numpy==2.3.5" \
             "pydantic==2.13.4" \
+            "PyYAML==6.0.3" \
             "plyfile==1.1.4" \
             "loguru==0.7.3" \
             "pywin32==311; sys_platform == 'win32'"
@@ -269,7 +270,12 @@ jobs:
             tests/test_production_release_assets.py \
             tests/test_production_release_docs.py \
             tests/test_production_runtime_runner.py \
-            tests/test_production_release_builder.py
+            tests/test_production_release_builder.py \
+            tests/test_production_cuda_runtime_lock.py \
+            tests/test_production_cuda_image_release.py \
+            tests/test_production_cuda_image_probe.py \
+            tests/test_production_cuda_image_contract.py \
+            tests/test_production_cuda_image_workflow.py
 
       - name: Test private Linux append-only Production mutations
         if: matrix.os == 'ubuntu-latest'

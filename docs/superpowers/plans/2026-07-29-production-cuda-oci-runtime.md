@@ -367,7 +367,7 @@ class OciAttestationBinding(FrozenModel):
         "https://slsa.dev/provenance/v1",
     ]
     manifest_digest: str
-    predicate_blob_digest: str
+    attestation_blob_digest: str
     subject_digest: str
 
 
@@ -809,10 +809,10 @@ Expected: CLI file is missing or the new assertions fail.
 - [ ] **Step 3: Implement the producer**
 
 The script parses each `--attestation` as
-`role,predicate-type,manifest-digest,predicate-blob-digest,subject-digest`,
+`role,predicate-type,manifest-digest,attestation-blob-digest,subject-digest`,
 with every digest encoded as `sha256:` followed by exactly 64 lowercase hex
 characters. BuildKit SBOM and provenance predicates may share one attestation
-manifest, but their predicate blob digests must be distinct. The script loads
+manifest, but their attestation blob digests must be distinct. The script loads
 the canonical runtime lock and probe, checks their SHA equality, hashes
 Dockerfile/requirements from stable regular files, creates
 `ProductionCudaImageRelease`, writes canonical bytes no-replace, reopens them
@@ -857,7 +857,7 @@ Parse YAML with the existing loader convention and assert:
 - job-scoped permissions are exactly `contents: read`, `packages: write`,
   `id-token: write`, `attestations: write`;
 - every action uses the full SHA listed below;
-- BuildKit uses `sbom: true`, `provenance: mode=max`;
+- BuildKit uses `sbom: true`, `provenance: mode=max,version=v1`;
 - digest output, not a tag, feeds probe and attest steps;
 - runtime probe uses `--network none`;
 - receipt and summary are the only uploaded workflow artifacts.
@@ -894,8 +894,8 @@ The workflow:
 6. pulls and runs the exact digest with `/workspace` read-only, `/evidence`
    writable and `--network none`;
 7. retrieves the AMD64 child manifest plus BuildKit attestation manifest and
-   predicate blob digests with bounded JSON parsing, verifying both predicate
-   subjects against the AMD64 child manifest;
+   attestation blob digests with bounded JSON parsing, verifying both
+   predicate subjects against the AMD64 child manifest;
 8. creates the GitHub image attestation using the digest;
 9. emits the detached receipt;
 10. attests the receipt as a file;
