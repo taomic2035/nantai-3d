@@ -404,7 +404,9 @@ def _is_linklike(path: Path, result: os.stat_result | None = None) -> bool:
     except OSError:
         return path.is_symlink()
     attributes = int(getattr(observed, "st_file_attributes", 0))
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    reparse_flag = int(
+        getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
     return (
         stat.S_ISLNK(observed.st_mode)
         or bool(attributes & reparse_flag)
@@ -460,13 +462,15 @@ def canonical_stage_receipt_bytes(receipt: StageReceipt) -> bytes:
 
 def _stat_signature(
     result: os.stat_result,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         result.st_dev,
         result.st_ino,
         result.st_mode,
         result.st_size,
         result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
 
 
@@ -496,10 +500,26 @@ def _hash_artifact(
             raise DatasetEvidenceError(f"stage artifact is missing or link-like: {relative}")
         digest = hashlib.sha256()
         measured = 0
-        with inspected_path.open("rb") as stream:
+        descriptor = os.open(
+            inspected_path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise DatasetEvidenceError(f"stage artifact changed before read: {relative}")
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 measured += len(chunk)
                 digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = inspected_path.lstat()
         resolved_after = inspected_path.resolve(strict=True)
     except DatasetEvidenceError:
@@ -508,7 +528,9 @@ def _hash_artifact(
         raise DatasetEvidenceError(f"stage artifact cannot be read: {relative}") from exc
     if (
         _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
         or resolved_before != resolved_after
+        or measured != before.st_size
     ):
         raise DatasetEvidenceError(f"stage artifact changed while hashing: {relative}")
     return StageArtifactBinding(
@@ -521,17 +543,39 @@ def _hash_artifact(
 def _read_receipt(path: Path) -> tuple[StageReceipt, str]:
     try:
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        if _is_linklike(path, before) or not stat.S_ISREG(before.st_mode):
             raise DatasetEvidenceError("stage receipt is missing or link-like")
         if before.st_size <= 0 or before.st_size > _MAX_RECEIPT_BYTES:
             raise DatasetEvidenceError("stage receipt size is outside the allowed range")
-        raw = path.read_bytes()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise DatasetEvidenceError("stage receipt changed before read")
+            raw = stream.read(_MAX_RECEIPT_BYTES + 1)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except DatasetEvidenceError:
         raise
     except OSError as exc:
         raise DatasetEvidenceError("stage receipt cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+        or len(raw) > _MAX_RECEIPT_BYTES
+        or len(raw) != before.st_size
+    ):
         raise DatasetEvidenceError("stage receipt changed while being read")
     digest = hashlib.sha256(raw).hexdigest()
     if path.name != f"{digest}.json":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +55,157 @@ def test_hash_artifact_supports_windows_long_path(tmp_path):
     assert binding.path == artifact.relative_to(workspace).as_posix()
     assert binding.byte_length == 8
     assert binding.sha256 == hashlib.sha256(b"evidence").hexdigest()
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_hash_artifact_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "artifact.bin"
+    artifact.write_bytes(b"stable artifact")
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(runner_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        DatasetEvidenceError,
+        match="stage artifact changed while hashing",
+    ):
+        runner_module._hash_artifact(
+            artifact,
+            workspace=workspace,
+        )
+
+    assert calls == 2
+
+
+def test_hash_artifact_rejects_short_read(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifact = workspace / "artifact.bin"
+    artifact.write_bytes(b"stable artifact")
+    original_fdopen = os.fdopen
+
+    class EarlyEofStream:
+        def __init__(self, stream):
+            self._stream = stream
+            self._read_once = False
+
+        def fileno(self):
+            return self._stream.fileno()
+
+        def read(self, size=-1):
+            if self._read_once:
+                return b""
+            self._read_once = True
+            return self._stream.read(min(size, 1))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._stream.__exit__(
+                exc_type,
+                exc_value,
+                traceback,
+            )
+
+    def early_eof_fdopen(descriptor, *args, **kwargs):
+        return EarlyEofStream(
+            original_fdopen(descriptor, *args, **kwargs)
+        )
+
+    monkeypatch.setattr(runner_module.os, "fdopen", early_eof_fdopen)
+
+    with pytest.raises(
+        DatasetEvidenceError,
+        match="stage artifact changed while hashing",
+    ):
+        runner_module._hash_artifact(
+            artifact,
+            workspace=workspace,
+        )
+
+
+def test_stage_receipt_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    runner, _operations = _runner(tmp_path)
+    receipt = runner.run("fetch")
+    digest = hashlib.sha256(
+        canonical_stage_receipt_bytes(receipt)
+    ).hexdigest()
+    receipt_path = runner.receipt_root / "fetch" / f"{digest}.json"
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(runner_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        DatasetEvidenceError,
+        match="stage receipt changed while being read",
+    ):
+        runner_module._read_receipt(receipt_path)
+
+    assert calls == 2
+
+
+def test_stage_receipt_open_error_hides_private_details(
+    tmp_path,
+    monkeypatch,
+):
+    runner, _operations = _runner(tmp_path)
+    receipt = runner.run("fetch")
+    digest = hashlib.sha256(
+        canonical_stage_receipt_bytes(receipt)
+    ).hexdigest()
+    receipt_path = runner.receipt_root / "fetch" / f"{digest}.json"
+    private_detail = r"D:\private-capture\secret-token"
+
+    def fail_open(*_args, **_kwargs):
+        raise OSError(private_detail)
+
+    monkeypatch.setattr(runner_module.os, "open", fail_open)
+
+    with pytest.raises(DatasetEvidenceError) as captured:
+        runner_module._read_receipt(receipt_path)
+
+    assert str(captured.value) == "stage receipt cannot be read"
+    assert private_detail not in str(captured.value)
 
 
 class _Operations:

@@ -525,21 +525,49 @@ def _reject_duplicate_json_pairs(pairs):
     return result
 
 
-def _stat_signature(result: os.stat_result) -> tuple[int, int, int, int, int]:
+def _stat_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
     return (
         result.st_dev,
         result.st_ino,
         result.st_mode,
         result.st_size,
         result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
+
+
+def _is_linklike(
+    path: Path,
+    observed: os.stat_result,
+) -> bool:
+    reparse_flag = getattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        0x400,
+    )
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0))
+        & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 def load_real_scene_journal(path: Path) -> RealSceneJournal:
     journal_path = Path(path).expanduser().absolute()
     try:
         before = journal_path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        if (
+            _is_linklike(journal_path, before)
+            or not stat.S_ISREG(before.st_mode)
+        ):
             raise TrainingExecutorError(
                 "real-scene journal is missing or link-like"
             )
@@ -547,7 +575,26 @@ def load_real_scene_journal(path: Path) -> RealSceneJournal:
             raise TrainingExecutorError(
                 "real-scene journal size is outside the allowed range"
             )
-        raw = journal_path.read_bytes()
+        descriptor = os.open(
+            journal_path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise TrainingExecutorError(
+                    "real-scene journal changed before read"
+                )
+            raw = stream.read(_MAX_JOURNAL_BYTES + 1)
+            descriptor_after = os.fstat(stream.fileno())
         after = journal_path.lstat()
     except TrainingExecutorError:
         raise
@@ -555,7 +602,12 @@ def load_real_scene_journal(path: Path) -> RealSceneJournal:
         raise TrainingExecutorError(
             "real-scene journal cannot be read"
         ) from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+        or len(raw) > _MAX_JOURNAL_BYTES
+        or len(raw) != before.st_size
+    ):
         raise TrainingExecutorError(
             "real-scene journal changed while being read"
         )

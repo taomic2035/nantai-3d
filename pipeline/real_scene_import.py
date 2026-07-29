@@ -131,6 +131,7 @@ _SOURCE_ROLES = Literal["internal-canary", "production-acceptance"]
 _QUALITY_ROLES = Literal["preview-only", "production"]
 
 _ONE_MIB = 1024 * 1024
+_MAX_IMPORT_FILE_BYTES = 4 * 1024 * _ONE_MIB
 
 
 @dataclass(frozen=True)
@@ -505,13 +506,15 @@ def inspect_real_scene_ply(
 
 def _stat_signature(
     result: os.stat_result,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         result.st_dev,
         result.st_ino,
         result.st_mode,
         result.st_size,
         result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
 
 
@@ -534,13 +537,39 @@ def _read_regular_bytes(
             raise RealSceneImportError(
                 f"{label} is missing or link-like"
             )
-        payload = candidate.read_bytes()
+        if before.st_size > _MAX_IMPORT_FILE_BYTES:
+            raise RealSceneImportError(
+                f"{label} size is outside the allowed range"
+            )
+        descriptor = os.open(
+            candidate,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise RealSceneImportError(f"{label} changed before read")
+            payload = stream.read(_MAX_IMPORT_FILE_BYTES + 1)
+            descriptor_after = os.fstat(stream.fileno())
         after = candidate.lstat()
     except RealSceneImportError:
         raise
     except OSError as exc:
         raise RealSceneImportError(f"{label} cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+        or len(payload) > _MAX_IMPORT_FILE_BYTES
+        or len(payload) != before.st_size
+    ):
         raise RealSceneImportError(f"{label} changed while being read")
     if not allow_empty and not payload:
         raise RealSceneImportError(f"{label} is empty")

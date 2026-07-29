@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+import pipeline.training_executor as training_executor_module
 from pipeline.durable_io import DurableIOError
 from pipeline.training_executor import (
     ExecutorInputIdentity,
@@ -302,6 +307,110 @@ def test_journal_create_update_and_load_are_canonical(tmp_path):
     write_real_scene_journal(path, previous=initial, updated=updated)
 
     assert load_real_scene_journal(path) == updated
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def _journal_fixture(path):
+    journal = RealSceneJournal(
+        run_id="real-scene-canary-001",
+        created_at_utc=_T0,
+        attempts=(_attempt(),),
+    )
+    create_or_load_real_scene_journal(path, journal)
+    return journal
+
+
+def test_journal_read_rejects_path_reparse_point(
+    tmp_path,
+    monkeypatch,
+):
+    path = (tmp_path / "real-scene-journal.json").absolute()
+    _journal_fixture(path)
+    original_lstat = Path.lstat
+
+    def reparse_lstat(candidate):
+        observed = original_lstat(candidate)
+        return (
+            _stat_with_reparse(observed)
+            if candidate.absolute() == path
+            else observed
+        )
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(
+        TrainingExecutorError,
+        match="real-scene journal is missing or link-like",
+    ):
+        load_real_scene_journal(path)
+
+
+def test_journal_read_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "real-scene-journal.json"
+    _journal_fixture(path)
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(
+        training_executor_module.os,
+        "fstat",
+        drifting_fstat,
+    )
+
+    with pytest.raises(
+        TrainingExecutorError,
+        match="real-scene journal changed while being read",
+    ):
+        load_real_scene_journal(path)
+
+    assert calls == 2
+
+
+def test_journal_read_open_error_hides_private_details(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "real-scene-journal.json"
+    _journal_fixture(path)
+    private_detail = r"D:\private-capture\secret-token"
+
+    def fail_open(*_args, **_kwargs):
+        raise OSError(private_detail)
+
+    monkeypatch.setattr(
+        training_executor_module.os,
+        "open",
+        fail_open,
+    )
+
+    with pytest.raises(TrainingExecutorError) as captured:
+        load_real_scene_journal(path)
+
+    assert str(captured.value) == "real-scene journal cannot be read"
+    assert private_detail not in str(captured.value)
 
 
 def test_journal_refuses_mismatch_corruption_and_stale_previous(tmp_path):

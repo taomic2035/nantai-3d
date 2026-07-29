@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -122,6 +124,115 @@ _BASE_PROPERTIES = (
     "rot_2",
     "rot_3",
 )
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_read_regular_bytes_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "import-evidence.json"
+    source.write_bytes(b'{"evidence":true}\n')
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(import_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        RealSceneImportError,
+        match="import evidence changed while being read",
+    ):
+        import_module._read_regular_bytes(
+            source,
+            label="import evidence",
+        )
+
+    assert calls == 2
+
+
+def test_read_regular_bytes_rejects_size_cap_before_open(
+    tmp_path,
+    monkeypatch,
+):
+    source = (tmp_path / "import-evidence.json").absolute()
+    source.write_bytes(b'{"evidence":true}\n')
+    original_lstat = Path.lstat
+
+    def oversized_lstat(path):
+        observed = original_lstat(path)
+        if path.absolute() != source:
+            return observed
+        return SimpleNamespace(
+            st_dev=observed.st_dev,
+            st_ino=observed.st_ino,
+            st_mode=observed.st_mode,
+            st_size=import_module._MAX_IMPORT_FILE_BYTES + 1,
+            st_mtime_ns=observed.st_mtime_ns,
+            st_file_attributes=getattr(
+                observed,
+                "st_file_attributes",
+                0,
+            ),
+        )
+
+    monkeypatch.setattr(Path, "lstat", oversized_lstat)
+
+    def forbidden_open(*_args, **_kwargs):
+        raise AssertionError("oversized import input must not be opened")
+
+    monkeypatch.setattr(import_module.os, "open", forbidden_open)
+
+    with pytest.raises(
+        RealSceneImportError,
+        match="import evidence size is outside the allowed range",
+    ):
+        import_module._read_regular_bytes(
+            source,
+            label="import evidence",
+        )
+
+
+def test_read_regular_bytes_open_error_hides_private_details(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "import-evidence.json"
+    source.write_bytes(b'{"evidence":true}\n')
+    private_detail = r"D:\private-capture\secret-token"
+
+    def fail_open(*_args, **_kwargs):
+        raise OSError(private_detail)
+
+    monkeypatch.setattr(import_module.os, "open", fail_open)
+
+    with pytest.raises(RealSceneImportError) as captured:
+        import_module._read_regular_bytes(
+            source,
+            label="import evidence",
+        )
+
+    assert str(captured.value) == "import evidence cannot be read"
+    assert private_detail not in str(captured.value)
 
 
 def _write_3dgs_ply(
