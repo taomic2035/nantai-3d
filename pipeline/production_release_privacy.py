@@ -265,13 +265,34 @@ def _stable_policy_bytes(path: Path) -> bytes:
         )
     if path_before.st_size > _MAXIMUM_POLICY_BYTES:
         raise ProductionReleasePrivacyError("privacy policy exceeds its limit")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
     try:
-        with path.open("rb") as stream:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProductionReleasePrivacyError(
+            "privacy policy cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleasePrivacyError(
+            "privacy policy cannot be read"
+        ) from exc
+    try:
+        with stream:
             descriptor_before = os.fstat(stream.fileno())
             payload = stream.read(_MAXIMUM_POLICY_BYTES + 1)
             descriptor_after = os.fstat(stream.fileno())
         _require_safe_policy_location(path)
         path_after = path.lstat()
+    except ProductionReleasePrivacyError:
+        raise
     except OSError as exc:
         raise ProductionReleasePrivacyError(
             "privacy policy cannot be read"
@@ -535,8 +556,27 @@ def _scan_file(
             f"release file became unsafe: {relative}"
         )
 
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
     try:
-        with path.open("rb") as stream:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProductionReleasePrivacyError(
+            f"release file cannot be privacy scanned: {relative}"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleasePrivacyError(
+            f"release file cannot be privacy scanned: {relative}"
+        ) from exc
+    try:
+        with stream:
             descriptor_before = os.fstat(stream.fileno())
             if _signature(path_before) != _signature(descriptor_before):
                 raise ProductionReleasePrivacyError(
@@ -716,7 +756,31 @@ def _audit_verified_archive(
 ) -> ProductionPrivacyReport:
     try:
         path_before = source.lstat()
-        with source.open("rb") as source_stream:
+    except OSError as exc:
+        raise ProductionReleasePrivacyError(
+            "Production archive cannot be privacy scanned"
+        ) from exc
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise ProductionReleasePrivacyError(
+            "Production archive cannot be privacy scanned"
+        ) from exc
+    try:
+        source_stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleasePrivacyError(
+            "Production archive cannot be privacy scanned"
+        ) from exc
+    try:
+        with source_stream:
             descriptor_before = os.fstat(source_stream.fileno())
             if _signature(path_before) != _signature(descriptor_before):
                 raise ProductionReleasePrivacyError(

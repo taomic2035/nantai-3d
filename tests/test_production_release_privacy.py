@@ -693,9 +693,15 @@ def test_mid_read_drift_is_rejected(tmp_path: Path, monkeypatch) -> None:
     def mutate_after_first_target_chunk(stream):
         nonlocal mutated
         chunk = original_read(stream)
-        if not mutated and Path(stream.name) == target:
-            mutated = True
-            target.write_bytes(payload + b"changed")
+        if not mutated:
+            stream_stat = os.fstat(stream.fileno())
+            target_stat = target.lstat()
+            if (
+                stream_stat.st_dev == target_stat.st_dev
+                and stream_stat.st_ino == target_stat.st_ino
+            ):
+                mutated = True
+                target.write_bytes(payload + b"changed")
         return chunk
 
     monkeypatch.setattr(
@@ -1037,3 +1043,97 @@ def test_privacy_release_files_rejects_scandir_toctou_subdirectory_swap(
         match="changed during scan",
     ):
         privacy_module._release_files(root)
+
+
+def test_stable_policy_bytes_does_not_reopen_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_policy_bytes must use os.open, not Path.open.
+
+    Path.open reopens by name after the pre-open lstat, which is a
+    check-then-reopen TOCTOU that follows symlinks.  Verified bytes must
+    come from a single fd opened with O_NOFOLLOW.
+    """
+
+    policy = tmp_path / "private-policy.json"
+    _write_policy(policy, b"private-canonical-needle")
+
+    called: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == policy:
+            called.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    privacy_module._stable_policy_bytes(policy)
+
+    assert not called, "Path.open was called (should use os.open)"
+
+
+def test_scan_file_does_not_reopen_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _scan_file must use os.open, not Path.open.
+
+    Path.open reopens by name after the pre-open lstat, which is a
+    check-then-reopen TOCTOU that follows symlinks.  Privacy scan input
+    must come from a single fd opened with O_NOFOLLOW.
+    """
+
+    root = tmp_path / "runtime"
+    write_modeled_production_tree(root)
+    target = root / "web/viewer/index.html"
+    _write_policy(tmp_path / "private-policy.json", b"private-canonical-needle")
+    policy = privacy_module._load_policy(tmp_path / "private-policy.json")
+
+    called: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == target:
+            called.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    privacy_module._scan_file("web/viewer/index.html", target, policy)
+
+    assert not called, "Path.open was called (should use os.open)"
+
+
+def test_audit_verified_archive_does_not_reopen_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _audit_verified_archive must use os.open, not Path.open.
+
+    Path.open reopens by name after the pre-open lstat, which is a
+    check-then-reopen TOCTOU that follows symlinks.  Archive privacy scan
+    input must come from a single fd opened with O_NOFOLLOW.
+    """
+
+    tree = tmp_path / "runtime"
+    write_modeled_production_tree(tree)
+    archive = tmp_path / "release.zip"
+    write_modeled_production_archive(tree, archive)
+    policy = tmp_path / "private-policy.json"
+    _write_policy(policy, b"private-canonical-needle")
+
+    called: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == archive:
+            called.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    privacy_module._audit_verified_archive(archive, policy)
+
+    assert not called, "Path.open was called (should use os.open)"
