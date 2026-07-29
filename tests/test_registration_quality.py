@@ -1141,22 +1141,26 @@ def test_colmap_stream_rejects_path_after_swap(
     evidence = tmp_path / "images.txt"
     evidence.write_bytes(b"1 1 0 0 0 0 0 0 1 img.jpg\n\n")
     original_lstat = Path.lstat
-    calls = 0
+    evidence_calls = [0]
 
     def swapping_lstat(self):
-        nonlocal calls
-        calls += 1
         observed = original_lstat(self)
-        if calls >= 2:
-            return SimpleNamespace(
-                st_dev=observed.st_dev,
-                st_ino=observed.st_ino + 1,
-                st_mode=observed.st_mode,
-                st_size=observed.st_size,
-                st_mtime_ns=observed.st_mtime_ns,
-                st_ctime_ns=observed.st_ctime_ns,
-                st_file_attributes=getattr(observed, "st_file_attributes", 0),
-            )
+        if self == evidence:
+            evidence_calls[0] += 1
+            # first_linklike_path calls lstat once, then before.lstat,
+            # then after.lstat — swap on the 3rd call (after read)
+            if evidence_calls[0] >= 3:
+                return SimpleNamespace(
+                    st_dev=observed.st_dev,
+                    st_ino=observed.st_ino + 1,
+                    st_mode=observed.st_mode,
+                    st_size=observed.st_size,
+                    st_mtime_ns=observed.st_mtime_ns,
+                    st_ctime_ns=observed.st_ctime_ns,
+                    st_file_attributes=getattr(
+                        observed, "st_file_attributes", 0
+                    ),
+                )
         return observed
 
     monkeypatch.setattr(Path, "lstat", swapping_lstat)
@@ -1254,4 +1258,31 @@ def test_colmap_parsers_have_no_bare_read_text() -> None:
         )
         assert ".read_bytes(" not in source, (
             f"{func_name} must not use Path.read_bytes()"
+        )
+
+
+def test_colmap_stream_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stream_colmap_text_lines must reject reparse ancestors."""
+    evidence = tmp_path / "images.txt"
+    evidence.write_bytes(b"1 1 0 0 0 0 0 0 1 img.jpg\n\n")
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        registration_quality_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="bounded regular file",
+    ):
+        registration_quality_module._stream_colmap_text_lines(
+            evidence, label="test"
         )

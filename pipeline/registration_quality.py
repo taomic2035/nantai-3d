@@ -24,6 +24,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pipeline.durable_io import first_linklike_path
 from pipeline.recon_schema import RegistrationResult
 
 
@@ -95,13 +96,17 @@ def _stream_colmap_text_lines(
     treat missing files as empty.
     """
     try:
+        redirected = first_linklike_path(Path(path.anchor), path)
         before = path.lstat()
     except FileNotFoundError:
         raise
     except OSError as exc:
         raise ValueError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise ValueError(f"{label} cannot be inspected") from exc
     if (
-        _is_linklike(path, before)
+        redirected is not None
+        or _is_linklike(path, before)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size > max_bytes
     ):
