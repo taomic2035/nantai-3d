@@ -605,3 +605,33 @@ def test_stable_render_read_uses_observed_reparse_identity(
             label="render frame",
             max_bytes=32,
         )
+
+
+def test_stable_render_read_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _read_stable must reject reparse-point ancestors."""
+    artifact = tmp_path / "render.png"
+    artifact.write_bytes(b"render")
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        render_evaluation,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RenderEvaluationError,
+        match="not a regular file",
+    ):
+        render_evaluation._read_stable(
+            tmp_path,
+            "render.png",
+            label="render frame",
+            max_bytes=32,
+        )

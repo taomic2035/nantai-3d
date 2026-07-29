@@ -26,6 +26,7 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.durable_io import first_linklike_path
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_training import (
     HeldOutSplit,
@@ -339,9 +340,11 @@ def _read_stable(
 ) -> bytes:
     path = _member_path(root, relative, label=label)
     try:
+        redirected = first_linklike_path(Path(path.anchor), path)
         before = path.lstat()
         if (
-            _is_linklike(path, before)
+            redirected is not None
+            or _is_linklike(path, before)
             or not stat.S_ISREG(before.st_mode)
         ):
             raise RenderEvaluationError(f"{label} is not a regular file")
@@ -352,6 +355,8 @@ def _read_stable(
     except RenderEvaluationError:
         raise
     except OSError as exc:
+        raise RenderEvaluationError(f"{label} cannot be read") from exc
+    except ValueError as exc:
         raise RenderEvaluationError(f"{label} cannot be read") from exc
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
         os, "O_NOFOLLOW", 0
