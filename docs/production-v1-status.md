@@ -113,6 +113,18 @@ scene 的 production SfM/CUDA 训练、实测米制对齐和 receipt-bound Viewe
 已通过 [GitHub Actions run 30399588079](https://github.com/taomic2035/nantai-3d/actions/runs/30399588079)
 全部 14 个 job。
 
+## 2026-07-29 CC BY 真实数据候选
+
+Indoor3Dmapping 的 99 组 RGB 全景、dense/sparse depth 与发布位姿已完成归档校验、
+三种 COLMAP 方案和真实浏览器 point-preview。数据许可为 CC BY 4.0，但最佳 SfM
+仅注册 56/99，最长连续缺失 43，且对发布位置的 Sim3 RMS 为 5.982 m；另外两种
+方案更差，因此该候选明确拒绝进入 accepted real-photo SfM。
+
+RGB-D 诊断物可见真实彩色点云并验证了空间块加载与 fidelity fail-closed，但相机
+轴向未由数据集权威定义，只能保持 `dc-point-preview / preview-proxy`。完整数据、
+数值、浏览器结果和五门判定见
+[Indoor3Dmapping 真实数据候选审计](verification/2026-07-29-indoor3dmapping-real-data-candidate.md)。
+
 ## 正式版关键路径
 
 ```text
