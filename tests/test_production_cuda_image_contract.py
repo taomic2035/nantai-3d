@@ -122,6 +122,7 @@ def test_python_requirement_inputs_and_hash_lock_are_closed() -> None:
     for requirement in (
         "nerfstudio==1.1.5",
         "gsplat==1.4.0",
+        "fpsample==0.3.3",
         "numpy<2.0",
         "pydantic>=2.7",
     ):
@@ -147,6 +148,12 @@ def test_python_requirement_inputs_and_hash_lock_are_closed() -> None:
     )
     assert "nerfstudio==1.1.5" in locked
     assert "gsplat==1.4.0" in locked
+    assert "fpsample==0.3.3" in locked
+    assert "fpsample==1.0.2" not in locked
+    assert (
+        "be912030603108eb32b92fedb5c6afe541b933ab5ed4d713190970e438b18ff6"
+        in locked
+    )
     assert "nvidia-cublas-cu12" not in locked
 
 

@@ -21,7 +21,10 @@ architectures `7.5;8.0;8.6;8.9;9.0+PTX`.
 1. Select a new Ubuntu snapshot and resolve every requested apt package from
    the official `main`, `universe`, `multiverse` and `restricted` indices.
 2. Review `requirements.in`. Use `uv 0.8.13` to resolve CPython 3.11 for
-   `x86_64-manylinux_2_31` with `--generate-hashes`.
+   `x86_64-manylinux_2_31` with `--generate-hashes`. Keep
+   `fpsample==0.3.3` explicit unless a replacement has a verified CPython
+   3.11 manylinux wheel; newer source-only releases cannot satisfy the
+   image's binary-only dependency gate.
 3. PyTorch's cu118 wheel is 2.2 GiB. To avoid downloading it merely for
    metadata, range-read its official wheel `METADATA`, resolve with the same
    `2.1.2` dependency metadata, then replace only the Torch and Torchvision

@@ -703,9 +703,11 @@ fonttools==4.63.0 \
     --hash=sha256:ef3048ef05dbb552b89817713d9cac912e00d0fde4a3105c00d29e52e10c89af \
     --hash=sha256:fd1e3094f42d806d3d7c79162fc59e5910fcbe3a7360c385b8da969bc4493745
     # via matplotlib
-fpsample==1.0.2 \
-    --hash=sha256:5e25f97c03412d243767fb9e47f7b6d6c736c7ce1e9d51918894e3fd327749f2
-    # via nerfstudio
+fpsample==0.3.3 \
+    --hash=sha256:be912030603108eb32b92fedb5c6afe541b933ab5ed4d713190970e438b18ff6
+    # via
+    #   -r containers/production-cuda/requirements.in
+    #   nerfstudio
 fqdn==1.5.1 \
     --hash=sha256:105ed3677e767fb5ca086a0c1f4bb66ebc3c100be518f0e0d755d9eae164d89f \
     --hash=sha256:3a179af3761e4df6eb2e026ff9e1a3033d3587bf980a0b1b2e1e5d08d7358014

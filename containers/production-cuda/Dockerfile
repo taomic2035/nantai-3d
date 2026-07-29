@@ -69,7 +69,7 @@ ENV LD_LIBRARY_PATH=/opt/python/lib \
 
 COPY containers/production-cuda/requirements.lock /tmp/requirements.lock
 RUN printf '%s  %s\n' \
-      'd139a25c397427ca074c33a6f54b35bedd656ec1a863bfe181a712ebe4880cf4' \
+      'b9f94a93d49e25ba8bb947389c16c4f3d008e730408c7f0adc8f6ba3303e64a9' \
       '/tmp/requirements.lock' | sha256sum -c - \
     && awk ' \
       /^(gsplat|nerfstudio|torch|torchvision)(==| @)/ { skip=1; next } \
@@ -102,7 +102,7 @@ RUN printf '%s  %s\n' \
 COPY pipeline /opt/nantai/repo/pipeline
 COPY containers/production-cuda/runtime-lock.json /opt/nantai/runtime-lock.json
 RUN PYTHONPATH=/opt/nantai/repo /opt/python/bin/python3.11 -c \
-      'from pathlib import Path; from pipeline.production_cuda_runtime_lock import load_production_cuda_runtime_lock_bytes; lock=load_production_cuda_runtime_lock_bytes(Path("/opt/nantai/runtime-lock.json").read_bytes()); assert lock.content_sha256 == "b9f6e786aca58ec0039823ccef077b446f084be26cb656c32765fd123e16a148"'
+      'from pathlib import Path; from pipeline.production_cuda_runtime_lock import load_production_cuda_runtime_lock_bytes; lock=load_production_cuda_runtime_lock_bytes(Path("/opt/nantai/runtime-lock.json").read_bytes()); assert lock.content_sha256 == "1721de5f38dd4710d1d7d72fa3e217d96793a2d4430950d1829a25f25227bf0d"'
 
 # linux/amd64 manifest:
 # sha256:7c8e5ee1e8531f0d19f8d7e78c5b7efa9c455697fa96e62f083f361d6842e452
@@ -151,7 +151,7 @@ LABEL org.opencontainers.image.source="https://github.com/taomic2035/nantai-3d" 
       org.opencontainers.image.licenses="MIT" \
       io.nantai.base.builder="nvidia/cuda:11.8.0-devel-ubuntu22.04@sha256:94fd755736cb58979173d491504f0b573247b1745250249415b07fefc738e41f" \
       io.nantai.base.runtime="nvidia/cuda:11.8.0-runtime-ubuntu22.04@sha256:eaaccb3528ceca110601131434ab467e41d694a41e8c9bf280fb27ac18fcb29b" \
-      io.nantai.runtime-lock.content-sha256="b9f6e786aca58ec0039823ccef077b446f084be26cb656c32765fd123e16a148"
+      io.nantai.runtime-lock.content-sha256="1721de5f38dd4710d1d7d72fa3e217d96793a2d4430950d1829a25f25227bf0d"
 
 ENV PYTHONHOME=/opt/python \
     PYTHONPATH=/opt/nantai/repo \
