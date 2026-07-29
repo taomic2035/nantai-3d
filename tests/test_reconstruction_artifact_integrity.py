@@ -30,6 +30,8 @@ from pipeline.reconstruction_artifact_integrity import (
     ChunksReport,
     IntegrityReport,
     PathSafetyViolation,
+    _ArtifactIntegrityError,
+    _sha256_file,
     verify_recon_artifacts,
 )
 
@@ -954,3 +956,82 @@ def test_cli_json_on_problems_still_exits_two(tmp_path: Path, capsys) -> None:
     assert parsed["mismatch"][0]["artifact_key"] == "full_3dgs"
     # Trust never promoted, even when bytes mismatch.
     assert parsed["trust_preserved"] is True
+
+
+# ---------------------------------------------------------------------------
+# GLM-064: secure descriptor-based hash — ancestor reparse and swap rejection
+# ---------------------------------------------------------------------------
+
+
+def test_sha256_file_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _sha256_file must reject a reparse-point ancestor."""
+    target = tmp_path / "artifact.ply"
+    target.write_bytes(b"ply data\n")
+
+    sentinel = tmp_path / "ancestor-reparse"
+    import pipeline.reconstruction_artifact_integrity as rai_module
+
+    original = rai_module.first_linklike_path
+
+    def fake_first_linklike_path(root, leaf):
+        if Path(leaf) == target:
+            return sentinel
+        return original(root, leaf)
+
+    monkeypatch.setattr(
+        rai_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        _ArtifactIntegrityError,
+        match="regular non-link file|redirected|unsafe",
+    ):
+        _sha256_file(target)
+
+
+def test_sha256_file_rejects_path_swap_before_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _sha256_file must detect a path swap between lstat and open."""
+    original_path = tmp_path / "artifact.ply"
+    original_path.write_bytes(b"original\n")
+
+    swap_count = 0
+    original_lstat = Path.lstat
+    original_open = os.open
+
+    def swapping_lstat(target):
+        return original_lstat(target)
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal swap_count
+        swap_count += 1
+        if swap_count == 1:
+            original_path.write_bytes(b"swapped content\n")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    monkeypatch.setattr(os, "open", swapping_open)
+
+    with pytest.raises(
+        _ArtifactIntegrityError,
+        match="changed before hash|changed while",
+    ):
+        _sha256_file(original_path)
+
+
+def test_sha256_file_returns_measured_and_digest(tmp_path: Path) -> None:
+    """_sha256_file returns (measured_bytes, digest_hex) tuple."""
+    payload = b"hello world\n"
+    target = tmp_path / "test.ply"
+    target.write_bytes(payload)
+
+    measured, digest = _sha256_file(target)
+    assert measured == len(payload)
+    assert digest == hashlib.sha256(payload).hexdigest()
