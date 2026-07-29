@@ -1,0 +1,13 @@
+torch @ https://download-r2.pytorch.org/whl/cu118/torch-2.1.2%2Bcu118-cp311-cp311-linux_x86_64.whl
+torchvision @ https://download-r2.pytorch.org/whl/cu118/torchvision-0.16.2%2Bcu118-cp311-cp311-linux_x86_64.whl
+nerfstudio==1.1.5
+gsplat==1.4.0
+numpy<2.0
+pydantic>=2.7
+plyfile>=1.0
+trimesh>=4.4
+Pillow>=10.4
+opencv-python-headless>=4.10
+scikit-image>=0.26
+psutil>=5.9
+rich>=13.7

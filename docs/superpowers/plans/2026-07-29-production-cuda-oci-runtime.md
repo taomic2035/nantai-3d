@@ -635,14 +635,17 @@ Generate and review:
 python -m pip install "uv==0.8.13"
 uv pip compile containers/production-cuda/requirements.in `
   --python-version 3.11 `
-  --python-platform x86_64-manylinux_2_17 `
+  --python-platform x86_64-manylinux_2_31 `
   --generate-hashes `
   --output-file containers/production-cuda/requirements.lock
 ```
 
 Expected: every resolved distribution has one or more SHA-256 hashes; Torch is
 `2.1.2+cu118`, Torchvision is `0.16.2+cu118`, Nerfstudio is `1.1.5`, gsplat is
-`1.4.0`, and NumPy is below 2.0.
+`1.4.0`, and NumPy is below 2.0. `manylinux_2_31` is required because
+Nerfstudio's Open3D dependency has no CPython 3.11 wheel for
+`manylinux_2_17`; it remains compatible with the Ubuntu 22.04 / glibc 2.35
+runtime base.
 
 - [ ] **Step 4: Resolve exact snapshot apt locks**
 

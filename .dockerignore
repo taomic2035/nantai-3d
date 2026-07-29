@@ -1,0 +1,20 @@
+**
+
+# Explicit private, mutable, and release-output exclusions.
+.nantai-studio/
+input/
+output/
+releases/
+trained/
+handoff/
+.git/
+
+# The Production CUDA image has a deliberately tiny source context.
+!.dockerignore
+!containers/
+!containers/production-cuda/
+!containers/production-cuda/**
+!pipeline/
+!pipeline/**
+!cloud/
+!cloud/probe_production_cuda_image.py

@@ -1,0 +1,16 @@
+build-essential=12.9ubuntu3
+ca-certificates=20260601~22.04.1
+libbz2-dev=1.0.8-5build1
+libexpat1-dev=2.4.7-1ubuntu0.7
+libffi-dev=3.4.2-4
+libgdbm-compat-dev=1.23-1
+libgdbm-dev=1.23-1
+liblzma-dev=5.2.5-2ubuntu1.1
+libncursesw5-dev=6.3-2ubuntu0.1
+libreadline-dev=8.1.2-1
+libsqlite3-dev=3.37.2-2ubuntu0.6
+libssl-dev=3.0.2-0ubuntu1.25
+pkg-config=0.29.2-1ubuntu3
+uuid-dev=2.37.2-4ubuntu3.5
+xz-utils=5.2.5-2ubuntu1.1
+zlib1g-dev=1:1.2.11.dfsg-2ubuntu9.2
