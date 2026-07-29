@@ -16,6 +16,18 @@
 | fresh GPU clearance | 获批 GPU host 对同一镜像运行 fresh readiness，GPU/driver/executable 全部实测绑定 | 该 host 可尝试正式训练 |
 | non-mock training | 同一 scene 的 production caller 产生并复验真实 3DGS result bundle | 才有真实训练产物 |
 
+## 当前已验证的镜像
+
+- Source commit：`f399db891b4db2562208201407b3f0151c94c724`
+- Workflow：[30428129482](https://github.com/taomic2035/nantai-3d/actions/runs/30428129482)
+- Image：`ghcr.io/taomic2035/nantai-3d-production-cuda@sha256:bd65e13522e11fde61ea1148fbed598407fc05c76bdaf1925ec06d9baeb0016d`
+- Receipt 内容 SHA：`3b60d00c11ef9f513dea959ed70238a9421d552d776901b675afba110d6bae58`
+
+该 workflow 的普通 CI、断网 no-GPU probe、OCI 检查、SBOM/provenance、双
+attestation 与下载后复验均已通过，因此 `published image contract` 已完成。它
+仍是 `modeled-unverified`；下一门是获批 NVIDIA host 对同一 digest 的 fresh GPU
+clearance，不是重新构建镜像。
+
 GitHub 托管 runner 没有 GPU。工作流中的 no-GPU probe 只检查包版本、CLI schema、
 可执行文件和导入能力，不能证明 CUDA 可用；后续必须另跑 `fresh GPU clearance`，
 再跑 `non-mock training`。

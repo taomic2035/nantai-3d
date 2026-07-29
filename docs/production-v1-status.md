@@ -15,9 +15,18 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 层级 | 当前状态 | 放行含义 |
 |---|---|---|
 | `repository contract` | completed | canonical lock、Dockerfile、no-GPU probe、OCI receipt/inspector 与手动 workflow 合同已进入 `main` |
-| `published image contract` | pending external workflow completion | 只有精确 source SHA 的 GHCR digest、SBOM/provenance、GitHub attestation、detached receipt 和下载后复验同时成功才能关闭 |
+| `published image contract` | completed | 精确 source SHA 的 GHCR digest、SBOM/provenance、双 attestation、detached receipt 与下载后复验已通过 |
 | `fresh GPU runtime` | pending external GPU | 必须在获批 GPU host 对 receipt 给出的同一 digest fresh 实测；GitHub 托管 runner 不能代替 |
 | `non-mock training` | pending real scene and GPU | 必须由 production caller 对同一真实 scene 生成并复验训练/result closure |
+
+已验证的发布证据为 source
+`f399db891b4db2562208201407b3f0151c94c724`、[workflow run
+30428129482](https://github.com/taomic2035/nantai-3d/actions/runs/30428129482)、镜像
+`ghcr.io/taomic2035/nantai-3d-production-cuda@sha256:bd65e13522e11fde61ea1148fbed598407fc05c76bdaf1925ec06d9baeb0016d`
+与 receipt 内容 SHA
+`3b60d00c11ef9f513dea959ed70238a9421d552d776901b675afba110d6bae58`。
+下载后的两文件白名单、canonical receipt、receipt attestation 与 OCI attestation
+均已独立复验。
 
 镜像发布与复验操作见
 [Production CUDA 镜像手册](manual/production-cuda-image.md)。即使

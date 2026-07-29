@@ -175,3 +175,19 @@ def test_cuda_image_manual_is_linked_and_uses_formal_11_8_receipt() -> None:
         "non-mock training",
     ):
         assert level in status
+
+
+def test_cuda_image_docs_record_the_verified_published_receipt() -> None:
+    manual = CUDA_IMAGE_MANUAL.read_text(encoding="utf-8")
+    status = _read("docs/production-v1-status.md")
+
+    for evidence in (
+        "f399db891b4db2562208201407b3f0151c94c724",
+        "30428129482",
+        "sha256:bd65e13522e11fde61ea1148fbed598407fc05c76bdaf1925ec06d9baeb0016d",
+        "3b60d00c11ef9f513dea959ed70238a9421d552d776901b675afba110d6bae58",
+    ):
+        assert evidence in manual
+        assert evidence in status
+    assert "| `published image contract` | completed |" in status
+    assert "pending external workflow completion" not in status
