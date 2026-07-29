@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import struct
 import zipfile
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,6 +33,99 @@ from pipeline.training_provenance import (
 )
 
 _T0 = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_read_transforms_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    transforms = tmp_path / "transforms.json"
+    transforms.write_bytes(b'{"frames":[]}\n')
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(prepare_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        PreparedDatasetError,
+        match="changed while being read",
+    ):
+        prepare_module._read_transforms(transforms)
+
+    assert calls == 2
+
+
+def test_collect_manifest_members_streams_bounded_chunks(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "prepared"
+    root.mkdir()
+    (root / "large-member.bin").write_bytes(
+        b"x" * (2 * 1024 * 1024 + 17)
+    )
+    original_fdopen = os.fdopen
+    requested_sizes = []
+
+    class RecordingStream:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def fileno(self):
+            return self._stream.fileno()
+
+        def read(self, size=-1):
+            requested_sizes.append(size)
+            return self._stream.read(size)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._stream.__exit__(
+                exc_type,
+                exc_value,
+                traceback,
+            )
+
+    def recording_fdopen(descriptor, *args, **kwargs):
+        return RecordingStream(
+            original_fdopen(descriptor, *args, **kwargs)
+        )
+
+    monkeypatch.setattr(
+        prepare_module.os,
+        "fdopen",
+        recording_fdopen,
+    )
+
+    members = prepare_module._collect_manifest_members(root)
+
+    assert len(members) == 1
+    assert requested_sizes
+    assert max(requested_sizes) <= 1024 * 1024
 
 
 def _sha(payload: bytes) -> str:

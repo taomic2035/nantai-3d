@@ -49,6 +49,7 @@ class FrozenModel(BaseModel):
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _PINNED_NERFSTUDIO_VERSION = "1.1.5"
 _MAX_TRANSFORMS_BYTES = 64 * 1024 * 1024
+_ONE_MIB = 1024 * 1024
 _SPARSE_PREFIX = "sfm/sparse/0/"
 _REQUIRED_SPARSE_FILES = frozenset(
     {
@@ -60,6 +61,53 @@ _REQUIRED_SPARSE_FILES = frozenset(
         "points3D.txt",
     }
 )
+
+
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_mode,
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        0x400,
+    )
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0))
+        & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 class PreparedDatasetMember(FrozenModel):
@@ -213,22 +261,60 @@ def _verified_image_bytes(
 
 def _read_transforms(path: Path) -> dict[str, Any]:
     try:
-        result = path.lstat()
-        if stat.S_ISLNK(result.st_mode) or not stat.S_ISREG(result.st_mode):
+        before = path.lstat()
+        if _is_linklike(path, before) or not stat.S_ISREG(before.st_mode):
             raise PreparedDatasetError(
                 "Nerfstudio transforms.json is missing or link-like"
             )
-        if result.st_size <= 0 or result.st_size > _MAX_TRANSFORMS_BYTES:
+        if before.st_size <= 0 or before.st_size > _MAX_TRANSFORMS_BYTES:
             raise PreparedDatasetError(
                 "Nerfstudio transforms.json size is outside the allowed range"
             )
-        raw = path.read_bytes()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise PreparedDatasetError(
+                    "Nerfstudio transforms.json changed before read"
+                )
+            raw = stream.read(_MAX_TRANSFORMS_BYTES + 1)
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
     except PreparedDatasetError:
         raise
     except OSError as exc:
         raise PreparedDatasetError(
             "Nerfstudio transforms.json cannot be read"
         ) from exc
+    if (
+        _cross_surface_signature(before)
+        != _cross_surface_signature(descriptor_before)
+        or _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
+        or _same_surface_signature(before)
+        != _same_surface_signature(after)
+        or len(raw) > _MAX_TRANSFORMS_BYTES
+        or len(raw) != before.st_size
+    ):
+        raise PreparedDatasetError(
+            "Nerfstudio transforms.json changed while being read"
+        )
 
     def reject_duplicates(pairs):
         value = {}
@@ -260,27 +346,78 @@ def _collect_manifest_members(root: Path) -> tuple[PreparedDatasetMember, ...]:
         if path.name == "prepared-dataset-manifest.json":
             continue
         try:
-            metadata = path.lstat()
+            before = path.lstat()
         except OSError as exc:
             raise PreparedDatasetError(
                 "prepared dataset member disappeared"
             ) from exc
-        if stat.S_ISLNK(metadata.st_mode):
+        if _is_linklike(path, before):
             raise PreparedDatasetError(
                 "prepared dataset contains a symlink"
             )
-        if not stat.S_ISREG(metadata.st_mode):
+        if not stat.S_ISREG(before.st_mode):
             continue
-        payload = path.read_bytes()
-        if not payload:
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                stream = os.fdopen(descriptor, "rb", buffering=0)
+            except OSError:
+                os.close(descriptor)
+                raise
+            with stream:
+                descriptor_before = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(descriptor_before.st_mode)
+                    or _cross_surface_signature(descriptor_before)
+                    != _cross_surface_signature(before)
+                ):
+                    raise PreparedDatasetError(
+                        f"prepared dataset member changed before read: {path.name}"
+                    )
+                digest = hashlib.sha256()
+                measured = 0
+                for chunk in iter(
+                    lambda stream=stream: stream.read(_ONE_MIB),
+                    b"",
+                ):
+                    digest.update(chunk)
+                    measured += len(chunk)
+                descriptor_after = os.fstat(stream.fileno())
+            after = path.lstat()
+        except PreparedDatasetError:
+            raise
+        except OSError as exc:
+            raise PreparedDatasetError(
+                f"prepared dataset member cannot be read: {path.name}"
+            ) from exc
+        if (
+            _cross_surface_signature(before)
+            != _cross_surface_signature(descriptor_before)
+            or _same_surface_signature(descriptor_before)
+            != _same_surface_signature(descriptor_after)
+            or _cross_surface_signature(descriptor_after)
+            != _cross_surface_signature(after)
+            or _same_surface_signature(before)
+            != _same_surface_signature(after)
+            or measured != before.st_size
+        ):
+            raise PreparedDatasetError(
+                f"prepared dataset member changed while being read: {path.name}"
+            )
+        if measured <= 0:
             raise PreparedDatasetError(
                 f"prepared dataset member is empty: {path.name}"
             )
         result.append(
             PreparedDatasetMember(
                 path=path.relative_to(root).as_posix(),
-                byte_length=len(payload),
-                sha256=hashlib.sha256(payload).hexdigest(),
+                byte_length=measured,
+                sha256=digest.hexdigest(),
             )
         )
     return tuple(result)

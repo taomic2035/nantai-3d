@@ -303,6 +303,7 @@ _REQUIRED_NERFSTUDIO_EXTRAS = {
 _FIXED_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _MAX_ARCHIVE_MEMBERS = 20_000
 _MAX_ARCHIVE_BYTES = 64 * 1024 * 1024 * 1024
+_SameSurfaceSignature = tuple[int, int, int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -310,41 +311,115 @@ class _MemberSource:
     member: TrainingBundleMember
     data: bytes | None = None
     path: Path | None = None
-    stat_signature: tuple[int, int, int, int, int] | None = None
+    stat_signature: _SameSurfaceSignature | None = None
 
 
-def _stat_signature(result: os.stat_result) -> tuple[int, int, int, int, int]:
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    result: os.stat_result,
+) -> _SameSurfaceSignature:
     return (
         result.st_dev,
         result.st_ino,
         result.st_mode,
         result.st_size,
         result.st_mtime_ns,
+        result.st_ctime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        0x400,
+    )
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0))
+        & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 def _hash_file_stable(
     path: Path,
     *,
     label: str,
-) -> tuple[int, str, tuple[int, int, int, int, int]]:
+) -> tuple[int, str, _SameSurfaceSignature]:
     try:
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        if _is_linklike(path, before) or not stat.S_ISREG(before.st_mode):
             raise RealSceneTrainingError(f"{label} is missing or link-like")
-        digest = hashlib.sha256()
-        measured = 0
-        with path.open("rb") as stream:
+    except RealSceneTrainingError:
+        raise
+    except OSError as exc:
+        raise RealSceneTrainingError(f"{label} cannot be read") from exc
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RealSceneTrainingError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RealSceneTrainingError(f"{label} cannot be read") from exc
+    digest = hashlib.sha256()
+    measured = 0
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise RealSceneTrainingError(
+                    f"{label} changed before hashing"
+                )
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
                 measured += len(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except RealSceneTrainingError:
         raise
     except OSError as exc:
         raise RealSceneTrainingError(f"{label} cannot be read") from exc
-    signature = _stat_signature(before)
-    if signature != _stat_signature(after):
+    signature = _same_surface_signature(before)
+    if (
+        signature != _same_surface_signature(after)
+        or _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
+        or measured != before.st_size
+    ):
         raise RealSceneTrainingError(f"{label} changed while being hashed")
     if measured <= 0:
         raise RealSceneTrainingError(f"{label} is empty")
@@ -355,13 +430,54 @@ def _read_file_stable(path: Path, *, label: str) -> bytes:
     measured, expected_sha, signature = _hash_file_stable(path, label=label)
     try:
         before = path.lstat()
-        payload = path.read_bytes()
+        if (
+            _is_linklike(path, before)
+            or _same_surface_signature(before) != signature
+        ):
+            raise RealSceneTrainingError(f"{label} changed before read")
+    except RealSceneTrainingError:
+        raise
+    except OSError as exc:
+        raise RealSceneTrainingError(f"{label} cannot be read") from exc
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RealSceneTrainingError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RealSceneTrainingError(f"{label} cannot be read") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise RealSceneTrainingError(
+                    f"{label} changed before read"
+                )
+            payload = stream.read(measured + 1)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
+    except RealSceneTrainingError:
+        raise
     except OSError as exc:
         raise RealSceneTrainingError(f"{label} cannot be read") from exc
     if (
-        _stat_signature(before) != signature
-        or _stat_signature(after) != signature
+        _same_surface_signature(after) != signature
+        or _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
         or len(payload) != measured
         or hashlib.sha256(payload).hexdigest() != expected_sha
     ):
@@ -592,21 +708,64 @@ def _write_member(
         raise RealSceneTrainingError("bundle member source is incomplete")
     try:
         before = source.path.lstat()
-        if _stat_signature(before) != source.stat_signature:
+        if (
+            _is_linklike(source.path, before)
+            or _same_surface_signature(before)
+            != source.stat_signature
+        ):
             raise RealSceneTrainingError(
                 f"bundle source changed before write: {source.member.path}"
             )
-        digest = hashlib.sha256()
-        measured = 0
-        with source.path.open("rb") as input_stream, archive.open(
+    except RealSceneTrainingError:
+        raise
+    except OSError as exc:
+        raise RealSceneTrainingError(
+            f"cannot write bundle member: {source.member.path}"
+        ) from exc
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(source.path, flags)
+    except OSError as exc:
+        raise RealSceneTrainingError(
+            f"cannot write bundle member: {source.member.path}"
+        ) from exc
+    try:
+        input_stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RealSceneTrainingError(
+            f"cannot write bundle member: {source.member.path}"
+        ) from exc
+    try:
+        with input_stream, archive.open(
             info,
             "w",
             force_zip64=True,
         ) as output_stream:
-            for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
+            descriptor_before = os.fstat(input_stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise RealSceneTrainingError(
+                    f"bundle source changed before write: "
+                    f"{source.member.path}"
+                )
+            digest = hashlib.sha256()
+            measured = 0
+            for chunk in iter(
+                lambda: input_stream.read(1024 * 1024), b""
+            ):
                 digest.update(chunk)
                 measured += len(chunk)
                 output_stream.write(chunk)
+            descriptor_after = os.fstat(input_stream.fileno())
         after = source.path.lstat()
     except RealSceneTrainingError:
         raise
@@ -615,7 +774,11 @@ def _write_member(
             f"cannot write bundle member: {source.member.path}"
         ) from exc
     if (
-        _stat_signature(after) != source.stat_signature
+        _same_surface_signature(after) != source.stat_signature
+        or _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
         or measured != source.member.byte_length
         or digest.hexdigest() != source.member.sha256
     ):
@@ -1378,7 +1541,7 @@ def verify_training_job_bundle(path: Path) -> VerifiedTrainingJobBundle:
         raise RealSceneTrainingError(
             "training job archive disappeared after verification"
         ) from exc
-    if _stat_signature(after) != archive_signature:
+    if _same_surface_signature(after) != archive_signature:
         raise RealSceneTrainingError(
             "training job archive changed while being verified"
         )

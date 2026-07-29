@@ -312,3 +312,73 @@ Run Ruff on the six paths and `git diff --check`.
 
 Use subject `fix: bind production runtime reads to full identities`, the exact
 Codex co-author trailer, and the one-shot push proxy.
+
+### Task 7: Prove training-input read gaps
+
+**Files:**
+
+- Modify: `tests/test_prepare_real_scene_dataset.py`
+- Modify: `tests/test_dataparser_transform.py`
+- Modify: `tests/test_real_scene_training.py`
+
+- [x] **Step 1: Add reparse RED tests**
+
+Inject descriptor-after reparse drift into `_read_transforms`,
+`validate_dataparser_transform`, and `_hash_file_stable`; each real helper must
+reject it with its existing fixed “changed” error.
+
+- [x] **Step 2: Add prepared-member streaming RED test**
+
+Create a prepared member larger than 2 MiB, wrap `os.fdopen`, record every
+requested read size, call `_collect_manifest_members`, and require every read
+request to be at most 1 MiB. The existing whole-member read must fail this
+assertion.
+
+- [x] **Step 3: Add training short-read RED test**
+
+Make `_hash_file_stable` receive one byte followed by EOF while `fstat` retains
+the original size. Require `RealSceneTrainingError` instead of a truncated
+digest.
+
+- [x] **Step 4: Run the five tests and confirm RED**
+
+Expected: all new tests fail for the intended missing identity/streaming
+behavior.
+
+### Task 8: Close training-input reads
+
+**Files:**
+
+- Modify: `cloud/prepare_real_scene_dataset.py`
+- Modify: `cloud/validate_dataparser_transform.py`
+- Modify: `pipeline/real_scene_training.py`
+
+- [x] **Step 1: Apply cross/same-surface identities**
+
+Use the Windows-compatible cross-surface and same-surface signatures established
+in Task 5. Reject symlink, junction, and reparse inputs before opening.
+
+- [x] **Step 2: Stream prepared members**
+
+Replace `read(before.st_size + 1)` with a 1 MiB digest loop; retain only
+`measured` and SHA-256, reject empty or incomplete reads, and never allocate a
+member-sized byte buffer.
+
+- [x] **Step 3: Reject incomplete training reads**
+
+In `_hash_file_stable`, require measured bytes to equal the original descriptor
+size. Apply the adjacent identity chain to hashing, bounded readback, and ZIP
+member emission.
+
+- [x] **Step 4: Run GREEN tests**
+
+Run the Task 7 tests and require all to pass.
+
+### Task 9: Verify and publish the training-input batch
+
+- [x] **Step 1: Run the three complete focused suites**
+- [x] **Step 2: Run Ruff and diff-check**
+- [x] **Step 3: Commit only the plan, three production files, and three tests**
+
+Use subject `fix: stabilize production training input reads`, the exact Codex
+co-author trailer, and the one-shot push proxy.

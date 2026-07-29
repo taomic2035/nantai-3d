@@ -7,6 +7,7 @@ import zipfile
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,6 +50,104 @@ from pipeline.studio_revisions import (
     canonical_manifest_bytes,
 )
 from pipeline.training_provenance import TrainingConfig
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_hash_file_stable_rejects_descriptor_reparse_drift(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "training-input.bin"
+    source.write_bytes(b"stable training input")
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(training_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        RealSceneTrainingError,
+        match="changed while being hashed",
+    ):
+        training_module._hash_file_stable(
+            source,
+            label="training input",
+        )
+
+    assert calls == 2
+
+
+def test_hash_file_stable_rejects_short_read(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "training-input.bin"
+    source.write_bytes(b"stable training input")
+    original_fdopen = os.fdopen
+
+    class EarlyEofStream:
+        def __init__(self, stream):
+            self._stream = stream
+            self._read_once = False
+
+        def fileno(self):
+            return self._stream.fileno()
+
+        def read(self, size=-1):
+            if self._read_once:
+                return b""
+            self._read_once = True
+            return self._stream.read(min(size, 1))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._stream.__exit__(
+                exc_type,
+                exc_value,
+                traceback,
+            )
+
+    def early_eof_fdopen(descriptor, *args, **kwargs):
+        return EarlyEofStream(
+            original_fdopen(descriptor, *args, **kwargs)
+        )
+
+    monkeypatch.setattr(
+        training_module.os,
+        "fdopen",
+        early_eof_fdopen,
+    )
+
+    with pytest.raises(
+        RealSceneTrainingError,
+        match="changed while being hashed",
+    ):
+        training_module._hash_file_stable(
+            source,
+            label="training input",
+        )
 
 
 def _capture(
