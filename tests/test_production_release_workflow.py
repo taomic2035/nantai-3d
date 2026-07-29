@@ -74,12 +74,15 @@ def _transaction_code() -> str:
     return match.group("code")
 
 
-def test_dispatch_accepts_only_a_validated_version_via_environment() -> None:
+def test_dispatch_accepts_only_a_stable_version_via_environment() -> None:
     workflow = _workflow()
     inputs = workflow["on"]["workflow_dispatch"]["inputs"]
 
     assert set(inputs) == {"version"}
     assert inputs["version"]["required"] == "true"
+    assert inputs["version"]["description"] == (
+        "Stable production release version (for example v1.0.0)"
+    )
 
     for job_id in ("private_stage", "public_publish"):
         job = workflow["jobs"][job_id]
@@ -87,10 +90,16 @@ def test_dispatch_accepts_only_a_validated_version_via_environment() -> None:
         runs = "\n".join(_run_blocks(job))
         assert re.search(
             r'"\$VERSION" =~ \^v\[0-9\]\+\\\.\[0-9\]\+'
-            r'\\\.\[0-9\]\+\(-\[0-9A-Za-z\.\-\]\+\)\?\$',
+            r'\\\.\[0-9\]\+\$',
             runs,
         )
         assert '"$VERSION"' in runs
+
+    transaction = _transaction_code()
+    assert (
+        're.fullmatch(r"v[0-9]+\\.[0-9]+\\.[0-9]+", version)'
+        in transaction
+    )
 
 
 def test_untrusted_expressions_are_never_interpolated_in_shell() -> None:
