@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from datetime import date
 from pathlib import Path, PurePosixPath
@@ -257,13 +258,125 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+_MAX_DATASET_JSON_BYTES = 1024 * 1024
+_MAX_DATASET_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
+
+
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_mode,
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
+def _stable_read_bytes(
+    path: Path,
+    *,
+    label: str,
+    maximum_bytes: int = _MAX_DATASET_JSON_BYTES,
+) -> bytes:
+    """Read a trust-critical JSON file via a single controlled descriptor."""
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise DatasetEvidenceError(
+            f"{label} cannot be inspected"
+        ) from exc
+    if (
+        _is_linklike(path, before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum_bytes
+    ):
+        raise DatasetEvidenceError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise DatasetEvidenceError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise DatasetEvidenceError(f"{label} cannot be read") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise DatasetEvidenceError(f"{label} changed before read")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > maximum_bytes:
+                    raise DatasetEvidenceError(
+                        f"{label} exceeds its byte limit"
+                    )
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except DatasetEvidenceError:
+        raise
+    except OSError as exc:
+        raise DatasetEvidenceError(f"{label} cannot be read") from exc
+    if (
+        _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _same_surface_signature(before) != _same_surface_signature(after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise DatasetEvidenceError(f"{label} changed while being read")
+    return bytes(payload)
+
+
 def load_real_dataset_source(path: Path) -> HfDatasetSource | LocalCaptureSource:
     """Load a canonical source record without accepting duplicate JSON keys."""
 
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise DatasetEvidenceError(f"cannot read dataset source: {exc}") from exc
+    raw = _stable_read_bytes(path, label="dataset source")
     try:
         payload = json.loads(
             raw.decode("utf-8"),
@@ -272,11 +385,11 @@ def load_real_dataset_source(path: Path) -> HfDatasetSource | LocalCaptureSource
     except DatasetEvidenceError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise DatasetEvidenceError(f"invalid dataset source JSON: {exc}") from exc
+        raise DatasetEvidenceError("invalid dataset source JSON") from exc
     try:
         source = REAL_DATASET_SOURCE.validate_python(payload)
     except ValidationError as exc:
-        raise DatasetEvidenceError(f"invalid dataset source: {exc}") from exc
+        raise DatasetEvidenceError("invalid dataset source") from exc
     if raw != canonical_model_bytes(source):
         raise DatasetEvidenceError("dataset source JSON is not canonical")
     return source
@@ -289,12 +402,7 @@ def load_capture_rights_receipt(path: Path) -> CaptureRightsReceipt:
     the canonical receipt bytes by SHA-256.
     """
 
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise DatasetEvidenceError(
-            f"cannot read capture rights receipt: {exc}"
-        ) from exc
+    raw = _stable_read_bytes(path, label="capture rights receipt")
     try:
         json.loads(
             raw.decode("utf-8"),
@@ -304,13 +412,13 @@ def load_capture_rights_receipt(path: Path) -> CaptureRightsReceipt:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DatasetEvidenceError(
-            f"invalid capture rights receipt JSON: {exc}"
+            "invalid capture rights receipt JSON"
         ) from exc
     try:
         receipt = CaptureRightsReceipt.model_validate_json(raw)
     except ValidationError as exc:
         raise DatasetEvidenceError(
-            f"invalid capture rights receipt: {exc}"
+            "invalid capture rights receipt"
         ) from exc
     if raw != canonical_model_bytes(receipt):
         raise DatasetEvidenceError(
@@ -346,7 +454,7 @@ def _walk_regular_files(root: Path) -> dict[str, Path]:
     try:
         root_mode = root.lstat().st_mode
     except OSError as exc:
-        raise DatasetEvidenceError(f"dataset root is unavailable: {exc}") from exc
+        raise DatasetEvidenceError("dataset root is unavailable") from exc
     if stat.S_ISLNK(root_mode):
         raise DatasetEvidenceError("dataset root must not be a symlink")
     if not stat.S_ISDIR(root_mode):
@@ -356,12 +464,14 @@ def _walk_regular_files(root: Path) -> dict[str, Path]:
     try:
         candidates = sorted(root.rglob("*"), key=lambda item: item.as_posix())
     except OSError as exc:
-        raise DatasetEvidenceError(f"cannot enumerate dataset root: {exc}") from exc
+        raise DatasetEvidenceError("cannot enumerate dataset root") from exc
     for candidate in candidates:
         try:
             mode = candidate.lstat().st_mode
         except OSError as exc:
-            raise DatasetEvidenceError(f"cannot inspect dataset member: {exc}") from exc
+            raise DatasetEvidenceError(
+                "cannot inspect dataset member"
+            ) from exc
         relative = candidate.relative_to(root).as_posix()
         if stat.S_ISLNK(mode):
             raise DatasetEvidenceError(f"dataset member is a symlink: {relative}")
@@ -376,15 +486,74 @@ def _walk_regular_files(root: Path) -> dict[str, Path]:
 
 
 def _sha256_file(path: Path) -> tuple[int, str]:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise DatasetEvidenceError(
+            "dataset member cannot be inspected"
+        ) from exc
+    if (
+        _is_linklike(path, before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > _MAX_DATASET_MEMBER_BYTES
+    ):
+        raise DatasetEvidenceError("dataset member is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise DatasetEvidenceError(
+            "dataset member cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise DatasetEvidenceError(
+            "dataset member cannot be read"
+        ) from exc
     digest = hashlib.sha256()
     measured_bytes = 0
     try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise DatasetEvidenceError(
+                    "dataset member changed before hash"
+                )
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 measured_bytes += len(chunk)
                 digest.update(chunk)
+                if measured_bytes > _MAX_DATASET_MEMBER_BYTES:
+                    raise DatasetEvidenceError(
+                        "dataset member exceeds its byte limit"
+                    )
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except DatasetEvidenceError:
+        raise
     except OSError as exc:
-        raise DatasetEvidenceError(f"cannot hash dataset member: {exc}") from exc
+        raise DatasetEvidenceError(
+            "dataset member cannot be read"
+        ) from exc
+    if (
+        _same_surface_signature(descriptor_before)
+        != _same_surface_signature(descriptor_after)
+        or _same_surface_signature(before) != _same_surface_signature(after)
+        or _cross_surface_signature(descriptor_after)
+        != _cross_surface_signature(after)
+        or measured_bytes != before.st_size
+    ):
+        raise DatasetEvidenceError("dataset member changed while hashing")
     return measured_bytes, digest.hexdigest()
 
 

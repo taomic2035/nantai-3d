@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+import pipeline.real_dataset as real_dataset_module
 from pipeline.real_dataset import (
     CaptureRightsReceipt,
     DatasetEvidenceError,
@@ -492,4 +495,175 @@ def test_committed_poster_source_and_policy_are_frozen() -> None:
             max_unregistered_consecutive_run=5,
             min_largest_connected_model_share=0.95,
         )
+    )
+
+
+# ---------------------------------------------------------------------------
+# RED → GREEN: stable-read security contracts for real_dataset.py
+# ---------------------------------------------------------------------------
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_stable_read_bytes_rejects_descriptor_reparse_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Descriptor-after reparse drift must be rejected."""
+    evidence = tmp_path / "source.json"
+    evidence.write_bytes(b'{"valid":true}')
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(fd):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(fd)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(real_dataset_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        DatasetEvidenceError,
+        match="changed while being read",
+    ):
+        real_dataset_module._stable_read_bytes(
+            evidence, label="test-evidence"
+        )
+
+    assert calls == 2
+
+
+def test_stable_read_bytes_rejects_short_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Early EOF must be rejected."""
+    evidence = tmp_path / "source.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    class ShortStream:
+        def __init__(self, fd):
+            self._fd = fd
+            self._done = False
+
+        def fileno(self):
+            return self._fd
+
+        def read(self, size=-1):
+            del size
+            if self._done:
+                return b""
+            self._done = True
+            return b"short"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            del args
+
+    monkeypatch.setattr(
+        real_dataset_module.os,
+        "fdopen",
+        lambda fd, *a, **kw: ShortStream(fd),
+    )
+
+    with pytest.raises(
+        DatasetEvidenceError,
+        match="changed while being read",
+    ):
+        real_dataset_module._stable_read_bytes(
+            evidence, label="test-evidence"
+        )
+
+
+def test_stable_read_bytes_rejects_oversized_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Files exceeding the 1 MiB cap must be rejected before read."""
+    evidence = tmp_path / "large.json"
+    evidence.write_bytes(b"x" * 100)
+    original_lstat = Path.lstat
+
+    def oversized_lstat(path):
+        observed = original_lstat(path)
+        if path == evidence:
+            return SimpleNamespace(
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino,
+                st_mode=observed.st_mode,
+                st_size=(1024 * 1024 + 1),
+                st_mtime_ns=observed.st_mtime_ns,
+                st_ctime_ns=observed.st_ctime_ns,
+                st_file_attributes=getattr(
+                    observed, "st_file_attributes", 0
+                ),
+            )
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", oversized_lstat)
+
+    with pytest.raises(
+        DatasetEvidenceError,
+        match="not a bounded regular file",
+    ):
+        real_dataset_module._stable_read_bytes(
+            evidence, label="test-evidence"
+        )
+
+
+def test_stable_read_bytes_oserror_does_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """OSError text must not appear in the user-facing error."""
+    evidence = tmp_path / "source.json"
+    evidence.write_bytes(b'{"valid":true}')
+    private_detail = str(evidence.resolve())
+
+    def fail_open(*args, **kwargs):
+        del args, kwargs
+        raise OSError(private_detail)
+
+    monkeypatch.setattr(real_dataset_module.os, "open", fail_open)
+
+    with pytest.raises(DatasetEvidenceError) as captured:
+        real_dataset_module._stable_read_bytes(
+            evidence, label="test-evidence"
+        )
+
+    assert private_detail not in str(captured.value)
+
+
+def test_real_dataset_source_has_no_bare_read_bytes() -> None:
+    """Static contract: no Path.read_bytes in trust-critical loaders."""
+    import re
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "pipeline"
+        / "real_dataset.py"
+    ).read_text(encoding="utf-8")
+    assert not re.search(r"(?<!os)\.open\s*\(", source), (
+        "Path.open detected in real_dataset.py"
+    )
+    read_bytes_calls = re.findall(r"\.read_bytes\s*\(", source)
+    assert not read_bytes_calls, (
+        "Path.read_bytes detected in real_dataset.py"
     )
