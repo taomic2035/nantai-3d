@@ -292,14 +292,95 @@ def _human_review_content_id(review: HumanVisualReview) -> str:
 
 def _stat_signature(
     result: os.stat_result,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         result.st_dev,
         result.st_ino,
         result.st_mode,
         result.st_size,
         result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
+
+
+def _is_linklike(path: Path) -> bool:
+    try:
+        observed = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
+def _stable_read_bytes(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    label: str,
+) -> bytes:
+    """Read a trust-critical file via a single controlled fd."""
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise RealSceneAcceptanceError(f"{label} is unavailable") from exc
+    if (
+        _is_linklike(path)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum_bytes
+    ):
+        raise RealSceneAcceptanceError(f"{label} is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RealSceneAcceptanceError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RealSceneAcceptanceError(f"{label} cannot be read") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before)
+                != _stat_signature(before)
+            ):
+                raise RealSceneAcceptanceError(f"{label} changed before read")
+            payload = stream.read(maximum_bytes + 1)
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except RealSceneAcceptanceError:
+        raise
+    except OSError as exc:
+        raise RealSceneAcceptanceError(f"{label} cannot be read") from exc
+    if (
+        len(payload) > maximum_bytes
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise RealSceneAcceptanceError(f"{label} changed during read")
+    return payload
 
 
 def _member_path(root: Path, relative: str, *, label: str) -> Path:
@@ -332,21 +413,11 @@ def _read_stable_screenshot(
         binding.path,
         label=f"screenshot {binding.pose_id}",
     )
-    try:
-        before = path.lstat()
-        if not stat.S_ISREG(before.st_mode):
-            raise RealSceneAcceptanceError(f"screenshot {binding.pose_id} is not a regular file")
-        if before.st_size <= 0 or before.st_size > maximum_bytes:
-            raise RealSceneAcceptanceError(f"screenshot {binding.pose_id} byte length is invalid")
-        payload = path.read_bytes()
-        after = path.lstat()
-    except RealSceneAcceptanceError:
-        raise
-    except OSError as exc:
-        raise RealSceneAcceptanceError(f"screenshot {binding.pose_id} cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after) or len(payload) != before.st_size:
-        raise RealSceneAcceptanceError(f"screenshot {binding.pose_id} changed while being read")
-    return payload
+    return _stable_read_bytes(
+        path,
+        maximum_bytes=maximum_bytes,
+        label=f"screenshot {binding.pose_id}",
+    )
 
 
 def _png_dimensions(payload: bytes) -> tuple[int, int]:
@@ -902,22 +973,43 @@ def acceptance_evidence_reference(
     digest = hashlib.sha256()
     try:
         before = member.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        if _is_linklike(member) or not stat.S_ISREG(before.st_mode):
             raise RealSceneAcceptanceError(f"acceptance evidence {relative} is not a regular file")
         if before.st_size <= 0 or before.st_size > _MAX_TRAINING_BUNDLE_BYTES:
             raise RealSceneAcceptanceError(f"acceptance evidence {relative} length is invalid")
-        with member.open("rb") as stream:
+        descriptor = os.open(
+            member,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise RealSceneAcceptanceError(
+                    f"acceptance evidence {relative} changed before read"
+                )
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = member.lstat()
     except RealSceneAcceptanceError:
         raise
     except OSError as exc:
         raise RealSceneAcceptanceError(f"acceptance evidence {relative} cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+    ):
         raise RealSceneAcceptanceError(f"acceptance evidence {relative} changed while read")
     return AcceptanceEvidenceReference(
         path=relative,
@@ -1084,23 +1176,20 @@ def load_latest_real_scene_acceptance(root: Path) -> Path | None:
         raise RealSceneAcceptanceError("acceptance pointer root must be a real directory")
     pointer_path = boundary / "latest-acceptance.json"
     try:
-        before = pointer_path.lstat()
+        pointer_path.lstat()
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise RealSceneAcceptanceError("acceptance pointer cannot be inspected") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise RealSceneAcceptanceError("acceptance pointer must be a regular file")
-    if before.st_size <= 0 or before.st_size > _MAX_ACCEPTANCE_DOCUMENT_BYTES:
-        raise RealSceneAcceptanceError("acceptance pointer length is invalid")
+    payload = _stable_read_bytes(
+        pointer_path,
+        maximum_bytes=_MAX_ACCEPTANCE_DOCUMENT_BYTES,
+        label="acceptance pointer",
+    )
     try:
-        payload = pointer_path.read_bytes()
-        after = pointer_path.lstat()
         pointer = RealSceneAcceptancePointer.model_validate_json(payload)
-    except (OSError, ValidationError) as exc:
+    except ValidationError as exc:
         raise RealSceneAcceptanceError("acceptance pointer is invalid") from exc
-    if _stat_signature(before) != _stat_signature(after):
-        raise RealSceneAcceptanceError("acceptance pointer changed while read")
     if payload != canonical_real_scene_acceptance_pointer_bytes(pointer):
         raise RealSceneAcceptanceError("acceptance pointer is not canonical JSON")
     reference = AcceptanceEvidenceReference(
@@ -1199,7 +1288,7 @@ def _hash_reference(
         raise RealSceneAcceptanceError(
             f"acceptance evidence {reference.path} is unavailable"
         ) from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+    if _is_linklike(path) or not stat.S_ISREG(before.st_mode):
         raise RealSceneAcceptanceError(
             f"acceptance evidence {reference.path} is not a regular file"
         )
@@ -1211,7 +1300,24 @@ def _hash_reference(
     digest = hashlib.sha256()
     retained = bytearray() if retain_bytes else None
     try:
-        with path.open("rb") as stream:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise RealSceneAcceptanceError(
+                    f"acceptance evidence {reference.path} changed before read"
+                )
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -1219,12 +1325,16 @@ def _hash_reference(
                 digest.update(chunk)
                 if retained is not None:
                     retained.extend(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except OSError as exc:
         raise RealSceneAcceptanceError(
             f"acceptance evidence {reference.path} cannot be read"
         ) from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+    ):
         raise RealSceneAcceptanceError(f"acceptance evidence {reference.path} changed while read")
     if digest.hexdigest() != reference.sha256:
         raise RealSceneAcceptanceError(f"acceptance evidence {reference.path} SHA-256 disagrees")
@@ -1332,18 +1442,39 @@ def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     try:
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        if _is_linklike(path) or not stat.S_ISREG(before.st_mode):
             raise RealSceneAcceptanceError(
                 f"accepted scene artifact is not a regular file: {path.name}"
             )
-        with path.open("rb") as stream:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise RealSceneAcceptanceError(
+                    f"accepted scene artifact changed before read: {path.name}"
+                )
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
-        if _stat_signature(before) != _stat_signature(after):
+        if (
+            _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+            or _stat_signature(before) != _stat_signature(after)
+        ):
             raise RealSceneAcceptanceError(
                 f"accepted scene artifact changed while read: {path.name}"
             )
@@ -1492,21 +1623,11 @@ def _read_acceptance_member(
     maximum_bytes: int = _MAX_STRUCTURED_EVIDENCE_BYTES,
 ) -> bytes:
     path = _member_path(root, relative, label=label)
-    try:
-        before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise RealSceneAcceptanceError(f"{label} is not a regular file")
-        if before.st_size <= 0 or before.st_size > maximum_bytes:
-            raise RealSceneAcceptanceError(f"{label} length is outside the allowed range")
-        payload = path.read_bytes()
-        after = path.lstat()
-    except RealSceneAcceptanceError:
-        raise
-    except OSError as exc:
-        raise RealSceneAcceptanceError(f"{label} cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
-        raise RealSceneAcceptanceError(f"{label} changed while read")
-    return payload
+    return _stable_read_bytes(
+        path,
+        maximum_bytes=maximum_bytes,
+        label=label,
+    )
 
 
 def _validate_packaged_render_evaluation(
@@ -2078,21 +2199,11 @@ def _load_real_scene_acceptance(
     report_path: Path,
 ) -> tuple[RealSceneAcceptance, bytes, Path]:
     path = Path(report_path).expanduser().absolute()
-    try:
-        before = path.lstat()
-    except OSError as exc:
-        raise RealSceneAcceptanceError("real-scene acceptance report is unavailable") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise RealSceneAcceptanceError("real-scene acceptance report must be a regular file")
-    if before.st_size <= 0 or before.st_size > _MAX_ACCEPTANCE_DOCUMENT_BYTES:
-        raise RealSceneAcceptanceError("real-scene acceptance report length is invalid")
-    try:
-        payload = path.read_bytes()
-        after = path.lstat()
-    except OSError as exc:
-        raise RealSceneAcceptanceError("real-scene acceptance report cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
-        raise RealSceneAcceptanceError("real-scene acceptance report changed while read")
+    payload = _stable_read_bytes(
+        path,
+        maximum_bytes=_MAX_ACCEPTANCE_DOCUMENT_BYTES,
+        label="real-scene acceptance report",
+    )
     parsed = _unique_json(
         payload,
         label="real-scene acceptance report",

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 import struct
 import zipfile
 import zlib
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1142,6 +1144,83 @@ def test_aggregate_rejects_policies_weaker_than_production_baseline():
     assert acceptance_module._viewer_policy_failures(
         viewer_policy.model_copy(update={"maximum_interactive_ms": 10_000.01})
     )
+
+
+def test_real_scene_acceptance_source_has_no_bare_read_bytes_or_open_rb() -> None:
+    """Static contract: trust-critical reads must not use Path.read_bytes or Path.open."""
+    source_path = Path(acceptance_module.__file__)
+    source_text = source_path.read_text(encoding="utf-8")
+    forbidden_patterns = [".read_bytes()", '.open("rb")']
+    for pattern in forbidden_patterns:
+        assert pattern not in source_text, (
+            f"real_scene_acceptance.py must not contain '{pattern}'; "
+            "use _stable_read_bytes or os.open+os.fdopen for trust-critical reads"
+        )
+
+
+def test_acceptance_link_check_rejects_windows_reparse_attribute() -> None:
+    candidate = SimpleNamespace(
+        is_symlink=lambda: False,
+        is_junction=lambda: False,
+        lstat=lambda: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_file_attributes=0x400,
+        ),
+    )
+
+    assert acceptance_module._is_linklike(candidate)
+
+
+def test_acceptance_stat_signature_binds_windows_reparse_attribute() -> None:
+    common = {
+        "st_dev": 1,
+        "st_ino": 2,
+        "st_mode": stat.S_IFREG | 0o600,
+        "st_size": 3,
+        "st_mtime_ns": 4,
+    }
+
+    assert acceptance_module._stat_signature(
+        SimpleNamespace(**common, st_file_attributes=0)
+    ) != acceptance_module._stat_signature(
+        SimpleNamespace(**common, st_file_attributes=0x400)
+    )
+
+
+def test_acceptance_stable_read_rejects_descriptor_after_drift(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "acceptance.json"
+    target.write_bytes(b"payload\n")
+    original_fstat = acceptance_module.os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        observed = original_fstat(descriptor)
+        calls += 1
+        if calls != 2:
+            return observed
+        return SimpleNamespace(
+            st_dev=observed.st_dev,
+            st_ino=observed.st_ino,
+            st_mode=observed.st_mode,
+            st_size=observed.st_size + 1,
+            st_mtime_ns=observed.st_mtime_ns,
+        )
+
+    monkeypatch.setattr(acceptance_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        acceptance_module.RealSceneAcceptanceError,
+        match="changed during read",
+    ):
+        acceptance_module._stable_read_bytes(
+            target,
+            maximum_bytes=1024,
+            label="real-scene acceptance report",
+        )
 
 
 def test_packaged_render_evaluation_reopens_held_out_bundle_bytes(

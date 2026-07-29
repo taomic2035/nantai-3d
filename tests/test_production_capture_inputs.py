@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import pipeline.production_capture_inputs as inputs_module
 from pipeline.production_capture_inputs import (
     ProductionCaptureInputError,
     main,
@@ -181,3 +185,77 @@ def test_cli_materializes_private_pair_without_manual_sha(
     output = capsys.readouterr().out
     assert "Rights SHA-256:" in output
     assert "Source SHA-256:" in output
+
+
+def test_production_capture_inputs_source_has_no_bare_read_bytes() -> None:
+    """Static contract: trust-critical reads must not use Path.read_bytes."""
+    source_path = Path(inputs_module.__file__)
+    source_text = source_path.read_text(encoding="utf-8")
+    forbidden = ".read_bytes()"
+    assert forbidden not in source_text, (
+        "production_capture_inputs.py must not contain bare .read_bytes() calls"
+    )
+
+
+def test_capture_input_link_check_rejects_windows_reparse_attribute() -> None:
+    candidate = SimpleNamespace(
+        is_symlink=lambda: False,
+        is_junction=lambda: False,
+        lstat=lambda: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_file_attributes=0x400,
+        ),
+    )
+
+    assert inputs_module._is_linklike(candidate)
+
+
+def test_capture_input_file_identity_binds_windows_reparse_attribute() -> None:
+    common = {
+        "st_dev": 1,
+        "st_ino": 2,
+        "st_mode": stat.S_IFREG | 0o600,
+        "st_size": 3,
+        "st_mtime_ns": 4,
+    }
+
+    assert inputs_module._file_identity(
+        SimpleNamespace(**common, st_file_attributes=0)
+    ) != inputs_module._file_identity(
+        SimpleNamespace(**common, st_file_attributes=0x400)
+    )
+
+
+def test_capture_input_stable_read_rejects_descriptor_after_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "registration-policy.json"
+    target.write_bytes(b"payload\n")
+    original_fstat = inputs_module.os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        observed = original_fstat(descriptor)
+        calls += 1
+        if calls != 2:
+            return observed
+        return SimpleNamespace(
+            st_dev=observed.st_dev,
+            st_ino=observed.st_ino,
+            st_mode=observed.st_mode,
+            st_size=observed.st_size + 1,
+            st_mtime_ns=observed.st_mtime_ns,
+        )
+
+    monkeypatch.setattr(inputs_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        ProductionCaptureInputError,
+        match="changed during read",
+    ):
+        inputs_module._stable_read_bytes(
+            target,
+            label="registration policy",
+        )

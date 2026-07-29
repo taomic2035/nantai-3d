@@ -183,20 +183,112 @@ def _safe_evidence_files(root: Path) -> tuple[Path, ...]:
 
 def _file_identity(
     value: os.stat_result,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         value.st_dev,
         value.st_ino,
         value.st_mode,
         value.st_size,
         value.st_mtime_ns,
+        int(getattr(value, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
 
 
 def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
+    try:
+        observed = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
+def _stable_read_bytes(
+    path: Path,
+    *,
+    maximum_bytes: int = 16 * 1024 * 1024,
+    label: str = "evidence file",
+) -> bytes:
+    """Read a trust-critical file via a single controlled fd.
+
+    Mirrors the _verify_matching_immutable_file pattern: os.open with
+    O_NOFOLLOW, post-open os.fstat identity check, bounded read, and
+    a post-read lstat namespace drift check.  OSError produces a fixed
+    message without echoing absolute paths.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise RealSceneCaptureError(
+            f"{label} is unavailable"
+        ) from exc
+    if (
+        _is_linklike(path)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > maximum_bytes
+    ):
+        raise RealSceneCaptureError(
+            f"{label} is not a regular non-link file"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
     )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RealSceneCaptureError(
+            f"{label} cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RealSceneCaptureError(
+            f"{label} cannot be read"
+        ) from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _file_identity(descriptor_before) != _file_identity(before)
+            ):
+                raise RealSceneCaptureError(
+                    f"{label} changed before read"
+                )
+            payload = stream.read(maximum_bytes + 1)
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except RealSceneCaptureError:
+        raise
+    except OSError as exc:
+        raise RealSceneCaptureError(
+            f"{label} cannot be read"
+        ) from exc
+    if (
+        len(payload) > maximum_bytes
+        or _file_identity(descriptor_before) != _file_identity(descriptor_after)
+        or _file_identity(before) != _file_identity(after)
+        or len(payload) != before.st_size
+    ):
+        raise RealSceneCaptureError(
+            f"{label} changed during read"
+        )
+    return payload
 
 
 def _verify_matching_immutable_file(
@@ -557,7 +649,10 @@ class RealScenePipelineOperations:
                 raise RealSceneCaptureError("production SfM requires an explicit POLICY")
             policy_path = _CANARY_POLICY
         try:
-            raw = Path(policy_path).read_bytes()
+            raw = _stable_read_bytes(
+                Path(policy_path),
+                label="registration quality policy",
+            )
             policy = RegistrationQualityPolicy.model_validate_json(raw)
         except (OSError, ValidationError) as exc:
             raise RealSceneCaptureError(f"registration quality policy is invalid: {exc}") from exc
@@ -651,7 +746,10 @@ class RealScenePipelineOperations:
         try:
             capture = verify_capture_bundle(sfm_root / "capture/bundle")
             evidence_path = sfm_root / "prepared-capture-evidence.json"
-            evidence_bytes = evidence_path.read_bytes()
+            evidence_bytes = _stable_read_bytes(
+                evidence_path,
+                label="prepared capture evidence",
+            )
             evidence = PreparedCaptureEvidence.model_validate_json(evidence_bytes)
             if evidence_bytes != canonical_model_bytes(evidence):
                 raise RealSceneTrainingError("prepared capture evidence is not canonical")
@@ -668,16 +766,25 @@ class RealScenePipelineOperations:
                 capture=capture,
             )
 
-            policy_bytes = (sfm_root / "registration-quality-policy.json").read_bytes()
+            policy_bytes = _stable_read_bytes(
+                sfm_root / "registration-quality-policy.json",
+                label="registration quality policy",
+            )
             policy = RegistrationQualityPolicy.model_validate_json(policy_bytes)
             if policy_bytes != canonical_model_bytes(policy):
                 raise RealSceneTrainingError("registration policy evidence is not canonical")
 
             registration_path = sfm_root / "sfm/registration.json"
-            registration_bytes = registration_path.read_bytes()
+            registration_bytes = _stable_read_bytes(
+                registration_path,
+                label="sfm registration",
+            )
             registration = RegistrationResult.model_validate_json(registration_bytes)
             quality_path = sfm_root / "sfm/registration-quality-report.json"
-            quality_bytes = quality_path.read_bytes()
+            quality_bytes = _stable_read_bytes(
+                quality_path,
+                label="registration quality report",
+            )
             quality = RegistrationQualityReport.model_validate_json(quality_bytes)
             enumeration = enumerate_sparse_models(
                 sfm_root / "sfm/colmap/sparse",
@@ -1201,7 +1308,11 @@ class RealScenePipelineOperations:
             workspace / report.human_visual_review.path,
         ]
         try:
-            review = HumanVisualReview.model_validate_json(files[-1].read_bytes())
+            review_bytes = _stable_read_bytes(
+                files[-1],
+                label="human visual review",
+            )
+            review = HumanVisualReview.model_validate_json(review_bytes)
         except (OSError, ValidationError) as exc:
             raise RealSceneAcceptanceError(
                 f"human review evidence cannot be reopened: {exc}"

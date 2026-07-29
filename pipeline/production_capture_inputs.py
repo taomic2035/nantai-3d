@@ -46,9 +46,22 @@ class ProductionCaptureInputMaterialization:
 
 
 def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
-    )
+    try:
+        observed = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 def _output_directory(path: Path) -> Path:
@@ -150,6 +163,91 @@ def _write_private_file(path: Path, payload: bytes) -> None:
         os.fsync(stream.fileno())
 
 
+def _stable_read_bytes(
+    path: Path,
+    *,
+    maximum_bytes: int = 1024 * 1024,
+    label: str = "production capture input",
+) -> bytes:
+    """Read a trust-critical file via a single controlled fd."""
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ProductionCaptureInputError(
+            f"{label} is unavailable"
+        ) from exc
+    if (
+        _is_linklike(path)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > maximum_bytes
+    ):
+        raise ProductionCaptureInputError(
+            f"{label} is not a regular non-link file"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProductionCaptureInputError(
+            f"{label} cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionCaptureInputError(
+            f"{label} cannot be read"
+        ) from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _file_identity(descriptor_before) != _file_identity(before)
+            ):
+                raise ProductionCaptureInputError(
+                    f"{label} changed before read"
+                )
+            payload = stream.read(maximum_bytes + 1)
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except ProductionCaptureInputError:
+        raise
+    except OSError as exc:
+        raise ProductionCaptureInputError(
+            f"{label} cannot be read"
+        ) from exc
+    if (
+        len(payload) > maximum_bytes
+        or _file_identity(descriptor_before) != _file_identity(descriptor_after)
+        or _file_identity(before) != _file_identity(after)
+        or len(payload) != before.st_size
+    ):
+        raise ProductionCaptureInputError(
+            f"{label} changed during read"
+        )
+    return payload
+
+
+def _file_identity(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        int(getattr(value, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
 def materialize_production_capture_inputs(
     *,
     output_dir: Path,
@@ -214,7 +312,10 @@ def materialize_production_capture_inputs(
         )
         reopened_source = load_real_dataset_source(staging_source)
         try:
-            reopened_policy_payload = staging_policy.read_bytes()
+            reopened_policy_payload = _stable_read_bytes(
+                staging_policy,
+                label="registration policy",
+            )
             reopened_policy = (
                 RegistrationQualityPolicy.model_validate_json(
                     reopened_policy_payload

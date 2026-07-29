@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import struct
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import cloud.evaluate_real_scene as evaluator_module
 from cloud.evaluate_real_scene import (
     EvaluatedFrame,
     RealSceneEvaluatorError,
@@ -24,6 +28,76 @@ from pipeline.render_evaluation import (
     render_artifact_stem,
     validate_render_evaluation,
 )
+
+
+def test_evaluator_link_check_rejects_windows_reparse_attribute() -> None:
+    candidate = SimpleNamespace(
+        is_symlink=lambda: False,
+        is_junction=lambda: False,
+        lstat=lambda: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_file_attributes=0x400,
+        ),
+    )
+
+    assert evaluator_module._is_linklike(candidate)
+
+
+def test_evaluator_stat_signature_binds_windows_reparse_attribute() -> None:
+    common = {
+        "st_dev": 1,
+        "st_ino": 2,
+        "st_mode": stat.S_IFREG | 0o600,
+        "st_size": 3,
+        "st_mtime_ns": 4,
+    }
+
+    assert evaluator_module._stat_signature(
+        SimpleNamespace(**common, st_file_attributes=0)
+    ) != evaluator_module._stat_signature(
+        SimpleNamespace(**common, st_file_attributes=0x400)
+    )
+
+
+def test_evaluator_regular_read_rejects_descriptor_after_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "transforms.json"
+    target.write_bytes(b"payload\n")
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        observed = original_fstat(descriptor)
+        calls += 1
+        if calls != 2:
+            return observed
+        return SimpleNamespace(
+            st_dev=observed.st_dev,
+            st_ino=observed.st_ino,
+            st_mode=observed.st_mode,
+            st_size=observed.st_size + 1,
+            st_mtime_ns=observed.st_mtime_ns,
+            st_file_attributes=getattr(
+                observed,
+                "st_file_attributes",
+                0,
+            ),
+        )
+
+    monkeypatch.setattr(evaluator_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        RealSceneEvaluatorError,
+        match="changed while being read",
+    ):
+        evaluator_module._read_regular(
+            target,
+            label="transforms.json",
+            max_bytes=1024,
+        )
 
 
 def _png(width: int = 800, height: int = 600) -> bytes:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -2222,3 +2223,148 @@ def test_remote_poll_deadline_crossed_in_main_loop_does_not_sleep_zero(
     assert execution.state == "unknown"
     assert 0 not in sleeps
     assert poll_count["n"] == 1
+
+
+def test_stable_read_bytes_never_uses_path_read_bytes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_read_bytes must use os.open, not Path.read_bytes."""
+    target = tmp_path / "evidence.json"
+    target.write_bytes(b'{"valid": true}')
+
+    called: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def tracking_read_bytes(self, *args, **kwargs):
+        if self == target:
+            called.append(self)
+        return original_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", tracking_read_bytes)
+
+    result = operations_module._stable_read_bytes(
+        target, label="test-evidence"
+    )
+
+    assert result == b'{"valid": true}'
+    assert not called, "Path.read_bytes was called (should use os.open)"
+
+
+def test_stable_read_bytes_link_check_rejects_windows_reparse_attribute() -> None:
+    candidate = SimpleNamespace(
+        is_symlink=lambda: False,
+        is_junction=lambda: False,
+        lstat=lambda: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_file_attributes=0x400,
+        ),
+    )
+
+    assert operations_module._is_linklike(candidate)
+
+
+def test_real_scene_file_identity_binds_windows_reparse_attribute() -> None:
+    common = {
+        "st_dev": 1,
+        "st_ino": 2,
+        "st_mode": stat.S_IFREG | 0o600,
+        "st_size": 3,
+        "st_mtime_ns": 4,
+    }
+
+    assert operations_module._file_identity(
+        SimpleNamespace(**common, st_file_attributes=0)
+    ) != operations_module._file_identity(
+        SimpleNamespace(**common, st_file_attributes=0x400)
+    )
+
+
+def test_stable_read_bytes_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    """RED->GREEN: _stable_read_bytes must reject symlinks via O_NOFOLLOW."""
+    target = tmp_path / "link.json"
+    victim = tmp_path / "victim.json"
+    victim.write_bytes(b"preserve-me\n")
+    try:
+        target.symlink_to(victim)
+    except OSError:
+        pytest.skip("filesystem does not permit symlink creation")
+
+    with pytest.raises(operations_module.RealSceneCaptureError):
+        operations_module._stable_read_bytes(
+            target, label="test-evidence"
+        )
+
+    assert victim.read_bytes() == b"preserve-me\n"
+
+
+def test_stable_read_bytes_oserror_does_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: error messages must not echo absolute paths."""
+    target = tmp_path / "evidence.json"
+    target.write_bytes(b"payload\n")
+
+    secret = "operator-token-do-not-echo"
+
+    def fake_open(*_args, **_kwargs):
+        raise OSError(f"cannot open {target.resolve()} secret={secret}")
+
+    monkeypatch.setattr(operations_module.os, "open", fake_open)
+
+    with pytest.raises(operations_module.RealSceneCaptureError) as exc_info:
+        operations_module._stable_read_bytes(
+            target, label="test-evidence"
+        )
+
+    message = str(exc_info.value)
+    assert str(target) not in message
+    assert str(target.resolve()) not in message
+    assert secret not in message
+    assert "test-evidence" in message
+
+
+def test_stable_read_bytes_rejects_descriptor_after_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "evidence.json"
+    target.write_bytes(b"payload\n")
+    original_fstat = operations_module.os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        observed = original_fstat(descriptor)
+        calls += 1
+        if calls != 2:
+            return observed
+        return SimpleNamespace(
+            st_dev=observed.st_dev,
+            st_ino=observed.st_ino,
+            st_mode=observed.st_mode,
+            st_size=observed.st_size + 1,
+            st_mtime_ns=observed.st_mtime_ns,
+        )
+
+    monkeypatch.setattr(operations_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        operations_module.RealSceneCaptureError,
+        match="changed during read",
+    ):
+        operations_module._stable_read_bytes(target, label="test-evidence")
+
+
+def test_real_scene_operations_source_has_no_bare_read_bytes_in_trust_paths() -> None:
+    """Static contract: trust-critical reads must not use Path.read_bytes."""
+    source_path = Path(operations_module.__file__)
+    source_text = source_path.read_text(encoding="utf-8")
+    forbidden = ".read_bytes()"
+    assert forbidden not in source_text, (
+        "real_scene_operations.py must not contain bare .read_bytes() calls; "
+        "use _stable_read_bytes for trust-critical reads"
+    )

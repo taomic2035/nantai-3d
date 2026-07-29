@@ -73,14 +73,35 @@ _MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 
 def _stat_signature(
     result: os.stat_result,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         result.st_dev,
         result.st_ino,
         result.st_mode,
         result.st_size,
         result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
+
+
+def _is_linklike(path: Path) -> bool:
+    try:
+        observed = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 def _read_regular(
@@ -88,11 +109,11 @@ def _read_regular(
     *,
     label: str,
     max_bytes: int,
-) -> tuple[bytes, tuple[int, int, int, int, int]]:
+) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
     candidate = Path(path).expanduser().absolute()
     try:
         before = candidate.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
+        if _is_linklike(candidate) or not stat.S_ISREG(
             before.st_mode
         ):
             raise RealSceneEvaluatorError(
@@ -102,7 +123,29 @@ def _read_regular(
             raise RealSceneEvaluatorError(
                 f"{label} byte length is outside allowed range"
             )
-        payload = candidate.read_bytes()
+        descriptor = os.open(
+            candidate,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before)
+                != _stat_signature(before)
+            ):
+                raise RealSceneEvaluatorError(
+                    f"{label} changed before read"
+                )
+            payload = stream.read(max_bytes + 1)
+            descriptor_after = os.fstat(stream.fileno())
         after = candidate.lstat()
     except RealSceneEvaluatorError:
         raise
@@ -111,6 +154,9 @@ def _read_regular(
     signature = _stat_signature(before)
     if (
         signature != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or len(payload) > max_bytes
         or len(payload) != before.st_size
     ):
         raise RealSceneEvaluatorError(
@@ -258,7 +304,7 @@ def _real_result_parent(root: Path) -> Path:
 def _recheck_config(
     path: Path,
     original: bytes,
-    signature: tuple[int, int, int, int, int],
+    signature: tuple[int, int, int, int, int, int],
 ) -> None:
     current, current_signature = _read_regular(
         path,
@@ -754,7 +800,11 @@ class NerfstudioEvaluationBackend:
                             source_bytes
                         ).hexdigest(),
                         transforms_sha256=hashlib.sha256(
-                            (prepared_root / "transforms.json").read_bytes()
+                            _read_regular(
+                                prepared_root / "transforms.json",
+                                label="transforms.json",
+                                max_bytes=_MAX_CONFIG_BYTES,
+                            )[0]
                         ).hexdigest(),
                         camera_model="perspective",
                         source_width=int(source.shape[1]),
