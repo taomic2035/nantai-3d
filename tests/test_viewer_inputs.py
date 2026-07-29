@@ -352,3 +352,246 @@ def test_read_regular_bytes_rejects_short_read(
         viewer_inputs_module._read_regular_bytes(
             evidence, label="test manifest"
         )
+
+
+def test_read_regular_bytes_rejects_descriptor_before_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A file swap between os.open and the first fstat must be rejected."""
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+    swapped_payload = b'{"swapped":true}'
+
+    original_open = viewer_inputs_module.os.open
+
+    def swapping_open(path, flags):
+        fd = original_open(path, flags)
+        # Swap the path content immediately after open, before _read_regular_bytes
+        # can call fstat on the descriptor.  The descriptor still points at the
+        # original inode, so the post-open fstat identity must disagree with the
+        # pre-open lstat identity (different mtime/size).
+        evidence.write_bytes(swapped_payload)
+        return fd
+
+    monkeypatch.setattr(viewer_inputs_module.os, "open", swapping_open)
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="changed before read",
+    ):
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
+        )
+
+
+def test_read_regular_bytes_rejects_descriptor_after_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A file swap during read must be detected via post-read fstat."""
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    original_open = viewer_inputs_module.os.open
+
+    def mutating_open(path, flags):
+        fd = original_open(path, flags)
+        original_fdopen = viewer_inputs_module.os.fdopen
+        real_stream = original_fdopen(fd, "rb", buffering=0)
+
+        class MutatingStream:
+            def __init__(self, stream):
+                self._stream = stream
+                self._read_done = False
+
+            def read(self, size=-1):
+                data = self._stream.read(size)
+                if not self._read_done:
+                    self._read_done = True
+                    # Mutate the underlying file so the post-read fstat
+                    # signature differs from the pre-read descriptor identity.
+                    evidence.write_bytes(b'{"valid":true,"extra":1}')
+                return data
+
+            def fileno(self):
+                return self._stream.fileno()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self._stream.close()
+
+        def patched_fdopen(fd_arg, *a, **kw):
+            if fd_arg == fd:
+                return MutatingStream(real_stream)
+            return original_fdopen(fd_arg, *a, **kw)
+
+        monkeypatch.setattr(viewer_inputs_module.os, "fdopen", patched_fdopen)
+        return fd
+
+    monkeypatch.setattr(viewer_inputs_module.os, "open", mutating_open)
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="changed while being read",
+    ):
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
+        )
+
+
+def test_read_regular_bytes_rejects_path_after_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A file swap at the path after read must be caught by post-read lstat."""
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    original_lstat = Path.lstat
+    read_completed = []
+
+    def swapping_lstat(path):
+        result = original_lstat(path)
+        if path == evidence and read_completed:
+            # Post-read lstat: report a different inode so the post-read
+            # identity disagrees with the pre-open identity.
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    original_fdopen = viewer_inputs_module.os.fdopen
+
+    def tracking_fdopen(fd, *args, **kwargs):
+        stream = original_fdopen(fd, *args, **kwargs)
+        original_read = stream.read
+
+        def tracking_read(size=-1):
+            data = original_read(size)
+            read_completed.append(True)
+            return data
+
+        stream.read = tracking_read
+        return stream
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    monkeypatch.setattr(viewer_inputs_module.os, "fdopen", tracking_fdopen)
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="changed while being read",
+    ):
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
+        )
+
+
+def test_read_regular_bytes_rejects_reparse_parent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A reparse-point leaf must be rejected before any read."""
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    original_lstat = Path.lstat
+    probe = tmp_path / "manifest.json"
+
+    def reparse_lstat(path: Path):
+        result = original_lstat(path)
+        if path == probe:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+                st_file_attributes=0x400,
+            )
+        return result
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="missing or link-like",
+    ):
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
+        )
+
+
+def test_read_regular_bytes_rejects_empty_file(
+    tmp_path: Path,
+) -> None:
+    """An empty file must be rejected after the identity checks pass."""
+
+    evidence = tmp_path / "empty.json"
+    evidence.write_bytes(b"")
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="empty",
+    ):
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
+        )
+
+
+def test_read_regular_bytes_errors_do_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Error messages must not echo the absolute path or parent directory."""
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+    absolute = str(evidence)
+
+    original_os_open = viewer_inputs_module.os.open
+
+    def failing_os_open(p, *args, **kwargs):
+        if Path(p) == evidence:
+            raise OSError("injected")
+        return original_os_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(viewer_inputs_module.os, "open", failing_os_open)
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="cannot be read",
+    ) as exc:
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
+        )
+
+    message = str(exc.value)
+    assert absolute not in message
+    assert str(evidence.parent) not in message
+
+
+def test_read_regular_bytes_preserves_canonical_json_payload(
+    tmp_path: Path,
+) -> None:
+    """A valid canonical JSON payload must round-trip without regression."""
+
+    payload = b'{"valid":true}'
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(payload)
+
+    result = viewer_inputs_module._read_regular_bytes(
+        evidence, label="test manifest"
+    )
+
+    assert result == payload
