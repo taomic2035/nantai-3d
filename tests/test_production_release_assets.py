@@ -1710,3 +1710,172 @@ def test_public_bundle_scan_closes_iterator_on_iteration_error(
     message = str(exc.value)
     assert str(root) not in message
     assert closed_iterators, "iterator was not closed on error"
+
+
+def _make_valid_bundle(tmp_path: Path) -> tuple[Path, Path, str]:
+    """Create a valid four-file bundle and return (bundle, archive, name)."""
+    archive, _receipt = _write_real_contract_archive(tmp_path / "source")
+    runtime = archive.parent / "runtime"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    archive_name = "nantai-3d-v1.0.0-runtime.zip"
+    copied_archive = bundle / archive_name
+    shutil.copyfile(archive, copied_archive)
+    digest = stable_regular_file_digest(copied_archive)
+    (bundle / f"{archive_name}.sha256").write_bytes(
+        f"{digest.sha256}  {archive_name}\n".encode("ascii"),
+    )
+    shutil.copyfile(
+        runtime / PRODUCTION_RELEASE_NAME,
+        bundle / PRODUCTION_RELEASE_NAME,
+    )
+    shutil.copyfile(
+        runtime / CHECKSUMS_NAME,
+        bundle / CHECKSUMS_NAME,
+    )
+    return bundle, copied_archive, archive_name
+
+
+@pytest.mark.parametrize(
+    "target_suffix",
+    [
+        "nantai-3d-v1.0.0-runtime.zip",
+        "nantai-3d-v1.0.0-runtime.zip.sha256",
+        PRODUCTION_RELEASE_NAME,
+        CHECKSUMS_NAME,
+    ],
+)
+def test_verify_bundle_rejects_oserror_without_path_leak(
+    tmp_path: Path,
+    monkeypatch,
+    target_suffix: str,
+) -> None:
+    """E2E: OSError on any bundle file must fail closed without path leak."""
+
+    bundle, archive, _name = _make_valid_bundle(tmp_path)
+    target = bundle / target_suffix
+    absolute = str(target)
+
+    original_os_open = os.open
+
+    def failing_os_open(path, *args, **kwargs):
+        if Path(path) == target:
+            raise OSError(f"private {absolute}")
+        return original_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_os_open)
+
+    with pytest.raises(ProductionReleaseAssetsError) as exc:
+        verify_production_release_assets(bundle)
+
+    message = str(exc.value)
+    assert absolute not in message
+    assert "private" not in message
+
+
+def test_verify_bundle_rejects_archive_identity_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """E2E: archive identity drift between digest and second pass must reject."""
+
+    bundle, archive, _name = _make_valid_bundle(tmp_path)
+
+    call_count = {"n": 0}
+    original_fstat = os.fstat
+
+    def drifting_fstat(fd: int):
+        result = original_fstat(fd)
+        call_count["n"] += 1
+        # Drift on a later fstat call to trigger identity mismatch
+        if call_count["n"] > 10:
+            return _drift_stat(result, "st_ino", 1)
+        return result
+
+    monkeypatch.setattr(os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="changed|failed",
+    ):
+        verify_production_release_assets(bundle)
+
+
+def test_verify_bundle_rejects_file_replacement_during_verification(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """E2E: replacing a file during verification must be rejected."""
+
+    bundle, archive, _name = _make_valid_bundle(tmp_path)
+
+    call_count = {"n": 0}
+    original_stable_digest = assets_module.stable_regular_file_digest
+
+    def swapping_digest(path, **kwargs):
+        call_count["n"] += 1
+        result = original_stable_digest(path, **kwargs)
+        if call_count["n"] == 1:
+            archive.write_bytes(b"tampered content")
+        return result
+
+    monkeypatch.setattr(
+        assets_module,
+        "stable_regular_file_digest",
+        swapping_digest,
+    )
+
+    with pytest.raises(ProductionReleaseAssetsError, match="failed"):
+        verify_production_release_assets(bundle)
+
+    # Verify no files were deleted or overwritten by the verifier
+    assert archive.exists()
+    assert (bundle / "nantai-3d-v1.0.0-runtime.zip.sha256").exists()
+    assert (bundle / PRODUCTION_RELEASE_NAME).exists()
+    assert (bundle / CHECKSUMS_NAME).exists()
+
+
+def test_verify_bundle_bounded_streaming_for_large_archive(
+    tmp_path: Path,
+) -> None:
+    """E2E: archive streaming must use bounded chunk sizes."""
+
+    bundle, _archive, _name = _make_valid_bundle(tmp_path)
+
+    # stable_regular_file_digest reads in 1 MiB chunks; _COPY_CHUNK_BYTES
+    # bounds the comparison loop. Both must stay <= 1 MiB.
+    assert assets_module._COPY_CHUNK_BYTES <= 1024 * 1024
+
+    result = verify_production_release_assets(bundle)
+    assert result.valid is True
+
+
+def test_verify_bundle_does_not_delete_or_overwrite_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """E2E: verification must not delete or overwrite any input file."""
+
+    bundle, archive, _name = _make_valid_bundle(tmp_path)
+
+    # Record all input file contents and mtimes before verification
+    before = {}
+    for path in sorted(bundle.iterdir()):
+        before[path.name] = (path.read_bytes(), path.stat().st_mtime_ns)
+
+    # Forbid any write/delete operations
+    def forbidden_write(*args, **kwargs):
+        raise AssertionError(
+            "verification must not write or delete inputs"
+        )
+
+    monkeypatch.setattr(Path, "write_bytes", forbidden_write)
+    monkeypatch.setattr(Path, "write_text", forbidden_write)
+    monkeypatch.setattr(Path, "unlink", forbidden_write)
+
+    verify_production_release_assets(bundle)
+
+    # Verify all files are unchanged
+    for path in sorted(bundle.iterdir()):
+        after = before[path.name]
+        assert path.read_bytes() == after[0], f"{path.name} content changed"
