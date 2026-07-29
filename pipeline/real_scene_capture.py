@@ -194,6 +194,79 @@ def _sha256_file(path: Path) -> tuple[int, str]:
     return measured, digest.hexdigest()
 
 
+_MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+
+
+def _stable_read_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_MANIFEST_BYTES,
+) -> bytes:
+    """Read a trust-critical manifest via a single controlled descriptor."""
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise RealSceneCaptureError(
+            f"{label} cannot be inspected"
+        ) from exc
+    if (
+        _is_linklike(path, before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > max_bytes
+    ):
+        raise RealSceneCaptureError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RealSceneCaptureError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RealSceneCaptureError(f"{label} cannot be read") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            fd_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(fd_before.st_mode)
+                or _cross_surface_signature(fd_before)
+                != _cross_surface_signature(before)
+            ):
+                raise RealSceneCaptureError(
+                    f"{label} changed before read"
+                )
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise RealSceneCaptureError(
+                        f"{label} exceeds its byte limit"
+                    )
+            fd_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except RealSceneCaptureError:
+        raise
+    except OSError as exc:
+        raise RealSceneCaptureError(f"{label} cannot be read") from exc
+    if (
+        _same_surface_signature(fd_before)
+        != _same_surface_signature(fd_after)
+        or _same_surface_signature(before) != _same_surface_signature(after)
+        or _cross_surface_signature(fd_after) != _cross_surface_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise RealSceneCaptureError(f"{label} changed while being read")
+    return bytes(payload)
+
+
 def _require_absent_capture_boundary(run_root: Path) -> Path:
     boundary = run_root / "capture"
     if boundary.exists() or boundary.is_symlink():
@@ -202,7 +275,7 @@ def _require_absent_capture_boundary(run_root: Path) -> Path:
         boundary.mkdir(parents=True)
     except OSError as exc:
         raise RealSceneCaptureError(
-            f"cannot create capture output boundary: {exc}"
+            "cannot create capture output boundary"
         ) from exc
     if boundary.is_symlink() or boundary.resolve(strict=True) != boundary.absolute():
         raise RealSceneCaptureError("capture output boundary is redirected")
@@ -314,8 +387,11 @@ def prepare_real_capture(
     try:
         ingest_all(selected_root, ingest_root)
     except Exception as exc:
-        raise RealSceneCaptureError(f"ingest failed: {exc}") from exc
-    ingest_bytes = (ingest_root / MANIFEST_FILENAME).read_bytes()
+        raise RealSceneCaptureError("ingest failed") from exc
+    ingest_bytes = _stable_read_bytes(
+        ingest_root / MANIFEST_FILENAME,
+        label="ingest manifest",
+    )
     revision_id = (
         "capture-" + hashlib.sha256(ingest_bytes).hexdigest()[:32]
     )
@@ -330,7 +406,7 @@ def prepare_real_capture(
         )
     except Exception as exc:
         raise RealSceneCaptureError(
-            f"capture bundle preparation failed: {exc}"
+            "capture bundle preparation failed"
         ) from exc
     return PreparedRealCapture(
         source_sha256=hashlib.sha256(canonical_model_bytes(source)).hexdigest(),
@@ -359,7 +435,7 @@ def prepare_local_capture(
         validate_capture_rights(source, rights)
     except DatasetEvidenceError as exc:
         raise RealSceneCaptureError(
-            f"capture rights validation failed: {exc}"
+            "capture rights validation failed"
         ) from exc
 
     boundary = _require_absent_capture_boundary(run_root)
@@ -372,7 +448,7 @@ def prepare_local_capture(
         )
     except Exception as exc:
         raise RealSceneCaptureError(
-            f"private media ingest failed: {exc}"
+            "private media ingest failed"
         ) from exc
 
     selected_root = boundary / "source"
@@ -380,7 +456,7 @@ def prepare_local_capture(
         selected_root.mkdir()
     except OSError as exc:
         raise RealSceneCaptureError(
-            f"cannot create private source copy: {exc}"
+            "cannot create private source copy"
         ) from exc
     selected_paths = tuple(
         sorted(record.source_path for record in ingest.sources)
@@ -403,7 +479,7 @@ def prepare_local_capture(
         )
     except Exception as exc:
         raise RealSceneCaptureError(
-            f"private source copy differs from ingest evidence: {exc}"
+            "private source copy differs from ingest evidence"
         ) from exc
     if copied_ingest != ingest:
         raise RealSceneCaptureError(
@@ -411,10 +487,13 @@ def prepare_local_capture(
         )
 
     try:
-        ingest_bytes = (ingest_root / MANIFEST_FILENAME).read_bytes()
-    except OSError as exc:
+        ingest_bytes = _stable_read_bytes(
+            ingest_root / MANIFEST_FILENAME,
+            label="private ingest manifest",
+        )
+    except RealSceneCaptureError as exc:
         raise RealSceneCaptureError(
-            f"cannot read private ingest evidence: {exc}"
+            "cannot read private ingest evidence"
         ) from exc
     ingest_sha256 = hashlib.sha256(ingest_bytes).hexdigest()
     revision_id = f"capture-{ingest_sha256[:32]}"
@@ -429,7 +508,7 @@ def prepare_local_capture(
         )
     except Exception as exc:
         raise RealSceneCaptureError(
-            f"private capture bundle preparation failed: {exc}"
+            "private capture bundle preparation failed"
         ) from exc
     return PreparedRealCapture(
         source_sha256=hashlib.sha256(
@@ -447,7 +526,7 @@ def _write_model_json(path: Path, model) -> bytes:
         path.write_bytes(payload)
     except OSError as exc:
         raise RealSceneCaptureError(
-            f"cannot write {path.name}: {exc}"
+            f"cannot write {path.name}"
         ) from exc
     return payload
 
@@ -465,7 +544,7 @@ def run_real_sfm(
     try:
         sfm_root.mkdir(parents=True)
     except OSError as exc:
-        raise RealSceneCaptureError(f"cannot create SfM boundary: {exc}") from exc
+        raise RealSceneCaptureError("cannot create SfM boundary") from exc
     registration_path = sfm_root / "registration.json"
     colmap_root = sfm_root / "colmap"
     try:
@@ -476,13 +555,16 @@ def run_real_sfm(
             workspace=colmap_root,
         )
     except Exception as exc:
-        raise RealSceneCaptureError(f"COLMAP registration failed: {exc}") from exc
+        raise RealSceneCaptureError("COLMAP registration failed") from exc
     try:
-        registration_bytes = registration_path.read_bytes()
+        registration_bytes = _stable_read_bytes(
+            registration_path,
+            label="registration evidence",
+        )
         reparsed = RegistrationResult.model_validate_json(registration_bytes)
-    except (OSError, ValueError) as exc:
+    except (RealSceneCaptureError, ValueError) as exc:
         raise RealSceneCaptureError(
-            f"registration evidence is unreadable: {exc}"
+            "registration evidence is unreadable"
         ) from exc
     if reparsed != registration:
         raise RealSceneCaptureError(
@@ -498,7 +580,7 @@ def run_real_sfm(
             )
         except ValueError as exc:
             raise RealSceneCaptureError(
-                f"COLMAP sparse model enumeration failed: {exc}"
+                "COLMAP sparse model enumeration failed"
             ) from exc
         selected = next(
             model
@@ -532,7 +614,10 @@ def run_real_sfm(
         )
 
     capture_manifest_path = capture.capture.bundle / "manifest.json"
-    capture_manifest_bytes = capture_manifest_path.read_bytes()
+    capture_manifest_bytes = _stable_read_bytes(
+        capture_manifest_path,
+        label="capture manifest",
+    )
     try:
         quality = build_registration_quality_report(
             registration=registration,
@@ -552,7 +637,7 @@ def run_real_sfm(
         )
     except ValueError as exc:
         raise RealSceneCaptureError(
-            f"registration quality evidence is inconsistent: {exc}"
+            "registration quality evidence is inconsistent"
         ) from exc
     quality_path = sfm_root / "registration-quality-report.json"
     quality_bytes = _write_model_json(quality_path, quality)

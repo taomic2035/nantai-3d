@@ -637,3 +637,184 @@ def test_sha256_file_never_uses_path_open(
 
     assert measured == len(payload)
     assert sha256 == hashlib.sha256(payload).hexdigest()
+
+
+# ============================================================
+# RED → GREEN: stable manifest read boundary
+# ============================================================
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_stable_read_bytes_rejects_oversized_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b"x" * 100)
+    original_lstat = Path.lstat
+
+    def oversized_lstat(path):
+        observed = original_lstat(path)
+        if path == evidence:
+            return SimpleNamespace(
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino,
+                st_mode=observed.st_mode,
+                st_size=real_scene_capture._MAX_MANIFEST_BYTES + 1,
+                st_mtime_ns=observed.st_mtime_ns,
+                st_ctime_ns=observed.st_ctime_ns,
+                st_file_attributes=getattr(observed, "st_file_attributes", 0),
+            )
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", oversized_lstat)
+    with pytest.raises(RealSceneCaptureError, match="bounded regular file"):
+        real_scene_capture._stable_read_bytes(
+            evidence,
+            label="test manifest",
+        )
+
+
+def test_stable_read_bytes_rejects_descriptor_after_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import os as os_module
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+    original_fstat = os_module.fstat
+    calls = 0
+
+    def drifting_fstat(fd):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(fd)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(real_scene_capture.os, "fstat", drifting_fstat)
+    with pytest.raises(
+        RealSceneCaptureError, match="changed while being read"
+    ):
+        real_scene_capture._stable_read_bytes(
+            evidence,
+            label="test manifest",
+        )
+    assert calls == 2
+
+
+def test_stable_read_bytes_rejects_path_after_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+    original_lstat = Path.lstat
+    evidence_calls = [0]
+
+    def swapping_lstat(self):
+        observed = original_lstat(self)
+        if self == evidence:
+            evidence_calls[0] += 1
+            if evidence_calls[0] >= 2:
+                return SimpleNamespace(
+                    st_dev=observed.st_dev,
+                    st_ino=observed.st_ino + 1,
+                    st_mode=observed.st_mode,
+                    st_size=observed.st_size,
+                    st_mtime_ns=observed.st_mtime_ns,
+                    st_ctime_ns=observed.st_ctime_ns,
+                    st_file_attributes=getattr(
+                        observed, "st_file_attributes", 0
+                    ),
+                )
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    with pytest.raises(
+        RealSceneCaptureError, match="changed while being read"
+    ):
+        real_scene_capture._stable_read_bytes(
+            evidence,
+            label="test manifest",
+        )
+
+
+def test_stable_read_bytes_rejects_symlink(tmp_path: Path) -> None:
+    import os as os_module
+
+    if not hasattr(os_module, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    target = tmp_path / "real.json"
+    target.write_bytes(b'{"valid":true}')
+    link = tmp_path / "manifest.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+    with pytest.raises(
+        RealSceneCaptureError, match="bounded regular file"
+    ):
+        real_scene_capture._stable_read_bytes(
+            link,
+            label="test manifest",
+        )
+
+
+def test_stable_read_bytes_oserror_does_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    def raising_open(path, flags):
+        raise OSError("simulated permission denied")
+
+    monkeypatch.setattr(real_scene_capture.os, "open", raising_open)
+    with pytest.raises(
+        RealSceneCaptureError, match="cannot be read"
+    ) as exc_info:
+        real_scene_capture._stable_read_bytes(
+            evidence,
+            label="test manifest",
+        )
+    assert str(tmp_path) not in str(exc_info.value)
+
+
+def test_stable_read_bytes_never_uses_path_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "manifest.json"
+    payload = b'{"valid":true}'
+    evidence.write_bytes(payload)
+
+    def reject_path_open(*args, **kwargs):
+        del args, kwargs
+        pytest.fail(
+            "_stable_read_bytes must use its controlled descriptor"
+        )
+
+    monkeypatch.setattr(Path, "open", reject_path_open)
+
+    result = real_scene_capture._stable_read_bytes(
+        evidence,
+        label="test manifest",
+    )
+    assert result == payload
