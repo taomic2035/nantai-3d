@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -215,6 +217,7 @@ class ProbeFixture:
     executables: dict[str, Path]
     which_calls: list[str]
     run_calls: list[tuple[str, ...]]
+    run_envs: list[dict[str, str]]
     import_calls: list[str]
     package_calls: list[str]
     version_stdout: bytes = _version_output()
@@ -231,6 +234,7 @@ class ProbeFixture:
         assert kwargs["capture_output"] is True
         assert kwargs["check"] is False
         assert 0 < kwargs["timeout"] <= 30
+        self.run_envs.append(dict(kwargs["env"]))
         if "-c" in command:
             return SimpleNamespace(
                 returncode=0,
@@ -268,6 +272,7 @@ def _probe_fixture(tmp_path: Path) -> ProbeFixture:
         executables=executables,
         which_calls=[],
         run_calls=[],
+        run_envs=[],
         import_calls=[],
         package_calls=[],
     )
@@ -331,6 +336,23 @@ def test_probe_derives_versions_executables_and_cli_schema(
         "cuda.is_available" not in " ".join(call)
         for call in fixture.run_calls
     )
+    assert len(fixture.run_envs) == 2
+    for command_env in fixture.run_envs:
+        assert command_env["PYTHONIOENCODING"] == "ascii:backslashreplace"
+        assert command_env["NO_COLOR"] == "1"
+        assert command_env["TERM"] == "dumb"
+        assert command_env["COLUMNS"] == "120"
+
+
+def test_bounded_command_escapes_unicode_cli_layout_as_ascii() -> None:
+    stdout, stderr = probe_module._bounded_command(
+        subprocess.run,
+        [sys.executable, "-c", "print(chr(0x2500))"],
+        label="unicode layout probe",
+    )
+
+    assert stdout.splitlines() == ["\\u2500"]
+    assert stderr == ""
 
 
 def test_probe_rejects_symlink_executable(tmp_path: Path) -> None:

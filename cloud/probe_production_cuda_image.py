@@ -42,6 +42,12 @@ _MAX_LOCK_BYTES = 16 * 1024 * 1024
 _MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 _MAX_COMMAND_BYTES = 1024 * 1024
 _COMMAND_TIMEOUT_SECONDS = 20
+_COMMAND_ENV_OVERRIDES = {
+    "COLUMNS": "120",
+    "NO_COLOR": "1",
+    "PYTHONIOENCODING": "ascii:backslashreplace",
+    "TERM": "dumb",
+}
 _OPTION_RE = re.compile(r"--[a-z0-9][a-z0-9.-]*")
 _EXECUTABLE_ROLES = ("ns-export", "ns-train", "python")
 _VERSION_KEYS = {
@@ -279,11 +285,14 @@ def _bounded_command(
     *,
     label: str,
 ) -> tuple[str, str]:
+    command_env = os.environ.copy()
+    command_env.update(_COMMAND_ENV_OVERRIDES)
     try:
         result = run_command(
             argv,
             capture_output=True,
             check=False,
+            env=command_env,
             timeout=_COMMAND_TIMEOUT_SECONDS,
         )
     except Exception as exc:
