@@ -14,7 +14,9 @@ from pydantic import ValidationError
 
 from pipeline.durable_io import (
     DurableIOError,
+    capture_real_directory_identity,
     flush_file,
+    matches_real_directory_identity,
     publish_file_noreplace,
 )
 from pipeline.real_scene_acceptance import (
@@ -32,6 +34,7 @@ from pipeline.viewer_acceptance import (
 )
 
 PRODUCTION_MAXIMUM_SCREENSHOT_BYTES = 16 * 1024 * 1024
+_MAX_VIEWER_EVIDENCE_BYTES = 16 * 1024 * 1024
 
 
 class HumanReviewInputError(ValueError):
@@ -45,14 +48,46 @@ class HumanReviewPolicyMaterialization:
     viewer_report_sha256: str
 
 
-def _identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
     return (
-        item.st_dev,
-        item.st_ino,
-        item.st_mode,
-        item.st_size,
-        item.st_mtime_ns,
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
     )
+
+
+def _same_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_mode,
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
 
 
 def _real_evidence_root(path: Path) -> Path:
@@ -88,6 +123,7 @@ def _read_regular_bytes(
     *,
     root: Path,
     label: str,
+    max_bytes: int = _MAX_VIEWER_EVIDENCE_BYTES,
 ) -> bytes:
     path = _below_root(path, root, label=label)
     current = root
@@ -95,22 +131,61 @@ def _read_regular_bytes(
         for part in path.relative_to(root).parts:
             current = current / part
             inspected = current.lstat()
-            if stat.S_ISLNK(inspected.st_mode):
+            if _is_linklike(current, inspected):
                 raise HumanReviewInputError(f"{label} must not traverse a link")
         before = path.lstat()
-        if not stat.S_ISREG(before.st_mode):
-            raise HumanReviewInputError(f"{label} must be a real regular file")
-        with path.open("rb") as stream:
-            payload = stream.read()
-            after = os.fstat(stream.fileno())
-        final = path.lstat()
+        if (
+            _is_linklike(path, before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            raise HumanReviewInputError(f"{label} must be a bounded regular file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+            os, "O_NOFOLLOW", 0
+        )
+        descriptor = os.open(path, flags)
     except HumanReviewInputError:
         raise
     except OSError as exc:
         raise HumanReviewInputError(f"{label} cannot be read") from exc
-    if not payload or _identity(before) != _identity(after) or _identity(after) != _identity(final):
-        raise HumanReviewInputError(f"{label} is empty or changed while being read")
-    return payload
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise HumanReviewInputError(f"{label} cannot be read") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            fd_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(fd_before.st_mode)
+                or _cross_surface_signature(fd_before)
+                != _cross_surface_signature(before)
+            ):
+                raise HumanReviewInputError(f"{label} changed before read")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise HumanReviewInputError(f"{label} exceeds its byte limit")
+            fd_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except HumanReviewInputError:
+        raise
+    except OSError as exc:
+        raise HumanReviewInputError(f"{label} cannot be read") from exc
+    if (
+        _same_surface_signature(fd_before)
+        != _same_surface_signature(fd_after)
+        or _same_surface_signature(before) != _same_surface_signature(after)
+        or _cross_surface_signature(fd_after) != _cross_surface_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise HumanReviewInputError(f"{label} changed while being read")
+    return bytes(payload)
 
 
 def _prepare_output(path: Path, root: Path) -> Path:
@@ -127,7 +202,7 @@ def _prepare_output(path: Path, root: Path) -> Path:
             current = current / part
             if current.exists() or current.is_symlink():
                 inspected = current.lstat()
-                if stat.S_ISLNK(inspected.st_mode) or not stat.S_ISDIR(inspected.st_mode):
+                if _is_linklike(current, inspected) or not stat.S_ISDIR(inspected.st_mode):
                     raise HumanReviewInputError(
                         "human review policy output parent must be a real directory"
                     )
@@ -205,10 +280,28 @@ def materialize_human_review_policy(
     )
     payload = canonical_human_review_policy_bytes(human_policy)
     output = _prepare_output(Path(output_path), root)
+    parent_identity = capture_real_directory_identity(output.parent)
     staging = output.parent / (f".{output.name}.{uuid.uuid4().hex}.staging")
     try:
-        with staging.open("xb") as stream:
-            stream.write(payload)
+        if not matches_real_directory_identity(output.parent, parent_identity):
+            raise HumanReviewInputError(
+                "human review policy output parent changed before write"
+            )
+        staging_fd = os.open(
+            staging,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            with os.fdopen(staging_fd, "wb") as stream:
+                stream.write(payload)
+        except OSError as exc:
+            raise HumanReviewInputError(
+                "human review policy output cannot be written"
+            ) from exc
         flush_file(staging)
         publish_file_noreplace(staging, output)
     except (DurableIOError, OSError) as exc:
