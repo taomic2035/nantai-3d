@@ -129,6 +129,10 @@ test('viewer runtime accepts static spatial reconstruction chunks without world 
   assert.match(main, /isSpatialChunkManifest\(/);
   assert.match(main, /createSpatialSplatLayer\(/);
   assert.match(main, /createSpatialPointLayer\(/);
+  assert.match(
+    main,
+    /spatialStreamingAnchor\(\s*cameraMode,\s*\[\s*camera\.position\.x,[\s\S]*controls\.target\.z,\s*\],?\s*\)/,
+  );
   assert.doesNotMatch(main, /world_offset/);
 });
 

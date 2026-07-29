@@ -65,6 +65,18 @@ export function estimatedLodPointCount(entry, lodFraction) {
   return Math.ceil(entry.point_count * lodFraction);
 }
 
+export function spatialStreamingAnchor(cameraMode, cameraThree, targetThree) {
+  const anchor = cameraMode === 'orbit' ? targetThree : cameraThree;
+  if (
+    !Array.isArray(anchor)
+    || anchor.length < 3
+    || !anchor.slice(0, 3).every(Number.isFinite)
+  ) {
+    throw new TypeError('spatial streaming anchor must contain three finite coordinates');
+  }
+  return anchor.slice(0, 3);
+}
+
 export function isSpatialChunkManifest(manifest) {
   if (
     manifest?.schema_version !== 1

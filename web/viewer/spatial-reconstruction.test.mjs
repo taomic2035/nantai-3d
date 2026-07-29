@@ -183,3 +183,18 @@ test('keeps absent or invalid LOD density evidence unknown', () => {
   }
   assert.equal(estimatedLodPointCount({ point_count: 0 }, 0.25), null);
 });
+
+test('uses the orbit target as the spatial streaming anchor', () => {
+  const { spatialStreamingAnchor } = subject();
+  const cameraThree = [48, 49, 42];
+  const targetThree = [0.4, -3.1, 2.2];
+
+  assert.deepEqual(
+    spatialStreamingAnchor('orbit', cameraThree, targetThree),
+    targetThree,
+  );
+  assert.deepEqual(
+    spatialStreamingAnchor('free', cameraThree, targetThree),
+    cameraThree,
+  );
+});

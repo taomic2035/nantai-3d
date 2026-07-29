@@ -36,7 +36,10 @@ import {
   createSplatLayer,
   isSupersededLoadResult,
 } from './splat-layer.mjs';
-import { isSpatialChunkManifest } from './spatial-reconstruction.mjs';
+import {
+  isSpatialChunkManifest,
+  spatialStreamingAnchor,
+} from './spatial-reconstruction.mjs';
 import { createSpatialSplatLayer } from './splat-chunks-layer.mjs';
 import { createSpatialPointLayer } from './spatial-point-layer.mjs';
 import {
@@ -2360,9 +2363,15 @@ async function updateSpatialRecon() {
   spatialReconUpdating = true;
   try {
     await activeLayer.update({
-      cameraWorld: threeToWorld([
-        camera.position.x, camera.position.y, camera.position.z,
-      ]),
+      cameraWorld: threeToWorld(spatialStreamingAnchor(
+        cameraMode,
+        [
+          camera.position.x, camera.position.y, camera.position.z,
+        ],
+        [
+          controls.target.x, controls.target.y, controls.target.z,
+        ],
+      )),
       lodOverride: qualityOverride,
     });
   } finally {
