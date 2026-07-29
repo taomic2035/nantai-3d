@@ -125,6 +125,7 @@ test('viewer runtime accepts static spatial reconstruction chunks without world 
   assert.match(main, /from ['"]\.\/spatial-reconstruction\.mjs['"]/);
   assert.match(main, /from ['"]\.\/splat-chunks-layer\.mjs['"]/);
   assert.match(main, /from ['"]\.\/spatial-point-layer\.mjs['"]/);
+  assert.match(main, /from ['"]\.\/point-preview-color\.mjs['"]/);
   assert.match(main, /kind\s*!==\s*['"]recon-manifest['"][\s\S]*kind\s*!==\s*['"]chunk-manifest['"]/);
   assert.match(main, /isSpatialChunkManifest\(/);
   assert.match(main, /createSpatialSplatLayer\(/);
@@ -133,13 +134,19 @@ test('viewer runtime accepts static spatial reconstruction chunks without world 
     main,
     /spatialStreamingAnchor\(\s*cameraMode,\s*\[\s*camera\.position\.x,[\s\S]*controls\.target\.z,\s*\],?\s*\)/,
   );
+  assert.match(
+    main,
+    /spatialChunkRendererMode\(reconManifest\)\s*===\s*['"]spark-chunks['"]/,
+  );
+  assert.match(main, /pointPreviewColorComponent\(p\.name,\s*val\)/);
   assert.doesNotMatch(main, /world_offset/);
 });
 
 test('spatial reconstruction HUD exposes only evidence-backed active point estimates', () => {
   assert.match(main, /active_estimated_points/);
   assert.match(main, /Number\.isSafeInteger\(/);
-  assert.match(main, /~\$\{rendererState\.active_estimated_points\.toLocaleString\(\)\} splats/);
+  assert.match(main, /rendererState\?\.mode\s*===\s*['"]dc-point-chunks['"]/);
+  assert.match(main, /~\$\{rendererState\.active_estimated_points\.toLocaleString\(\)\} \$\{activeUnit\}/);
 });
 
 test('coverage evidence has a dedicated fail-closed HUD separate from provenance', () => {

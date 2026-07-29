@@ -225,7 +225,19 @@ class TestPartition:
         scene.save_ply(ply, flavor="3dgs")
         recon_manifest = tmp_path / "recon_manifest.json"
         recon_manifest.write_text(json.dumps(
-            {"provenance": {"geometry_usability": "preview-only", "synthetic": False}}),
+            {
+                "full_3dgs": "recon_full.ply",
+                "artifacts": {
+                    "full_3dgs": {
+                        "path": "recon_full.ply",
+                        "fidelity": "full-3dgs",
+                    },
+                },
+                "provenance": {
+                    "geometry_usability": "preview-only",
+                    "synthetic": False,
+                },
+            }),
             encoding="utf-8")
 
         rc = cr.main([str(ply), "--out-dir", str(tmp_path / "out"),
@@ -235,6 +247,8 @@ class TestPartition:
             (tmp_path / "out" / "chunks.json").read_text(encoding="utf-8"))
         # 源是 preview-only → 分块产物照样 preview-only (绝不因分块升级)
         assert out["source"]["geometry_usability"] == "preview-only"
+        assert out["source"]["full_3dgs"] is True
+        assert out["source"]["render_fidelity"] == "full-3dgs"
         assert out["source"]["recon_manifest_sha256"] == hashlib.sha256(
             recon_manifest.read_bytes()).hexdigest()
 

@@ -50,6 +50,16 @@ def _source_provenance(recon_manifest: Path | None) -> dict | None:
     usability = (parsed.get("provenance") or {}).get("geometry_usability")
     if usability is not None:      # 缺席即未知, 不编造
         provenance["geometry_usability"] = usability
+    full_path = parsed.get("full_3dgs")
+    full_descriptor = (parsed.get("artifacts") or {}).get("full_3dgs")
+    if (
+        isinstance(full_path, str)
+        and isinstance(full_descriptor, dict)
+        and full_descriptor.get("path") == full_path
+        and full_descriptor.get("fidelity") == "full-3dgs"
+    ):
+        provenance["full_3dgs"] = True
+        provenance["render_fidelity"] = "full-3dgs"
     return provenance
 
 

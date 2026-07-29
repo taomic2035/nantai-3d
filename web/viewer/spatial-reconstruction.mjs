@@ -103,6 +103,18 @@ export function isSpatialChunkManifest(manifest) {
   return true;
 }
 
+export function spatialChunkRendererMode(manifest) {
+  if (!isSpatialChunkManifest(manifest)) {
+    throw new TypeError('invalid spatial-chunks manifest');
+  }
+  return (
+    manifest.source?.full_3dgs === true
+    && manifest.source?.render_fidelity === 'full-3dgs'
+  )
+    ? 'spark-chunks'
+    : 'dc-point-chunks';
+}
+
 export function resolveSpatialChunkUrl(manifestUrl, entry, lod) {
   if (!LOD_LEVELS.includes(lod)) {
     throw new RangeError(`unsupported reconstruction chunk LOD: ${lod}`);

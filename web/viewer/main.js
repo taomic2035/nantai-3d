@@ -38,10 +38,12 @@ import {
 } from './splat-layer.mjs';
 import {
   isSpatialChunkManifest,
+  spatialChunkRendererMode,
   spatialStreamingAnchor,
 } from './spatial-reconstruction.mjs';
 import { createSpatialSplatLayer } from './splat-chunks-layer.mjs';
 import { createSpatialPointLayer } from './spatial-point-layer.mjs';
+import { pointPreviewColorComponent } from './point-preview-color.mjs';
 import {
   clampPitch,
   directionFromYawPitchThree,
@@ -143,6 +145,9 @@ const CHUNK_VIEW_RADIUS = 2;   // 视野半径 (最远用低清 LOD)
 const CHUNK_CACHE_MAX = 36;    // LRU 上限 (保留略多于视野)
 const MESH_VIEW_RADIUS = 1;    // 纹理 GLB 较重，保持 3×3 活跃块
 const VIEWER_FOV_DEG = 65;
+const POINT_COLOR_PROPERTIES = new Set([
+  'r', 'g', 'b', 'f_dc_0', 'f_dc_1', 'f_dc_2',
+]);
 
 // ============ 全局状态 ============
 let scene, camera, renderer, controls;
@@ -345,10 +350,11 @@ function parsePly(buffer) {
       if (p.name === 'x') positions[i * 3] = val;
       else if (p.name === 'y') positions[i * 3 + 1] = val;
       else if (p.name === 'z') positions[i * 3 + 2] = val;
-      else if (p.name === 'r') colors[i * 3] = val / 255.0;
-      else if (p.name === 'g') colors[i * 3 + 1] = val / 255.0;
-      else if (p.name === 'b') colors[i * 3 + 2] = val / 255.0;
       else if (p.name === 'scale') sizes[i] = Math.max(0.05, val);
+      else if (POINT_COLOR_PROPERTIES.has(p.name)) {
+        const color = pointPreviewColorComponent(p.name, val);
+        if (color) colors[i * 3 + color.index] = color.value;
+      }
       offset += t.size;
     }
   }
@@ -2444,22 +2450,44 @@ async function loadReconstructionLayer() {
   disposeReconPointPreview();
   if (isSpatialChunkManifest(reconManifest)) {
     splatLayer?.dispose();
-    spatialPointLayer?.dispose();
-    const sparkResult = await spatialSplatLayer.load({
-      manifest: reconManifest,
-      manifestUrl: reconManifestUrl,
-      visible: reconVisible,
-    });
-    if (isSupersededLoadResult(sparkResult)) return sparkResult;
-
-    let result = sparkResult;
-    if (sparkResult.mode !== 'spark-chunks') {
+    let result;
+    if (spatialChunkRendererMode(reconManifest) === 'spark-chunks') {
+      spatialPointLayer?.dispose();
+      const sparkResult = await spatialSplatLayer.load({
+        manifest: reconManifest,
+        manifestUrl: reconManifestUrl,
+        visible: reconVisible,
+      });
+      if (isSupersededLoadResult(sparkResult)) return sparkResult;
+      result = sparkResult;
+      if (sparkResult.mode !== 'spark-chunks') {
+        if (requiredProductionScene) {
+          throw new Error(
+            `Production scene requires full 3DGS chunk rendering: ${sparkResult.reason}`,
+          );
+        }
+        spatialSplatFallbackReason = sparkResult.reason;
+        const pointResult = spatialPointLayer.load({
+          manifest: reconManifest,
+          manifestUrl: reconManifestUrl,
+          visible: reconVisible,
+        });
+        result = {
+          ...pointResult,
+          spark_fallback_reason: spatialSplatFallbackReason,
+        };
+        console.warn(`${spatialSplatFallbackReason}; 使用分块 DC point preview`);
+      }
+    } else {
+      spatialSplatLayer?.dispose();
+      spatialSplatFallbackReason = (
+        'spatial chunk source is not explicitly declared full-3dgs'
+      );
       if (requiredProductionScene) {
         throw new Error(
-          `Production scene requires full 3DGS chunk rendering: ${sparkResult.reason}`,
+          `Production scene requires full 3DGS chunk rendering: ${spatialSplatFallbackReason}`,
         );
       }
-      spatialSplatFallbackReason = sparkResult.reason;
       const pointResult = spatialPointLayer.load({
         manifest: reconManifest,
         manifestUrl: reconManifestUrl,
@@ -2535,10 +2563,13 @@ function updateHUD() {
     const count = reconManifest?.gaussian_count ?? reconManifest?.point_count ?? 'unknown';
     const rendererState = activeReconstructionState();
     const spatial = isSpatialChunkManifest(reconManifest);
+    const activeUnit = rendererState?.mode === 'dc-point-chunks'
+      ? 'points'
+      : 'splats';
     const estimatedSpatialPoints = Number.isSafeInteger(
       rendererState?.active_estimated_points,
     )
-      ? ` · ~${rendererState.active_estimated_points.toLocaleString()} splats`
+      ? ` · ~${rendererState.active_estimated_points.toLocaleString()} ${activeUnit}`
       : '';
     reconEl.textContent = presentationMode !== 'points'
       ? '当前未展示（独立合成网格模式）'

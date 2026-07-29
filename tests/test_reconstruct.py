@@ -430,6 +430,8 @@ class TestImportEngine:
         # provenance 自动随行, 且与本次重建判定一致 (分块绝不升级信任)
         assert (chunks["source"]["geometry_usability"]
                 == m["provenance"]["geometry_usability"])
+        assert chunks["source"]["full_3dgs"] is True
+        assert chunks["source"]["render_fidelity"] == "full-3dgs"
         assert (web / ref["manifest"]).parent.joinpath(
             chunks["chunks"][0]["ply_file"]).is_file()
 

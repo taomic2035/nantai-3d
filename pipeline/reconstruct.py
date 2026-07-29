@@ -825,7 +825,11 @@ def reconstruct(photos_dir: str | Path = "photos",
             merged, web_dir / "chunks", chunk_size_m=chunk_size_m,
             # 本次重建挣得的判定随分块产物走: 免手工 --recon-manifest 链接 (忘了就丢信任标签)。
             # 分块只搬运判定, 从不产生判定, 更不因分块升级。
-            source_provenance={"geometry_usability": geometry_usability},
+            source_provenance={
+                "geometry_usability": geometry_usability,
+                "full_3dgs": full_artifact["fidelity"] == "full-3dgs",
+                "render_fidelity": full_artifact["fidelity"],
+            },
         )
         chunks_artifact = {
             "manifest": f"chunks/{MANIFEST_NAME}",

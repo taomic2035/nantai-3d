@@ -198,3 +198,27 @@ test('uses the orbit target as the spatial streaming anchor', () => {
     cameraThree,
   );
 });
+
+test('uses Spark chunks only for an explicitly full 3DGS source artifact', () => {
+  const { spatialChunkRendererMode } = subject();
+  const full = {
+    ...VALID_MANIFEST,
+    source: {
+      full_3dgs: true,
+      render_fidelity: 'full-3dgs',
+    },
+  };
+
+  assert.equal(spatialChunkRendererMode(full), 'spark-chunks');
+  for (const source of [
+    undefined,
+    { full_3dgs: false, render_fidelity: 'dc-point-preview' },
+    { full_3dgs: true, render_fidelity: 'dc-point-preview' },
+    { full_3dgs: false, render_fidelity: 'full-3dgs' },
+  ]) {
+    assert.equal(
+      spatialChunkRendererMode({ ...VALID_MANIFEST, source }),
+      'dc-point-chunks',
+    );
+  }
+});
