@@ -2092,3 +2092,96 @@ def test_build_rejects_non_linux_before_any_output_creation(
 
     assert not output.exists()
     assert not output.with_suffix(".zip.sha256").exists()
+
+
+def test_safe_regular_payload_does_not_reopen_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _safe_regular_payload must use os.open, not Path.read_bytes.
+
+    Path.read_bytes opens a fresh fd by name after the pre-open lstat, which is
+    a check-then-reopen TOCTOU.  Verified bytes must come from the same
+    controlled fd opened with O_NOFOLLOW and identity-checked via fstat.
+    """
+
+    path = tmp_path / "evidence.json"
+    path.write_bytes(b'{"valid": true}')
+
+    called: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def tracking_read_bytes(self, *args, **kwargs):
+        if self == path:
+            called.append(self)
+        return original_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", tracking_read_bytes)
+
+    builder_module._safe_regular_payload(
+        path, maximum_bytes=1024, label="test-evidence"
+    )
+
+    assert not called, "Path.read_bytes was called (should use os.open)"
+
+
+def test_safe_regular_payload_errors_do_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _safe_regular_payload error messages must not echo paths.
+
+    Absolute paths, parent directories, and untrusted labels must not appear in
+    error text.  Only the relative operator-supplied label may be echoed.
+    """
+
+    path = tmp_path / "evidence.json"
+    path.write_bytes(b'{"valid": true}')
+    absolute = str(path)
+
+    original_os_open = os.open
+
+    def failing_os_open(p, *args, **kwargs):
+        if Path(p) == path:
+            raise OSError("injected")
+        return original_os_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_os_open)
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="cannot be read",
+    ) as exc:
+        builder_module._safe_regular_payload(
+            path, maximum_bytes=1024, label="test-evidence"
+        )
+
+    message = str(exc.value)
+    assert absolute not in message
+    assert str(path.parent) not in message
+
+
+def test_source_payload_change_error_does_not_leak_absolute_path(
+    tmp_path: Path,
+) -> None:
+    """RED->GREEN: _source_payload drift error must echo the relative destination."""
+
+    path = tmp_path / "source.bin"
+    path.write_bytes(b"content")
+
+    with pytest.raises(
+        ProductionReleaseBuilderError,
+        match="changed",
+    ) as exc:
+        builder_module._source_payload(
+            path,
+            "evidence/viewer/policy.json",
+            "viewer-policy",
+            observations=[],
+            expected_sha256="0" * 64,
+            expected_bytes=7,
+        )
+
+    message = str(exc.value)
+    assert str(path) not in message
+    assert "evidence/viewer/policy.json" in message

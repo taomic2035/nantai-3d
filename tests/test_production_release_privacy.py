@@ -944,3 +944,96 @@ def test_cli_refuses_report_inside_verified_release_tree(
     )
     assert not output.exists()
     assert str(root) not in capsys.readouterr().err
+
+
+def test_privacy_release_files_rejects_scandir_toctou_root_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _release_files must re-stat root after os.scandir.
+
+    Without a post-scan identity recheck, a TOCTOU swap of the root directory to
+    a reparse point between the pre-scan lstat and os.scandir would cause the
+    iterator to follow the redirect and walk an untrusted tree.
+    """
+
+    root = tmp_path / "runtime"
+    write_modeled_production_tree(root)
+
+    scandir_called = False
+    original_lstat = Path.lstat
+    original_scandir = os.scandir
+
+    def swapping_lstat(path):
+        result = original_lstat(path)
+        if path == root and scandir_called:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    def tracking_scandir(path, *args, **kwargs):
+        nonlocal scandir_called
+        if path == root:
+            scandir_called = True
+        return original_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="changed during scan",
+    ):
+        privacy_module._release_files(root)
+
+
+def test_privacy_release_files_rejects_scandir_toctou_subdirectory_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _release_files must re-stat each subdirectory after scandir.
+
+    Each subdirectory is lstat'd, then opened via os.scandir by name.  Without
+    a post-scan identity recheck, a TOCTOU swap to a reparse point between
+    lstat and scandir would cause the iterator to follow the redirect.
+    """
+
+    root = tmp_path / "runtime"
+    write_modeled_production_tree(root)
+    sub = root / "web/viewer"
+
+    sub_scandir_called = False
+    original_lstat = Path.lstat
+    original_scandir = os.scandir
+
+    def swapping_lstat(path):
+        result = original_lstat(path)
+        if path == sub and sub_scandir_called:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    def tracking_scandir(path, *args, **kwargs):
+        nonlocal sub_scandir_called
+        if path == sub:
+            sub_scandir_called = True
+        return original_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+
+    with pytest.raises(
+        ProductionReleasePrivacyError,
+        match="changed during scan",
+    ):
+        privacy_module._release_files(root)

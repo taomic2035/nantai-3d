@@ -285,12 +285,14 @@ class _ObservedFile:
     path: Path
     byte_length: int
     sha256: str
+    label: str = "release evidence"
 
 
 def _safe_regular_payload(
     path: Path,
     *,
     maximum_bytes: int = _MAXIMUM_PUBLIC_SOURCE_BYTES,
+    label: str = "release evidence",
 ) -> tuple[bytes, _ObservedFile]:
     source = Path(path)
     _require_no_linklike_ancestors(source, label="release evidence path")
@@ -298,25 +300,19 @@ def _safe_regular_payload(
         before = source.lstat()
     except OSError as exc:
         raise ProductionReleaseBuilderError(
-            f"release evidence is unavailable: {source}"
+            f"release evidence is unavailable: {label}"
         ) from exc
     if _is_linklike(source, observed=before) or not stat.S_ISREG(
         before.st_mode
     ):
         raise ProductionReleaseBuilderError(
-            f"release evidence must be a regular non-link file: {source}"
+            f"release evidence must be a regular non-link file: {label}"
         )
     if before.st_size < 0 or before.st_size > maximum_bytes:
         raise ProductionReleaseBuilderError(
-            f"release evidence length is invalid: {source}"
+            f"release evidence length is invalid: {label}"
         )
-    try:
-        payload = source.read_bytes()
-        after = source.lstat()
-    except OSError as exc:
-        raise ProductionReleaseBuilderError(
-            f"release evidence cannot be read: {source}"
-        ) from exc
+
     def signature(value) -> tuple[int, int, int, int, int]:
         return (
             value.st_dev,
@@ -325,17 +321,63 @@ def _safe_regular_payload(
             value.st_size,
             value.st_mtime_ns,
         )
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            f"release evidence cannot be read: {label}"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleaseBuilderError(
+            f"release evidence cannot be read: {label}"
+        ) from exc
+    with stream:
+        try:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _is_linklike(source, observed=descriptor_before)
+                or not stat.S_ISREG(descriptor_before.st_mode)
+                or signature(before) != signature(descriptor_before)
+            ):
+                raise ProductionReleaseBuilderError(
+                    f"release evidence changed during read: {label}"
+                )
+            payload = stream.read(maximum_bytes + 1)
+            descriptor_after = os.fstat(stream.fileno())
+        except ProductionReleaseBuilderError:
+            raise
+        except OSError as exc:
+            raise ProductionReleaseBuilderError(
+                f"release evidence cannot be read: {label}"
+            ) from exc
+    try:
+        after = source.lstat()
+    except OSError as exc:
+        raise ProductionReleaseBuilderError(
+            f"release evidence cannot be read: {label}"
+        ) from exc
     if (
-        signature(before) != signature(after)
+        len(payload) > maximum_bytes
+        or signature(before) != signature(descriptor_after)
+        or signature(before) != signature(after)
         or len(payload) != before.st_size
     ):
         raise ProductionReleaseBuilderError(
-            f"release evidence changed during read: {source}"
+            f"release evidence changed during read: {label}"
         )
     return payload, _ObservedFile(
         path=source,
         byte_length=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
+        label=label,
     )
 
 
@@ -360,6 +402,7 @@ def _reference_payload(
     payload, observed = _safe_regular_payload(
         path,
         maximum_bytes=reference.byte_length,
+        label=reference.path,
     )
     if (
         observed.byte_length != reference.byte_length
@@ -412,6 +455,7 @@ def _load_acceptance_report(
     payload, observed = _safe_regular_payload(
         report_path,
         maximum_bytes=4 * 1024 * 1024,
+        label="acceptance report",
     )
     observations.append(observed)
     try:
@@ -534,6 +578,7 @@ def _load_closure(
     payload, observed = _safe_regular_payload(
         import_root.joinpath(*safe_posix_member_path(relative).parts),
         maximum_bytes=binding.byte_length,
+        label=relative,
     )
     observations.append(observed)
     if (
@@ -580,6 +625,7 @@ def _source_payload(
             if expected_bytes is not None
             else _MAXIMUM_PUBLIC_SOURCE_BYTES
         ),
+        label=destination,
     )
     if (
         expected_sha256 is not None
@@ -589,7 +635,7 @@ def _source_payload(
         and observed.byte_length != expected_bytes
     ):
         raise ProductionReleaseBuilderError(
-            f"public release source changed: {path}"
+            f"public release source changed: {destination}"
         )
     observations.append(observed)
     return (
@@ -644,14 +690,14 @@ def _second_pass(observations: list[_ObservedFile]) -> None:
             )
         except ReleaseArchiveError as exc:
             raise ProductionReleaseBuilderError(
-                f"release evidence changed after validation: {expected.path}"
+                f"release evidence changed after validation: {expected.label}"
             ) from exc
         if (
             observed.byte_length != expected.byte_length
             or observed.sha256 != expected.sha256
         ):
             raise ProductionReleaseBuilderError(
-                f"release evidence changed after validation: {expected.path}"
+                f"release evidence changed after validation: {expected.label}"
             )
 
 
@@ -1243,12 +1289,14 @@ def resolve_runtime_scene_payloads(
             *safe_posix_member_path(receipt.manifest_path).parts
         ),
         maximum_bytes=manifest_binding.byte_length,
+        label=receipt.manifest_path,
     )
     chunks_payload, _chunks_observed = _safe_regular_payload(
         import_root.joinpath(
             *safe_posix_member_path(receipt.chunks_manifest_path).parts
         ),
         maximum_bytes=chunks_binding.byte_length,
+        label=receipt.chunks_manifest_path,
     )
     if (
         len(manifest_payload) != manifest_binding.byte_length
@@ -1346,7 +1394,7 @@ def resolve_runtime_scene_payloads(
             or observed.sha256 != payload.sha256
         ):
             raise ProductionReleaseBuilderError(
-                f"scene payload changed after resolution: {payload.source_path}"
+                f"scene payload changed after resolution: {payload.destination_path}"
             )
     return tuple(payloads)
 
@@ -1811,7 +1859,9 @@ def build_production_release_archive(
             archive_bound = parent.create_file(output.name, mode=0o644)
         except FileExistsError as exc:
             raise ProductionReleaseBuilderError(
-                f"Production publication destination exists: {output}"
+                "Production publication destination already exists",
+                published=tuple(public_names),
+                retained=tuple(public_names),
             ) from exc
         public_names.append(output.name)
         wrapper = f"nantai-3d-{version}"
@@ -1965,7 +2015,7 @@ def build_production_release_archive(
             sidecar_bound = parent.create_file(sidecar.name, mode=0o644)
         except FileExistsError as exc:
             raise ProductionReleaseBuilderError(
-                f"Production publication destination exists: {sidecar}",
+                "Production publication sidecar destination already exists",
                 published=tuple(public_names),
                 retained=tuple(public_names),
             ) from exc

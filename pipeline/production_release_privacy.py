@@ -199,6 +199,38 @@ def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _verify_scandir_target(
+    path: Path,
+    expected: os.stat_result,
+    *,
+    label: str,
+) -> None:
+    """Re-stat one scandir target and reject identity drift or reparse.
+
+    Without this recheck, a TOCTOU swap between the pre-scan lstat and
+    os.scandir would cause the iterator to follow a reparse point and walk
+    an untrusted tree.  The iterator must already be on the stack so the
+    finally block closes it if this check fails.
+    """
+
+    suffix = f": {label}" if label else ""
+    try:
+        reopened = path.lstat()
+    except OSError as exc:
+        raise ProductionReleasePrivacyError(
+            f"release directory is unavailable{suffix}",
+        ) from exc
+    if (
+        _is_linklike(path, observed=reopened)
+        or reopened.st_dev != expected.st_dev
+        or reopened.st_ino != expected.st_ino
+        or stat.S_IFMT(reopened.st_mode) != stat.S_IFMT(expected.st_mode)
+    ):
+        raise ProductionReleasePrivacyError(
+            f"release directory changed during scan{suffix}",
+        )
+
+
 def _require_safe_policy_location(path: Path) -> Path:
     policy_path = path.expanduser().absolute()
     try:
@@ -332,11 +364,25 @@ def _release_files(
     stack = []
     try:
         try:
+            root_stat = root.lstat()
+        except OSError as exc:
+            raise ProductionReleasePrivacyError(
+                "release directory is unavailable"
+            ) from exc
+        if (
+            _is_linklike(root, observed=root_stat)
+            or not stat.S_ISDIR(root_stat.st_mode)
+        ):
+            raise ProductionReleasePrivacyError(
+                "release directory is unavailable or unsafe"
+            )
+        try:
             stack.append((root, os.scandir(root)))
         except OSError as exc:
             raise ProductionReleasePrivacyError(
                 "release directory is unavailable"
             ) from exc
+        _verify_scandir_target(root, root_stat, label="")
         while stack:
             current_path, iterator = stack[-1]
             try:
@@ -381,11 +427,13 @@ def _release_files(
                 )
             if stat.S_ISDIR(candidate_stat.st_mode):
                 try:
-                    stack.append((candidate, os.scandir(candidate)))
+                    child_iterator = os.scandir(candidate)
                 except OSError as exc:
                     raise ProductionReleasePrivacyError(
                         "release directory is unavailable"
                     ) from exc
+                stack.append((candidate, child_iterator))
+                _verify_scandir_target(candidate, candidate_stat, label=relative)
                 continue
             if not stat.S_ISREG(candidate_stat.st_mode):
                 raise ProductionReleasePrivacyError(
