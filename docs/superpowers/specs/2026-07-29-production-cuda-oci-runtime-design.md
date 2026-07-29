@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: approach A confirmed by the user; written specification awaiting approval
+Status: approved by the user on 2026-07-29
 
 ## Problem
 
