@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
+from pipeline.durable_io import first_linklike_path
 from pipeline.ingest import ingest_all
 from pipeline.ingest_manifest import (
     MANIFEST_FILENAME,
@@ -127,12 +128,23 @@ def _is_linklike(path: Path, observed: os.stat_result) -> bool:
 
 def _sha256_file(path: Path) -> tuple[int, str]:
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
     except OSError as exc:
         raise RealSceneCaptureError(
             "source media cannot be inspected"
         ) from exc
-    if _is_linklike(path, before) or not stat.S_ISREG(before.st_mode):
+    except ValueError as exc:
+        raise RealSceneCaptureError(
+            "source media cannot be inspected"
+        ) from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
         raise RealSceneCaptureError(
             "source media is not a regular file"
         )
@@ -205,13 +217,21 @@ def _stable_read_bytes(
 ) -> bytes:
     """Read a trust-critical manifest via a single controlled descriptor."""
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
     except OSError as exc:
         raise RealSceneCaptureError(
             f"{label} cannot be inspected"
         ) from exc
+    except ValueError as exc:
+        raise RealSceneCaptureError(
+            f"{label} cannot be inspected"
+        ) from exc
     if (
-        _is_linklike(path, before)
+        redirected is not None
+        or _is_linklike(path, before)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size <= 0
         or before.st_size > max_bytes

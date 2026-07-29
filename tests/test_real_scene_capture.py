@@ -731,7 +731,10 @@ def test_stable_read_bytes_rejects_path_after_swap(
         observed = original_lstat(self)
         if self == evidence:
             evidence_calls[0] += 1
-            if evidence_calls[0] >= 2:
+            # first_linklike_path calls lstat once (call 1),
+            # before = path.lstat() is call 2,
+            # after = path.lstat() is call 3 — swap here.
+            if evidence_calls[0] >= 3:
                 return SimpleNamespace(
                     st_dev=observed.st_dev,
                     st_ino=observed.st_ino + 1,
@@ -818,3 +821,69 @@ def test_stable_read_bytes_never_uses_path_open(
         label="test manifest",
     )
     assert result == payload
+
+
+# ============================================================
+# RED → GREEN: ancestor reparse / junction bypass
+# ============================================================
+
+
+def test_sha256_file_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _sha256_file must reject a reparse-point ancestor.
+
+    Without first_linklike_path, a junction in the parent chain would
+    redirect the leaf lstat to an untrusted tree.
+    """
+
+    source = tmp_path / "capture.bin"
+    source.write_bytes(b"capture")
+
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        real_scene_capture,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="source media|redirected|unsafe",
+    ):
+        real_scene_capture._sha256_file(source)
+
+
+def test_stable_read_bytes_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_read_bytes must reject a reparse-point ancestor."""
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        real_scene_capture,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="bounded regular file|redirected|unsafe",
+    ):
+        real_scene_capture._stable_read_bytes(
+            evidence,
+            label="test manifest",
+        )
