@@ -14,12 +14,10 @@ RUN printf '%s  %s\n' \
       '/tmp/apt-build.lock' | sha256sum -c - \
     && rm -f /etc/apt/sources.list.d/*.list \
     && printf '%s\n' \
-      'deb https://archive.ubuntu.com/ubuntu jammy main universe multiverse restricted' \
-      'deb https://archive.ubuntu.com/ubuntu jammy-updates main universe multiverse restricted' \
-      'deb https://security.ubuntu.com/ubuntu jammy-security main universe multiverse restricted' \
-      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy main universe multiverse restricted' \
-      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-updates main universe multiverse restricted' \
-      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-security main universe multiverse restricted' \
+      'deb https://archive.ubuntu.com/ubuntu jammy main universe' \
+      'deb https://archive.ubuntu.com/ubuntu jammy-updates main universe' \
+      'deb https://security.ubuntu.com/ubuntu jammy-security main universe' \
+      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-updates main' \
       > /etc/apt/sources.list \
     && apt-get \
       -o Acquire::Retries=5 \
@@ -155,12 +153,10 @@ RUN printf '%s  %s\n' \
       '/tmp/apt-runtime.lock' | sha256sum -c - \
     && rm -f /etc/apt/sources.list.d/*.list \
     && printf '%s\n' \
-      'deb https://archive.ubuntu.com/ubuntu jammy main universe multiverse restricted' \
-      'deb https://archive.ubuntu.com/ubuntu jammy-updates main universe multiverse restricted' \
-      'deb https://security.ubuntu.com/ubuntu jammy-security main universe multiverse restricted' \
-      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy main universe multiverse restricted' \
-      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-updates main universe multiverse restricted' \
-      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-security main universe multiverse restricted' \
+      'deb https://archive.ubuntu.com/ubuntu jammy main universe' \
+      'deb https://archive.ubuntu.com/ubuntu jammy-updates main universe' \
+      'deb https://security.ubuntu.com/ubuntu jammy-security main universe' \
+      'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260701T000000Z jammy-updates main' \
       > /etc/apt/sources.list \
     && apt-get \
       -o Acquire::Retries=5 \
