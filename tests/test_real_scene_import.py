@@ -1783,3 +1783,127 @@ def test_training_ply_sha_mismatch_is_rejected(
             tmp_path / "import",
             source_role="internal-canary",
         )
+
+
+# ============================================================
+# RED → GREEN: manifest and contract stable read boundary
+# ============================================================
+
+
+def test_import_module_has_no_raw_read_text_or_read_bytes_in_trust_paths():
+    """Trust-critical manifest and contract reads must use _read_regular_bytes."""
+    import inspect
+
+    source = inspect.getsource(import_module)
+    # _read_regular_bytes itself is allowed to use os.open
+    # but no other function should call Path.read_text or Path.read_bytes
+    lines = source.splitlines()
+    violations = []
+    for lineno, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if (
+            ".read_text(" in stripped or ".read_bytes(" in stripped
+        ) and "def _read_regular_bytes" not in stripped:
+            violations.append((lineno, stripped))
+    assert not violations, (
+        f"raw read_text/read_bytes found: {violations}"
+    )
+
+
+def test_read_regular_bytes_rejects_path_after_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The path lstat after reading must match the pre-open lstat."""
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+    original_lstat = Path.lstat
+    evidence_calls = [0]
+
+    def swapping_lstat(self):
+        observed = original_lstat(self)
+        if self == evidence:
+            evidence_calls[0] += 1
+            # first_linklike_path calls lstat once, then before.lstat,
+            # then after.lstat — swap on the 3rd call (after read)
+            if evidence_calls[0] >= 3:
+                return SimpleNamespace(
+                    st_dev=observed.st_dev,
+                    st_ino=observed.st_ino + 1,
+                    st_mode=observed.st_mode,
+                    st_size=observed.st_size,
+                    st_mtime_ns=observed.st_mtime_ns,
+                    st_ctime_ns=observed.st_ctime_ns,
+                    st_file_attributes=getattr(
+                        observed, "st_file_attributes", 0
+                    ),
+                )
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    with pytest.raises(
+        RealSceneImportError, match="changed while being read"
+    ):
+        import_module._read_regular_bytes(
+            evidence,
+            label="test manifest",
+        )
+
+
+def test_read_regular_bytes_rejects_short_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A stream returning fewer bytes than st_size must be rejected."""
+    evidence = tmp_path / "manifest.json"
+    payload = b'{"valid":true}'
+    evidence.write_bytes(payload)
+
+    original_open = import_module.os.open
+
+    def short_read_open(path, flags):
+        fd = original_open(path, flags)
+        original_fdopen = import_module.os.fdopen
+        real_stream = original_fdopen(fd, "rb", buffering=0)
+
+        class ShortStream:
+            def __init__(self, stream):
+                self._stream = stream
+                self._done = False
+
+            def read(self, size=-1):
+                if self._done:
+                    return b""
+                self._done = True
+                # Return one byte fewer than the actual file content
+                data = self._stream.read(size)
+                return data[:-1] if data else data
+
+            def fileno(self):
+                return self._stream.fileno()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self._stream.close()
+
+        def patched_fdopen(fd_arg, *a, **kw):
+            if fd_arg == fd:
+                return ShortStream(real_stream)
+            return original_fdopen(fd_arg, *a, **kw)
+
+        monkeypatch.setattr(import_module.os, "fdopen", patched_fdopen)
+        return fd
+
+    monkeypatch.setattr(import_module.os, "open", short_read_open)
+
+    with pytest.raises(
+        RealSceneImportError, match="changed while being read"
+    ):
+        import_module._read_regular_bytes(
+            evidence,
+            label="test manifest",
+        )

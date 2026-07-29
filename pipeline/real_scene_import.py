@@ -1139,8 +1139,12 @@ def _verify_coordinate_repack(
     )
     chunks_path = root / "web/chunks/chunks.json"
     try:
-        chunks_manifest = json.loads(chunks_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
+        chunks_manifest = json.loads(
+            _read_regular_bytes(
+                chunks_path, label="chunk manifest"
+            ).decode("utf-8")
+        )
+    except (UnicodeError, ValueError) as exc:
         raise RealSceneImportError(
             "chunk manifest cannot be reopened"
         ) from exc
@@ -1280,9 +1284,12 @@ def _validate_manifest_claims(
 ) -> None:
     try:
         manifest = json.loads(
-            (root / receipt.manifest_path).read_text(encoding="utf-8")
+            _read_regular_bytes(
+                root / receipt.manifest_path,
+                label="reconstruction manifest",
+            ).decode("utf-8")
         )
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError) as exc:
         raise RealSceneImportError(
             "reconstruction manifest cannot be reopened"
         ) from exc
@@ -1497,7 +1504,12 @@ def validate_real_scene_import_receipt(
         )
     scene_count, chunk_count = _verify_coordinate_repack(
         root,
-        json.loads((root / receipt.manifest_path).read_text(encoding="utf-8")),
+        json.loads(
+            _read_regular_bytes(
+                root / receipt.manifest_path,
+                label="reconstruction manifest",
+            ).decode("utf-8")
+        ),
     )
     if scene_count != receipt.gaussian_count or chunk_count != scene_count:
         raise RealSceneImportError(
@@ -1822,10 +1834,16 @@ def import_real_scene(
             extra_evidence=(evidence_prefix + result_sha,),
         )
         prepared_registration = RegistrationResult.model_validate_json(
-            registration_path.read_bytes()
+            _read_regular_bytes(
+                registration_path,
+                label="registration contract",
+            )
         )
         splat_input = SplatInput.model_validate_json(
-            splat_path.read_bytes()
+            _read_regular_bytes(
+                splat_path,
+                label="splat contract",
+            )
         )
         (root / "capture").mkdir()
         manifest = reconstruct(
