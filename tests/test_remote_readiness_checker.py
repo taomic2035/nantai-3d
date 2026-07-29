@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,117 @@ WORKER = ROOT / "cloud/remote_training_worker.py"
 CONTAINER_IDENTITY = (
     "registry.example/nantai@sha256:" + ("c" * 64)
 )
+
+
+def test_stable_payload_never_reopens_with_path_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "config.json"
+    target.write_bytes(b'{"schema":"fixture"}\n')
+    original_read_bytes = Path.read_bytes
+
+    def forbidden_read_bytes(path):
+        if path == target:
+            raise AssertionError("stable payload reopened by path")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+
+    payload, _signature = checker._stable_bytes(
+        target,
+        label="fixture",
+        maximum_bytes=1024,
+    )
+
+    assert payload == b'{"schema":"fixture"}\n'
+
+
+def test_stable_digest_streams_bounded_chunks_from_one_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "runtime"
+    payload = b"x" * (3 * 1024 * 1024 + 17)
+    target.write_bytes(payload)
+    original_fdopen = os.fdopen
+    observed_read_sizes: list[int] = []
+
+    class TrackingStream:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self._wrapped.close()
+
+        def fileno(self):
+            return self._wrapped.fileno()
+
+        def read(self, size=-1):
+            observed_read_sizes.append(size)
+            return self._wrapped.read(size)
+
+    def tracking_fdopen(fd, *args, **kwargs):
+        return TrackingStream(original_fdopen(fd, *args, **kwargs))
+
+    monkeypatch.setattr(os, "fdopen", tracking_fdopen)
+
+    digest, byte_length, _signature = checker._stable_digest(
+        target,
+        label="runtime",
+        maximum_bytes=len(payload),
+    )
+
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert byte_length == len(payload)
+    assert observed_read_sizes
+    assert all(0 < size <= 1024 * 1024 for size in observed_read_sizes)
+
+
+def test_stable_digest_rejects_open_descriptor_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "runtime"
+    target.write_bytes(b"runtime")
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(fd):
+        nonlocal calls
+        observed = original_fstat(fd)
+        calls += 1
+        if calls == 1:
+            return os.stat_result(
+                (
+                    observed.st_mode,
+                    observed.st_ino + 1,
+                    observed.st_dev,
+                    observed.st_nlink,
+                    observed.st_uid,
+                    observed.st_gid,
+                    observed.st_size,
+                    observed.st_atime,
+                    observed.st_mtime,
+                    observed.st_ctime,
+                )
+            )
+        return observed
+
+    monkeypatch.setattr(os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        checker.RemoteReadinessCheckError,
+        match="changed before read",
+    ):
+        checker._stable_digest(
+            target,
+            label="runtime",
+            maximum_bytes=1024,
+        )
 
 
 def test_remote_readiness_checker_is_directly_runnable():

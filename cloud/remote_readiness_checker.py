@@ -31,6 +31,7 @@ _MAX_CONFIG_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024
 _MAX_WORKER_BYTES = 16 * 1024 * 1024
 _MAX_RUNTIME_BYTES = 256 * 1024 * 1024
+_READ_CHUNK_BYTES = 1024 * 1024
 _CONTAINER_PATTERN = re.compile(
     r"^[A-Za-z0-9._/:+-]+@sha256:[0-9a-f]{64}$"
 )
@@ -71,16 +72,71 @@ def _stat_signature(
     )
 
 
+def _identity_signature(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
 def _stable_bytes(
     path: Path,
     *,
     label: str,
     maximum_bytes: int,
 ) -> tuple[bytes, tuple[int, int, int, int, int, int]]:
+    payload, _sha256, _byte_length, signature = _read_stable_file(
+        path,
+        label=label,
+        maximum_bytes=maximum_bytes,
+        capture_payload=True,
+    )
+    assert payload is not None
+    return payload, signature
+
+
+def _stable_digest(
+    path: Path,
+    *,
+    label: str,
+    maximum_bytes: int,
+) -> tuple[str, int, tuple[int, int, int, int, int, int]]:
+    _payload, sha256, byte_length, signature = _read_stable_file(
+        path,
+        label=label,
+        maximum_bytes=maximum_bytes,
+        capture_payload=False,
+    )
+    return sha256, byte_length, signature
+
+
+def _read_stable_file(
+    path: Path,
+    *,
+    label: str,
+    maximum_bytes: int,
+    capture_payload: bool,
+) -> tuple[
+    bytes | None,
+    str,
+    int,
+    tuple[int, int, int, int, int, int],
+]:
     try:
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
-            before.st_mode
+        reparse_flag = getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+        )
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or int(getattr(before, "st_file_attributes", 0))
+            & reparse_flag
+            or not stat.S_ISREG(before.st_mode)
         ):
             raise RemoteReadinessCheckError(
                 f"{label} must be a regular file"
@@ -89,7 +145,60 @@ def _stable_bytes(
             raise RemoteReadinessCheckError(
                 f"{label} size is invalid"
             )
-        payload = path.read_bytes()
+    except RemoteReadinessCheckError:
+        raise
+    except OSError as exc:
+        raise RemoteReadinessCheckError(
+            f"{label} cannot be read"
+        ) from exc
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RemoteReadinessCheckError(
+            f"{label} cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RemoteReadinessCheckError(
+            f"{label} cannot be read"
+        ) from exc
+
+    digest = hashlib.sha256()
+    payload_buffer = bytearray() if capture_payload else None
+    byte_length = 0
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            before_signature = _stat_signature(before)
+            if _identity_signature(before) != _identity_signature(
+                descriptor_before
+            ):
+                raise RemoteReadinessCheckError(
+                    f"{label} changed before read"
+                )
+            while True:
+                remaining = maximum_bytes - byte_length + 1
+                chunk = stream.read(
+                    min(_READ_CHUNK_BYTES, remaining)
+                )
+                if not chunk:
+                    break
+                byte_length += len(chunk)
+                digest.update(chunk)
+                if payload_buffer is not None:
+                    payload_buffer.extend(chunk)
+                if byte_length > maximum_bytes:
+                    break
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except RemoteReadinessCheckError:
         raise
@@ -99,13 +208,26 @@ def _stable_bytes(
         ) from exc
     before_signature = _stat_signature(before)
     if (
-        before_signature != _stat_signature(after)
-        or len(payload) != before.st_size
+        _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _identity_signature(before)
+        != _identity_signature(descriptor_after)
+        or before_signature != _stat_signature(after)
+        or byte_length != before.st_size
     ):
         raise RemoteReadinessCheckError(
             f"{label} changed while read"
         )
-    return payload, before_signature
+    if byte_length <= 0 or byte_length > maximum_bytes:
+        raise RemoteReadinessCheckError(
+            f"{label} size is invalid"
+        )
+    payload = (
+        bytes(payload_buffer)
+        if payload_buffer is not None
+        else None
+    )
+    return payload, digest.hexdigest(), byte_length, before_signature
 
 
 def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -335,18 +457,22 @@ def collect_remote_readiness(
             "container runtime resolved path must be absolute"
         )
     runtime_resolved = str(runtime_path)
-    runtime_bytes, runtime_signature = _stable_bytes(
+    runtime_sha256, runtime_byte_length, runtime_signature = _stable_digest(
         runtime_path,
         label="container runtime binary",
         maximum_bytes=_MAX_RUNTIME_BYTES,
     )
     checker_path = Path(__file__)
-    checker_bytes, checker_signature = _stable_bytes(
+    checker_sha256, checker_byte_length, checker_signature = _stable_digest(
         checker_path,
         label="checker executable",
         maximum_bytes=_MAX_WORKER_BYTES,
     )
-    worker_python_bytes, worker_python_signature = _stable_bytes(
+    (
+        worker_python_sha256,
+        worker_python_byte_length,
+        worker_python_signature,
+    ) = _stable_digest(
         worker_python_path,
         label="worker Python executable",
         maximum_bytes=_MAX_RUNTIME_BYTES,
@@ -391,7 +517,7 @@ def collect_remote_readiness(
         run_command=run_command,
     )
 
-    worker_bytes, worker_signature = _stable_bytes(
+    worker_sha256, worker_byte_length, worker_signature = _stable_digest(
         worker_path,
         label="remote worker",
         maximum_bytes=_MAX_WORKER_BYTES,
@@ -407,50 +533,70 @@ def collect_remote_readiness(
         raise RemoteReadinessCheckError(
             "remote worker version is invalid"
         )
-    worker_after, after_signature = _stable_bytes(
+    (
+        worker_after_sha256,
+        worker_after_byte_length,
+        after_signature,
+    ) = _stable_digest(
         worker_path,
         label="remote worker",
         maximum_bytes=_MAX_WORKER_BYTES,
     )
     if (
         worker_signature != after_signature
-        or worker_bytes != worker_after
+        or worker_sha256 != worker_after_sha256
+        or worker_byte_length != worker_after_byte_length
     ):
         raise RemoteReadinessCheckError(
             "remote worker changed during probe"
         )
-    worker_python_after, worker_python_after_sig = _stable_bytes(
+    (
+        worker_python_after_sha256,
+        worker_python_after_byte_length,
+        worker_python_after_sig,
+    ) = _stable_digest(
         worker_python_path,
         label="worker Python executable",
         maximum_bytes=_MAX_RUNTIME_BYTES,
     )
     if (
-        worker_python_bytes != worker_python_after
+        worker_python_sha256 != worker_python_after_sha256
+        or worker_python_byte_length != worker_python_after_byte_length
         or worker_python_signature != worker_python_after_sig
     ):
         raise RemoteReadinessCheckError(
             "worker Python executable changed during probe"
         )
 
-    runtime_after, runtime_after_sig = _stable_bytes(
+    (
+        runtime_after_sha256,
+        runtime_after_byte_length,
+        runtime_after_sig,
+    ) = _stable_digest(
         runtime_path,
         label="container runtime binary",
         maximum_bytes=_MAX_RUNTIME_BYTES,
     )
     if (
-        runtime_bytes != runtime_after
+        runtime_sha256 != runtime_after_sha256
+        or runtime_byte_length != runtime_after_byte_length
         or runtime_signature != runtime_after_sig
     ):
         raise RemoteReadinessCheckError(
             "container runtime binary changed during probe"
         )
-    checker_after, checker_after_sig = _stable_bytes(
+    (
+        checker_after_sha256,
+        checker_after_byte_length,
+        checker_after_sig,
+    ) = _stable_digest(
         checker_path,
         label="checker executable",
         maximum_bytes=_MAX_WORKER_BYTES,
     )
     if (
-        checker_bytes != checker_after
+        checker_sha256 != checker_after_sha256
+        or checker_byte_length != checker_after_byte_length
         or checker_signature != checker_after_sig
     ):
         raise RemoteReadinessCheckError(
@@ -484,13 +630,9 @@ def collect_remote_readiness(
         "container_runtime": runtime,
         "container_runtime_version": runtime_version,
         "container_identity": identity,
-        "worker_sha256": hashlib.sha256(
-            worker_bytes
-        ).hexdigest(),
+        "worker_sha256": worker_sha256,
         "worker_python": str(worker_python_path),
-        "worker_python_sha256": hashlib.sha256(
-            worker_python_bytes
-        ).hexdigest(),
+        "worker_python_sha256": worker_python_sha256,
         "worker_version": worker_version,
     }
 
