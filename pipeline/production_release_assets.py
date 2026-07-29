@@ -223,8 +223,27 @@ def _stable_contract_bytes(path: Path) -> bytes:
         raise ProductionReleaseAssetsError(
             "Production public contract is unsafe"
         )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
     try:
-        with path.open("rb") as stream:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProductionReleaseAssetsError(
+            "Production public contract cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleaseAssetsError(
+            "Production public contract cannot be read"
+        ) from exc
+    try:
+        with stream:
             descriptor_before = os.fstat(stream.fileno())
             payload = stream.read(_MAXIMUM_PUBLIC_CONTRACT_BYTES + 1)
             descriptor_after = os.fstat(stream.fileno())
@@ -308,7 +327,31 @@ def _archive_contract_payloads_stream(
 def _archive_contract_payloads(path: Path) -> tuple[bytes, bytes]:
     try:
         path_before = path.lstat()
-        with path.open("rb") as source:
+    except OSError as exc:
+        raise ProductionReleaseAssetsError(
+            "Production archive contracts cannot be read"
+        ) from exc
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProductionReleaseAssetsError(
+            "Production archive contracts cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ProductionReleaseAssetsError(
+            "Production archive contracts cannot be read"
+        ) from exc
+    try:
+        with stream as source:
             descriptor_before = os.fstat(source.fileno())
             if _signature(path_before) != _signature(descriptor_before):
                 raise ProductionReleaseAssetsError(

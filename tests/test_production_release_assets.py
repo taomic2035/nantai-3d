@@ -1463,3 +1463,108 @@ def _drift_stat(
     index = field_map[field]
     values[index] = values[index] + delta
     return os.stat_result(tuple(values))
+
+
+def test_stable_contract_bytes_never_uses_path_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_contract_bytes must use os.open, not Path.open."""
+
+    path = tmp_path / "contract.json"
+    path.write_bytes(b'{"valid": true}')
+
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == path:
+            opened.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    result = assets_module._stable_contract_bytes(path)
+
+    assert result == b'{"valid": true}'
+    assert not opened, "Path.open was called (should use os.open)"
+
+
+def test_stable_contract_bytes_oserror_uses_fixed_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: OSError must produce a fixed message without exc text."""
+
+    path = tmp_path / "contract.json"
+    path.write_bytes(b'{"valid": true}')
+
+    original_os_open = os.open
+
+    def failing_os_open(p, *args, **kwargs):
+        if Path(p) == path:
+            raise OSError("private absolute path leaked")
+        return original_os_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_os_open)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="cannot be read",
+    ) as exc:
+        assets_module._stable_contract_bytes(path)
+
+    message = str(exc.value)
+    assert "private absolute path leaked" not in message
+    assert str(path) not in message
+
+
+def test_archive_contract_payloads_never_reopens_archive_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _archive_contract_payloads must use os.open, not Path.open."""
+
+    archive, _receipt = _write_real_contract_archive(tmp_path / "stage")
+
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == archive:
+            opened.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    assets_module._archive_contract_payloads(archive)
+
+    assert not opened, "Path.open was called (should use os.open)"
+
+
+def test_archive_contract_payloads_oserror_uses_fixed_message(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: OSError must produce a fixed message without exc text."""
+
+    archive, _receipt = _write_real_contract_archive(tmp_path / "stage")
+
+    original_os_open = os.open
+
+    def failing_os_open(p, *args, **kwargs):
+        if Path(p) == archive:
+            raise OSError("private absolute path leaked")
+        return original_os_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_os_open)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="cannot be read",
+    ) as exc:
+        assets_module._archive_contract_payloads(archive)
+
+    message = str(exc.value)
+    assert "private absolute path leaked" not in message
+    assert str(archive) not in message
