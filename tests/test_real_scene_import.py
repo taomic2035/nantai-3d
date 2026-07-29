@@ -1907,3 +1907,63 @@ def test_read_regular_bytes_rejects_short_read(
             evidence,
             label="test manifest",
         )
+
+
+def test_validate_receipt_rejects_manifest_drift_after_digest(
+    tmp_path,
+    monkeypatch,
+):
+    """RED->GREEN: manifest re-read after digest must match binding SHA.
+
+    The digest loop proves the manifest SHA at read time using
+    ``_stream_regular_digest``.  Subsequent re-reads via
+    ``_read_regular_bytes`` must prove the SAME bytes are used, not just a
+    file with the same stat signature.  This test tampers the manifest
+    payload returned by ``_read_regular_bytes`` while leaving the on-disk
+    file (and thus ``_stream_regular_digest``) untouched, proving that
+    re-reads are now bound to the receipt artifact SHA.
+    """
+    training_root = tmp_path / "training"
+    fixture = _write_preview_training_stage(training_root)
+    monkeypatch.setattr(
+        import_module,
+        "verify_training_job_bundle",
+        lambda path: fixture.verified_bundle,
+    )
+    monkeypatch.setattr(
+        import_module,
+        "load_training_job_input_bytes",
+        lambda bundle: fixture.input_bytes,
+    )
+    output_root = tmp_path / "import"
+    import_real_scene(
+        training_root,
+        output_root,
+        source_role="internal-canary",
+        chunk_size=2.0,
+    )
+
+    original_read = import_module._read_regular_bytes
+
+    def drifting_read(path, *, label, allow_empty=False):
+        payload = original_read(
+            path, label=label, allow_empty=allow_empty,
+        )
+        if Path(path).name == "recon_manifest.json":
+            manifest = json.loads(payload)
+            manifest["_drift_marker"] = True
+            return json.dumps(manifest).encode("utf-8")
+        return payload
+
+    monkeypatch.setattr(
+        import_module, "_read_regular_bytes", drifting_read,
+    )
+
+    with pytest.raises(
+        RealSceneImportError,
+        match="differs from receipt-bound bytes",
+    ):
+        import_module.validate_real_scene_import_receipt(
+            output_root / "import-receipt.json",
+            output_root,
+        )

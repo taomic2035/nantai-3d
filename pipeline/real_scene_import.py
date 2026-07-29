@@ -659,6 +659,73 @@ def _stream_regular_digest(
     return total, digest.hexdigest()
 
 
+def _binding_for_path(
+    receipt: RealSceneImportReceipt,
+    relative_path: str,
+) -> ImportArtifactBinding:
+    """Return the receipt artifact binding for *relative_path*."""
+    for binding in receipt.artifacts:
+        if binding.path == relative_path:
+            return binding
+    raise RealSceneImportError(
+        "import artifact is not bound by receipt"
+    )
+
+
+def _read_receipt_bound_bytes(
+    root: Path,
+    receipt: RealSceneImportReceipt,
+    relative_path: str,
+    *,
+    label: str,
+) -> bytes:
+    """Re-read a receipt-bound artifact and prove it matches the digest.
+
+    The digest loop in ``validate_real_scene_import_receipt`` proves that
+    the on-disk file had ``binding.sha256`` at read time.  Subsequent
+    re-reads must prove the SAME bytes are parsed, not merely a file with
+    the same stat signature.  This re-hashes the re-read payload and
+    compares it against the receipt artifact binding, closing the
+    check-then-reopen gap between the digest loop and semantic
+    re-validation.
+    """
+    binding = _binding_for_path(receipt, relative_path)
+    payload = _read_regular_bytes(
+        root / relative_path,
+        label=label,
+        allow_empty=True,
+    )
+    if (
+        len(payload) != binding.byte_length
+        or hashlib.sha256(payload).hexdigest() != binding.sha256
+    ):
+        raise RealSceneImportError(
+            f"{label} differs from receipt-bound bytes"
+        )
+    return payload
+
+
+def _load_canonical_bound_model(
+    root: Path,
+    receipt: RealSceneImportReceipt,
+    relative_path: str,
+    model_type,
+    *,
+    label: str,
+):
+    """Load a canonical model from receipt-bound bytes."""
+    payload = _read_receipt_bound_bytes(
+        root, receipt, relative_path, label=label,
+    )
+    try:
+        model = model_type.model_validate_json(payload)
+    except ValueError as exc:
+        raise RealSceneImportError(f"{label} is invalid") from exc
+    if payload != canonical_model_bytes(model):
+        raise RealSceneImportError(f"{label} is not canonical JSON")
+    return model, payload
+
+
 def _load_canonical_model(
     path: Path,
     model_type,
@@ -1129,6 +1196,7 @@ def _canonical_vertex_bytes(rows: np.ndarray) -> bytes:
 def _verify_coordinate_repack(
     root: Path,
     manifest: dict,
+    receipt: RealSceneImportReceipt | None = None,
 ) -> tuple[int, int]:
     scene = GaussianScene.load_ply(
         root / "recon/scene_full.ply",
@@ -1137,13 +1205,20 @@ def _verify_coordinate_repack(
     scene_schema, scene_rows = _ply_vertex_rows(
         root / "recon/scene_full.ply"
     )
-    chunks_path = root / "web/chunks/chunks.json"
-    try:
-        chunks_manifest = json.loads(
-            _read_regular_bytes(
-                chunks_path, label="chunk manifest"
-            ).decode("utf-8")
+    if receipt is not None:
+        chunks_bytes = _read_receipt_bound_bytes(
+            root,
+            receipt,
+            receipt.chunks_manifest_path,
+            label="chunk manifest",
         )
+    else:
+        chunks_bytes = _read_regular_bytes(
+            root / "web/chunks/chunks.json",
+            label="chunk manifest",
+        )
+    try:
+        chunks_manifest = json.loads(chunks_bytes.decode("utf-8"))
     except (UnicodeError, ValueError) as exc:
         raise RealSceneImportError(
             "chunk manifest cannot be reopened"
@@ -1282,13 +1357,14 @@ def _validate_manifest_claims(
     root: Path,
     receipt: RealSceneImportReceipt,
 ) -> None:
+    manifest_bytes = _read_receipt_bound_bytes(
+        root,
+        receipt,
+        receipt.manifest_path,
+        label="reconstruction manifest",
+    )
     try:
-        manifest = json.loads(
-            _read_regular_bytes(
-                root / receipt.manifest_path,
-                label="reconstruction manifest",
-            ).decode("utf-8")
-        )
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeError, ValueError) as exc:
         raise RealSceneImportError(
             "reconstruction manifest cannot be reopened"
@@ -1340,18 +1416,24 @@ def _validate_metric_alignment_claims(
     assert measurement_path is not None
     assert policy_path is not None
     assert decision_path is not None
-    source, _source_bytes = _load_canonical_model(
-        root / source_path,
+    source, _source_bytes = _load_canonical_bound_model(
+        root,
+        receipt,
+        source_path,
         RegistrationResult,
         label="source alignment registration",
     )
-    observed, _observed_bytes = _load_canonical_model(
-        root / observed_path,
+    observed, _observed_bytes = _load_canonical_bound_model(
+        root,
+        receipt,
+        observed_path,
         RegistrationResult,
         label="observed aligned registration",
     )
-    prepared_bytes = _read_regular_bytes(
-        root / receipt.registration_path,
+    prepared_bytes = _read_receipt_bound_bytes(
+        root,
+        receipt,
+        receipt.registration_path,
         label="prepared import registration",
     )
     try:
@@ -1362,26 +1444,34 @@ def _validate_metric_alignment_claims(
         ) from exc
     try:
         control_points = load_canonical_control_points_bytes(
-            _read_regular_bytes(
-                root / control_points_path,
+            _read_receipt_bound_bytes(
+                root,
+                receipt,
+                control_points_path,
                 label="metric alignment control points",
             )
         )
         measurement = load_metric_alignment_measurement_bytes(
-            _read_regular_bytes(
-                root / measurement_path,
+            _read_receipt_bound_bytes(
+                root,
+                receipt,
+                measurement_path,
                 label="metric alignment measurement",
             )
         )
         policy = load_metric_alignment_policy_bytes(
-            _read_regular_bytes(
-                root / policy_path,
+            _read_receipt_bound_bytes(
+                root,
+                receipt,
+                policy_path,
                 label="metric alignment policy",
             )
         )
         decision = load_metric_alignment_decision_bytes(
-            _read_regular_bytes(
-                root / decision_path,
+            _read_receipt_bound_bytes(
+                root,
+                receipt,
+                decision_path,
                 label="metric alignment decision",
             )
         )
@@ -1427,8 +1517,10 @@ def _validate_production_closure_claims(
         )
     try:
         closure = load_production_training_closure_bytes(
-            _read_regular_bytes(
-                root / path,
+            _read_receipt_bound_bytes(
+                root,
+                receipt,
+                path,
                 label="bound production training closure",
             )
         )
@@ -1502,21 +1594,29 @@ def validate_real_scene_import_receipt(
         raise RealSceneImportError(
             "chunk payload integrity is not closed"
         )
-    scene_count, chunk_count = _verify_coordinate_repack(
+    manifest_bytes = _read_receipt_bound_bytes(
         root,
-        json.loads(
-            _read_regular_bytes(
-                root / receipt.manifest_path,
-                label="reconstruction manifest",
-            ).decode("utf-8")
-        ),
+        receipt,
+        receipt.manifest_path,
+        label="reconstruction manifest",
+    )
+    try:
+        repack_manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise RealSceneImportError(
+            "reconstruction manifest cannot be reopened"
+        ) from exc
+    scene_count, chunk_count = _verify_coordinate_repack(
+        root, repack_manifest, receipt=receipt,
     )
     if scene_count != receipt.gaussian_count or chunk_count != scene_count:
         raise RealSceneImportError(
             "receipt Gaussian counts differ from reconstructed bytes"
         )
-    declared_integrity, _integrity_bytes = _load_canonical_model(
-        root / receipt.integrity_report_path,
+    declared_integrity, _integrity_bytes = _load_canonical_bound_model(
+        root,
+        receipt,
+        receipt.integrity_report_path,
         RealSceneImportIntegrity,
         label="real-scene import integrity report",
     )
