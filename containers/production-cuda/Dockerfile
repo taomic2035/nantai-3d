@@ -37,6 +37,9 @@ ADD --checksum=sha256:8aa81a785e0daf3ed60d0b9930a56c0f337280e6989351d1f1b74e21cf
 ADD --checksum=sha256:ee6d3d360a1e363ad2f1703b602da5a8987485bff812d0ae8aa4a6e672b994c4 \
     https://files.pythonhosted.org/packages/ee/86/93a22f779f3810be8ddbaae9073c7adfed97d4703a2953e66d36bdb4037a/nerfstudio-1.1.5-py3-none-any.whl \
     /tmp/artifacts/nerfstudio-1.1.5-py3-none-any.whl
+ADD --checksum=sha256:bb0b899b3830c02fdf3dbde48ea59611833f366fef836e5c32cf8145134b7d3d \
+    https://files.pythonhosted.org/packages/2c/ba/a4bc465d36f6aafbff89da1bf67bcc6a97475b1d2300a74a778dcb293cef/pyliblzfse-0.4.1.tar.gz \
+    /tmp/artifacts/pyliblzfse-0.4.1.tar.gz
 ADD --checksum=sha256:051833f6174e672eb313ee1c70dbcaf97e558dc46237215407933d28f40bca85 \
     https://download-r2.pytorch.org/whl/cu118/torch-2.1.2%2Bcu118-cp311-cp311-linux_x86_64.whl \
     /tmp/artifacts/torch-2.1.2+cu118-cp311-cp311-linux_x86_64.whl
@@ -72,11 +75,11 @@ RUN printf '%s  %s\n' \
       'b9f94a93d49e25ba8bb947389c16c4f3d008e730408c7f0adc8f6ba3303e64a9' \
       '/tmp/requirements.lock' | sha256sum -c - \
     && awk ' \
-      /^(gsplat|nerfstudio|torch|torchvision)(==| @)/ { skip=1; next } \
+      /^(gsplat|nerfstudio|pyliblzfse|torch|torchvision)(==| @)/ { skip=1; next } \
       skip && /^[A-Za-z0-9][A-Za-z0-9._-]*(==| @)/ { skip=0 } \
       !skip { print } \
     ' /tmp/requirements.lock > /tmp/base-requirements.lock \
-    && ! grep -Eq '^(gsplat|nerfstudio|torch|torchvision)(==| @)' \
+    && ! grep -Eq '^(gsplat|nerfstudio|pyliblzfse|torch|torchvision)(==| @)' \
       /tmp/base-requirements.lock \
     && /opt/python/bin/python3.11 -m pip install \
       --no-deps \
@@ -92,6 +95,9 @@ RUN printf '%s  %s\n' \
       /tmp/artifacts/nerfstudio-1.1.5-py3-none-any.whl \
     && /opt/python/bin/python3.11 -m pip install --no-build-isolation \
       --no-deps --no-index \
+      /tmp/artifacts/pyliblzfse-0.4.1.tar.gz \
+    && /opt/python/bin/python3.11 -m pip install --no-build-isolation \
+      --no-deps --no-index \
       /tmp/artifacts/gsplat-1.4.0.tar.gz \
     && /opt/python/bin/python3.11 -m pip check \
     && /opt/python/bin/python3.11 -c \
@@ -102,7 +108,7 @@ RUN printf '%s  %s\n' \
 COPY pipeline /opt/nantai/repo/pipeline
 COPY containers/production-cuda/runtime-lock.json /opt/nantai/runtime-lock.json
 RUN PYTHONPATH=/opt/nantai/repo /opt/python/bin/python3.11 -c \
-      'from pathlib import Path; from pipeline.production_cuda_runtime_lock import load_production_cuda_runtime_lock_bytes; lock=load_production_cuda_runtime_lock_bytes(Path("/opt/nantai/runtime-lock.json").read_bytes()); assert lock.content_sha256 == "1721de5f38dd4710d1d7d72fa3e217d96793a2d4430950d1829a25f25227bf0d"'
+      'from pathlib import Path; from pipeline.production_cuda_runtime_lock import load_production_cuda_runtime_lock_bytes; lock=load_production_cuda_runtime_lock_bytes(Path("/opt/nantai/runtime-lock.json").read_bytes()); assert lock.content_sha256 == "c84760e12c405d5b20b84d8fffae7ac8bb0fb54c6259756d588be5ec31424c1d"'
 
 # linux/amd64 manifest:
 # sha256:7c8e5ee1e8531f0d19f8d7e78c5b7efa9c455697fa96e62f083f361d6842e452
@@ -151,7 +157,7 @@ LABEL org.opencontainers.image.source="https://github.com/taomic2035/nantai-3d" 
       org.opencontainers.image.licenses="MIT" \
       io.nantai.base.builder="nvidia/cuda:11.8.0-devel-ubuntu22.04@sha256:94fd755736cb58979173d491504f0b573247b1745250249415b07fefc738e41f" \
       io.nantai.base.runtime="nvidia/cuda:11.8.0-runtime-ubuntu22.04@sha256:eaaccb3528ceca110601131434ab467e41d694a41e8c9bf280fb27ac18fcb29b" \
-      io.nantai.runtime-lock.content-sha256="1721de5f38dd4710d1d7d72fa3e217d96793a2d4430950d1829a25f25227bf0d"
+      io.nantai.runtime-lock.content-sha256="c84760e12c405d5b20b84d8fffae7ac8bb0fb54c6259756d588be5ec31424c1d"
 
 ENV PYTHONHOME=/opt/python \
     PYTHONPATH=/opt/nantai/repo \

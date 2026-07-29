@@ -107,6 +107,17 @@ def _runtime_lock(
                 ),
             ),
             LockedSourceArtifact(
+                role="pyliblzfse-sdist",
+                version="0.4.1",
+                filename="pyliblzfse-0.4.1.tar.gz",
+                url=(
+                    "https://files.pythonhosted.org/packages/source/p/"
+                    "pyliblzfse/pyliblzfse-0.4.1.tar.gz"
+                ),
+                byte_length=1,
+                sha256=_digest("pyliblzfse-sdist"),
+            ),
+            LockedSourceArtifact(
                 role="torch-wheel",
                 version="2.1.2+cu118",
                 filename=(

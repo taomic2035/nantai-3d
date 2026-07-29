@@ -95,6 +95,19 @@ def _source_artifacts() -> tuple[LockedSourceArtifact, ...]:
             ),
         ),
         LockedSourceArtifact(
+            role="pyliblzfse-sdist",
+            version="0.4.1",
+            filename="pyliblzfse-0.4.1.tar.gz",
+            url=(
+                "https://files.pythonhosted.org/packages/source/p/pyliblzfse/"
+                "pyliblzfse-0.4.1.tar.gz"
+            ),
+            byte_length=47_666,
+            sha256=(
+                "bb0b899b3830c02fdf3dbde48ea59611833f366fef836e5c32cf8145134b7d3d"
+            ),
+        ),
+        LockedSourceArtifact(
             role="torch-wheel",
             version="2.1.2+cu118",
             filename=(

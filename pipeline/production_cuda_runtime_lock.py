@@ -35,6 +35,7 @@ _SOURCE_ROLES = (
     "cpython-source",
     "gsplat-sdist",
     "nerfstudio-wheel",
+    "pyliblzfse-sdist",
     "torch-wheel",
     "torchvision-wheel",
 )
@@ -120,6 +121,7 @@ class LockedSourceArtifact(FrozenModel):
         "cpython-source",
         "gsplat-sdist",
         "nerfstudio-wheel",
+        "pyliblzfse-sdist",
         "torch-wheel",
         "torchvision-wheel",
     ]

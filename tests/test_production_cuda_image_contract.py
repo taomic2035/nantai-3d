@@ -53,6 +53,8 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
         "LD_LIBRARY_PATH=/opt/python/lib "
         "/opt/python/bin/python3.11 -c"
     ) in dockerfile
+    assert "/tmp/artifacts/pyliblzfse-0.4.1.tar.gz" in dockerfile
+    assert "gsplat|nerfstudio|pyliblzfse|torch|torchvision" in dockerfile
     assert "curl |" not in dockerfile
     assert ":latest" not in dockerfile
     assert "pip install nerfstudio==1.1.5" not in dockerfile
@@ -85,6 +87,7 @@ def test_runtime_lock_has_exact_production_contract() -> None:
         "cpython-source": "3.11.9",
         "gsplat-sdist": "1.4.0",
         "nerfstudio-wheel": "1.1.5",
+        "pyliblzfse-sdist": "0.4.1",
         "torch-wheel": "2.1.2+cu118",
         "torchvision-wheel": "0.16.2+cu118",
     }
