@@ -1312,9 +1312,23 @@ def load_remote_shell_preflight_report(
         )
     descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(report_path.absolute().anchor), report_path
+        )
         before = report_path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
-            before.st_mode
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote preflight report cannot be read"
+        ) from exc
+    except ValueError as exc:
+        raise RemoteShellExecutionError(
+            "remote preflight report cannot be read"
+        ) from exc
+    try:
+        if (
+            redirected is not None
+            or stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
         ):
             raise RemoteShellExecutionError(
                 "remote preflight report must be a regular file"
@@ -1479,10 +1493,25 @@ def load_remote_shell_job_ref(
         raise RemoteShellExecutionError(
             "remote job reference path must be absolute"
         )
+    descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(job_path.absolute().anchor), job_path
+        )
         before = job_path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
-            before.st_mode
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote job reference cannot be read"
+        ) from exc
+    except ValueError as exc:
+        raise RemoteShellExecutionError(
+            "remote job reference cannot be read"
+        ) from exc
+    try:
+        if (
+            redirected is not None
+            or stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
         ):
             raise RemoteShellExecutionError(
                 "remote job reference must be a regular file"
@@ -1491,7 +1520,37 @@ def load_remote_shell_job_ref(
             raise RemoteShellExecutionError(
                 "remote job reference size is invalid"
             )
-        payload = job_path.read_bytes()
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(job_path, flags)
+        descriptor_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_before.st_mode)
+            or _open_file_identity_signature(descriptor_before)
+            != _open_file_identity_signature(before)
+        ):
+            raise RemoteShellExecutionError(
+                "remote job reference changed while read"
+            )
+        chunks: list[bytes] = []
+        measured = 0
+        while measured <= _MAX_STATUS_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(
+                    64 * 1024,
+                    _MAX_STATUS_BYTES + 1 - measured,
+                ),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            measured += len(chunk)
+        payload = b"".join(chunks)
+        descriptor_after = os.fstat(descriptor)
         after = job_path.lstat()
     except RemoteShellExecutionError:
         raise
@@ -1499,8 +1558,21 @@ def load_remote_shell_job_ref(
         raise RemoteShellExecutionError(
             "remote job reference cannot be read"
         ) from exc
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     if (
-        _stat_signature(before) != _stat_signature(after)
+        len(payload) > _MAX_STATUS_BYTES
+        or _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+        or _open_file_identity_signature(before)
+        != _open_file_identity_signature(descriptor_before)
+        or _open_file_identity_signature(descriptor_after)
+        != _open_file_identity_signature(after)
         or len(payload) != before.st_size
     ):
         raise RemoteShellExecutionError(
@@ -1547,9 +1619,23 @@ def load_remote_container_lifecycle_receipt(
         )
     descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(lifecycle_path.absolute().anchor), lifecycle_path
+        )
         before = lifecycle_path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
-            before.st_mode
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote container lifecycle cannot be read"
+        ) from exc
+    except ValueError as exc:
+        raise RemoteShellExecutionError(
+            "remote container lifecycle cannot be read"
+        ) from exc
+    try:
+        if (
+            redirected is not None
+            or stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
         ):
             raise RemoteShellExecutionError(
                 "remote container lifecycle must be a regular file"

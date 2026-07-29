@@ -4629,3 +4629,125 @@ def test_poll_rejected_observation_does_not_publish_status_or_enable_fetch(
     with pytest.raises(RemoteShellExecutionError, match="succeeded"):
         executor.fetch(job, tmp_path / "result")
     assert len(runner.calls) == calls_before_fetch
+
+
+# ============================================================
+# RED → GREEN: ancestor reparse / junction bypass
+# ============================================================
+
+
+def test_load_remote_shell_preflight_report_rejects_ancestor_reparse(
+    tmp_path,
+    monkeypatch,
+):
+    """RED->GREEN: preflight report loader must reject reparse ancestors."""
+    config = _config(tmp_path)
+    runner = _Runner()
+    runner.responses.append(_readiness_response(config))
+    report = run_remote_shell_preflight(
+        config,
+        probe_remote=True,
+        run_command=runner,
+        now=lambda: _T0,
+    )
+    report_path = tmp_path / "preflight.json"
+    remote_module.publish_remote_shell_preflight(report, report_path)
+
+    sentinel = tmp_path / "ancestor-reparse"
+    original = remote_module.first_linklike_path
+
+    def fake_first_linklike_path(root, leaf):
+        if Path(leaf) == report_path:
+            return sentinel
+        return original(root, leaf)
+
+    monkeypatch.setattr(
+        remote_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="regular file|redirected|unsafe|immutable",
+    ):
+        remote_module.load_remote_shell_preflight_report(report_path)
+
+
+def test_load_remote_shell_job_ref_rejects_ancestor_reparse(
+    tmp_path,
+    monkeypatch,
+):
+    """RED->GREEN: job ref loader must reject reparse ancestors."""
+    job = RemoteShellJobRef(
+        job_id="job-1",
+        attempt_id="attempt-1",
+        submitted_at_utc=_T0,
+        request_sha256="a" * 64,
+        training_bundle_sha256="b" * 64,
+        runtime_policy_sha256="c" * 64,
+        config_identity_sha256="e" * 64,
+        remote_job_path="/srv/nantai-jobs/job-1/attempt-1",
+    )
+    path = tmp_path / "remote-job.private.json"
+    path.write_bytes(canonical_remote_shell_job_ref_bytes(job))
+
+    sentinel = tmp_path / "ancestor-reparse"
+    original = remote_module.first_linklike_path
+
+    def fake_first_linklike_path(root, leaf):
+        if Path(leaf) == path:
+            return sentinel
+        return original(root, leaf)
+
+    monkeypatch.setattr(
+        remote_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="regular file|redirected|unsafe|immutable",
+    ):
+        remote_module.load_remote_shell_job_ref(path)
+
+
+def test_load_remote_container_lifecycle_receipt_rejects_ancestor_reparse(
+    tmp_path,
+    monkeypatch,
+):
+    """RED->GREEN: lifecycle receipt loader must reject reparse ancestors."""
+    job = RemoteShellJobRef(
+        job_id="job-1",
+        attempt_id="attempt-1",
+        submitted_at_utc=_T0,
+        request_sha256="a" * 64,
+        training_bundle_sha256="b" * 64,
+        runtime_policy_sha256="c" * 64,
+        config_identity_sha256="e" * 64,
+        remote_job_path="/srv/nantai-jobs/job-1/attempt-1",
+    )
+    receipt = _lifecycle_receipt(job)
+    path = tmp_path / "lifecycle.json"
+    path.write_bytes(canonical_container_lifecycle_bytes(receipt))
+
+    sentinel = tmp_path / "ancestor-reparse"
+    original = remote_module.first_linklike_path
+
+    def fake_first_linklike_path(root, leaf):
+        if Path(leaf) == path:
+            return sentinel
+        return original(root, leaf)
+
+    monkeypatch.setattr(
+        remote_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RemoteShellExecutionError,
+        match="regular file|redirected|unsafe|immutable",
+    ):
+        remote_module.load_remote_container_lifecycle_receipt(path)
