@@ -18,6 +18,8 @@ import numpy as np
 from pipeline import real_scene_import
 from pipeline.durable_io import (
     DurableIOError,
+    _is_linklike,
+    first_linklike_path,
     flush_directory,
     flush_file,
     publish_directory_noreplace,
@@ -60,27 +62,64 @@ class _WorldCamera:
     forward: np.ndarray
 
 
-def _identity(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+_MAXIMUM_VIEWER_INPUT_BYTES = 16 * 1024 * 1024
+
+
+def _stat_signature(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Cross-surface file identity (lstat vs fstat).
+
+    Only the file type bits of st_mode are compared, because permission bits
+    can differ between path-based and descriptor-based stat on some platforms.
+    """
+
     return (
         stat_result.st_dev,
         stat_result.st_ino,
-        stat_result.st_mode,
+        stat.S_IFMT(stat_result.st_mode),
         stat_result.st_size,
         stat_result.st_mtime_ns,
     )
 
 
 def _read_regular_bytes(path: Path, *, label: str) -> bytes:
+    candidate = Path(path).expanduser().absolute()
     try:
-        before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        redirected = first_linklike_path(Path(candidate.anchor), candidate)
+        before = candidate.lstat()
+        if (
+            redirected is not None
+            or stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or _is_linklike(candidate, observed=before)
+        ):
             raise ViewerInputMaterializationError(
-                f"{label} must be a real regular file"
+                f"{label} is missing or link-like"
             )
-        with path.open("rb") as stream:
-            payload = stream.read()
-            after = os.fstat(stream.fileno())
-        final = path.lstat()
+        if before.st_size > _MAXIMUM_VIEWER_INPUT_BYTES:
+            raise ViewerInputMaterializationError(
+                f"{label} size is outside the allowed range"
+            )
+        descriptor = os.open(
+            candidate,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(descriptor_before.st_mode)
+                or _stat_signature(descriptor_before) != _stat_signature(before)
+            ):
+                raise ViewerInputMaterializationError(
+                    f"{label} changed before read"
+                )
+            payload = stream.read(_MAXIMUM_VIEWER_INPUT_BYTES + 1)
+            descriptor_after = os.fstat(stream.fileno())
+        after = candidate.lstat()
     except ViewerInputMaterializationError:
         raise
     except OSError as exc:
@@ -88,13 +127,16 @@ def _read_regular_bytes(path: Path, *, label: str) -> bytes:
             f"{label} cannot be read"
         ) from exc
     if (
-        not payload
-        or _identity(before) != _identity(after)
-        or _identity(after) != _identity(final)
+        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+        or len(payload) > _MAXIMUM_VIEWER_INPUT_BYTES
+        or len(payload) != before.st_size
     ):
         raise ViewerInputMaterializationError(
-            f"{label} is empty or changed while being read"
+            f"{label} changed while being read"
         )
+    if not payload:
+        raise ViewerInputMaterializationError(f"{label} is empty")
     return payload
 
 

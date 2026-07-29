@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 import pipeline.real_scene_import as import_module
+import pipeline.viewer_inputs as viewer_inputs_module
 import pipeline.viewer_session as session_module
 from pipeline.real_dataset import (
     LocalCaptureSource,
@@ -236,4 +237,118 @@ def test_materializer_rejects_preview_or_unverified_import_root(
         materialize_production_viewer_inputs(
             import_root=unverified,
             output_dir=tmp_path / "viewer-inputs",
+        )
+
+
+def test_read_regular_bytes_does_not_reopen_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _read_regular_bytes must use os.open, not Path.open.
+
+    Path.open reopens by name after the pre-open lstat, which is a
+    check-then-reopen TOCTOU that follows symlinks.  Verified bytes must
+    come from a single fd opened with O_NOFOLLOW.
+    """
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid": true}')
+
+    called: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == evidence:
+            called.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    viewer_inputs_module._read_regular_bytes(evidence, label="test manifest")
+
+    assert not called, "Path.open was called (should use os.open)"
+
+
+def test_read_regular_bytes_rejects_oversized_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _read_regular_bytes must enforce a bounded file size.
+
+    Without a pre-size check, an attacker could supply an enormous file
+    that exhausts memory during stream.read().
+    """
+
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid": true}')
+
+    monkeypatch.setattr(
+        viewer_inputs_module,
+        "_MAXIMUM_VIEWER_INPUT_BYTES",
+        4,
+    )
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="outside the allowed range|exceeds",
+    ):
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
+        )
+
+
+def test_read_regular_bytes_rejects_short_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: a stream returning fewer bytes than st_size must be rejected."""
+
+    evidence = tmp_path / "manifest.json"
+    payload = b'{"valid":true}'
+    evidence.write_bytes(payload)
+
+    original_open = viewer_inputs_module.os.open
+
+    def short_read_open(path, flags):
+        fd = original_open(path, flags)
+        original_fdopen = viewer_inputs_module.os.fdopen
+        real_stream = original_fdopen(fd, "rb", buffering=0)
+
+        class ShortStream:
+            def __init__(self, stream):
+                self._stream = stream
+                self._done = False
+
+            def read(self, size=-1):
+                if self._done:
+                    return b""
+                self._done = True
+                data = self._stream.read(size)
+                return data[:-1] if data else data
+
+            def fileno(self):
+                return self._stream.fileno()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self._stream.close()
+
+        def patched_fdopen(fd_arg, *a, **kw):
+            if fd_arg == fd:
+                return ShortStream(real_stream)
+            return original_fdopen(fd_arg, *a, **kw)
+
+        monkeypatch.setattr(viewer_inputs_module.os, "fdopen", patched_fdopen)
+        return fd
+
+    monkeypatch.setattr(viewer_inputs_module.os, "open", short_read_open)
+
+    with pytest.raises(
+        ViewerInputMaterializationError,
+        match="changed while being read",
+    ):
+        viewer_inputs_module._read_regular_bytes(
+            evidence, label="test manifest"
         )
