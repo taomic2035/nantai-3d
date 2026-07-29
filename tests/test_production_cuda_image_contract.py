@@ -48,8 +48,11 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
     assert "TORCH_CUDA_ARCH_LIST=\"7.5;8.0;8.6;8.9;9.0+PTX\"" in dockerfile
     assert "snapshot.ubuntu.com/ubuntu/20260701T000000Z" in dockerfile
     assert dockerfile.count("APT::Update::Error-Mode=any") == 2
-    assert dockerfile.count("Acquire::Retries=5") == 2
-    assert dockerfile.count("Acquire::https::Timeout=30") == 2
+    # Both the index refresh and the package download need bounded retries in
+    # each stage.  Snapshot metadata can be healthy while one .deb transiently
+    # returns 5xx.
+    assert dockerfile.count("Acquire::Retries=5") == 4
+    assert dockerfile.count("Acquire::https::Timeout=30") == 4
     assert "install -m 0755 /opt/python/bin/python3.11" in dockerfile
     assert "COPY --from=builder /opt/python /opt/python" in dockerfile
     assert (
@@ -70,6 +73,16 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
     assert "pip install nerfstudio==1.1.5" not in dockerfile
     assert "--mount=type=secret" not in dockerfile
     assert "ARG TOKEN" not in dockerfile
+
+
+def test_dockerfile_oci_label_binds_current_runtime_lock() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    lock = _runtime_lock()
+
+    assert (
+        f'io.nantai.runtime-lock.content-sha256="{lock.content_sha256}"'
+        in dockerfile
+    )
 
 
 def test_auxiliary_lock_hashes_match_actual_bytes() -> None:

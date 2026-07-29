@@ -23,7 +23,10 @@ RUN printf '%s  %s\n' \
       -o Acquire::https::Timeout=30 \
       -o APT::Update::Error-Mode=any \
       update \
-    && xargs --no-run-if-empty apt-get install -y --no-install-recommends \
+    && xargs --no-run-if-empty apt-get \
+      -o Acquire::Retries=5 \
+      -o Acquire::https::Timeout=30 \
+      install -y --no-install-recommends \
       < /tmp/apt-build.lock \
     && while IFS= read -r binding; do \
       package="${binding%%=*}"; expected="${binding#*=}"; \
@@ -150,7 +153,10 @@ RUN printf '%s  %s\n' \
       -o Acquire::https::Timeout=30 \
       -o APT::Update::Error-Mode=any \
       update \
-    && xargs --no-run-if-empty apt-get install -y --no-install-recommends \
+    && xargs --no-run-if-empty apt-get \
+      -o Acquire::Retries=5 \
+      -o Acquire::https::Timeout=30 \
+      install -y --no-install-recommends \
       < /tmp/apt-runtime.lock \
     && while IFS= read -r binding; do \
       package="${binding%%=*}"; expected="${binding#*=}"; \
@@ -179,7 +185,7 @@ LABEL org.opencontainers.image.source="https://github.com/taomic2035/nantai-3d" 
       org.opencontainers.image.licenses="MIT" \
       io.nantai.base.builder="nvidia/cuda:11.8.0-devel-ubuntu22.04@sha256:94fd755736cb58979173d491504f0b573247b1745250249415b07fefc738e41f" \
       io.nantai.base.runtime="nvidia/cuda:11.8.0-runtime-ubuntu22.04@sha256:eaaccb3528ceca110601131434ab467e41d694a41e8c9bf280fb27ac18fcb29b" \
-      io.nantai.runtime-lock.content-sha256="c84760e12c405d5b20b84d8fffae7ac8bb0fb54c6259756d588be5ec31424c1d"
+      io.nantai.runtime-lock.content-sha256="562f54435d92066bc1bc2a5f842b0e4a3571613aee1729983e33d32fb8917a3a"
 
 ENV PYTHONHOME=/opt/python \
     PYTHONPATH=/opt/nantai/repo \
