@@ -337,6 +337,12 @@ class ProductionCudaImageRelease(FrozenModel):
             _ATTESTATION_ROLES
         ):
             raise ValueError("attestation role set or order is invalid")
+        if len(
+            {item.manifest_digest for item in self.attestations}
+        ) != len(self.attestations):
+            raise ValueError(
+                "attestation manifest digests must be distinct"
+            )
         expected_content = hashlib.sha256(
             canonical_production_cuda_image_release_signing_bytes(self)
         ).hexdigest()

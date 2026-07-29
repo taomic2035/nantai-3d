@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +23,9 @@ from pipeline.production_cuda_image_release import (
 from pipeline.production_runtime_evidence import (
     training_cli_schema_sha256,
 )
+from scripts import emit_production_cuda_image_release as release_script
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _digest(label: str) -> str:
@@ -52,11 +56,16 @@ def _options() -> tuple[str, ...]:
     )
 
 
-def _valid_probe() -> ProductionCudaImageProbe:
+def _valid_probe(
+    *,
+    runtime_lock_sha256: str | None = None,
+) -> ProductionCudaImageProbe:
     options = _options()
     return ProductionCudaImageProbe.create(
         platform="linux/amd64",
-        runtime_lock_sha256=_digest("runtime-lock"),
+        runtime_lock_sha256=(
+            runtime_lock_sha256 or _digest("runtime-lock")
+        ),
         python_version="3.11.9",
         torch_version="2.1.2+cu118",
         torch_cuda_version="11.8",
@@ -391,3 +400,253 @@ def test_probe_and_release_reject_noncanonical_json() -> None:
             match="not canonical",
         ):
             loader(pretty)
+
+
+def _producer_fixture(tmp_path: Path) -> tuple[list[str], Path]:
+    runtime_lock_bytes = (
+        ROOT / "containers" / "production-cuda" / "runtime-lock.json"
+    ).read_bytes()
+    runtime_lock = tmp_path / "runtime-lock.json"
+    runtime_lock.write_bytes(runtime_lock_bytes)
+    probe = _valid_probe(
+        runtime_lock_sha256=hashlib.sha256(
+            runtime_lock_bytes
+        ).hexdigest()
+    )
+    probe_path = tmp_path / "image-probe.json"
+    probe_path.write_bytes(
+        canonical_production_cuda_image_probe_bytes(probe)
+    )
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_bytes(b"FROM example.invalid@sha256:bound\n")
+    requirements = tmp_path / "requirements.lock"
+    requirements.write_bytes(
+        b"example==1.0 \\\n"
+        b"    --hash=sha256:"
+        + _digest("example-wheel").encode("ascii")
+        + b"\n"
+    )
+    output = tmp_path / "image-release.json"
+    image_digest = f"sha256:{_digest('published-image')}"
+    argv = [
+        "--runtime-lock",
+        str(runtime_lock),
+        "--probe",
+        str(probe_path),
+        "--source-commit",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--image-name",
+        "ghcr.io/taomic2035/nantai-3d-production-cuda",
+        "--image-digest",
+        image_digest,
+        "--platform-manifest-digest",
+        f"sha256:{_digest('amd64-manifest')}",
+        "--dockerfile",
+        str(dockerfile),
+        "--requirements-lock",
+        str(requirements),
+        "--workflow-repository",
+        "taomic2035/nantai-3d",
+        "--workflow-run-id",
+        "30413151667",
+        "--workflow-run-attempt",
+        "1",
+    ]
+    for role, predicate, attestation_digest in (
+        (
+            "buildkit-provenance",
+            "https://slsa.dev/provenance/v1",
+            f"sha256:{_digest('buildkit-provenance')}",
+        ),
+        (
+            "buildkit-sbom",
+            "https://spdx.dev/Document",
+            f"sha256:{_digest('buildkit-sbom')}",
+        ),
+        (
+            "github-build-provenance",
+            "https://slsa.dev/provenance/v1",
+            f"sha256:{_digest('github-provenance')}",
+        ),
+    ):
+        argv.extend(
+            [
+                "--attestation",
+                f"{role},{predicate},{attestation_digest}",
+            ]
+        )
+    argv.extend(["--output", str(output)])
+    return argv, output
+
+
+def test_release_requires_distinct_attestation_manifests() -> None:
+    probe = _valid_probe()
+    attestations = list(_attestations())
+    attestations[0] = attestations[0].model_copy(
+        update={
+            "manifest_digest": (
+                attestations[1].manifest_digest
+            )
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="attestation manifest digests must be distinct",
+    ):
+        ProductionCudaImageRelease.create(
+            source_commit=(
+                "0123456789abcdef0123456789abcdef01234567"
+            ),
+            image_name=(
+                "ghcr.io/taomic2035/nantai-3d-production-cuda"
+            ),
+            image_digest=f"sha256:{_digest('published-image')}",
+            platform_manifest_digest=(
+                f"sha256:{_digest('amd64-manifest')}"
+            ),
+            dockerfile_sha256=_digest("dockerfile"),
+            requirements_lock_sha256=_digest("requirements-lock"),
+            image_probe=probe,
+            workflow_repository="taomic2035/nantai-3d",
+            workflow_run_id=304_131_516_67,
+            workflow_run_attempt=1,
+            attestations=tuple(attestations),
+        )
+
+
+def test_release_producer_hashes_inputs_and_emits_canonical_receipt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv, output = _producer_fixture(tmp_path)
+
+    assert release_script.main(argv) == 0
+
+    release = load_production_cuda_image_release_bytes(
+        output.read_bytes()
+    )
+    summary = json.loads(capsys.readouterr().out)
+    assert summary == {
+        "image_identity": release.image_identity,
+        "receipt_sha256": release.content_sha256,
+    }
+    assert release.dockerfile_sha256 == hashlib.sha256(
+        (tmp_path / "Dockerfile").read_bytes()
+    ).hexdigest()
+    assert release.requirements_lock_sha256 == hashlib.sha256(
+        (tmp_path / "requirements.lock").read_bytes()
+    ).hexdigest()
+    assert release.runtime_lock_sha256 == hashlib.sha256(
+        (tmp_path / "runtime-lock.json").read_bytes()
+    ).hexdigest()
+    assert release.runtime_policy_image_facts().expected_container_identity == (
+        release.image_identity
+    )
+
+
+def test_release_producer_reopens_every_local_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv, _ = _producer_fixture(tmp_path)
+    observed: list[str] = []
+    original = release_script._read_stable_regular_file
+
+    def recording_read(path: Path, *, label: str, byte_cap: int):
+        observed.append(label)
+        return original(path, label=label, byte_cap=byte_cap)
+
+    monkeypatch.setattr(
+        release_script,
+        "_read_stable_regular_file",
+        recording_read,
+    )
+
+    assert release_script.main(argv) == 0
+    assert observed == [
+        "runtime lock",
+        "image probe",
+        "Dockerfile",
+        "requirements lock",
+        "published receipt",
+    ]
+
+
+def test_release_producer_refuses_existing_output_before_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv, output = _producer_fixture(tmp_path)
+    output.write_bytes(b"existing")
+
+    def unexpected_read(*args, **kwargs):
+        raise AssertionError("local inputs must not be read")
+
+    monkeypatch.setattr(
+        release_script,
+        "_read_stable_regular_file",
+        unexpected_read,
+    )
+
+    assert release_script.main(argv) == 2
+    assert output.read_bytes() == b"existing"
+
+
+def test_release_producer_rejects_symlink_output(
+    tmp_path: Path,
+) -> None:
+    argv, output = _producer_fixture(tmp_path)
+    target = tmp_path / "target.json"
+    target.write_bytes(b"target")
+    try:
+        output.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    assert release_script.main(argv) == 2
+    assert target.read_bytes() == b"target"
+
+
+@pytest.mark.parametrize(
+    "attestation",
+    (
+        (
+            "unknown-role,https://slsa.dev/provenance/v1,"
+            "sha256:"
+            + "1" * 64
+        ),
+        (
+            "buildkit-sbom,https://slsa.dev/provenance/v1,"
+            "sha256:"
+            + "1" * 64
+        ),
+        (
+            "buildkit-sbom,https://spdx.dev/Document,"
+            "sha256:ABC"
+        ),
+    ),
+)
+def test_release_producer_rejects_invalid_attestation(
+    tmp_path: Path,
+    attestation: str,
+) -> None:
+    argv, output = _producer_fixture(tmp_path)
+    index = argv.index("--attestation")
+    argv[index + 1] = attestation
+
+    assert release_script.main(argv) == 2
+    assert not output.exists()
+
+
+def test_release_producer_rejects_lock_probe_mismatch(
+    tmp_path: Path,
+) -> None:
+    argv, output = _producer_fixture(tmp_path)
+    probe_path = Path(argv[argv.index("--probe") + 1])
+    probe_path.write_bytes(
+        canonical_production_cuda_image_probe_bytes(_valid_probe())
+    )
+
+    assert release_script.main(argv) == 2
+    assert not output.exists()
