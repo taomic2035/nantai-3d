@@ -3,11 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import stat
 import struct
 import zlib
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import pipeline.viewer_acceptance as viewer_acceptance_module
 from pipeline.viewer_acceptance import (
     StableViewerExecutableObservation,
     ViewerAcceptanceError,
@@ -738,3 +743,235 @@ def test_cli_v2_requires_and_reopens_capture_evidence_root(
     assert '"accepted":true' in decision_path.read_text(
         encoding="ascii"
     )
+
+
+# ============================================================
+# RED → GREEN: CLI evidence read and decision write boundary
+# ============================================================
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_read_evidence_bytes_rejects_oversized_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "policy.json"
+    evidence.write_bytes(b"x" * 100)
+    original_lstat = Path.lstat
+
+    def oversized_lstat(path):
+        observed = original_lstat(path)
+        if path == evidence:
+            return SimpleNamespace(
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino,
+                st_mode=observed.st_mode,
+                st_size=viewer_acceptance_module._MAX_CLI_EVIDENCE_BYTES + 1,
+                st_mtime_ns=observed.st_mtime_ns,
+                st_ctime_ns=observed.st_ctime_ns,
+                st_file_attributes=getattr(observed, "st_file_attributes", 0),
+            )
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", oversized_lstat)
+    with pytest.raises(ViewerAcceptanceError, match="bounded regular file"):
+        viewer_acceptance_module._read_evidence_bytes(
+            evidence,
+            label="test",
+        )
+
+
+def test_read_evidence_bytes_rejects_descriptor_after_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "policy.json"
+    evidence.write_bytes(b'{"valid":true}')
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(fd):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(fd)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(
+        viewer_acceptance_module.os, "fstat", drifting_fstat
+    )
+    with pytest.raises(
+        ViewerAcceptanceError, match="changed while being read"
+    ):
+        viewer_acceptance_module._read_evidence_bytes(
+            evidence,
+            label="test",
+        )
+    assert calls == 2
+
+
+def test_read_evidence_bytes_rejects_path_after_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "policy.json"
+    evidence.write_bytes(b'{"valid":true}')
+    original_lstat = Path.lstat
+    evidence_calls = [0]
+
+    def swapping_lstat(self):
+        observed = original_lstat(self)
+        if self == evidence:
+            evidence_calls[0] += 1
+            if evidence_calls[0] >= 2:
+                return SimpleNamespace(
+                    st_dev=observed.st_dev,
+                    st_ino=observed.st_ino + 1,
+                    st_mode=observed.st_mode,
+                    st_size=observed.st_size,
+                    st_mtime_ns=observed.st_mtime_ns,
+                    st_ctime_ns=observed.st_ctime_ns,
+                    st_file_attributes=getattr(
+                        observed, "st_file_attributes", 0
+                    ),
+                )
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    with pytest.raises(
+        ViewerAcceptanceError, match="changed while being read"
+    ):
+        viewer_acceptance_module._read_evidence_bytes(
+            evidence,
+            label="test",
+        )
+
+
+def test_read_evidence_bytes_rejects_symlink(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    target = tmp_path / "real.json"
+    target.write_bytes(b'{"valid":true}')
+    link = tmp_path / "policy.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+    with pytest.raises(
+        ViewerAcceptanceError, match="bounded regular file"
+    ):
+        viewer_acceptance_module._read_evidence_bytes(
+            link,
+            label="test",
+        )
+
+
+def test_read_evidence_bytes_oserror_does_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence = tmp_path / "policy.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    def raising_open(path, flags):
+        raise OSError("simulated permission denied")
+
+    monkeypatch.setattr(
+        viewer_acceptance_module.os, "open", raising_open
+    )
+    with pytest.raises(ViewerAcceptanceError, match="cannot be read") as exc_info:
+        viewer_acceptance_module._read_evidence_bytes(
+            evidence,
+            label="test",
+        )
+    assert str(tmp_path) not in str(exc_info.value)
+
+
+def test_write_decision_noreplace_rejects_existing_destination(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "decision.json"
+    destination.write_bytes(b'{"old":true}')
+
+    with pytest.raises(
+        ViewerAcceptanceError, match="already exists"
+    ):
+        viewer_acceptance_module._write_decision_noreplace(
+            destination,
+            b'{"accepted":true}\n',
+        )
+
+
+def test_write_decision_noreplace_rejects_symlink_destination(
+    tmp_path: Path,
+) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    target = tmp_path / "real.json"
+    target.write_bytes(b'{"old":true}')
+    link = tmp_path / "decision.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+
+    with pytest.raises(
+        ViewerAcceptanceError, match="already exists"
+    ):
+        viewer_acceptance_module._write_decision_noreplace(
+            link,
+            b'{"accepted":true}\n',
+        )
+
+
+def test_write_decision_noreplace_publishes_atomic_payload(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "decision.json"
+    payload = b'{"accepted":true}\n'
+
+    viewer_acceptance_module._write_decision_noreplace(
+        destination,
+        payload,
+    )
+
+    assert destination.read_bytes() == payload
+    # No staging file left behind
+    staging_files = list(tmp_path.glob(".decision.json.*.staging"))
+    assert staging_files == []
+
+
+def test_write_decision_noreplace_rejects_parent_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    destination = tmp_path / "decision.json"
+
+    monkeypatch.setattr(
+        viewer_acceptance_module,
+        "matches_real_directory_identity",
+        lambda path, expected: False,
+    )
+
+    with pytest.raises(
+        ViewerAcceptanceError, match="parent changed before write"
+    ):
+        viewer_acceptance_module._write_decision_noreplace(
+            destination,
+            b'{"accepted":true}\n',
+        )
+    assert not destination.exists()

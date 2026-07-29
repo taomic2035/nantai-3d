@@ -9,6 +9,7 @@ import math
 import os
 import stat
 import struct
+import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -18,6 +19,14 @@ from pydantic import (
     Field,
     field_validator,
     model_validator,
+)
+
+from pipeline.durable_io import (
+    DurableIOError,
+    capture_real_directory_identity,
+    flush_file,
+    matches_real_directory_identity,
+    publish_file_noreplace,
 )
 
 
@@ -38,6 +47,171 @@ _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _POSE_PATTERN = r"^pose-[0-9a-f]{64}$"
 _REPORT_ID_PATTERN = r"^viewer-capture-[0-9a-f]{64}$"
 _MAX_CAPTURE_ARTIFACT_BYTES = 100 * 1024 * 1024
+_MAX_CLI_EVIDENCE_BYTES = 16 * 1024 * 1024
+
+
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_mode,
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
+def _read_evidence_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_CLI_EVIDENCE_BYTES,
+) -> bytes:
+    """Read a CLI evidence file via a single controlled descriptor."""
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ViewerAcceptanceError(f"{label} cannot be inspected") from exc
+    if (
+        _is_linklike(path, before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > max_bytes
+    ):
+        raise ViewerAcceptanceError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ViewerAcceptanceError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ViewerAcceptanceError(f"{label} cannot be read") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            fd_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(fd_before.st_mode)
+                or _cross_surface_signature(fd_before)
+                != _cross_surface_signature(before)
+            ):
+                raise ViewerAcceptanceError(f"{label} changed before read")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise ViewerAcceptanceError(
+                        f"{label} exceeds its byte limit"
+                    )
+            fd_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except ViewerAcceptanceError:
+        raise
+    except OSError as exc:
+        raise ViewerAcceptanceError(f"{label} cannot be read") from exc
+    if (
+        _same_surface_signature(fd_before)
+        != _same_surface_signature(fd_after)
+        or _same_surface_signature(before) != _same_surface_signature(after)
+        or _cross_surface_signature(fd_after) != _cross_surface_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise ViewerAcceptanceError(f"{label} changed while being read")
+    return bytes(payload)
+
+
+def _write_decision_noreplace(destination: Path, payload: bytes) -> None:
+    """Publish a CLI decision via private staging and no-replace publication.
+
+    The destination must not already exist, must not be a link-like redirect,
+    and its parent directory must remain the same non-redirected identity from
+    capture through publication.  A failure never leaves a partial decision.
+    """
+
+    try:
+        destination.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise ViewerAcceptanceError("decision output already exists")
+    parent_identity = capture_real_directory_identity(destination.parent)
+    staging = destination.parent / (
+        f".{destination.name}.{uuid.uuid4().hex}.staging"
+    )
+    try:
+        if not matches_real_directory_identity(destination.parent, parent_identity):
+            raise ViewerAcceptanceError(
+                "decision output parent changed before write"
+            )
+        staging_fd = os.open(
+            staging,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            with os.fdopen(staging_fd, "wb") as stream:
+                stream.write(payload)
+        except OSError as exc:
+            raise ViewerAcceptanceError(
+                "decision output cannot be written"
+            ) from exc
+        flush_file(staging)
+        publish_file_noreplace(staging, destination)
+    except (DurableIOError, OSError) as exc:
+        state = (
+            "published but durability is unconfirmed"
+            if isinstance(exc, DurableIOError) and exc.published
+            else "not published"
+        )
+        raise ViewerAcceptanceError(
+            f"decision output cannot be published ({state})"
+        ) from exc
+    finally:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -988,10 +1162,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         policy = ViewerPerformancePolicy.model_validate_json(
-            Path(args.policy).read_bytes()
+            _read_evidence_bytes(Path(args.policy), label="Viewer policy")
         )
         report = load_viewer_performance_report_bytes(
-            Path(args.report).read_bytes()
+            _read_evidence_bytes(Path(args.report), label="Viewer report")
         )
         if isinstance(report, ViewerPerformanceReportV2):
             if not args.evidence_root:
@@ -1012,11 +1186,14 @@ def main(argv: list[str] | None = None) -> int:
         decision.model_dump(mode="json", by_alias=True)
     )
     if args.decision:
-        Path(args.decision).write_text(
-            decision_json,
-            encoding="ascii",
-            newline="",
-        )
+        try:
+            _write_decision_noreplace(
+                Path(args.decision),
+                decision_json.encode("ascii"),
+            )
+        except (ViewerAcceptanceError, OSError) as exc:
+            print(f"INVALID: {exc}")
+            return 2
     verdict = "ACCEPTED" if decision.accepted else "REJECTED"
     print(
         f"{verdict}: {len(decision.failed_gates)} failed gate(s)"
