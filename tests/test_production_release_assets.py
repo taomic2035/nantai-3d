@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from dataclasses import replace
@@ -1568,3 +1569,144 @@ def test_archive_contract_payloads_oserror_uses_fixed_message(
     message = str(exc.value)
     assert "private absolute path leaked" not in message
     assert str(archive) not in message
+
+
+def test_public_bundle_scan_rejects_root_identity_swap_after_scandir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: root identity must be re-checked after os.scandir."""
+
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "nantai-3d-v1.0.0-runtime.zip").write_bytes(b"archive")
+    (root / "nantai-3d-v1.0.0-runtime.zip.sha256").write_bytes(b"hash")
+    (root / PRODUCTION_RELEASE_NAME).write_bytes(b"receipt")
+    (root / CHECKSUMS_NAME).write_bytes(b"checksums")
+
+    scandir_called = False
+    original_lstat = Path.lstat
+    original_scandir = os.scandir
+
+    def swapping_lstat(path):
+        result = original_lstat(path)
+        if path == root and scandir_called:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    def tracking_scandir(path, *args, **kwargs):
+        nonlocal scandir_called
+        if Path(path) == root:
+            scandir_called = True
+        return original_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="changed during scan",
+    ):
+        assets_module._public_bundle_files(root)
+
+
+def test_public_bundle_scan_rejects_entry_reparse_without_following(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: entry with FILE_ATTRIBUTE_REPARSE_POINT must be rejected."""
+
+    root = tmp_path / "bundle"
+    root.mkdir()
+    regular = root / "nantai-3d-v1.0.0-runtime.zip"
+    regular.write_bytes(b"archive")
+    (root / "nantai-3d-v1.0.0-runtime.zip.sha256").write_bytes(b"hash")
+    (root / PRODUCTION_RELEASE_NAME).write_bytes(b"receipt")
+    (root / CHECKSUMS_NAME).write_bytes(b"checksums")
+
+    reparse_attr = getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+    )
+    original_path_lstat = Path.lstat
+
+    def reparse_entry_lstat(path):
+        result = original_path_lstat(path)
+        if path == regular:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+                st_file_attributes=reparse_attr,
+            )
+        return result
+
+    monkeypatch.setattr(Path, "lstat", reparse_entry_lstat)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="regular non-link",
+    ):
+        assets_module._public_bundle_files(root)
+
+
+def test_public_bundle_scan_closes_iterator_on_iteration_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: iterator must be closed on mid-iteration OSError."""
+
+    root = tmp_path / "bundle"
+    root.mkdir()
+    (root / "nantai-3d-v1.0.0-runtime.zip").write_bytes(b"archive")
+
+    original_scandir = os.scandir
+    closed_iterators: list[object] = []
+
+    class FailingIterator:
+        def __init__(self, real_iter):
+            self._real = real_iter
+            self._closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            next(self._real)
+            raise OSError("injected mid-iteration")
+
+        def close(self):
+            self._closed = True
+            closed_iterators.append(self)
+            self._real.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+    def failing_scandir(path, *args, **kwargs):
+        real = original_scandir(path, *args, **kwargs)
+        if Path(path) == root:
+            return FailingIterator(real)
+        return real
+
+    monkeypatch.setattr(os, "scandir", failing_scandir)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="cannot be read",
+    ) as exc:
+        assets_module._public_bundle_files(root)
+
+    message = str(exc.value)
+    assert str(root) not in message
+    assert closed_iterators, "iterator was not closed on error"
