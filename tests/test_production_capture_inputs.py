@@ -259,3 +259,38 @@ def test_capture_input_stable_read_rejects_descriptor_after_drift(
             target,
             label="registration policy",
         )
+
+
+# ============================================================
+# RED → GREEN: ancestor reparse / junction bypass
+# ============================================================
+
+
+def test_capture_input_stable_read_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_read_bytes must reject a reparse-point ancestor."""
+    target = tmp_path / "registration-policy.json"
+    target.write_bytes(b"payload\n")
+
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        inputs_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProductionCaptureInputError,
+        match="regular non-link file|redirected|unsafe",
+    ):
+        inputs_module._stable_read_bytes(
+            target,
+            label="registration policy",
+        )

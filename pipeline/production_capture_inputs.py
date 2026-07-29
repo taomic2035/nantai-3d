@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from pipeline.durable_io import (
     DurableIOError,
+    first_linklike_path,
     flush_directory,
     flush_file,
     publish_directory_noreplace,
@@ -171,13 +172,21 @@ def _stable_read_bytes(
 ) -> bytes:
     """Read a trust-critical file via a single controlled fd."""
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
     except OSError as exc:
         raise ProductionCaptureInputError(
             f"{label} is unavailable"
         ) from exc
+    except ValueError as exc:
+        raise ProductionCaptureInputError(
+            f"{label} is unavailable"
+        ) from exc
     if (
-        _is_linklike(path)
+        redirected is not None
+        or _is_linklike(path)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size > maximum_bytes
     ):

@@ -2368,3 +2368,71 @@ def test_real_scene_operations_source_has_no_bare_read_bytes_in_trust_paths() ->
         "real_scene_operations.py must not contain bare .read_bytes() calls; "
         "use _stable_read_bytes for trust-critical reads"
     )
+
+
+# ============================================================
+# RED → GREEN: ancestor reparse / junction bypass
+# ============================================================
+
+
+def test_stable_read_bytes_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_read_bytes must reject a reparse-point ancestor.
+
+    Without first_linklike_path, a junction in the parent chain would
+    redirect the leaf lstat to an untrusted tree while still passing the
+    per-leaf _is_linklike check.
+    """
+    evidence = tmp_path / "manifest.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        operations_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+        raising=False,
+    )
+
+    with pytest.raises(
+        operations_module.RealSceneCaptureError,
+        match="regular non-link file|redirected|unsafe",
+    ):
+        operations_module._stable_read_bytes(
+            evidence,
+            label="test evidence",
+        )
+
+
+def test_verify_matching_immutable_file_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _verify_matching_immutable_file must reject reparse ancestor."""
+    config = tmp_path / "public-config.json"
+    payload = b'{"remote":"config"}'
+    config.write_bytes(payload)
+
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        operations_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+        raising=False,
+    )
+
+    with pytest.raises(
+        operations_module.RemoteShellExecutionError,
+        match="immutable|redirected|unsafe",
+    ):
+        operations_module._verify_matching_immutable_file(config, payload)

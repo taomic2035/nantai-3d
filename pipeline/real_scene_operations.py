@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pipeline.durable_io import (
     DurableIOError,
     atomic_replace,
+    first_linklike_path,
     publish_file_noreplace,
 )
 from pipeline.local_brush_executor import (
@@ -228,13 +229,21 @@ def _stable_read_bytes(
     message without echoing absolute paths.
     """
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
     except OSError as exc:
         raise RealSceneCaptureError(
             f"{label} is unavailable"
         ) from exc
+    except ValueError as exc:
+        raise RealSceneCaptureError(
+            f"{label} is unavailable"
+        ) from exc
     if (
-        _is_linklike(path)
+        redirected is not None
+        or _is_linklike(path)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size > maximum_bytes
     ):
@@ -297,9 +306,22 @@ def _verify_matching_immutable_file(
 ) -> None:
     descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
+    except OSError as exc:
+        raise RemoteShellExecutionError(
+            "remote executor public config cannot be inspected"
+        ) from exc
+    except ValueError as exc:
+        raise RemoteShellExecutionError(
+            "remote executor public config cannot be inspected"
+        ) from exc
+    try:
         if (
-            _is_linklike(path)
+            redirected is not None
+            or _is_linklike(path)
             or not stat.S_ISREG(before.st_mode)
             or before.st_size != len(expected)
             or before.st_size > _MAX_REMOTE_PUBLIC_CONFIG_BYTES
