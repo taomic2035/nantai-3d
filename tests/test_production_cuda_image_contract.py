@@ -49,6 +49,10 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
     assert "snapshot.ubuntu.com/ubuntu/20260701T000000Z" in dockerfile
     assert "install -m 0755 /opt/python/bin/python3.11" in dockerfile
     assert "COPY --from=builder /opt/python /opt/python" in dockerfile
+    assert (
+        "LD_LIBRARY_PATH=/opt/python/lib "
+        "/opt/python/bin/python3.11 -c"
+    ) in dockerfile
     assert "curl |" not in dockerfile
     assert ":latest" not in dockerfile
     assert "pip install nerfstudio==1.1.5" not in dockerfile

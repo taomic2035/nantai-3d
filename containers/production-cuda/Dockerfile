@@ -55,7 +55,7 @@ RUN mkdir -p /tmp/cpython \
       --with-ensurepip=install \
     && make -j"$(nproc)" \
     && make altinstall \
-    && /opt/python/bin/python3.11 -c \
+    && LD_LIBRARY_PATH=/opt/python/lib /opt/python/bin/python3.11 -c \
       'import platform; assert platform.python_version() == "3.11.9"' \
     && rm -rf /tmp/cpython
 
