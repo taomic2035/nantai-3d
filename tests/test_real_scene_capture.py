@@ -595,3 +595,129 @@ def test_source_media_hash_hides_operating_system_error_details(
 
     assert str(captured.value) == "source media cannot be read"
     assert private_detail not in str(captured.value)
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_sha256_file_rejects_path_reparse_point(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: a path-level reparse point must be rejected before open."""
+    source = tmp_path / "capture.bin"
+    source.write_bytes(b"capture")
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path):
+        observed = original_lstat(path)
+        return (
+            _stat_with_reparse(observed)
+            if path == source
+            else observed
+        )
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="source media is not a regular file",
+    ):
+        real_scene_capture._sha256_file(source)
+
+
+def test_sha256_file_rejects_descriptor_reparse_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: descriptor-after reparse drift must be rejected."""
+    source = tmp_path / "capture.bin"
+    source.write_bytes(b"capture")
+    original_fstat = real_scene_capture.os.fstat
+    calls = 0
+
+    def drifting_fstat(fd):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(fd)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(real_scene_capture.os, "fstat", drifting_fstat)
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="source media changed while hashing",
+    ):
+        real_scene_capture._sha256_file(source)
+
+    assert calls == 2
+
+
+def test_sha256_file_rejects_short_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: a short read must be rejected, not silently accepted."""
+    source = tmp_path / "capture.bin"
+    source.write_bytes(b"capture-data-payload")
+
+    class ShortReadStream:
+        def __init__(self, fd):
+            self._fd = fd
+            self._done = False
+
+        def fileno(self):
+            return self._fd
+
+        def read(self, size=-1):
+            del size
+            if self._done:
+                return b""
+            self._done = True
+            return b"short"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            del args
+
+    def fake_fdopen(fd, *args, **kwargs):
+        del args, kwargs
+        return ShortReadStream(fd)
+
+    monkeypatch.setattr(real_scene_capture.os, "fdopen", fake_fdopen)
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="source media changed while hashing",
+    ):
+        real_scene_capture._sha256_file(source)
+
+
+def test_sha256_file_never_uses_path_open(tmp_path: Path) -> None:
+    """Static contract: _sha256_file must not call Path.open."""
+    import re
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "pipeline"
+        / "real_scene_capture.py"
+    ).read_text(encoding="utf-8")
+    path_open = re.compile(r"(?<!os)\.open\s*\(")
+    assert not path_open.search(source), (
+        "Path.open detected in real_scene_capture.py — use os.open + os.fdopen"
+    )
