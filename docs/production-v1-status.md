@@ -8,6 +8,22 @@
 但目前还没有同时满足权利、真实 CUDA 3DGS、实测控制点与真实 Viewer QA 的同一
 scene identity，因此仍是 Preview，不是 Production V1。
 
+## CUDA 运行时证据阶梯
+
+这四层严格单向推进，低层完成不能替代高层实测：
+
+| 层级 | 当前状态 | 放行含义 |
+|---|---|---|
+| `repository contract` | completed | canonical lock、Dockerfile、no-GPU probe、OCI receipt/inspector 与手动 workflow 合同已进入 `main` |
+| `published image contract` | pending external workflow completion | 只有精确 source SHA 的 GHCR digest、SBOM/provenance、GitHub attestation、detached receipt 和下载后复验同时成功才能关闭 |
+| `fresh GPU runtime` | pending external GPU | 必须在获批 GPU host 对 receipt 给出的同一 digest fresh 实测；GitHub 托管 runner 不能代替 |
+| `non-mock training` | pending real scene and GPU | 必须由 production caller 对同一真实 scene 生成并复验训练/result closure |
+
+镜像发布与复验操作见
+[Production CUDA 镜像手册](manual/production-cuda-image.md)。即使
+`published image contract` 完成，也只说明可复核运行时字节已经发布；状态仍为
+`modeled-unverified`，不会自动关闭真实采集、SfM、控制点或 Viewer/human QA。
+
 ## 已完成的必要基础
 
 | 能力 | 状态 |

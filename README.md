@@ -48,6 +48,8 @@ Linux/macOS 将虚拟环境路径替换为 `.venv/bin/python`。
 | Synthetic 场景 | 可替换素材、确定性世界与 Blender 质量门 |
 
 高质量 3DGS 训练需要外部 NVIDIA GPU。本机无可用 CUDA；Brush 仅适合受限小场景。
+不可变 GHCR 训练运行时的发布、收据验证与 GPU 门分层见
+[Production CUDA 镜像手册](docs/manual/production-cuda-image.md)。
 
 ### 正式版真实链路进度
 

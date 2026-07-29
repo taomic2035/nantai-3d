@@ -122,8 +122,15 @@ CUDA/Python/Nerfstudio 版本、`ns-train` schema/必需选项，以及 containe
 替换为真实值，不能使用重复字符或测试占位 SHA：
 
 ```json
-{"expected_container_identity":"registry.example/nantai@sha256:<64-hex>","expected_container_runtime_sha256":"<64-hex>","expected_cuda_runtime_version":"12.8","expected_gpu_uuid":"GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx","expected_nerfstudio_version":"1.1.5","expected_nvidia_smi_sha256":"<64-hex>","expected_python_sha256":"<64-hex>","expected_python_version":"3.11.9","expected_remote_target_sha256":"<64-hex>","expected_training_cli_schema_sha256":"<64-hex>","expected_training_cli_sha256":"<64-hex>","min_gpu_memory_mib":16384,"required_training_cli_options":["--data","--output-dir"],"schema":"nantai.production-runtime-policy-input.v1"}
+{"expected_container_identity":"ghcr.io/taomic2035/nantai-3d-production-cuda@sha256:<verified-receipt-digest>","expected_container_runtime_sha256":"<measured-host-sha256>","expected_cuda_runtime_version":"11.8","expected_gpu_uuid":"GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx","expected_nerfstudio_version":"1.1.5","expected_nvidia_smi_sha256":"<measured-host-sha256>","expected_python_sha256":"<verified-receipt-sha256>","expected_python_version":"3.11.9","expected_remote_target_sha256":"<operator-bound-sha256>","expected_training_cli_schema_sha256":"<verified-receipt-sha256>","expected_training_cli_sha256":"<verified-receipt-sha256>","min_gpu_memory_mib":16384,"required_training_cli_options":["--data","--machine.seed","--max-num-iterations","--output-dir","--viewer.quit-on-train-completion"],"schema":"nantai.production-runtime-policy-input.v1"}
 ```
+
+镜像相关字段必须从已经完成 attestation 验证的 detached receipt 投影，完整发布、
+下载、OCI 复验和字段映射见
+[Production CUDA 镜像手册](production-cuda-image.md)。上例中的 CUDA `11.8`、
+Python `3.11.9` 和 Nerfstudio `1.1.5` 是当前 canonical image lock 的精确值；
+GPU UUID/显存、container runtime 与 `nvidia-smi` SHA 则只能来自获批 host 的 fresh
+实测。不能用 GitHub 托管 runner 的 no-GPU probe 填充 host-specific 字段。
 
 从将要部署的干净 checkout 运行：
 

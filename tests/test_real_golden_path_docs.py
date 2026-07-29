@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "docs/verification/2026-07-26-real-golden-path-canary.md"
+CUDA_IMAGE_MANUAL = ROOT / "docs/manual/production-cuda-image.md"
 
 
 def _read(path: str) -> str:
@@ -140,3 +141,37 @@ def test_production_viewer_docs_materialize_provenance_bound_inputs() -> None:
     assert "receipt-bound" in status
     assert "viewer_session" in status
     assert "human_review_inputs" in status
+
+
+def test_cuda_image_manual_keeps_publish_runtime_and_training_gates_separate():
+    manual = CUDA_IMAGE_MANUAL.read_text(encoding="utf-8")
+
+    assert "image@sha256:" in manual
+    assert "gh attestation verify oci://" in manual
+    assert "modeled-unverified" in manual
+    assert "fresh GPU clearance" in manual
+    assert "non-mock training" in manual
+    assert "不等于 Production V1" in manual
+    assert ":latest" not in manual
+    assert "GitHub 托管 runner 没有 GPU" in manual
+    assert "不能证明 CUDA 可用" in manual
+
+
+def test_cuda_image_manual_is_linked_and_uses_formal_11_8_receipt() -> None:
+    readme = _read("README.md")
+    docs_index = _read("docs/README.md")
+    reconstruction = _read("docs/manual/reconstruction-setup.md")
+    status = _read("docs/production-v1-status.md")
+
+    assert readme.count("docs/manual/production-cuda-image.md") == 1
+    assert docs_index.count("manual/production-cuda-image.md") == 1
+    assert "expected_cuda_runtime_version" in reconstruction
+    assert '"11.8"' in reconstruction
+    assert '"12.8"' not in reconstruction
+    for level in (
+        "repository contract",
+        "published image contract",
+        "fresh GPU runtime",
+        "non-mock training",
+    ):
+        assert level in status

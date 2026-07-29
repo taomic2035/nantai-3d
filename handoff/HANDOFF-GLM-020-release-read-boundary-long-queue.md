@@ -181,4 +181,3 @@ check-then-open、句柄漂移、reparse/junction 与错误信息泄漏边界；
 - [ ] 最终一次性报告：完成项、跳过项及冲突原因、提交 SHA、测试计数、剩余真实外部
   门。不要在每完成一个 Task 后停下来索要新工单。
 - [ ] 结束后等待 Codex review；不得自行把 repo-local 安全修复描述为 Production V1。
-
