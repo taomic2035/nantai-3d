@@ -25,7 +25,9 @@ from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 from pipeline.durable_io import (  # noqa: E402
     DurableIOError,
+    _is_linklike,
     atomic_replace,
+    first_linklike_path,
     flush_file,
     publish_file_noreplace,
 )
@@ -115,10 +117,16 @@ def _stat_signature(
 
 def _real_directory(path: Path, *, label: str) -> None:
     try:
+        redirected = first_linklike_path(Path(path.anchor), path)
         result = path.lstat()
     except OSError as exc:
         raise RemoteWorkerError(f"{label} is unavailable") from exc
-    if stat.S_ISLNK(result.st_mode) or not stat.S_ISDIR(result.st_mode):
+    if (
+        redirected is not None
+        or stat.S_ISLNK(result.st_mode)
+        or not stat.S_ISDIR(result.st_mode)
+        or _is_linklike(path, observed=result)
+    ):
         raise RemoteWorkerError(f"{label} must be a real directory")
 
 
@@ -804,10 +812,16 @@ def _materialize_runtime_evidence(
         "decision.json",
     }
     try:
+        redirected_source = first_linklike_path(
+            Path(source_root.anchor),
+            source_root,
+        )
         source_before = source_root.lstat()
         if (
-            stat.S_ISLNK(source_before.st_mode)
+            redirected_source is not None
+            or stat.S_ISLNK(source_before.st_mode)
             or not stat.S_ISDIR(source_before.st_mode)
+            or _is_linklike(source_root, observed=source_before)
         ):
             raise RemoteWorkerError(
                 "production runtime evidence root is link-like"

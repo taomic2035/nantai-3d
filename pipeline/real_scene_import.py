@@ -39,6 +39,7 @@ from pipeline.alignment import (
     align_registration,
     load_control_points_json,
 )
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.metric_alignment_evidence import (
     MetricAlignmentDecision,
@@ -387,7 +388,14 @@ def inspect_real_scene_ply(
 
     source = Path(path).expanduser().absolute()
     try:
-        if source.is_symlink() or not source.is_file():
+        redirected = first_linklike_path(Path(source.anchor), source)
+        source_stat = source.lstat()
+        if (
+            redirected is not None
+            or stat.S_ISLNK(source_stat.st_mode)
+            or not stat.S_ISREG(source_stat.st_mode)
+            or _is_linklike(source, observed=source_stat)
+        ):
             raise RealSceneImportError(
                 "source PLY must be a regular non-link file"
             )
@@ -515,9 +523,13 @@ def _read_regular_bytes(
 ) -> bytes:
     candidate = Path(path).expanduser().absolute()
     try:
+        redirected = first_linklike_path(Path(candidate.anchor), candidate)
         before = candidate.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(
-            before.st_mode
+        if (
+            redirected is not None
+            or stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or _is_linklike(candidate, observed=before)
         ):
             raise RealSceneImportError(
                 f"{label} is missing or link-like"
@@ -552,11 +564,15 @@ def _stream_regular_digest(
 
     candidate = Path(path).expanduser().absolute()
     try:
+        redirected = first_linklike_path(Path(candidate.anchor), candidate)
         before_lstat = candidate.lstat()
     except OSError as exc:
         raise RealSceneImportError(f"{label} cannot be read") from exc
-    if stat.S_ISLNK(before_lstat.st_mode) or not stat.S_ISREG(
-        before_lstat.st_mode
+    if (
+        redirected is not None
+        or stat.S_ISLNK(before_lstat.st_mode)
+        or not stat.S_ISREG(before_lstat.st_mode)
+        or _is_linklike(candidate, observed=before_lstat)
     ):
         raise RealSceneImportError(f"{label} is missing or link-like")
 
@@ -651,13 +667,17 @@ def _load_training_material(
 ) -> _TrainingMaterial:
     root = Path(training_root).expanduser().absolute()
     try:
+        redirected_root = first_linklike_path(Path(root.anchor), root)
         root_stat = root.lstat()
     except OSError as exc:
         raise RealSceneImportError(
             "training stage root is unavailable"
         ) from exc
-    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(
-        root_stat.st_mode
+    if (
+        redirected_root is not None
+        or stat.S_ISLNK(root_stat.st_mode)
+        or not stat.S_ISDIR(root_stat.st_mode)
+        or _is_linklike(root, observed=root_stat)
     ):
         raise RealSceneImportError(
             "training stage root must be a real directory"
@@ -665,8 +685,8 @@ def _load_training_material(
     local_root = root / "local-brush"
     remote_root = root / "remote-result"
     available = (
-        local_root.is_dir() and not local_root.is_symlink(),
-        remote_root.is_dir() and not remote_root.is_symlink(),
+        local_root.is_dir() and not _is_linklike(local_root),
+        remote_root.is_dir() and not _is_linklike(remote_root),
     )
     if sum(available) != 1:
         raise RealSceneImportError(
@@ -1178,12 +1198,16 @@ def _regular_output_files(
         for name in [*directory_names, *file_names]:
             candidate = parent / name
             try:
-                mode = candidate.lstat().st_mode
+                candidate_stat = candidate.lstat()
             except OSError as exc:
                 raise RealSceneImportError(
                     "import output cannot be enumerated"
                 ) from exc
-            if stat.S_ISLNK(mode):
+            mode = candidate_stat.st_mode
+            if (
+                stat.S_ISLNK(mode)
+                or _is_linklike(candidate, observed=candidate_stat)
+            ):
                 raise RealSceneImportError(
                     "import output contains a link"
                 )

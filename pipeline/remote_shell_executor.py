@@ -40,7 +40,7 @@ from cloud.validate_dataparser_transform import (
     DataparserTransformError,
     validate_dataparser_transform,
 )
-from pipeline.durable_io import first_linklike_path
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.production_runtime_evidence import (
     ProductionRuntimeDecision,
     ProductionRuntimeEvidenceError,
@@ -1081,13 +1081,20 @@ def _publish_remote_private_record(
     parent = destination.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
+        redirected_parent = first_linklike_path(
+            Path(parent.anchor),
+            parent,
+        )
         parent_stat = parent.lstat()
     except OSError as exc:
         raise RemoteShellExecutionError(
             f"{label} cannot be published"
         ) from exc
-    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(
-        parent_stat.st_mode
+    if (
+        redirected_parent is not None
+        or stat.S_ISLNK(parent_stat.st_mode)
+        or not stat.S_ISDIR(parent_stat.st_mode)
+        or _is_linklike(parent, observed=parent_stat)
     ):
         raise RemoteShellExecutionError(
             f"{label} cannot be published"
@@ -1641,8 +1648,12 @@ def _enumerate_result_tree(
             parent = Path(current)
             for name in directory_names:
                 candidate = parent / name
-                mode = candidate.lstat().st_mode
-                if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                candidate_stat = candidate.lstat()
+                if (
+                    stat.S_ISLNK(candidate_stat.st_mode)
+                    or not stat.S_ISDIR(candidate_stat.st_mode)
+                    or _is_linklike(candidate, observed=candidate_stat)
+                ):
                     raise RemoteResultBundleError(
                         "remote result tree contains a link-like directory"
                     )
@@ -1651,8 +1662,12 @@ def _enumerate_result_tree(
                 )
             for name in file_names:
                 candidate = parent / name
-                mode = candidate.lstat().st_mode
-                if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                candidate_stat = candidate.lstat()
+                if (
+                    stat.S_ISLNK(candidate_stat.st_mode)
+                    or not stat.S_ISREG(candidate_stat.st_mode)
+                    or _is_linklike(candidate, observed=candidate_stat)
+                ):
                     raise RemoteResultBundleError(
                         "remote result tree contains a non-regular member"
                     )
@@ -2094,20 +2109,31 @@ def build_remote_result_bundle(
             "remote result bundle output must be absent"
         )
     try:
+        redirected_root = first_linklike_path(Path(root.anchor), root)
+        redirected_parent = first_linklike_path(
+            Path(output.parent.anchor),
+            output.parent,
+        )
         root_stat = root.lstat()
         parent_stat = output.parent.lstat()
     except OSError as exc:
         raise RemoteResultBundleError(
             "remote result bundle boundary is unavailable"
         ) from exc
-    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(
-        root_stat.st_mode
+    if (
+        redirected_root is not None
+        or stat.S_ISLNK(root_stat.st_mode)
+        or not stat.S_ISDIR(root_stat.st_mode)
+        or _is_linklike(root, observed=root_stat)
     ):
         raise RemoteResultBundleError(
             "remote result root must be a real directory"
         )
-    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(
-        parent_stat.st_mode
+    if (
+        redirected_parent is not None
+        or stat.S_ISLNK(parent_stat.st_mode)
+        or not stat.S_ISDIR(parent_stat.st_mode)
+        or _is_linklike(output.parent, observed=parent_stat)
     ):
         raise RemoteResultBundleError(
             "remote result bundle parent must be a real directory"
@@ -2406,6 +2432,11 @@ def build_production_remote_result_bundle(
             "production result bundle output must be absent"
         )
     try:
+        redirected_root = first_linklike_path(Path(root.anchor), root)
+        redirected_parent = first_linklike_path(
+            Path(output.parent.anchor),
+            output.parent,
+        )
         root_stat = root.lstat()
         parent_stat = output.parent.lstat()
     except OSError as exc:
@@ -2413,10 +2444,14 @@ def build_production_remote_result_bundle(
             "production result bundle boundary is unavailable"
         ) from exc
     if (
-        stat.S_ISLNK(root_stat.st_mode)
+        redirected_root is not None
+        or stat.S_ISLNK(root_stat.st_mode)
         or not stat.S_ISDIR(root_stat.st_mode)
+        or _is_linklike(root, observed=root_stat)
+        or redirected_parent is not None
         or stat.S_ISLNK(parent_stat.st_mode)
         or not stat.S_ISDIR(parent_stat.st_mode)
+        or _is_linklike(output.parent, observed=parent_stat)
     ):
         raise RemoteResultBundleError(
             "production result bundle boundary must be real directories"

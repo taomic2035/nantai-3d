@@ -1,0 +1,28 @@
+{
+  "name": "v1.0.0-tag-protection",
+  "target": "tag",
+  "source_type": "Repository",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/tags/v1.0.0"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "creation"
+    },
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "update"
+    }
+  ]
+}

@@ -222,6 +222,94 @@ def test_streaming_artifact_digest_rejects_linklike_or_nonregular_member(tmp_pat
         _stream_regular_digest(directory, label="directory artifact")
 
 
+def _maybe_create_directory_redirect(
+    *,
+    real_target: Path,
+    redirected: Path,
+) -> bool:
+    """Create a junction (Windows) or directory symlink (POSIX)."""
+    import subprocess
+
+    if os.name == "nt":
+        created = subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(redirected),
+                str(real_target),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return created.returncode == 0
+    redirected.symlink_to(
+        real_target,
+        target_is_directory=True,
+    )
+    return True
+
+
+def _cleanup_directory_redirect(redirected: Path) -> None:
+    try:
+        if os.name == "nt":
+            os.rmdir(redirected)
+        else:
+            redirected.unlink()
+    except OSError:
+        pass
+
+
+def test_streaming_artifact_digest_rejects_redirected_ancestor(tmp_path):
+    from pipeline.real_scene_import import _stream_regular_digest
+
+    real_parent = tmp_path / "real-ancestor"
+    real_parent.mkdir()
+    target = real_parent / "artifact.bin"
+    target.write_bytes(b"ancestor-redirected-payload")
+    redirected_parent = tmp_path / "redirected-ancestor"
+    if not _maybe_create_directory_redirect(
+        real_target=real_parent,
+        redirected=redirected_parent,
+    ):
+        pytest.skip("junction creation unavailable")
+
+    candidate = redirected_parent / "artifact.bin"
+    try:
+        with pytest.raises(
+            RealSceneImportError,
+            match="missing or link-like",
+        ):
+            _stream_regular_digest(candidate, label="redirected ancestor")
+    finally:
+        _cleanup_directory_redirect(redirected_parent)
+
+
+def test_read_regular_bytes_rejects_redirected_ancestor(tmp_path):
+    real_parent = tmp_path / "real-read-ancestor"
+    real_parent.mkdir()
+    target = real_parent / "payload.bin"
+    target.write_bytes(b"read-redirected-payload")
+    redirected_parent = tmp_path / "redirected-read-ancestor"
+    if not _maybe_create_directory_redirect(
+        real_target=real_parent,
+        redirected=redirected_parent,
+    ):
+        pytest.skip("junction creation unavailable")
+
+    candidate = redirected_parent / "payload.bin"
+    try:
+        with pytest.raises(
+            RealSceneImportError,
+            match="missing or link-like",
+        ):
+            _read_regular_bytes(candidate, label="redirected ancestor")
+    finally:
+        _cleanup_directory_redirect(redirected_parent)
+
+
 def test_streaming_artifact_digest_preserves_canonical_receipt_bytes(tmp_path):
     from pipeline.real_scene_import import _stream_regular_digest
 

@@ -1139,6 +1139,137 @@ def test_result_bundle_builder_is_deterministic_and_verifiable(tmp_path):
         )
 
 
+def _materialize_canonical_result_tree(result_root: Path) -> None:
+    members = {
+        "container-identity.txt": (
+            "registry.example/nantai@sha256:" + ("c" * 64) + "\n"
+        ).encode("ascii"),
+        "dataparser_transforms.json": (
+            b'{"scale":1.0,"transform":'
+            b'[[1,0,0,0],[0,1,0,0],[0,0,1,0]]}\n'
+        ),
+        "operator-intent-config.yml": b"config\n",
+        "point_cloud.ply": b"ply\n",
+        "training-request.json": b"{}\n",
+        "training-result.json": b"{}\n",
+        "training.log": b"log\n",
+        "worker.stderr.log": b"",
+        "worker.stdout.log": b"container completed\n",
+    }
+    for name, payload in members.items():
+        (result_root / name).write_bytes(payload)
+
+
+def _maybe_create_redirect(
+    *,
+    real_target: Path,
+    redirected: Path,
+) -> bool:
+    """Create a junction (Windows) or directory symlink (POSIX)."""
+    if os.name == "nt":
+        created = subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(redirected),
+                str(real_target),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return created.returncode == 0
+    redirected.symlink_to(
+        real_target,
+        target_is_directory=True,
+    )
+    return True
+
+
+def _cleanup_redirect(redirected: Path) -> None:
+    try:
+        if os.name == "nt":
+            os.rmdir(redirected)
+        else:
+            redirected.unlink()
+    except OSError:
+        pass
+
+
+def test_result_bundle_builder_rejects_redirected_result_root(
+    tmp_path,
+):
+    request_sha = request_canonical_sha256(_request())
+    real_root = tmp_path / "real-result"
+    real_root.mkdir()
+    _materialize_canonical_result_tree(real_root)
+    redirected_root = tmp_path / "redirected-result"
+    if not _maybe_create_redirect(
+        real_target=real_root,
+        redirected=redirected_root,
+    ):
+        pytest.skip("junction creation unavailable")
+    output = tmp_path / "bundle.zip"
+    try:
+        with pytest.raises(
+            RemoteResultBundleError,
+            match="real directory",
+        ):
+            build_remote_result_bundle(
+                result_root=redirected_root,
+                output_path=output,
+                job_id="job-expected",
+                attempt_id="attempt-expected",
+                request_sha256=request_sha,
+                training_bundle_sha256="d" * 64,
+                container_identity=(
+                    "registry.example/nantai@sha256:" + ("c" * 64)
+                ),
+            )
+    finally:
+        _cleanup_redirect(redirected_root)
+    assert not output.exists()
+
+
+def test_result_bundle_builder_rejects_redirected_output_parent(
+    tmp_path,
+):
+    request_sha = request_canonical_sha256(_request())
+    result_root = tmp_path / "result"
+    result_root.mkdir()
+    _materialize_canonical_result_tree(result_root)
+    real_parent = tmp_path / "real-output-parent"
+    real_parent.mkdir()
+    redirected_parent = tmp_path / "redirected-output-parent"
+    if not _maybe_create_redirect(
+        real_target=real_parent,
+        redirected=redirected_parent,
+    ):
+        pytest.skip("junction creation unavailable")
+    output = redirected_parent / "bundle.zip"
+    try:
+        with pytest.raises(
+            RemoteResultBundleError,
+            match="real directory",
+        ):
+            build_remote_result_bundle(
+                result_root=result_root,
+                output_path=output,
+                job_id="job-expected",
+                attempt_id="attempt-expected",
+                request_sha256=request_sha,
+                training_bundle_sha256="d" * 64,
+                container_identity=(
+                    "registry.example/nantai@sha256:" + ("c" * 64)
+                ),
+            )
+    finally:
+        _cleanup_redirect(redirected_parent)
+    assert not output.exists()
+
+
 def test_result_bundle_sync_failure_never_exposes_final(
     tmp_path,
     monkeypatch,
