@@ -298,6 +298,97 @@ def test_stable_digest_rejects_symlink(tmp_path) -> None:
         stable_regular_file_digest(link)
 
 
+def test_stable_regular_file_digest_never_uses_path_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: digest must use os.open, not Path.open (check-then-reopen)."""
+
+    target = tmp_path / "scene.ply"
+    target.write_bytes(b"payload")
+
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self == target:
+            opened.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    result = stable_regular_file_digest(target)
+
+    assert result.byte_length == 7
+    assert not opened, "Path.open was called (should use os.open)"
+
+
+def test_stable_regular_file_digest_rejects_open_handle_identity_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: post-open fstat identity drift must be rejected."""
+
+    target = tmp_path / "scene.ply"
+    target.write_bytes(b"payload")
+
+    original_fstat = os.fstat
+    call_count = {"n": 0}
+
+    def drifting_fstat(fd: int):
+        result = original_fstat(fd)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # descriptor_before: drift inode so signature mismatch fires
+            return os.stat_result(
+                (
+                    result.st_mode,
+                    result.st_ino + 1,
+                    result.st_dev,
+                    result.st_nlink,
+                    result.st_uid,
+                    result.st_gid,
+                    result.st_size,
+                    result.st_atime,
+                    result.st_mtime,
+                    result.st_ctime,
+                )
+            )
+        return result
+
+    monkeypatch.setattr(os, "fstat", drifting_fstat)
+
+    with pytest.raises(ReleaseArchiveError, match="changed before read"):
+        stable_regular_file_digest(target)
+
+
+def test_stable_regular_file_digest_oserror_does_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: OSError must produce a fixed message, no absolute path."""
+
+    target = tmp_path / "scene.ply"
+    target.write_bytes(b"payload")
+    absolute = str(target)
+
+    original_os_open = os.open
+
+    def failing_os_open(path, *args, **kwargs):
+        if Path(path) == target:
+            raise OSError(f"private context {absolute}")
+        return original_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_os_open)
+
+    with pytest.raises(ReleaseArchiveError, match="cannot be read") as exc:
+        stable_regular_file_digest(target)
+
+    message = str(exc.value)
+    assert absolute not in message
+    assert "private context" not in message
+
+
 @pytest.mark.parametrize(
     ("executable", "permissions"),
     ((False, 0o644), (True, 0o755)),

@@ -367,8 +367,21 @@ def stable_regular_file_digest(
 
     digest = hashlib.sha256()
     byte_length = 0
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        with source.open("rb") as stream:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise ReleaseArchiveError("release file cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ReleaseArchiveError("release file cannot be read") from exc
+    try:
+        with stream:
             descriptor_before = os.fstat(stream.fileno())
             if _stat_signature(path_before) != _stat_signature(descriptor_before):
                 raise ReleaseArchiveError("release file changed before read")
