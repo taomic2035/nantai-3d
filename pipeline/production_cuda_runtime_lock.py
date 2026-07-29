@@ -33,6 +33,7 @@ _CUDA_ARCHITECTURES = ("7.5", "8.0", "8.6", "8.9", "9.0+PTX")
 _BASE_ROLES = ("builder", "runtime")
 _SOURCE_ROLES = (
     "cpython-source",
+    "glm-source",
     "gsplat-sdist",
     "nerfstudio-wheel",
     "pyliblzfse-sdist",
@@ -47,6 +48,7 @@ _AUXILIARY_PATHS = {
     ),
 }
 _COMMIT_BOUND_SOURCE_ROLES = {
+    "glm-source",
     "gsplat-sdist",
     "nerfstudio-wheel",
 }
@@ -119,6 +121,7 @@ class LockedBaseImage(FrozenModel):
 class LockedSourceArtifact(FrozenModel):
     role: Literal[
         "cpython-source",
+        "glm-source",
         "gsplat-sdist",
         "nerfstudio-wheel",
         "pyliblzfse-sdist",

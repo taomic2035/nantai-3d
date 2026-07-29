@@ -63,6 +63,22 @@ def _source_artifacts() -> tuple[LockedSourceArtifact, ...]:
             ),
         ),
         LockedSourceArtifact(
+            role="glm-source",
+            version="1.0.2",
+            filename="45008b225e28eb700fa0f7d3ff69b7c1db94fadf.tar.gz",
+            url=(
+                "https://github.com/g-truc/glm/archive/"
+                "45008b225e28eb700fa0f7d3ff69b7c1db94fadf.tar.gz"
+            ),
+            byte_length=4_575_919,
+            sha256=(
+                "38e9523d4312b7cce2a5b7780a0e9f1b2716ef0af884872278c3ec6872dd4693"
+            ),
+            upstream_commit=(
+                "45008b225e28eb700fa0f7d3ff69b7c1db94fadf"
+            ),
+        ),
+        LockedSourceArtifact(
             role="gsplat-sdist",
             version="1.4.0",
             filename="gsplat-1.4.0.tar.gz",

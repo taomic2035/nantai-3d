@@ -31,6 +31,9 @@ RUN printf '%s  %s\n' \
 ADD --checksum=sha256:9b1e896523fc510691126c864406d9360a3d1e986acbda59cda57b5abda45b87 \
     https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tar.xz \
     /tmp/artifacts/Python-3.11.9.tar.xz
+ADD --checksum=sha256:38e9523d4312b7cce2a5b7780a0e9f1b2716ef0af884872278c3ec6872dd4693 \
+    https://github.com/g-truc/glm/archive/45008b225e28eb700fa0f7d3ff69b7c1db94fadf.tar.gz \
+    /tmp/artifacts/glm-1.0.2.tar.gz
 ADD --checksum=sha256:8aa81a785e0daf3ed60d0b9930a56c0f337280e6989351d1f1b74e21cf190160 \
     https://files.pythonhosted.org/packages/58/a9/f2a40a8fbe6f53ed49934cbfe44045d4cb131ae514a2b113458bcaf567b0/gsplat-1.4.0.tar.gz \
     /tmp/artifacts/gsplat-1.4.0.tar.gz
@@ -96,9 +99,20 @@ RUN printf '%s  %s\n' \
     && /opt/python/bin/python3.11 -m pip install --no-build-isolation \
       --no-deps --no-index \
       /tmp/artifacts/pyliblzfse-0.4.1.tar.gz \
+    && mkdir -p \
+      /tmp/gsplat \
+      /tmp/gsplat/gsplat/cuda/csrc/third_party/glm \
+    && tar --extract --gzip --strip-components=1 \
+      --file /tmp/artifacts/gsplat-1.4.0.tar.gz \
+      --directory /tmp/gsplat \
+    && tar --extract --gzip --strip-components=1 \
+      --file /tmp/artifacts/glm-1.0.2.tar.gz \
+      --directory /tmp/gsplat/gsplat/cuda/csrc/third_party/glm \
+    && test -f \
+      /tmp/gsplat/gsplat/cuda/csrc/third_party/glm/glm/glm.hpp \
     && /opt/python/bin/python3.11 -m pip install --no-build-isolation \
       --no-deps --no-index \
-      /tmp/artifacts/gsplat-1.4.0.tar.gz \
+      /tmp/gsplat \
     && /opt/python/bin/python3.11 -m pip check \
     && /opt/python/bin/python3.11 -c \
       'import importlib.metadata as m, torch, torchvision; assert m.version("nerfstudio") == "1.1.5"; assert m.version("gsplat") == "1.4.0"; assert torch.__version__ == "2.1.2+cu118"; assert torch.version.cuda == "11.8"; assert torchvision.__version__ == "0.16.2+cu118"' \
@@ -108,7 +122,7 @@ RUN printf '%s  %s\n' \
 COPY pipeline /opt/nantai/repo/pipeline
 COPY containers/production-cuda/runtime-lock.json /opt/nantai/runtime-lock.json
 RUN PYTHONPATH=/opt/nantai/repo /opt/python/bin/python3.11 -c \
-      'from pathlib import Path; from pipeline.production_cuda_runtime_lock import load_production_cuda_runtime_lock_bytes; lock=load_production_cuda_runtime_lock_bytes(Path("/opt/nantai/runtime-lock.json").read_bytes()); assert lock.content_sha256 == "c84760e12c405d5b20b84d8fffae7ac8bb0fb54c6259756d588be5ec31424c1d"'
+      'from pathlib import Path; from pipeline.production_cuda_runtime_lock import load_production_cuda_runtime_lock_bytes; lock=load_production_cuda_runtime_lock_bytes(Path("/opt/nantai/runtime-lock.json").read_bytes()); assert lock.content_sha256 == "562f54435d92066bc1bc2a5f842b0e4a3571613aee1729983e33d32fb8917a3a"'
 
 # linux/amd64 manifest:
 # sha256:7c8e5ee1e8531f0d19f8d7e78c5b7efa9c455697fa96e62f083f361d6842e452

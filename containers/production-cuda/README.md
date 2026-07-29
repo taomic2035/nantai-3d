@@ -15,7 +15,9 @@ The Dockerfile accepts only:
 
 The image build must pass `SOURCE_COMMIT` as exactly 40 lowercase hexadecimal
 characters. It compiles gsplat 1.4.0 from the locked sdist for CUDA
-architectures `7.5;8.0;8.6;8.9;9.0+PTX`.
+architectures `7.5;8.0;8.6;8.9;9.0+PTX`. Because the PyPI sdist omits its
+GLM Git submodule, the Dockerfile injects the exact upstream GLM commit
+recorded by the gsplat source tree from a separately SHA-256-bound archive.
 
 ## Refresh procedure
 

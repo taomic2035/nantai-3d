@@ -79,6 +79,22 @@ def _runtime_lock(
                 sha256=_digest("cpython-source"),
             ),
             LockedSourceArtifact(
+                role="glm-source",
+                version="1.0.2",
+                filename=(
+                    "45008b225e28eb700fa0f7d3ff69b7c1db94fadf.tar.gz"
+                ),
+                url=(
+                    "https://github.com/g-truc/glm/archive/"
+                    "45008b225e28eb700fa0f7d3ff69b7c1db94fadf.tar.gz"
+                ),
+                byte_length=1,
+                sha256=_digest("glm-source"),
+                upstream_commit=(
+                    "45008b225e28eb700fa0f7d3ff69b7c1db94fadf"
+                ),
+            ),
+            LockedSourceArtifact(
                 role="gsplat-sdist",
                 version="1.4.0",
                 filename="gsplat-1.4.0.tar.gz",

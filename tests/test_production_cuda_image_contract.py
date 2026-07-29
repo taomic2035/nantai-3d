@@ -54,6 +54,13 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
         "/opt/python/bin/python3.11 -c"
     ) in dockerfile
     assert "/tmp/artifacts/pyliblzfse-0.4.1.tar.gz" in dockerfile
+    assert "/tmp/artifacts/glm-1.0.2.tar.gz" in dockerfile
+    assert "/tmp/gsplat/gsplat/cuda/csrc/third_party/glm" in dockerfile
+    assert (
+        "--directory /tmp/gsplat/gsplat/cuda/csrc/third_party/glm"
+        in dockerfile
+    )
+    assert "/tmp/gsplat" in dockerfile
     assert "gsplat|nerfstudio|pyliblzfse|torch|torchvision" in dockerfile
     assert "curl |" not in dockerfile
     assert ":latest" not in dockerfile
@@ -85,6 +92,7 @@ def test_runtime_lock_has_exact_production_contract() -> None:
         item.role: item.version for item in lock.source_artifacts
     } == {
         "cpython-source": "3.11.9",
+        "glm-source": "1.0.2",
         "gsplat-sdist": "1.4.0",
         "nerfstudio-wheel": "1.1.5",
         "pyliblzfse-sdist": "0.4.1",
