@@ -1,6 +1,8 @@
 """素材注册表 (可替换) + GPT 交付物验收闭环"""
 import hashlib
 import json
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -274,3 +276,84 @@ class TestHandoffValidation:
         assert "验收结果: ✅ 全部通过" in refreshed
         assert refreshed.count("## 人工备注") == 1
         assert "keep this handoff evidence" in refreshed
+
+
+class TestSha256FileIntegrity:
+    """Security boundary tests for validate_handoff._sha256_file."""
+
+    def test_returns_correct_digest(self, tmp_path):
+        from pipeline.validate_handoff import _sha256_file
+        data = b"hello world\n"
+        path = tmp_path / "a.ply"
+        path.write_bytes(data)
+        assert _sha256_file(path) == hashlib.sha256(data).hexdigest()
+
+    def test_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.validate_handoff as vh
+        from pipeline.validate_handoff import _HandoffIntegrityError, _sha256_file
+
+        target = tmp_path / "a.ply"
+        target.write_bytes(b"ply data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = vh.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(vh, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(
+            _HandoffIntegrityError,
+            match="regular non-link file|redirected|unsafe",
+        ):
+            _sha256_file(target)
+
+    def test_rejects_path_swap_before_open(self, tmp_path, monkeypatch):
+        from pipeline.validate_handoff import _HandoffIntegrityError, _sha256_file
+
+        original_path = tmp_path / "a.ply"
+        original_path.write_bytes(b"original\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                original_path.write_bytes(b"swapped content\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(
+            _HandoffIntegrityError,
+            match="changed before hash|changed while",
+        ):
+            _sha256_file(original_path)
+
+    def test_check_item_reports_integrity_violation(self, tmp_path, monkeypatch):
+        """End-to-end: a reparse-point ancestor yields a problem, not a crash."""
+        import pipeline.validate_handoff as vh
+        from pipeline.validate_handoff import DeliverableItem, check_item
+
+        d = tmp_path / "deliv"
+        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}])
+        manifest = json.loads((d / "manifest.json").read_text())
+        manifest["schema_version"] = 2
+        manifest["coordinate_system"] = {"units": "meters", "axes": "local-z-up"}
+        manifest["generator"] = {"name": "test", "version": "1"}
+        manifest["items"][0]["sha256"] = _sha256(d / "a1.ply")
+        (d / "manifest.json").write_text(json.dumps(manifest))
+
+        item = DeliverableItem(**manifest["items"][0])
+        sentinel = tmp_path / "ancestor-reparse"
+        original = vh.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf).name == "a1.ply":
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(vh, "first_linklike_path", fake_first_linklike_path)
+        problems = check_item(item, d)
+        assert any("完整性校验失败" in p for p in problems)
