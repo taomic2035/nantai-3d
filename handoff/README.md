@@ -5,15 +5,18 @@
 
 ## 当前真实场景主线
 
-1. [Real-scene status closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md) —
+1. [GLM-020 Release read boundary 长队列](HANDOFF-GLM-020-release-read-boundary-long-queue.md) —
+   当前辅助 lane：连续完成单句柄读取、目录 identity 与错误隐私矩阵，不碰 CUDA、
+   文档和正式版外部证据
+2. [Real-scene status closure](FEEDBACK-HANDOFF-GLM-017-v2-production-readiness-design.md) —
    当前入口：`make.py real-scene ... status`；执行 source-bound 五阶段只读状态、
    权威 acceptance 重验和固定错误边界
-2. [Real-scene serve closure](FEEDBACK-HANDOFF-GLM-019-real-scene-serve-semantics.md) —
+3. [Real-scene serve closure](FEEDBACK-HANDOFF-GLM-019-real-scene-serve-semantics.md) —
    `all` 结束于 accept；serve 只读重验后以前台 loopback Studio 启动，不写 receipt
-3. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
-4. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
-5. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
-6. [Roaming graph producer（P2）](HANDOFF-GLM-009-roaming-graph-producer.md)
+4. [Production V1 关键路径审计背景](HANDOFF-GLM-011-production-v1-critical-path.md)
+5. [Production V1 实现计划](../docs/superpowers/plans/2026-07-26-production-v1-real-golden-path.md)
+6. [真实 golden-path canary 证据](../docs/verification/2026-07-26-real-golden-path-canary.md)
+7. [Roaming graph producer（P2）](HANDOFF-GLM-009-roaming-graph-producer.md)
 
 Production V1 的 P0/P1-1/P1-2/P1-3A-C 已关闭，P1-3D 固定演练由 `4150cfb`
 关闭；P1-4A 由 `42df736` 关闭，P1-4B 的测量 / policy / decision 分层由
