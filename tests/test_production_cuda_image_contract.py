@@ -47,6 +47,15 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
     assert "--no-build-isolation" in dockerfile
     assert "TORCH_CUDA_ARCH_LIST=\"7.5;8.0;8.6;8.9;9.0+PTX\"" in dockerfile
     assert "snapshot.ubuntu.com/ubuntu/20260701T000000Z" in dockerfile
+    for official_fallback in (
+        "deb https://archive.ubuntu.com/ubuntu jammy "
+        "main universe multiverse restricted",
+        "deb https://archive.ubuntu.com/ubuntu jammy-updates "
+        "main universe multiverse restricted",
+        "deb https://security.ubuntu.com/ubuntu jammy-security "
+        "main universe multiverse restricted",
+    ):
+        assert dockerfile.count(f"'{official_fallback}'") == 2
     assert dockerfile.count("APT::Update::Error-Mode=any") == 2
     # Both the index refresh and the package download need bounded retries in
     # each stage.  Snapshot metadata can be healthy while one .deb transiently
