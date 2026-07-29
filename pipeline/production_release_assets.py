@@ -395,38 +395,49 @@ def _public_bundle_files(root: Path) -> dict[str, Path]:
         )
     observed: dict[str, Path] = {}
     iterator = None
-    try:
-        iterator = os.scandir(root)
+
+    def require_stable_root() -> None:
         try:
-            root_after_scan = root.lstat()
+            current_root = root.lstat()
         except OSError as exc:
             raise ProductionReleaseAssetsError(
                 "Production release asset directory cannot be read"
             ) from exc
         if (
-            _is_linklike(root, observed=root_after_scan)
-            or not stat.S_ISDIR(root_after_scan.st_mode)
-            or root_stat.st_dev != root_after_scan.st_dev
-            or root_stat.st_ino != root_after_scan.st_ino
+            _is_linklike(root, observed=current_root)
+            or not stat.S_ISDIR(current_root.st_mode)
+            or root_stat.st_dev != current_root.st_dev
+            or root_stat.st_ino != current_root.st_ino
         ):
             raise ProductionReleaseAssetsError(
                 "Production release asset directory changed during scan"
             )
+
+    try:
+        iterator = os.scandir(root)
+        require_stable_root()
         for entry in iterator:
             candidate = root / entry.name
             try:
-                current = candidate.lstat()
+                current = entry.stat(follow_symlinks=False)
             except OSError as exc:
                 raise ProductionReleaseAssetsError(
                     "Production release asset is unavailable"
                 ) from exc
-            if _is_linklike(candidate, observed=current) or not stat.S_ISREG(
-                current.st_mode
+            reparse_flag = getattr(
+                stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+            )
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or int(getattr(current, "st_file_attributes", 0))
+                & reparse_flag
+                or not stat.S_ISREG(current.st_mode)
             ):
                 raise ProductionReleaseAssetsError(
                     "Production release assets must be regular non-link files"
                 )
             observed[candidate.name] = candidate
+        require_stable_root()
     except ProductionReleaseAssetsError:
         raise
     except OSError as exc:

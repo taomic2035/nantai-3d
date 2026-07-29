@@ -1633,11 +1633,15 @@ def test_public_bundle_scan_rejects_entry_reparse_without_following(
     reparse_attr = getattr(
         stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
     )
-    original_path_lstat = Path.lstat
+    original_scandir = os.scandir
 
-    def reparse_entry_lstat(path):
-        result = original_path_lstat(path)
-        if path == regular:
+    class ReparseEntry:
+        def __init__(self, entry):
+            self._entry = entry
+            self.name = entry.name
+
+        def stat(self, *, follow_symlinks=True):
+            result = self._entry.stat(follow_symlinks=follow_symlinks)
             return SimpleNamespace(
                 st_dev=result.st_dev,
                 st_ino=result.st_ino,
@@ -1646,9 +1650,30 @@ def test_public_bundle_scan_rejects_entry_reparse_without_following(
                 st_mtime_ns=result.st_mtime_ns,
                 st_file_attributes=reparse_attr,
             )
-        return result
 
-    monkeypatch.setattr(Path, "lstat", reparse_entry_lstat)
+    class ReparseIterator:
+        def __init__(self, real_iterator):
+            self._real = real_iterator
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self._real)
+            if entry.name == regular.name:
+                return ReparseEntry(entry)
+            return entry
+
+        def close(self):
+            self._real.close()
+
+    def reparse_scandir(path, *args, **kwargs):
+        real_iterator = original_scandir(path, *args, **kwargs)
+        if Path(path) == root:
+            return ReparseIterator(real_iterator)
+        return real_iterator
+
+    monkeypatch.setattr(os, "scandir", reparse_scandir)
 
     with pytest.raises(
         ProductionReleaseAssetsError,
@@ -1879,3 +1904,101 @@ def test_verify_bundle_does_not_delete_or_overwrite_inputs(
     for path in sorted(bundle.iterdir()):
         after = before[path.name]
         assert path.read_bytes() == after[0], f"{path.name} content changed"
+
+
+def test_public_bundle_scan_rejects_root_identity_swap_during_iteration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The root identity must still match after the iterator is exhausted."""
+
+    root = tmp_path / "bundle"
+    root.mkdir()
+    expected_names = {
+        "nantai-3d-v1.0.0-runtime.zip",
+        "nantai-3d-v1.0.0-runtime.zip.sha256",
+        PRODUCTION_RELEASE_NAME,
+        CHECKSUMS_NAME,
+    }
+    for name in expected_names:
+        (root / name).write_bytes(name.encode("ascii"))
+
+    iteration_finished = False
+    original_lstat = Path.lstat
+    original_scandir = os.scandir
+
+    class SwappingIterator:
+        def __init__(self, real_iterator):
+            self._real = real_iterator
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal iteration_finished
+            try:
+                return next(self._real)
+            except StopIteration:
+                iteration_finished = True
+                raise
+
+        def close(self):
+            self._real.close()
+
+    def swapping_scandir(path, *args, **kwargs):
+        real_iterator = original_scandir(path, *args, **kwargs)
+        if Path(path) == root:
+            return SwappingIterator(real_iterator)
+        return real_iterator
+
+    def drifting_lstat(path):
+        result = original_lstat(path)
+        if path == root and iteration_finished:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    monkeypatch.setattr(os, "scandir", swapping_scandir)
+    monkeypatch.setattr(Path, "lstat", drifting_lstat)
+
+    with pytest.raises(
+        ProductionReleaseAssetsError,
+        match="changed during scan",
+    ):
+        assets_module._public_bundle_files(root)
+
+
+def test_public_bundle_scan_uses_direntry_stat_for_entries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Directory entries must be inspected from the active scandir handle."""
+
+    root = tmp_path / "bundle"
+    root.mkdir()
+    expected_names = {
+        "nantai-3d-v1.0.0-runtime.zip",
+        "nantai-3d-v1.0.0-runtime.zip.sha256",
+        PRODUCTION_RELEASE_NAME,
+        CHECKSUMS_NAME,
+    }
+    for name in expected_names:
+        (root / name).write_bytes(name.encode("ascii"))
+
+    original_lstat = Path.lstat
+
+    def root_only_lstat(path):
+        if path.parent == root:
+            raise AssertionError("entry was reopened by path")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", root_only_lstat)
+
+    observed = assets_module._public_bundle_files(root)
+
+    assert set(observed) == expected_names
