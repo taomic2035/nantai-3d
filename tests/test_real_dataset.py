@@ -667,3 +667,37 @@ def test_real_dataset_source_has_no_bare_read_bytes() -> None:
     assert not read_bytes_calls, (
         "Path.read_bytes detected in real_dataset.py"
     )
+
+
+# ============================================================
+# RED → GREEN: ancestor reparse / junction bypass
+# ============================================================
+
+
+def test_stable_read_bytes_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_read_bytes must reject a reparse-point ancestor."""
+    evidence = tmp_path / "source.json"
+    evidence.write_bytes(b'{"valid":true}')
+
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        real_dataset_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+        raising=False,
+    )
+
+    with pytest.raises(
+        DatasetEvidenceError,
+        match="bounded regular file|redirected|unsafe",
+    ):
+        real_dataset_module._stable_read_bytes(
+            evidence, label="test-evidence"
+        )

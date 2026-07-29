@@ -24,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.durable_io import first_linklike_path
 from pipeline.production_training_closure import (
     ProductionTrainingClosureError,
     load_production_training_closure_bytes,
@@ -331,11 +332,17 @@ def _stable_read_bytes(
 ) -> bytes:
     """Read a trust-critical file via a single controlled fd."""
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
     except OSError as exc:
         raise RealSceneAcceptanceError(f"{label} is unavailable") from exc
+    except ValueError as exc:
+        raise RealSceneAcceptanceError(f"{label} is unavailable") from exc
     if (
-        _is_linklike(path)
+        redirected is not None
+        or _is_linklike(path)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size <= 0
         or before.st_size > maximum_bytes

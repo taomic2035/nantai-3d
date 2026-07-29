@@ -25,6 +25,8 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.durable_io import first_linklike_path
+
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 PortablePath = Annotated[str, StringConstraints(min_length=1)]
 DatasetId = Annotated[
@@ -312,13 +314,21 @@ def _stable_read_bytes(
 ) -> bytes:
     """Read a trust-critical JSON file via a single controlled descriptor."""
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
     except OSError as exc:
         raise DatasetEvidenceError(
             f"{label} cannot be inspected"
         ) from exc
+    except ValueError as exc:
+        raise DatasetEvidenceError(
+            f"{label} cannot be inspected"
+        ) from exc
     if (
-        _is_linklike(path, before)
+        redirected is not None
+        or _is_linklike(path, before)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size <= 0
         or before.st_size > maximum_bytes

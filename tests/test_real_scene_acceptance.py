@@ -1223,6 +1223,37 @@ def test_acceptance_stable_read_rejects_descriptor_after_drift(
         )
 
 
+def test_acceptance_stable_read_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_read_bytes must reject a reparse-point ancestor."""
+    target = tmp_path / "acceptance.json"
+    target.write_bytes(b'{"valid":true}')
+
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        acceptance_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+        raising=False,
+    )
+
+    with pytest.raises(
+        acceptance_module.RealSceneAcceptanceError,
+        match="regular non-link file|redirected|unsafe",
+    ):
+        acceptance_module._stable_read_bytes(
+            target,
+            maximum_bytes=1024,
+            label="real-scene acceptance report",
+        )
+
+
 def test_packaged_render_evaluation_reopens_held_out_bundle_bytes(
     tmp_path,
     monkeypatch,
