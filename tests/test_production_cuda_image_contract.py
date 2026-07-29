@@ -46,21 +46,20 @@ def test_dockerfile_uses_only_digest_and_hash_locked_inputs() -> None:
     assert "pip install --require-hashes" in dockerfile
     assert "--no-build-isolation" in dockerfile
     assert "TORCH_CUDA_ARCH_LIST=\"7.5;8.0;8.6;8.9;9.0+PTX\"" in dockerfile
-    snapshot_source = (
+    for snapshot_source in (
         "deb [check-valid-until=no] "
         "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z "
-        "jammy-updates main"
-    )
-    assert dockerfile.count(f"'{snapshot_source}'") == 2
-    for official_fallback in (
-        "deb https://archive.ubuntu.com/ubuntu jammy "
-        "main universe",
-        "deb https://archive.ubuntu.com/ubuntu jammy-updates "
-        "main universe",
-        "deb https://security.ubuntu.com/ubuntu jammy-security "
-        "main universe",
+        "jammy main universe",
+        "deb [check-valid-until=no] "
+        "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z "
+        "jammy-updates main universe",
+        "deb [check-valid-until=no] "
+        "https://snapshot.ubuntu.com/ubuntu/20260701T000000Z "
+        "jammy-security main universe",
     ):
-        assert dockerfile.count(f"'{official_fallback}'") == 2
+        assert dockerfile.count(f"'{snapshot_source}'") == 2
+    assert "archive.ubuntu.com" not in dockerfile
+    assert "security.ubuntu.com" not in dockerfile
     assert " multiverse" not in dockerfile
     assert " restricted" not in dockerfile
     assert dockerfile.count("APT::Update::Error-Mode=any") == 2
