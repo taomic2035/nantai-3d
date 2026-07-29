@@ -111,6 +111,16 @@ def test_untrusted_expressions_are_never_interpolated_in_shell() -> None:
             )
 
 
+def test_stable_release_can_only_publish_from_main() -> None:
+    for job_id in ("private_stage", "public_publish"):
+        runs = "\n".join(_run_blocks(_job(job_id)))
+        assert (
+            'if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then'
+            in runs
+        )
+        assert "Production release source ref is not main" in runs
+
+
 def test_no_remote_candidate_or_caller_supplied_identity_exists() -> None:
     workflow_text = _text()
     assert "archive_url" not in workflow_text

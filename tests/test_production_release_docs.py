@@ -52,6 +52,8 @@ def test_manual_owns_the_exact_production_build_verify_and_run_path() -> None:
         assert required in manual
 
     assert re.search(r"VERSION.*没有默认值", manual, re.DOTALL)
+    assert re.search(r"正式发布.*只接受.*vX\.Y\.Z", manual)
+    assert re.search(r"workflow.*只能从.*main", manual, re.IGNORECASE)
     assert re.search(r"production_release_allowed\s*=\s*true", manual)
     assert re.search(r"下载.*字节.*verify-production", manual, re.DOTALL)
     assert re.search(r"真实浏览器.*QA", manual, re.IGNORECASE)

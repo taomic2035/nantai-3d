@@ -13,6 +13,10 @@ aggregate 明确给出 `production_release_allowed=true`，才能开始正式封
 `VERSION` 没有默认值。门禁未满足时不得填写或发布 `v1.0.0`，也不得预先创建正式
 tag；继续使用 Preview 版本号并保留 blocked/unknown 状态。
 
+正式发布入口只接受稳定版本 `vX.Y.Z`，拒绝任何 Preview、RC 或其他后缀；官方
+`production-release-publish` workflow 只能从 `main` 启动。两项限制用于阻止把候选
+版本误发成 `prerelease=false` 的正式 Release，不能替代后续真实场景门禁。
+
 ## 仓库维护命令
 
 以下五个命令只属于源码仓库根目录的开发版 `make.py`：
