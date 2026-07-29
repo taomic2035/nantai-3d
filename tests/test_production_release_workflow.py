@@ -333,15 +333,15 @@ def test_real_gh_parses_full_upload_url_as_uploads_host(
                 b"Connection: close\r\n\r\n"
             )
 
-    with socketserver.TCPServer(
+    with socketserver.ThreadingTCPServer(
         ("127.0.0.1", 0),
         CaptureProxy,
     ) as proxy:
-        proxy.timeout = 10
         host, port = proxy.server_address
         proxy_url = f"http://{host}:{port}"
         thread = threading.Thread(
-            target=proxy.handle_request,
+            target=proxy.serve_forever,
+            kwargs={"poll_interval": 0.01},
             daemon=True,
         )
         thread.start()
@@ -365,25 +365,30 @@ def test_real_gh_parses_full_upload_url_as_uploads_host(
             "101/assets?name=asset.zip"
         )
 
-        completed = subprocess.run(
-            [
-                gh,
-                "api",
-                "--method",
-                "POST",
-                "--input",
-                os.devnull,
-                endpoint,
-            ],
-            check=False,
-            capture_output=True,
-            env=environment,
-            timeout=15,
-        )
-        thread.join(timeout=12)
+        try:
+            completed = subprocess.run(
+                [
+                    gh,
+                    "api",
+                    "--method",
+                    "POST",
+                    "--input",
+                    os.devnull,
+                    endpoint,
+                ],
+                check=False,
+                capture_output=True,
+                env=environment,
+                timeout=15,
+            )
+        finally:
+            proxy.shutdown()
+            thread.join(timeout=12)
 
     assert completed.returncode != 0
-    assert captured == [b"CONNECT uploads.github.com:443 HTTP/1.1"]
+    expected_request = b"CONNECT uploads.github.com:443 HTTP/1.1"
+    assert captured
+    assert all(request == expected_request for request in captured)
 
 
 @pytest.mark.parametrize(

@@ -50,6 +50,7 @@ def _write_config(
     *,
     runtime: str = "docker",
 ) -> tuple[Path, Path, bytes, Path]:
+    worker_python = Path(sys.executable).resolve(strict=True)
     worker = tmp_path / "remote_training_worker.py"
     worker.write_bytes(b"remote-worker-v1\n")
     runtime_bin = tmp_path / runtime
@@ -61,7 +62,7 @@ def _write_config(
                 "container_runtime": runtime,
                 "container_identity": CONTAINER_IDENTITY,
                 "worker_path": str(worker),
-                "worker_python": sys.executable,
+                "worker_python": str(worker_python),
             },
             ensure_ascii=True,
             separators=(",", ":"),
@@ -72,6 +73,24 @@ def _write_config(
     config = tmp_path / "remote-readiness.json"
     config.write_bytes(payload)
     return config, worker, payload, runtime_bin
+
+
+def test_write_config_binds_canonical_worker_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_python = Path(sys.executable).resolve(strict=True)
+    noncanonical_python = (
+        worker_python.parent
+        / ".."
+        / worker_python.parent.name
+        / worker_python.name
+    )
+    monkeypatch.setattr(sys, "executable", str(noncanonical_python))
+
+    _config, _worker, config_bytes, _runtime_bin = _write_config(tmp_path)
+
+    assert json.loads(config_bytes)["worker_python"] == str(worker_python)
 
 
 def _which_factory(
@@ -162,9 +181,9 @@ def test_checker_measures_runtime_image_and_worker_identity(tmp_path):
         "worker_sha256": hashlib.sha256(
             worker.read_bytes()
         ).hexdigest(),
-        "worker_python": str(Path(sys.executable)),
+        "worker_python": str(Path(sys.executable).resolve(strict=True)),
         "worker_python_sha256": hashlib.sha256(
-            Path(sys.executable).read_bytes()
+            Path(sys.executable).resolve(strict=True).read_bytes()
         ).hexdigest(),
         "worker_version": "1.0.0",
     }
@@ -172,7 +191,7 @@ def test_checker_measures_runtime_image_and_worker_identity(tmp_path):
     assert len(calls) == 4
     # Every runtime probe must use the resolved absolute path
     for call in calls:
-        if call[0] != sys.executable:
+        if call[0] != str(Path(sys.executable).resolve(strict=True)):
             assert Path(call[0]).resolve() == runtime_bin.resolve(), (
                 f"runtime probe must use resolved path, got {call[0]}"
             )
@@ -811,7 +830,7 @@ def test_checker_runtime_probes_use_resolved_path_not_config_name(
     runtime_calls = [
         c
         for c in calls
-        if c and c[0] != sys.executable
+        if c and c[0] != str(Path(sys.executable).resolve(strict=True))
     ]
     assert runtime_calls, "expected at least one runtime probe call"
     for call in runtime_calls:
@@ -875,7 +894,7 @@ def test_checker_rejects_path_wrapper_swap_after_resolution(tmp_path):
     assert which_calls == 1
     assert runtime_calls
     assert all(
-        call[0] == sys.executable
+        call[0] == str(Path(sys.executable).resolve(strict=True))
         or Path(call[0]) == runtime_bin
         for call in runtime_calls
     )
