@@ -8,13 +8,18 @@ the validator catches self-reported or misparsed data.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+import pipeline.registration_quality as registration_quality_module
 from pipeline.recon_schema import (
     AlignmentStatus,
     AxisConvention,
@@ -1060,3 +1065,193 @@ class TestRoundTrip:
                 loaded, policy, reg_bytes,
                 capture_manifest_bytes=manifest_bytes,
                 sparse_enumeration=sparse)
+
+
+# ============================================================
+# Phase 10: COLMAP text streaming security boundary (RED → GREEN)
+# ============================================================
+
+
+def _stat_with_reparse(observed):
+    """Build a stat-like namespace with the reparse-point flag set."""
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_colmap_stream_rejects_oversized_images_txt(tmp_path: Path) -> None:
+    """A COLMAP images.txt larger than 2 MiB must be rejected."""
+    sparse = tmp_path / "sparse" / "0"
+    sparse.mkdir(parents=True)
+    big = sparse / "images.txt"
+    big.write_bytes(b"# comment\n" + b"x" * (2 * 1024 * 1024 + 1) + b"\n")
+    (sparse / "points3D.txt").write_text("1 0 0 0 0 0 0 1 0 0 0\n")
+    with pytest.raises(ValueError, match="bounded regular file|byte limit"):
+        enumerate_sparse_models(sparse.parent, total_input_images=1)
+
+
+def test_colmap_stream_rejects_oversized_points3d_txt(tmp_path: Path) -> None:
+    """A COLMAP points3D.txt larger than 2 MiB must be rejected."""
+    big = tmp_path / "points3D.txt"
+    big.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="bounded regular file|byte limit"):
+        registration_quality_module._parse_colmap_points3d_count(big)
+
+
+def test_colmap_stream_rejects_descriptor_after_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The second fstat (fd_after) must match fd_before."""
+    evidence = tmp_path / "images.txt"
+    evidence.write_bytes(b"1 1 0 0 0 0 0 0 1 img.jpg\n\n")
+    original_fstat = os.fstat
+    calls = 0
+
+    def drifting_fstat(fd):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(fd)
+        return _stat_with_reparse(observed) if calls == 2 else observed
+
+    monkeypatch.setattr(registration_quality_module.os, "fstat", drifting_fstat)
+
+    with pytest.raises(ValueError, match="changed while being read"):
+        registration_quality_module._stream_colmap_text_lines(
+            evidence, label="test"
+        )
+    assert calls == 2
+
+
+def test_colmap_stream_rejects_path_after_swap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The path lstat after reading must match the pre-open lstat."""
+    evidence = tmp_path / "images.txt"
+    evidence.write_bytes(b"1 1 0 0 0 0 0 0 1 img.jpg\n\n")
+    original_lstat = Path.lstat
+    calls = 0
+
+    def swapping_lstat(self):
+        nonlocal calls
+        calls += 1
+        observed = original_lstat(self)
+        if calls >= 2:
+            return SimpleNamespace(
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino + 1,
+                st_mode=observed.st_mode,
+                st_size=observed.st_size,
+                st_mtime_ns=observed.st_mtime_ns,
+                st_ctime_ns=observed.st_ctime_ns,
+                st_file_attributes=getattr(observed, "st_file_attributes", 0),
+            )
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+
+    with pytest.raises(ValueError, match="changed while being read"):
+        registration_quality_module._stream_colmap_text_lines(
+            evidence, label="test"
+        )
+
+
+def test_colmap_stream_rejects_abnormally_long_line(tmp_path: Path) -> None:
+    """A single line exceeding 64 KiB must be rejected."""
+    evidence = tmp_path / "images.txt"
+    evidence.write_bytes(b"x" * (64 * 1024 + 1) + b"\n")
+    with pytest.raises(ValueError, match="abnormally long line"):
+        registration_quality_module._stream_colmap_text_lines(
+            evidence, label="test"
+        )
+
+
+def test_colmap_stream_rejects_invalid_utf8(tmp_path: Path) -> None:
+    """Invalid UTF-8 bytes must be rejected."""
+    evidence = tmp_path / "images.txt"
+    evidence.write_bytes(b"\xff\xfe invalid utf8\n")
+    with pytest.raises(ValueError, match="not valid UTF-8"):
+        registration_quality_module._stream_colmap_text_lines(
+            evidence, label="test"
+        )
+
+
+def test_colmap_stream_rejects_symlink(tmp_path: Path) -> None:
+    """A symlink must be rejected."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    target = tmp_path / "real.txt"
+    target.write_bytes(b"1 1 0 0 0 0 0 0 1 img.jpg\n\n")
+    link = tmp_path / "images.txt"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+    with pytest.raises(ValueError, match="bounded regular file"):
+        registration_quality_module._stream_colmap_text_lines(
+            link, label="test"
+        )
+
+
+def test_colmap_stream_oserror_does_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """OSError text must not appear in the user-facing error."""
+    evidence = tmp_path / "images.txt"
+    evidence.write_bytes(b"1 1 0 0 0 0 0 0 1 img.jpg\n\n")
+    private_detail = str(evidence.resolve())
+
+    def fail_open(*args, **kwargs):
+        del args, kwargs
+        raise OSError(private_detail)
+
+    monkeypatch.setattr(registration_quality_module.os, "open", fail_open)
+
+    with pytest.raises(ValueError) as captured:
+        registration_quality_module._stream_colmap_text_lines(
+            evidence, label="test"
+        )
+    assert private_detail not in str(captured.value)
+
+
+def test_colmap_images_txt_error_does_not_leak_absolute_path(
+    tmp_path: Path,
+) -> None:
+    """Parsing error messages must not contain the absolute path."""
+    sparse = tmp_path / "sparse" / "0"
+    sparse.mkdir(parents=True)
+    (sparse / "images.txt").write_text(
+        "1 1 0 0 0 0 0 0 1 photo.jpg\n", encoding="utf-8")
+    (sparse / "points3D.txt").write_text(
+        "1 0 0 0 0 0 0 1 0 0 0\n", encoding="utf-8")
+    with pytest.raises(ValueError) as captured:
+        enumerate_sparse_models(sparse.parent, total_input_images=1)
+    assert str(tmp_path) not in str(captured.value)
+
+
+def test_colmap_parsers_have_no_bare_read_text() -> None:
+    """Static contract: parsers must not use Path.read_text/read_bytes."""
+    for func_name in (
+        "_parse_colmap_images_txt",
+        "_parse_colmap_points3d_count",
+    ):
+        func = getattr(registration_quality_module, func_name)
+        source = inspect.getsource(func)
+        assert ".read_text(" not in source, (
+            f"{func_name} must not use Path.read_text()"
+        )
+        assert ".read_bytes(" not in source, (
+            f"{func_name} must not use Path.read_bytes()"
+        )

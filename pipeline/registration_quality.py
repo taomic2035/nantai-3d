@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Literal
 
@@ -32,6 +34,136 @@ class FrozenModel(BaseModel):
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _COLMAP_RUNTIME_PREFIX = "colmap.runtime.v1="
 _COLMAP_VERSION_RE = re.compile(r"^COLMAP \d+(?:\.\d+)+$")
+
+_MAX_COLMAP_TEXT_BYTES = 2 * 1024 * 1024
+_MAX_COLMAP_LINE_BYTES = 64 * 1024
+
+
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _same_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_mode,
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+        int(getattr(result, "st_file_attributes", 0))
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _is_linklike(path: Path, observed: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
+def _stream_colmap_text_lines(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_COLMAP_TEXT_BYTES,
+) -> list[str]:
+    """Read a COLMAP text file as UTF-8 lines via a single controlled fd.
+
+    Rejects symlinks, junctions, reparse points, non-regular files, oversized
+    files, invalid UTF-8, abnormally long lines, and identity drift during
+    reading.  ``FileNotFoundError`` is allowed to propagate so callers can
+    treat missing files as empty.
+    """
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be inspected") from exc
+    if (
+        _is_linklike(path, before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > max_bytes
+    ):
+        raise ValueError(f"{label} is not a bounded regular file")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ValueError(f"{label} cannot be read") from exc
+
+    payload = bytearray()
+    try:
+        with stream:
+            fd_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(fd_before.st_mode)
+                or _cross_surface_signature(fd_before)
+                != _cross_surface_signature(before)
+            ):
+                raise ValueError(f"{label} changed before read")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise ValueError(f"{label} exceeds its byte limit")
+            fd_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be read") from exc
+
+    if (
+        _same_surface_signature(fd_before)
+        != _same_surface_signature(fd_after)
+        or _same_surface_signature(before) != _same_surface_signature(after)
+        or _cross_surface_signature(fd_after) != _cross_surface_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise ValueError(f"{label} changed while being read")
+
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{label} is not valid UTF-8") from exc
+
+    lines = text.splitlines()
+    for line in lines:
+        if len(line.encode("utf-8")) > _MAX_COLMAP_LINE_BYTES:
+            raise ValueError(f"{label} contains an abnormally long line")
+    return lines
 
 
 def build_colmap_runtime_evidence(
@@ -184,9 +316,10 @@ def _parse_colmap_images_txt(path: Path) -> tuple[str, ...]:
     rows as image headers — a POINTS2D line with 4+ points easily exceeds 10
     tokens and was previously misclassified as an image header.
     """
-    if not path.exists():
+    try:
+        raw_lines = _stream_colmap_text_lines(path, label="COLMAP images.txt")
+    except FileNotFoundError:
         return tuple()
-    raw_lines = path.read_text(encoding="utf-8").splitlines()
     images: list[str] = []
     line_index = 0
     while line_index < len(raw_lines):
@@ -204,7 +337,7 @@ def _parse_colmap_images_txt(path: Path) -> tuple[str, ...]:
         images.append(parts[9])
         if line_index >= len(raw_lines):
             raise ValueError(
-                f"COLMAP images.txt {path} is missing the POINTS2D line for "
+                "COLMAP images.txt is missing the POINTS2D line for "
                 f"image {parts[9]!r}; expected two lines per image"
             )
         # The next physical line is the POINTS2D row.  It is legitimately empty
@@ -215,10 +348,12 @@ def _parse_colmap_images_txt(path: Path) -> tuple[str, ...]:
 
 def _parse_colmap_points3d_count(path: Path) -> int:
     """Count points in a COLMAP points3D.txt file."""
-    if not path.exists():
+    try:
+        raw_lines = _stream_colmap_text_lines(path, label="COLMAP points3D.txt")
+    except FileNotFoundError:
         return 0
     count = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in raw_lines:
         line = line.strip()
         if line and not line.startswith("#"):
             count += 1
