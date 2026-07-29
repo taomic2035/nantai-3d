@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import pipeline.real_scene_capture as real_scene_capture
 from pipeline.real_dataset import (
     CaptureRightsReceipt,
     DatasetLock,
@@ -495,3 +498,100 @@ def test_sfm_blocks_when_selected_sparse_model_differs_from_poses(
     )
     with pytest.raises(RealSceneCaptureError, match="selected sparse model"):
         run_real_sfm(prepared, run_root, _policy())
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_source_media_hash_rejects_descriptor_reparse_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "capture.bin"
+    source.write_bytes(b"capture")
+    real_fstat = real_scene_capture.os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        observed = real_fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            return _stat_with_reparse(observed)
+        return observed
+
+    monkeypatch.setattr(real_scene_capture.os, "fstat", drifting_fstat)
+
+    with pytest.raises(RealSceneCaptureError, match="changed while hashing"):
+        real_scene_capture._sha256_file(source)
+
+
+def test_source_media_hash_rejects_early_eof(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "capture.bin"
+    source.write_bytes(b"capture")
+    real_fdopen = real_scene_capture.os.fdopen
+
+    class EarlyEofStream:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self._read_once = False
+
+        def fileno(self):
+            return self._wrapped.fileno()
+
+        def read(self, size=-1):
+            if self._read_once:
+                return b""
+            self._read_once = True
+            return self._wrapped.read(min(size, 1))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self._wrapped.__exit__(exc_type, exc, traceback)
+
+    def early_fdopen(descriptor, *args, **kwargs):
+        return EarlyEofStream(real_fdopen(descriptor, *args, **kwargs))
+
+    monkeypatch.setattr(real_scene_capture.os, "fdopen", early_fdopen)
+
+    with pytest.raises(RealSceneCaptureError, match="changed while hashing"):
+        real_scene_capture._sha256_file(source)
+
+
+def test_source_media_hash_hides_operating_system_error_details(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "capture.bin"
+    source.write_bytes(b"capture")
+    private_detail = r"D:\private-capture\secret-token"
+
+    def fail_open(*args, **kwargs):
+        del args, kwargs
+        raise OSError(private_detail)
+
+    monkeypatch.setattr(real_scene_capture.os, "open", fail_open)
+
+    with pytest.raises(RealSceneCaptureError) as captured:
+        real_scene_capture._sha256_file(source)
+
+    assert str(captured.value) == "source media cannot be read"
+    assert private_detail not in str(captured.value)

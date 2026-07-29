@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import math
+import stat
 import struct
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import pipeline.render_evaluation as render_evaluation
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_training import (
     HeldOutSplit,
@@ -529,3 +532,76 @@ def test_validator_cli_returns_two_for_byte_tamper(tmp_path, capsys):
     assert "render frame" in captured.err
     assert "policy_sha256=" in captured.out
     assert "report_sha256=" in captured.out
+
+
+def _stat_with_reparse(observed):
+    return SimpleNamespace(
+        st_dev=observed.st_dev,
+        st_ino=observed.st_ino,
+        st_mode=observed.st_mode,
+        st_size=observed.st_size,
+        st_mtime_ns=observed.st_mtime_ns,
+        st_ctime_ns=observed.st_ctime_ns,
+        st_file_attributes=getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        ),
+    )
+
+
+def test_stable_render_read_rejects_descriptor_reparse_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "render.png"
+    artifact.write_bytes(b"render")
+    real_fstat = render_evaluation.os.fstat
+    calls = 0
+
+    def drifting_fstat(descriptor):
+        nonlocal calls
+        observed = real_fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            return _stat_with_reparse(observed)
+        return observed
+
+    monkeypatch.setattr(render_evaluation.os, "fstat", drifting_fstat)
+
+    with pytest.raises(RenderEvaluationError, match="changed while being read"):
+        render_evaluation._read_stable(
+            tmp_path,
+            "render.png",
+            label="render frame",
+            max_bytes=32,
+        )
+
+
+def test_stable_render_read_uses_observed_reparse_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "render.png"
+    artifact.write_bytes(b"render")
+    real_lstat = Path.lstat
+    target_calls = 0
+
+    def drifting_lstat(path):
+        nonlocal target_calls
+        observed = real_lstat(path)
+        if Path(path) == artifact:
+            target_calls += 1
+            if target_calls == 2:
+                return _stat_with_reparse(observed)
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", drifting_lstat)
+
+    with pytest.raises(RenderEvaluationError, match="not a regular file"):
+        render_evaluation._read_stable(
+            tmp_path,
+            "render.png",
+            label="render frame",
+            max_bytes=32,
+        )

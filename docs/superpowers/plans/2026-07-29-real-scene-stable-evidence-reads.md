@@ -382,3 +382,62 @@ Run the Task 7 tests and require all to pass.
 
 Use subject `fix: stabilize production training input reads`, the exact Codex
 co-author trailer, and the one-shot push proxy.
+
+### Task 10: Prove capture and render evidence-read gaps
+
+**Files:**
+
+- Modify: `tests/test_real_scene_capture.py`
+- Modify: `tests/test_render_evaluation.py`
+
+- [x] **Step 1: Add capture RED tests**
+
+Require source-media hashing to reject descriptor reparse drift and incomplete
+reads, and require operating-system failures to remain free of private path
+details.
+
+- [x] **Step 2: Add render RED tests**
+
+Require stable render reads to reject descriptor reparse drift and a reparse
+identity observed by the path-before stat even if a later filesystem lookup
+would appear clean.
+
+- [x] **Step 3: Run the five tests and confirm RED**
+
+All five tests must fail for the intended missing safety property.
+
+### Task 11: Close capture and render evidence reads
+
+**Files:**
+
+- Modify: `pipeline/real_scene_capture.py`
+- Modify: `pipeline/render_evaluation.py`
+
+- [x] **Step 1: Apply cross/same-surface identities**
+
+Use the Windows-compatible identity chain from Task 5. Pass the already
+observed stat into link-like checks, reject symlink/junction/reparse inputs,
+and bind path-before to descriptor-before to descriptor-after to path-after.
+
+- [x] **Step 2: Reject incomplete reads**
+
+Require the measured source-media byte count and returned render payload length
+to match the original stable size exactly.
+
+- [x] **Step 3: Keep errors private**
+
+Map capture read/open failures to fixed messages that never contain either the
+local path or operating-system exception text.
+
+- [x] **Step 4: Run GREEN tests**
+
+Run the five Task 10 tests and require all to pass.
+
+### Task 12: Verify and publish the capture/render batch
+
+- [x] **Step 1: Run both complete focused suites**
+- [x] **Step 2: Run Ruff and diff-check**
+- [x] **Step 3: Commit only the plan, two production files, and two tests**
+
+Use subject `fix: close capture and render evidence reads`, the exact Codex
+co-author trailer, and the one-shot push proxy.
