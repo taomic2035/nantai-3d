@@ -30,6 +30,7 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.durable_io import first_linklike_path
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_capture import PreparedRealCapture, RealSfmResult
 from pipeline.recon_schema import RegistrationResult
@@ -367,12 +368,19 @@ def _hash_file_stable(
     label: str,
 ) -> tuple[int, str, _SameSurfaceSignature]:
     try:
+        redirected = first_linklike_path(Path(path.anchor), path)
         before = path.lstat()
-        if _is_linklike(path, before) or not stat.S_ISREG(before.st_mode):
+        if (
+            redirected is not None
+            or _is_linklike(path, before)
+            or not stat.S_ISREG(before.st_mode)
+        ):
             raise RealSceneTrainingError(f"{label} is missing or link-like")
     except RealSceneTrainingError:
         raise
     except OSError as exc:
+        raise RealSceneTrainingError(f"{label} cannot be read") from exc
+    except ValueError as exc:
         raise RealSceneTrainingError(f"{label} cannot be read") from exc
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
         os, "O_NOFOLLOW", 0

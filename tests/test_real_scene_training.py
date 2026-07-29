@@ -817,3 +817,31 @@ def test_bundle_rejects_pose_changing_dataparser_config(
             tmp_path / "bundle",
             policy=policy,
         )
+
+
+def test_hash_file_stable_rejects_ancestor_reparse(
+    tmp_path,
+    monkeypatch,
+):
+    """RED->GREEN: _hash_file_stable must reject reparse-point ancestors."""
+    source = tmp_path / "training-input.bin"
+    source.write_bytes(b"stable training input")
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        training_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+    )
+
+    with pytest.raises(
+        RealSceneTrainingError,
+        match="missing or link-like",
+    ):
+        training_module._hash_file_stable(
+            source,
+            label="training input",
+        )
