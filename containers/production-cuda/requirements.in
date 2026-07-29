@@ -3,6 +3,7 @@ torchvision @ https://download-r2.pytorch.org/whl/cu118/torchvision-0.16.2%2Bcu1
 nerfstudio==1.1.5
 gsplat==1.4.0
 fpsample==0.3.3
+setuptools==80.9.0
 numpy<2.0
 pydantic>=2.7
 plyfile>=1.0

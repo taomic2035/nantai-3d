@@ -72,7 +72,7 @@ ENV LD_LIBRARY_PATH=/opt/python/lib \
 
 COPY containers/production-cuda/requirements.lock /tmp/requirements.lock
 RUN printf '%s  %s\n' \
-      'b9f94a93d49e25ba8bb947389c16c4f3d008e730408c7f0adc8f6ba3303e64a9' \
+      '63f8a156e43296f386c85af0f9829bedfb7c67a2fde514deb768b5962d336c6f' \
       '/tmp/requirements.lock' | sha256sum -c - \
     && awk ' \
       /^(gsplat|nerfstudio|pyliblzfse|torch|torchvision)(==| @)/ { skip=1; next } \

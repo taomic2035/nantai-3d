@@ -26,6 +26,9 @@ architectures `7.5;8.0;8.6;8.9;9.0+PTX`.
    `fpsample==0.3.3` explicit unless a replacement has a verified CPython
    3.11 manylinux wheel; newer source-only releases cannot satisfy the
    image's binary-only dependency gate.
+   Keep `setuptools==80.9.0`: Torch 2.1.2 imports `pkg_resources` while
+   preparing gsplat 1.4.0, and Setuptools 81+ removes that compatibility
+   module.
    `pyliblzfse==0.4.1` is the reviewed exception: viser requires it on Linux,
    PyPI publishes no Linux wheel, and the Dockerfile compiles its exact
    SHA-bound sdist separately before `pip check`.
