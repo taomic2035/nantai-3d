@@ -117,19 +117,72 @@ def _stable_regular_files_equal(left: Path, right: Path) -> bool:
         if left_path_before.st_size != right_path_before.st_size:
             return False
 
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+            os, "O_NOFOLLOW", 0
+        )
+        try:
+            left_descriptor = os.open(left, flags)
+        except OSError as exc:
+            raise ProductionReleaseAssetsError(
+                "Production acceptance byte comparison cannot be read"
+            ) from exc
+        try:
+            right_descriptor = os.open(right, flags)
+        except OSError as exc:
+            try:
+                os.close(left_descriptor)
+            except OSError:
+                pass
+            raise ProductionReleaseAssetsError(
+                "Production acceptance byte comparison cannot be read"
+            ) from exc
+        try:
+            left_stream = os.fdopen(left_descriptor, "rb", buffering=0)
+        except OSError as exc:
+            try:
+                os.close(left_descriptor)
+            except OSError:
+                pass
+            try:
+                os.close(right_descriptor)
+            except OSError:
+                pass
+            raise ProductionReleaseAssetsError(
+                "Production acceptance byte comparison cannot be read"
+            ) from exc
+        try:
+            right_stream = os.fdopen(right_descriptor, "rb", buffering=0)
+        except OSError as exc:
+            try:
+                os.close(right_descriptor)
+            except OSError:
+                pass
+            try:
+                left_stream.close()
+            except OSError:
+                pass
+            raise ProductionReleaseAssetsError(
+                "Production acceptance byte comparison cannot be read"
+            ) from exc
+
         equal = True
-        with left.open("rb") as left_stream, right.open("rb") as right_stream:
-            left_descriptor_before = os.fstat(left_stream.fileno())
-            right_descriptor_before = os.fstat(right_stream.fileno())
-            while True:
-                left_chunk = left_stream.read(_COPY_CHUNK_BYTES)
-                right_chunk = right_stream.read(_COPY_CHUNK_BYTES)
-                if left_chunk != right_chunk:
-                    equal = False
-                if not left_chunk and not right_chunk:
-                    break
-            left_descriptor_after = os.fstat(left_stream.fileno())
-            right_descriptor_after = os.fstat(right_stream.fileno())
+        try:
+            with left_stream, right_stream:
+                left_descriptor_before = os.fstat(left_stream.fileno())
+                right_descriptor_before = os.fstat(right_stream.fileno())
+                while True:
+                    left_chunk = left_stream.read(_COPY_CHUNK_BYTES)
+                    right_chunk = right_stream.read(_COPY_CHUNK_BYTES)
+                    if left_chunk != right_chunk:
+                        equal = False
+                    if not left_chunk and not right_chunk:
+                        break
+                left_descriptor_after = os.fstat(left_stream.fileno())
+                right_descriptor_after = os.fstat(right_stream.fileno())
+        except OSError as exc:
+            raise ProductionReleaseAssetsError(
+                "Production acceptance byte comparison cannot be read"
+            ) from exc
         left_path_after = left.lstat()
         right_path_after = right.lstat()
     except ProductionReleaseAssetsError:

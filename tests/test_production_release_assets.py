@@ -4,6 +4,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
@@ -1330,3 +1331,135 @@ def test_release_guide_references_bundled_offline_verifier() -> None:
     guide = _RELEASE_GUIDE.read_text(encoding="utf-8")
     assert "python make.py verify" in guide
     assert "scripts/verify_production_release.py" in guide
+
+
+def test_acceptance_byte_comparison_never_uses_path_open(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: byte comparison must use os.open, not Path.open."""
+
+    left = tmp_path / "left.bin"
+    right = tmp_path / "right.bin"
+    left.write_bytes(b"same bytes")
+    right.write_bytes(b"same bytes")
+
+    opened: list[Path] = []
+    original_open = Path.open
+
+    def tracking_open(self, *args, **kwargs):
+        if self in (left, right):
+            opened.append(self)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    assert assets_module._stable_regular_files_equal(left, right) is True
+    assert not opened, "Path.open was called (should use os.open)"
+
+
+def test_acceptance_byte_comparison_closes_left_if_right_open_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: if right os.open fails, left fd must be closed."""
+
+    left = tmp_path / "left.bin"
+    right = tmp_path / "right.bin"
+    left.write_bytes(b"same bytes")
+    right.write_bytes(b"same bytes")
+
+    closed_descriptors: list[int] = []
+    original_os_open = os.open
+    original_os_close = os.close
+    left_descriptor_holder: list[int] = []
+
+    def tracking_open(path, *args, **kwargs):
+        descriptor = original_os_open(path, *args, **kwargs)
+        if Path(path) == left:
+            left_descriptor_holder.append(descriptor)
+        if Path(path) == right:
+            # simulate right open failing after left is opened
+            original_os_close(descriptor)
+            raise OSError("injected right failure")
+        return descriptor
+
+    def tracking_close(fd, *args, **kwargs):
+        closed_descriptors.append(fd)
+        return original_os_close(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "close", tracking_close)
+
+    with pytest.raises(ProductionReleaseAssetsError, match="cannot be read"):
+        assets_module._stable_regular_files_equal(left, right)
+
+    assert left_descriptor_holder, "left descriptor was never opened"
+    assert left_descriptor_holder[0] in closed_descriptors, (
+        "left fd was not closed when right open failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "side,field,delta",
+    [
+        ("left", "st_ino", 1),
+        ("left", "st_size", 1),
+        ("left", "st_mtime", 1.0),
+        ("right", "st_ino", 1),
+        ("right", "st_size", 1),
+        ("right", "st_mtime", 1.0),
+    ],
+)
+def test_acceptance_byte_comparison_rejects_descriptor_identity_drift(
+    tmp_path: Path,
+    monkeypatch,
+    side: str,
+    field: str,
+    delta: int | float,
+) -> None:
+    """RED->GREEN: descriptor-before identity drift must be rejected."""
+
+    left = tmp_path / "left.bin"
+    right = tmp_path / "right.bin"
+    left.write_bytes(b"same bytes")
+    right.write_bytes(b"same bytes")
+
+    original_fstat = os.fstat
+    call_count = {"n": 0}
+
+    def drifting_fstat(fd: int):
+        result = original_fstat(fd)
+        call_count["n"] += 1
+        target_call = 1 if side == "left" else 2
+        if call_count["n"] == target_call:
+            return _drift_stat(result, field, delta)
+        return result
+
+    monkeypatch.setattr(os, "fstat", drifting_fstat)
+
+    with pytest.raises(ProductionReleaseAssetsError, match="changed"):
+        assets_module._stable_regular_files_equal(left, right)
+
+
+def _drift_stat(
+    result: os.stat_result,
+    field: str,
+    delta: int | float,
+) -> os.stat_result:
+    values = list(result)
+    field_map = {
+        "st_mode": 0,
+        "st_ino": 1,
+        "st_dev": 2,
+        "st_nlink": 3,
+        "st_uid": 4,
+        "st_gid": 5,
+        "st_size": 6,
+        "st_atime": 7,
+        "st_mtime": 8,
+        "st_ctime": 9,
+    }
+    index = field_map[field]
+    values[index] = values[index] + delta
+    return os.stat_result(tuple(values))
