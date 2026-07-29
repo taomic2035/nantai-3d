@@ -103,7 +103,6 @@ def _stream_colmap_text_lines(
     if (
         _is_linklike(path, before)
         or not stat.S_ISREG(before.st_mode)
-        or before.st_size <= 0
         or before.st_size > max_bytes
     ):
         raise ValueError(f"{label} is not a bounded regular file")
