@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -65,6 +66,30 @@ def _options(tmp_path: Path) -> ViewerSessionOptions:
         headless=True,
         measurement_timeout_ms=345_000,
     )
+
+
+def _make_directory_redirect(alias: Path, target: Path) -> None:
+    if os.name == "nt":
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            pytest.skip(f"junction creation unavailable: {created.stderr}")
+        return
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is not permitted")
+
+
+def _remove_directory_redirect(alias: Path) -> None:
+    if os.name == "nt":
+        os.rmdir(alias)
+    else:
+        alias.unlink()
 
 
 def test_session_starts_bound_server_runs_fixed_capture_and_always_closes(
@@ -440,6 +465,41 @@ def test_require_absent_rejects_symlink(tmp_path: Path) -> None:
 
     with pytest.raises(ViewerSessionError, match="already exists"):
         session_module._require_absent(link, label="test")
+
+
+def test_require_regular_file_rejects_symlinked_parent(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    (real_parent / "policy.json").write_text("{}\n", encoding="utf-8")
+    link_parent = tmp_path / "link-parent"
+    _make_directory_redirect(link_parent, real_parent)
+    try:
+        with pytest.raises(ViewerSessionError, match="regular file"):
+            session_module._require_regular_file(
+                link_parent / "policy.json",
+                label="test",
+            )
+    finally:
+        _remove_directory_redirect(link_parent)
+
+
+def test_require_absent_rejects_symlinked_parent(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    link_parent = tmp_path / "link-parent"
+    _make_directory_redirect(link_parent, real_parent)
+    try:
+        with pytest.raises(ViewerSessionError, match="redirected"):
+            session_module._require_absent(
+                link_parent / "report.json",
+                label="test",
+            )
+    finally:
+        _remove_directory_redirect(link_parent)
 
 
 def test_validated_options_rejects_symlinked_project_root(

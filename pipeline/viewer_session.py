@@ -11,6 +11,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from pipeline.durable_io import first_linklike_path
 from pipeline.human_review_inputs import (
     HumanReviewInputError,
     materialize_human_review_policy,
@@ -44,13 +45,18 @@ def _is_linklike(path: Path) -> bool:
 def _require_regular_file(path: Path, *, label: str) -> Path:
     candidate = Path(path).expanduser().absolute()
     try:
+        redirected = first_linklike_path(
+            Path(candidate.anchor),
+            candidate,
+        )
         observed = candidate.lstat()
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise ViewerSessionError(
             f"{label} must be an existing regular file"
         ) from exc
     if (
-        _is_linklike(candidate)
+        redirected is not None
+        or _is_linklike(candidate)
         or not stat.S_ISREG(observed.st_mode)
     ):
         raise ViewerSessionError(
@@ -62,9 +68,24 @@ def _require_regular_file(path: Path, *, label: str) -> Path:
 def _require_absent(path: Path, *, label: str) -> Path:
     candidate = Path(path).expanduser().absolute()
     try:
+        redirected = first_linklike_path(
+            Path(candidate.anchor),
+            candidate,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ViewerSessionError(
+            f"{label} path cannot be inspected"
+        ) from exc
+    if redirected is not None:
+        raise ViewerSessionError(f"{label} path is redirected")
+    try:
         candidate.lstat()
     except FileNotFoundError:
         return candidate
+    except OSError as exc:
+        raise ViewerSessionError(
+            f"{label} path cannot be inspected"
+        ) from exc
     raise ViewerSessionError(f"{label} already exists")
 
 
@@ -114,13 +135,18 @@ def _validated_options(
         (evidence_root, "evidence root"),
     ):
         try:
+            redirected = first_linklike_path(
+                Path(path.anchor),
+                path,
+            )
             observed = path.lstat()
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             raise ViewerSessionError(
                 f"{label} must be an existing regular directory"
             ) from exc
         if (
-            _is_linklike(path)
+            redirected is not None
+            or _is_linklike(path)
             or not stat.S_ISDIR(observed.st_mode)
         ):
             raise ViewerSessionError(
