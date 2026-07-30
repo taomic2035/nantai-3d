@@ -20,6 +20,7 @@ from pipeline.real_dataset import (
     LocalCaptureSource,
     canonical_model_bytes,
 )
+from pipeline.real_dataset_fetch import DatasetDownloadError
 from pipeline.real_scene_capture import (
     RealSceneCaptureError,
     prepare_local_capture,
@@ -203,7 +204,7 @@ def test_capture_revalidates_live_source_before_materializing(
     target = workspace / "dataset/poster/images/frame_a.png"
     target.write_bytes(b"tampered")
 
-    with pytest.raises(RealSceneCaptureError, match="sha256|length"):
+    with pytest.raises(RealSceneCaptureError, match="dataset verification failed"):
         prepare_real_capture(source, workspace, tmp_path / "run")
     assert not (tmp_path / "run/capture/ingest").exists()
 
@@ -887,3 +888,39 @@ def test_stable_read_bytes_rejects_ancestor_reparse(
             evidence,
             label="test manifest",
         )
+
+
+# ============================================================
+# RED → GREEN: dataset download error privacy
+# ============================================================
+
+
+def test_prepare_real_capture_hides_dataset_download_error_details(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """DatasetDownloadError text must not leak into the top-level message.
+
+    verify_hf_dataset failures may include remote URLs, repository paths or
+    HTTP error text.  prepare_real_capture must surface a fixed label and
+    keep the original exception only in the chained cause for local debugging.
+    """
+    source, workspace = _write_verified_source(tmp_path / "source")
+    private_detail = "https://internal.example.com/secret-repo/abc-token"
+
+    def fail_verify(source_arg, root):
+        del source_arg, root
+        raise DatasetDownloadError(private_detail)
+
+    monkeypatch.setattr(
+        real_scene_capture,
+        "verify_hf_dataset",
+        fail_verify,
+    )
+
+    with pytest.raises(RealSceneCaptureError) as exc_info:
+        prepare_real_capture(source, workspace, tmp_path / "run")
+
+    assert private_detail not in str(exc_info.value)
+    assert exc_info.value.__cause__ is not None
+    assert private_detail in str(exc_info.value.__cause__)

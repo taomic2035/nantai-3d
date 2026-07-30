@@ -382,7 +382,9 @@ def prepare_real_capture(
     try:
         receipt = verify_hf_dataset(source, source_root)
     except DatasetDownloadError as exc:
-        raise RealSceneCaptureError(str(exc)) from exc
+        raise RealSceneCaptureError(
+            "dataset verification failed"
+        ) from exc
 
     selected_paths = _select_hf_capture_paths(
         source,
