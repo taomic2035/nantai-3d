@@ -909,3 +909,72 @@ class TestColmapBinaryReaderIntegrity:
             pytest.skip("symlink creation is unavailable")
         with pytest.raises(RuntimeError, match="regular non-link file"):
             _sha256_colmap_binary(link)
+
+
+class TestColmapTextReaderIntegrity:
+    """Security boundary tests for _read_colmap_text_stable."""
+
+    def test_read_colmap_text_rejects_ancestor_reparse(
+        self, tmp_path, monkeypatch
+    ):
+        import pipeline.registration as reg
+        from pipeline.registration import _read_colmap_text_stable
+
+        target = tmp_path / "images.txt"
+        target.write_text("1 1 0 0 0 0 0 0 1 IMG_001\n", encoding="utf-8")
+        sentinel = tmp_path / "ancestor-reparse"
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return reg.first_linklike_path(root, leaf)
+
+        monkeypatch.setattr(reg, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(
+            RuntimeError,
+            match="bounded regular file|cannot be inspected",
+        ):
+            _read_colmap_text_stable(target, label="COLMAP images.txt")
+
+    def test_read_colmap_text_never_uses_path_read_text(
+        self, tmp_path, monkeypatch
+    ):
+        from pipeline.registration import _read_colmap_text_stable
+
+        target = tmp_path / "images.txt"
+        payload = b"1 1 0 0 0 0 0 0 1 IMG_001\n"
+        target.write_bytes(payload)
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError(
+                "_read_colmap_text_stable must not use Path.read_text"
+            )
+
+        monkeypatch.setattr(Path, "read_text", reject_read_text)
+        result = _read_colmap_text_stable(target, label="COLMAP images.txt")
+        assert result == payload.decode("utf-8")
+
+    def test_read_colmap_text_rejects_path_swap_during_read(
+        self, tmp_path, monkeypatch
+    ):
+        import pipeline.registration as reg
+        from pipeline.registration import _read_colmap_text_stable
+
+        target = tmp_path / "images.txt"
+        target.write_text("original\n", encoding="utf-8")
+        monkeypatch.setattr(
+            reg, "first_linklike_path", lambda root, leaf: None
+        )
+        original_lstat = Path.lstat
+        calls = {"n": 0}
+
+        def swapping_lstat(self):
+            if self == target:
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    target.write_text("swapped\n", encoding="utf-8")
+            return original_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", swapping_lstat)
+        with pytest.raises(RuntimeError, match="changed while being read"):
+            _read_colmap_text_stable(target, label="COLMAP images.txt")

@@ -580,6 +580,85 @@ def _sha256_colmap_binary(binary: str | Path) -> str:
     return digest.hexdigest()
 
 
+_MAX_COLMAP_TEXT_BYTES = 64 * 1024 * 1024
+
+
+def _read_colmap_text_stable(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_COLMAP_TEXT_BYTES,
+) -> str:
+    """Read a COLMAP text file via a single controlled descriptor.
+
+    Rejects symlinks, junctions, reparse-point ancestors, non-regular
+    files, oversized inputs, short reads, and identity drift during
+    reading.  Returns the decoded UTF-8 text.
+    """
+    try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+        before = path.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise RuntimeError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"{label} cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > max_bytes
+    ):
+        raise RuntimeError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RuntimeError(f"{label} cannot be read") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            fd_before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(fd_before.st_mode)
+                or _cross_surface_signature(fd_before)
+                != _cross_surface_signature(before)
+            ):
+                raise RuntimeError(f"{label} changed before read")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise RuntimeError(f"{label} exceeds its byte limit")
+            fd_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except RuntimeError:
+        raise
+    except OSError as exc:
+        raise RuntimeError(f"{label} cannot be read") from exc
+    if (
+        _cross_surface_signature(fd_before)
+        != _cross_surface_signature(fd_after)
+        or _cross_surface_signature(before)
+        != _cross_surface_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise RuntimeError(f"{label} changed while being read")
+    return payload.decode("utf-8")
+
+
 def colmap_version(binary: str | Path | None = None) -> str:
     """Return the exact active COLMAP version or fail closed."""
 
@@ -747,8 +826,12 @@ def colmap_register(
 
     sparse_enumeration = enumerate_sparse_models(sparse, n_images)
     model_dir = sparse / str(sparse_enumeration.selected_model_index)
-    images_txt = (model_dir / "images.txt").read_text(encoding="utf-8")
-    cameras_txt = (model_dir / "cameras.txt").read_text(encoding="utf-8")
+    images_txt = _read_colmap_text_stable(
+        model_dir / "images.txt", label="COLMAP images.txt"
+    )
+    cameras_txt = _read_colmap_text_stable(
+        model_dir / "cameras.txt", label="COLMAP cameras.txt"
+    )
     image_records = parse_colmap_image_records(images_txt)
     cameras = parse_colmap_cameras_txt(cameras_txt)
 
