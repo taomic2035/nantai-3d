@@ -321,7 +321,7 @@ def test_verify_is_offline_and_rehashes_live_bytes(tmp_path: Path) -> None:
         assert len(state.requests) == requests_before_verify
 
         (tmp_path / "dataset/poster/images/frame.png").write_bytes(b"other")
-        with pytest.raises(DatasetDownloadError, match="sha256"):
+        with pytest.raises(DatasetDownloadError, match="dataset verification failed"):
             verify_hf_dataset(_source(), tmp_path)
 
 
@@ -397,3 +397,44 @@ class TestDatasetFetchReaderIntegrity:
             match="changed before hash|changed while",
         ):
             _hash_file(original_path, expected_bytes=9)
+
+    def test_verify_does_not_use_path_read_bytes_for_policy(
+        self, tmp_path, monkeypatch
+    ):
+        """RED->GREEN: verify_hf_dataset must not use Path.read_bytes for policy.
+
+        dataset-policy.json is a trust-critical input.  Reading it via
+        Path.read_bytes() is vulnerable to symlink/reparse redirection and
+        lacks identity verification.  It must be loaded via the same
+        descriptor-based _load_canonical_model reader used for lock/receipt.
+        """
+        with _http_fixture() as (_state, transport):
+            fetch_hf_dataset(_source(), tmp_path, transport)
+
+        def reject_read_bytes(self, *args, **kwargs):
+            raise AssertionError(
+                "verify_hf_dataset must not use Path.read_bytes"
+            )
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+
+        verify_hf_dataset(_source(), tmp_path)
+
+    def test_verify_hf_dataset_hides_oserror_details(
+        self, tmp_path, monkeypatch
+    ):
+        """RED->GREEN: OSError text must not leak into DatasetDownloadError."""
+        with _http_fixture() as (_state, transport):
+            fetch_hf_dataset(_source(), tmp_path, transport)
+
+        private_detail = r"D:\private-capture\secret-token"
+
+        def fail_open(*_args, **_kwargs):
+            raise OSError(private_detail)
+
+        monkeypatch.setattr(os, "open", fail_open)
+
+        with pytest.raises(DatasetDownloadError) as exc_info:
+            verify_hf_dataset(_source(), tmp_path)
+
+        assert private_detail not in str(exc_info.value)

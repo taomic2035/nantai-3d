@@ -578,9 +578,9 @@ def _load_canonical_model(path: Path, model_type: type[BaseModel]) -> BaseModel:
         )
         before = path.lstat()
     except OSError as exc:
-        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+        raise DatasetDownloadError(f"invalid receipt file {path.name}") from exc
     except ValueError as exc:
-        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+        raise DatasetDownloadError(f"invalid receipt file {path.name}") from exc
     if (
         redirected is not None
         or _is_linklike(path, observed=before)
@@ -593,7 +593,7 @@ def _load_canonical_model(path: Path, model_type: type[BaseModel]) -> BaseModel:
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+        raise DatasetDownloadError(f"invalid receipt file {path.name}") from exc
     try:
         stream = os.fdopen(descriptor, "rb", buffering=0)
     except OSError as exc:
@@ -601,7 +601,7 @@ def _load_canonical_model(path: Path, model_type: type[BaseModel]) -> BaseModel:
             os.close(descriptor)
         except OSError:
             pass
-        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+        raise DatasetDownloadError(f"invalid receipt file {path.name}") from exc
     try:
         with stream:
             descriptor_before = os.fstat(stream.fileno())
@@ -616,7 +616,7 @@ def _load_canonical_model(path: Path, model_type: type[BaseModel]) -> BaseModel:
     except DatasetDownloadError:
         raise
     except OSError as exc:
-        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+        raise DatasetDownloadError(f"invalid receipt file {path.name}") from exc
     if (
         _cross_surface_signature(before) != _cross_surface_signature(after)
         or _cross_surface_signature(descriptor_before)
@@ -630,7 +630,7 @@ def _load_canonical_model(path: Path, model_type: type[BaseModel]) -> BaseModel:
         )
         model = model_type.model_validate_json(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
-        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+        raise DatasetDownloadError(f"invalid receipt file {path.name}") from exc
     if raw != canonical_model_bytes(model):
         raise DatasetDownloadError(f"receipt file {path.name} is not canonical")
     return model
@@ -648,7 +648,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             os.fsync(handle.fileno())
         os.replace(part, path)
     except OSError as exc:
-        raise DatasetDownloadError(f"cannot publish receipt {path.name}: {exc}") from exc
+        raise DatasetDownloadError(f"cannot publish receipt {path.name}") from exc
 
 
 def verify_hf_dataset(
@@ -665,8 +665,12 @@ def verify_hf_dataset(
         )
         assert isinstance(lock, DatasetLock)
         assert isinstance(receipt, DatasetReceipt)
-        policy_bytes = (workspace / "dataset-policy.json").read_bytes()
-        if policy_bytes != canonical_model_bytes(source):
+        policy_source = _load_canonical_model(
+            workspace / "dataset-policy.json",
+            HfDatasetSource,
+        )
+        assert isinstance(policy_source, HfDatasetSource)
+        if policy_source != source:
             raise DatasetDownloadError("dataset-policy does not match source")
         validate_dataset_receipt(
             source,
@@ -677,7 +681,7 @@ def verify_hf_dataset(
     except DatasetDownloadError:
         raise
     except (OSError, DatasetEvidenceError) as exc:
-        raise DatasetDownloadError(str(exc)) from exc
+        raise DatasetDownloadError("dataset verification failed") from exc
     return receipt
 
 
