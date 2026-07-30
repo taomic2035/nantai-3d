@@ -945,3 +945,58 @@ def test_false_claim_removed():
     src = Path(ingest.__file__).read_text(encoding="utf-8")
     assert "EXIF 写入源视频时间戳" not in src
     assert "do not preserve source bytes" in src
+
+
+class TestIngestManifestSha256FileIntegrity:
+    """Security boundary tests for ingest_manifest.sha256_file."""
+
+    def test_returns_correct_digest(self, tmp_path):
+        from pipeline.ingest_manifest import sha256_file
+        data = b"hello world\n"
+        path = tmp_path / "a.bin"
+        path.write_bytes(data)
+        assert sha256_file(path) == hashlib.sha256(data).hexdigest()
+
+    def test_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        from pipeline.ingest_manifest import IngestArtifactError, sha256_file
+
+        target = tmp_path / "a.bin"
+        target.write_bytes(b"data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = ingest_contract.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(
+            ingest_contract, "first_linklike_path", fake_first_linklike_path
+        )
+        with pytest.raises(
+            IngestArtifactError,
+            match="regular non-link file|redirected|unsafe",
+        ):
+            sha256_file(target)
+
+    def test_rejects_path_swap_before_open(self, tmp_path, monkeypatch):
+        from pipeline.ingest_manifest import IngestArtifactError, sha256_file
+
+        original_path = tmp_path / "a.bin"
+        original_path.write_bytes(b"original\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                original_path.write_bytes(b"swapped content\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(
+            IngestArtifactError,
+            match="changed before hash|changed while",
+        ):
+            sha256_file(original_path)

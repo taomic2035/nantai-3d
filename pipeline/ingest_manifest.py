@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
@@ -17,6 +18,9 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from pipeline.durable_io import _is_linklike as _durable_is_linklike
+from pipeline.durable_io import first_linklike_path
 
 MANIFEST_FILENAME = "ingest_manifest.json"
 SCHEMA_VERSION = 1
@@ -38,12 +42,69 @@ class IngestArtifactError(ValueError):
 
 
 def sha256_file(path: str | Path) -> str:
-    """Return a lowercase SHA-256 digest without loading the file into memory."""
+    """Return a lowercase SHA-256 digest via a single secure descriptor.
 
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
+    Rejects symlink/junction/reparse-point ancestors, leaf links, and file
+    swaps before/during the hash.
+    """
+    leaf = Path(path)
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(
+            Path(leaf.absolute().anchor), leaf
+        )
+        before = leaf.lstat()
+    except OSError as exc:
+        raise IngestArtifactError("file cannot be inspected") from exc
+    except ValueError as exc:
+        raise IngestArtifactError("file cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(leaf)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise IngestArtifactError("file is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(leaf, flags)
+    except OSError as exc:
+        raise IngestArtifactError("file cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise IngestArtifactError("file cannot be opened") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise IngestArtifactError("file changed before hash")
+            digest = hashlib.sha256()
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
+        after = leaf.lstat()
+    except IngestArtifactError:
+        raise
+    except OSError as exc:
+        raise IngestArtifactError("file cannot be hashed") from exc
+    if (
+        _cross_surface_signature(before) != _cross_surface_signature(after)
+        or _cross_surface_signature(descriptor_before)
+        != _cross_surface_signature(descriptor_after)
+    ):
+        raise IngestArtifactError("file changed while being hashed")
     return digest.hexdigest()
 
 
@@ -283,8 +344,20 @@ def build_manifest(
 
 
 def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)()
+    return _durable_is_linklike(path)
+
+
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
     )
 
 
@@ -325,10 +398,39 @@ def _scan_regular_files(root: Path, *, label: str) -> dict[str, Path]:
 
 
 def _load_bounded_manifest(path: Path) -> IngestManifest:
-    if not path.is_file() or _is_linklike(path):
-        raise IngestArtifactError("ingest manifest is missing")
+    descriptor = -1
     try:
-        with path.open("rb") as stream:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+        path_before = path.lstat()
+    except OSError as exc:
+        raise IngestArtifactError("ingest manifest cannot be inspected") from exc
+    except ValueError as exc:
+        raise IngestArtifactError("ingest manifest cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path)
+        or not stat.S_ISREG(path_before.st_mode)
+    ):
+        raise IngestArtifactError("ingest manifest is missing")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise IngestArtifactError("ingest manifest cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise IngestArtifactError("ingest manifest cannot be read") from exc
+    try:
+        with stream:
             before = os.fstat(stream.fileno())
             if before.st_size > MAX_MANIFEST_BYTES:
                 raise IngestArtifactError("ingest manifest is too large")
@@ -380,6 +482,8 @@ def _verify_file(path: Path, *, expected_size: int, expected_sha256: str, label:
     try:
         actual_sha256 = sha256_file(path)
         after = path.stat()
+    except IngestArtifactError:
+        raise
     except OSError as exc:
         raise IngestArtifactError(f"{label} sha256 cannot be read") from exc
     if _stat_signature(before) != _stat_signature(after) or _is_linklike(path):
