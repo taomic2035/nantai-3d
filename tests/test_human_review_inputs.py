@@ -300,6 +300,71 @@ def test_read_regular_bytes_has_no_bare_read_or_path_open() -> None:
     )
 
 
+def test_read_regular_bytes_rejects_ancestor_symlink(
+    tmp_path: Path,
+) -> None:
+    """A symlink ancestor directory must be rejected before reading."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    real_dir = tmp_path / "real-evidence"
+    real_dir.mkdir()
+    evidence = real_dir / "policy.json"
+    evidence.write_bytes(b'{"valid":true}')
+    link_dir = tmp_path / "linked-evidence"
+    try:
+        link_dir.symlink_to(real_dir)
+    except OSError:
+        pytest.skip("symlink creation is not permitted")
+    with pytest.raises(HumanReviewInputError, match="traverse a link"):
+        human_review_inputs_module._read_regular_bytes(
+            link_dir / "policy.json",
+            root=tmp_path,
+            label="test",
+        )
+
+
+def test_read_regular_bytes_rejects_short_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Early EOF (payload shorter than st_size) must be rejected."""
+
+    class ShortStream:
+        def __init__(self, fd):
+            self._fd = fd
+            self._done = False
+
+        def fileno(self):
+            return self._fd
+
+        def read(self, size=-1):
+            del size
+            if self._done:
+                return b""
+            self._done = True
+            return b"short"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            del args
+
+    evidence = tmp_path / "policy.json"
+    evidence.write_bytes(b'{"valid":true}')
+    monkeypatch.setattr(
+        human_review_inputs_module.os,
+        "fdopen",
+        lambda fd, *a, **kw: ShortStream(fd),
+    )
+    with pytest.raises(HumanReviewInputError, match="changed while being read"):
+        human_review_inputs_module._read_regular_bytes(
+            evidence,
+            root=tmp_path,
+            label="test",
+        )
+
+
 def test_staging_uses_os_open_with_no_follow() -> None:
     """Static contract: staging file must use os.open, not Path.open."""
     source = inspect.getsource(
