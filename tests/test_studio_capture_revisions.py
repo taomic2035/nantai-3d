@@ -272,7 +272,7 @@ def test_stable_read_rejects_cross_api_mtime_drift(
     manifest.write_bytes(b'{"kind":"capture"}\n')
     _drift_target_path_stat(monkeypatch, manifest, field="st_mtime_ns")
 
-    with pytest.raises(CaptureBundleError, match="changed while being read"):
+    with pytest.raises(CaptureBundleError, match="changed (before read|while being read)"):
         _read_stable_bytes(
             manifest,
             label="capture manifest",

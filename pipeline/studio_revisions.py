@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.ingest_manifest import (
     IngestManifest,
     IngestParams,
@@ -230,12 +232,6 @@ def capture_manifest_digest(manifest: CaptureRevisionManifest) -> str:
     return hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest()
 
 
-def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(
-        getattr(path, "is_junction", lambda: False)(),
-    )
-
-
 def _require_real_directory(path: Path, *, label: str) -> Path:
     absolute = path.expanduser().absolute()
     if _is_linklike(absolute):
@@ -259,35 +255,82 @@ def _stat_signature(result: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
 def _read_stable_bytes(
     path: Path,
     *,
     label: str,
     maximum: int,
 ) -> bytes:
+    descriptor = -1
     try:
-        if _is_linklike(path) or not path.is_file():
-            raise CaptureBundleError(f"{label} is missing or link-like")
-        with path.open("rb") as stream:
-            before = os.fstat(stream.fileno())
-            if before.st_size > maximum:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+        before = path.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise CaptureBundleError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise CaptureBundleError(f"{label} cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise CaptureBundleError(f"{label} is missing or link-like")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CaptureBundleError(f"{label} cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise CaptureBundleError(f"{label} cannot be opened") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise CaptureBundleError(f"{label} changed before read")
+            if descriptor_before.st_size > maximum:
                 raise CaptureBundleError(f"{label} is too large")
             payload = stream.read(maximum + 1)
-            after = os.fstat(stream.fileno())
-        path_after = path.stat()
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
     except CaptureBundleError:
         raise
     except OSError as exc:
         raise CaptureBundleError(f"{label} cannot be read") from exc
     if (
         len(payload) > maximum
-        or _stat_signature(before) != _stat_signature(after)
-        # Windows can expose different ctime precision or semantics through
-        # an open handle and a path lookup. Keep ctime in the same-handle
-        # mutation check above, but compare only portable identity, size, and
-        # mtime evidence across the two APIs.
-        or _stat_signature(after)[:-1] != _stat_signature(path_after)[:-1]
-        or _is_linklike(path)
+        or _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+        or _cross_surface_signature(before) != _cross_surface_signature(after)
+        or _cross_surface_signature(descriptor_before)
+        != _cross_surface_signature(descriptor_after)
     ):
         raise CaptureBundleError(f"{label} changed while being read")
     return payload
@@ -300,6 +343,14 @@ def _verify_regular_file(
     expected_sha256: str,
     label: str,
 ) -> None:
+    try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+    except (OSError, ValueError) as exc:
+        raise CaptureBundleError(f"{label} cannot be inspected") from exc
+    if redirected is not None:
+        raise CaptureBundleError(f"{label} has a reparse-point ancestor")
     try:
         if _is_linklike(path) or not path.is_file():
             raise CaptureBundleError(f"{label} is missing or link-like")
