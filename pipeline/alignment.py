@@ -31,16 +31,20 @@ The fit is recorded as ``Sim3AlignmentEvidence`` and serialised onto both the
 ``sim3.alignment.v1=<json>`` convention, so downstream audit code can re-derive
 the residuals and see the gate outcome.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.recon_schema import (
     AlignmentStatus,
     AxisConvention,
@@ -126,6 +130,76 @@ class AlignmentError(ValueError):
     """Raised when a Sim3 alignment gate fails; no world frame is emitted."""
 
 
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
+def _read_calibration_bytes(path: Path) -> bytes:
+    """Read the calibration record via a single secure descriptor.
+
+    The check-then-reopen pattern (``is_file`` then ``read_text``) leaves a
+    TOCTOU window where the file can be swapped between validation and
+    reading. This helper binds a single descriptor from ``os.open`` with
+    ``O_NOFOLLOW`` for the entire read and rechecks file identity before
+    and after hashing to close that window. Ancestor reparse points are
+    rejected via ``first_linklike_path``.
+    """
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
+        before = path.lstat()
+    except OSError as exc:
+        raise AlignmentError(f"共享噪声标定记录 {path} 无法访问: {exc}") from exc
+    except ValueError as exc:
+        raise AlignmentError(f"共享噪声标定记录 {path} 无法访问: {exc}") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise AlignmentError(f"共享噪声标定记录 {path} 不是常规非链接文件")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AlignmentError(f"共享噪声标定记录 {path} 无法打开: {exc}") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise AlignmentError(f"共享噪声标定记录 {path} 无法打开: {exc}") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise AlignmentError(f"共享噪声标定记录 {path} 在打开期间被替换")
+            raw = stream.read()
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except AlignmentError:
+        raise
+    except OSError as exc:
+        raise AlignmentError(f"共享噪声标定记录 {path} 无法读取: {exc}") from exc
+    if _cross_surface_signature(before) != _cross_surface_signature(
+        after
+    ) or _cross_surface_signature(descriptor_before) != _cross_surface_signature(descriptor_after):
+        raise AlignmentError(f"共享噪声标定记录 {path} 在读取期间被替换")
+    return raw
+
+
 class SharedNoiseCalibration(BaseModel):
     """两次真实 COLMAP 重建之间共享相机中心的实测噪声标定记录。
 
@@ -169,8 +243,14 @@ class SharedNoiseCalibration(BaseModel):
     residual_distance_corr: float
     affine_rms_m: float = Field(ge=0)
 
-    @field_validator("shared_centre_rms_m", "shared_centre_max_m", "scene_extent_m",
-                     "relative_rms", "residual_distance_corr", "affine_rms_m")
+    @field_validator(
+        "shared_centre_rms_m",
+        "shared_centre_max_m",
+        "scene_extent_m",
+        "relative_rms",
+        "residual_distance_corr",
+        "affine_rms_m",
+    )
     @classmethod
     def _finite(cls, value: float) -> float:
         value = float(value)
@@ -287,14 +367,11 @@ def load_shared_noise_calibration(
             f"\n提示: 若你要的是【整村漫游】而不是测量, 走 merge_for_preview —— 漫游只"
             f"需要各批次落在同一个坐标系里, 不需要米制, 故它不需要本标定。"
         )
+    raw = _read_calibration_bytes(resolved)
     try:
-        record = SharedNoiseCalibration.model_validate_json(
-            resolved.read_text(encoding="utf-8")
-        )
+        record = SharedNoiseCalibration.model_validate_json(raw)
     except Exception as exc:  # noqa: BLE001 - 任何不自洽都必须 fail-closed
-        raise AlignmentError(
-            f"共享噪声标定记录 {resolved} 无法解析或不自洽: {exc}"
-        ) from exc
+        raise AlignmentError(f"共享噪声标定记录 {resolved} 无法解析或不自洽: {exc}") from exc
     _verify_calibration_binds_to_reference(record, aligned_ref, resolved)
     return record
 
@@ -324,7 +401,7 @@ def umeyama_sim3(
         s[2, 2] = -1.0  # reflection guard: force a proper rotation
     rotation = u @ s @ vt
     if with_scale:
-        var_src = (src_c ** 2).sum() / n
+        var_src = (src_c**2).sum() / n
         if var_src <= 0:
             raise AlignmentError("source points are coincident; scale is undefined")
         scale = float(np.trace(np.diag(d) @ s) / var_src)
@@ -340,7 +417,7 @@ def _residuals(
     """Per-point Euclidean residuals plus their RMS and max, in metres."""
     predicted = scale * (src @ rotation.T) + t
     per_point = np.linalg.norm(dst - predicted, axis=1)
-    rms = float(np.sqrt((per_point ** 2).mean()))
+    rms = float(np.sqrt((per_point**2).mean()))
     max_residual = float(per_point.max())
     return per_point, rms, max_residual
 
@@ -366,9 +443,7 @@ def _n_effective(points: np.ndarray, radius_m: float) -> int:
     """
     representatives: list[np.ndarray] = []
     for point in points:
-        if not any(
-            float(np.linalg.norm(point - rep)) <= radius_m for rep in representatives
-        ):
+        if not any(float(np.linalg.norm(point - rep)) <= radius_m for rep in representatives):
             representatives.append(point)
     return len(representatives)
 
@@ -422,7 +497,7 @@ def _holdout_residuals(
     residuals: list[float] = []
     folds = 0
     for start in range(0, n, k):
-        test = indices[start:start + k]
+        test = indices[start : start + k]
         train = np.setdiff1d(indices, test)
         if len(train) < _MIN_CONTROL_POINTS:
             raise AlignmentError(
@@ -444,9 +519,7 @@ def _holdout_residuals(
         scale, rotation, translation = umeyama_sim3(train_src, train_dst)
         if not np.isfinite(scale) or scale <= 0:
             raise AlignmentError("留出验证的训练折拟合出非正尺度; fail-closed")
-        per_point, _, _ = _residuals(
-            src[test], dst[test], scale, rotation, translation
-        )
+        per_point, _, _ = _residuals(src[test], dst[test], scale, rotation, translation)
         residuals.extend(per_point.tolist())
         folds += 1
     return np.asarray(residuals, dtype=np.float64), folds
@@ -517,9 +590,7 @@ def control_points_from_shared_images(
         requested = set(images)
         missing = sorted(requested - set(shared))
         if missing:
-            raise AlignmentError(
-                f"请求的共享影像未同时出现在两批重建里: {missing}"
-            )
+            raise AlignmentError(f"请求的共享影像未同时出现在两批重建里: {missing}")
         shared = [image for image in shared if image in requested]
 
     sim3 = aligned_ref.pose_to_world.sim3
@@ -528,9 +599,7 @@ def control_points_from_shared_images(
         local = np.asarray([ref_poses[image].t_xyz], dtype=np.float64)
         enu = sim3.apply(local)[0]
         if not np.all(np.isfinite(enu)):
-            raise AlignmentError(
-                f"共享影像 {image!r} 的参考世界坐标非有限; fail-closed"
-            )
+            raise AlignmentError(f"共享影像 {image!r} 的参考世界坐标非有限; fail-closed")
         control_points.append(
             ControlPoint(
                 label=image,
@@ -573,14 +642,11 @@ def build_control_points(
         else:
             if origin is None:
                 raise AlignmentError(
-                    f"control point {cp.label!r} uses a GPS anchor but no geo origin"
-                    " is available"
+                    f"control point {cp.label!r} uses a GPS anchor but no geo origin is available"
                 )
             enu = np.asarray(gps_to_enu(cp.geo, origin), dtype=np.float64)
         if not (np.all(np.isfinite(sfm)) and np.all(np.isfinite(enu))):
-            raise AlignmentError(
-                f"control point {cp.label!r} resolved to non-finite coordinates"
-            )
+            raise AlignmentError(f"control point {cp.label!r} resolved to non-finite coordinates")
         resolved.append((sfm, enu, cp.label))
     return resolved
 
@@ -660,9 +726,7 @@ def fit_sfm_to_enu(
                 "ACCEPTED)。本模块不替调用方编一个半径"
             )
         if not np.isfinite(cluster_radius_m) or cluster_radius_m <= 0:
-            raise AlignmentError(
-                f"cluster_radius_m 必须有限且为正, 得到 {cluster_radius_m}"
-            )
+            raise AlignmentError(f"cluster_radius_m 必须有限且为正, 得到 {cluster_radius_m}")
 
     # holdout_k 的守卫【与模式无关】: 非派生模式也会算留出 (只记录不裁决), 而
     # holdout_k=0 会让 range(0, n, 0) 抛裸 ValueError —— 调用方的 except AlignmentError
@@ -699,8 +763,7 @@ def fit_sfm_to_enu(
         )
     if n_distinct_source < _MIN_CONTROL_POINTS:
         raise AlignmentError(
-            f"只有 {n_distinct_source} 个互不相同的源位置 "
-            f"(<{_MIN_CONTROL_POINTS}): fail-closed"
+            f"只有 {n_distinct_source} 个互不相同的源位置 (<{_MIN_CONTROL_POINTS}): fail-closed"
         )
 
     # 精确重复的靶标: 不需要编任何半径就能认出来, 故【所有模式】都挡。真实触发是
@@ -718,8 +781,7 @@ def fit_sfm_to_enu(
         )
     if n_distinct < _MIN_CONTROL_POINTS:
         raise AlignmentError(
-            f"只有 {n_distinct} 个互不相同的靶标位置 (<{_MIN_CONTROL_POINTS}): "
-            "fail-closed"
+            f"只有 {n_distinct} 个互不相同的靶标位置 (<{_MIN_CONTROL_POINTS}): fail-closed"
         )
 
     n_effective: int | None = None
@@ -734,8 +796,8 @@ def fit_sfm_to_enu(
                 "派生靶标的误差会复合, 故这条路要求更密的共享影像 (>=8)。注意 8 是"
                 "【政策选择不是标定值】: 实测凸包内误差随点数平滑改善、并不在 8 处"
                 "进平台, 见 docs/verification/2026-07-17-derived-mode-control-point-floor.md"
-                if derived else
-                f"Sim3 需要 >={_MIN_CONTROL_POINTS} 个非共面控制点, 这个契约作用在"
+                if derived
+                else f"Sim3 需要 >={_MIN_CONTROL_POINTS} 个非共面控制点, 这个契约作用在"
                 "【有效】点数上才有意义"
             )
             raise AlignmentError(
@@ -774,7 +836,7 @@ def fit_sfm_to_enu(
             # 只能回落到偏乐观的 fit rms —— 与 HEAD 同, 不是新的 fail-open。
             holdout, holdout_folds = None, None
         if holdout is not None:
-            holdout_rms = float(np.sqrt((holdout ** 2).mean()))
+            holdout_rms = float(np.sqrt((holdout**2).mean()))
             holdout_max = float(holdout.max())
     if derived:
         if not np.isfinite(holdout_rms):
@@ -860,8 +922,9 @@ def _check_derived_targets_are_declared(
     诚实限制: 本门只挡【标记存在却不声明】。手写一份 enu_xyz 控制点 JSON 冒充实测,
     机器无从分辨 —— 那时 enu_xyz 是操作者的物理测量声称, 是这条路径的信任根本身。
     """
-    sources = {cp.derived_from_alignment for cp in control_points
-               if cp.derived_from_alignment is not None}
+    sources = {
+        cp.derived_from_alignment for cp in control_points if cp.derived_from_alignment is not None
+    }
     if not sources:
         return
     if declared is None:
@@ -956,9 +1019,7 @@ def align_registration(
     if method is None:
         # GPS-derived targets => GPS_ANCHOR; explicit surveyed ENU => CONTROL_POINTS.
         used_gps = any(cp.geo is not None for cp in control_points)
-        method = (
-            TransformMethod.GPS_ANCHOR if used_gps else TransformMethod.CONTROL_POINTS
-        )
+        method = TransformMethod.GPS_ANCHOR if used_gps else TransformMethod.CONTROL_POINTS
     transform = FrameTransform(
         source_frame=reg.pose_frame.frame_id,
         target_frame=world_frame_id,
@@ -989,11 +1050,7 @@ def _effective_rms_m(evidence: Sim3AlignmentEvidence) -> float:
     **诚实限制**: 留出算不动时 (n<=4, 或折退化) 只能回落到偏乐观的 fit rms。那不是
     "够好", 是【定不出更好的数】—— 此时下游的米制声称比它看起来的更松。
     """
-    own = (
-        evidence.holdout_rms_m
-        if evidence.holdout_rms_m is not None
-        else evidence.rms_residual_m
-    )
+    own = evidence.holdout_rms_m if evidence.holdout_rms_m is not None else evidence.rms_residual_m
     return float(own) + float(evidence.upstream_alignment_rms_m or 0.0)
 
 
@@ -1129,9 +1186,7 @@ def _shared_pose_centres(
         requested = set(images)
         missing = sorted(requested - set(shared))
         if missing:
-            raise AlignmentError(
-                f"请求的共享影像未同时出现在两批重建里: {missing}"
-            )
+            raise AlignmentError(f"请求的共享影像未同时出现在两批重建里: {missing}")
         shared = [image for image in shared if image in requested]
     src = np.array([b_poses[i].t_xyz for i in shared], dtype=np.float64)
     dst = np.array([a_poses[i].t_xyz for i in shared], dtype=np.float64)
@@ -1190,9 +1245,7 @@ def merge_for_preview(
       【同时错】, 缝得严丝合缝却都不是真的。
     """
     if not np.isfinite(max_relative_rms) or max_relative_rms <= 0:
-        raise AlignmentError(
-            f"max_relative_rms 必须有限且为正, 得到 {max_relative_rms}"
-        )
+        raise AlignmentError(f"max_relative_rms 必须有限且为正, 得到 {max_relative_rms}")
     if holdout_k < 1:
         raise AlignmentError(f"holdout_k 必须 >=1, 得到 {holdout_k}")
     if reg_b.pose_frame.frame_id == reg_a.pose_frame.frame_id:
@@ -1231,8 +1284,7 @@ def merge_for_preview(
         )
     if n_distinct < _MIN_CONTROL_POINTS:
         raise AlignmentError(
-            f"只有 {n_distinct} 个互不相同的中心 (<{_MIN_CONTROL_POINTS}): "
-            "fail-closed"
+            f"只有 {n_distinct} 个互不相同的中心 (<{_MIN_CONTROL_POINTS}): fail-closed"
         )
 
     # 靶标跨度: 归一化的分母。它与 rms 同在 A 的 gauge 里, 故商无量纲。
@@ -1260,7 +1312,7 @@ def merge_for_preview(
             # 0.963~1.717, 见 docs/verification/2026-07-17-derived-mode-control-point-floor.md)。
             holdout, holdout_folds = None, None
         if holdout is not None:
-            holdout_relative_rms = float(np.sqrt((holdout ** 2).mean())) / extent
+            holdout_relative_rms = float(np.sqrt((holdout**2).mean())) / extent
 
     relative_rms = rms / extent
     relative_max = max_residual / extent
@@ -1300,9 +1352,11 @@ def merge_for_preview(
     # 目标 frame 【原样继承 A 的 pose_frame 契约】: 任意单位、非 geo。刻意不走
     # align_registration —— 它会为任何 world_frame_id 硬编码 enu-z-up/metric/aligned,
     # 对一个纯任意 frame 那就是伪造米制声称。
-    target_frame = reg_a.pose_frame.model_copy(update={
-        "evidence": (*reg_a.pose_frame.evidence, evidence_str),
-    })
+    target_frame = reg_a.pose_frame.model_copy(
+        update={
+            "evidence": (*reg_a.pose_frame.evidence, evidence_str),
+        }
+    )
     transform = FrameTransform(
         source_frame=reg_b.pose_frame.frame_id,
         target_frame=reg_a.pose_frame.frame_id,
@@ -1341,21 +1395,24 @@ def load_control_points_from_ingest_gps(
     """
     from pipeline.ingest_manifest import IngestManifest
 
-    manifest = IngestManifest.model_validate_json(
-        Path(manifest_path).read_text(encoding="utf-8"))
+    manifest = IngestManifest.model_validate_json(Path(manifest_path).read_text(encoding="utf-8"))
     anchors: dict[str, GeoAnchor] = {}
     for src in manifest.sources:
         if src.gps is None:
             continue
-        anchor = GeoAnchor(lat=src.gps.lat, lon=src.gps.lon,
-                           alt=src.gps.altitude_m if src.gps.altitude_m is not None else 0.0)
+        anchor = GeoAnchor(
+            lat=src.gps.lat,
+            lon=src.gps.lon,
+            alt=src.gps.altitude_m if src.gps.altitude_m is not None else 0.0,
+        )
         for out in src.outputs:
             anchors[str(out.output_path)] = anchor
     control_points = control_points_from_geo_anchors(reg, anchors)
     if not control_points:
         raise AlignmentError(
             "--from-gps 未找到【既注册又带 EXIF GPS】的图: 确认照片含 GPS 且已被配准, "
-            "或改用 --control-points 手工提供")
+            "或改用 --control-points 手工提供"
+        )
     return control_points
 
 
@@ -1363,24 +1420,37 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Fit an SfM->ENU Sim3 and write an aligned registration.json"
     )
-    parser.add_argument("--registration", required=True,
-                        help="path to a RegistrationResult JSON (sfm-local)")
+    parser.add_argument(
+        "--registration", required=True, help="path to a RegistrationResult JSON (sfm-local)"
+    )
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--control-points",
-                        help="path to a control-point spec JSON list")
-    source.add_argument("--from-gps", metavar="INGEST_MANIFEST",
-                        help="derive control points from per-image EXIF GPS in an "
-                             "ingest manifest (turnkey for GPS-tagged captures); "
-                             "pairs each registered image with its GPS anchor")
-    parser.add_argument("--max-rms", type=float, default=2.0,
-                        help="RMS residual gate in metres (default 2.0)")
-    parser.add_argument("--min-span-ratio", type=float, default=1e-3,
-                        help="relative degeneracy floor for the source span")
-    parser.add_argument("--out", required=True,
-                        help="output path for the aligned registration.json")
-    parser.add_argument("--geo-origin", default=None, metavar="LAT,LON,ALT",
-                        help="ENU tangent origin lat,lon,alt; supplies/overrides "
-                             "registration.geo_origin (required if neither has one)")
+    source.add_argument("--control-points", help="path to a control-point spec JSON list")
+    source.add_argument(
+        "--from-gps",
+        metavar="INGEST_MANIFEST",
+        help="derive control points from per-image EXIF GPS in an "
+        "ingest manifest (turnkey for GPS-tagged captures); "
+        "pairs each registered image with its GPS anchor",
+    )
+    parser.add_argument(
+        "--max-rms", type=float, default=2.0, help="RMS residual gate in metres (default 2.0)"
+    )
+    parser.add_argument(
+        "--min-span-ratio",
+        type=float,
+        default=1e-3,
+        help="relative degeneracy floor for the source span",
+    )
+    parser.add_argument(
+        "--out", required=True, help="output path for the aligned registration.json"
+    )
+    parser.add_argument(
+        "--geo-origin",
+        default=None,
+        metavar="LAT,LON,ALT",
+        help="ENU tangent origin lat,lon,alt; supplies/overrides "
+        "registration.geo_origin (required if neither has one)",
+    )
     args = parser.parse_args(argv)
 
     reg = RegistrationResult.model_validate_json(
@@ -1420,8 +1490,9 @@ def main(argv: list[str] | None = None) -> int:
             ) from exc
         raise
     # LF: registration.json is a trust root; keep it byte-reproducible across OSes.
-    Path(args.out).write_text(aligned.model_dump_json(indent=2) + "\n",
-                              encoding="utf-8", newline="\n")
+    Path(args.out).write_text(
+        aligned.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
     print(f"[OK] aligned registration written to {args.out}")
     return 0
 

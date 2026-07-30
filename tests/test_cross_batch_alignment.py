@@ -8,9 +8,12 @@ fail-open: 门必须挡住它, 而不是被漂亮的 rms 骗过去。
 关键: 靶标 (enu_xyz) 是从参考批 A 的已对齐位姿【派生】的, 不是物理测量。派生模式下
 留出验证 / n_effective / 误差复合 三道门【强制】开启, 且靶标来源必须机器可溯。
 """
+
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -139,9 +142,14 @@ def _registration(frame_id: str, poses: list[CameraPose], session: str) -> Regis
         pose_frame=_sfm_frame(frame_id),
         alignment_status=AlignmentStatus.UNALIGNED,
         geo_origin=_ORIGIN,
-        sessions=[CaptureSession(
-            session_id=session, kind="photo_batch", source="nantai",
-            images=[p.image for p in poses])],
+        sessions=[
+            CaptureSession(
+                session_id=session,
+                kind="photo_batch",
+                source="nantai",
+                images=[p.image for p in poses],
+            )
+        ],
         poses=poses,
     )
 
@@ -205,8 +213,9 @@ def _calibration_record_for(ref: RegistrationResult, **overrides) -> dict:
 
 
 def _write_calibration(path, ref: RegistrationResult, **overrides):
-    path.write_text(json.dumps(_calibration_record_for(ref, **overrides)),
-                    encoding="utf-8", newline="\n")
+    path.write_text(
+        json.dumps(_calibration_record_for(ref, **overrides)), encoding="utf-8", newline="\n"
+    )
     return path
 
 
@@ -214,9 +223,11 @@ def _write_calibration(path, ref: RegistrationResult, **overrides):
 def calibration_for(tmp_path):
     """工厂: 产一份绑定到【调用方指定的参考批】的标定记录。"""
     counter = iter(range(1000))
+
     def make(ref: RegistrationResult, **overrides):
         path = tmp_path / f"colmap_shared_noise_{next(counter)}.json"
         return _write_calibration(path, ref, **overrides)
+
     return make
 
 
@@ -231,8 +242,10 @@ def calibration(calibration_for):
 
 
 def _resolved(src, dst):
-    return [(np.asarray(s, float), np.asarray(d, float), f"cp{i}")
-            for i, (s, d) in enumerate(zip(src, dst, strict=True))]
+    return [
+        (np.asarray(s, float), np.asarray(d, float), f"cp{i}")
+        for i, (s, d) in enumerate(zip(src, dst, strict=True))
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -252,8 +265,7 @@ class TestSharedImageTargets:
             got = np.asarray(by_label[image].enu_xyz)
             # 靶标 == A 的【世界】中心 (米), 不是 A 的 pose_frame 原始坐标。
             assert np.allclose(got, enu, atol=1e-6)
-            raw = np.asarray(
-                next(p.t_xyz for p in ref.poses if p.image == image), dtype=float)
+            raw = np.asarray(next(p.t_xyz for p in ref.poses if p.image == image), dtype=float)
             assert not np.allclose(got, raw, atol=1e-3)
             assert by_label[image].geo is None  # 走 ENU 中枢, 不冒充 GPS 锚
 
@@ -281,11 +293,18 @@ class TestSharedImageTargets:
             world_frame=bogus_world,
             alignment_status=AlignmentStatus.ALIGNED,
             pose_to_world=FrameTransform(
-                source_frame="sfm-local-A", target_frame="pseudo-world",
-                sim3=_S_A, method=TransformMethod.CONTROL_POINTS, evidence=()),
+                source_frame="sfm-local-A",
+                target_frame="pseudo-world",
+                sim3=_S_A,
+                method=TransformMethod.CONTROL_POINTS,
+                evidence=(),
+            ),
             geo_origin=_ORIGIN,
-            sessions=[CaptureSession(session_id="A", kind="photo_batch",
-                                     source="nantai", images=list(world))],
+            sessions=[
+                CaptureSession(
+                    session_id="A", kind="photo_batch", source="nantai", images=list(world)
+                )
+            ],
             poses=poses,
         )
         with pytest.raises(AlignmentError, match="米制|metric"):
@@ -308,16 +327,14 @@ class TestPointCountContract:
         assert ">=3 control points" not in message
 
     def test_four_non_coplanar_points_pass(self):
-        src = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
-                        [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]])
+        src = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]])
         dst = 2.0 * src + np.array([1.0, 2.0, 3.0])
         sim3, evidence = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
         assert evidence.passed is True
         assert np.isclose(sim3.scale, 2.0)
 
     def test_four_coplanar_points_still_rejected(self):
-        src = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
-                        [0.0, 10.0, 0.0], [10.0, 10.0, 0.0]])
+        src = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [10.0, 10.0, 0.0]])
         dst = 2.0 * src + np.array([1.0, 2.0, 3.0])
         with pytest.raises(AlignmentError, match="degenerate"):
             fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
@@ -329,26 +346,38 @@ class TestPointCountContract:
 class TestHoldoutGate:
     def test_derived_targets_require_upstream_and_cluster_radius(self):
         world = _world_centres()
-        src = np.array([_poses_in_frame(world, _S_B, "B")[i].t_xyz
-                        for i in range(len(world))])
+        src = np.array([_poses_in_frame(world, _S_B, "B")[i].t_xyz for i in range(len(world))])
         dst = np.array(list(world.values()))
         with pytest.raises(AlignmentError, match="upstream"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           cluster_radius_m=0.5)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                cluster_radius_m=0.5,
+            )
         with pytest.raises(AlignmentError, match="聚类半径|cluster"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+            )
 
     def test_fewer_than_eight_effective_points_rejected_in_derived_mode(self):
         world = _world_centres(n=6)
         src = np.array([p.t_xyz for p in _poses_in_frame(world, _S_B, "B")])
         dst = np.array(list(world.values()))
         with pytest.raises(AlignmentError, match="n_effective"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+            )
 
     def test_holdout_catches_overfitting_that_fit_rms_hides(self, calibration):
         """载荷门的【真实】作用域: 拟合把噪声吸进 7 个自由度, fit rms 因此偏乐观。
@@ -361,8 +390,11 @@ class TestHoldoutGate:
         """
         rng = np.random.default_rng(249)
         src = rng.uniform(-20.0, 20.0, size=(8, 3))
-        dst = (1.3 * (src @ _rotation("z", 12.0).T) + np.array([2.0, 1.0, 0.5])
-               + rng.normal(scale=0.10, size=(8, 3)))
+        dst = (
+            1.3 * (src @ _rotation("z", 12.0).T)
+            + np.array([2.0, 1.0, 0.5])
+            + rng.normal(scale=0.10, size=(8, 3))
+        )
 
         # 前提: fit rms 自己是过门的 —— 否则测的就不是留出门。
         _, fit_only = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=0.18)
@@ -373,9 +405,14 @@ class TestHoldoutGate:
         # 退化成 (0 + holdout), 与留出门等价 —— 若不钉死措辞, 留出门被摘掉后复合门会
         # 兜住结果, 测试照样绿而门实际没了 (变异测试 MUTANT-2 实测如此)。
         with pytest.raises(AlignmentError, match="held-out") as exc:
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=0.18,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=0.18,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+            )
         assert "复合" not in str(exc.value)
 
     def test_holdout_is_blind_to_collinear_degeneracy(self, calibration):
@@ -398,30 +435,34 @@ class TestHoldoutGate:
         """
         rng = np.random.default_rng(3)
         n = 12
-        src = np.column_stack([
-            np.linspace(0.0, 60.0, n),
-            rng.normal(scale=0.1, size=n),
-            rng.normal(scale=0.1, size=n),
-        ])
+        src = np.column_stack(
+            [
+                np.linspace(0.0, 60.0, n),
+                rng.normal(scale=0.1, size=n),
+                rng.normal(scale=0.1, size=n),
+            ]
+        )
         rot = _rotation("z", 12.0)
-        dst = (1.3 * (src @ rot.T) + np.array([2.0, 1.0, 0.5])
-               + rng.normal(scale=0.02, size=(n, 3)))
+        dst = 1.3 * (src @ rot.T) + np.array([2.0, 1.0, 0.5]) + rng.normal(scale=0.02, size=(n, 3))
 
         singular = np.linalg.svd(src - src.mean(axis=0), compute_uv=False)
         assert singular[2] / singular[0] > 1e-3  # span 门放行
 
         # 门放行了 —— 这是【记录事实】, 不是庆祝。
         sim3, evidence = fit_sfm_to_enu(
-            _resolved(src, dst), _ORIGIN, max_rms_m=0.05,
+            _resolved(src, dst),
+            _ORIGIN,
+            max_rms_m=0.05,
             control_target_provenance="derived-from-alignment:xf-x",
-            upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            upstream_alignment_rms_m=0.0,
+            cluster_radius_m=0.5,
+        )
         assert evidence.passed is True
         assert evidence.holdout_rms_m < 0.05
         assert evidence.holdout_rms_m / evidence.rms_residual_m < 2.0  # 没有"必然爆"
 
         # 而 100m 外的真实误差是米级 —— 没有任何门看见它。
-        probe = np.column_stack([np.linspace(0.0, 60.0, 20),
-                                 np.full(20, 100.0), np.full(20, 50.0)])
+        probe = np.column_stack([np.linspace(0.0, 60.0, 20), np.full(20, 100.0), np.full(20, 50.0)])
         truth = 1.3 * (probe @ rot.T) + np.array([2.0, 1.0, 0.5])
         error = np.linalg.norm(truth - sim3.apply(probe), axis=1).mean()
         assert error > 1.0, "盲区若消失说明门变强了, 请重测并更新 honest limits"
@@ -430,8 +471,8 @@ class TestHoldoutGate:
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
         aligned = align_to_reference(
-            ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5,
-            calibration_path=calibration)
+            ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=calibration
+        )
         assert aligned.alignment_status is AlignmentStatus.ALIGNED
         evidence = Sim3AlignmentEvidence.parse(aligned.pose_to_world.evidence[0])
         assert evidence.passed is True
@@ -450,9 +491,14 @@ class TestHoldoutGate:
         line = np.array([[float(i) * 3.0, 0.0, 0.0] for i in range(12)])
         dst = 2.0 * line + np.array([1.0, 1.0, 1.0])
         with pytest.raises(AlignmentError, match="degenerate") as exc:
-            fit_sfm_to_enu(_resolved(line, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            fit_sfm_to_enu(
+                _resolved(line, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+            )
         assert "held-out" not in str(exc.value)
 
 
@@ -461,22 +507,34 @@ class TestHoldoutGate:
 # --------------------------------------------------------------------------
 class TestEffectiveCount:
     def test_five_clusters_of_six_rejected(self, calibration):
-        base = np.array([[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 30.0, 0.0],
-                         [0.0, 0.0, 30.0], [30.0, 30.0, 30.0]])
+        base = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [0.0, 30.0, 0.0],
+                [0.0, 0.0, 30.0],
+                [30.0, 30.0, 30.0],
+            ]
+        )
         rng = np.random.default_rng(5)
         src = np.repeat(base, 6, axis=0) + rng.normal(scale=0.01, size=(30, 3))
         dst = 2.0 * src + np.array([1.0, 2.0, 3.0])
         with pytest.raises(AlignmentError, match="n_effective"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=1.0)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=1.0,
+            )
 
     def test_evidence_records_both_raw_and_effective_counts(self, calibration):
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
-        aligned = align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                                     cluster_radius_m=0.5,
-                                     calibration_path=calibration)
+        aligned = align_to_reference(
+            ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=calibration
+        )
         evidence = Sim3AlignmentEvidence.parse(aligned.pose_to_world.evidence[0])
         assert evidence.n_control_points == 12
         assert evidence.n_effective_control_points == 12
@@ -493,20 +551,28 @@ class TestErrorCompounding:
         # B 自身留出误差 ~0.8m; A 的锚定误差 1.5m; 阈值 2.0m。各自单独都过, 和不过。
         dst = np.array(list(world.values())) + rng.normal(scale=0.8, size=(12, 3))
         with pytest.raises(AlignmentError, match="复合|compound"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=1.5, cluster_radius_m=0.5)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=1.5,
+                cluster_radius_m=0.5,
+            )
 
-    def test_upstream_rms_is_read_from_reference_evidence_not_caller(
-            self, calibration_for):
+    def test_upstream_rms_is_read_from_reference_evidence_not_caller(self, calibration_for):
         world = _world_centres(n=12)
         ref = _aligned_reference(world, rms_m=1.5)
         upstream = Sim3AlignmentEvidence.parse(ref.pose_to_world.evidence[0])
         assert upstream.rms_residual_m > 1.0
         with pytest.raises(AlignmentError, match="复合|compound"):
-            align_to_reference(ref, _reg_b(world), max_rms_m=1.0,
-                               cluster_radius_m=0.5,
-                               calibration_path=calibration_for(ref))
+            align_to_reference(
+                ref,
+                _reg_b(world),
+                max_rms_m=1.0,
+                cluster_radius_m=0.5,
+                calibration_path=calibration_for(ref),
+            )
 
     def test_evidence_carries_upstream_rms(self, calibration_for):
         """B 记的上游必须是 A 的【留出】残差, 不是 A 的 fit rms。
@@ -518,14 +584,17 @@ class TestErrorCompounding:
         """
         world = _world_centres(n=12)
         ref = _aligned_reference(world, rms_m=0.3)
-        aligned = align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                                     cluster_radius_m=0.5,
-                                     calibration_path=calibration_for(ref))
+        aligned = align_to_reference(
+            ref,
+            _reg_b(world),
+            max_rms_m=2.0,
+            cluster_radius_m=0.5,
+            calibration_path=calibration_for(ref),
+        )
         evidence = Sim3AlignmentEvidence.parse(aligned.pose_to_world.evidence[0])
         upstream = Sim3AlignmentEvidence.parse(ref.pose_to_world.evidence[0])
         assert upstream.holdout_rms_m > upstream.rms_residual_m  # fit rms 偏乐观
-        assert evidence.upstream_alignment_rms_m == pytest.approx(
-            upstream.holdout_rms_m)
+        assert evidence.upstream_alignment_rms_m == pytest.approx(upstream.holdout_rms_m)
         assert evidence.upstream_alignment_rms_m > upstream.rms_residual_m
 
 
@@ -536,9 +605,9 @@ class TestTargetProvenance:
     def test_provenance_names_the_reference_transform_id(self, calibration):
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
-        aligned = align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                                     cluster_radius_m=0.5,
-                                     calibration_path=calibration)
+        aligned = align_to_reference(
+            ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=calibration
+        )
         evidence = Sim3AlignmentEvidence.parse(aligned.pose_to_world.evidence[0])
         expected = f"derived-from-alignment:{ref.pose_to_world.transform_id}"
         assert evidence.control_target_provenance == expected
@@ -547,6 +616,7 @@ class TestTargetProvenance:
 
     def test_caller_cannot_forge_provenance_through_align_to_reference(self, calibration):
         import inspect
+
         params = inspect.signature(align_to_reference).parameters
         assert "control_target_provenance" not in params
         assert "upstream_alignment_rms_m" not in params
@@ -554,17 +624,25 @@ class TestTargetProvenance:
     def test_reference_without_parsable_evidence_fails_closed(self, calibration):
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
-        stripped = ref.model_copy(update={
-            "pose_to_world": FrameTransform(
-                source_frame=ref.pose_to_world.source_frame,
-                target_frame=ref.pose_to_world.target_frame,
-                sim3=ref.pose_to_world.sim3,
-                method=ref.pose_to_world.method,
-                evidence=("hand-wavy-note",),
-            )})
+        stripped = ref.model_copy(
+            update={
+                "pose_to_world": FrameTransform(
+                    source_frame=ref.pose_to_world.source_frame,
+                    target_frame=ref.pose_to_world.target_frame,
+                    sim3=ref.pose_to_world.sim3,
+                    method=ref.pose_to_world.method,
+                    evidence=("hand-wavy-note",),
+                )
+            }
+        )
         with pytest.raises(AlignmentError, match="sim3.alignment.v1"):
-            align_to_reference(stripped, _reg_b(world), max_rms_m=2.0,
-                               cluster_radius_m=0.5, calibration_path=calibration)
+            align_to_reference(
+                stripped,
+                _reg_b(world),
+                max_rms_m=2.0,
+                cluster_radius_m=0.5,
+                calibration_path=calibration,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -574,9 +652,9 @@ class TestEnuHubOnly:
     def test_target_frame_is_the_reference_enu_world(self, calibration):
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
-        aligned = align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                                     cluster_radius_m=0.5,
-                                     calibration_path=calibration)
+        aligned = align_to_reference(
+            ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=calibration
+        )
         assert aligned.pose_to_world.target_frame == ref.world_frame.frame_id
         assert aligned.pose_to_world.source_frame == "sfm-local-B"
         assert aligned.world_frame.units is CoordinateUnits.METERS
@@ -584,12 +662,12 @@ class TestEnuHubOnly:
         # B 的位姿被搬进 A 的世界: 同一影像在两批里落到同一个 ENU 点。
         by_image = {p.image: p for p in aligned.poses}
         for image, enu in world.items():
-            centre = aligned.pose_to_world.sim3.apply(
-                np.asarray([by_image[image].t_xyz]))[0]
+            centre = aligned.pose_to_world.sim3.apply(np.asarray([by_image[image].t_xyz]))[0]
             assert np.allclose(centre, enu, atol=1e-6)
 
     def test_no_arbitrary_frame_can_be_the_world_frame_id(self, calibration):
         import inspect
+
         assert "world_frame_id" not in inspect.signature(align_to_reference).parameters
 
     def test_reference_and_b_sharing_a_frame_id_fails_closed(self, calibration):
@@ -597,8 +675,9 @@ class TestEnuHubOnly:
         ref = _aligned_reference(world)
         same = _registration("sfm-local-A", _poses_in_frame(world, _S_B, "B"), "B")
         with pytest.raises(AlignmentError, match="frame"):
-            align_to_reference(ref, same, max_rms_m=2.0, cluster_radius_m=0.5,
-                               calibration_path=calibration)
+            align_to_reference(
+                ref, same, max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=calibration
+            )
 
 
 # --------------------------------------------------------------------------
@@ -609,9 +688,13 @@ class TestCalibrationPrerequisite:
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
         with pytest.raises(AlignmentError, match="measure_colmap_shared_noise"):
-            align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                               cluster_radius_m=0.5,
-                               calibration_path=tmp_path / "nope.json")
+            align_to_reference(
+                ref,
+                _reg_b(world),
+                max_rms_m=2.0,
+                cluster_radius_m=0.5,
+                calibration_path=tmp_path / "nope.json",
+            )
 
     def test_calibration_from_too_few_shared_images_rejected(self, calibration_for):
         ref = _aligned_reference(_world_centres(n=12))
@@ -626,8 +709,11 @@ class TestCalibrationPrerequisite:
         0.067697 / 6.769743 "m"。这种记录没有米制基准可言, 只能作废重测。
         """
         ref = _aligned_reference(_world_centres(n=12))
-        v1 = {k: v for k, v in _calibration_record_for(ref).items()
-              if k not in ("reference_world_frame_id", "metric_basis", "relative_rms")}
+        v1 = {
+            k: v
+            for k, v in _calibration_record_for(ref).items()
+            if k not in ("reference_world_frame_id", "metric_basis", "relative_rms")
+        }
         v1["record_version"] = 1
         path = tmp_path / "v1.json"
         path.write_text(json.dumps(v1), encoding="utf-8", newline="\n")
@@ -643,7 +729,8 @@ class TestCalibrationPrerequisite:
 
     def test_valid_calibration_loads(self, calibration):
         record = load_shared_noise_calibration(
-            calibration, aligned_ref=_aligned_reference(_world_centres(n=12)))
+            calibration, aligned_ref=_aligned_reference(_world_centres(n=12))
+        )
         assert record.shared_centre_rms_m == pytest.approx(0.0015)
         assert record.n_shared_images == 24
 
@@ -672,18 +759,16 @@ class TestCalibrationIsBoundToTheActualReference:
     冒充实测同属一类, 是操作者的测量声称, 见 load_shared_noise_calibration 的诚实限制。
     """
 
-    def test_forged_basis_naming_a_nonexistent_transform_is_rejected(
-            self, calibration_for):
+    def test_forged_basis_naming_a_nonexistent_transform_is_rejected(self, calibration_for):
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
-        path = calibration_for(
-            ref, metric_basis="reference-pose-to-world:xf-DOES-NOT-EXIST")
+        path = calibration_for(ref, metric_basis="reference-pose-to-world:xf-DOES-NOT-EXIST")
         with pytest.raises(AlignmentError, match="metric_basis|transform_id"):
-            align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                               cluster_radius_m=0.5, calibration_path=path)
+            align_to_reference(
+                ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=path
+            )
 
-    def test_calibration_bound_to_a_different_alignment_is_rejected(
-            self, calibration_for):
+    def test_calibration_bound_to_a_different_alignment_is_rejected(self, calibration_for):
         """记录量在【另一次对齐】的世界里 -> 它的 *_m 不描述本次参考批, 数字无意义。
 
         真实成因: A 用更好的控制点重新对齐了一次 (sim3 变了 -> transform_id 变了),
@@ -696,8 +781,9 @@ class TestCalibrationIsBoundToTheActualReference:
         assert other.pose_to_world.transform_id != ref.pose_to_world.transform_id
         path = calibration_for(other)
         with pytest.raises(AlignmentError, match="metric_basis|transform_id"):
-            align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                               cluster_radius_m=0.5, calibration_path=path)
+            align_to_reference(
+                ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=path
+            )
 
     def test_world_frame_id_mismatch_is_rejected(self, calibration_for):
         """reference_world_frame_id 对不上 = 记录说它量在另一个世界里。"""
@@ -705,21 +791,27 @@ class TestCalibrationIsBoundToTheActualReference:
         ref = _aligned_reference(world)
         path = calibration_for(ref, reference_world_frame_id="some-other-world")
         with pytest.raises(AlignmentError, match="reference_world_frame_id|世界"):
-            align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                               cluster_radius_m=0.5, calibration_path=path)
+            align_to_reference(
+                ref, _reg_b(world), max_rms_m=2.0, cluster_radius_m=0.5, calibration_path=path
+            )
 
     def test_a_correctly_bound_record_still_opens_the_gate(self, calibration_for):
         """只降不升: 真的绑对了的记录必须照常放行, 否则这道门就是在拒真。"""
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
-        aligned = align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                                     cluster_radius_m=0.5,
-                                     calibration_path=calibration_for(ref))
+        aligned = align_to_reference(
+            ref,
+            _reg_b(world),
+            max_rms_m=2.0,
+            cluster_radius_m=0.5,
+            calibration_path=calibration_for(ref),
+        )
         assert aligned.alignment_status is AlignmentStatus.ALIGNED
 
     def test_consumer_cannot_load_without_bringing_the_reference(self):
         """复核所需的 A 必须是【必填】—— 可选就等于下一个人会忘, 这个洞就是这么来的。"""
         import inspect
+
         sig = inspect.signature(load_shared_noise_calibration)
         assert "aligned_ref" in sig.parameters
         assert sig.parameters["aligned_ref"].default is inspect.Parameter.empty
@@ -751,19 +843,21 @@ class TestSharedNoiseMeasurementIsMetric:
             # A 的 pose_frame gauge 任意变 100 倍, 但 A 已对齐到【米制 ENU 世界】。
             s_a = _sim3(gauge, _rotation("z", 24.0), [5.0, -3.0, 2.0])
             reg_a = _registration("sfm-local-A", _poses_in_frame(world, s_a, "A"), "A")
-            cps = [ControlPoint(label=i, image=i, enu_xyz=tuple(e))
-                   for i, e in world.items()]
+            cps = [ControlPoint(label=i, image=i, enu_xyz=tuple(e)) for i, e in world.items()]
             ref = align_registration(reg_a, cps, geo_origin=_ORIGIN, max_rms_m=10.0)
             records.append(measure(ref, _reg_b(world)))
 
         # 米是米: gauge 变 100 倍, 报出来的米数【不变】。
-        assert records[0]["scene_extent_m"] == pytest.approx(
-            records[1]["scene_extent_m"], rel=1e-9)
+        assert records[0]["scene_extent_m"] == pytest.approx(records[1]["scene_extent_m"], rel=1e-9)
         assert records[0]["shared_centre_rms_m"] == pytest.approx(
-            records[1]["shared_centre_rms_m"], abs=1e-9)
+            records[1]["shared_centre_rms_m"], abs=1e-9
+        )
         # 且跨度确实是真实世界的米数 (world_centres 在 ±20m 里散开)。
-        truth = float(np.linalg.norm(
-            np.max(list(world.values()), axis=0) - np.min(list(world.values()), axis=0)))
+        truth = float(
+            np.linalg.norm(
+                np.max(list(world.values()), axis=0) - np.min(list(world.values()), axis=0)
+            )
+        )
         assert records[0]["scene_extent_m"] == pytest.approx(truth, rel=1e-6)
 
     def test_unaligned_reference_fails_closed(self):
@@ -784,11 +878,13 @@ class TestSharedNoiseMeasurementIsMetric:
         record = measure(ref, _reg_b(world))
         assert record["reference_world_frame_id"] == ref.world_frame.frame_id
         assert record["metric_basis"] == (
-            f"reference-pose-to-world:{ref.pose_to_world.transform_id}")
+            f"reference-pose-to-world:{ref.pose_to_world.transform_id}"
+        )
         # 尺度无关量必须【进】记录 —— 它是唯一不随 gauge 浮动的判据。
         assert "relative_rms" in record
         loaded = SharedNoiseCalibration.model_validate(
-            {k: v for k, v in record.items() if not k.startswith("_")})
+            {k: v for k, v in record.items() if not k.startswith("_")}
+        )
         assert loaded.reference_world_frame_id == ref.world_frame.frame_id
 
 
@@ -813,8 +909,10 @@ class TestDerivednessTravelsWithTheTargets:
         expected = ref.pose_to_world.transform_id
         assert all(cp.derived_from_alignment == expected for cp in cps)
         # 标记必须活过 JSON 往返 (消费者从磁盘加载的路径)。
-        assert ControlPoint.model_validate_json(
-            cps[0].model_dump_json()).derived_from_alignment == expected
+        assert (
+            ControlPoint.model_validate_json(cps[0].model_dump_json()).derived_from_alignment
+            == expected
+        )
 
     def test_bypass_through_align_registration_fails_closed(self, calibration):
         """实跑过的洗白: 靶标派生自 A, 却不声明派生 -> 三门全跳过 -> ACCEPTED。"""
@@ -824,12 +922,15 @@ class TestDerivednessTravelsWithTheTargets:
         cps = control_points_from_shared_images(ref, reg_b)
 
         with pytest.raises(AlignmentError, match="派生|derived"):
-            align_registration(reg_b, cps, geo_origin=_ORIGIN,
-                               world_frame_id=ref.world_frame.frame_id,
-                               max_rms_m=1.0)
+            align_registration(
+                reg_b,
+                cps,
+                geo_origin=_ORIGIN,
+                world_frame_id=ref.world_frame.frame_id,
+                max_rms_m=1.0,
+            )
 
-    def test_bypass_cannot_launder_a_reference_for_the_sanctioned_entry(
-            self, calibration):
+    def test_bypass_cannot_launder_a_reference_for_the_sanctioned_entry(self, calibration):
         """关键放大: 洗白的 B 当参考批喂认可入口, C 会继承 upstream≈0 而实际继承 A 的 1.5m。
 
         实跑过: 'C via align_to_reference @budget 0.05m: aligned | upstream
@@ -841,9 +942,13 @@ class TestDerivednessTravelsWithTheTargets:
         reg_b = _reg_b(world)
         cps = control_points_from_shared_images(ref, reg_b)
         with pytest.raises(AlignmentError):
-            align_registration(reg_b, cps, geo_origin=_ORIGIN,
-                               world_frame_id=ref.world_frame.frame_id,
-                               max_rms_m=1.0)
+            align_registration(
+                reg_b,
+                cps,
+                geo_origin=_ORIGIN,
+                world_frame_id=ref.world_frame.frame_id,
+                max_rms_m=1.0,
+            )
 
     def test_declared_provenance_must_name_the_actual_source_alignment(self):
         """自报的 provenance 必须与靶标自带的标记【对得上】, 不能随便编一个。"""
@@ -852,18 +957,22 @@ class TestDerivednessTravelsWithTheTargets:
         reg_b = _reg_b(world)
         cps = control_points_from_shared_images(ref, reg_b)
         with pytest.raises(AlignmentError, match="派生|derived"):
-            align_registration(reg_b, cps, geo_origin=_ORIGIN,
-                               world_frame_id=ref.world_frame.frame_id,
-                               max_rms_m=2.0,
-                               control_target_provenance="derived-from-alignment:xf-bogus",
-                               upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            align_registration(
+                reg_b,
+                cps,
+                geo_origin=_ORIGIN,
+                world_frame_id=ref.world_frame.frame_id,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-bogus",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+            )
 
     def test_surveyed_control_points_are_unaffected(self):
         """实测控制点不带标记 -> 老路径原样работает (不许误伤)。"""
         world = _world_centres(n=12)
         reg = _registration("sfm-local-A", _poses_in_frame(world, _S_A, "A"), "A")
-        cps = [ControlPoint(label=i, image=i, enu_xyz=tuple(e))
-               for i, e in world.items()]
+        cps = [ControlPoint(label=i, image=i, enu_xyz=tuple(e)) for i, e in world.items()]
         assert all(cp.derived_from_alignment is None for cp in cps)
         aligned = align_registration(reg, cps, geo_origin=_ORIGIN, max_rms_m=2.0)
         assert aligned.alignment_status is AlignmentStatus.ALIGNED
@@ -898,9 +1007,13 @@ class TestChainedUpstreamCompounding:
         ref = _aligned_reference(world, rms_m=1.0)
         upstream_a = Sim3AlignmentEvidence.parse(ref.pose_to_world.evidence[0])
         assert upstream_a.rms_residual_m > 0.5  # A 的锚定误差是真的
-        reg_b = align_to_reference(ref, _reg_b(world), max_rms_m=2.0,
-                                   cluster_radius_m=0.5,
-                                   calibration_path=calibration_for(ref))
+        reg_b = align_to_reference(
+            ref,
+            _reg_b(world),
+            max_rms_m=2.0,
+            cluster_radius_m=0.5,
+            calibration_path=calibration_for(ref),
+        )
         return ref, reg_b, upstream_a
 
     def test_chained_batch_inherits_the_whole_upstream_chain(self, calibration_for):
@@ -909,9 +1022,13 @@ class TestChainedUpstreamCompounding:
         ev_b = Sim3AlignmentEvidence.parse(reg_b.pose_to_world.evidence[0])
 
         # C 派生自 B, 但 B 的世界继承了 A 的锚定误差 -> C 必须背上整条链。
-        aligned_c = align_to_reference(reg_b, _reg_c(world), max_rms_m=2.0,
-                                       cluster_radius_m=0.5,
-                                       calibration_path=calibration_for(reg_b))
+        aligned_c = align_to_reference(
+            reg_b,
+            _reg_c(world),
+            max_rms_m=2.0,
+            cluster_radius_m=0.5,
+            calibration_path=calibration_for(reg_b),
+        )
         ev_c = Sim3AlignmentEvidence.parse(aligned_c.pose_to_world.evidence[0])
         expected = ev_b.holdout_rms_m + ev_b.upstream_alignment_rms_m
         assert ev_c.upstream_alignment_rms_m == pytest.approx(expected)
@@ -924,9 +1041,13 @@ class TestChainedUpstreamCompounding:
         world = _world_centres(n=12)
         _, reg_b, _ = self._chain(calibration_for, world)
         with pytest.raises(AlignmentError, match="复合|compound") as exc:
-            align_to_reference(reg_b, _reg_c(world), max_rms_m=0.5,
-                               cluster_radius_m=0.5,
-                               calibration_path=calibration_for(reg_b))
+            align_to_reference(
+                reg_b,
+                _reg_c(world),
+                max_rms_m=0.5,
+                cluster_radius_m=0.5,
+                calibration_path=calibration_for(reg_b),
+            )
         # 报的上游必须是整条链的数, 不能是 0。
         assert "上游对齐 rms 0.0000m" not in str(exc.value)
 
@@ -944,20 +1065,29 @@ class TestReferenceMustHavePassed:
         ref = _aligned_reference(world)
         good = Sim3AlignmentEvidence.parse(ref.pose_to_world.evidence[0])
         failed = Sim3AlignmentEvidence.model_validate(
-            {**good.model_dump(mode="json"), "passed": False})
-        tampered = ref.model_copy(update={
-            "pose_to_world": FrameTransform(
-                source_frame=ref.pose_to_world.source_frame,
-                target_frame=ref.pose_to_world.target_frame,
-                sim3=ref.pose_to_world.sim3,
-                method=ref.pose_to_world.method,
-                evidence=(failed.to_evidence(),),
-            )})
+            {**good.model_dump(mode="json"), "passed": False}
+        )
+        tampered = ref.model_copy(
+            update={
+                "pose_to_world": FrameTransform(
+                    source_frame=ref.pose_to_world.source_frame,
+                    target_frame=ref.pose_to_world.target_frame,
+                    sim3=ref.pose_to_world.sim3,
+                    method=ref.pose_to_world.method,
+                    evidence=(failed.to_evidence(),),
+                )
+            }
+        )
         # 走真实消费者的路径: 经 JSON 往返再喂进去。
         reloaded = RegistrationResult.model_validate_json(tampered.model_dump_json())
         with pytest.raises(AlignmentError, match="passed=False"):
-            align_to_reference(reloaded, _reg_b(world), max_rms_m=2.0,
-                               cluster_radius_m=0.5, calibration_path=calibration)
+            align_to_reference(
+                reloaded,
+                _reg_b(world),
+                max_rms_m=2.0,
+                cluster_radius_m=0.5,
+                calibration_path=calibration,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -983,14 +1113,16 @@ class TestHoldoutFoldDegeneracy:
         主 s3 门【健康放行】。但去掉那个离面点后训练折就共面了。
         """
         rng = np.random.default_rng(seed)
-        src = np.vstack([
-            np.column_stack([rng.uniform(-20, 20, 11), rng.uniform(-20, 20, 11),
-                             np.zeros(11)]),
-            np.array([[0.0, 0.0, 8.0]]),
-        ])
+        src = np.vstack(
+            [
+                np.column_stack([rng.uniform(-20, 20, 11), rng.uniform(-20, 20, 11), np.zeros(11)]),
+                np.array([[0.0, 0.0, 8.0]]),
+            ]
+        )
         rot = _rotation("z", 11.5)
-        dst = (1.3 * (src @ rot.T) + np.array([2.0, 1.0, 0.5])
-               + rng.normal(scale=sigma, size=(12, 3)))
+        dst = (
+            1.3 * (src @ rot.T) + np.array([2.0, 1.0, 0.5]) + rng.normal(scale=sigma, size=(12, 3))
+        )
         return src, dst, rot
 
     def test_coplanar_train_fold_is_not_degenerate_for_a_sim3(self):
@@ -1004,23 +1136,23 @@ class TestHoldoutFoldDegeneracy:
         无依据地放行共面折。
         """
         rot = _rotation("z", 17.0) @ _rotation("x", 23.0)
-        probe = np.column_stack([np.linspace(-20, 20, 25), np.full(25, 10.0),
-                                 np.full(25, 30.0)])
+        probe = np.column_stack([np.linspace(-20, 20, 25), np.full(25, 10.0), np.full(25, 30.0)])
         truth_probe = 1.3 * (probe @ rot.T) + np.array([2.0, 1.0, 0.5])
 
         def fit_and_probe(src, sigma, seed):
             truth = 1.3 * (src @ rot.T) + np.array([2.0, 1.0, 0.5])
-            dst = truth + np.random.default_rng(seed).normal(
-                scale=sigma, size=src.shape)
+            dst = truth + np.random.default_rng(seed).normal(scale=sigma, size=src.shape)
             scale, rotation, t = umeyama_sim3(src, dst)
             pred = scale * (probe @ rotation.T) + t
             return float(np.linalg.norm(truth_probe - pred, axis=1).mean())
 
         rng = np.random.default_rng(1)
-        coplanar = np.column_stack([rng.uniform(-20, 20, 12),
-                                    rng.uniform(-20, 20, 12), np.zeros(12)])
-        assert np.linalg.svd(coplanar - coplanar.mean(axis=0),
-                             compute_uv=False)[2] == pytest.approx(0.0, abs=1e-12)
+        coplanar = np.column_stack(
+            [rng.uniform(-20, 20, 12), rng.uniform(-20, 20, 12), np.zeros(12)]
+        )
+        assert np.linalg.svd(coplanar - coplanar.mean(axis=0), compute_uv=False)[
+            2
+        ] == pytest.approx(0.0, abs=1e-12)
         # 共面 + 零噪声 -> 【精确】复原 (反射是唯一歧义, det=+1 守卫已消掉它)。
         assert fit_and_probe(coplanar, 0.0, 2) < 1e-9
         # 共面 + 噪声 -> 出平面误差随噪声【线性】走, 无放大。
@@ -1028,8 +1160,7 @@ class TestHoldoutFoldDegeneracy:
         assert fit_and_probe(coplanar, 0.10, 2) < 0.5
 
         # 对照: 共线是【真】退化 —— 零噪声下误差就已经是米级, 且不随噪声变 (结构性)。
-        collinear = np.column_stack([np.linspace(-20, 20, 12), np.zeros(12),
-                                     np.zeros(12)])
+        collinear = np.column_stack([np.linspace(-20, 20, 12), np.zeros(12), np.zeros(12)])
         assert fit_and_probe(collinear, 0.0, 2) > 1.0
         assert fit_and_probe(collinear, 0.02, 2) > 1.0
 
@@ -1043,16 +1174,24 @@ class TestHoldoutFoldDegeneracy:
         rng = np.random.default_rng(4)
         line = np.column_stack([np.linspace(-30, 30, 10), np.zeros(10), np.zeros(10)])
         src = np.vstack([line, np.array([[0.0, 9.0, 0.0], [0.0, 0.0, 9.0]])])
-        dst = (1.3 * (src @ _rotation("z", 11.5).T) + np.array([2.0, 1.0, 0.5])
-               + rng.normal(scale=0.01, size=(12, 3)))
+        dst = (
+            1.3 * (src @ _rotation("z", 11.5).T)
+            + np.array([2.0, 1.0, 0.5])
+            + rng.normal(scale=0.01, size=(12, 3))
+        )
         singular = np.linalg.svd(src - src.mean(axis=0), compute_uv=False)
         assert singular[2] / singular[0] > 1e-3, "前提: 全集必须过主 s3 门"
 
         with pytest.raises(AlignmentError, match="共线") as exc:
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=0.5,
-                           holdout_k=2)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+                holdout_k=2,
+            )
         assert "留出" in str(exc.value)
 
     def test_fixed_altitude_strip_with_one_off_plane_shot_is_accepted(self):
@@ -1072,25 +1211,30 @@ class TestHoldoutFoldDegeneracy:
                 assert singular[2] / singular[0] > 0.1  # 主 s3 门远远放行
 
                 sim3, ev = fit_sfm_to_enu(
-                    _resolved(src, dst), _ORIGIN, max_rms_m=2.0,
+                    _resolved(src, dst),
+                    _ORIGIN,
+                    max_rms_m=2.0,
                     control_target_provenance="derived-from-alignment:xf-x",
-                    upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+                    upstream_alignment_rms_m=0.0,
+                    cluster_radius_m=0.5,
+                )
                 assert ev.passed is True
                 assert ev.holdout_folds == 12
 
                 # 留出 rms 与真实误差【同量级】即可 —— 断言的是"它在跟踪", 不是
                 # "它是上界"。实测 6/6 比值 0.963~1.717, seed=12 低报 4%, 故这里
                 # 【不能】断言 ratio>=1 (本类 docstring 与 alignment.py 的实测依据同)。
-                probe = np.column_stack([np.linspace(-20, 20, 20), np.full(20, 10.0),
-                                         np.full(20, 30.0)])
+                probe = np.column_stack(
+                    [np.linspace(-20, 20, 20), np.full(20, 10.0), np.full(20, 30.0)]
+                )
                 truth = 1.3 * (probe @ rot.T) + np.array([2.0, 1.0, 0.5])
-                true_err = float(
-                    np.linalg.norm(truth - sim3.apply(probe), axis=1).mean())
+                true_err = float(np.linalg.norm(truth - sim3.apply(probe), axis=1).mean())
                 ratio = ev.holdout_rms_m / true_err
                 assert 0.5 < ratio < 3.0, (
                     f"seed={seed} sigma={sigma}: 留出 {ev.holdout_rms_m} 与真实误差 "
                     f"{true_err} 脱钩 (比值 {ratio}) —— 放行这个构型的依据是"
-                    "'留出残差在跟踪真实误差', 依据没了就不该放行")
+                    "'留出残差在跟踪真实误差', 依据没了就不该放行"
+                )
                 # 对齐本身是对的: 拒绝它没有任何实测依据。
                 assert true_err < 0.5 * sigma * 10
 
@@ -1103,16 +1247,25 @@ class TestHoldoutFoldDegeneracy:
         """
         src, dst, _ = self._plane_plus_one(11, 0.05)
         _, clean = fit_sfm_to_enu(
-            _resolved(src, dst), _ORIGIN, max_rms_m=2.0,
+            _resolved(src, dst),
+            _ORIGIN,
+            max_rms_m=2.0,
             control_target_provenance="derived-from-alignment:xf-x",
-            upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            upstream_alignment_rms_m=0.0,
+            cluster_radius_m=0.5,
+        )
         assert clean.rms_residual_m < 0.15
 
         dst[-1, 2] += 5.0  # 粗差只打在那【一个】离面孤点上
         with pytest.raises(AlignmentError, match="held-out|rms"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=1.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=1.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1126,11 +1279,17 @@ class TestEffectiveCountOnTheProductionPath:
 
     def _clustered(self, n_repeat: int = 6):
         """5 个位置各重复采样 n_repeat 次 (照抄模块 docstring 记录的那个 fail-open)。"""
-        base = np.array([[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 30.0, 0.0],
-                         [0.0, 0.0, 30.0], [30.0, 30.0, 30.0]])
+        base = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [0.0, 30.0, 0.0],
+                [0.0, 0.0, 30.0],
+                [30.0, 30.0, 30.0],
+            ]
+        )
         rng = np.random.default_rng(5)
-        src = np.repeat(base, n_repeat, axis=0) + rng.normal(
-            scale=0.01, size=(5 * n_repeat, 3))
+        src = np.repeat(base, n_repeat, axis=0) + rng.normal(scale=0.01, size=(5 * n_repeat, 3))
         dst = 2.0 * src + np.array([1.0, 2.0, 3.0])
         return src, dst
 
@@ -1162,8 +1321,7 @@ class TestEffectiveCountOnTheProductionPath:
         assert singular[2] / singular[0] > 1e-3  # 前提: 主 s3 门放行 (它只看 src)
 
         with pytest.raises(AlignmentError, match="n_effective"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=1e9,
-                           cluster_radius_m=1.0)
+            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=1e9, cluster_radius_m=1.0)
 
     def test_five_clusters_are_accepted_but_the_evidence_says_five_not_thirty(self):
         """5 个有效位置 = 15 个方程 vs 7 个自由度 —— 按既有 >=4 契约它【就是】够的。
@@ -1173,8 +1331,7 @@ class TestEffectiveCountOnTheProductionPath:
         "30 个控制点 + 3e-14 米残差"就以为约束极强。
         """
         src, dst = self._clustered()
-        _, ev = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                               cluster_radius_m=1.0)
+        _, ev = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0, cluster_radius_m=1.0)
         assert ev.passed is True
         assert ev.n_control_points == 30
         assert ev.n_effective_control_points == 5
@@ -1197,13 +1354,19 @@ class TestEffectiveCountOnTheProductionPath:
         派生路都没标定过的数去卡实测控制点路径更没有依据。所以这里 6 个有效点必须
         【放行】, 3 个必须拒。
         """
-        base = np.array([[0.0, 0.0, 0.0], [30.0, 0.0, 0.0], [0.0, 30.0, 0.0],
-                         [0.0, 0.0, 30.0], [30.0, 30.0, 30.0], [30.0, 30.0, 0.0]])
-        src = np.repeat(base, 3, axis=0) + np.random.default_rng(5).normal(
-            scale=0.01, size=(18, 3))
+        base = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [0.0, 30.0, 0.0],
+                [0.0, 0.0, 30.0],
+                [30.0, 30.0, 30.0],
+                [30.0, 30.0, 0.0],
+            ]
+        )
+        src = np.repeat(base, 3, axis=0) + np.random.default_rng(5).normal(scale=0.01, size=(18, 3))
         dst = 2.0 * src + np.array([1.0, 2.0, 3.0])
-        _, ev = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                               cluster_radius_m=1.0)
+        _, ev = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0, cluster_radius_m=1.0)
         assert ev.passed is True
         assert ev.n_effective_control_points == 6
         assert ev.n_control_points == 18  # 两个数都写进证据供复核
@@ -1214,9 +1377,14 @@ class TestEffectiveCountOnTheProductionPath:
         src = np.array([p.t_xyz for p in _poses_in_frame(world, _S_B, "B")])
         dst = np.array(list(world.values()))
         with pytest.raises(AlignmentError, match="n_effective"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1235,8 +1403,11 @@ class TestUpstreamTermIsNotTheOptimisticFitRms:
         8 个实测控制点, 各轴真实噪声 sigma=0.10m -> fit 0.1404 而留出 0.2338。"""
         rng = np.random.default_rng(249)
         src = rng.uniform(-20.0, 20.0, size=(8, 3))
-        dst = (1.3 * (src @ _rotation("z", 12.0).T) + np.array([2.0, 1.0, 0.5])
-               + rng.normal(scale=0.10, size=(8, 3)))
+        dst = (
+            1.3 * (src @ _rotation("z", 12.0).T)
+            + np.array([2.0, 1.0, 0.5])
+            + rng.normal(scale=0.10, size=(8, 3))
+        )
         return src, dst
 
     def test_non_derived_alignment_records_its_holdout(self):
@@ -1269,8 +1440,7 @@ class TestUpstreamTermIsNotTheOptimisticFitRms:
         此时下游复合仍只能拿 fit rms —— 这是【定不出更好的数】, 不是假装它够好。
         None 的含义是"该门未运行", 不是"该门通过"。
         """
-        src = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0],
-                        [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]])
+        src = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]])
         dst = 2.0 * src + np.array([1.0, 2.0, 3.0])
         _, ev = fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0)
         assert ev.passed is True
@@ -1289,9 +1459,12 @@ class TestInputValidationGates:
         world = _world_centres(n=12)
         src = np.array([p.t_xyz for p in _poses_in_frame(world, _S_B, "B")])
         dst = np.array(list(world.values()))
-        base = dict(max_rms_m=2.0,
-                    control_target_provenance="derived-from-alignment:xf-x",
-                    upstream_alignment_rms_m=0.0, cluster_radius_m=0.5)
+        base = dict(
+            max_rms_m=2.0,
+            control_target_provenance="derived-from-alignment:xf-x",
+            upstream_alignment_rms_m=0.0,
+            cluster_radius_m=0.5,
+        )
         return fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, **{**base, **kwargs})
 
     def test_negative_upstream_rms_rejected(self):
@@ -1320,10 +1493,15 @@ class TestInputValidationGates:
         src = np.array([p.t_xyz for p in _poses_in_frame(world, _S_B, "B")])
         dst = np.array(list(world.values()))
         with pytest.raises(AlignmentError, match="训练折"):
-            fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                           control_target_provenance="derived-from-alignment:xf-x",
-                           upstream_alignment_rms_m=0.0, cluster_radius_m=0.5,
-                           holdout_k=7)
+            fit_sfm_to_enu(
+                _resolved(src, dst),
+                _ORIGIN,
+                max_rms_m=2.0,
+                control_target_provenance="derived-from-alignment:xf-x",
+                upstream_alignment_rms_m=0.0,
+                cluster_radius_m=0.5,
+                holdout_k=7,
+            )
 
     def test_non_finite_shared_image_world_coordinate_fails_closed(self):
         """A 的 pose_to_world 把某张共享影像映到非有限坐标 -> 不能当靶标。"""
@@ -1341,7 +1519,8 @@ class TestInputValidationGates:
         reg_b = _reg_b(world, images=sorted(world)[:9])
         with pytest.raises(AlignmentError, match="未同时出现"):
             control_points_from_shared_images(
-                ref, reg_b, images=["img_000.jpg", "img_999_typo.jpg"])
+                ref, reg_b, images=["img_000.jpg", "img_999_typo.jpg"]
+            )
 
     def test_images_subset_filter_selects_exactly_the_requested_shared_images(self):
         """images= 形参整个零测试覆盖。它功能正常, 但没有任何测试锁住这个行为。"""
@@ -1361,12 +1540,14 @@ class TestInputValidationGates:
         变异测试实测: 只测 NaN 时把 _finite 整个删掉, 全套测试照样全绿。
         """
         ref = _aligned_reference(_world_centres(n=12))
-        bad = [("shared_centre_rms_m", float("inf")),
-               ("scene_extent_m", float("inf")),
-               ("affine_rms_m", float("inf")),
-               ("relative_rms", float("inf")),
-               ("residual_distance_corr", float("nan")),
-               ("residual_distance_corr", float("inf"))]
+        bad = [
+            ("shared_centre_rms_m", float("inf")),
+            ("scene_extent_m", float("inf")),
+            ("affine_rms_m", float("inf")),
+            ("relative_rms", float("inf")),
+            ("residual_distance_corr", float("nan")),
+            ("residual_distance_corr", float("inf")),
+        ]
         for field, value in bad:
             path = tmp_path / f"{field}_{value}.json"
             _write_calibration(path, ref, **{field: value})
@@ -1391,12 +1572,21 @@ class TestCalibrationRoundTrips:
         world = _world_centres(n=12)
         ref = _aligned_reference(world)
         (tmp_path / "a.json").write_text(ref.model_dump_json(), encoding="utf-8")
-        (tmp_path / "b.json").write_text(_reg_b(world).model_dump_json(),
-                                         encoding="utf-8")
+        (tmp_path / "b.json").write_text(_reg_b(world).model_dump_json(), encoding="utf-8")
         out = tmp_path / "cal.json"
-        assert main(["--registration-a", str(tmp_path / "a.json"),
-                     "--registration-b", str(tmp_path / "b.json"),
-                     "--out", str(out)]) == 0
+        assert (
+            main(
+                [
+                    "--registration-a",
+                    str(tmp_path / "a.json"),
+                    "--registration-b",
+                    str(tmp_path / "b.json"),
+                    "--out",
+                    str(out),
+                ]
+            )
+            == 0
+        )
 
         # 脚本产出的记录必须【绑得住它自己量的那个参考批】—— 否则前置门仍不可满足。
         record = load_shared_noise_calibration(out, aligned_ref=ref)
@@ -1441,16 +1631,16 @@ class TestDerivedFloorHasNoErrorPlateau:
             singular = np.linalg.svd(src - src.mean(axis=0), compute_uv=False)
             if singular[0] <= 0 or singular[2] / singular[0] < 1e-3:
                 continue  # 退化抽样: 主 s3 门本来就会拒, 不该计入
-            dst = (scale_true * (src @ rot.T) + t_true
-                   + rng.normal(scale=self._SIGMA, size=(k, 3)))
+            dst = scale_true * (src @ rot.T) + t_true + rng.normal(scale=self._SIGMA, size=(k, 3))
             scale, rotation, t = umeyama_sim3(src, dst)
             holdout, _ = _holdout_residuals(src, dst, k=1, min_span_ratio=1e-3)
-            holdouts.append(float(np.sqrt((holdout ** 2).mean())))
+            holdouts.append(float(np.sqrt((holdout**2).mean())))
             # 真实误差只在控制点凸包【内】量 —— 凸包外的外推没有任何门守得住。
             probe = rng.uniform(-self._EXTENT / 2, self._EXTENT / 2, size=(200, 3))
             truth = scale_true * (probe @ rot.T) + t_true
-            errors.append(float(np.linalg.norm(
-                truth - (scale * (probe @ rotation.T) + t), axis=1).mean()))
+            errors.append(
+                float(np.linalg.norm(truth - (scale * (probe @ rotation.T) + t), axis=1).mean())
+            )
         return float(np.median(errors)), float(np.median(holdouts))
 
     def test_true_error_keeps_improving_past_eight_so_eight_is_not_a_plateau(self):
@@ -1460,7 +1650,8 @@ class TestDerivedFloorHasNoErrorPlateau:
         assert err8 > 1.3 * err16, (
             f"k=8 真实误差 {err8:.6f}m vs k=16 {err16:.6f}m: 若这两个数接近, 说明"
             "误差【真的】在 8 处进平台, 那份验证记录的订正就错了 —— 请重测并更新 "
-            "docs/verification/2026-07-17-derived-mode-control-point-floor.md")
+            "docs/verification/2026-07-17-derived-mode-control-point-floor.md"
+        )
 
     def test_the_holdout_statistic_is_what_plateaus_not_the_error(self):
         """留出统计量在 k=8..16 基本持平 (收敛到噪声地板), 而真实误差同期显著改善。
@@ -1471,7 +1662,8 @@ class TestDerivedFloorHasNoErrorPlateau:
         err8, ho8 = self._sweep(8, trials=200, seed=1008)
         err16, ho16 = self._sweep(16, trials=200, seed=1016)
         assert ho8 == pytest.approx(ho16, rel=0.25), (
-            f"留出 rms k=8 {ho8:.6f} vs k=16 {ho16:.6f}: 平台没了")
+            f"留出 rms k=8 {ho8:.6f} vs k=16 {ho16:.6f}: 平台没了"
+        )
         # 同一区间里真实误差【改善了】—— 两个量讲的不是一个故事。
         assert err16 < 0.8 * err8
         # 且留出统计量确实停在噪声地板附近 (3D rms 1.49mm), 不是停在真实误差上。
@@ -1514,8 +1706,7 @@ class TestPreviewOnlyMerge:
     def test_preview_merge_never_claims_metric_or_aligned(self):
         """preview 产物绝不许自称 metric/aligned/geo-aligned —— 它就是 preview-only。"""
         world = _world_centres(n=12)
-        merged = merge_for_preview(_aligned_reference(world), _reg_b(world),
-                                   max_relative_rms=1e-3)
+        merged = merge_for_preview(_aligned_reference(world), _reg_b(world), max_relative_rms=1e-3)
         assert merged.alignment_status is AlignmentStatus.UNALIGNED
         target = merged.target_frame
         assert target.units is CoordinateUnits.ARBITRARY
@@ -1531,11 +1722,16 @@ class TestPreviewOnlyMerge:
         from pipeline.reconstruct import _derive_geometry_usability
 
         world = _world_centres(n=12)
-        merged = merge_for_preview(_aligned_reference(world), _reg_b(world),
-                                   max_relative_rms=1e-3)
-        assert _derive_geometry_usability(
-            merged.target_frame, merged.alignment_status,
-            list(merged.pose_to_world.evidence), synthetic=False) == "preview-only"
+        merged = merge_for_preview(_aligned_reference(world), _reg_b(world), max_relative_rms=1e-3)
+        assert (
+            _derive_geometry_usability(
+                merged.target_frame,
+                merged.alignment_status,
+                list(merged.pose_to_world.evidence),
+                synthetic=False,
+            )
+            == "preview-only"
+        )
 
     def test_preview_merge_actually_puts_both_batches_in_one_frame(self):
         """漫游的【全部要求】: 同一张影像在两批里落到同一个点 (A 的 frame 里)。"""
@@ -1546,8 +1742,7 @@ class TestPreviewOnlyMerge:
         a_by_image = {p.image: p for p in ref.poses}
         b_by_image = {p.image: p for p in merged.poses}
         for image in world:
-            landed = merged.pose_to_world.sim3.apply(
-                np.asarray([b_by_image[image].t_xyz]))[0]
+            landed = merged.pose_to_world.sim3.apply(np.asarray([b_by_image[image].t_xyz]))[0]
             # 靶标是 A 的 pose_frame 坐标 (任意单位), 不是 A 的 ENU 世界坐标。
             assert np.allclose(landed, a_by_image[image].t_xyz, atol=1e-6)
 
@@ -1562,18 +1757,24 @@ class TestPreviewOnlyMerge:
         world = _world_centres(n=12)
         rng = np.random.default_rng(23)
         reg_b = _reg_b(world)
-        reg_b = reg_b.model_copy(update={"poses": [
-            p.model_copy(update={
-                "t_xyz": (np.asarray(p.t_xyz)
-                          + rng.normal(scale=0.05, size=3)).tolist()})
-            for p in reg_b.poses]})
+        reg_b = reg_b.model_copy(
+            update={
+                "poses": [
+                    p.model_copy(
+                        update={
+                            "t_xyz": (np.asarray(p.t_xyz) + rng.normal(scale=0.05, size=3)).tolist()
+                        }
+                    )
+                    for p in reg_b.poses
+                ]
+            }
+        )
 
         relatives, raws = [], []
         for gauge in (1.7, 170.0):
             s_a = _sim3(gauge, _rotation("z", 24.0), [5.0, -3.0, 2.0])
             reg_a = _registration("sfm-local-A", _poses_in_frame(world, s_a, "A"), "A")
-            cps = [ControlPoint(label=i, image=i, enu_xyz=tuple(e))
-                   for i, e in world.items()]
+            cps = [ControlPoint(label=i, image=i, enu_xyz=tuple(e)) for i, e in world.items()]
             ref = align_registration(reg_a, cps, geo_origin=_ORIGIN, max_rms_m=10.0)
             merged = merge_for_preview(ref, reg_b, max_relative_rms=1e-2)
             ev = PreviewMergeEvidence.parse(merged.pose_to_world.evidence[0])
@@ -1589,8 +1790,7 @@ class TestPreviewOnlyMerge:
     def test_preview_evidence_has_no_metre_denominated_field(self):
         """证据里【一个 *_m 字段都不许有】: 这批数字量在 A 的任意 gauge 里。"""
         world = _world_centres(n=12)
-        merged = merge_for_preview(_aligned_reference(world), _reg_b(world),
-                                   max_relative_rms=1e-3)
+        merged = merge_for_preview(_aligned_reference(world), _reg_b(world), max_relative_rms=1e-3)
         ev = PreviewMergeEvidence.parse(merged.pose_to_world.evidence[0])
         metre_named = [f for f in ev.model_dump() if f.endswith("_m")]
         assert metre_named == [], f"preview 证据不许有米制字段: {metre_named}"
@@ -1601,17 +1801,14 @@ class TestPreviewOnlyMerge:
         否则 preview 就成了洗白旁路: 无标定造出一个"世界", 再拿它当 A 给 C 盖米制章。
         """
         world = _world_centres(n=12)
-        merged = merge_for_preview(_aligned_reference(world), _reg_b(world),
-                                   max_relative_rms=1e-3)
+        merged = merge_for_preview(_aligned_reference(world), _reg_b(world), max_relative_rms=1e-3)
         with pytest.raises(AlignmentError):
-            align_to_reference(merged, _reg_c(world), max_rms_m=2.0,
-                               cluster_radius_m=0.5)
+            align_to_reference(merged, _reg_c(world), max_rms_m=2.0, cluster_radius_m=0.5)
 
     def test_preview_evidence_is_not_parsable_as_metric_alignment_evidence(self):
         """两种证据串必须【互不可解析】—— 共用前缀就等于共用信任。"""
         world = _world_centres(n=12)
-        merged = merge_for_preview(_aligned_reference(world), _reg_b(world),
-                                   max_relative_rms=1e-3)
+        merged = merge_for_preview(_aligned_reference(world), _reg_b(world), max_relative_rms=1e-3)
         for item in merged.pose_to_world.evidence:
             with pytest.raises(ValueError):
                 Sim3AlignmentEvidence.parse(item)
@@ -1622,8 +1819,7 @@ class TestPreviewOnlyMerge:
         共享影像沿一条直线 (细长航带的重叠带) -> 绕线轴的旋转是【连续】歧义, 缝出来
         的 B 在离线处可以任意错位。少一个米制声称不会让这件事变得可接受。
         """
-        world = {f"img_{i:03d}.jpg": np.array([float(i) * 3.0, 0.0, 0.0])
-                 for i in range(12)}
+        world = {f"img_{i:03d}.jpg": np.array([float(i) * 3.0, 0.0, 0.0]) for i in range(12)}
         # A 用不着已对齐 (preview 不声称米), 正好也绕开 align_registration 的共面门。
         reg_a = _registration("sfm-local-A", _poses_in_frame(world, _S_A, "A"), "A")
         with pytest.raises(AlignmentError, match="degenerate|共线|退化"):
@@ -1669,9 +1865,12 @@ class TestPreviewOnlyMerge:
         reg_b = _reg_b(world)
         # 给 B 的位姿注入噪声 -> 两批不再由一个精确 Sim3 相关。
         rng = np.random.default_rng(17)
-        noisy = [p.model_copy(update={
-            "t_xyz": (np.asarray(p.t_xyz) + rng.normal(scale=0.5, size=3)).tolist()})
-            for p in reg_b.poses]
+        noisy = [
+            p.model_copy(
+                update={"t_xyz": (np.asarray(p.t_xyz) + rng.normal(scale=0.5, size=3)).tolist()}
+            )
+            for p in reg_b.poses
+        ]
         reg_b = reg_b.model_copy(update={"poses": noisy})
         with pytest.raises(AlignmentError, match="relative_rms"):
             merge_for_preview(ref, reg_b, max_relative_rms=1e-6)
@@ -1679,6 +1878,7 @@ class TestPreviewOnlyMerge:
     def test_preview_requires_an_explicit_relative_budget(self):
         """无默认值: 编不出的数就不编 (与 align_to_reference 的 max_rms_m 同规矩)。"""
         import inspect
+
         params = inspect.signature(merge_for_preview).parameters
         assert params["max_relative_rms"].default is inspect.Parameter.empty
         # 且绝不暴露任何米制/geo 参数 —— preview 没有米可言。
@@ -1692,8 +1892,7 @@ class TestPreviewOnlyMerge:
         不要求, 因为它不声称米。要求它 = 把一个不存在的前置门强加给唯一能用的路。
         """
         world = _world_centres(n=12)
-        unaligned_a = _registration("sfm-local-A",
-                                    _poses_in_frame(world, _S_A, "A"), "A")
+        unaligned_a = _registration("sfm-local-A", _poses_in_frame(world, _S_A, "A"), "A")
         assert unaligned_a.alignment_status is AlignmentStatus.UNALIGNED
         merged = merge_for_preview(unaligned_a, _reg_b(world), max_relative_rms=1e-3)
         assert merged.alignment_status is AlignmentStatus.UNALIGNED
@@ -1713,5 +1912,114 @@ class TestHoldoutKGuardAppliesEverywhere:
         dst = 2.0 * src + np.array([1.0, 2.0, 3.0])
         for bad in (0, -1):
             with pytest.raises(AlignmentError, match="holdout_k"):
-                fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0,
-                               holdout_k=bad)
+                fit_sfm_to_enu(_resolved(src, dst), _ORIGIN, max_rms_m=2.0, holdout_k=bad)
+
+
+# --------------------------------------------------------------------------
+# 门 19: 共享噪声标定记录读取的 TOCTOU 安全边界
+# --------------------------------------------------------------------------
+class TestSharedNoiseCalibrationReaderIntegrity:
+    """Security boundary tests for load_shared_noise_calibration.
+
+    The calibration record gates the metric cross-batch alignment path —
+    a swapped record could open the metric gate. A check-then-reopen
+    (``is_file`` then ``read_text``) leaves a TOCTOU window where the
+    file can be swapped between validation and reading. The secure pattern
+    binds a single descriptor from ``os.open``+``O_NOFOLLOW`` for the
+    entire read and rechecks file identity before and after reading, with
+    ancestor reparse rejection via ``first_linklike_path``.
+    """
+
+    def test_load_calibration_rejects_ancestor_reparse(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import pipeline.alignment as align
+
+        world = _world_centres(n=8)
+        ref = _aligned_reference(world)
+        cal_path = _write_calibration(tmp_path / "cal.json", ref)
+        sentinel = tmp_path / "ancestor-reparse"
+        original = align.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == cal_path:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(align, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(AlignmentError, match="常规非链接文件|无法访问"):
+            load_shared_noise_calibration(cal_path, aligned_ref=ref)
+
+    def test_load_calibration_rejects_path_swap_before_open(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        world = _world_centres(n=8)
+        ref = _aligned_reference(world)
+        cal_path = _write_calibration(tmp_path / "cal.json", ref)
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                # Swap file bytes between lstat and os.open so the
+                # fstat-after-open identity check fires.
+                cal_path.write_bytes(b"swapped-calibration-record\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(AlignmentError, match="在打开期间被替换|无法打开"):
+            load_shared_noise_calibration(cal_path, aligned_ref=ref)
+
+    def test_load_calibration_rejects_swap_during_read(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import pipeline.alignment as align
+
+        world = _world_centres(n=8)
+        ref = _aligned_reference(world)
+        cal_path = _write_calibration(tmp_path / "cal.json", ref)
+        # Stub first_linklike_path so lstat on cal_path is called exactly
+        # twice: before-open and post-read.
+        monkeypatch.setattr(align, "first_linklike_path", lambda root, leaf: None)
+        original_lstat = Path.lstat
+        swap_state = {"target_lstat_calls": 0}
+
+        def swapping_lstat(self):
+            if self == cal_path:
+                swap_state["target_lstat_calls"] += 1
+                if swap_state["target_lstat_calls"] == 2:
+                    cal_path.write_bytes(b"swapped-after-read\n")
+            return original_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", swapping_lstat)
+        with pytest.raises(AlignmentError, match="在读取期间被替换"):
+            load_shared_noise_calibration(cal_path, aligned_ref=ref)
+
+    def test_load_calibration_stable_read_returns_record(self, tmp_path):
+        world = _world_centres(n=8)
+        ref = _aligned_reference(world)
+        cal_path = _write_calibration(tmp_path / "cal.json", ref)
+        record = load_shared_noise_calibration(cal_path, aligned_ref=ref)
+        assert isinstance(record, SharedNoiseCalibration)
+        assert record.reference_world_frame_id == ref.world_frame.frame_id
+
+    def test_load_calibration_rejects_symlink_target(self, tmp_path):
+        world = _world_centres(n=8)
+        ref = _aligned_reference(world)
+        real = tmp_path / "real-cal.json"
+        _write_calibration(real, ref)
+        link = tmp_path / "link-cal.json"
+        try:
+            link.symlink_to(real)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+        with pytest.raises(AlignmentError, match="常规非链接文件"):
+            load_shared_noise_calibration(link, aligned_ref=ref)
