@@ -68,17 +68,14 @@ def test_registry_is_fixed_and_content_addressed():
         "P1-3C-retry-new-attempt",
     )
     assert len({case.case_id for case in DRILL_CASES}) == len(DRILL_CASES)
-    assert drill_case_set_sha256() == hashlib.sha256(
-        b"".join(case.canonical_bytes() for case in DRILL_CASES)
-    ).hexdigest()
+    assert (
+        drill_case_set_sha256()
+        == hashlib.sha256(b"".join(case.canonical_bytes() for case in DRILL_CASES)).hexdigest()
+    )
 
 
 def test_submit_case_tracks_authoritative_poll_semantics():
-    submit_case = next(
-        case
-        for case in DRILL_CASES
-        if case.case_id == "P1-3A-submit-running"
-    )
+    submit_case = next(case for case in DRILL_CASES if case.case_id == "P1-3A-submit-running")
 
     assert submit_case.pytest_node_id == (
         "tests/test_remote_shell_executor.py::"
@@ -366,3 +363,45 @@ def test_cli_runs_fixed_registry_and_publishes(tmp_path, monkeypatch, capsys):
     assert calls[0][0:2] == ("run", str(tmp_path))
     assert calls[1] == ("publish", str(output), report)
     assert capsys.readouterr().out == '{"schema":"fixture"}\n'
+
+
+class TestRemoteTrainingDrillReaderIntegrity:
+    """Security boundary tests for remote_training_drill trust-critical readers."""
+
+    def test_stable_report_bytes_does_not_use_path_read_bytes(self, tmp_path, monkeypatch):
+        """RED->GREEN: _stable_report_bytes must not use Path.read_bytes.
+
+        The drill report is a trust-critical evidence artifact. Reading it
+        via Path.read_bytes leaves a check-then-reopen TOCTOU window. It must
+        use a single descriptor from os.open+O_NOFOLLOW for the entire read.
+        """
+        from pipeline.remote_training_drill import _stable_report_bytes
+
+        payload = b'{"schema":"fixture"}\n'
+        target = tmp_path / "report.json"
+        target.write_bytes(payload)
+
+        def reject_read_bytes(*_args, **_kwargs):
+            raise AssertionError("_stable_report_bytes must not use Path.read_bytes")
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        result = _stable_report_bytes(target)
+        assert result == payload
+
+    def test_stable_report_bytes_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        """RED->GREEN: _stable_report_bytes must reject ancestor reparse."""
+        import pipeline.remote_training_drill as rtd
+        from pipeline.remote_training_drill import _stable_report_bytes
+
+        target = tmp_path / "report.json"
+        target.write_bytes(b'{"schema":"fixture"}\n')
+        sentinel = tmp_path / "ancestor-reparse"
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return rtd.first_linklike_path(root, leaf)
+
+        monkeypatch.setattr(rtd, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(RemoteTrainingDrillError, match="invalid|inspected"):
+            _stable_report_bytes(target)

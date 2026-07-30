@@ -23,7 +23,13 @@ from typing import Any, Literal
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from pipeline.durable_io import DurableIOError, flush_file, publish_file_noreplace
+from pipeline.durable_io import (
+    DurableIOError,
+    _is_linklike,
+    first_linklike_path,
+    flush_file,
+    publish_file_noreplace,
+)
 
 
 class RemoteTrainingDrillError(ValueError):
@@ -169,9 +175,7 @@ DRILL_CASES: tuple[DrillCaseDefinition, ...] = (
 
 
 def drill_case_set_sha256() -> str:
-    return hashlib.sha256(
-        b"".join(case.canonical_bytes() for case in DRILL_CASES)
-    ).hexdigest()
+    return hashlib.sha256(b"".join(case.canonical_bytes() for case in DRILL_CASES)).hexdigest()
 
 
 class RemoteTrainingDrillCaseResult(FrozenModel):
@@ -243,18 +247,13 @@ class RemoteTrainingDrillReport(FrozenModel):
         ):
             if (
                 result.suite != definition.suite
-                or result.definition_sha256
-                != definition.definition_sha256
+                or result.definition_sha256 != definition.definition_sha256
             ):
-                raise ValueError(
-                    "drill case disagrees with the fixed registry"
-                )
+                raise ValueError("drill case disagrees with the fixed registry")
         if self.case_set_sha256 != drill_case_set_sha256():
             raise ValueError("drill case_set_sha256 disagrees")
         expected_status = (
-            "accepted"
-            if all(item.status == "passed" for item in self.case_results)
-            else "failed"
+            "accepted" if all(item.status == "passed" for item in self.case_results) else "failed"
         )
         if self.status != expected_status:
             raise ValueError("drill report status disagrees")
@@ -280,20 +279,14 @@ def remote_training_drill_content_sha256(
 def canonical_remote_training_drill_bytes(
     report: RemoteTrainingDrillReport,
 ) -> bytes:
-    return _canonical_json_bytes(
-        report.model_dump(mode="json", by_alias=True)
-    )
+    return _canonical_json_bytes(report.model_dump(mode="json", by_alias=True))
 
 
 def _build_remote_training_drill_report(
     **fields: Any,
 ) -> RemoteTrainingDrillReport:
     case_results = tuple(fields["case_results"])
-    status = (
-        "accepted"
-        if all(item.status == "passed" for item in case_results)
-        else "failed"
-    )
+    status = "accepted" if all(item.status == "passed" for item in case_results) else "failed"
     zero = "0" * 64
     provisional = RemoteTrainingDrillReport.model_construct(
         report_id=f"remote-training-drill-{zero}",
@@ -360,17 +353,13 @@ def _tool_version(root: Path) -> str:
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise RemoteTrainingDrillError(
-            "ruff version cannot be measured"
-        ) from exc
+        raise RemoteTrainingDrillError("ruff version cannot be measured") from exc
     if completed.returncode != 0:
         raise RemoteTrainingDrillError("ruff version cannot be measured")
     try:
         version = (completed.stdout or b"").decode("ascii").strip()
     except UnicodeError as exc:
-        raise RemoteTrainingDrillError(
-            "ruff version cannot be measured"
-        ) from exc
+        raise RemoteTrainingDrillError("ruff version cannot be measured") from exc
     if not version or len(version) > 64:
         raise RemoteTrainingDrillError("ruff version cannot be measured")
     return version
@@ -395,9 +384,7 @@ def _execute_case(
 ) -> RemoteTrainingDrillCaseResult:
     normalized = _normalized_case_command(case)
     argv = [sys.executable, *normalized[1:]]
-    command_sha = hashlib.sha256(
-        _canonical_json_bytes({"argv": normalized})
-    ).hexdigest()
+    command_sha = hashlib.sha256(_canonical_json_bytes({"argv": normalized})).hexdigest()
     exit_code: int | None
     failure_code: DrillFailureCode | None
     stdout = b""
@@ -411,10 +398,7 @@ def _execute_case(
         exit_code = completed.returncode
         stdout = completed.stdout or b""
         stderr = completed.stderr or b""
-        if (
-            len(stdout) > _MAX_CASE_OUTPUT_BYTES
-            or len(stderr) > _MAX_CASE_OUTPUT_BYTES
-        ):
+        if len(stdout) > _MAX_CASE_OUTPUT_BYTES or len(stderr) > _MAX_CASE_OUTPUT_BYTES:
             failure_code = "output-too-large"
         elif exit_code == 0:
             failure_code = None
@@ -428,9 +412,7 @@ def _execute_case(
     except OSError:
         exit_code = None
         failure_code = "case-exec-error"
-    status: DrillCaseStatus = (
-        "passed" if failure_code is None else "failed"
-    )
+    status: DrillCaseStatus = "passed" if failure_code is None else "failed"
     observation = {
         "exit_code": exit_code,
         "failure_code": failure_code,
@@ -443,9 +425,7 @@ def _execute_case(
         suite=case.suite,
         definition_sha256=case.definition_sha256,
         command_sha256=command_sha,
-        observation_sha256=hashlib.sha256(
-            _canonical_json_bytes(observation)
-        ).hexdigest(),
+        observation_sha256=hashlib.sha256(_canonical_json_bytes(observation)).hexdigest(),
         status=status,
         exit_code=exit_code,
         failure_code=failure_code,
@@ -468,16 +448,12 @@ def run_remote_training_drills(
     root = Path(repo_root).resolve()
     exact_commit, clean = _measure_git_state(root)
     if not clean:
-        raise RemoteTrainingDrillError(
-            "remote training drills require a clean git tree"
-        )
+        raise RemoteTrainingDrillError("remote training drills require a clean git tree")
     ruff_version = _tool_version(root)
     results = tuple(_execute_case(root, case) for case in DRILL_CASES)
     final_commit, final_clean = _measure_git_state(root)
     if final_commit != exact_commit or not final_clean:
-        raise RemoteTrainingDrillError(
-            "git state changed during remote training drills"
-        )
+        raise RemoteTrainingDrillError("git state changed during remote training drills")
     return _build_remote_training_drill_report(
         generated_at_utc=generated_at_utc or datetime.now(UTC),
         exact_commit=exact_commit,
@@ -500,53 +476,80 @@ def _reject_duplicate_pairs(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise RemoteTrainingDrillError(
-                "remote training drill report has duplicate keys"
-            )
+            raise RemoteTrainingDrillError("remote training drill report has duplicate keys")
         result[key] = value
     return result
 
 
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
 def _stable_report_bytes(path: Path) -> bytes:
+    descriptor = -1
     try:
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
         before = path.lstat()
-        if (
-            stat.S_ISLNK(before.st_mode)
-            or not stat.S_ISREG(before.st_mode)
-            or before.st_size <= 0
-            or before.st_size > _MAX_REPORT_BYTES
-        ):
-            raise RemoteTrainingDrillError(
-                "remote training drill report file is invalid"
-            )
-        payload = path.read_bytes()
+    except OSError as exc:
+        raise RemoteTrainingDrillError("remote training drill report cannot be inspected") from exc
+    except ValueError as exc:
+        raise RemoteTrainingDrillError("remote training drill report cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > _MAX_REPORT_BYTES
+    ):
+        raise RemoteTrainingDrillError("remote training drill report file is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RemoteTrainingDrillError("remote training drill report cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RemoteTrainingDrillError("remote training drill report cannot be opened") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise RemoteTrainingDrillError("remote training drill report changed before read")
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                payload.extend(chunk)
+                if len(payload) > _MAX_REPORT_BYTES:
+                    raise RemoteTrainingDrillError(
+                        "remote training drill report exceeds byte limit"
+                    )
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except RemoteTrainingDrillError:
         raise
     except OSError as exc:
-        raise RemoteTrainingDrillError(
-            "remote training drill report cannot be read"
-        ) from exc
-    signature = (
-        before.st_dev,
-        before.st_ino,
-        before.st_mode,
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    )
-    if signature != (
-        after.st_dev,
-        after.st_ino,
-        after.st_mode,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    ) or len(payload) != before.st_size:
-        raise RemoteTrainingDrillError(
-            "remote training drill report changed while read"
-        )
-    return payload
+        raise RemoteTrainingDrillError("remote training drill report cannot be read") from exc
+    if (
+        _cross_surface_signature(before) != _cross_surface_signature(after)
+        or _cross_surface_signature(descriptor_before) != _cross_surface_signature(descriptor_after)
+        or len(payload) != before.st_size
+    ):
+        raise RemoteTrainingDrillError("remote training drill report changed while read")
+    return bytes(payload)
 
 
 def load_remote_training_drill_report(
@@ -562,13 +565,9 @@ def load_remote_training_drill_report(
     except RemoteTrainingDrillError:
         raise
     except (UnicodeError, ValueError) as exc:
-        raise RemoteTrainingDrillError(
-            "remote training drill report is invalid"
-        ) from exc
+        raise RemoteTrainingDrillError("remote training drill report is invalid") from exc
     if payload != canonical_remote_training_drill_bytes(report):
-        raise RemoteTrainingDrillError(
-            "remote training drill report is not canonical"
-        )
+        raise RemoteTrainingDrillError("remote training drill report is not canonical")
     return report
 
 
@@ -578,9 +577,7 @@ def publish_remote_training_drill_report(
 ) -> None:
     final = Path(destination).absolute()
     final.parent.mkdir(parents=True, exist_ok=True)
-    staging = final.with_name(
-        f".{final.name}.{uuid.uuid4().hex}.partial"
-    )
+    staging = final.with_name(f".{final.name}.{uuid.uuid4().hex}.partial")
     try:
         with staging.open("xb") as stream:
             stream.write(canonical_remote_training_drill_bytes(report))
@@ -591,18 +588,12 @@ def publish_remote_training_drill_report(
     except FileExistsError:
         raise
     except DurableIOError as exc:
-        state = (
-            "published but durability is unconfirmed"
-            if exc.published
-            else "not published"
-        )
+        state = "published but durability is unconfirmed" if exc.published else "not published"
         raise RemoteTrainingDrillError(
             f"remote training drill report cannot be published ({state})"
         ) from exc
     except OSError as exc:
-        raise RemoteTrainingDrillError(
-            "remote training drill report cannot be published"
-        ) from exc
+        raise RemoteTrainingDrillError("remote training drill report cannot be published") from exc
     finally:
         try:
             staging.unlink(missing_ok=True)
