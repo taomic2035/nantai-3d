@@ -47,14 +47,19 @@
 - 几何一致 ≠ 同源。本模块**不是**密码学绑定；要真正的绑定需要训练器侧输出可验证的
   workspace 摘要，那不在本仓库控制范围内。
 """
+
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 import numpy as np
 from plyfile import PlyData
+
+from pipeline.durable_io import _is_linklike, first_linklike_path
 
 # 子采样规模：probe 点决定 median 的统计噪声，ref 上限决定最坏耗时。
 # ratio 密度无关，故对 ref 子采样不改变结论 (null model 用子采样后的点数算)。
@@ -66,6 +71,88 @@ _SEED = 20260717  # 固定 seed：同输入必须同结论 (可审计/可复现)
 # null model 的解析锚点是 1.0 (= 与同密度随机点云无异)。2.0 是其上的安全裕度。
 # 依据见模块 docstring；这是**矛盾侧**阈值，不是"通过"阈值 (后者本模块不设)。
 CONTRADICTION_RATIO = 2.0
+
+_MAX_COLMAP_TEXT_BYTES = 256 * 1024 * 1024
+
+
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
+def _read_colmap_text_stable(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_COLMAP_TEXT_BYTES,
+) -> str:
+    """Read a COLMAP text file via a single secure descriptor.
+
+    Rejects symlinks, junctions, reparse-point ancestors, non-regular
+    files, oversized inputs, short reads, and identity drift during
+    reading. Returns the decoded UTF-8 text.
+    """
+    try:
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
+        before = path.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise ValueError(f"{label} cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > max_bytes
+    ):
+        raise ValueError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ValueError(f"{label} cannot be read") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            fd_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(fd_before) != _cross_surface_signature(before):
+                raise ValueError(f"{label} changed before read")
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise ValueError(f"{label} exceeds byte limit")
+            fd_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be read") from exc
+    if (
+        _cross_surface_signature(fd_before) != _cross_surface_signature(fd_after)
+        or _cross_surface_signature(before) != _cross_surface_signature(after)
+        or len(payload) != before.st_size
+    ):
+        raise ValueError(f"{label} changed while being read")
+    return payload.decode("utf-8")
 
 
 class Verdict(Enum):
@@ -124,7 +211,7 @@ def load_colmap_points3d(path: str | Path) -> np.ndarray:
             f"--output_type TXT 转换)"
         )
     pts = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _read_colmap_text_stable(path, label="COLMAP points3D.txt").splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         fields = line.split()
@@ -167,9 +254,9 @@ def _min_nn_distance(query: np.ndarray, ref: np.ndarray, block: int = 256) -> np
     """每个 query 点到最近 ref 点的距离 (分块暴力，避免 O(N·M) 的内存峰值)。"""
     out = np.empty(len(query), dtype=np.float64)
     for i in range(0, len(query), block):
-        chunk = query[i:i + block]
+        chunk = query[i : i + block]
         d = np.linalg.norm(chunk[:, None, :] - ref[None, :, :], axis=2)
-        out[i:i + block] = d.min(axis=1)
+        out[i : i + block] = d.min(axis=1)
     return out
 
 
@@ -200,8 +287,7 @@ def check_splat_against_sparse(
 
     if len(sparse) < _MIN_POINTS or len(gauss) < _MIN_POINTS:
         return _unknown(
-            f"点太少，统计量无意义 (sparse={len(sparse)}, 高斯={len(gauss)}, "
-            f"下限={_MIN_POINTS})"
+            f"点太少，统计量无意义 (sparse={len(sparse)}, 高斯={len(gauss)}, 下限={_MIN_POINTS})"
         )
 
     s_lo, s_hi = sparse.min(axis=0), sparse.max(axis=0)

@@ -5,6 +5,7 @@
 - ``NOT_CONTRADICTED`` **不是**"通过"、不是证明,只是"没发现矛盾"。
 - 读不到证据 -> ``UNKNOWN``，绝不退化成 NOT_CONTRADICTED。
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -177,3 +178,50 @@ def test_result_is_deterministic(tmp_path, sparse_pts):
 
     assert a.signal_ratio == b.signal_ratio
     assert a.verdict == b.verdict
+
+
+class TestSplatProvenanceReaderIntegrity:
+    """Security boundary tests for splat_provenance trust-critical readers."""
+
+    def test_load_colmap_points3d_does_not_use_path_read_text(self, tmp_path, monkeypatch):
+        """RED->GREEN: load_colmap_points3d must not use Path.read_text.
+
+        points3D.txt is the reference geometry for the splat provenance check.
+        Reading it via Path.read_text leaves a check-then-reopen TOCTOU window.
+        It must go through _read_colmap_text_stable (single descriptor,
+        identity recheck).
+        """
+        from pathlib import Path
+
+        from pipeline.splat_provenance import load_colmap_points3d
+
+        pts = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        target = tmp_path / "points3D.txt"
+        write_points3d(target, pts)
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError("load_colmap_points3d must not use Path.read_text")
+
+        monkeypatch.setattr(Path, "read_text", reject_read_text)
+        arr = load_colmap_points3d(target)
+        assert arr.shape == (2, 3)
+
+    def test_read_colmap_text_stable_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        """RED->GREEN: _read_colmap_text_stable must reject ancestor reparse."""
+        from pathlib import Path
+
+        import pipeline.splat_provenance as sp
+        from pipeline.splat_provenance import _read_colmap_text_stable
+
+        target = tmp_path / "points3D.txt"
+        target.write_bytes(b"# header\n1 0 0 0 128 128 128 0.5\n")
+        sentinel = tmp_path / "ancestor-reparse"
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return sp.first_linklike_path(root, leaf)
+
+        monkeypatch.setattr(sp, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(ValueError, match="regular file|inspected"):
+            _read_colmap_text_stable(target, label="COLMAP points3D.txt")
