@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import stat
 import subprocess
@@ -105,6 +106,110 @@ def _require_below_evidence_root(
         raise ViewerSessionError(
             f"{label} must stay below the evidence root"
         )
+
+
+def _stable_file_identity(
+    observed: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Cross-surface stable identity for a regular file.
+
+    Uses ``S_IFMT`` for the file type so Windows permission-bit differences
+    between ``lstat`` and ``fstat`` do not cause false rejections.
+    """
+
+    return (
+        observed.st_dev,
+        observed.st_ino,
+        stat.S_IFMT(observed.st_mode),
+        observed.st_size,
+        observed.st_mtime_ns,
+    )
+
+
+def _capture_launch_identities(
+    validated: ViewerSessionOptions,
+) -> list[tuple[str, Path, tuple[int, int, int, int, int]]]:
+    """Capture stable identities for trust-critical inputs after validation.
+
+    Called immediately after ``_validated_options`` so the launch preflight
+    can re-verify each file has not been swapped before ``subprocess.run``.
+    """
+
+    capture_script = (
+        validated.project_root / "scripts/capture_viewer_acceptance.mjs"
+    )
+    scene_manifest = validated.import_root / "web/recon_manifest.json"
+    entries: list[tuple[str, Path, tuple[int, int, int, int, int]]] = []
+    for label, path in (
+        ("Viewer capture script", capture_script),
+        ("scene manifest", scene_manifest),
+        ("Viewer policy", validated.policy_path),
+        ("Viewer camera set", validated.camera_set_path),
+        ("Node executable", validated.node_executable),
+        ("Python executable", validated.python_executable),
+    ):
+        entries.append((label, path, _stable_file_identity(path.lstat())))
+    return entries
+
+
+def _verify_launch_identity(
+    path: Path,
+    expected: tuple[int, int, int, int, int],
+    *,
+    label: str,
+) -> None:
+    """Re-verify a trust-critical input's identity just before launch."""
+
+    try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor),
+            path,
+        )
+        observed = path.lstat()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ViewerSessionError(
+            f"{label} is no longer accessible"
+        ) from exc
+    if (
+        redirected is not None
+        or _is_linklike(path)
+        or not stat.S_ISREG(observed.st_mode)
+    ):
+        raise ViewerSessionError(
+            f"{label} is no longer a regular file"
+        )
+    actual = _stable_file_identity(observed)
+    if actual != expected:
+        raise ViewerSessionError(f"{label} changed before launch")
+
+
+def _verify_output_still_absent(
+    path: Path,
+    *,
+    label: str,
+) -> None:
+    """Re-verify an output path is still absent just before launch."""
+
+    try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor),
+            path,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ViewerSessionError(
+            f"{label} path cannot be inspected"
+        ) from exc
+    if redirected is not None:
+        raise ViewerSessionError(f"{label} path is redirected")
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ViewerSessionError(
+            f"{label} path cannot be inspected"
+        ) from exc
+    raise ViewerSessionError(f"{label} was pre-occupied before launch")
 
 
 @dataclass(frozen=True)
@@ -282,6 +387,7 @@ def run_production_viewer_session(
     """Start a bound Studio server, run capture, and close it on every path."""
 
     validated = _validated_options(options)
+    launch_identities = _capture_launch_identities(validated)
     try:
         server = make_server(
             validated.project_root,
@@ -308,6 +414,21 @@ def run_production_viewer_session(
     process_error: OSError | None = None
     return_code: int | None = None
     try:
+        for label, path, expected in launch_identities:
+            _verify_launch_identity(path, expected, label=label)
+        _verify_output_still_absent(
+            validated.output_path,
+            label="Viewer report",
+        )
+        _verify_output_still_absent(
+            validated.decision_path,
+            label="Viewer decision",
+        )
+        if validated.human_review_policy_output_path is not None:
+            _verify_output_still_absent(
+                validated.human_review_policy_output_path,
+                label="human review policy",
+            )
         result = subprocess.run(
             _capture_argv(
                 validated,

@@ -654,3 +654,322 @@ def test_human_review_error_does_not_leak_exception_text(
         run_production_viewer_session(options)
 
     assert secret_message not in str(exc_info.value)
+
+
+# ============================================================
+# RED -> GREEN: launch preflight identity re-verification
+# ============================================================
+
+
+def _make_swapping_make_server(
+    target_path: Path,
+    new_payload: bytes,
+    server: _FakeServer,
+):
+    """Return a make_server replacement that swaps target_path's content
+    before returning the server, simulating a TOCTOU swap between
+    _validated_options and subprocess.run."""
+
+    def _swap(*_args, **_kwargs):
+        target_path.write_bytes(new_payload)
+        return server
+
+    return _swap
+
+
+def test_launch_rejects_policy_swap_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: A Viewer policy swapped between validation and launch must
+    fail closed, not be silently re-bound by the downstream mjs probe."""
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    original_bytes = options.policy_path.read_bytes()
+    server = _FakeServer()
+
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        _make_swapping_make_server(
+            options.policy_path,
+            b"swapped\n",
+            server,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="changed before launch|no longer a regular file",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+    options.policy_path.write_bytes(original_bytes)
+
+
+def test_launch_rejects_camera_set_swap_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: A Viewer camera set swapped between validation and launch
+    must fail closed."""
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    original_bytes = options.camera_set_path.read_bytes()
+    server = _FakeServer()
+
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        _make_swapping_make_server(
+            options.camera_set_path,
+            b"swapped\n",
+            server,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="changed before launch|no longer a regular file",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+    options.camera_set_path.write_bytes(original_bytes)
+
+
+def test_launch_rejects_capture_script_swap_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: The capture script swapped between validation and launch
+    must fail closed."""
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    capture_script = (
+        options.project_root / "scripts/capture_viewer_acceptance.mjs"
+    )
+    original_bytes = capture_script.read_bytes()
+    server = _FakeServer()
+
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        _make_swapping_make_server(
+            capture_script,
+            b"// replaced\n",
+            server,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="changed before launch|no longer a regular file",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+    capture_script.write_bytes(original_bytes)
+
+
+def test_launch_rejects_node_executable_swap_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: The Node executable swapped between validation and launch
+    must fail closed."""
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    original_bytes = options.node_executable.read_bytes()
+    server = _FakeServer()
+
+    monkeypatch.setattr(
+        session_module,
+        "make_server",
+        _make_swapping_make_server(
+            options.node_executable,
+            b"replaced\n",
+            server,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="changed before launch|no longer a regular file",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+    options.node_executable.write_bytes(original_bytes)
+
+
+def test_launch_rejects_output_pre_occupied_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: A Viewer report path pre-occupied between validation and
+    launch must fail closed, not be silently overwritten."""
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    server = _FakeServer()
+
+    def _occupy(*_args, **_kwargs):
+        options.output_path.parent.mkdir(parents=True, exist_ok=True)
+        options.output_path.write_text("occupied\n", encoding="utf-8")
+        return server
+
+    monkeypatch.setattr(session_module, "make_server", _occupy)
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="pre-occupied|already exists",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+
+
+def test_launch_rejects_decision_pre_occupied_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: A Viewer decision path pre-occupied between validation and
+    launch must fail closed."""
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    server = _FakeServer()
+
+    def _occupy(*_args, **_kwargs):
+        options.decision_path.parent.mkdir(parents=True, exist_ok=True)
+        options.decision_path.write_text("occupied\n", encoding="utf-8")
+        return server
+
+    monkeypatch.setattr(session_module, "make_server", _occupy)
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="pre-occupied|already exists",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+
+
+def test_launch_rejects_policy_replaced_with_symlink_after_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: A Viewer policy replaced with a symlink between validation
+    and launch must fail closed."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    original_bytes = options.policy_path.read_bytes()
+    server = _FakeServer()
+    replacement = options.policy_path.parent / "replacement.json"
+    replacement.write_text("{}\n", encoding="utf-8")
+
+    def _symlink_swap(*_args, **_kwargs):
+        options.policy_path.unlink()
+        try:
+            options.policy_path.symlink_to(replacement)
+        except OSError:
+            pytest.skip("symlink creation is not permitted")
+        return server
+
+    monkeypatch.setattr(session_module, "make_server", _symlink_swap)
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(
+        ViewerSessionError,
+        match="no longer a regular file|changed before launch",
+    ):
+        run_production_viewer_session(options)
+
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
+    try:
+        options.policy_path.unlink()
+    except OSError:
+        pass
+    options.policy_path.write_bytes(original_bytes)
+
+
+def test_launch_error_does_not_leak_absolute_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED: Launch identity re-verification errors must not contain absolute
+    paths from OSError text."""
+    options = _options(tmp_path)
+    options.node_executable.write_bytes(b"node")
+    options.python_executable.write_bytes(b"python")
+    server = _FakeServer()
+    private_path = str(options.policy_path.resolve())
+
+    def _deleting_make_server(*_args, **_kwargs):
+        options.policy_path.unlink()
+        return server
+
+    monkeypatch.setattr(session_module, "make_server", _deleting_make_server)
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+
+    with pytest.raises(ViewerSessionError) as exc_info:
+        run_production_viewer_session(options)
+
+    assert private_path not in str(exc_info.value)
+    assert server.shutdown_calls == 1
+    assert server.close_calls == 1
