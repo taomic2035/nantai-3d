@@ -17,11 +17,14 @@
 用法:
     python -m pipeline.registration --photos photos --out recon/registration.json
 """
+
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +32,7 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.recon_schema import (
     AlignmentStatus,
     AxisConvention,
@@ -53,9 +57,9 @@ from pipeline.registration_quality import (
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 
 # mock 布局参数
-SESSION_GRID_SPACING = 80.0   # 无 GPS 会话间隔 (米)
-ORBIT_RADIUS_VIDEO = 25.0     # 视频环拍半径
-ORBIT_RADIUS_PHOTO = 20.0     # 照片环拍半径
+SESSION_GRID_SPACING = 80.0  # 无 GPS 会话间隔 (米)
+ORBIT_RADIUS_VIDEO = 25.0  # 视频环拍半径
+ORBIT_RADIUS_PHOTO = 20.0  # 照片环拍半径
 
 
 _COLMAP_CAMERA_PARAM_NAMES = {
@@ -119,9 +123,7 @@ def parse_colmap_cameras_txt(text: str) -> dict[int, ColmapCamera]:
         params = tuple(float(value) for value in parts[4:])
         param_names = _COLMAP_CAMERA_PARAM_NAMES[model]
         if len(params) != len(param_names):
-            raise ValueError(
-                f"COLMAP {model} 需要 {len(param_names)} 个参数, 实际 {len(params)}"
-            )
+            raise ValueError(f"COLMAP {model} 需要 {len(param_names)} 个参数, 实际 {len(params)}")
         if not np.all(np.isfinite(params)):
             raise ValueError(f"COLMAP CAMERA_ID={camera_id} 参数必须有限")
         if camera_id in cameras:
@@ -206,6 +208,7 @@ def _read_gps(path: Path) -> GeoAnchor | None:
     """从照片 EXIF 读 GPS, 无则 None"""
     try:
         import exifread
+
         with open(path, "rb") as f:
             tags = exifread.process_file(f, details=False)
 
@@ -232,6 +235,7 @@ def _read_gps(path: Path) -> GeoAnchor | None:
 def _image_size(path: Path) -> tuple[int, int]:
     try:
         from PIL import Image
+
         with Image.open(path) as im:
             return im.size  # (w, h)
     except Exception:
@@ -253,20 +257,22 @@ def group_sessions(photos_dir: str | Path) -> list[CaptureSession]:
 
     # 视频会话: 每个子目录
     for sub in sorted(p for p in photos_dir.iterdir() if p.is_dir()):
-        frames = sorted(f.name for f in sub.iterdir()
-                        if f.suffix.lower() in PHOTO_EXTS)
+        frames = sorted(f.name for f in sub.iterdir() if f.suffix.lower() in PHOTO_EXTS)
         if not frames:
             continue
-        sessions.append(CaptureSession(
-            session_id=f"video_{sub.name}",
-            kind="video",
-            source=sub.name,
-            images=[f"{sub.name}/{f}" for f in frames],
-        ))
+        sessions.append(
+            CaptureSession(
+                session_id=f"video_{sub.name}",
+                kind="video",
+                source=sub.name,
+                images=[f"{sub.name}/{f}" for f in frames],
+            )
+        )
 
     # 照片会话: 顶层散图
-    top_photos = sorted(f for f in photos_dir.iterdir()
-                        if f.is_file() and f.suffix.lower() in PHOTO_EXTS)
+    top_photos = sorted(
+        f for f in photos_dir.iterdir() if f.is_file() and f.suffix.lower() in PHOTO_EXTS
+    )
     if top_photos:
         gps_list = [g for g in (_read_gps(p) for p in top_photos) if g]
         anchor = None
@@ -276,28 +282,29 @@ def group_sessions(photos_dir: str | Path) -> list[CaptureSession]:
                 lon=float(np.mean([g.lon for g in gps_list])),
                 alt=float(np.mean([g.alt for g in gps_list])),
             )
-        sessions.append(CaptureSession(
-            session_id="photos_batch_0",
-            kind="photo_batch",
-            source=str(photos_dir.name),
-            images=[p.name for p in top_photos],
-            geo_anchor=anchor,
-        ))
+        sessions.append(
+            CaptureSession(
+                session_id="photos_batch_0",
+                kind="photo_batch",
+                source=str(photos_dir.name),
+                images=[p.name for p in top_photos],
+                geo_anchor=anchor,
+            )
+        )
 
     if not sessions:
         raise ValueError(
             f"{photos_dir} 中没有任何可用图像 (支持: {sorted(PHOTO_EXTS)}); "
-            f"先运行 python -m pipeline.ingest 处理 input/ 目录")
+            f"先运行 python -m pipeline.ingest 处理 input/ 目录"
+        )
 
-    logger.info(f"会话划分: {len(sessions)} 个会话, "
-                f"共 {sum(len(s.images) for s in sessions)} 张图")
+    logger.info(f"会话划分: {len(sessions)} 个会话, 共 {sum(len(s.images) for s in sessions)} 张图")
     return sessions
 
 
 # ============ mock 配准 (确定性降级) ============
 def _session_seed(session: CaptureSession) -> int:
-    h = hashlib.sha1(
-        (session.session_id + "|".join(session.images)).encode()).hexdigest()
+    h = hashlib.sha1((session.session_id + "|".join(session.images)).encode()).hexdigest()
     return int(h[:8], 16)
 
 
@@ -311,14 +318,14 @@ def _session_anchor_xy(sessions: list[CaptureSession]) -> dict[str, np.ndarray]:
             anchors[s.session_id] = gps_to_enu(s.geo_anchor, origin)
         else:
             # 无 GPS: 沿 X 轴网格排布, 顺序确定 (sessions 已排序)
-            anchors[s.session_id] = np.array(
-                [grid_i * SESSION_GRID_SPACING, 0.0, 0.0])
+            anchors[s.session_id] = np.array([grid_i * SESSION_GRID_SPACING, 0.0, 0.0])
             grid_i += 1
     return anchors
 
 
-def mock_register(photos_dir: str | Path,
-                  sessions: list[CaptureSession] | None = None) -> RegistrationResult:
+def mock_register(
+    photos_dir: str | Path, sessions: list[CaptureSession] | None = None
+) -> RegistrationResult:
     """确定性 mock 配准: 每个会话绕锚点环拍，输出 synthetic metric 位姿。
 
     同一输入必然产生同一输出 (种子取自会话内容 hash), 保证可复现。
@@ -343,22 +350,22 @@ def mock_register(photos_dir: str | Path,
                 height = 12.0 + 6.0 * np.sin(2 * np.pi * i / max(n, 1))
             else:
                 # 照片: 环上确定性散布
-                angle = start_angle + 2 * np.pi * i / max(n, 1) \
-                    + rng.uniform(-0.15, 0.15)
+                angle = start_angle + 2 * np.pi * i / max(n, 1) + rng.uniform(-0.15, 0.15)
                 height = rng.uniform(1.6, 8.0)
-            eye = center + np.array([radius * np.cos(angle),
-                                     radius * np.sin(angle), height])
+            eye = center + np.array([radius * np.cos(angle), radius * np.sin(angle), height])
             look_target = center + np.array([0.0, 0.0, 2.0])
             rotation = _look_at_c2w(eye, look_target)
 
             w, h = _image_size(photos_dir / img)
-            poses.append(CameraPose(
-                image=img,
-                session_id=sess.session_id,
-                quat_wxyz=_rotmat_to_quat_wxyz(rotation),
-                t_xyz=eye.tolist(),
-                intrinsics=CameraIntrinsics.from_fov(w, h, 60.0),
-            ))
+            poses.append(
+                CameraPose(
+                    image=img,
+                    session_id=sess.session_id,
+                    quat_wxyz=_rotmat_to_quat_wxyz(rotation),
+                    t_xyz=eye.tolist(),
+                    intrinsics=CameraIntrinsics.from_fov(w, h, 60.0),
+                )
+            )
 
     if origin is None:
         pose_frame = CoordinateFrame(
@@ -447,11 +454,13 @@ def parse_colmap_image_records(text: str) -> dict[str, ColmapImageRecord]:
             raise ValueError(f"images.txt IMAGE_ID={image_id} 四元数无效")
         q = q / norm
         w, x, y, z = q
-        rotation_w2c = np.array([
-            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-        ])
+        rotation_w2c = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+            ]
+        )
         rotation_c2w = rotation_w2c.T
         t_c2w = -rotation_c2w @ np.array([tx, ty, tz])
         if not np.all(np.isfinite(t_c2w)):
@@ -503,25 +512,78 @@ def colmap_available() -> bool:
     return _find_colmap_binary() is not None
 
 
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
 def _sha256_colmap_binary(binary: str | Path) -> str:
     """Hash the executable bytes so runtime evidence identifies one binary."""
-
+    leaf = Path(binary)
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(Path(leaf.absolute().anchor), leaf)
+        before = leaf.lstat()
+    except OSError as exc:
+        raise RuntimeError("COLMAP binary cannot be inspected") from exc
+    except ValueError as exc:
+        raise RuntimeError("COLMAP binary cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(leaf, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise RuntimeError("COLMAP binary is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(leaf, flags)
+    except OSError as exc:
+        raise RuntimeError("COLMAP binary cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise RuntimeError("COLMAP binary cannot be opened") from exc
     digest = hashlib.sha256()
     try:
-        with Path(binary).open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise RuntimeError("COLMAP binary changed before hash")
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
                 digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
+        after = leaf.lstat()
+    except RuntimeError:
+        raise
     except OSError as exc:
         raise RuntimeError("COLMAP binary cannot be hashed") from exc
+    if _cross_surface_signature(before) != _cross_surface_signature(
+        after
+    ) or _cross_surface_signature(descriptor_before) != _cross_surface_signature(descriptor_after):
+        raise RuntimeError("COLMAP binary changed while being hashed")
     return digest.hexdigest()
 
 
 def colmap_version(binary: str | Path | None = None) -> str:
     """Return the exact active COLMAP version or fail closed."""
 
-    resolved_binary = (
-        _find_colmap_binary() if binary is None else str(binary)
-    )
+    resolved_binary = _find_colmap_binary() if binary is None else str(binary)
     if resolved_binary is None:
         raise RuntimeError("COLMAP version probe cannot find the active binary")
     try:
@@ -549,14 +611,13 @@ def _colmap_sift_group(binary: str | Path | None = None) -> str:
     的 nocuda 版已是 Feature*）。探测已安装 build 的帮助文本，两种命名都适配，
     避免 'unrecognised option' 直接失败。
     """
-    resolved_binary = (
-        _find_colmap_binary() if binary is None else str(binary)
-    )
+    resolved_binary = _find_colmap_binary() if binary is None else str(binary)
     if resolved_binary is None:
         return "Feature"
     try:
-        out = subprocess.run([resolved_binary, "feature_extractor", "-h"],
-                             capture_output=True, text=True, timeout=30)
+        out = subprocess.run(
+            [resolved_binary, "feature_extractor", "-h"], capture_output=True, text=True, timeout=30
+        )
         text = (out.stdout or "") + (out.stderr or "")
         if "SiftExtraction.use_gpu" in text and "FeatureExtraction.use_gpu" not in text:
             return "Sift"
@@ -565,10 +626,13 @@ def _colmap_sift_group(binary: str | Path | None = None) -> str:
     return "Feature"
 
 
-def colmap_register(photos_dir: str | Path, workspace: str | Path,
-                    sessions: list[CaptureSession] | None = None,
-                    use_gpu: bool = False,
-                    stage_timeout_s: float | None = 21600.0) -> RegistrationResult:
+def colmap_register(
+    photos_dir: str | Path,
+    workspace: str | Path,
+    sessions: list[CaptureSession] | None = None,
+    use_gpu: bool = False,
+    stage_timeout_s: float | None = 21600.0,
+) -> RegistrationResult:
     """COLMAP 联合 SfM: 所有照片 + 视频帧进入同一个 SfM-local frame。
 
     要求系统安装 colmap。SfM 尺度与地理方向均不确定；GPS 锚点仅作为后续
@@ -599,38 +663,59 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
     if colmap_bin is None:
         raise RuntimeError(
             "colmap not found: checked third/colmap/bin/ and PATH. "
-            "Install COLMAP or use --engine mock.")
+            "Install COLMAP or use --engine mock."
+        )
     binary_sha256 = _sha256_colmap_binary(colmap_bin)
     engine_version = colmap_version(colmap_bin)
 
     def run(args: list[str]):
         logger.info(f"colmap {' '.join(args[:2])} ...")
         try:
-            proc = subprocess.run([colmap_bin, *args], capture_output=True,
-                                  text=True, timeout=stage_timeout_s)
+            proc = subprocess.run(
+                [colmap_bin, *args], capture_output=True, text=True, timeout=stage_timeout_s
+            )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
                 f"colmap {args[0]} 超时 (>{stage_timeout_s}s): 子进程无进展 "
                 f"(headless/集显 OpenGL SIFT 停滞、matcher 病态输入或 I/O 挂起)。"
-                f"排查后可加大 stage_timeout_s 或改用 --engine mock") from exc
+                f"排查后可加大 stage_timeout_s 或改用 --engine mock"
+            ) from exc
         if proc.returncode != 0:
             raise RuntimeError(
                 f"colmap {args[0]} 失败 (exit {proc.returncode}):\n"
-                f"{proc.stderr[-2000:] if proc.stderr else proc.stdout[-2000:]}")
+                f"{proc.stderr[-2000:] if proc.stderr else proc.stdout[-2000:]}"
+            )
 
     grp = _colmap_sift_group(colmap_bin)
     gpu_flag = "1" if use_gpu else "0"
-    run(["feature_extractor", "--database_path", str(db),
-         "--image_path", str(photos_dir),
-         "--ImageReader.camera_model", "SIMPLE_RADIAL",
-         f"--{grp}Extraction.use_gpu", gpu_flag])
+    run(
+        [
+            "feature_extractor",
+            "--database_path",
+            str(db),
+            "--image_path",
+            str(photos_dir),
+            "--ImageReader.camera_model",
+            "SIMPLE_RADIAL",
+            f"--{grp}Extraction.use_gpu",
+            gpu_flag,
+        ]
+    )
     # 图少时穷举匹配最稳; 图多时顺序匹配利用视频帧时间连续性
     n_images = sum(len(s.images) for s in sessions)
     matcher = "exhaustive_matcher" if n_images <= 400 else "sequential_matcher"
-    run([matcher, "--database_path", str(db),
-         f"--{grp}Matching.use_gpu", gpu_flag])
-    run(["mapper", "--database_path", str(db),
-         "--image_path", str(photos_dir), "--output_path", str(sparse)])
+    run([matcher, "--database_path", str(db), f"--{grp}Matching.use_gpu", gpu_flag])
+    run(
+        [
+            "mapper",
+            "--database_path",
+            str(db),
+            "--image_path",
+            str(photos_dir),
+            "--output_path",
+            str(sparse),
+        ]
+    )
     model_dirs = sorted(
         (
             candidate
@@ -643,10 +728,20 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
         raise RuntimeError(
             f"COLMAP mapper 未产出模型 ({sparse} 下无数字模型目录): "
             f"图像间特征匹配不足, 无法联合配准。"
-            f"建议: 增加视角重叠 / 提高抽帧率 / 或改用 --engine mock")
+            f"建议: 增加视角重叠 / 提高抽帧率 / 或改用 --engine mock"
+        )
     for candidate in model_dirs:
-        run(["model_converter", "--input_path", str(candidate),
-             "--output_path", str(candidate), "--output_type", "TXT"])
+        run(
+            [
+                "model_converter",
+                "--input_path",
+                str(candidate),
+                "--output_path",
+                str(candidate),
+                "--output_type",
+                "TXT",
+            ]
+        )
     if _sha256_colmap_binary(colmap_bin) != binary_sha256:
         raise RuntimeError("COLMAP binary changed during registration")
 
@@ -670,15 +765,18 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
                 "但 cameras.txt 中不存在该相机"
             )
         used_camera_ids.add(record.camera_id)
-        poses.append(CameraPose(
-            image=name, session_id=img_to_session[name],
-            quat_wxyz=record.quat_wxyz_c2w.tolist(),
-            t_xyz=record.t_xyz_c2w.tolist(),
-            intrinsics=camera.intrinsics.model_copy(deep=True),
-            camera_id=camera.camera_id,
-            camera_model=camera.model,
-            camera_params=camera.params,
-        ))
+        poses.append(
+            CameraPose(
+                image=name,
+                session_id=img_to_session[name],
+                quat_wxyz=record.quat_wxyz_c2w.tolist(),
+                t_xyz=record.t_xyz_c2w.tolist(),
+                intrinsics=camera.intrinsics.model_copy(deep=True),
+                camera_id=camera.camera_id,
+                camera_model=camera.model,
+                camera_params=camera.params,
+            )
+        )
     logger.info(f"COLMAP 配准: {len(poses)}/{n_images} 张图注册成功 (联合模型, 坐标系一致)")
 
     registered_images = {pose.image for pose in poses}
@@ -775,10 +873,13 @@ def colmap_register(photos_dir: str | Path, workspace: str | Path,
 
 
 # ============ 统一入口 ============
-def register(photos_dir: str | Path, out_json: str | Path | None = None,
-             engine: str = "auto",
-             workspace: str | Path = "recon/colmap_ws",
-             colmap_use_gpu: bool = False) -> RegistrationResult:
+def register(
+    photos_dir: str | Path,
+    out_json: str | Path | None = None,
+    engine: str = "auto",
+    workspace: str | Path = "recon/colmap_ws",
+    colmap_use_gpu: bool = False,
+) -> RegistrationResult:
     """配准入口: engine = auto | colmap | mock (colmap_use_gpu 默认 CPU, 可靠优先)"""
     if engine == "auto":
         engine = "colmap" if colmap_available() else "mock"
@@ -797,8 +898,7 @@ def register(photos_dir: str | Path, out_json: str | Path | None = None,
         # LF (not Windows CRLF): registration.json is a coordinate trust root;
         # byte-reproducibility keeps its digest stable across OSes. Consumers
         # read it via json.loads, so line endings are semantically neutral.
-        out_json.write_text(result.model_dump_json(indent=2) + "\n",
-                            encoding="utf-8", newline="\n")
+        out_json.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
         logger.info(f"配准结果已写入: {out_json} ({len(result.poses)} 个位姿)")
     return result
 
@@ -807,12 +907,10 @@ def main():
     parser = argparse.ArgumentParser(description="统一坐标系配准 (照片 + 视频帧)")
     parser.add_argument("--photos", default="photos", help="输入图像目录")
     parser.add_argument("--out", default="recon/registration.json", help="输出 JSON")
-    parser.add_argument("--engine", default="auto",
-                        choices=["auto", "colmap", "mock"])
+    parser.add_argument("--engine", default="auto", choices=["auto", "colmap", "mock"])
     args = parser.parse_args()
     result = register(args.photos, args.out, args.engine)
-    print(f"引擎: {result.engine} | 会话: {len(result.sessions)} | "
-          f"位姿: {len(result.poses)}")
+    print(f"引擎: {result.engine} | 会话: {len(result.sessions)} | 位姿: {len(result.poses)}")
 
 
 if __name__ == "__main__":

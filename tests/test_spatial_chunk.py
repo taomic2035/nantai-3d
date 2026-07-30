@@ -7,9 +7,13 @@ manifest, 让 viewer 只载相机附近的块。
 铁律: 分块是【纯空间重打包】—— 不改几何、不改坐标、不改 provenance。每个高斯恰好落入
 一个块 (无损、不重复); 分块产物绝不比源场景声称更多信任。
 """
+
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -20,14 +24,15 @@ from pipeline.spatial_chunk import partition_scene_to_chunks, verify_chunks_inte
 
 def _scene(n=800, span=200.0, seed=3, **kw):
     rng = np.random.default_rng(seed)
-    xyz = np.column_stack([
-        rng.uniform(-span / 2, span / 2, n),
-        rng.uniform(-span / 2, span / 2, n),
-        rng.uniform(0, 12, n),
-    ])
+    xyz = np.column_stack(
+        [
+            rng.uniform(-span / 2, span / 2, n),
+            rng.uniform(-span / 2, span / 2, n),
+            rng.uniform(0, 12, n),
+        ]
+    )
     rgb = np.clip(rng.uniform(0, 1, (n, 3)), 0, 1)
-    return GaussianScene(xyz, rgb, rng.uniform(0.3, 1.0, n),
-                         rng.uniform(0.05, 0.4, (n, 3)), **kw)
+    return GaussianScene(xyz, rgb, rng.uniform(0.3, 1.0, n), rng.uniform(0.05, 0.4, (n, 3)), **kw)
 
 
 class TestPartition:
@@ -55,14 +60,12 @@ class TestPartition:
         (逐轴排序比对, 容差仅为 ply 的 float32 往返)。"""
         scene = _scene(n=300, span=120.0, seed=9)
         manifest = partition_scene_to_chunks(scene, tmp_path, chunk_size_m=40.0)
-        rejoined = np.concatenate([
-            GaussianScene.load_ply(tmp_path / c["ply_file"]).xyz
-            for c in manifest["chunks"]
-        ])
+        rejoined = np.concatenate(
+            [GaussianScene.load_ply(tmp_path / c["ply_file"]).xyz for c in manifest["chunks"]]
+        )
         assert len(rejoined) == len(scene)
         for axis in range(3):
-            assert np.allclose(np.sort(rejoined[:, axis]),
-                               np.sort(scene.xyz[:, axis]), atol=1e-3)
+            assert np.allclose(np.sort(rejoined[:, axis]), np.sort(scene.xyz[:, axis]), atol=1e-3)
 
     def test_manifest_carries_bounds_aabb_extent_and_source_frame(self, tmp_path):
         """manifest 须让 viewer 无需下载 ply 即可裁剪/取景, 且如实带源 frame 契约。"""
@@ -79,9 +82,12 @@ class TestPartition:
 
         ext = manifest["extent"]
         xs = [c["x"] for c in manifest["chunks"]]
-        assert ext == {"x_min": min(xs), "x_max": max(xs),
-                       "y_min": min(c["y"] for c in manifest["chunks"]),
-                       "y_max": max(c["y"] for c in manifest["chunks"])}
+        assert ext == {
+            "x_min": min(xs),
+            "x_max": max(xs),
+            "y_min": min(c["y"] for c in manifest["chunks"]),
+            "y_max": max(c["y"] for c in manifest["chunks"]),
+        }
         for chunk in manifest["chunks"]:
             aabb = chunk["aabb"]
             assert len(aabb["min"]) == 3 and aabb["max"][0] >= aabb["min"][0]
@@ -101,12 +107,14 @@ class TestPartition:
         缩水), core_bounds 是【附加】信息, 不是替代品。
         """
         rng = np.random.default_rng(11)
-        core = np.column_stack([rng.uniform(-30, 30, 2000), rng.uniform(-30, 30, 2000),
-                                rng.uniform(0, 8, 2000)])
+        core = np.column_stack(
+            [rng.uniform(-30, 30, 2000), rng.uniform(-30, 30, 2000), rng.uniform(0, 8, 2000)]
+        )
         floaters = np.array([[400.0, 300.0, 250.0], [-380.0, -290.0, -240.0]])
         xyz = np.vstack([core, floaters])
-        scene = GaussianScene(xyz, np.full((len(xyz), 3), 0.5),
-                              np.full(len(xyz), 0.8), np.full((len(xyz), 3), 0.1))
+        scene = GaussianScene(
+            xyz, np.full((len(xyz), 3), 0.5), np.full(len(xyz), 0.8), np.full((len(xyz), 3), 0.1)
+        )
         manifest = partition_scene_to_chunks(scene, tmp_path, chunk_size_m=50.0)
 
         # bounds 仍是【全量真相】: 漂浮物也在内, 绝不因为难看就砍掉
@@ -115,10 +123,10 @@ class TestPartition:
 
         cb = manifest["core_bounds"]
         core_size = np.array(cb["max"]) - np.array(cb["min"])
-        full_size = (np.array(manifest["bounds"]["max"])
-                     - np.array(manifest["bounds"]["min"]))
-        assert np.all(core_size < full_size / 5), \
+        full_size = np.array(manifest["bounds"]["max"]) - np.array(manifest["bounds"]["min"])
+        assert np.all(core_size < full_size / 5), (
             "core_bounds 须真的收紧到主体几何, 否则对取景毫无用处"
+        )
         assert core_size[2] < 20.0, "Z 向漂浮物须被排除在 core_bounds 外"
 
     def test_core_bounds_coverage_is_measured_not_assumed(self, tmp_path):
@@ -140,8 +148,7 @@ class TestPartition:
     def test_degenerate_scene_core_bounds_does_not_crash_or_lie(self, tmp_path):
         """所有点重合 / 点数极少时, 分位数退化 —— core_bounds 须仍是有效盒且不谎报覆盖。"""
         xyz = np.tile([5.0, 5.0, 1.0], (4, 1))
-        scene = GaussianScene(xyz, np.full((4, 3), 0.5), np.full(4, 0.8),
-                              np.full((4, 3), 0.1))
+        scene = GaussianScene(xyz, np.full((4, 3), 0.5), np.full(4, 0.8), np.full((4, 3), 0.1))
         manifest = partition_scene_to_chunks(scene, tmp_path, chunk_size_m=50.0)
         cb = manifest["core_bounds"]
         assert cb["contains_points"] == 4 and cb["contains_fraction"] == 1.0
@@ -151,10 +158,11 @@ class TestPartition:
         """manifest 须声明各 LOD 的【比例】而非只给文件名 —— 否则消费者不知道 lod0 是
         8% 还是别的密度, 无法据此按距离正确选级 (早先审计标记的同类潜在缺口)。"""
         manifest = partition_scene_to_chunks(
-            _scene(n=500), tmp_path, chunk_size_m=100.0,
-            lod_fractions={0: 0.1, 1: 0.4})
-        assert manifest["lod_fractions"] == {"0": 0.1, "1": 0.4, "2": 1.0}, \
+            _scene(n=500), tmp_path, chunk_size_m=100.0, lod_fractions={0: 0.1, 1: 0.4}
+        )
+        assert manifest["lod_fractions"] == {"0": 0.1, "1": 0.4, "2": 1.0}, (
             "含 lod2=1.0 全量, 让消费者无需猜测任何一级的密度语义"
+        )
         # 声明的比例须与实际产出一致
         chunk = max(manifest["chunks"], key=lambda c: c["point_count"])
         full = len(GaussianScene.load_ply(tmp_path / chunk["lod"]["2"]))
@@ -165,7 +173,8 @@ class TestPartition:
         """每块出 LOD: lod0 < lod1 < 全量(lod2), viewer 按距离选级省带宽。"""
         scene = _scene(n=2000)
         manifest = partition_scene_to_chunks(
-            scene, tmp_path, chunk_size_m=100.0, lod_fractions={0: 0.1, 1: 0.4})
+            scene, tmp_path, chunk_size_m=100.0, lod_fractions={0: 0.1, 1: 0.4}
+        )
         chunk = max(manifest["chunks"], key=lambda c: c["point_count"])
         full = len(GaussianScene.load_ply(tmp_path / chunk["lod"]["2"]))
         lod0 = len(GaussianScene.load_ply(tmp_path / chunk["lod"]["0"]))
@@ -176,7 +185,9 @@ class TestPartition:
     def test_partition_preserves_provenance_and_never_upgrades_it(self, tmp_path):
         """分块是纯空间重打包: 每块继承源的 frame/units/transform 历史, 绝不提升信任。"""
         scene = _scene(
-            n=200, frame_id="sfm-local", units="arbitrary",
+            n=200,
+            frame_id="sfm-local",
+            units="arbitrary",
             applied_transform_ids=["xf-abc"],
             applied_transform_paths=[["xf-abc"]],
         )
@@ -195,23 +206,28 @@ class TestPartition:
         (preview-only vs metric-aligned) —— 重打包不该丢信任等级。"""
         scene = _scene(n=200, frame_id="world-enu", units="meters")
         manifest = partition_scene_to_chunks(
-            scene, tmp_path, chunk_size_m=60.0,
+            scene,
+            tmp_path,
+            chunk_size_m=60.0,
             source_provenance={
                 "geometry_usability": "metric-aligned",
                 "recon_manifest_sha256": "a" * 64,
-            })
+            },
+        )
         src = manifest["source"]
         assert src["geometry_usability"] == "metric-aligned"
         assert src["recon_manifest_sha256"] == "a" * 64
-        assert src["frame_id"] == "world-enu"      # 原有字段不被覆盖
-        assert json.loads(
-            (tmp_path / "chunks.json").read_text(encoding="utf-8")
-        )["source"]["geometry_usability"] == "metric-aligned"
+        assert src["frame_id"] == "world-enu"  # 原有字段不被覆盖
+        assert (
+            json.loads((tmp_path / "chunks.json").read_text(encoding="utf-8"))["source"][
+                "geometry_usability"
+            ]
+            == "metric-aligned"
+        )
 
     def test_source_provenance_absent_stays_absent_not_guessed(self, tmp_path):
         """未提供源判定时, 绝不猜测/编造信任等级 (缺席即未知)。"""
-        manifest = partition_scene_to_chunks(
-            _scene(n=100), tmp_path, chunk_size_m=60.0)
+        manifest = partition_scene_to_chunks(_scene(n=100), tmp_path, chunk_size_m=60.0)
         assert "geometry_usability" not in manifest["source"]
         assert "recon_manifest_sha256" not in manifest["source"]
 
@@ -220,37 +236,51 @@ class TestPartition:
         import hashlib
 
         import scripts.chunk_reconstruction as cr
+
         scene = _scene(n=150, frame_id="world-enu", units="meters")
         ply = tmp_path / "recon.ply"
         scene.save_ply(ply, flavor="3dgs")
         recon_manifest = tmp_path / "recon_manifest.json"
-        recon_manifest.write_text(json.dumps(
-            {
-                "full_3dgs": "recon_full.ply",
-                "artifacts": {
-                    "full_3dgs": {
-                        "path": "recon_full.ply",
-                        "fidelity": "full-3dgs",
+        recon_manifest.write_text(
+            json.dumps(
+                {
+                    "full_3dgs": "recon_full.ply",
+                    "artifacts": {
+                        "full_3dgs": {
+                            "path": "recon_full.ply",
+                            "fidelity": "full-3dgs",
+                        },
                     },
-                },
-                "provenance": {
-                    "geometry_usability": "preview-only",
-                    "synthetic": False,
-                },
-            }),
-            encoding="utf-8")
+                    "provenance": {
+                        "geometry_usability": "preview-only",
+                        "synthetic": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
 
-        rc = cr.main([str(ply), "--out-dir", str(tmp_path / "out"),
-                      "--chunk-size-m", "80", "--recon-manifest", str(recon_manifest)])
+        rc = cr.main(
+            [
+                str(ply),
+                "--out-dir",
+                str(tmp_path / "out"),
+                "--chunk-size-m",
+                "80",
+                "--recon-manifest",
+                str(recon_manifest),
+            ]
+        )
         assert rc == 0
-        out = json.loads(
-            (tmp_path / "out" / "chunks.json").read_text(encoding="utf-8"))
+        out = json.loads((tmp_path / "out" / "chunks.json").read_text(encoding="utf-8"))
         # 源是 preview-only → 分块产物照样 preview-only (绝不因分块升级)
         assert out["source"]["geometry_usability"] == "preview-only"
         assert out["source"]["full_3dgs"] is True
         assert out["source"]["render_fidelity"] == "full-3dgs"
-        assert out["source"]["recon_manifest_sha256"] == hashlib.sha256(
-            recon_manifest.read_bytes()).hexdigest()
+        assert (
+            out["source"]["recon_manifest_sha256"]
+            == hashlib.sha256(recon_manifest.read_bytes()).hexdigest()
+        )
 
     def test_manifest_written_lf_and_deterministic(self, tmp_path):
         """manifest 跨平台 LF 字节可复现 (与 trust root 惯例一致); 分块确定。"""
@@ -271,8 +301,8 @@ class TestPartition:
     def test_empty_scene_fails_closed(self, tmp_path):
         with pytest.raises(ValueError, match="empty"):
             partition_scene_to_chunks(
-                GaussianScene(np.zeros((0, 3)), np.zeros((0, 3))), tmp_path,
-                chunk_size_m=50.0)
+                GaussianScene(np.zeros((0, 3)), np.zeros((0, 3))), tmp_path, chunk_size_m=50.0
+            )
 
 
 class TestChunkPayloadSHA:
@@ -283,8 +313,7 @@ class TestChunkPayloadSHA:
     """
 
     def test_each_chunk_has_sha256_and_size_bytes(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         for chunk in manifest["chunks"]:
             assert "sha256" in chunk, "每个 chunk 须绑定 ply_file 的 sha256"
             assert "size_bytes" in chunk, "每个 chunk 须绑定 ply_file 的 size_bytes"
@@ -295,8 +324,8 @@ class TestChunkPayloadSHA:
 
     def test_sha256_matches_actual_file_bytes(self, tmp_path):
         import hashlib
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         for chunk in manifest["chunks"]:
             ply_path = tmp_path / chunk["ply_file"]
             actual_sha = hashlib.sha256(ply_path.read_bytes()).hexdigest()
@@ -306,8 +335,8 @@ class TestChunkPayloadSHA:
 
     def test_payloads_covers_all_lod_levels(self, tmp_path):
         manifest = partition_scene_to_chunks(
-            _scene(n=500), tmp_path, chunk_size_m=100.0,
-            lod_fractions={0: 0.1, 1: 0.4})
+            _scene(n=500), tmp_path, chunk_size_m=100.0, lod_fractions={0: 0.1, 1: 0.4}
+        )
         for chunk in manifest["chunks"]:
             payloads = chunk["payloads"]
             # 须含 lod0, lod1, lod2 (full) 三级
@@ -321,9 +350,10 @@ class TestChunkPayloadSHA:
 
     def test_payload_sha_matches_lod_files(self, tmp_path):
         import hashlib
+
         manifest = partition_scene_to_chunks(
-            _scene(n=500), tmp_path, chunk_size_m=100.0,
-            lod_fractions={0: 0.1, 1: 0.4})
+            _scene(n=500), tmp_path, chunk_size_m=100.0, lod_fractions={0: 0.1, 1: 0.4}
+        )
         for chunk in manifest["chunks"]:
             for _level, payload in chunk["payloads"].items():
                 ply_path = tmp_path / payload["file"]
@@ -332,8 +362,7 @@ class TestChunkPayloadSHA:
                 assert payload["size_bytes"] == ply_path.stat().st_size
 
     def test_payload_full_matches_chunk_sha256(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         for chunk in manifest["chunks"]:
             assert chunk["payloads"]["2"]["sha256"] == chunk["sha256"]
             assert chunk["payloads"]["2"]["size_bytes"] == chunk["size_bytes"]
@@ -351,16 +380,18 @@ class TestChunkPayloadSHA:
     def test_sha_does_not_promote_trust(self, tmp_path):
         """绑定 SHA 是完整性校验, 不提升几何信任等级。"""
         manifest = partition_scene_to_chunks(
-            _scene(n=200), tmp_path, chunk_size_m=60.0,
-            source_provenance={"geometry_usability": "preview-only"})
+            _scene(n=200),
+            tmp_path,
+            chunk_size_m=60.0,
+            source_provenance={"geometry_usability": "preview-only"},
+        )
         assert manifest["source"]["geometry_usability"] == "preview-only"
         for chunk in manifest["chunks"]:
             assert "sha256" in chunk  # SHA 存在
         # 但 SHA 不改变信任等级: 仍是 preview-only
 
     def test_verify_chunks_integrity_passes_for_valid_manifest(self, tmp_path):
-        partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         report = verify_chunks_integrity(tmp_path)
         assert report["valid"] is True
         assert report["per_chunk_sha_verified"] is True
@@ -368,8 +399,7 @@ class TestChunkPayloadSHA:
         assert report["mismatches"] == []
 
     def test_verify_chunks_integrity_detects_tampered_file(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         # 篡改一个 PLY 文件
         chunk = manifest["chunks"][0]
         ply_path = tmp_path / chunk["ply_file"]
@@ -384,31 +414,30 @@ class TestChunkPayloadSHA:
         assert mismatch["declared_sha256"] != mismatch["actual_sha256"]
 
     def test_verify_chunks_integrity_detects_missing_file(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         # 删除一个 PLY 文件
         chunk = manifest["chunks"][0]
         (tmp_path / chunk["ply_file"]).unlink()
         report = verify_chunks_integrity(tmp_path)
         assert report["valid"] is False
-        assert any("missing" in str(m).lower() or "not found" in str(m).lower()
-                      for m in report["mismatches"])
+        assert any(
+            "missing" in str(m).lower() or "not found" in str(m).lower()
+            for m in report["mismatches"]
+        )
 
     def test_verify_chunks_integrity_detects_size_mismatch(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         # 篡改文件大小但不改 SHA (理论上很难, 但测试 size_bytes 检查路径)
         chunk = manifest["chunks"][0]
         ply_path = tmp_path / chunk["ply_file"]
         original = ply_path.read_bytes()
         # 截断文件: sha 和 size 都会变
-        ply_path.write_bytes(original[:len(original) // 2])
+        ply_path.write_bytes(original[: len(original) // 2])
         report = verify_chunks_integrity(tmp_path)
         assert report["valid"] is False
 
     def test_verify_returns_dict_with_human_readable_summary(self, tmp_path):
-        partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0)
+        partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         report = verify_chunks_integrity(tmp_path)
         assert "total_chunks" in report
         assert "verified_payloads" in report
@@ -420,9 +449,7 @@ class TestChunkPayloadSHA:
         self,
         tmp_path,
     ):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0
-        )
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         manifest.pop("integrity")
         for chunk in manifest["chunks"]:
             chunk.pop("sha256")
@@ -441,9 +468,7 @@ class TestChunkPayloadSHA:
         assert report["verified_payloads"] == 0
 
     def test_new_manifest_missing_payload_row_fails_closed(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0
-        )
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         manifest["chunks"][0]["payloads"].pop("1")
         (tmp_path / "chunks.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -461,9 +486,7 @@ class TestChunkPayloadSHA:
         )
 
     def test_payload_path_must_match_lod_and_stay_inside_root(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0
-        )
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         manifest["chunks"][0]["payloads"]["0"]["file"] = "../outside.ply"
         (tmp_path / "chunks.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -475,14 +498,11 @@ class TestChunkPayloadSHA:
 
         assert report["valid"] is False
         assert any(
-            "path" in row["reason"] or "lod" in row["reason"]
-            for row in report["mismatches"]
+            "path" in row["reason"] or "lod" in row["reason"] for row in report["mismatches"]
         )
 
     def test_duplicate_lod_payload_paths_fail_closed(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0
-        )
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         chunk = manifest["chunks"][0]
         chunk["lod"]["1"] = chunk["lod"]["0"]
         chunk["payloads"]["1"] = dict(chunk["payloads"]["0"])
@@ -495,15 +515,10 @@ class TestChunkPayloadSHA:
         report = verify_chunks_integrity(tmp_path)
 
         assert report["valid"] is False
-        assert any(
-            "duplicate payload path" in row["reason"]
-            for row in report["mismatches"]
-        )
+        assert any("duplicate payload path" in row["reason"] for row in report["mismatches"])
 
     def test_redirected_payload_path_fails_closed(self, tmp_path):
-        manifest = partition_scene_to_chunks(
-            _scene(n=300), tmp_path, chunk_size_m=80.0
-        )
+        manifest = partition_scene_to_chunks(_scene(n=300), tmp_path, chunk_size_m=80.0)
         chunk = manifest["chunks"][0]
         original = tmp_path / chunk["payloads"]["0"]["file"]
         alias = tmp_path / "redirected-lod0.ply"
@@ -522,10 +537,7 @@ class TestChunkPayloadSHA:
         report = verify_chunks_integrity(tmp_path)
 
         assert report["valid"] is False
-        assert any(
-            "redirected" in row["reason"]
-            for row in report["mismatches"]
-        )
+        assert any("redirected" in row["reason"] for row in report["mismatches"])
 
     def test_manifest_bytes_are_canonical_across_output_roots(self, tmp_path):
         scene = _scene(n=300, seed=19)
@@ -559,3 +571,118 @@ class TestChunkPayloadSHA:
                 chunk_size_m=80.0,
                 source_provenance={"frame_id": "forged-frame"},
             )
+
+
+class TestSpatialChunkReaderIntegrity:
+    """Security boundary tests for _file_sha256_and_size and manifest reader.
+
+    The chunk SHA binds per-payload byte integrity. A check-then-reopen
+    (lstat then Path.open) would let an attacker swap the ply between
+    validation and reading. The secure pattern uses a single descriptor
+    from os.open+O_NOFOLLOW with cross-surface identity rechecks before
+    and after hashing, and rejects reparse-point ancestors via
+    first_linklike_path.
+    """
+
+    def test_file_sha256_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.spatial_chunk as sc
+        from pipeline.spatial_chunk import _ChunkIntegrityError, _file_sha256_and_size
+
+        target = tmp_path / "chunk.ply"
+        target.write_bytes(b"valid chunk data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = sc.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(sc, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(_ChunkIntegrityError, match="regular non-link file"):
+            _file_sha256_and_size(target)
+
+    def test_file_sha256_rejects_path_swap_before_open(self, tmp_path, monkeypatch):
+        from pipeline.spatial_chunk import _ChunkIntegrityError, _file_sha256_and_size
+
+        target = tmp_path / "chunk.ply"
+        target.write_bytes(b"original-bytes\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                # Swap file bytes between lstat and os.open so the
+                # fstat-after-open identity check fires.
+                target.write_bytes(b"swapped-bytes-payload\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(_ChunkIntegrityError, match="changed before hash|cannot be"):
+            _file_sha256_and_size(target)
+
+    def test_file_sha256_rejects_swap_during_read(self, tmp_path, monkeypatch):
+        import pipeline.spatial_chunk as sc
+        from pipeline.spatial_chunk import _ChunkIntegrityError, _file_sha256_and_size
+
+        target = tmp_path / "chunk.ply"
+        target.write_bytes(b"chunk-payload-bytes\n")
+        # Stub first_linklike_path so lstat on target is called exactly
+        # twice: before-open and post-read.
+        monkeypatch.setattr(sc, "first_linklike_path", lambda root, leaf: None)
+        original_lstat = Path.lstat
+        swap_state = {"target_lstat_calls": 0}
+
+        def swapping_lstat(self):
+            if self == target:
+                swap_state["target_lstat_calls"] += 1
+                if swap_state["target_lstat_calls"] == 2:
+                    target.write_bytes(b"swapped-after-read\n")
+            return original_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", swapping_lstat)
+        with pytest.raises(_ChunkIntegrityError, match="changed while being hashed"):
+            _file_sha256_and_size(target)
+
+    def test_file_sha256_hashes_match_stable_read(self, tmp_path):
+        from pipeline.spatial_chunk import _file_sha256_and_size
+
+        target = tmp_path / "chunk.ply"
+        payload = b"stable-chunk-bytes\n"
+        target.write_bytes(payload)
+        digest, size = _file_sha256_and_size(target)
+        assert digest == hashlib.sha256(payload).hexdigest()
+        assert size == len(payload)
+
+    def test_file_sha256_rejects_symlink_target(self, tmp_path):
+        from pipeline.spatial_chunk import _ChunkIntegrityError, _file_sha256_and_size
+
+        real = tmp_path / "real.ply"
+        real.write_bytes(b"real-bytes\n")
+        link = tmp_path / "link.ply"
+        try:
+            link.symlink_to(real)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+        with pytest.raises(_ChunkIntegrityError, match="regular non-link file"):
+            _file_sha256_and_size(link)
+
+    def test_verify_chunks_integrity_rejects_symlink_manifest(self, tmp_path):
+        """verify_chunks_integrity must reject a symlinked chunks.json."""
+        partition_scene_to_chunks(_scene(n=200), tmp_path, chunk_size_m=80.0)
+        real_manifest = tmp_path / "chunks.json"
+        link_dir = tmp_path / "link-root"
+        link_dir.mkdir()
+        linked_manifest = link_dir / "chunks.json"
+        try:
+            linked_manifest.symlink_to(real_manifest)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+        # Copy chunk ply files into link_dir so the manifest's relative
+        # paths still resolve — the manifest itself is the link we test.
+        for chunk_file in tmp_path.glob("chunk_*.ply"):
+            (link_dir / chunk_file.name).write_bytes(chunk_file.read_bytes())
+        with pytest.raises(FileNotFoundError, match="chunks.json"):
+            verify_chunks_integrity(link_dir)
