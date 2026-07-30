@@ -12,6 +12,7 @@ but not sufficient condition for training.
 
 See: docs/superpowers/specs/2026-07-23-registration-sfm-quality-policy-design.md
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -112,9 +113,7 @@ def _stream_colmap_text_lines(
     ):
         raise ValueError(f"{label} is not a bounded regular file")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
-        os, "O_NOFOLLOW", 0
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -132,11 +131,9 @@ def _stream_colmap_text_lines(
     try:
         with stream:
             fd_before = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(fd_before.st_mode)
-                or _cross_surface_signature(fd_before)
-                != _cross_surface_signature(before)
-            ):
+            if not stat.S_ISREG(fd_before.st_mode) or _cross_surface_signature(
+                fd_before
+            ) != _cross_surface_signature(before):
                 raise ValueError(f"{label} changed before read")
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 payload.extend(chunk)
@@ -150,8 +147,7 @@ def _stream_colmap_text_lines(
         raise ValueError(f"{label} cannot be read") from exc
 
     if (
-        _same_surface_signature(fd_before)
-        != _same_surface_signature(fd_after)
+        _same_surface_signature(fd_before) != _same_surface_signature(fd_after)
         or _same_surface_signature(before) != _same_surface_signature(after)
         or _cross_surface_signature(fd_after) != _cross_surface_signature(after)
         or len(payload) != before.st_size
@@ -178,12 +174,7 @@ def build_colmap_runtime_evidence(
 ) -> str:
     """Build canonical runtime evidence for the binary used by registration."""
 
-    if (
-        not binary_name
-        or binary_name in {".", ".."}
-        or "/" in binary_name
-        or "\\" in binary_name
-    ):
+    if not binary_name or binary_name in {".", ".."} or "/" in binary_name or "\\" in binary_name:
         raise ValueError("COLMAP runtime binary_name must be one basename")
     if _COLMAP_VERSION_RE.fullmatch(engine_version) is None:
         raise ValueError("COLMAP runtime engine_version is not exact")
@@ -214,14 +205,10 @@ def derive_registration_engine_version(
     )
     if registration.engine != "colmap":
         if entries:
-            raise ValueError(
-                "non-COLMAP registration must not contain COLMAP runtime evidence"
-            )
+            raise ValueError("non-COLMAP registration must not contain COLMAP runtime evidence")
         return None
     if len(entries) != 1:
-        raise ValueError(
-            "engine='colmap' requires exactly one COLMAP runtime evidence entry"
-        )
+        raise ValueError("engine='colmap' requires exactly one COLMAP runtime evidence entry")
     try:
         payload = json.loads(entries[0])
     except (json.JSONDecodeError, TypeError) as exc:
@@ -245,6 +232,7 @@ def derive_registration_engine_version(
 # ============================================================
 # Policy
 # ============================================================
+
 
 class RegistrationQualityPolicy(FrozenModel):
     """Operator-supplied coverage thresholds.  All fields required — no defaults.
@@ -275,6 +263,7 @@ def policy_canonical_sha256(policy: RegistrationQualityPolicy) -> str:
 # ============================================================
 # Sparse model enumeration
 # ============================================================
+
 
 class SparseModelEntry(FrozenModel):
     """One COLMAP sparse model discovered under ``sparse/<index>/``."""
@@ -382,8 +371,7 @@ def _select_model(
     )
     selected = ranked[0]
     if selected.point3d_count > 0 and any(
-        e.image_count == selected.image_count
-        and e.point3d_count != selected.point3d_count
+        e.image_count == selected.image_count and e.point3d_count != selected.point3d_count
         for e in models
         if e.model_index != selected.model_index
     ):
@@ -403,14 +391,14 @@ def enumerate_sparse_models(
     tie-break by lowest model index.  This replaces the ``sparse/"0"`` hardcode.
     """
     if not sparse_dir.exists() or not sparse_dir.is_dir():
-        raise ValueError(f"sparse directory does not exist: {sparse_dir}")
+        raise ValueError("sparse directory does not exist")
 
     model_dirs = sorted(
         (d for d in sparse_dir.iterdir() if d.is_dir()),
         key=lambda d: d.name,
     )
     if not model_dirs:
-        raise ValueError(f"no sparse models found in {sparse_dir}")
+        raise ValueError("no sparse models found")
 
     entries: list[SparseModelEntry] = []
     for model_dir in model_dirs:
@@ -420,15 +408,17 @@ def enumerate_sparse_models(
             continue
         images = _parse_colmap_images_txt(model_dir / "images.txt")
         point3d_count = _parse_colmap_points3d_count(model_dir / "points3D.txt")
-        entries.append(SparseModelEntry(
-            model_index=model_index,
-            image_count=len(images),
-            point3d_count=point3d_count,
-            images=images,
-        ))
+        entries.append(
+            SparseModelEntry(
+                model_index=model_index,
+                image_count=len(images),
+                point3d_count=point3d_count,
+                images=images,
+            )
+        )
 
     if not entries:
-        raise ValueError(f"no valid sparse models found in {sparse_dir}")
+        raise ValueError("no valid sparse models found")
 
     selected_index, rule = _select_model(tuple(entries), total_input_images)
     return SparseModelEnumeration(
@@ -442,6 +432,7 @@ def enumerate_sparse_models(
 # ============================================================
 # Quality report
 # ============================================================
+
 
 class SessionQualityOutcome(FrozenModel):
     """Per-session registration outcome."""
@@ -492,6 +483,7 @@ class RegistrationQualityReport(FrozenModel):
 # Derivation helpers (used by both builder and validator)
 # ============================================================
 
+
 def _derive_registered_names(registration: RegistrationResult) -> tuple[str, ...]:
     """Unique image names from ``registration.poses``, in first-appearance order.
 
@@ -533,22 +525,19 @@ def _derive_session_outcomes(
     outcomes: list[SessionQualityOutcome] = []
     for session in registration.sessions:
         session_registered = {
-            pose.image for pose in registration.poses
-            if pose.session_id == session.session_id
+            pose.image for pose in registration.poses if pose.session_id == session.session_id
         }
-        unregistered = tuple(
-            img for img in session.images if img not in registered_names
+        unregistered = tuple(img for img in session.images if img not in registered_names)
+        longest_run = _longest_consecutive_unregistered_run(session.images, registered_names)
+        outcomes.append(
+            SessionQualityOutcome(
+                session_id=session.session_id,
+                registered=len(session_registered),
+                total=len(session.images),
+                unregistered_images=unregistered,
+                longest_unregistered_run=longest_run,
+            )
         )
-        longest_run = _longest_consecutive_unregistered_run(
-            session.images, registered_names
-        )
-        outcomes.append(SessionQualityOutcome(
-            session_id=session.session_id,
-            registered=len(session_registered),
-            total=len(session.images),
-            unregistered_images=unregistered,
-            longest_unregistered_run=longest_run,
-        ))
     return tuple(outcomes)
 
 
@@ -570,6 +559,7 @@ def _derive_total_input_images(
 # ============================================================
 # Decision derivation
 # ============================================================
+
 
 def derive_quality_accepted(
     report: RegistrationQualityReport,
@@ -652,6 +642,7 @@ def derive_training_allowed(
 # Builder (derives all fields from authoritative artifacts)
 # ============================================================
 
+
 def build_registration_quality_report(
     *,
     registration: RegistrationResult,
@@ -673,26 +664,19 @@ def build_registration_quality_report(
     reg_sha = hashlib.sha256(registration_json_bytes).hexdigest()
     reparsed_reg = RegistrationResult.model_validate_json(registration_json_bytes)
     if reparsed_reg != registration:
-        raise ValueError(
-            "registration object does not match registration_json_bytes"
-        )
+        raise ValueError("registration object does not match registration_json_bytes")
 
     # 2. Capture manifest bytes must match the passed object.
     if capture_manifest is not None:
         if capture_manifest_bytes is None:
-            raise ValueError(
-                "capture_manifest provided but capture_manifest_bytes is None"
-            )
+            raise ValueError("capture_manifest provided but capture_manifest_bytes is None")
         manifest_sha = hashlib.sha256(capture_manifest_bytes).hexdigest()
         # Lazy import to avoid circular dependency at module load.
         from pipeline.studio_revisions import CaptureRevisionManifest
-        reparsed_manifest = CaptureRevisionManifest.model_validate_json(
-            capture_manifest_bytes
-        )
+
+        reparsed_manifest = CaptureRevisionManifest.model_validate_json(capture_manifest_bytes)
         if reparsed_manifest != capture_manifest:
-            raise ValueError(
-                "capture_manifest object does not match capture_manifest_bytes"
-            )
+            raise ValueError("capture_manifest object does not match capture_manifest_bytes")
     else:
         manifest_sha = None
 
@@ -701,29 +685,21 @@ def build_registration_quality_report(
     if engine == "colmap" and sparse_enumeration is None:
         raise ValueError("engine='colmap' requires sparse_enumeration")
     if engine != "colmap" and sparse_enumeration is not None:
-        raise ValueError(
-            f"sparse_enumeration is not allowed for engine={engine!r}"
-        )
+        raise ValueError(f"sparse_enumeration is not allowed for engine={engine!r}")
     # Always derive so non-COLMAP engines cannot smuggle COLMAP runtime
     # evidence (and colmap engines cannot omit it). The caller-supplied
     # engine_version, if any, must agree with the derived value.
     derived_engine_version = derive_registration_engine_version(registration)
     if engine_version is not None and engine_version != derived_engine_version:
-        raise ValueError(
-            "engine_version disagrees with registration runtime evidence"
-        )
+        raise ValueError("engine_version disagrees with registration runtime evidence")
     engine_version = derived_engine_version
 
     # 4. Derive measured fields.
     registered_names = _derive_registered_names(registration)
     registered_count = len(registered_names)
     total_input_images = _derive_total_input_images(registration, capture_manifest)
-    registered_ratio = (
-        registered_count / total_input_images if total_input_images > 0 else 0.0
-    )
-    session_outcomes = _derive_session_outcomes(
-        registration, frozenset(registered_names)
-    )
+    registered_ratio = registered_count / total_input_images if total_input_images > 0 else 0.0
+    session_outcomes = _derive_session_outcomes(registration, frozenset(registered_names))
 
     # 5. Consistency: session totals must sum to the global total.
     session_total_sum = sum(s.total for s in session_outcomes)
@@ -788,16 +764,19 @@ def build_registration_quality_report(
     quality_accepted, reasons = derive_quality_accepted(report, policy)
     training_allowed = derive_training_allowed(report, policy)
 
-    return report.model_copy(update={
-        "quality_accepted": quality_accepted,
-        "training_allowed": training_allowed,
-        "rejection_reasons": tuple(reasons),
-    })
+    return report.model_copy(
+        update={
+            "quality_accepted": quality_accepted,
+            "training_allowed": training_allowed,
+            "rejection_reasons": tuple(reasons),
+        }
+    )
 
 
 # ============================================================
 # Validation (re-derive everything from authoritative artifacts)
 # ============================================================
+
 
 def validate_registration_quality(
     report: RegistrationQualityReport,
@@ -850,9 +829,7 @@ def validate_registration_quality(
     # evidence, and colmap engines cannot omit it.
     derived_engine_version = derive_registration_engine_version(registration)
     if report.engine_version != derived_engine_version:
-        raise ValueError(
-            "engine_version does not match registration runtime evidence"
-        )
+        raise ValueError("engine_version does not match registration runtime evidence")
 
     # 5. Capture manifest: if SHA is bound, bytes must be supplied and match.
     if report.capture_manifest_sha256 is not None:
@@ -870,9 +847,8 @@ def validate_registration_quality(
             )
         try:
             from pipeline.studio_revisions import CaptureRevisionManifest
-            capture_manifest = CaptureRevisionManifest.model_validate_json(
-                capture_manifest_bytes
-            )
+
+            capture_manifest = CaptureRevisionManifest.model_validate_json(capture_manifest_bytes)
         except Exception as exc:
             raise ValueError(
                 f"capture_manifest_bytes do not parse as CaptureRevisionManifest: {exc}"
@@ -883,17 +859,12 @@ def validate_registration_quality(
     # 6. Sparse enumeration: required for colmap, forbidden otherwise.
     if report.engine == "colmap":
         if sparse_enumeration is None:
-            raise ValueError(
-                "engine='colmap' requires sparse_enumeration argument to validator"
-            )
+            raise ValueError("engine='colmap' requires sparse_enumeration argument to validator")
         if report.model_enumeration is None:
-            raise ValueError(
-                "engine='colmap' report must have model_enumeration field"
-            )
+            raise ValueError("engine='colmap' report must have model_enumeration field")
         if report.model_enumeration != sparse_enumeration:
             raise ValueError(
-                "report.model_enumeration does not match authoritative "
-                "sparse_enumeration argument"
+                "report.model_enumeration does not match authoritative sparse_enumeration argument"
             )
         # Re-derive selection from models tuple.
         re_selected, re_rule = _select_model(
@@ -919,9 +890,7 @@ def validate_registration_quality(
                 )
     else:
         if report.model_enumeration is not None:
-            raise ValueError(
-                f"engine={report.engine!r} report must not have model_enumeration"
-            )
+            raise ValueError(f"engine={report.engine!r} report must not have model_enumeration")
         if sparse_enumeration is not None:
             raise ValueError(
                 f"sparse_enumeration argument not allowed for engine={report.engine!r}"
@@ -931,12 +900,8 @@ def validate_registration_quality(
     registered_names = _derive_registered_names(registration)
     registered_count = len(registered_names)
     total_input_images = _derive_total_input_images(registration, capture_manifest)
-    registered_ratio = (
-        registered_count / total_input_images if total_input_images > 0 else 0.0
-    )
-    session_outcomes = _derive_session_outcomes(
-        registration, frozenset(registered_names)
-    )
+    registered_ratio = registered_count / total_input_images if total_input_images > 0 else 0.0
+    session_outcomes = _derive_session_outcomes(registration, frozenset(registered_names))
 
     # 8. Require exact equality with stored values.
     if report.registered_count != registered_count:
