@@ -1,6 +1,7 @@
 """端到端重建: mock 全链路 / 导入引擎 / 变清晰 (区域替换) / 视频抽帧"""
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -1216,3 +1217,57 @@ class TestVideoIngest:
         assert (out / "photo.jpg").exists()
         frames = list((out / "clip.mp4.frames").glob("*.jpg"))
         assert len(frames) >= 4  # 2s * 4fps ≈ 8 帧
+
+
+class TestSha256FileIntegrity:
+    """Security boundary tests for reconstruct._sha256_file."""
+
+    def test_returns_correct_digest(self, tmp_path):
+        from pipeline.reconstruct import _sha256_file
+        data = b"hello world\n"
+        path = tmp_path / "a.ply"
+        path.write_bytes(data)
+        assert _sha256_file(path) == hashlib.sha256(data).hexdigest()
+
+    def test_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.reconstruct as rc
+        from pipeline.reconstruct import _ReconstructIntegrityError, _sha256_file
+
+        target = tmp_path / "a.ply"
+        target.write_bytes(b"ply data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = rc.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(rc, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(
+            _ReconstructIntegrityError,
+            match="regular non-link file|redirected|unsafe",
+        ):
+            _sha256_file(target)
+
+    def test_rejects_path_swap_before_open(self, tmp_path, monkeypatch):
+        from pipeline.reconstruct import _ReconstructIntegrityError, _sha256_file
+
+        original_path = tmp_path / "a.ply"
+        original_path.write_bytes(b"original\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                original_path.write_bytes(b"swapped content\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(
+            _ReconstructIntegrityError,
+            match="changed before hash|changed while",
+        ):
+            _sha256_file(original_path)
