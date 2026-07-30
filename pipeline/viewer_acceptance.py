@@ -24,6 +24,7 @@ from pydantic import (
 from pipeline.durable_io import (
     DurableIOError,
     capture_real_directory_identity,
+    first_linklike_path,
     flush_file,
     matches_real_directory_identity,
     publish_file_noreplace,
@@ -100,11 +101,19 @@ def _read_evidence_bytes(
 ) -> bytes:
     """Read a CLI evidence file via a single controlled descriptor."""
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
+    except FileNotFoundError:
+        raise
     except OSError as exc:
         raise ViewerAcceptanceError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise ViewerAcceptanceError(f"{label} cannot be inspected") from exc
     if (
-        _is_linklike(path, before)
+        redirected is not None
+        or _is_linklike(path, before)
         or not stat.S_ISREG(before.st_mode)
         or before.st_size <= 0
         or before.st_size > max_bytes

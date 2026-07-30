@@ -853,7 +853,8 @@ def test_read_evidence_bytes_rejects_path_after_swap(
 
     monkeypatch.setattr(Path, "lstat", swapping_lstat)
     with pytest.raises(
-        ViewerAcceptanceError, match="changed while being read"
+        ViewerAcceptanceError,
+        match="changed (before read|while being read)",
     ):
         viewer_acceptance_module._read_evidence_bytes(
             evidence,
@@ -975,3 +976,31 @@ def test_write_decision_noreplace_rejects_parent_drift(
             b'{"accepted":true}\n',
         )
     assert not destination.exists()
+
+
+def test_read_evidence_bytes_rejects_ancestor_reparse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """An ancestor reparse point must be rejected before reading."""
+    evidence = tmp_path / "policy.json"
+    evidence.write_bytes(b'{"valid":true}')
+    sentinel = tmp_path / "ancestor-reparse"
+
+    def fake_first_linklike_path(root, leaf):
+        return sentinel
+
+    monkeypatch.setattr(
+        viewer_acceptance_module,
+        "first_linklike_path",
+        fake_first_linklike_path,
+        raising=False,
+    )
+    with pytest.raises(
+        ViewerAcceptanceError,
+        match="bounded regular file",
+    ):
+        viewer_acceptance_module._read_evidence_bytes(
+            evidence,
+            label="test",
+        )
