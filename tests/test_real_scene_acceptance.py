@@ -248,9 +248,7 @@ def test_screenshot_symlink_is_rejected(tmp_path):
         original.symlink_to(target)
     except OSError as exc:
         if getattr(exc, "winerror", None) == 1314:
-            pytest.skip(
-                "Windows SeCreateSymbolicLinkPrivilege not held"
-            )
+            pytest.skip("Windows SeCreateSymbolicLinkPrivilege not held")
         raise
 
     with pytest.raises(RealSceneAcceptanceError, match="symlink"):
@@ -274,24 +272,14 @@ def test_screenshot_escape_is_rejected(tmp_path):
 
 def _review_for_viewer_capture(tmp_path, viewer_report):
     human_policy = _policy().model_copy(
-        update={
-            "required_pose_ids": tuple(
-                row.pose_id for row in viewer_report.poses
-            )
-        }
+        update={"required_pose_ids": tuple(row.pose_id for row in viewer_report.poses)}
     )
     return record_human_visual_review(
         policy=human_policy,
         root=tmp_path,
         reviewer="Reviewer One",
-        dispositions={
-            category: "accepted"
-            for category in REQUIRED_VISUAL_CATEGORIES
-        },
-        screenshots={
-            row.pose_id: row.path
-            for row in viewer_report.screenshots
-        },
+        dispositions={category: "accepted" for category in REQUIRED_VISUAL_CATEGORIES},
+        screenshots={row.pose_id: row.path for row in viewer_report.screenshots},
         reviewed_at=datetime(2026, 7, 26, 12, 0, tzinfo=UTC),
     )
 
@@ -311,9 +299,7 @@ def test_production_acceptance_reopens_v2_capture_and_binds_human_screenshots(
         expected_scene_manifest_path=viewer_report.scene_manifest.path,
         expected_viewer_policy_path=viewer_report.viewer_policy.path,
         expected_import_receipt_sha256=IMPORT_RECEIPT_SHA256,
-        expected_aligned_registration_sha256=(
-            ALIGNED_REGISTRATION_SHA256
-        ),
+        expected_aligned_registration_sha256=(ALIGNED_REGISTRATION_SHA256),
     )
 
 
@@ -342,14 +328,10 @@ def test_production_acceptance_rejects_camera_set_provenance_drift(
             expected_scene_manifest_path=viewer_report.scene_manifest.path,
             expected_viewer_policy_path=viewer_report.viewer_policy.path,
             expected_import_receipt_sha256=(
-                "a" * 64
-                if field == "import"
-                else IMPORT_RECEIPT_SHA256
+                "a" * 64 if field == "import" else IMPORT_RECEIPT_SHA256
             ),
             expected_aligned_registration_sha256=(
-                "a" * 64
-                if field == "registration"
-                else ALIGNED_REGISTRATION_SHA256
+                "a" * 64 if field == "registration" else ALIGNED_REGISTRATION_SHA256
             ),
         )
 
@@ -367,9 +349,7 @@ def test_production_acceptance_rejects_viewer_v1_without_capture_receipt(
             expected_scene_manifest_path="imported/manifest.json",
             expected_viewer_policy_path="viewer/policy.json",
             expected_import_receipt_sha256=IMPORT_RECEIPT_SHA256,
-            expected_aligned_registration_sha256=(
-                ALIGNED_REGISTRATION_SHA256
-            ),
+            expected_aligned_registration_sha256=(ALIGNED_REGISTRATION_SHA256),
         )
 
 
@@ -378,9 +358,7 @@ def test_production_acceptance_rejects_human_screenshot_not_from_capture(
 ):
     viewer_report = _viewer_report_v2(tmp_path)
     viewer_pose_ids = tuple(row.pose_id for row in viewer_report.poses)
-    human_policy = _policy().model_copy(
-        update={"required_pose_ids": viewer_pose_ids}
-    )
+    human_policy = _policy().model_copy(update={"required_pose_ids": viewer_pose_ids})
     replacement_paths = {}
     for index, pose_id in enumerate(viewer_pose_ids):
         relative = f"review/other-{index}.png"
@@ -392,10 +370,7 @@ def test_production_acceptance_rejects_human_screenshot_not_from_capture(
         policy=human_policy,
         root=tmp_path,
         reviewer="Reviewer One",
-        dispositions={
-            category: "accepted"
-            for category in REQUIRED_VISUAL_CATEGORIES
-        },
+        dispositions={category: "accepted" for category in REQUIRED_VISUAL_CATEGORIES},
         screenshots=replacement_paths,
         reviewed_at=datetime(2026, 7, 26, 12, 0, tzinfo=UTC),
     )
@@ -413,9 +388,7 @@ def test_production_acceptance_rejects_human_screenshot_not_from_capture(
             expected_scene_manifest_path=viewer_report.scene_manifest.path,
             expected_viewer_policy_path=viewer_report.viewer_policy.path,
             expected_import_receipt_sha256=IMPORT_RECEIPT_SHA256,
-            expected_aligned_registration_sha256=(
-                ALIGNED_REGISTRATION_SHA256
-            ),
+            expected_aligned_registration_sha256=(ALIGNED_REGISTRATION_SHA256),
         )
 
 
@@ -510,9 +483,7 @@ def _viewer_bound_cli_fixture(tmp_path):
     root.mkdir()
     report = _viewer_report_v2(root)
     report_path = root / "viewer/report.json"
-    report_path.write_bytes(
-        canonical_viewer_performance_report_bytes(report)
-    )
+    report_path.write_bytes(canonical_viewer_performance_report_bytes(report))
     policy = HumanReviewPolicy(
         source_role="production-acceptance",
         required_categories=REQUIRED_VISUAL_CATEGORIES,
@@ -548,9 +519,9 @@ def test_human_review_cli_derives_screenshots_from_verified_viewer_report(
     assert exit_code == 0
     output = root / "evidence/human-visual-review.json"
     review = HumanVisualReview.model_validate_json(output.read_bytes())
-    assert tuple(
-        (row.pose_id, row.path) for row in review.screenshots
-    ) == tuple((row.pose_id, row.path) for row in report.screenshots)
+    assert tuple((row.pose_id, row.path) for row in review.screenshots) == tuple(
+        (row.pose_id, row.path) for row in report.screenshots
+    )
     assert validate_human_visual_review(policy, review, root).accepted is True
 
 
@@ -802,9 +773,7 @@ def test_latest_acceptance_pointer_is_relative_content_bound_and_idempotent(
 ):
     root = tmp_path / "real-scene"
     payload = b'{"schema":"fixture"}\n'
-    report = root / "run-a" / (
-        f"real-scene-acceptance-{hashlib.sha256(payload).hexdigest()}.json"
-    )
+    report = root / "run-a" / (f"real-scene-acceptance-{hashlib.sha256(payload).hexdigest()}.json")
     report.parent.mkdir(parents=True)
     report.write_bytes(payload)
 
@@ -813,9 +782,7 @@ def test_latest_acceptance_pointer_is_relative_content_bound_and_idempotent(
 
     assert first == second == root / "latest-acceptance.json"
     pointer_model = RealSceneAcceptancePointer.model_validate_json(first.read_bytes())
-    assert first.read_bytes() == canonical_real_scene_acceptance_pointer_bytes(
-        pointer_model
-    )
+    assert first.read_bytes() == canonical_real_scene_acceptance_pointer_bytes(pointer_model)
     assert load_latest_real_scene_acceptance(root) == report
     pointer = json.loads(first.read_bytes())
     assert pointer["report_path"] == f"run-a/{report.name}"
@@ -833,8 +800,8 @@ def test_latest_acceptance_pointer_flush_failure_preserves_previous_pointer(
 ):
     root = tmp_path / "real-scene"
     first_payload = b'{"schema":"first"}\n'
-    first = root / "run-a" / (
-        f"real-scene-acceptance-{hashlib.sha256(first_payload).hexdigest()}.json"
+    first = (
+        root / "run-a" / (f"real-scene-acceptance-{hashlib.sha256(first_payload).hexdigest()}.json")
     )
     first.parent.mkdir(parents=True)
     first.write_bytes(first_payload)
@@ -842,8 +809,10 @@ def test_latest_acceptance_pointer_flush_failure_preserves_previous_pointer(
     previous = pointer.read_bytes()
 
     second_payload = b'{"schema":"second"}\n'
-    second = root / "run-b" / (
-        f"real-scene-acceptance-{hashlib.sha256(second_payload).hexdigest()}.json"
+    second = (
+        root
+        / "run-b"
+        / (f"real-scene-acceptance-{hashlib.sha256(second_payload).hexdigest()}.json")
     )
     second.parent.mkdir()
     second.write_bytes(second_payload)
@@ -869,9 +838,7 @@ def test_latest_acceptance_pointer_rejects_report_tamper_and_unsafe_paths(
     root = tmp_path / "real-scene"
     root.mkdir()
     payload = b'{"schema":"fixture"}\n'
-    report = root / (
-        f"real-scene-acceptance-{hashlib.sha256(payload).hexdigest()}.json"
-    )
+    report = root / (f"real-scene-acceptance-{hashlib.sha256(payload).hexdigest()}.json")
     report.write_bytes(payload)
     pointer = publish_real_scene_acceptance_pointer(report, root)
 
@@ -954,16 +921,12 @@ def test_acceptance_validator_binds_expected_import_receipt(
     monkeypatch.setattr(
         acceptance_module,
         "_validate_acceptance_evidence",
-        lambda *_args, **_kwargs: _accepted_evidence(
-            role="production-acceptance"
-        ),
+        lambda *_args, **_kwargs: _accepted_evidence(role="production-acceptance"),
     )
 
     decision = validate_real_scene_acceptance(
         path,
-        expected_import_receipt_sha256=(
-            report.import_receipt.sha256
-        ),
+        expected_import_receipt_sha256=(report.import_receipt.sha256),
     )
     assert decision.production_release_allowed is True
 
@@ -988,19 +951,12 @@ def test_aggregate_reopens_original_production_runtime_evidence(
     )
     _patch_production_bundle(monkeypatch, fixture)
     material = import_module._load_training_material(training_root)
-    closure_path = (
-        training_root
-        / "remote-result/production-training-closure.json"
-    )
-    closure = load_production_training_closure_bytes(
-        closure_path.read_bytes()
-    )
+    closure_path = training_root / "remote-result/production-training-closure.json"
+    closure = load_production_training_closure_bytes(closure_path.read_bytes())
     imported = SimpleNamespace(
         schema_id="nantai.real-scene-import-receipt.v3",
         production_training_closure_sha256=closure.content_sha256,
-        production_runtime_decision_sha256=(
-            closure.runtime_decision_sha256
-        ),
+        production_runtime_decision_sha256=(closure.runtime_decision_sha256),
     )
     report = SimpleNamespace(
         source_role="production-acceptance",
@@ -1012,10 +968,7 @@ def test_aggregate_reopens_original_production_runtime_evidence(
         material,
         imported,
     )
-    decision_path = (
-        training_root
-        / "remote-result/production-runtime/decision.json"
-    )
+    decision_path = training_root / "remote-result/production-runtime/decision.json"
     decision_path.write_bytes(decision_path.read_bytes() + b" ")
 
     with pytest.raises(
@@ -1182,9 +1135,7 @@ def test_acceptance_stat_signature_binds_windows_reparse_attribute() -> None:
 
     assert acceptance_module._stat_signature(
         SimpleNamespace(**common, st_file_attributes=0)
-    ) != acceptance_module._stat_signature(
-        SimpleNamespace(**common, st_file_attributes=0x400)
-    )
+    ) != acceptance_module._stat_signature(SimpleNamespace(**common, st_file_attributes=0x400))
 
 
 def test_acceptance_stable_read_rejects_descriptor_after_drift(
@@ -1388,3 +1339,37 @@ def test_packaged_render_evaluation_reopens_held_out_bundle_bytes(
     )
 
     assert decision.accepted is True
+
+
+def test_validate_real_scene_acceptance_oserror_does_not_leak_absolute_path(
+    tmp_path,
+    monkeypatch,
+):
+    """RED: OSError in _validate_acceptance_evidence must not leak absolute path.
+
+    The except (OSError, ValueError) handler in validate_real_scene_acceptance
+    interpolates {exc} into the error message. OSError messages contain the
+    absolute file path, which leaks private filesystem layout to callers.
+    """
+    _root, path, _report = _acceptance_report(
+        tmp_path,
+        role="internal-canary",
+    )
+    private_path = str(tmp_path / "private" / "secret-evidence.json")
+
+    def _raise_oserror(*_args, **_kwargs):
+        raise OSError(2, "No such file or directory", private_path)
+
+    monkeypatch.setattr(
+        acceptance_module,
+        "_validate_acceptance_evidence",
+        _raise_oserror,
+    )
+
+    with pytest.raises(RealSceneAcceptanceError) as exc_info:
+        validate_real_scene_acceptance(path)
+
+    message = str(exc_info.value)
+    assert str(tmp_path) not in message, f"absolute path leaked in error message: {message}"
+    assert "private" not in message, f"private path segment leaked in error message: {message}"
+    assert "secret-evidence" not in message, f"private filename leaked in error message: {message}"

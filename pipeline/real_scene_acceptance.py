@@ -332,9 +332,7 @@ def _stable_read_bytes(
 ) -> bytes:
     """Read a trust-critical file via a single controlled fd."""
     try:
-        redirected = first_linklike_path(
-            Path(path.absolute().anchor), path
-        )
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
         before = path.lstat()
     except OSError as exc:
         raise RealSceneAcceptanceError(f"{label} is unavailable") from exc
@@ -348,9 +346,7 @@ def _stable_read_bytes(
         or before.st_size > maximum_bytes
     ):
         raise RealSceneAcceptanceError(f"{label} is not a regular non-link file")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
-        os, "O_NOFOLLOW", 0
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -366,11 +362,9 @@ def _stable_read_bytes(
     try:
         with stream:
             descriptor_before = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(descriptor_before.st_mode)
-                or _stat_signature(descriptor_before)
-                != _stat_signature(before)
-            ):
+            if not stat.S_ISREG(descriptor_before.st_mode) or _stat_signature(
+                descriptor_before
+            ) != _stat_signature(before):
                 raise RealSceneAcceptanceError(f"{label} changed before read")
             payload = stream.read(maximum_bytes + 1)
             descriptor_after = os.fstat(stream.fileno())
@@ -381,8 +375,7 @@ def _stable_read_bytes(
         raise RealSceneAcceptanceError(f"{label} cannot be read") from exc
     if (
         len(payload) > maximum_bytes
-        or _stat_signature(descriptor_before)
-        != _stat_signature(descriptor_after)
+        or _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
         or _stat_signature(before) != _stat_signature(after)
         or len(payload) != before.st_size
     ):
@@ -995,10 +988,9 @@ def acceptance_evidence_reference(
             raise
         with stream:
             descriptor_before = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(descriptor_before.st_mode)
-                or _stat_signature(descriptor_before) != _stat_signature(before)
-            ):
+            if not stat.S_ISREG(descriptor_before.st_mode) or _stat_signature(
+                descriptor_before
+            ) != _stat_signature(before):
                 raise RealSceneAcceptanceError(
                     f"acceptance evidence {relative} changed before read"
                 )
@@ -1013,10 +1005,9 @@ def acceptance_evidence_reference(
         raise
     except OSError as exc:
         raise RealSceneAcceptanceError(f"acceptance evidence {relative} cannot be read") from exc
-    if (
-        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
-        or _stat_signature(before) != _stat_signature(after)
-    ):
+    if _stat_signature(descriptor_before) != _stat_signature(descriptor_after) or _stat_signature(
+        before
+    ) != _stat_signature(after):
         raise RealSceneAcceptanceError(f"acceptance evidence {relative} changed while read")
     return AcceptanceEvidenceReference(
         path=relative,
@@ -1080,18 +1071,10 @@ def publish_real_scene_acceptance(
     except RealSceneAcceptanceError:
         raise
     except DurableIOError as exc:
-        state = (
-            "published but durability is unconfirmed"
-            if exc.published
-            else "not published"
-        )
-        raise RealSceneAcceptanceError(
-            f"acceptance report cannot be published ({state})"
-        ) from exc
+        state = "published but durability is unconfirmed" if exc.published else "not published"
+        raise RealSceneAcceptanceError(f"acceptance report cannot be published ({state})") from exc
     except OSError as exc:
-        raise RealSceneAcceptanceError(
-            "acceptance report cannot be published"
-        ) from exc
+        raise RealSceneAcceptanceError("acceptance report cannot be published") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1148,18 +1131,10 @@ def publish_real_scene_acceptance_pointer(
         atomic_replace(temporary, destination)
         temporary = ""
     except DurableIOError as exc:
-        state = (
-            "published but durability is unconfirmed"
-            if exc.published
-            else "not published"
-        )
-        raise RealSceneAcceptanceError(
-            f"acceptance pointer cannot be published ({state})"
-        ) from exc
+        state = "published but durability is unconfirmed" if exc.published else "not published"
+        raise RealSceneAcceptanceError(f"acceptance pointer cannot be published ({state})") from exc
     except OSError as exc:
-        raise RealSceneAcceptanceError(
-            "acceptance pointer cannot be published"
-        ) from exc
+        raise RealSceneAcceptanceError("acceptance pointer cannot be published") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1318,10 +1293,9 @@ def _hash_reference(
             raise
         with stream:
             descriptor_before = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(descriptor_before.st_mode)
-                or _stat_signature(descriptor_before) != _stat_signature(before)
-            ):
+            if not stat.S_ISREG(descriptor_before.st_mode) or _stat_signature(
+                descriptor_before
+            ) != _stat_signature(before):
                 raise RealSceneAcceptanceError(
                     f"acceptance evidence {reference.path} changed before read"
                 )
@@ -1338,10 +1312,9 @@ def _hash_reference(
         raise RealSceneAcceptanceError(
             f"acceptance evidence {reference.path} cannot be read"
         ) from exc
-    if (
-        _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
-        or _stat_signature(before) != _stat_signature(after)
-    ):
+    if _stat_signature(descriptor_before) != _stat_signature(descriptor_after) or _stat_signature(
+        before
+    ) != _stat_signature(after):
         raise RealSceneAcceptanceError(f"acceptance evidence {reference.path} changed while read")
     if digest.hexdigest() != reference.sha256:
         raise RealSceneAcceptanceError(f"acceptance evidence {reference.path} SHA-256 disagrees")
@@ -1464,10 +1437,9 @@ def _sha256_file(path: Path) -> str:
             raise
         with stream:
             descriptor_before = os.fstat(stream.fileno())
-            if (
-                not stat.S_ISREG(descriptor_before.st_mode)
-                or _stat_signature(descriptor_before) != _stat_signature(before)
-            ):
+            if not stat.S_ISREG(descriptor_before.st_mode) or _stat_signature(
+                descriptor_before
+            ) != _stat_signature(before):
                 raise RealSceneAcceptanceError(
                     f"accepted scene artifact changed before read: {path.name}"
                 )
@@ -1478,10 +1450,9 @@ def _sha256_file(path: Path) -> str:
                 digest.update(chunk)
             descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
-        if (
-            _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
-            or _stat_signature(before) != _stat_signature(after)
-        ):
+        if _stat_signature(descriptor_before) != _stat_signature(
+            descriptor_after
+        ) or _stat_signature(before) != _stat_signature(after):
             raise RealSceneAcceptanceError(
                 f"accepted scene artifact changed while read: {path.name}"
             )
@@ -1557,9 +1528,7 @@ def _validate_bound_viewer_capture(
     if source_role != "production-acceptance":
         return
     if not isinstance(viewer_report, ViewerPerformanceReportV2):
-        raise RealSceneAcceptanceError(
-            "production acceptance requires Viewer v2 capture evidence"
-        )
+        raise RealSceneAcceptanceError("production acceptance requires Viewer v2 capture evidence")
     try:
         camera_set = verify_viewer_capture_report(
             viewer_policy,
@@ -1567,36 +1536,20 @@ def _validate_bound_viewer_capture(
             root,
         )
     except ViewerAcceptanceError as exc:
-        raise RealSceneAcceptanceError(
-            f"Viewer v2 capture evidence is invalid: {exc}"
-        ) from exc
-    if (
-        camera_set.import_receipt_sha256
-        != expected_import_receipt_sha256
-    ):
-        raise RealSceneAcceptanceError(
-            "Viewer camera set differs from accepted import receipt"
-        )
-    if (
-        camera_set.aligned_registration_sha256
-        != expected_aligned_registration_sha256
-    ):
+        raise RealSceneAcceptanceError(f"Viewer v2 capture evidence is invalid: {exc}") from exc
+    if camera_set.import_receipt_sha256 != expected_import_receipt_sha256:
+        raise RealSceneAcceptanceError("Viewer camera set differs from accepted import receipt")
+    if camera_set.aligned_registration_sha256 != expected_aligned_registration_sha256:
         raise RealSceneAcceptanceError(
             "Viewer camera set differs from accepted aligned registration"
         )
     if (
-        viewer_report.scene_manifest.path
-        != expected_scene_manifest_path
-        or viewer_report.viewer_policy.path
-        != expected_viewer_policy_path
+        viewer_report.scene_manifest.path != expected_scene_manifest_path
+        or viewer_report.viewer_policy.path != expected_viewer_policy_path
     ):
-        raise RealSceneAcceptanceError(
-            "Viewer v2 capture paths differ from aggregate evidence"
-        )
+        raise RealSceneAcceptanceError("Viewer v2 capture paths differ from aggregate evidence")
     if human_review is None:
-        raise RealSceneAcceptanceError(
-            "production Viewer v2 capture requires human review"
-        )
+        raise RealSceneAcceptanceError("production Viewer v2 capture requires human review")
     human_review = _validated_review(human_review)
     captured = tuple(
         (
@@ -1728,9 +1681,7 @@ def _revalidate_production_training_evidence(
         or imported.production_training_closure_sha256 is None
         or imported.production_runtime_decision_sha256 is None
     ):
-        raise RealSceneAcceptanceError(
-            "production import has no verified training evidence"
-        )
+        raise RealSceneAcceptanceError("production import has no verified training evidence")
     training_root = _member_path(
         root,
         report.training_root.path,
@@ -1744,14 +1695,10 @@ def _revalidate_production_training_evidence(
     try:
         closure = load_production_training_closure_bytes(closure_bytes)
     except ProductionTrainingClosureError as exc:
-        raise RealSceneAcceptanceError(
-            "production training evidence is invalid"
-        ) from exc
+        raise RealSceneAcceptanceError("production training evidence is invalid") from exc
     if (
-        closure.content_sha256
-        != imported.production_training_closure_sha256
-        or closure.runtime_decision_sha256
-        != imported.production_runtime_decision_sha256
+        closure.content_sha256 != imported.production_training_closure_sha256
+        or closure.runtime_decision_sha256 != imported.production_runtime_decision_sha256
     ):
         raise RealSceneAcceptanceError(
             "production training evidence differs from the import receipt"
@@ -1940,13 +1887,9 @@ def _validate_acceptance_evidence(
         label="viewer performance policy",
     )
     try:
-        viewer_report = load_viewer_performance_report_bytes(
-            payloads[report.viewer_report.path]
-        )
+        viewer_report = load_viewer_performance_report_bytes(payloads[report.viewer_report.path])
     except ViewerAcceptanceError as exc:
-        raise RealSceneAcceptanceError(
-            f"viewer performance report is invalid: {exc}"
-        ) from exc
+        raise RealSceneAcceptanceError(f"viewer performance report is invalid: {exc}") from exc
     scene_manifest_path = root / report.import_root.path / imported.manifest_path
     if (
         viewer_report.source_role != report.source_role
@@ -1978,28 +1921,16 @@ def _validate_acceptance_evidence(
         raise RealSceneAcceptanceError(
             "human review policy differs from viewer pose/source contract"
         )
-    aligned_registration_path = (
-        imported.alignment_observed_registration_path
-    )
+    aligned_registration_path = imported.alignment_observed_registration_path
     aligned_registration_bindings = tuple(
-        binding
-        for binding in imported.artifacts
-        if binding.path == aligned_registration_path
+        binding for binding in imported.artifacts if binding.path == aligned_registration_path
     )
-    if (
-        report.source_role == "production-acceptance"
-        and (
-            aligned_registration_path is None
-            or len(aligned_registration_bindings) != 1
-        )
+    if report.source_role == "production-acceptance" and (
+        aligned_registration_path is None or len(aligned_registration_bindings) != 1
     ):
-        raise RealSceneAcceptanceError(
-            "production import aligned registration binding is missing"
-        )
+        raise RealSceneAcceptanceError("production import aligned registration binding is missing")
     expected_aligned_registration_sha256 = (
-        aligned_registration_bindings[0].sha256
-        if aligned_registration_bindings
-        else "0" * 64
+        aligned_registration_bindings[0].sha256 if aligned_registration_bindings else "0" * 64
     )
     _validate_bound_viewer_capture(
         source_role=report.source_role,
@@ -2007,16 +1938,12 @@ def _validate_acceptance_evidence(
         viewer_report=viewer_report,
         human_review=human_review,
         root=root,
-        expected_scene_manifest_path=(
-            f"{report.import_root.path}/{imported.manifest_path}"
-        ),
+        expected_scene_manifest_path=(f"{report.import_root.path}/{imported.manifest_path}"),
         expected_viewer_policy_path=report.viewer_policy.path,
         expected_import_receipt_sha256=hashlib.sha256(
             payloads[report.import_receipt.path]
         ).hexdigest(),
-        expected_aligned_registration_sha256=(
-            expected_aligned_registration_sha256
-        ),
+        expected_aligned_registration_sha256=(expected_aligned_registration_sha256),
     )
     human_decision = validate_human_visual_review(
         human_policy,
@@ -2242,12 +2169,9 @@ def validate_real_scene_acceptance(
     report, payload, root = _load_real_scene_acceptance(report_path)
     if (
         expected_import_receipt_sha256 is not None
-        and report.import_receipt.sha256
-        != expected_import_receipt_sha256
+        and report.import_receipt.sha256 != expected_import_receipt_sha256
     ):
-        raise RealSceneAcceptanceError(
-            "acceptance report differs from the expected import receipt"
-        )
+        raise RealSceneAcceptanceError("acceptance report differs from the expected import receipt")
     first_payloads = _preflight_acceptance_references(report, root)
     try:
         evidence = _validate_acceptance_evidence(
@@ -2258,7 +2182,7 @@ def validate_real_scene_acceptance(
     except RealSceneAcceptanceError:
         raise
     except (OSError, ValueError) as exc:
-        raise RealSceneAcceptanceError(f"real-scene acceptance evidence is invalid: {exc}") from exc
+        raise RealSceneAcceptanceError("real-scene acceptance evidence is invalid") from exc
     second_payloads = _preflight_acceptance_references(report, root)
     if first_payloads != second_payloads:
         raise RealSceneAcceptanceError("real-scene acceptance evidence changed during validation")
