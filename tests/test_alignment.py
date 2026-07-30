@@ -5,6 +5,7 @@ The recurring theme is provenance safety: a degenerate, inconsistent, or
 under-determined fit must never promote arbitrary SfM geometry to a metric ENU
 world -- it must fail closed, leaving the registration sfm-local / UNALIGNED.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -213,13 +214,15 @@ class TestFitGates:
     def test_duplicate_source_points_fail_closed(self):
         """同一 SfM 点重复出现不能靠多行重复权重冒充独立约束。"""
 
-        src = np.array([
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [0.0, 10.0, 0.0],
-            [0.0, 0.0, 10.0],
-            [0.0, 0.0, 10.0],
-        ])
+        src = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+                [0.0, 0.0, 10.0],
+                [0.0, 0.0, 10.0],
+            ]
+        )
         dst = 1.5 * src + np.array([1.0, 2.0, 3.0])
         dst[-1] += np.array([0.01, 0.0, 0.0])
 
@@ -232,18 +235,22 @@ class TestFitGates:
 
     def test_non_finite_control_points_fail_closed(self):
         """NaN/Inf 坐标的控制点必须 fail-closed, 不能被静默放行。"""
-        src = np.array([
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [0.0, 10.0, 1.0],
-            [3.0, 4.0, 8.0],
-        ])
-        dst = np.array([
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [0.0, 10.0, 1.0],
-            [np.nan, 4.0, 8.0],  # NaN in target
-        ])
+        src = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 1.0],
+                [3.0, 4.0, 8.0],
+            ]
+        )
+        dst = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 1.0],
+                [np.nan, 4.0, 8.0],  # NaN in target
+            ]
+        )
         with pytest.raises(AlignmentError, match="non-finite"):
             fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
 
@@ -251,13 +258,15 @@ class TestFitGates:
         """源点重合 (var_src=0) 会让 scale 不可辨识; fail-closed。"""
         # 所有源点完全相同 -> var_src=0 -> scale undefined
         src = np.array([[1.0, 2.0, 3.0]] * 5)
-        dst = np.array([
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-            [0.0, 10.0, 1.0],
-            [3.0, 4.0, 8.0],
-            [5.0, 5.0, 5.0],
-        ])
+        dst = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 1.0],
+                [3.0, 4.0, 8.0],
+                [5.0, 5.0, 5.0],
+            ]
+        )
         # 源点重合 -> source span 退化 -> degenerate 守卫先拒绝
         with pytest.raises(AlignmentError, match="degenerate|coincident"):
             fit_sfm_to_enu(_resolved(src, dst), _ORIGIN)
@@ -265,26 +274,22 @@ class TestFitGates:
     def test_default_span_ratio_separates_near_coplanar_from_3d(self):
         """冻结默认阈值必须拒绝近共面，同时接受有真实纵深的同尺度构型。"""
 
-        near = np.array([
-            [0.0, 0.0, 0.0],
-            [10.0, 0.0, 1e-8],
-            [0.0, 10.0, 1e-8],
-            [3.0, 4.0, 1e-8],
-        ])
-        rotation = _rotation_z(np.radians(10.0))
-        near_dst = (
-            1.5 * (near @ rotation.T)
-            + np.array([1.0, 2.0, 3.0])
+        near = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 1e-8],
+                [0.0, 10.0, 1e-8],
+                [3.0, 4.0, 1e-8],
+            ]
         )
+        rotation = _rotation_z(np.radians(10.0))
+        near_dst = 1.5 * (near @ rotation.T) + np.array([1.0, 2.0, 3.0])
         with pytest.raises(AlignmentError, match="degenerate"):
             fit_sfm_to_enu(_resolved(near, near_dst), _ORIGIN)
 
         volumetric = near.copy()
         volumetric[-1, 2] = 1.0
-        volumetric_dst = (
-            1.5 * (volumetric @ rotation.T)
-            + np.array([1.0, 2.0, 3.0])
-        )
+        volumetric_dst = 1.5 * (volumetric @ rotation.T) + np.array([1.0, 2.0, 3.0])
         sim3, evidence = fit_sfm_to_enu(
             _resolved(volumetric, volumetric_dst),
             _ORIGIN,
@@ -313,9 +318,12 @@ class TestFitGates:
         assert evidence.max_residual_m >= 0
         assert evidence.max_residual_m == max(evidence.per_point_residual_m)
         # RMS 与 per-point 一致
-        expected_rms = float(np.sqrt(
-            sum(r ** 2 for r in evidence.per_point_residual_m) / len(evidence.per_point_residual_m)
-        ))
+        expected_rms = float(
+            np.sqrt(
+                sum(r**2 for r in evidence.per_point_residual_m)
+                / len(evidence.per_point_residual_m)
+            )
+        )
         assert np.isclose(evidence.rms_residual_m, expected_rms, atol=1e-9)
 
         # 证据记录退化守卫的输入
@@ -363,20 +371,17 @@ class TestAlignRegistration:
             east, north, up = enu
             earth_r = 6378137.0
             lat = _ORIGIN.lat + np.degrees(north / earth_r)
-            lon = _ORIGIN.lon + np.degrees(
-                east / (earth_r * np.cos(np.radians(_ORIGIN.lat)))
-            )
+            lon = _ORIGIN.lon + np.degrees(east / (earth_r * np.cos(np.radians(_ORIGIN.lat))))
             alt = _ORIGIN.alt + up
             control_points.append(
-                ControlPoint(label=pose.image, image=pose.image,
-                             geo=GeoAnchor(lat=lat, lon=lon, alt=alt))
+                ControlPoint(
+                    label=pose.image, image=pose.image, geo=GeoAnchor(lat=lat, lon=lon, alt=alt)
+                )
             )
         return control_points
 
     def test_gps_control_points_yield_aligned_world_enu(self):
-        reg = _registration_with_camera_centres(
-            self._non_collinear_centres(), geo_origin=_ORIGIN
-        )
+        reg = _registration_with_camera_centres(self._non_collinear_centres(), geo_origin=_ORIGIN)
         scale, rotation, t = 1.0, _rotation_z(np.radians(15.0)), np.array([2.0, -1.0, 0.5])
         control_points = self._control_points_from_gps(reg, scale, rotation, t)
 
@@ -406,9 +411,7 @@ class TestAlignRegistration:
         assert restored.pose_to_world.transform_id == xf.transform_id
 
     def test_alignment_evidence_is_machine_parseable(self):
-        reg = _registration_with_camera_centres(
-            self._non_collinear_centres(), geo_origin=_ORIGIN
-        )
+        reg = _registration_with_camera_centres(self._non_collinear_centres(), geo_origin=_ORIGIN)
         scale, rotation, t = 1.3, _rotation_z(np.radians(-22.0)), np.array([7.0, 3.0, 1.0])
         control_points = self._control_points_from_gps(reg, scale, rotation, t)
 
@@ -434,9 +437,7 @@ class TestAlignRegistration:
             )
             for img, xyz in centres.items()
         ]
-        aligned = align_registration(
-            reg, control_points, geo_origin=_ORIGIN, max_rms_m=2.0
-        )
+        aligned = align_registration(reg, control_points, geo_origin=_ORIGIN, max_rms_m=2.0)
         assert aligned.pose_to_world.method is TransformMethod.CONTROL_POINTS
         assert aligned.world_frame.frame_id == "world-enu"
 
@@ -446,10 +447,12 @@ class TestAlignRegistration:
             {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (1.0, 0.0, 0.0)}, geo_origin=_ORIGIN
         )
         control_points = [
-            ControlPoint(label="a.jpg", image="a.jpg",
-                         geo=GeoAnchor(lat=26.0, lon=119.0, alt=50.0)),
-            ControlPoint(label="b.jpg", image="b.jpg",
-                         geo=GeoAnchor(lat=26.001, lon=119.0, alt=50.0)),
+            ControlPoint(
+                label="a.jpg", image="a.jpg", geo=GeoAnchor(lat=26.0, lon=119.0, alt=50.0)
+            ),
+            ControlPoint(
+                label="b.jpg", image="b.jpg", geo=GeoAnchor(lat=26.001, lon=119.0, alt=50.0)
+            ),
         ]
         with pytest.raises(AlignmentError):
             align_registration(reg, control_points)
@@ -462,23 +465,21 @@ class TestAlignRegistration:
             {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (1.0, 0.0, 0.0)}, geo_origin=_ORIGIN
         )
         control_points = [
-            ControlPoint(label="a.jpg", image="a.jpg",
-                         geo=GeoAnchor(lat=26.0, lon=119.0, alt=50.0)),
-            ControlPoint(label="b.jpg", image="b.jpg",
-                         geo=GeoAnchor(lat=26.001, lon=119.0, alt=50.0)),
+            ControlPoint(
+                label="a.jpg", image="a.jpg", geo=GeoAnchor(lat=26.0, lon=119.0, alt=50.0)
+            ),
+            ControlPoint(
+                label="b.jpg", image="b.jpg", geo=GeoAnchor(lat=26.001, lon=119.0, alt=50.0)
+            ),
         ]
-        result = align_registration(
-            reg, control_points, allow_unaligned_fallback=True
-        )
+        result = align_registration(reg, control_points, allow_unaligned_fallback=True)
         assert result is reg  # identical object, no partial mutation
         assert result.world_frame is None
         assert result.alignment_status is AlignmentStatus.UNALIGNED
 
     def test_high_residual_align_emits_no_world_frame(self):
         # Consistent geometry but a tight RMS gate the fit cannot meet.
-        reg = _registration_with_camera_centres(
-            self._non_collinear_centres(), geo_origin=_ORIGIN
-        )
+        reg = _registration_with_camera_centres(self._non_collinear_centres(), geo_origin=_ORIGIN)
         # Targets unrelated to source -> large residual under any similarity.
         rng = np.random.default_rng(2)
         control_points = [
@@ -497,8 +498,7 @@ class TestAlignRegistration:
     def test_missing_geo_origin_fails_closed(self):
         reg = _registration_with_camera_centres(self._non_collinear_centres())
         control_points = [
-            ControlPoint(label=img, image=img,
-                         geo=GeoAnchor(lat=26.0, lon=119.0, alt=50.0))
+            ControlPoint(label=img, image=img, geo=GeoAnchor(lat=26.0, lon=119.0, alt=50.0))
             for img in self._non_collinear_centres()
         ]
         with pytest.raises(AlignmentError, match="geo origin"):
@@ -507,9 +507,7 @@ class TestAlignRegistration:
 
 class TestBuildControlPoints:
     def test_image_names_resolve_to_camera_centres(self):
-        reg = _registration_with_camera_centres(
-            {"a.jpg": (1.0, 2.0, 3.0)}, geo_origin=_ORIGIN
-        )
+        reg = _registration_with_camera_centres({"a.jpg": (1.0, 2.0, 3.0)}, geo_origin=_ORIGIN)
         resolved = build_control_points(
             reg,
             [ControlPoint(label="a", image="a.jpg", enu_xyz=(0.0, 0.0, 0.0))],
@@ -546,25 +544,49 @@ class TestAlignmentCLI:
 
         from pipeline.alignment import main as align_main
 
-        centres = {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
-                   "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
+        centres = {
+            "a.jpg": (0.0, 0.0, 0.0),
+            "b.jpg": (10.0, 0.0, 0.0),
+            "c.jpg": (0.0, 10.0, 1.0),
+            "d.jpg": (3.0, 4.0, 8.0),
+        }
         reg = _registration_with_camera_centres(centres)  # no geo_origin
         reg_path = tmp_path / "reg.json"
         reg_path.write_text(reg.model_dump_json(), encoding="utf-8")
         cp_path = tmp_path / "cps.json"
-        cp_path.write_text(json.dumps(
-            [{"label": img, "image": img, "enu_xyz": list(xyz)}
-             for img, xyz in centres.items()]), encoding="utf-8")
+        cp_path.write_text(
+            json.dumps(
+                [{"label": img, "image": img, "enu_xyz": list(xyz)} for img, xyz in centres.items()]
+            ),
+            encoding="utf-8",
+        )
         out_path = tmp_path / "aligned.json"
 
         # Without --geo-origin (and no reg.geo_origin) the fit fails closed.
         with pytest.raises(AlignmentError, match="geo origin"):
-            align_main(["--registration", str(reg_path),
-                        "--control-points", str(cp_path), "--out", str(out_path)])
+            align_main(
+                [
+                    "--registration",
+                    str(reg_path),
+                    "--control-points",
+                    str(cp_path),
+                    "--out",
+                    str(out_path),
+                ]
+            )
 
-        rc = align_main(["--registration", str(reg_path),
-                         "--control-points", str(cp_path),
-                         "--geo-origin", "26.0,119.0,50.0", "--out", str(out_path)])
+        rc = align_main(
+            [
+                "--registration",
+                str(reg_path),
+                "--control-points",
+                str(cp_path),
+                "--geo-origin",
+                "26.0,119.0,50.0",
+                "--out",
+                str(out_path),
+            ]
+        )
         assert rc == 0
         raw = out_path.read_bytes()
         assert b"\r\n" not in raw
@@ -579,7 +601,8 @@ class TestControlPointsFromGeoAnchors:
 
     def test_pairs_only_registered_images_sorted_and_labeled(self):
         reg = _registration_with_camera_centres(
-            {"a.jpg": (0, 0, 0), "b.jpg": (10, 0, 0), "c.jpg": (0, 10, 1)})
+            {"a.jpg": (0, 0, 0), "b.jpg": (10, 0, 0), "c.jpg": (0, 10, 1)}
+        )
         anchors = {
             "b.jpg": GeoAnchor(lat=26.0, lon=119.001, alt=51.0),
             "a.jpg": GeoAnchor(lat=26.0, lon=119.0, alt=50.0),
@@ -595,13 +618,16 @@ class TestControlPointsFromGeoAnchors:
     def test_empty_when_no_registered_image_has_an_anchor(self):
         reg = _registration_with_camera_centres({"a.jpg": (0, 0, 0)})
         assert control_points_from_geo_anchors(reg, {}) == []
-        assert control_points_from_geo_anchors(
-            reg, {"other.jpg": GeoAnchor(lat=26.0, lon=119.0, alt=50.0)}) == []
+        assert (
+            control_points_from_geo_anchors(
+                reg, {"other.jpg": GeoAnchor(lat=26.0, lon=119.0, alt=50.0)}
+            )
+            == []
+        )
 
     def test_built_control_points_drive_alignment_end_to_end(self):
         # turnkey 真实路径: 逐图 geo 锚点 → 控制点 → align_registration → world-enu measured
-        reg = _registration_with_camera_centres(
-            self.__class__._non_collinear(), geo_origin=_ORIGIN)
+        reg = _registration_with_camera_centres(self.__class__._non_collinear(), geo_origin=_ORIGIN)
         scale, rotation, t = 1.0, _rotation_z(np.radians(15.0)), np.array([2.0, -1.0, 0.5])
         earth_r = 6378137.0
         anchors = {}
@@ -609,9 +635,9 @@ class TestControlPointsFromGeoAnchors:
             east, north, up = scale * (rotation @ np.asarray(pose.t_xyz, float)) + t
             anchors[pose.image] = GeoAnchor(
                 lat=_ORIGIN.lat + np.degrees(north / earth_r),
-                lon=_ORIGIN.lon + np.degrees(
-                    east / (earth_r * np.cos(np.radians(_ORIGIN.lat)))),
-                alt=_ORIGIN.alt + up)
+                lon=_ORIGIN.lon + np.degrees(east / (earth_r * np.cos(np.radians(_ORIGIN.lat)))),
+                alt=_ORIGIN.alt + up,
+            )
         cps = control_points_from_geo_anchors(reg, anchors)
         assert len(cps) == len(reg.poses)
         aligned = align_registration(reg, cps, max_rms_m=2.0)
@@ -620,8 +646,12 @@ class TestControlPointsFromGeoAnchors:
 
     @staticmethod
     def _non_collinear():
-        return {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
-                "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
+        return {
+            "a.jpg": (0.0, 0.0, 0.0),
+            "b.jpg": (10.0, 0.0, 0.0),
+            "c.jpg": (0.0, 10.0, 1.0),
+            "d.jpg": (3.0, 4.0, 8.0),
+        }
 
 
 class TestFromGpsIngestManifest:
@@ -633,44 +663,70 @@ class TestFromGpsIngestManifest:
         import hashlib
 
         from pipeline.ingest_manifest import FrameMapping, SourceRecord
+
         digest = hashlib.sha256(payload).hexdigest()
         return SourceRecord(
-            source_path=name, source_sha256=digest, kind="photo", bytes=len(payload),
-            gps=gps, exif_source="photo-exif",
-            outputs=(FrameMapping(
-                output_path=name, output_sha256=digest, output_bytes=len(payload),
-                source_frame_index=None, preserves_source_bytes=True),))
+            source_path=name,
+            source_sha256=digest,
+            kind="photo",
+            bytes=len(payload),
+            gps=gps,
+            exif_source="photo-exif",
+            outputs=(
+                FrameMapping(
+                    output_path=name,
+                    output_sha256=digest,
+                    output_bytes=len(payload),
+                    source_frame_index=None,
+                    preserves_source_bytes=True,
+                ),
+            ),
+        )
 
     def _write_manifest(self, path, images_gps):
         from datetime import UTC, datetime
 
         from pipeline.ingest_manifest import IngestParams, build_manifest
+
         params = IngestParams(fps=2, max_frames=300, blur_threshold=0, max_long_edge=2560)
-        sources = [self._photo(name, gps, f"payload-{i}".encode())
-                   for i, (name, gps) in enumerate(images_gps.items())]
-        path.write_text(build_manifest(
-            created_utc=datetime.now(UTC), params=params, sources=sources
-        ).model_dump_json(), encoding="utf-8")
+        sources = [
+            self._photo(name, gps, f"payload-{i}".encode())
+            for i, (name, gps) in enumerate(images_gps.items())
+        ]
+        path.write_text(
+            build_manifest(
+                created_utc=datetime.now(UTC), params=params, sources=sources
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
 
     def _synth_gps(self, reg, scale, rotation, t):
         from pipeline.ingest_manifest import GpsObservation
+
         earth_r = 6378137.0
         out = {}
         for pose in reg.poses:
             east, north, up = scale * (rotation @ np.asarray(pose.t_xyz, float)) + t
             out[pose.image] = GpsObservation(
                 lat=_ORIGIN.lat + np.degrees(north / earth_r),
-                lon=_ORIGIN.lon + np.degrees(
-                    east / (earth_r * np.cos(np.radians(_ORIGIN.lat)))),
-                altitude_m=_ORIGIN.alt + up)
+                lon=_ORIGIN.lon + np.degrees(east / (earth_r * np.cos(np.radians(_ORIGIN.lat)))),
+                altitude_m=_ORIGIN.alt + up,
+            )
         return out
 
     def test_loads_control_points_and_aligns(self, tmp_path):
         reg = _registration_with_camera_centres(
-            {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
-             "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}, geo_origin=_ORIGIN)
+            {
+                "a.jpg": (0.0, 0.0, 0.0),
+                "b.jpg": (10.0, 0.0, 0.0),
+                "c.jpg": (0.0, 10.0, 1.0),
+                "d.jpg": (3.0, 4.0, 8.0),
+            },
+            geo_origin=_ORIGIN,
+        )
         images_gps = self._synth_gps(
-            reg, 1.0, _rotation_z(np.radians(15.0)), np.array([2.0, -1.0, 0.5]))
+            reg, 1.0, _rotation_z(np.radians(15.0)), np.array([2.0, -1.0, 0.5])
+        )
         mpath = tmp_path / "ingest.json"
         self._write_manifest(mpath, images_gps)
 
@@ -682,11 +738,13 @@ class TestFromGpsIngestManifest:
 
     def test_no_registered_gps_fails_closed(self, tmp_path):
         from pipeline.ingest_manifest import GpsObservation
+
         reg = _registration_with_camera_centres({"a.jpg": (0.0, 0.0, 0.0)})
         # manifest 里的图名与注册的不同 → 无匹配 → fail-closed
         mpath = tmp_path / "ingest.json"
         self._write_manifest(
-            mpath, {"other.jpg": GpsObservation(lat=26.0, lon=119.0, altitude_m=50.0)})
+            mpath, {"other.jpg": GpsObservation(lat=26.0, lon=119.0, altitude_m=50.0)}
+        )
         with pytest.raises(AlignmentError, match="GPS"):
             load_control_points_from_ingest_gps(mpath, reg)
 
@@ -696,9 +754,16 @@ class TestFromGpsIngestManifest:
         而非只丢一句 exceeds max_rms 让用户困惑于"为什么 GPS 对不上"。"""
         from pipeline.alignment import main as align_main
         from pipeline.ingest_manifest import GpsObservation
+
         reg = _registration_with_camera_centres(
-            {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
-             "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}, geo_origin=_ORIGIN)
+            {
+                "a.jpg": (0.0, 0.0, 0.0),
+                "b.jpg": (10.0, 0.0, 0.0),
+                "c.jpg": (0.0, 10.0, 1.0),
+                "d.jpg": (3.0, 4.0, 8.0),
+            },
+            geo_origin=_ORIGIN,
+        )
         clean = self._synth_gps(reg, 1.0, _rotation_z(0.0), np.array([0.0, 0.0, 0.0]))
         # ~8m 随机噪声 (消费级 GPS 量级), 相似变换解释不了 → RMS 超门
         rng = np.random.default_rng(4)
@@ -707,36 +772,133 @@ class TestFromGpsIngestManifest:
             noisy[name] = GpsObservation(
                 lat=obs.lat + np.degrees(rng.normal(0, 8.0) / 6378137.0),
                 lon=obs.lon + np.degrees(rng.normal(0, 8.0) / 6378137.0),
-                altitude_m=obs.altitude_m + rng.normal(0, 8.0))
+                altitude_m=obs.altitude_m + rng.normal(0, 8.0),
+            )
         (tmp_path / "reg.json").write_text(reg.model_dump_json(), encoding="utf-8")
         self._write_manifest(tmp_path / "ingest.json", noisy)
 
         with pytest.raises(AlignmentError, match="GPS"):
-            align_main(["--registration", str(tmp_path / "reg.json"),
-                        "--from-gps", str(tmp_path / "ingest.json"),
-                        "--geo-origin", "26.0,119.0,50.0", "--max-rms", "2.0",
-                        "--out", str(tmp_path / "aligned.json")])
+            align_main(
+                [
+                    "--registration",
+                    str(tmp_path / "reg.json"),
+                    "--from-gps",
+                    str(tmp_path / "ingest.json"),
+                    "--geo-origin",
+                    "26.0,119.0,50.0",
+                    "--max-rms",
+                    "2.0",
+                    "--out",
+                    str(tmp_path / "aligned.json"),
+                ]
+            )
 
     def test_cli_from_gps_end_to_end(self, tmp_path):
         from pipeline.alignment import main as align_main
+
         reg = _registration_with_camera_centres(
-            {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
-             "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}, geo_origin=_ORIGIN)
+            {
+                "a.jpg": (0.0, 0.0, 0.0),
+                "b.jpg": (10.0, 0.0, 0.0),
+                "c.jpg": (0.0, 10.0, 1.0),
+                "d.jpg": (3.0, 4.0, 8.0),
+            },
+            geo_origin=_ORIGIN,
+        )
         (tmp_path / "reg.json").write_text(reg.model_dump_json(), encoding="utf-8")
         self._write_manifest(
             tmp_path / "ingest.json",
-            self._synth_gps(reg, 1.0, _rotation_z(np.radians(15.0)),
-                            np.array([2.0, -1.0, 0.5])))
+            self._synth_gps(reg, 1.0, _rotation_z(np.radians(15.0)), np.array([2.0, -1.0, 0.5])),
+        )
         out = tmp_path / "aligned.json"
-        rc = align_main(["--registration", str(tmp_path / "reg.json"),
-                         "--from-gps", str(tmp_path / "ingest.json"),
-                         "--geo-origin", "26.0,119.0,50.0", "--out", str(out)])
+        rc = align_main(
+            [
+                "--registration",
+                str(tmp_path / "reg.json"),
+                "--from-gps",
+                str(tmp_path / "ingest.json"),
+                "--geo-origin",
+                "26.0,119.0,50.0",
+                "--out",
+                str(out),
+            ]
+        )
         assert rc == 0
         result = RegistrationResult.model_validate_json(out.read_text(encoding="utf-8"))
         assert result.alignment_status is AlignmentStatus.ALIGNED
         assert result.target_frame.frame_id == "world-enu"
         # --control-points 与 --from-gps 互斥
         with pytest.raises(SystemExit):
-            align_main(["--registration", str(tmp_path / "reg.json"),
-                        "--control-points", "x.json", "--from-gps", "y.json",
-                        "--out", str(out)])
+            align_main(
+                [
+                    "--registration",
+                    str(tmp_path / "reg.json"),
+                    "--control-points",
+                    "x.json",
+                    "--from-gps",
+                    "y.json",
+                    "--out",
+                    str(out),
+                ]
+            )
+
+
+class TestAlignmentTrustReaderIntegrity:
+    """Security boundary tests for alignment trust-critical text readers."""
+
+    def test_load_control_points_json_does_not_use_path_read_text(self, tmp_path, monkeypatch):
+        """RED->GREEN: load_control_points_json must not use Path.read_text."""
+        from pathlib import Path
+
+        from pipeline.alignment import load_control_points_json
+
+        payload = b'[{"label":"a","source_xyz":[0,0,0],"enu_xyz":[0,0,0]}]\n'
+        target = tmp_path / "cps.json"
+        target.write_bytes(payload)
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError("load_control_points_json must not use Path.read_text")
+
+        monkeypatch.setattr(Path, "read_text", reject_read_text)
+        cps = load_control_points_json(target)
+        assert len(cps) == 1
+        assert cps[0].label == "a"
+
+    def test_load_control_points_from_ingest_gps_does_not_use_path_read_text(
+        self, tmp_path, monkeypatch
+    ):
+        """RED->GREEN: load_control_points_from_ingest_gps must not use Path.read_text."""
+        from pathlib import Path
+
+        from pipeline.alignment import load_control_points_from_ingest_gps
+        from pipeline.ingest_manifest import GpsObservation
+
+        reg = _registration_with_camera_centres({"a.jpg": (0.0, 0.0, 0.0)}, geo_origin=_ORIGIN)
+        from datetime import UTC, datetime
+
+        from pipeline.ingest_manifest import IngestParams, build_manifest
+
+        params = IngestParams(fps=2, max_frames=300, blur_threshold=0, max_long_edge=2560)
+        source = TestFromGpsIngestManifest._photo(
+            "a.jpg",
+            GpsObservation(lat=26.0, lon=119.0, altitude_m=50.0),
+            b"payload-a",
+        )
+        mpath = tmp_path / "ingest.json"
+        mpath.write_bytes(
+            build_manifest(
+                created_utc=datetime.now(UTC),
+                params=params,
+                sources=[source],
+            )
+            .model_dump_json()
+            .encode("utf-8")
+        )
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError("load_control_points_from_ingest_gps must not use Path.read_text")
+
+        monkeypatch.setattr(Path, "read_text", reject_read_text)
+        cps = load_control_points_from_ingest_gps(mpath, reg)
+        assert len(cps) == 1
+        assert cps[0].label == "a.jpg"

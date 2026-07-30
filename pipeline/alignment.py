@@ -144,8 +144,16 @@ def _cross_surface_signature(
     )
 
 
-def _read_calibration_bytes(path: Path) -> bytes:
-    """Read the calibration record via a single secure descriptor.
+_MAX_ALIGNMENT_FILE_BYTES = 16 * 1024 * 1024
+
+
+def _read_stable_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_ALIGNMENT_FILE_BYTES,
+) -> bytes:
+    """Read a trust-critical file via a single secure descriptor.
 
     The check-then-reopen pattern (``is_file`` then ``read_text``) leaves a
     TOCTOU window where the file can be swapped between validation and
@@ -159,20 +167,21 @@ def _read_calibration_bytes(path: Path) -> bytes:
         redirected = first_linklike_path(Path(path.absolute().anchor), path)
         before = path.lstat()
     except OSError as exc:
-        raise AlignmentError(f"共享噪声标定记录 {path} 无法访问: {exc}") from exc
+        raise AlignmentError(f"{label}无法访问") from exc
     except ValueError as exc:
-        raise AlignmentError(f"共享噪声标定记录 {path} 无法访问: {exc}") from exc
+        raise AlignmentError(f"{label}无法访问") from exc
     if (
         redirected is not None
         or _is_linklike(path, observed=before)
         or not stat.S_ISREG(before.st_mode)
+        or before.st_size > max_bytes
     ):
-        raise AlignmentError(f"共享噪声标定记录 {path} 不是常规非链接文件")
+        raise AlignmentError(f"{label}不是常规非链接文件")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise AlignmentError(f"共享噪声标定记录 {path} 无法打开: {exc}") from exc
+        raise AlignmentError(f"{label}无法打开") from exc
     try:
         stream = os.fdopen(descriptor, "rb", buffering=0)
     except OSError as exc:
@@ -180,24 +189,30 @@ def _read_calibration_bytes(path: Path) -> bytes:
             os.close(descriptor)
         except OSError:
             pass
-        raise AlignmentError(f"共享噪声标定记录 {path} 无法打开: {exc}") from exc
+        raise AlignmentError(f"{label}无法打开") from exc
+    payload = bytearray()
     try:
         with stream:
             descriptor_before = os.fstat(stream.fileno())
             if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
-                raise AlignmentError(f"共享噪声标定记录 {path} 在打开期间被替换")
-            raw = stream.read()
+                raise AlignmentError(f"{label}在打开期间被替换")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise AlignmentError(f"{label}超出大小限制")
             descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except AlignmentError:
         raise
     except OSError as exc:
-        raise AlignmentError(f"共享噪声标定记录 {path} 无法读取: {exc}") from exc
+        raise AlignmentError(f"{label}无法读取") from exc
     if _cross_surface_signature(before) != _cross_surface_signature(
         after
     ) or _cross_surface_signature(descriptor_before) != _cross_surface_signature(descriptor_after):
-        raise AlignmentError(f"共享噪声标定记录 {path} 在读取期间被替换")
-    return raw
+        raise AlignmentError(f"{label}在读取期间被替换")
+    if len(payload) != before.st_size:
+        raise AlignmentError(f"{label}在读取期间被替换")
+    return bytes(payload)
 
 
 class SharedNoiseCalibration(BaseModel):
@@ -298,7 +313,6 @@ class SharedNoiseCalibration(BaseModel):
 def _verify_calibration_binds_to_reference(
     record: SharedNoiseCalibration,
     aligned_ref: RegistrationResult,
-    resolved: Path,
 ) -> None:
     """记录声称的米制基准必须【就是本次的参考批】; 对不上即 fail-closed。
 
@@ -314,7 +328,7 @@ def _verify_calibration_binds_to_reference(
     expected_basis = _METRIC_BASIS_PREFIX + aligned_ref.pose_to_world.transform_id
     if record.metric_basis != expected_basis:
         raise AlignmentError(
-            f"标定记录 {resolved} 的 metric_basis={record.metric_basis!r} 指的不是本次"
+            f"标定记录的 metric_basis={record.metric_basis!r} 指的不是本次"
             f"参考批那次对齐 (期望 {expected_basis!r})。记录里的 *_m 只在它指名的那次"
             "对齐所定义的米制世界里才是米 —— 换了参考批, 那些数字就不描述本次的任何"
             "东西。常见成因: 参考批重新对齐过 (sim3 变了 -> transform_id 变了) 而记录"
@@ -323,7 +337,7 @@ def _verify_calibration_binds_to_reference(
         )
     if record.reference_world_frame_id != aligned_ref.world_frame.frame_id:
         raise AlignmentError(
-            f"标定记录 {resolved} 的 reference_world_frame_id="
+            f"标定记录的 reference_world_frame_id="
             f"{record.reference_world_frame_id!r} 与参考批的世界 "
             f"{aligned_ref.world_frame.frame_id!r} 对不上: 记录说它量在另一个世界里; "
             "fail-closed"
@@ -367,12 +381,14 @@ def load_shared_noise_calibration(
             f"\n提示: 若你要的是【整村漫游】而不是测量, 走 merge_for_preview —— 漫游只"
             f"需要各批次落在同一个坐标系里, 不需要米制, 故它不需要本标定。"
         )
-    raw = _read_calibration_bytes(resolved)
+    raw = _read_stable_bytes(resolved, label="共享噪声标定记录")
     try:
         record = SharedNoiseCalibration.model_validate_json(raw)
     except Exception as exc:  # noqa: BLE001 - 任何不自洽都必须 fail-closed
-        raise AlignmentError(f"共享噪声标定记录 {resolved} 无法解析或不自洽: {exc}") from exc
-    _verify_calibration_binds_to_reference(record, aligned_ref, resolved)
+        # validator 文本由本仓库固定字符串构成 (字段名 + 固定提示), 不含外部 URL/路径/
+        # 凭据, 故保留以利运维定位字段; 仅剔除本地绝对路径 resolved。
+        raise AlignmentError(f"共享噪声标定记录无法解析或不自洽: {exc}") from exc
+    _verify_calibration_binds_to_reference(record, aligned_ref)
     return record
 
 
@@ -1376,7 +1392,8 @@ def merge_for_preview(
 
 def load_control_points_json(path: str | Path) -> list[ControlPoint]:
     """Load a JSON array of control-point specs into validated ``ControlPoint``s."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    raw_bytes = _read_stable_bytes(Path(path), label="控制点 JSON")
+    raw = json.loads(raw_bytes.decode("utf-8"))
     if not isinstance(raw, list):
         raise AlignmentError("control-points JSON must be a list of objects")
     return [ControlPoint.model_validate(item) for item in raw]
@@ -1395,7 +1412,8 @@ def load_control_points_from_ingest_gps(
     """
     from pipeline.ingest_manifest import IngestManifest
 
-    manifest = IngestManifest.model_validate_json(Path(manifest_path).read_text(encoding="utf-8"))
+    manifest_bytes = _read_stable_bytes(Path(manifest_path), label="ingest manifest")
+    manifest = IngestManifest.model_validate_json(manifest_bytes)
     anchors: dict[str, GeoAnchor] = {}
     for src in manifest.sources:
         if src.gps is None:
@@ -1454,7 +1472,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     reg = RegistrationResult.model_validate_json(
-        Path(args.registration).read_text(encoding="utf-8")
+        _read_stable_bytes(Path(args.registration), label="registration JSON")
     )
     geo_origin = None
     if args.geo_origin:
