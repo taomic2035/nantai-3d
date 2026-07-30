@@ -15,6 +15,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.real_dataset import (
     DatasetEvidenceError,
     DatasetLock,
@@ -365,19 +366,83 @@ def _safe_target(dataset_root: Path, relative_path: str) -> Path:
     return target
 
 
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
 def _hash_file(path: Path, expected_bytes: int) -> tuple[int, str, str]:
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+        before = path.lstat()
+    except OSError as exc:
+        raise DatasetDownloadError("dataset file cannot be inspected") from exc
+    except ValueError as exc:
+        raise DatasetDownloadError("dataset file cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise DatasetDownloadError("dataset file is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise DatasetDownloadError("dataset file cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise DatasetDownloadError("dataset file cannot be opened") from exc
     sha256_digest = hashlib.sha256()
     git_digest = hashlib.sha1(usedforsecurity=False)
     git_digest.update(f"blob {expected_bytes}\0".encode("ascii"))
     measured = 0
     try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise DatasetDownloadError("dataset file changed before hash")
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
                 measured += len(chunk)
                 sha256_digest.update(chunk)
                 git_digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except DatasetDownloadError:
+        raise
     except OSError as exc:
-        raise DatasetDownloadError(f"cannot rehash dataset file: {exc}") from exc
+        raise DatasetDownloadError("dataset file cannot be hashed") from exc
+    if (
+        _cross_surface_signature(before) != _cross_surface_signature(after)
+        or _cross_surface_signature(descriptor_before)
+        != _cross_surface_signature(descriptor_after)
+    ):
+        raise DatasetDownloadError("dataset file changed while being hashed")
     return measured, sha256_digest.hexdigest(), git_digest.hexdigest()
 
 
@@ -506,16 +571,65 @@ def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _load_canonical_model(path: Path, model_type: type[BaseModel]) -> BaseModel:
+    descriptor = -1
     try:
-        raw = path.read_bytes()
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+        before = path.lstat()
+    except OSError as exc:
+        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+    except ValueError as exc:
+        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise DatasetDownloadError(f"receipt file {path.name} is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise DatasetDownloadError(f"receipt file {path.name} changed before read")
+            raw = stream.read()
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except DatasetDownloadError:
+        raise
+    except OSError as exc:
+        raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
+    if (
+        _cross_surface_signature(before) != _cross_surface_signature(after)
+        or _cross_surface_signature(descriptor_before)
+        != _cross_surface_signature(descriptor_after)
+    ):
+        raise DatasetDownloadError(f"receipt file {path.name} changed while being read")
+    try:
         json.loads(
             raw.decode("utf-8"),
             object_pairs_hook=_reject_duplicates,
         )
         model = model_type.model_validate_json(raw)
-    except DatasetDownloadError:
-        raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
         raise DatasetDownloadError(f"invalid receipt file {path.name}: {exc}") from exc
     if raw != canonical_model_bytes(model):
         raise DatasetDownloadError(f"receipt file {path.name} is not canonical")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -347,3 +348,52 @@ def test_verify_only_cli_uses_existing_receipts_without_network(
     )
     assert result.returncode == 0, result.stderr
     assert "receipt_sha256=" in result.stdout
+
+
+class TestDatasetFetchReaderIntegrity:
+    """Security boundary tests for real_dataset_fetch trust readers."""
+
+    def test_hash_file_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.real_dataset_fetch as rdf
+        from pipeline.real_dataset_fetch import DatasetDownloadError, _hash_file
+
+        target = tmp_path / "a.bin"
+        target.write_bytes(b"data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = rdf.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(rdf, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(
+            DatasetDownloadError,
+            match="regular non-link file|redirected|unsafe",
+        ):
+            _hash_file(target, expected_bytes=5)
+
+    def test_hash_file_rejects_path_swap_before_open(
+        self, tmp_path, monkeypatch
+    ):
+        from pipeline.real_dataset_fetch import DatasetDownloadError, _hash_file
+
+        original_path = tmp_path / "a.bin"
+        original_path.write_bytes(b"original\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                original_path.write_bytes(b"swapped content\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(
+            DatasetDownloadError,
+            match="changed before hash|changed while",
+        ):
+            _hash_file(original_path, expected_bytes=9)
