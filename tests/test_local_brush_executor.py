@@ -429,3 +429,82 @@ def test_local_brush_preview_receipt_cannot_become_production_gate(
             created_at_utc=_T0 + timedelta(minutes=1),
             quality_role="production",
         )
+
+
+class TestBrushReaderIntegrity:
+    """Security boundary tests for local_brush_executor trust readers."""
+
+    def test_hash_file_stable_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.local_brush_executor as lbe
+        from pipeline.local_brush_executor import (
+            LocalBrushExecutionError,
+            _hash_file_stable,
+        )
+
+        target = tmp_path / "a.ply"
+        target.write_bytes(b"ply data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = lbe.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(lbe, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(
+            LocalBrushExecutionError,
+            match="missing or link-like",
+        ):
+            _hash_file_stable(target, label="test", allow_empty=True)
+
+    def test_hash_file_stable_rejects_path_swap_before_open(
+        self, tmp_path, monkeypatch
+    ):
+        from pipeline.local_brush_executor import (
+            LocalBrushExecutionError,
+            _hash_file_stable,
+        )
+
+        original_path = tmp_path / "a.ply"
+        original_path.write_bytes(b"original\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                original_path.write_bytes(b"swapped content\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(
+            LocalBrushExecutionError,
+            match="changed before hash|changed while",
+        ):
+            _hash_file_stable(original_path, label="test", allow_empty=True)
+
+    def test_load_receipt_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.local_brush_executor as lbe
+        from pipeline.local_brush_executor import (
+            LocalBrushExecutionError,
+            load_local_brush_execution_receipt,
+        )
+
+        target = tmp_path / "receipt.json"
+        target.write_bytes(b"{}")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = lbe.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(lbe, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(
+            LocalBrushExecutionError,
+            match="missing or link-like",
+        ):
+            load_local_brush_execution_receipt(target)

@@ -29,6 +29,7 @@ from pydantic import (
     model_validator,
 )
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.real_dataset import canonical_model_bytes
 from pipeline.real_scene_training import (
     RealSceneTrainingError,
@@ -140,7 +141,7 @@ def _stat_signature(result: os.stat_result) -> tuple[int, int, int, int, int]:
     return (
         result.st_dev,
         result.st_ino,
-        result.st_mode,
+        stat.S_IFMT(result.st_mode),
         result.st_size,
         result.st_mtime_ns,
     )
@@ -152,22 +153,60 @@ def _hash_file_stable(
     label: str,
     allow_empty: bool,
 ) -> tuple[int, str]:
+    descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
         before = path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise LocalBrushExecutionError(f"{label} is missing or link-like")
-        digest = hashlib.sha256()
-        measured = 0
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+    except OSError as exc:
+        raise LocalBrushExecutionError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise LocalBrushExecutionError(f"{label} cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise LocalBrushExecutionError(f"{label} is missing or link-like")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise LocalBrushExecutionError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise LocalBrushExecutionError(f"{label} cannot be read") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _stat_signature(descriptor_before) != _stat_signature(before):
+                raise LocalBrushExecutionError(f"{label} changed before hash")
+            digest = hashlib.sha256()
+            measured = 0
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
                 digest.update(chunk)
                 measured += len(chunk)
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
     except LocalBrushExecutionError:
         raise
     except OSError as exc:
         raise LocalBrushExecutionError(f"{label} cannot be read") from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before) != _stat_signature(descriptor_after)
+    ):
         raise LocalBrushExecutionError(f"{label} changed while being hashed")
     if not allow_empty and measured == 0:
         raise LocalBrushExecutionError(f"{label} is empty")
@@ -244,17 +283,63 @@ def load_local_brush_execution_receipt(
     path: Path,
 ) -> LocalBrushExecutionReceipt:
     receipt_path = Path(path).expanduser().absolute()
+    descriptor = -1
     try:
+        redirected = first_linklike_path(
+            Path(receipt_path.absolute().anchor), receipt_path
+        )
         before = receipt_path.lstat()
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise LocalBrushExecutionError(
-                "local Brush receipt is missing or link-like"
-            )
-        if before.st_size <= 0 or before.st_size > _MAX_RECEIPT_BYTES:
-            raise LocalBrushExecutionError(
-                "local Brush receipt size is outside the allowed range"
-            )
-        raw = receipt_path.read_bytes()
+    except OSError as exc:
+        raise LocalBrushExecutionError(
+            "local Brush receipt cannot be inspected"
+        ) from exc
+    except ValueError as exc:
+        raise LocalBrushExecutionError(
+            "local Brush receipt cannot be inspected"
+        ) from exc
+    if (
+        redirected is not None
+        or _is_linklike(receipt_path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise LocalBrushExecutionError(
+            "local Brush receipt is missing or link-like"
+        )
+    if before.st_size <= 0 or before.st_size > _MAX_RECEIPT_BYTES:
+        raise LocalBrushExecutionError(
+            "local Brush receipt size is outside the allowed range"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(receipt_path, flags)
+    except OSError as exc:
+        raise LocalBrushExecutionError(
+            "local Brush receipt cannot be read"
+        ) from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise LocalBrushExecutionError(
+            "local Brush receipt cannot be read"
+        ) from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _stat_signature(descriptor_before)
+                != _stat_signature(before)
+            ):
+                raise LocalBrushExecutionError(
+                    "local Brush receipt changed before read"
+                )
+            raw = stream.read()
+            descriptor_after = os.fstat(stream.fileno())
         after = receipt_path.lstat()
     except LocalBrushExecutionError:
         raise
@@ -262,7 +347,11 @@ def load_local_brush_execution_receipt(
         raise LocalBrushExecutionError(
             "local Brush receipt cannot be read"
         ) from exc
-    if _stat_signature(before) != _stat_signature(after):
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
+    ):
         raise LocalBrushExecutionError(
             "local Brush receipt changed while being read"
         )
@@ -524,23 +613,60 @@ def _read_file_stable(
     label: str,
     allow_empty: bool,
 ) -> bytes:
-    size, digest = _hash_file_stable(
-        path,
-        label=label,
-        allow_empty=allow_empty,
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+        before = path.lstat()
+    except OSError as exc:
+        raise LocalBrushExecutionError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise LocalBrushExecutionError(f"{label} cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise LocalBrushExecutionError(f"{label} is missing or link-like")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
     )
     try:
-        before = path.lstat()
-        payload = path.read_bytes()
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise LocalBrushExecutionError(f"{label} cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise LocalBrushExecutionError(f"{label} cannot be read") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _stat_signature(descriptor_before)
+                != _stat_signature(before)
+            ):
+                raise LocalBrushExecutionError(f"{label} changed before read")
+            payload = stream.read()
+            descriptor_after = os.fstat(stream.fileno())
         after = path.lstat()
+    except LocalBrushExecutionError:
+        raise
     except OSError as exc:
         raise LocalBrushExecutionError(f"{label} cannot be read") from exc
     if (
         _stat_signature(before) != _stat_signature(after)
-        or len(payload) != size
-        or hashlib.sha256(payload).hexdigest() != digest
+        or _stat_signature(descriptor_before)
+        != _stat_signature(descriptor_after)
     ):
         raise LocalBrushExecutionError(f"{label} changed while being read")
+    if not allow_empty and len(payload) == 0:
+        raise LocalBrushExecutionError(f"{label} is empty")
     return payload
 
 
