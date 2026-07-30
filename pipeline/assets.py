@@ -10,6 +10,7 @@
 - 局部坐标系: Z 向上, 米制, XY 原点在素材水平中心, 地面 z=0
 - 加载时默认 normalize 兜底 (重心归零 + 落地), 容忍不完全规范的交付物
 """
+
 import errno
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 from collections.abc import Iterator
@@ -29,6 +31,7 @@ import numpy as np
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.gaussian_scene import GaussianScene
 from pipeline.recon_schema import Sim3
 
@@ -49,8 +52,7 @@ def validate_asset_id(asset_id: str) -> str:
     """Return a canonical safe asset id or fail before any path construction."""
     if not isinstance(asset_id, str) or _ASSET_ID_RE.fullmatch(asset_id) is None:
         raise ValueError(
-            "asset_id 必须匹配 ^[a-z0-9][a-z0-9_-]{0,63}$ "
-            f"(小写、不可含路径): {asset_id!r}"
+            f"asset_id 必须匹配 ^[a-z0-9][a-z0-9_-]{{0,63}}$ (小写、不可含路径): {asset_id!r}"
         )
     return asset_id
 
@@ -114,12 +116,91 @@ class RegistryDoc(BaseModel):
     assets: dict[str, AssetEntry] = Field(default_factory=dict)
 
 
-def sha256_file(path: str | Path) -> str:
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
+class _AssetIntegrityError(Exception):
+    """Raised when a file cannot be securely hashed or read."""
+
+
+def _stable_read_and_hash(path: str | Path) -> tuple[bytes, str]:
+    """Read file bytes and compute SHA-256 via a single secure descriptor.
+
+    Binds one descriptor from ``os.open``+``O_NOFOLLOW`` for the entire
+    read and rechecks file identity (cross-surface lstat/fstat) before and
+    after reading, with ancestor reparse rejection via
+    ``first_linklike_path``. Returns ``(bytes, sha256_hex)``.
+    """
+    leaf = Path(path)
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(Path(leaf.absolute().anchor), leaf)
+        before = leaf.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise _AssetIntegrityError("file cannot be inspected") from exc
+    except ValueError as exc:
+        raise _AssetIntegrityError("file cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(leaf, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise _AssetIntegrityError("file is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(leaf, flags)
+    except OSError as exc:
+        raise _AssetIntegrityError("file cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise _AssetIntegrityError("file cannot be opened") from exc
     digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    chunks: list[bytes] = []
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise _AssetIntegrityError("file changed before hash")
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                chunks.append(chunk)
+            descriptor_after = os.fstat(stream.fileno())
+        after = leaf.lstat()
+    except _AssetIntegrityError:
+        raise
+    except OSError as exc:
+        raise _AssetIntegrityError("file cannot be hashed") from exc
+    if _cross_surface_signature(before) != _cross_surface_signature(
+        after
+    ) or _cross_surface_signature(descriptor_before) != _cross_surface_signature(descriptor_after):
+        raise _AssetIntegrityError("file changed while being hashed")
+    return b"".join(chunks), digest.hexdigest()
+
+
+def sha256_file(path: str | Path) -> str:
+    _, digest = _stable_read_and_hash(path)
+    return digest
 
 
 def _now_iso() -> str:
@@ -176,21 +257,27 @@ class AssetRegistry:
         self._loaded_revision = self._last_read_revision
 
     def _read_doc(self) -> RegistryDoc:
-        if self.registry_path.exists():
-            payload = self.registry_path.read_bytes()
-            doc = RegistryDoc(**json.loads(payload.decode("utf-8")))
-            revision = hashlib.sha256(payload).hexdigest()
-        else:
+        try:
+            payload, revision = _stable_read_and_hash(self.registry_path)
+        except FileNotFoundError:
             doc = RegistryDoc()
             revision = None
+        except (_AssetIntegrityError, OSError) as exc:
+            raise ValueError(f"素材注册表无法安全读取: {exc}") from exc
+        else:
+            try:
+                doc = RegistryDoc(**json.loads(payload.decode("utf-8")))
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"素材注册表无法解析: {exc}") from exc
         self._validate_doc_paths(doc)
         self._last_read_revision = revision
         return doc
 
     def _registry_revision(self) -> str | None:
-        if not self.registry_path.exists():
+        try:
+            return sha256_file(self.registry_path)
+        except FileNotFoundError:
             return None
-        return sha256_file(self.registry_path)
 
     def _validate_doc_paths(self, doc: RegistryDoc) -> None:
         for asset_id, entry in doc.assets.items():
@@ -245,9 +332,7 @@ class AssetRegistry:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(tmp_name, self.registry_path)
-            self._loaded_revision = hashlib.sha256(
-                payload.encode("utf-8")
-            ).hexdigest()
+            self._loaded_revision = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         finally:
             Path(tmp_name).unlink(missing_ok=True)
 
@@ -273,8 +358,7 @@ class AssetRegistry:
             staged_sha = sha256_file(tmp_path)
             if not hmac.compare_digest(staged_sha, expected_sha256):
                 raise ValueError(
-                    "素材源文件在复制期间发生变化: "
-                    f"expected {expected_sha256}, staged {staged_sha}"
+                    f"素材源文件在复制期间发生变化: expected {expected_sha256}, staged {staged_sha}"
                 )
             # Open read-write (not "rb"): Windows os.fsync/FlushFileBuffers
             # rejects a read-only handle with EBADF, while POSIX tolerates it.
@@ -292,9 +376,7 @@ class AssetRegistry:
         *,
         expected_sha256: str,
     ) -> None:
-        staged = self._stage_copy(
-            source, destination, expected_sha256=expected_sha256
-        )
+        staged = self._stage_copy(source, destination, expected_sha256=expected_sha256)
         try:
             os.replace(staged, destination)
         finally:
@@ -311,9 +393,7 @@ class AssetRegistry:
         """Commit a new version, rolling back its payload if registry write fails."""
         if destination.exists():
             raise FileExistsError(f"拒绝覆盖未登记的素材 payload: {destination}")
-        staged = self._stage_copy(
-            source, destination, expected_sha256=expected_sha256
-        )
+        staged = self._stage_copy(source, destination, expected_sha256=expected_sha256)
         payload_committed = False
         try:
             os.replace(staged, destination)
@@ -342,12 +422,9 @@ class AssetRegistry:
         payload_sha = self._payload_sha256(entry)
         if not payload_sha:
             return ""
-        if entry.sha256 and payload_sha and not hmac.compare_digest(
-            entry.sha256, payload_sha
-        ):
+        if entry.sha256 and payload_sha and not hmac.compare_digest(entry.sha256, payload_sha):
             raise ValueError(
-                f"active payload SHA-256 不匹配: manifest={entry.sha256}, "
-                f"actual={payload_sha}"
+                f"active payload SHA-256 不匹配: manifest={entry.sha256}, actual={payload_sha}"
             )
         return entry.sha256 or payload_sha
 
@@ -356,9 +433,14 @@ class AssetRegistry:
         return sha256_file(payload) if payload.is_file() else ""
 
     # ============ 注册 / 替换 ============
-    def register(self, asset_id: str, ply_path: str | Path,
-                 kind: str = "other", origin: str = "synthetic",
-                 footprint_m: list[float] | None = None) -> AssetEntry:
+    def register(
+        self,
+        asset_id: str,
+        ply_path: str | Path,
+        kind: str = "other",
+        origin: str = "synthetic",
+        footprint_m: list[float] | None = None,
+    ) -> AssetEntry:
         """注册新素材: 把 ply 拷入 assets 目录, 版本从 1 开始。
         已存在同 id 时等价于 replace()。
         """
@@ -379,9 +461,7 @@ class AssetRegistry:
                             destination,
                             expected_sha256=source_sha,
                         )
-                        logger.info(
-                            f"素材 payload 恢复/修复: {asset_id} v{entry.version}"
-                        )
+                        logger.info(f"素材 payload 恢复/修复: {asset_id} v{entry.version}")
                     migrated = not entry.sha256 or not entry.registered_at
                     if not entry.sha256:
                         entry.sha256 = source_sha
@@ -393,10 +473,7 @@ class AssetRegistry:
                     else:
                         self._loaded_revision = disk_revision
                     self.doc = disk_doc
-                    logger.info(
-                        f"素材已是最新: {asset_id} v{entry.version} "
-                        f"({source_sha[:12]})"
-                    )
+                    logger.info(f"素材已是最新: {asset_id} v{entry.version} ({source_sha[:12]})")
                     return entry.model_copy(deep=True)
                 return self._replace_locked(
                     disk_doc,
@@ -431,9 +508,13 @@ class AssetRegistry:
             logger.info(f"素材注册: {asset_id} v1 ({origin}) ← {source}")
             return entry.model_copy(deep=True)
 
-    def replace(self, asset_id: str, new_ply_path: str | Path,
-                origin: str = "real",
-                expected_version: int | None = None) -> AssetEntry:
+    def replace(
+        self,
+        asset_id: str,
+        new_ply_path: str | Path,
+        origin: str = "real",
+        expected_version: int | None = None,
+    ) -> AssetEntry:
         """替换素材: 版本 +1, 旧 ply 存档进 history。
         引用该 asset_id 的所有布局无需改动, 重渲染即用新素材。
         """
@@ -465,8 +546,7 @@ class AssetRegistry:
         current = disk_doc.assets[asset_id]
         if expected_version is not None and current.version != expected_version:
             raise ValueError(
-                f"asset {asset_id}: expected version {expected_version}, "
-                f"actual {current.version}"
+                f"asset {asset_id}: expected version {expected_version}, actual {current.version}"
             )
         active_sha = self._active_sha256(current)
         if not active_sha:
@@ -554,8 +634,9 @@ class AssetRegistry:
             scene.xyz[:, 2] -= scene.xyz[:, 2].min()
         return scene
 
-    def instantiate(self, asset_id: str, pos_xy, rot_z_deg: float = 0.0,
-                    scale: float = 1.0, z: float = 0.0) -> GaussianScene | None:
+    def instantiate(
+        self, asset_id: str, pos_xy, rot_z_deg: float = 0.0, scale: float = 1.0, z: float = 0.0
+    ) -> GaussianScene | None:
         """素材 → 世界坐标实例 (旋转/缩放/平移), 供场景拼接"""
         position = np.asarray(pos_xy, dtype=np.float64)
         scalars = np.asarray([rot_z_deg, scale, z], dtype=np.float64)
@@ -576,8 +657,7 @@ class AssetRegistry:
 
     def list_assets(self) -> dict[str, AssetEntry]:
         return {
-            asset_id: entry.model_copy(deep=True)
-            for asset_id, entry in self.doc.assets.items()
+            asset_id: entry.model_copy(deep=True) for asset_id, entry in self.doc.assets.items()
         }
 
     def verify(self) -> dict[str, str]:
@@ -597,9 +677,7 @@ class AssetRegistry:
                 continue
             actual_sha = sha256_file(payload)
             if not hmac.compare_digest(actual_sha, entry.sha256):
-                problems[asset_id] = (
-                    f"{entry.ply} sha256 不匹配 (素材被改动或生成器漂移)"
-                )
+                problems[asset_id] = f"{entry.ply} sha256 不匹配 (素材被改动或生成器漂移)"
         return problems
 
 
@@ -615,8 +693,7 @@ if __name__ == "__main__":
         s.save_ply(src, flavor="3dgs")
 
         reg = AssetRegistry(d / "assets")
-        reg.register("house_test", src, kind="building", origin="gpt-mock",
-                     footprint_m=[8, 6, 6])
+        reg.register("house_test", src, kind="building", origin="gpt-mock", footprint_m=[8, 6, 6])
         assert reg.resolve("house_test") is not None
         inst = reg.instantiate("house_test", pos_xy=(50, 60), rot_z_deg=90, scale=2.0)
         assert inst is not None and len(inst) == 100

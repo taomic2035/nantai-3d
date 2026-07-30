@@ -1,4 +1,5 @@
 """素材注册表 (可替换) + GPT 交付物验收闭环"""
+
 import hashlib
 import json
 import os
@@ -21,11 +22,9 @@ def asset_ply(tmp_path):
     """一个 8x6x5m 的合成建筑素材 (局部坐标, 地面 z=0)"""
     rng = np.random.default_rng(11)
     n = 2000
-    xyz = np.stack([rng.uniform(-4, 4, n), rng.uniform(-3, 3, n),
-                    rng.uniform(0, 5, n)], axis=1)
+    xyz = np.stack([rng.uniform(-4, 4, n), rng.uniform(-3, 3, n), rng.uniform(0, 5, n)], axis=1)
     rgb = np.clip(0.55 + rng.normal(0, 0.08, (n, 3)), 0, 1)
-    s = GaussianScene(xyz, rgb, rng.uniform(0.5, 1, n),
-                      rng.uniform(0.02, 0.3, (n, 3)))
+    s = GaussianScene(xyz, rgb, rng.uniform(0.5, 1, n), rng.uniform(0.02, 0.3, (n, 3)))
     p = tmp_path / "asset_src.ply"
     s.save_ply(p, flavor="3dgs")
     return p
@@ -34,8 +33,9 @@ def asset_ply(tmp_path):
 class TestAssetRegistry:
     def test_register_and_resolve(self, tmp_path, asset_ply):
         reg = AssetRegistry(tmp_path / "assets")
-        reg.register("house_wood_01", asset_ply, kind="building",
-                     origin="gpt-mock", footprint_m=[8, 6, 5])
+        reg.register(
+            "house_wood_01", asset_ply, kind="building", origin="gpt-mock", footprint_m=[8, 6, 5]
+        )
         assert reg.resolve("house_wood_01").name == "house_wood_01_v1.ply"
         assert reg.resolve("nonexistent") is None
 
@@ -78,14 +78,23 @@ class TestRendererUsesRegistry:
         from pipeline.render_chunk_to_ply import build_chunk_array
         from pipeline.schema import ChunkLayout
 
-        layout = ChunkLayout(**{
-            "chunk_id": {"x": 0, "y": 0}, "world_seed": 1,
-            "geo_origin": {"lat": 26.0, "lon": 119.0, "alt": 50},
-            "terrain": {"heightmap": "t.png", "elevation_range": [0, 10],
-                        "material_zones": []},
-            "buildings": [{"id": "b1", "asset_id": "house_wood_01",
-                           "pos": [100, 100], "rot_z": 0.0, "scale": 1.0}],
-        })
+        layout = ChunkLayout(
+            **{
+                "chunk_id": {"x": 0, "y": 0},
+                "world_seed": 1,
+                "geo_origin": {"lat": 26.0, "lon": 119.0, "alt": 50},
+                "terrain": {"heightmap": "t.png", "elevation_range": [0, 10], "material_zones": []},
+                "buildings": [
+                    {
+                        "id": "b1",
+                        "asset_id": "house_wood_01",
+                        "pos": [100, 100],
+                        "rot_z": 0.0,
+                        "scale": 1.0,
+                    }
+                ],
+            }
+        )
         # 无注册表: 合成盒子 (地面 4000 + 墙 600 + 顶 100)
         arr_synth = build_chunk_array(layout, registry=None)
         # 有注册表: 素材 2000 高斯替换盒子
@@ -95,7 +104,7 @@ class TestRendererUsesRegistry:
         assert len(arr_asset) == 4000 + 2000
         assert len(arr_synth) != len(arr_asset)
         # 素材实例应落在建筑位置附近 (世界坐标 100,100)
-        bx = arr_asset['x'][4000:]
+        bx = arr_asset["x"][4000:]
         assert 90 < bx.mean() < 110
 
 
@@ -106,25 +115,34 @@ def _write_deliverable(d, items, ground_z=0.0, color_std=0.08, n=2000):
     manifest = {"handoff_id": "HANDOFF-T", "items": []}
     for item in items:
         w, dep, h = item.get("footprint", [8, 6, 5])
-        xyz = np.stack([rng.uniform(-w / 2, w / 2, n),
-                        rng.uniform(-dep / 2, dep / 2, n),
-                        rng.uniform(ground_z, ground_z + h, n)], axis=1)
+        xyz = np.stack(
+            [
+                rng.uniform(-w / 2, w / 2, n),
+                rng.uniform(-dep / 2, dep / 2, n),
+                rng.uniform(ground_z, ground_z + h, n),
+            ],
+            axis=1,
+        )
         rgb = np.clip(0.5 + rng.normal(0, color_std, (n, 3)), 0, 1)
-        s = GaussianScene(xyz, rgb, rng.uniform(0.5, 1, n),
-                          rng.uniform(0.02, 0.3, (n, 3)))
+        s = GaussianScene(xyz, rgb, rng.uniform(0.5, 1, n), rng.uniform(0.02, 0.3, (n, 3)))
         s.save_ply(d / item["ply"], flavor="3dgs")
-        manifest["items"].append({
-            "asset_id": item["asset_id"], "kind": "building",
-            "ply": item["ply"], "footprint_m": item.get("footprint", [8, 6, 5]),
-        })
+        manifest["items"].append(
+            {
+                "asset_id": item["asset_id"],
+                "kind": "building",
+                "ply": item["ply"],
+                "footprint_m": item.get("footprint", [8, 6, 5]),
+            }
+        )
     (d / "manifest.json").write_text(json.dumps(manifest))
 
 
 class TestHandoffValidation:
     def test_good_deliverable_passes(self, tmp_path):
         d = tmp_path / "deliv"
-        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"},
-                               {"asset_id": "a2", "ply": "a2.ply"}])
+        _write_deliverable(
+            d, [{"asset_id": "a1", "ply": "a1.ply"}, {"asset_id": "a2", "ply": "a2.ply"}]
+        )
         r = validate(d, feedback_dir=tmp_path / "fb")
         assert r["all_pass"] and r["n_pass"] == 2
         fb = (tmp_path / "fb" / "FEEDBACK-HANDOFF-T.md").read_text(encoding="utf-8")
@@ -140,16 +158,14 @@ class TestHandoffValidation:
 
     def test_floating_asset_fails(self, tmp_path):
         d = tmp_path / "deliv"
-        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}],
-                           ground_z=5.0)  # 悬空 5 米
+        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}], ground_z=5.0)  # 悬空 5 米
         r = validate(d, feedback_dir=tmp_path / "fb")
         assert not r["all_pass"]
         assert any("z=" in p for p in r["results"]["a1"])
 
     def test_wrong_footprint_fails(self, tmp_path):
         d = tmp_path / "deliv"
-        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply",
-                                "footprint": [8, 6, 5]}])
+        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply", "footprint": [8, 6, 5]}])
         # 篡改 manifest 声明成 30m 宽
         m = json.loads((d / "manifest.json").read_text())
         m["items"][0]["footprint_m"] = [30, 6, 5]
@@ -159,8 +175,7 @@ class TestHandoffValidation:
 
     def test_degenerate_color_fails(self, tmp_path):
         d = tmp_path / "deliv"
-        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}],
-                           color_std=0.0)
+        _write_deliverable(d, [{"asset_id": "a1", "ply": "a1.ply"}], color_std=0.0)
         r = validate(d, feedback_dir=tmp_path / "fb")
         assert not r["all_pass"]
         assert any("颜色退化" in p for p in r["results"]["a1"])
@@ -184,8 +199,9 @@ class TestHandoffValidation:
         manifest["generator"] = {"name": "gpt-image2", "version": "3.1"}
         manifest["items"][0]["sha256"] = _sha256(d / "a1.ply")
         manifest_path.write_text(json.dumps(manifest))
-        r = validate(d, feedback_dir=tmp_path / "fb",
-                     do_register=True, assets_dir=tmp_path / "assets")
+        r = validate(
+            d, feedback_dir=tmp_path / "fb", do_register=True, assets_dir=tmp_path / "assets"
+        )
         assert r["registered"] == ["a1"]
         reg = AssetRegistry(tmp_path / "assets")
         # origin 须诚实反映来源: --register 只落 v2 正式交付 (schema_version<2 fatal),
@@ -193,15 +209,16 @@ class TestHandoffValidation:
         assert reg.doc.assets["a1"].origin == "real"
 
     def test_real_deliverable_replacing_mock_bumps_version_and_origin(
-        self, tmp_path, asset_ply,
+        self,
+        tmp_path,
+        asset_ply,
     ):
         """真实素材落地实景 (即将发生): GPT 的 v2 交付替换既有 gpt-mock 占位 →
         版本升 + origin 转 real (不谎称 mock)。版本升是 chunk_content_key 缓存失效 /
         重烘拾取新素材的依据。"""
         assets_dir = tmp_path / "assets"
         reg0 = AssetRegistry(assets_dir)
-        reg0.register("a1", asset_ply, kind="building",
-                      origin="gpt-mock", footprint_m=[8, 6, 5])
+        reg0.register("a1", asset_ply, kind="building", origin="gpt-mock", footprint_m=[8, 6, 5])
         assert reg0.doc.assets["a1"].version == 1
         assert reg0.doc.assets["a1"].origin == "gpt-mock"
 
@@ -214,8 +231,7 @@ class TestHandoffValidation:
         manifest["items"][0]["sha256"] = _sha256(d / "a1.ply")
         (d / "manifest.json").write_text(json.dumps(manifest))
 
-        r = validate(d, feedback_dir=tmp_path / "fb",
-                     do_register=True, assets_dir=assets_dir)
+        r = validate(d, feedback_dir=tmp_path / "fb", do_register=True, assets_dir=assets_dir)
         assert r["registered"] == ["a1"]
         e = AssetRegistry(assets_dir).doc.assets["a1"]
         assert e.origin == "real", "真实交付替换 mock 后 origin 须转 real"
@@ -235,8 +251,7 @@ class TestHandoffValidation:
             item["sha256"] = _sha256(d / item["ply"])
         (d / "manifest.json").write_text(json.dumps(manifest))
 
-        r = validate(d, feedback_dir=tmp_path / "fb",
-                     do_register=True, assets_dir=assets_dir)
+        r = validate(d, feedback_dir=tmp_path / "fb", do_register=True, assets_dir=assets_dir)
         assert sorted(r["registered"]) == ["a0", "a1", "a2", "a3"]
         reg = AssetRegistry(assets_dir)
         assert all(reg.doc.assets[f"a{i}"].origin == "real" for i in range(4))
@@ -283,6 +298,7 @@ class TestSha256FileIntegrity:
 
     def test_returns_correct_digest(self, tmp_path):
         from pipeline.validate_handoff import _sha256_file
+
         data = b"hello world\n"
         path = tmp_path / "a.ply"
         path.write_bytes(data)
@@ -357,3 +373,121 @@ class TestSha256FileIntegrity:
         monkeypatch.setattr(vh, "first_linklike_path", fake_first_linklike_path)
         problems = check_item(item, d)
         assert any("完整性校验失败" in p for p in problems)
+
+
+class TestAssetRegistryReaderIntegrity:
+    """Security boundary tests for assets.sha256_file and _read_doc.
+
+    The registry carries asset sha256/version/origin and payload PLYs are
+    validated by hash. A check-then-reopen (exists/is_file then read_bytes/
+    sha256_file) leaves a TOCTOU window where the file can be swapped
+    between validation and reading. The secure pattern binds a single
+    descriptor from os.open+O_NOFOLLOW for the entire read.
+    """
+
+    def test_sha256_file_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.assets as assets
+        from pipeline.assets import _AssetIntegrityError, sha256_file
+
+        target = tmp_path / "asset.ply"
+        target.write_bytes(b"ply data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = assets.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(assets, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(_AssetIntegrityError, match="regular non-link file"):
+            sha256_file(target)
+
+    def test_sha256_file_rejects_path_swap_before_open(self, tmp_path, monkeypatch):
+        from pipeline.assets import _AssetIntegrityError, sha256_file
+
+        target = tmp_path / "asset.ply"
+        target.write_bytes(b"original-bytes\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                target.write_bytes(b"swapped-bytes-payload\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(_AssetIntegrityError, match="changed before hash|cannot be"):
+            sha256_file(target)
+
+    def test_sha256_file_rejects_swap_during_read(self, tmp_path, monkeypatch):
+        import pipeline.assets as assets
+        from pipeline.assets import _AssetIntegrityError, sha256_file
+
+        target = tmp_path / "asset.ply"
+        target.write_bytes(b"asset-payload-bytes\n")
+        monkeypatch.setattr(assets, "first_linklike_path", lambda root, leaf: None)
+        original_lstat = Path.lstat
+        swap_state = {"target_lstat_calls": 0}
+
+        def swapping_lstat(self):
+            if self == target:
+                swap_state["target_lstat_calls"] += 1
+                if swap_state["target_lstat_calls"] == 2:
+                    target.write_bytes(b"swapped-after-read\n")
+            return original_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", swapping_lstat)
+        with pytest.raises(_AssetIntegrityError, match="changed while being hashed"):
+            sha256_file(target)
+
+    def test_sha256_file_matches_stable_read(self, tmp_path):
+        from pipeline.assets import sha256_file
+
+        target = tmp_path / "asset.ply"
+        payload = b"stable-asset-bytes\n"
+        target.write_bytes(payload)
+        assert sha256_file(target) == hashlib.sha256(payload).hexdigest()
+
+    def test_sha256_file_rejects_symlink_target(self, tmp_path):
+        from pipeline.assets import _AssetIntegrityError, sha256_file
+
+        real = tmp_path / "real.ply"
+        real.write_bytes(b"real-bytes\n")
+        link = tmp_path / "link.ply"
+        try:
+            link.symlink_to(real)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+        with pytest.raises(_AssetIntegrityError, match="regular non-link file"):
+            sha256_file(link)
+
+    def test_read_doc_loads_registry_securely(self, tmp_path):
+        from pipeline.assets import AssetRegistry
+
+        assets_dir = tmp_path / "assets"
+        assets_dir.mkdir()
+        reg = AssetRegistry(assets_dir)
+        ply = tmp_path / "a.ply"
+        GaussianScene(
+            np.zeros((1, 3)),
+            np.zeros((1, 3)),
+        ).save_ply(ply, flavor="3dgs")
+        import shutil
+
+        shutil.copy(ply, assets_dir / "a1.ply")
+        reg.register("a1", assets_dir / "a1.ply", origin="synthetic")
+        reg.save()
+
+        reg2 = AssetRegistry(assets_dir)
+        assert "a1" in reg2.doc.assets
+        assert reg2.doc.assets["a1"].sha256 == reg.doc.assets["a1"].sha256
+
+    def test_read_doc_missing_registry_returns_empty(self, tmp_path):
+        from pipeline.assets import AssetRegistry, RegistryDoc
+
+        reg = AssetRegistry(tmp_path / "assets")
+        assert reg.doc == RegistryDoc()
+        assert reg._last_read_revision is None
