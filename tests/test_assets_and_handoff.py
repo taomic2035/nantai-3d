@@ -491,3 +491,68 @@ class TestAssetRegistryReaderIntegrity:
         reg = AssetRegistry(tmp_path / "assets")
         assert reg.doc == RegistryDoc()
         assert reg._last_read_revision is None
+
+
+class TestHandoffReaderIntegrity:
+    """Security boundary tests for validate_handoff trust-critical readers."""
+
+    def test_validate_does_not_use_path_read_text_for_manifest(self, tmp_path, monkeypatch):
+        """RED->GREEN: validate must not use Path.read_text for manifest.json.
+
+        The deliverable manifest declares asset paths and is a trust-critical
+        input to the validator. Reading it via Path.read_text leaves a
+        check-then-reopen TOCTOU window. It must go through
+        _read_stable_bytes (single descriptor, identity recheck).
+        """
+        from pipeline.validate_handoff import validate
+
+        # Build a minimal valid deliverable dir
+        deliverable = tmp_path / "deliverable"
+        deliverable.mkdir()
+        manifest = {
+            "schema_version": 1,
+            "handoff_id": "h1",
+            "items": [
+                {
+                    "asset_id": "a1",
+                    "ply": "a1.ply",
+                    "footprint_m": [1.0, 1.0, 1.0],
+                    "ground_z_m": 0.0,
+                }
+            ],
+        }
+        (deliverable / "manifest.json").write_bytes(json.dumps(manifest).encode("utf-8"))
+        # Minimal PLY content; check_item will fail on shape, but we only
+        # care that the manifest was parsed (no Path.read_text) and the
+        # fatal error does NOT blame manifest.json schema/read.
+        (deliverable / "a1.ply").write_bytes(b"ply bytes\n")
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError("validate must not use Path.read_text for manifest.json")
+
+        monkeypatch.setattr(Path, "read_text", reject_read_text)
+        result = validate(deliverable, feedback_dir=str(tmp_path / "fb"))
+        fatal = str(result.get("fatal", ""))
+        # Manifest must be parsed: schema/read failures are unacceptable.
+        assert "manifest.json 不符合 schema" not in fatal
+        assert "无法安全读取" not in fatal
+
+    def test_read_stable_bytes_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        """RED->GREEN: _read_stable_bytes must reject ancestor reparse points."""
+        import pipeline.validate_handoff as vh
+        from pipeline.validate_handoff import _read_stable_bytes
+
+        target = tmp_path / "manifest.json"
+        target.write_bytes(b'{"schema_version": 2}')
+        sentinel = tmp_path / "ancestor-reparse"
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return vh.first_linklike_path(root, leaf)
+
+        monkeypatch.setattr(vh, "first_linklike_path", fake_first_linklike_path)
+        from pipeline.validate_handoff import _HandoffIntegrityError
+
+        with pytest.raises(_HandoffIntegrityError, match="regular file|inspected"):
+            _read_stable_bytes(target, label="manifest.json")
