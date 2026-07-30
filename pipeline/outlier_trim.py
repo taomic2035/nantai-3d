@@ -58,6 +58,8 @@ from __future__ import annotations
 import hashlib
 import json
 import numbers
+import os
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +68,7 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
+from pipeline.durable_io import _is_linklike, first_linklike_path
 from pipeline.gaussian_scene import GaussianScene
 
 TRIM_MANIFEST_SUFFIX = ".trim_manifest.json"
@@ -381,11 +384,90 @@ def derive_trim_id(scene: GaussianScene, rules: list[TrimRule]) -> str:
     return "trim-" + hashlib.sha256(encoded).hexdigest()[:20]
 
 
+class _TrimIntegrityError(Exception):
+    """Raised when a file cannot be securely hashed."""
+
+
+def _cross_surface_signature(
+    result: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
+    """Hash *path* via a single descriptor with ancestor and swap checks."""
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(
+            Path(path.absolute().anchor), path
+        )
+        before = path.lstat()
+    except OSError as exc:
+        raise _TrimIntegrityError("file cannot be inspected") from exc
+    except ValueError as exc:
+        raise _TrimIntegrityError("file cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise _TrimIntegrityError("file is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise _TrimIntegrityError("file cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise _TrimIntegrityError("file cannot be opened") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if (
+                _cross_surface_signature(descriptor_before)
+                != _cross_surface_signature(before)
+            ):
+                raise _TrimIntegrityError("file changed before hash")
+            digest = hashlib.sha256()
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except _TrimIntegrityError:
+        raise
+    except OSError as exc:
+        raise _TrimIntegrityError("file cannot be hashed") from exc
+    if (
+        before.st_mode != after.st_mode
+        or before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or descriptor_before.st_mode != descriptor_after.st_mode
+        or descriptor_before.st_dev != descriptor_after.st_dev
+        or descriptor_before.st_ino != descriptor_after.st_ino
+        or descriptor_before.st_size != descriptor_after.st_size
+        or descriptor_before.st_mtime_ns != descriptor_after.st_mtime_ns
+    ):
+        raise _TrimIntegrityError("file changed while being hashed")
     return digest.hexdigest()
 
 

@@ -3,7 +3,10 @@
 这些测试锁的是**护栏**, 不只是算法: 没有阈值不许剔、没有确认不许写、
 写了就必须留下"丢了什么、按什么规则丢的"的可回溯记录。
 """
+import hashlib
 import json
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -389,3 +392,57 @@ class TestLossyEditIsRecordedInPlyBytes:
         evaluate_trim(clustered_scene,
                       rules=[OccupancyRule(voxel_size=5.0, min_occupancy=2)])
         assert clustered_scene.lossy_edits == before
+
+
+class TestSha256FileIntegrity:
+    """Security boundary tests for outlier_trim._sha256_file."""
+
+    def test_returns_correct_digest(self, tmp_path):
+        from pipeline.outlier_trim import _sha256_file
+        data = b"hello world\n"
+        path = tmp_path / "a.ply"
+        path.write_bytes(data)
+        assert _sha256_file(path) == hashlib.sha256(data).hexdigest()
+
+    def test_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        import pipeline.outlier_trim as ot
+        from pipeline.outlier_trim import _sha256_file, _TrimIntegrityError
+
+        target = tmp_path / "a.ply"
+        target.write_bytes(b"ply data\n")
+        sentinel = tmp_path / "ancestor-reparse"
+        original = ot.first_linklike_path
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return original(root, leaf)
+
+        monkeypatch.setattr(ot, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(
+            _TrimIntegrityError,
+            match="regular non-link file|redirected|unsafe",
+        ):
+            _sha256_file(target)
+
+    def test_rejects_path_swap_before_open(self, tmp_path, monkeypatch):
+        from pipeline.outlier_trim import _sha256_file, _TrimIntegrityError
+
+        original_path = tmp_path / "a.ply"
+        original_path.write_bytes(b"original\n")
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                original_path.write_bytes(b"swapped content\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+        with pytest.raises(
+            _TrimIntegrityError,
+            match="changed before hash|changed while",
+        ):
+            _sha256_file(original_path)
