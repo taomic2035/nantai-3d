@@ -235,6 +235,51 @@ def test_read_regular_bytes_open_error_hides_private_details(
     assert private_detail not in str(captured.value)
 
 
+def test_read_regular_bytes_tolerates_cross_surface_mode_drift(
+    tmp_path,
+    monkeypatch,
+):
+    """RED->GREEN: lstat/fstat st_mode permission bits may differ on Windows.
+
+    The file type (S_IFMT) must match, but permission bits (e.g. executable
+    bit) can legitimately differ between path-surface stat and
+    descriptor-surface stat on some platforms.  _stat_signature must compare
+    only the file type for cross-surface identity, not the full st_mode.
+    """
+    source = tmp_path / "import-evidence.json"
+    source.write_bytes(b'{"evidence":true}\n')
+    original_fstat = os.fstat
+    calls = 0
+
+    def mode_drifting_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        observed = original_fstat(descriptor)
+        if calls == 1:
+            # Flip permission bits but keep file type identical
+            new_mode = (observed.st_mode & ~0o777) | 0o600
+            return SimpleNamespace(
+                st_dev=observed.st_dev,
+                st_ino=observed.st_ino,
+                st_mode=new_mode,
+                st_size=observed.st_size,
+                st_mtime_ns=observed.st_mtime_ns,
+                st_ctime_ns=observed.st_ctime_ns,
+                st_file_attributes=getattr(
+                    observed, "st_file_attributes", 0
+                ),
+            )
+        return observed
+
+    monkeypatch.setattr(import_module.os, "fstat", mode_drifting_fstat)
+
+    payload = import_module._read_regular_bytes(
+        source,
+        label="import evidence",
+    )
+    assert payload == b'{"evidence":true}\n'
+
+
 def _write_3dgs_ply(
     path: Path,
     *,
