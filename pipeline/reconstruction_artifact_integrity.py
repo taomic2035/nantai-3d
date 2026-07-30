@@ -201,35 +201,23 @@ def _sha256_file(path: Path) -> tuple[int, str]:
     """
     descriptor = -1
     try:
-        redirected = first_linklike_path(
-            Path(path.absolute().anchor), path
-        )
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
         before = path.lstat()
     except OSError as exc:
-        raise _ArtifactIntegrityError(
-            "artifact cannot be inspected"
-        ) from exc
+        raise _ArtifactIntegrityError("artifact cannot be inspected") from exc
     except ValueError as exc:
-        raise _ArtifactIntegrityError(
-            "artifact cannot be inspected"
-        ) from exc
+        raise _ArtifactIntegrityError("artifact cannot be inspected") from exc
     if (
         redirected is not None
         or _is_linklike(path, observed=before)
         or not stat.S_ISREG(before.st_mode)
     ):
-        raise _ArtifactIntegrityError(
-            "artifact is not a regular non-link file"
-        )
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
-        os, "O_NOFOLLOW", 0
-    )
+        raise _ArtifactIntegrityError("artifact is not a regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise _ArtifactIntegrityError(
-            "artifact cannot be opened"
-        ) from exc
+        raise _ArtifactIntegrityError("artifact cannot be opened") from exc
     try:
         stream = os.fdopen(descriptor, "rb", buffering=0)
     except OSError as exc:
@@ -237,19 +225,12 @@ def _sha256_file(path: Path) -> tuple[int, str]:
             os.close(descriptor)
         except OSError:
             pass
-        raise _ArtifactIntegrityError(
-            "artifact cannot be opened"
-        ) from exc
+        raise _ArtifactIntegrityError("artifact cannot be opened") from exc
     try:
         with stream:
             descriptor_before = os.fstat(stream.fileno())
-            if (
-                _cross_surface_signature(descriptor_before)
-                != _cross_surface_signature(before)
-            ):
-                raise _ArtifactIntegrityError(
-                    "artifact changed before hash"
-                )
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise _ArtifactIntegrityError("artifact changed before hash")
             digest = hashlib.sha256()
             measured = 0
             while True:
@@ -263,9 +244,7 @@ def _sha256_file(path: Path) -> tuple[int, str]:
     except _ArtifactIntegrityError:
         raise
     except OSError as exc:
-        raise _ArtifactIntegrityError(
-            "artifact cannot be hashed"
-        ) from exc
+        raise _ArtifactIntegrityError("artifact cannot be hashed") from exc
     if (
         before.st_mode != after.st_mode
         or before.st_dev != after.st_dev
@@ -278,10 +257,79 @@ def _sha256_file(path: Path) -> tuple[int, str]:
         or descriptor_before.st_size != descriptor_after.st_size
         or descriptor_before.st_mtime_ns != descriptor_after.st_mtime_ns
     ):
-        raise _ArtifactIntegrityError(
-            "artifact changed while being hashed"
-        )
+        raise _ArtifactIntegrityError("artifact changed while being hashed")
     return measured, digest.hexdigest()
+
+
+_MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+
+
+def _read_stable_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_MANIFEST_BYTES,
+) -> bytes:
+    """Read a trust-critical manifest JSON via a single secure descriptor.
+
+    The check-then-reopen pattern (``is_file`` then ``read_text``) leaves a
+    TOCTOU window where the file can be swapped between validation and
+    reading. This helper binds a single descriptor from ``os.open`` with
+    ``O_NOFOLLOW`` for the entire read and rechecks file identity before
+    and after reading to close that window. Ancestor reparse points are
+    rejected via ``first_linklike_path``.
+    """
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
+        before = path.lstat()
+    except OSError as exc:
+        raise _ArtifactIntegrityError(f"{label} cannot be inspected") from exc
+    except ValueError as exc:
+        raise _ArtifactIntegrityError(f"{label} cannot be inspected") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > max_bytes
+    ):
+        raise _ArtifactIntegrityError(f"{label} is not a bounded regular non-link file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise _ArtifactIntegrityError(f"{label} cannot be opened") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise _ArtifactIntegrityError(f"{label} cannot be opened") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise _ArtifactIntegrityError(f"{label} changed before read")
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise _ArtifactIntegrityError(f"{label} exceeds byte limit")
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except _ArtifactIntegrityError:
+        raise
+    except OSError as exc:
+        raise _ArtifactIntegrityError(f"{label} cannot be read") from exc
+    if (
+        _cross_surface_signature(before) != _cross_surface_signature(after)
+        or _cross_surface_signature(descriptor_before) != _cross_surface_signature(descriptor_after)
+        or len(payload) != before.st_size
+    ):
+        raise _ArtifactIntegrityError(f"{label} changed while being read")
+    return bytes(payload)
 
 
 def _safe_resolve(path: Path) -> Path:
@@ -309,7 +357,7 @@ def _parse_sim3_evidence(evidence_list: Any) -> list[dict[str, Any]]:
     for entry in evidence_list:
         if not isinstance(entry, str) or not entry.startswith(_SIM3_EVIDENCE_PREFIX):
             continue
-        payload = entry[len(_SIM3_EVIDENCE_PREFIX):]
+        payload = entry[len(_SIM3_EVIDENCE_PREFIX) :]
         try:
             obj = json.loads(payload)
         except (json.JSONDecodeError, ValueError):
@@ -333,14 +381,10 @@ def _alignment_evidence_consistent(parsed: list[dict[str, Any]]) -> tuple[bool, 
     reasons: list[str] = []
     for idx, obj in enumerate(parsed):
         if obj.get("_unparseable"):
-            reasons.append(
-                f"metric_evidence[{idx}]: unparseable sim3.alignment.v1 record"
-            )
+            reasons.append(f"metric_evidence[{idx}]: unparseable sim3.alignment.v1 record")
             continue
         if "passed" in obj and obj["passed"] is False:
-            reasons.append(
-                f"metric_evidence[{idx}]: sim3.alignment.v1 record has passed=false"
-            )
+            reasons.append(f"metric_evidence[{idx}]: sim3.alignment.v1 record has passed=false")
     return (len(reasons) == 0, reasons)
 
 
@@ -368,8 +412,7 @@ def _check_metric_contradictions(manifest: dict[str, Any]) -> list[str]:
     if geometry_usability in ("metric-aligned", "metric-unaligned"):
         if is_synthetic:
             contradictions.append(
-                "geometry_usability claims "
-                f"{geometry_usability} but provenance.synthetic is true"
+                f"geometry_usability claims {geometry_usability} but provenance.synthetic is true"
             )
         units = target_frame.get("units")
         metric_status = target_frame.get("metric_status")
@@ -532,15 +575,13 @@ def _verify_chunks(
 
     # Structural consistency checks.
     declared_total_chunks = chunks_data.get("total_chunks")
-    total_chunks_matches_len = (
-        isinstance(declared_total_chunks, int)
-        and declared_total_chunks == len(chunks_list)
-    )
+    total_chunks_matches_len = isinstance(
+        declared_total_chunks, int
+    ) and declared_total_chunks == len(chunks_list)
 
     declared_total_points = chunks_data.get("total_points")
     total_points_matches_sum = (
-        isinstance(declared_total_points, int)
-        and declared_total_points == total_points_sum
+        isinstance(declared_total_points, int) and declared_total_points == total_points_sum
     )
 
     # Bounds consistency: declared bounds must contain all chunk AABBs.
@@ -569,9 +610,7 @@ def _verify_chunks(
 
     try:
         payload_report = verify_chunks_integrity(chunks_dir)
-        payload_sha_verified = payload_report[
-            "per_chunk_sha_verified"
-        ]
+        payload_sha_verified = payload_report["per_chunk_sha_verified"]
         payload_mismatches = [
             json.dumps(
                 mismatch,
@@ -606,7 +645,7 @@ def _load_json_with_duplicate_check(
 ) -> tuple[dict[str, Any], list[str]]:
     """Load JSON and record duplicate keys.  Returns ``(data, duplicates)``."""
     recorder = _DuplicateKeyRecorder()
-    text = path.read_text("utf-8")
+    text = _read_stable_bytes(path, label="manifest").decode("utf-8")
     data = json.loads(text, object_pairs_hook=recorder)
     return data, recorder.duplicates
 
@@ -635,15 +674,11 @@ def verify_recon_artifacts(manifest_path: Path) -> IntegrityReport:
     if not manifest_path.is_file():
         raise FileNotFoundError(f"manifest not found: {manifest_path}")
     if _is_symlink(manifest_path):
-        raise ValueError(
-            f"manifest is a symlink (fail-closed): {manifest_path}"
-        )
+        raise ValueError(f"manifest is a symlink (fail-closed): {manifest_path}")
 
     manifest, duplicates = _load_json_with_duplicate_check(manifest_path)
     if not isinstance(manifest, dict):
-        raise ValueError(
-            f"manifest root is not a JSON object: {type(manifest).__name__}"
-        )
+        raise ValueError(f"manifest root is not a JSON object: {type(manifest).__name__}")
 
     manifest_dir = manifest_path.parent.resolve()
     schema_version = manifest.get("schema_version")
@@ -678,7 +713,7 @@ def verify_recon_artifacts(manifest_path: Path) -> IntegrityReport:
             continue
 
         # Path-escape check: the resolved path must be inside manifest_dir.
-        candidate = (manifest_dir / declared_path)
+        candidate = manifest_dir / declared_path
         try:
             resolved = candidate.resolve()
             resolved.relative_to(manifest_dir)
@@ -740,22 +775,17 @@ def verify_recon_artifacts(manifest_path: Path) -> IntegrityReport:
         kind = entry.get("kind") or ""
         fidelity = entry.get("fidelity") or ""
 
-        if not isinstance(declared_sha, str) or not re.fullmatch(
-            r"[0-9a-f]{64}", declared_sha
-        ):
+        if not isinstance(declared_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", declared_sha):
             unknown.append(
                 ArtifactUnknown(
                     artifact_key=key,
                     path=declared_path,
-                    reason=(
-                        "missing or invalid sha256 field "
-                        "(expected 64 lowercase hex chars)"
-                    ),
+                    reason=("missing or invalid sha256 field (expected 64 lowercase hex chars)"),
                 )
             )
             continue
 
-        sha_match = (declared_sha == actual_sha)
+        sha_match = declared_sha == actual_sha
         size_match = (
             isinstance(declared_bytes, int)
             and not isinstance(declared_bytes, bool)

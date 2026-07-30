@@ -74,11 +74,7 @@ def _ply_body(point_count: int, attributes: list[str]) -> bytes:
     rows = []
     for i in range(point_count):
         # Deterministic but varied values per point per attribute.
-        rows.append(
-            b" ".join(
-                b"%g" % (float(i + k) / 10.0) for k in range(len(attributes))
-            )
-        )
+        rows.append(b" ".join(b"%g" % (float(i + k) / 10.0) for k in range(len(attributes))))
     return b"\n".join(rows) + b"\n"
 
 
@@ -127,9 +123,7 @@ def _bind_full_lossy_lineage(
     descriptor["bytes"] = len(payload)
     if manifest_edits is not None:
         manifest["lossy_edits"] = list(manifest_edits)
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True), "utf-8"
-    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), "utf-8")
 
 
 def _make_clean_manifest(
@@ -212,9 +206,7 @@ def _make_clean_manifest(
                 },
             },
         },
-        "sessions": [
-            {"session_id": "external_3dgs", "kind": "photo_batch", "n_images": 0}
-        ],
+        "sessions": [{"session_id": "external_3dgs", "kind": "photo_batch", "n_images": 0}],
         "coordinate_contract": {
             "pose_frame": {
                 "frame_id": "synthetic-local",
@@ -271,9 +263,7 @@ def _make_clean_manifest(
             payloads = {}
             for lod in ("0", "1", "2"):
                 fname = f"chunk_{cx}_{cy}_lod{lod}.ply"
-                payload = _write_ply(
-                    chunks_dir / fname, per_chunk_points, lod0_attrs
-                )
+                payload = _write_ply(chunks_dir / fname, per_chunk_points, lod0_attrs)
                 chunk_files[lod] = fname
                 payloads[lod] = {
                     "file": fname,
@@ -302,9 +292,7 @@ def _make_clean_manifest(
             "kind": "spatial-chunks",
             "chunk_size_m": 50.0,
             "integrity": {
-                "schema_version": (
-                    "nantai.spatial-chunks.payload-integrity.v1"
-                ),
+                "schema_version": ("nantai.spatial-chunks.payload-integrity.v1"),
                 "algorithm": "sha256",
                 "per_chunk_sha_required": True,
             },
@@ -343,9 +331,7 @@ def _make_clean_manifest(
         }
 
     manifest_path = recon_dir / "recon_manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True), "utf-8"
-    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), "utf-8")
     return manifest_path, manifest
 
 
@@ -535,10 +521,7 @@ def test_extra_unbound_chunk_detected(tmp_path: Path) -> None:
     report = verify_recon_artifacts(manifest_path)
     assert report.chunks_report is not None
     assert len(report.chunks_report.extra_unbound_chunk_files) == 1
-    assert any(
-        "chunk_9_9_lod0.ply" in p
-        for p in report.chunks_report.extra_unbound_chunk_files
-    )
+    assert any("chunk_9_9_lod0.ply" in p for p in report.chunks_report.extra_unbound_chunk_files)
 
 
 # ---------------------------------------------------------------------------
@@ -682,9 +665,9 @@ def test_metric_aligned_stays_metric_aligned_when_consistent(tmp_path: Path) -> 
     good["coordinate_contract"]["target_frame"]["evidence"] = [
         "sim3.alignment.v1=" + json.dumps({"passed": True, "rms_m": 0.05}),
     ]
-    good["coordinate_contract"]["metric_evidence"] = (
-        good["coordinate_contract"]["target_frame"]["evidence"]
-    )
+    good["coordinate_contract"]["metric_evidence"] = good["coordinate_contract"]["target_frame"][
+        "evidence"
+    ]
     good["provenance"]["synthetic"] = False
     manifest_path.write_text(json.dumps(good, indent=2, sort_keys=True), "utf-8")
     report = verify_recon_artifacts(manifest_path)
@@ -1035,3 +1018,46 @@ def test_sha256_file_returns_measured_and_digest(tmp_path: Path) -> None:
     measured, digest = _sha256_file(target)
     assert measured == len(payload)
     assert digest == hashlib.sha256(payload).hexdigest()
+
+
+class TestManifestReaderIntegrity:
+    """Security boundary tests for _read_stable_bytes (manifest JSON reader)."""
+
+    def test_verify_does_not_use_path_read_text_for_manifest(self, tmp_path, monkeypatch):
+        """RED->GREEN: verify_recon_artifacts must not use Path.read_text.
+
+        The recon manifest declares artifact SHAs and is THE trust-critical
+        input to the verifier. Reading it via Path.read_text leaves a
+        check-then-reopen TOCTOU window. It must go through
+        _read_stable_bytes (single descriptor, identity recheck).
+        """
+        real_manifest_path, _ = _make_clean_manifest(tmp_path / "recon")
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError("verify_recon_artifacts must not use Path.read_text")
+
+        monkeypatch.setattr(Path, "read_text", reject_read_text)
+        # Must not raise; the manifest is valid.
+        verify_recon_artifacts(real_manifest_path)
+
+    def test_read_stable_bytes_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        """RED->GREEN: _read_stable_bytes must reject ancestor reparse points."""
+        import pipeline.reconstruction_artifact_integrity as rai
+        from pipeline.reconstruction_artifact_integrity import _read_stable_bytes
+
+        target = tmp_path / "manifest.json"
+        target.write_bytes(b'{"schema_version": 1}')
+        sentinel = tmp_path / "ancestor-reparse"
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return rai.first_linklike_path(root, leaf)
+
+        monkeypatch.setattr(rai, "first_linklike_path", fake_first_linklike_path)
+        from pipeline.reconstruction_artifact_integrity import (
+            _ArtifactIntegrityError,
+        )
+
+        with pytest.raises(_ArtifactIntegrityError, match="regular non-link file|inspected"):
+            _read_stable_bytes(target, label="manifest")
