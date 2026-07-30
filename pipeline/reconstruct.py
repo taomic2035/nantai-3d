@@ -22,6 +22,7 @@
     # 补拍变清晰: 用新重建覆盖旧场景对应区域
     python -m pipeline.reconstruct --engine mock --base-scene recon/scene_full.ply
 """
+
 import argparse
 import hashlib
 import json
@@ -56,15 +57,110 @@ DEFAULT_OUT_DIR = "recon"
 DEFAULT_WEB_DIR = "web/data/recon"
 
 FULL_3DGS_BASE_ATTRIBUTES = [
-    "x", "y", "z", "nx", "ny", "nz",
-    "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
-    "scale_0", "scale_1", "scale_2",
-    "rot_0", "rot_1", "rot_2", "rot_3",
+    "x",
+    "y",
+    "z",
+    "nx",
+    "ny",
+    "nz",
+    "f_dc_0",
+    "f_dc_1",
+    "f_dc_2",
+    "opacity",
+    "scale_0",
+    "scale_1",
+    "scale_2",
+    "rot_0",
+    "rot_1",
+    "rot_2",
+    "rot_3",
 ]
 SIMPLE_PREVIEW_ATTRIBUTES = ["x", "y", "z", "r", "g", "b", "scale"]
 
 
 _SIM3_EVIDENCE_PREFIX = "sim3.alignment.v1="
+
+_MAX_RECON_FILE_BYTES = 64 * 1024 * 1024
+
+
+def _cross_surface_signature(result: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Identity stable across lstat and fstat on Windows/POSIX."""
+
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+    )
+
+
+def _read_stable_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = _MAX_RECON_FILE_BYTES,
+) -> bytes:
+    """Read a trust-critical file via a single secure descriptor.
+
+    The check-then-reopen pattern (``is_file`` then ``read_text``) leaves a
+    TOCTOU window where the file can be swapped between validation and
+    reading. This helper binds a single descriptor from ``os.open`` with
+    ``O_NOFOLLOW`` for the entire read and rechecks file identity before
+    and after reading to close that window. Ancestor reparse points are
+    rejected via ``first_linklike_path``.
+    """
+    descriptor = -1
+    try:
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
+        before = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label}无法访问") from exc
+    except ValueError as exc:
+        raise ValueError(f"{label}无法访问") from exc
+    if (
+        redirected is not None
+        or _is_linklike(path, observed=before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > max_bytes
+    ):
+        raise ValueError(f"{label}不是常规非链接文件")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"{label}无法打开") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ValueError(f"{label}无法打开") from exc
+    payload = bytearray()
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
+                raise ValueError(f"{label}在打开期间被替换")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise ValueError(f"{label}超出大小限制")
+            descriptor_after = os.fstat(stream.fileno())
+        after = path.lstat()
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label}无法读取") from exc
+    if _cross_surface_signature(before) != _cross_surface_signature(
+        after
+    ) or _cross_surface_signature(descriptor_before) != _cross_surface_signature(descriptor_after):
+        raise ValueError(f"{label}在读取期间被替换")
+    if len(payload) != before.st_size:
+        raise ValueError(f"{label}在读取期间被替换")
+    return bytes(payload)
 
 
 def _alignment_evidence_consistent(metric_evidence: list[str]) -> bool:
@@ -149,9 +245,7 @@ def _sha256_file(path: Path) -> str:
     """Hash *path* via a single descriptor with ancestor and swap checks."""
     descriptor = -1
     try:
-        redirected = first_linklike_path(
-            Path(path.absolute().anchor), path
-        )
+        redirected = first_linklike_path(Path(path.absolute().anchor), path)
         before = path.lstat()
     except OSError as exc:
         raise _ReconstructIntegrityError("file cannot be inspected") from exc
@@ -163,9 +257,7 @@ def _sha256_file(path: Path) -> str:
         or not stat.S_ISREG(before.st_mode)
     ):
         raise _ReconstructIntegrityError("file is not a regular non-link file")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
-        os, "O_NOFOLLOW", 0
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -181,10 +273,7 @@ def _sha256_file(path: Path) -> str:
     try:
         with stream:
             descriptor_before = os.fstat(stream.fileno())
-            if (
-                _cross_surface_signature(descriptor_before)
-                != _cross_surface_signature(before)
-            ):
+            if _cross_surface_signature(descriptor_before) != _cross_surface_signature(before):
                 raise _ReconstructIntegrityError("file changed before hash")
             digest = hashlib.sha256()
             while True:
@@ -254,8 +343,7 @@ def _full_3dgs_attributes(scene: GaussianScene) -> list[str]:
 
 
 # ============ mock 泼溅合成 ============
-def _sample_palette(photos_dir: Path, images: list[str],
-                    max_samples: int = 5) -> np.ndarray:
+def _sample_palette(photos_dir: Path, images: list[str], max_samples: int = 5) -> np.ndarray:
     """从输入图像抽取调色板 (Nx3, [0,1]) — mock 泼溅颜色与真实素材相关"""
     colors = []
     step = max(1, len(images) // max_samples)
@@ -263,6 +351,7 @@ def _sample_palette(photos_dir: Path, images: list[str],
         p = photos_dir / img
         try:
             from PIL import Image
+
             with Image.open(p) as im:
                 small = np.asarray(im.convert("RGB").resize((8, 8))) / 255.0
             colors.append(small.reshape(-1, 3))
@@ -273,8 +362,9 @@ def _sample_palette(photos_dir: Path, images: list[str],
     return np.concatenate(colors)
 
 
-def synth_session_splat(session: CaptureSession, reg: RegistrationResult,
-                        photos_dir: Path) -> GaussianScene:
+def synth_session_splat(
+    session: CaptureSession, reg: RegistrationResult, photos_dir: Path
+) -> GaussianScene:
     """由配准位姿 + 图像调色板合成一个会话的代理泼溅场景
 
     覆盖度与输入量挂钩: 帧越多 (视频多角度) → 高斯越多、越完整,
@@ -283,7 +373,8 @@ def synth_session_splat(session: CaptureSession, reg: RegistrationResult,
     poses = reg.poses_by_session(session.session_id)
     if not poses:
         return GaussianScene(
-            np.zeros((0, 3)), np.zeros((0, 3)),
+            np.zeros((0, 3)),
+            np.zeros((0, 3)),
             frame_id=reg.target_frame.frame_id,
             units=reg.target_frame.units.value,
         )
@@ -295,6 +386,7 @@ def synth_session_splat(session: CaptureSession, reg: RegistrationResult,
     radius = max(radius, 5.0)
 
     import hashlib
+
     seed = int(hashlib.sha1(session.session_id.encode()).hexdigest()[:8], 16)
     rng = np.random.default_rng(seed)
     palette = _sample_palette(photos_dir, session.images)
@@ -311,16 +403,25 @@ def synth_session_splat(session: CaptureSession, reg: RegistrationResult,
     # 地面盘
     ang = rng.uniform(0, 2 * np.pi, n_ground)
     rad = radius * np.sqrt(rng.uniform(0, 1, n_ground))
-    ground = np.stack([center[0] + rad * np.cos(ang),
-                       center[1] + rad * np.sin(ang),
-                       rng.uniform(0, 0.3, n_ground)], axis=1)
+    ground = np.stack(
+        [
+            center[0] + rad * np.cos(ang),
+            center[1] + rad * np.sin(ang),
+            rng.uniform(0, 0.3, n_ground),
+        ],
+        axis=1,
+    )
 
     # 中央结构 (盒状聚簇)
     w, d, h = 8.0, 6.0, 5.0
-    struct = np.stack([
-        center[0] + rng.uniform(-w / 2, w / 2, n_struct),
-        center[1] + rng.uniform(-d / 2, d / 2, n_struct),
-        rng.uniform(0, h, n_struct)], axis=1)
+    struct = np.stack(
+        [
+            center[0] + rng.uniform(-w / 2, w / 2, n_struct),
+            center[1] + rng.uniform(-d / 2, d / 2, n_struct),
+            rng.uniform(0, h, n_struct),
+        ],
+        axis=1,
+    )
 
     # 周边散布簇
     n_clusters = max(2, n_imgs // 10)
@@ -330,21 +431,21 @@ def synth_session_splat(session: CaptureSession, reg: RegistrationResult,
         c_rad = rng.uniform(radius * 0.3, radius * 0.9)
         c = center + np.array([c_rad * np.cos(c_ang), c_rad * np.sin(c_ang), 0])
         k = n_scatter // n_clusters
-        scatter_list.append(c + rng.normal(0, 1.5, (k, 3)) * [1, 1, 0.8]
-                            + [0, 0, 1.5])
+        scatter_list.append(c + rng.normal(0, 1.5, (k, 3)) * [1, 1, 0.8] + [0, 0, 1.5])
     scatter = np.concatenate(scatter_list) if scatter_list else np.zeros((0, 3))
     if len(scatter):
         scatter[:, 2] = np.abs(scatter[:, 2])
 
     xyz = np.concatenate([ground, struct, scatter])
     n = len(xyz)
-    rgb = np.concatenate([pick_colors(n_ground),
-                          pick_colors(n_struct),
-                          pick_colors(len(scatter))])
+    rgb = np.concatenate([pick_colors(n_ground), pick_colors(n_struct), pick_colors(len(scatter))])
     opacity = rng.uniform(0.55, 1.0, n)
     scale = np.exp(rng.normal(np.log(0.12), 0.4, (n, 3)))
     scene = GaussianScene(
-        xyz, rgb, opacity, scale,
+        xyz,
+        rgb,
+        opacity,
+        scale,
         frame_id=reg.pose_frame.frame_id,
         units=reg.pose_frame.units.value,
     )
@@ -370,13 +471,8 @@ def _apply_splat_transform(
     content-derived history enforces exactly-once semantics atomically.
     """
     source_frame = item.source_frame
-    if (
-        item.transform is not None
-        and item.transform.transform_id in scene.applied_transform_ids
-    ):
-        raise ValueError(
-            f"transform already applied: {item.transform.transform_id}"
-        )
+    if item.transform is not None and item.transform.transform_id in scene.applied_transform_ids:
+        raise ValueError(f"transform already applied: {item.transform.transform_id}")
     if scene.frame_id is None:
         scene.frame_id = source_frame.frame_id
     elif scene.frame_id != source_frame.frame_id:
@@ -461,8 +557,7 @@ def import_session_splats(
         # uncontracted metadata embedded in arbitrary PLY bytes cannot upgrade it.
         scene.provenance_frames = [item.source_frame.model_dump(mode="json")]
         logger.info(
-            f"导入泼溅: {item.session_id} ← {item.path} "
-            f"({len(scene)} 高斯, frame={scene.frame_id})"
+            f"导入泼溅: {item.session_id} ← {item.path} ({len(scene)} 高斯, frame={scene.frame_id})"
         )
         scenes.append(scene)
     return scenes
@@ -506,11 +601,7 @@ def _transform_catalog(
 ) -> tuple[dict[str, FrameTransform], dict[str, list[str]]]:
     """Index declared transform definitions separately from their evidence."""
     declared = list(reg.transform_chain)
-    declared.extend(
-        item.transform
-        for item in (splat_map or [])
-        if item.transform is not None
-    )
+    declared.extend(item.transform for item in (splat_map or []) if item.transform is not None)
     definitions: dict[str, FrameTransform] = {}
     evidence: dict[str, list[str]] = {}
     for transform in declared:
@@ -571,10 +662,7 @@ def _base_scene_frame_contracts(
     base artifact to measured provenance.  Embedded frames remain useful audit
     context, while the input boundary itself always fails closed as unknown.
     """
-    frames = [
-        CoordinateFrame.model_validate(raw)
-        for raw in scene.provenance_frames
-    ]
+    frames = [CoordinateFrame.model_validate(raw) for raw in scene.provenance_frames]
     target_geometry = (
         target_frame.frame_id,
         target_frame.handedness,
@@ -593,7 +681,8 @@ def _base_scene_frame_contracts(
             frame.units,
             frame.metric_status,
             frame.geo_aligned,
-        ) == target_geometry
+        )
+        == target_geometry
     ]
     raw_unknown = target_frame.model_dump(mode="json")
     raw_unknown["provenance"] = FrameProvenance.UNKNOWN.value
@@ -608,18 +697,20 @@ def _base_scene_frame_contracts(
 
 
 # ============ main pipeline ============
-def reconstruct(photos_dir: str | Path = "photos",
-                out_dir: str | Path = DEFAULT_OUT_DIR,
-                web_dir: str | Path = DEFAULT_WEB_DIR,
-                engine: str = "mock",
-                reg_engine: str = "auto",
-                splat_map: list[SplatInput] | None = None,
-                base_scene: str | Path | None = None,
-                dedup_voxel: float = 0.10,
-                replace_margin: float = 2.0,
-                registration: RegistrationResult | None = None,
-                colmap_use_gpu: bool = False,
-                chunk_size_m: float | None = None) -> dict:
+def reconstruct(
+    photos_dir: str | Path = "photos",
+    out_dir: str | Path = DEFAULT_OUT_DIR,
+    web_dir: str | Path = DEFAULT_WEB_DIR,
+    engine: str = "mock",
+    reg_engine: str = "auto",
+    splat_map: list[SplatInput] | None = None,
+    base_scene: str | Path | None = None,
+    dedup_voxel: float = 0.10,
+    replace_margin: float = 2.0,
+    registration: RegistrationResult | None = None,
+    colmap_use_gpu: bool = False,
+    chunk_size_m: float | None = None,
+) -> dict:
     """端到端重建, 返回 manifest dict
 
     ``chunk_size_m``: 给出时额外把成品场景按 XY 网格切成可流式的 chunk + LOD
@@ -649,13 +740,16 @@ def reconstruct(photos_dir: str | Path = "photos",
         # caller owns its provenance/alignment evidence. Persisted LF for record.
         reg = registration
         (out_dir / "registration.json").write_text(
-            reg.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
+            reg.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
     else:
-        reg = register(photos_dir, out_dir / "registration.json", engine=reg_engine,
-                       colmap_use_gpu=colmap_use_gpu)
-    dedup_voxel = _validate_spatial_parameter(
-        "dedup_voxel", dedup_voxel, reg.target_frame
-    )
+        reg = register(
+            photos_dir,
+            out_dir / "registration.json",
+            engine=reg_engine,
+            colmap_use_gpu=colmap_use_gpu,
+        )
+    dedup_voxel = _validate_spatial_parameter("dedup_voxel", dedup_voxel, reg.target_frame)
     replace_margin = _validate_spatial_parameter(
         "replace_margin",
         replace_margin,
@@ -687,9 +781,7 @@ def reconstruct(photos_dir: str | Path = "photos",
                 "result_frame_id": scene.frame_id,
                 "units": scene.units,
                 "applied_transform_ids": list(scene.applied_transform_ids),
-                "applied_transform_paths": [
-                    list(path) for path in scene.applied_transform_paths
-                ],
+                "applied_transform_paths": [list(path) for path in scene.applied_transform_paths],
             }
             for item, scene in zip(splat_map, scenes, strict=True)
         ]
@@ -706,20 +798,21 @@ def reconstruct(photos_dir: str | Path = "photos",
                 transform_definitions,
                 label=f"synthetic scene {sess.session_id!r}",
             )
-            logger.info(f"mock 泼溅: {sess.session_id} ({sess.kind}, "
-                        f"{len(sess.images)} 图) → {len(s)} 高斯")
+            logger.info(
+                f"mock 泼溅: {sess.session_id} ({sess.kind}, {len(sess.images)} 图) → {len(s)} 高斯"
+            )
             scenes.append(s)
-            ancestry.append({
-                "kind": "synthetic-session",
-                "session_id": sess.session_id,
-                "source_frame": reg.pose_frame.model_dump(mode="json"),
-                "result_frame_id": s.frame_id,
-                "units": s.units,
-                "applied_transform_ids": list(s.applied_transform_ids),
-                "applied_transform_paths": [
-                    list(path) for path in s.applied_transform_paths
-                ],
-            })
+            ancestry.append(
+                {
+                    "kind": "synthetic-session",
+                    "session_id": sess.session_id,
+                    "source_frame": reg.pose_frame.model_dump(mode="json"),
+                    "result_frame_id": s.frame_id,
+                    "units": s.units,
+                    "applied_transform_ids": list(s.applied_transform_ids),
+                    "applied_transform_paths": [list(path) for path in s.applied_transform_paths],
+                }
+            )
     # 3. Merge only after every scene reports the same target frame/units.
     merged = GaussianScene.merge(scenes, dedup_voxel=dedup_voxel)
     _validate_scene_history(
@@ -727,17 +820,16 @@ def reconstruct(photos_dir: str | Path = "photos",
         transform_definitions,
         label="merged scene",
     )
-    logger.info(f"拼接完成: {len(scenes)} 个会话场景 → {len(merged)} 高斯 "
-                f"(dedup_voxel={dedup_voxel} {reg.target_frame.units.value})")
+    logger.info(
+        f"拼接完成: {len(scenes)} 个会话场景 → {len(merged)} 高斯 "
+        f"(dedup_voxel={dedup_voxel} {reg.target_frame.units.value})"
+    )
 
     # 4. 可变清晰: 基底场景区域替换 (补拍的新重建覆盖旧区域)
     if base_scene:
         base_path = Path(base_scene)
         base = GaussianScene.load_ply(base_path)
-        if (
-            base.frame_id != reg.target_frame.frame_id
-            or base.units != reg.target_frame.units.value
-        ):
+        if base.frame_id != reg.target_frame.frame_id or base.units != reg.target_frame.units.value:
             raise ValueError(
                 "base scene coordinate contract does not match reconstruction "
                 f"target: {base.frame_id}/{base.units} vs "
@@ -749,17 +841,18 @@ def reconstruct(photos_dir: str | Path = "photos",
         base_provenance_frames, base_source_frame = _base_scene_frame_contracts(
             base, reg.target_frame
         )
-        ancestry.insert(0, {
-            "kind": "base-scene",
-            "artifact_sha256": _sha256_file(base_path),
-            "source_frame": base_source_frame.model_dump(mode="json"),
-            "result_frame_id": base.frame_id,
-            "units": base.units,
-            "applied_transform_ids": base_transform_ids,
-            "applied_transform_paths": [
-                list(path) for path in base.applied_transform_paths
-            ],
-        })
+        ancestry.insert(
+            0,
+            {
+                "kind": "base-scene",
+                "artifact_sha256": _sha256_file(base_path),
+                "source_frame": base_source_frame.model_dump(mode="json"),
+                "result_frame_id": base.frame_id,
+                "units": base.units,
+                "applied_transform_ids": base_transform_ids,
+                "applied_transform_paths": [list(path) for path in base.applied_transform_paths],
+            },
+        )
         before = len(base)
         merged = base.replace_region(merged, margin=replace_margin)
         _validate_scene_history(
@@ -774,13 +867,13 @@ def reconstruct(photos_dir: str | Path = "photos",
         provenance_frames.append(reg.world_frame)
     provenance_frames.extend(item.source_frame for item in (splat_map or []))
     provenance_frames.extend(base_provenance_frames)
-    provenance_frames = list({
-        json.dumps(frame.model_dump(mode="json"), sort_keys=True): frame
-        for frame in provenance_frames
-    }.values())
-    merged.provenance_frames = [
-        frame.model_dump(mode="json") for frame in provenance_frames
-    ]
+    provenance_frames = list(
+        {
+            json.dumps(frame.model_dump(mode="json"), sort_keys=True): frame
+            for frame in provenance_frames
+        }.values()
+    )
+    merged.provenance_frames = [frame.model_dump(mode="json") for frame in provenance_frames]
 
     # 5. 导出: 全量 3dgs ply + LOD simple ply + manifest
     audit_full_path = out_dir / "scene_full.ply"
@@ -812,35 +905,33 @@ def reconstruct(photos_dir: str | Path = "photos",
 
     lo, hi = merged.bounds()
     applied_transform_ids = list(merged.applied_transform_ids)
-    applied_transform_paths = [
-        list(path) for path in merged.applied_transform_paths
-    ]
+    applied_transform_paths = [list(path) for path in merged.applied_transform_paths]
     applied_transforms = [
         transform_definitions[transform_id] for transform_id in applied_transform_ids
     ]
     applied_set = set(applied_transform_ids)
     for ancestor in ancestry:
         ancestor["applied_transform_paths"] = [
-            [
-                transform_id
-                for transform_id in path
-                if transform_id in applied_set
-            ]
+            [transform_id for transform_id in path if transform_id in applied_set]
             for path in ancestor["applied_transform_paths"]
         ]
         ancestor["applied_transform_paths"] = [
             path for path in ancestor["applied_transform_paths"] if path
         ]
-        ancestor["applied_transform_ids"] = list(dict.fromkeys(
+        ancestor["applied_transform_ids"] = list(
+            dict.fromkeys(
+                transform_id
+                for path in ancestor["applied_transform_paths"]
+                for transform_id in path
+            )
+        )
+    ancestry_transform_ids = list(
+        dict.fromkeys(
             transform_id
-            for path in ancestor["applied_transform_paths"]
-            for transform_id in path
-        ))
-    ancestry_transform_ids = list(dict.fromkeys(
-        transform_id
-        for ancestor in ancestry
-        for transform_id in ancestor["applied_transform_ids"]
-    ))
+            for ancestor in ancestry
+            for transform_id in ancestor["applied_transform_ids"]
+        )
+    )
     if ancestry_transform_ids != applied_transform_ids:
         raise RuntimeError(
             "manifest ancestry does not match final applied transform history: "
@@ -854,27 +945,25 @@ def reconstruct(photos_dir: str | Path = "photos",
         }
 
     registration_chain = list(reg.transform_chain)
-    catalog_ids = list(dict.fromkeys([
-        *(transform.transform_id for transform in registration_chain),
-        *applied_transform_ids,
-    ]))
+    catalog_ids = list(
+        dict.fromkeys(
+            [
+                *(transform.transform_id for transform in registration_chain),
+                *applied_transform_ids,
+            ]
+        )
+    )
     transform_catalog = [
-        transform_record(transform_definitions[transform_id])
-        for transform_id in catalog_ids
+        transform_record(transform_definitions[transform_id]) for transform_id in catalog_ids
     ]
     for ancestor in ancestry:
         ancestor["transform_paths"] = [
-            [
-                transform_record(transform_definitions[transform_id])
-                for transform_id in path
-            ]
+            [transform_record(transform_definitions[transform_id]) for transform_id in path]
             for path in ancestor["applied_transform_paths"]
         ]
         if len(ancestor["transform_paths"]) <= 1:
             ancestor["transform_path"] = (
-                ancestor["transform_paths"][0]
-                if ancestor["transform_paths"]
-                else []
+                ancestor["transform_paths"][0] if ancestor["transform_paths"] else []
             )
         else:
             ancestor.pop("transform_path", None)
@@ -903,8 +992,11 @@ def reconstruct(photos_dir: str | Path = "photos",
     chunks_artifact = None
     if chunk_size_m is not None:
         from pipeline.spatial_chunk import MANIFEST_NAME, partition_scene_to_chunks
+
         chunk_manifest = partition_scene_to_chunks(
-            merged, web_dir / "chunks", chunk_size_m=chunk_size_m,
+            merged,
+            web_dir / "chunks",
+            chunk_size_m=chunk_size_m,
             # 本次重建挣得的判定随分块产物走: 免手工 --recon-manifest 链接 (忘了就丢信任标签)。
             # 分块只搬运判定, 从不产生判定, 更不因分块升级。
             source_provenance={
@@ -952,17 +1044,15 @@ def reconstruct(photos_dir: str | Path = "photos",
             **({"chunks": chunks_artifact} if chunks_artifact else {}),
         },
         "sessions": [
-            {"session_id": s.session_id, "kind": s.kind,
-             "n_images": len(s.images)} for s in reg.sessions
+            {"session_id": s.session_id, "kind": s.kind, "n_images": len(s.images)}
+            for s in reg.sessions
         ],
         "coordinate_contract": {
             "pose_frame": reg.pose_frame.model_dump(mode="json"),
             "target_frame": reg.target_frame.model_dump(mode="json"),
             "alignment_status": reg.alignment_status.value,
             "metric_evidence": metric_evidence,
-            "transform_chain": [
-                transform_record(transform) for transform in registration_chain
-            ],
+            "transform_chain": [transform_record(transform) for transform in registration_chain],
             "transform_catalog": transform_catalog,
             "applied_transform_ids": applied_transform_ids,
             "applied_transform_paths": applied_transform_paths,
@@ -970,9 +1060,7 @@ def reconstruct(photos_dir: str | Path = "photos",
         },
         "provenance": {
             "requested_reconstruction_engine": engine,
-            "actual_reconstruction_engine": (
-                "mock-proxy" if engine == "mock" else "imported-3dgs"
-            ),
+            "actual_reconstruction_engine": ("mock-proxy" if engine == "mock" else "imported-3dgs"),
             "requested_registration_engine": reg_engine,
             "actual_registration_engine": reg.engine,
             "synthetic": is_synthetic,
@@ -997,10 +1085,11 @@ def reconstruct(photos_dir: str | Path = "photos",
     # SHA-256 it already carries. It attests the manifest itself is intact.
     manifest_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     (web_dir / "recon_manifest.sha256").write_text(
-        f"{manifest_digest}  recon_manifest.json\n",
-        encoding="utf-8", newline="\n")
-    logger.info(f"重建完成: {len(merged)} 高斯 | LOD {list(lod_files)} | "
-                f"manifest → {manifest_path}")
+        f"{manifest_digest}  recon_manifest.json\n", encoding="utf-8", newline="\n"
+    )
+    logger.info(
+        f"重建完成: {len(merged)} 高斯 | LOD {list(lod_files)} | manifest → {manifest_path}"
+    )
     return manifest
 
 
@@ -1017,9 +1106,11 @@ def _parse_splat_args(pairs: list[str]) -> list[SplatInput]:
         spec_path = Path(pair)
         if spec_path.is_file() and spec_path.suffix.lower() == ".json":
             try:
-                raw = json.loads(spec_path.read_text(encoding="utf-8"))
+                raw = json.loads(
+                    _read_stable_bytes(spec_path, label="splat JSON spec").decode("utf-8")
+                )
             except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid --splat JSON spec {spec_path}: {exc}") from exc
+                raise ValueError("invalid --splat JSON spec: JSON decode error") from exc
             records = raw if isinstance(raw, list) else [raw]
             if not records or any(not isinstance(record, dict) for record in records):
                 raise ValueError("--splat JSON spec must contain an object or object list")
@@ -1032,65 +1123,114 @@ def _parse_splat_args(pairs: list[str]) -> list[SplatInput]:
             )
         declaration, path = pair.split("=", 1)
         session_id, frame_id = declaration.split("@", 1)
-        out.append(SplatInput(
-            session_id=session_id,
-            path=path,
-            frame_id=frame_id,
-        ))
+        out.append(
+            SplatInput(
+                session_id=session_id,
+                path=path,
+                frame_id=frame_id,
+            )
+        )
     return out
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="端到端重建: 照片+视频 → 统一坐标系 → 高斯泼溅 → LOD",
-        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
     parser.add_argument("--photos", default="photos", help="输入图像目录")
     parser.add_argument("--out", default=DEFAULT_OUT_DIR, help="重建输出目录")
     parser.add_argument("--web", default=DEFAULT_WEB_DIR, help="Web 数据输出目录")
-    parser.add_argument("--engine", default="mock", choices=["mock", "import"],
-                        help="泼溅引擎 (mock=本机代理, import=导入云端训练 ply)")
-    parser.add_argument("--reg-engine", default="auto",
-                        choices=["auto", "colmap", "mock"], help="配准引擎")
-    parser.add_argument("--splat", action="append", default=[],
-                        metavar="SPEC.json",
-                        help=("完整 SplatInput JSON 契约（推荐，可多次）；旧 "
-                              "SESSION@FRAME=PLY 仅保留为 unknown-frame 兼容入口"))
-    parser.add_argument("--base-scene", default=None,
-                        help="基底场景 ply (新重建将替换其对应区域 → 变清晰)")
-    parser.add_argument("--dedup-voxel", type=float, default=0.10,
-                        help="拼接去重体素 (米制 target frame；非米制仅允许 0)")
-    parser.add_argument("--replace-margin", type=float, default=2.0,
-                        help="区域替换外扩边距 (米制 target frame；非米制仅允许 0)")
-    parser.add_argument("--registration", default=None, metavar="ALIGNED.json",
-                        help=("预对齐 registration.json (如 pipeline.alignment 产出的 "
-                              "world-enu ALIGNED 结果)；提供时跳过重新配准"))
-    parser.add_argument("--colmap-gpu", action="store_true",
-                        help=("COLMAP SIFT 用 GPU (默认 CPU，无 NVIDIA/headless 更可靠)"))
-    parser.add_argument("--chunk-size-m", type=float, default=None, metavar="METERS",
-                        help=("额外产出可流式空间分块 (web/chunks/, XY 网格边长米数)：大重建 "
-                              "(上百万高斯) 让 viewer 只载相机附近的块才漫游得动；本次重建的 "
-                              "geometry_usability 自动随分块产物走。缺省不分块"))
+    parser.add_argument(
+        "--engine",
+        default="mock",
+        choices=["mock", "import"],
+        help="泼溅引擎 (mock=本机代理, import=导入云端训练 ply)",
+    )
+    parser.add_argument(
+        "--reg-engine", default="auto", choices=["auto", "colmap", "mock"], help="配准引擎"
+    )
+    parser.add_argument(
+        "--splat",
+        action="append",
+        default=[],
+        metavar="SPEC.json",
+        help=(
+            "完整 SplatInput JSON 契约（推荐，可多次）；旧 "
+            "SESSION@FRAME=PLY 仅保留为 unknown-frame 兼容入口"
+        ),
+    )
+    parser.add_argument(
+        "--base-scene", default=None, help="基底场景 ply (新重建将替换其对应区域 → 变清晰)"
+    )
+    parser.add_argument(
+        "--dedup-voxel",
+        type=float,
+        default=0.10,
+        help="拼接去重体素 (米制 target frame；非米制仅允许 0)",
+    )
+    parser.add_argument(
+        "--replace-margin",
+        type=float,
+        default=2.0,
+        help="区域替换外扩边距 (米制 target frame；非米制仅允许 0)",
+    )
+    parser.add_argument(
+        "--registration",
+        default=None,
+        metavar="ALIGNED.json",
+        help=(
+            "预对齐 registration.json (如 pipeline.alignment 产出的 "
+            "world-enu ALIGNED 结果)；提供时跳过重新配准"
+        ),
+    )
+    parser.add_argument(
+        "--colmap-gpu",
+        action="store_true",
+        help=("COLMAP SIFT 用 GPU (默认 CPU，无 NVIDIA/headless 更可靠)"),
+    )
+    parser.add_argument(
+        "--chunk-size-m",
+        type=float,
+        default=None,
+        metavar="METERS",
+        help=(
+            "额外产出可流式空间分块 (web/chunks/, XY 网格边长米数)：大重建 "
+            "(上百万高斯) 让 viewer 只载相机附近的块才漫游得动；本次重建的 "
+            "geometry_usability 自动随分块产物走。缺省不分块"
+        ),
+    )
     args = parser.parse_args()
 
     registration = None
     if args.registration:
         registration = RegistrationResult.model_validate_json(
-            Path(args.registration).read_text(encoding="utf-8"))
+            _read_stable_bytes(Path(args.registration), label="registration JSON")
+        )
 
     manifest = reconstruct(
-        photos_dir=args.photos, out_dir=args.out, web_dir=args.web,
-        engine=args.engine, reg_engine=args.reg_engine,
+        photos_dir=args.photos,
+        out_dir=args.out,
+        web_dir=args.web,
+        engine=args.engine,
+        reg_engine=args.reg_engine,
         splat_map=_parse_splat_args(args.splat) or None,
-        base_scene=args.base_scene, dedup_voxel=args.dedup_voxel,
-        replace_margin=args.replace_margin, registration=registration,
-        colmap_use_gpu=args.colmap_gpu, chunk_size_m=args.chunk_size_m,
+        base_scene=args.base_scene,
+        dedup_voxel=args.dedup_voxel,
+        replace_margin=args.replace_margin,
+        registration=registration,
+        colmap_use_gpu=args.colmap_gpu,
+        chunk_size_m=args.chunk_size_m,
     )
     print(f"\n重建完成: {manifest['gaussian_count']} 高斯")
     print(f"  LOD: {manifest['lod']}")
     if "chunks" in manifest["artifacts"]:
         chunks = manifest["artifacts"]["chunks"]
-        print(f"  可流式分块: {chunks['total_chunks']} 块 "
-              f"({chunks['chunk_size_m']:g}m 网格) → {chunks['manifest']}")
+        print(
+            f"  可流式分块: {chunks['total_chunks']} 块 "
+            f"({chunks['chunk_size_m']:g}m 网格) → {chunks['manifest']}"
+        )
     print("  查看: make serve  # http://127.0.0.1:8000/web/studio/")
 
 

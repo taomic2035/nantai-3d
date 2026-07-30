@@ -1,4 +1,5 @@
 """端到端重建: mock 全链路 / 导入引擎 / 变清晰 (区域替换) / 视频抽帧"""
+
 import hashlib
 import json
 import os
@@ -54,9 +55,13 @@ def _arbitrary_source_frame() -> CoordinateFrame:
 
 class TestMockPipeline:
     def test_end_to_end(self, photos_dir, tmp_path):
-        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                        web_dir=tmp_path / "web", engine="mock",
-                        reg_engine="mock")
+        m = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="mock",
+            reg_engine="mock",
+        )
         assert m["gaussian_count"] > 1000
         assert m["registration_engine"] == "mock"
         assert set(m["lod"]) == {"0", "1", "2"}
@@ -68,8 +73,7 @@ class TestMockPipeline:
         assert (tmp_path / "recon" / "scene_full.ply").exists()
         for f in m["lod"].values():
             assert (tmp_path / "web" / f).exists()
-        manifest_on_disk = json.loads(
-            (tmp_path / "web" / "recon_manifest.json").read_text())
+        manifest_on_disk = json.loads((tmp_path / "web" / "recon_manifest.json").read_text())
         assert manifest_on_disk["gaussian_count"] == m["gaussian_count"]
 
     def test_manifest_artifacts_are_web_relative_and_integrity_described(
@@ -107,7 +111,10 @@ class TestMockPipeline:
         assert full["fidelity"] == "full-3dgs"
         assert full["sh_degree"] == 0
         assert {
-            "f_dc_0", "opacity", "scale_0", "rot_0",
+            "f_dc_0",
+            "opacity",
+            "scale_0",
+            "rot_0",
         }.issubset(full["attributes"])
         for level, path in manifest["lod"].items():
             preview = artifacts["lod"][level]
@@ -120,14 +127,18 @@ class TestMockPipeline:
         # The manifest is the coordinate/provenance trust root; it must be
         # byte-identical across OSes (no Windows CRLF) so its digest is stable.
         web_dir = tmp_path / "web"
-        reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                    web_dir=web_dir, engine="mock", reg_engine="mock")
+        reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=web_dir,
+            engine="mock",
+            reg_engine="mock",
+        )
         raw = (web_dir / "recon_manifest.json").read_bytes()
         assert b"\r\n" not in raw
         assert raw.endswith(b"\n")
         # Sidecar digest attests the manifest bytes (sha256sum-compatible format).
-        digest, name = (web_dir / "recon_manifest.sha256").read_text(
-            encoding="utf-8").split()
+        digest, name = (web_dir / "recon_manifest.sha256").read_text(encoding="utf-8").split()
         assert name == "recon_manifest.json"
         assert digest == hashlib.sha256(raw).hexdigest()
 
@@ -142,17 +153,18 @@ class TestMockPipeline:
         reg = register(photos_dir, tmp_path / "reg.json", engine="mock")
         origin = GeoAnchor(lat=26.0, lon=119.0, alt=50.0)
         control_points = [
-            ControlPoint(label=p.image, image=p.image,
-                         enu_xyz=tuple(float(v) for v in p.t_xyz))
+            ControlPoint(label=p.image, image=p.image, enu_xyz=tuple(float(v) for v in p.t_xyz))
             for p in reg.poses
         ]
-        aligned = align_registration(reg, control_points, geo_origin=origin,
-                                     max_rms_m=2.0)
+        aligned = align_registration(reg, control_points, geo_origin=origin, max_rms_m=2.0)
         assert aligned.alignment_status is AlignmentStatus.ALIGNED
 
         manifest = reconstruct(
-            photos_dir=photos_dir, out_dir=tmp_path / "recon",
-            web_dir=tmp_path / "web", engine="mock", registration=aligned,
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="mock",
+            registration=aligned,
         )
         contract = manifest["coordinate_contract"]
         assert contract["target_frame"]["frame_id"] == "world-enu"
@@ -163,12 +175,20 @@ class TestMockPipeline:
         assert b"\r\n" not in raw
 
     def test_deterministic_across_runs(self, photos_dir, tmp_path):
-        m1 = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "r1",
-                         web_dir=tmp_path / "w1", engine="mock",
-                         reg_engine="mock")
-        m2 = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "r2",
-                         web_dir=tmp_path / "w2", engine="mock",
-                         reg_engine="mock")
+        m1 = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "r1",
+            web_dir=tmp_path / "w1",
+            engine="mock",
+            reg_engine="mock",
+        )
+        m2 = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "r2",
+            web_dir=tmp_path / "w2",
+            engine="mock",
+            reg_engine="mock",
+        )
         assert m1["gaussian_count"] == m2["gaussian_count"]
         s1 = GaussianScene.load_ply(tmp_path / "r1" / "scene_full.ply")
         s2 = GaussianScene.load_ply(tmp_path / "r2" / "scene_full.ply")
@@ -176,24 +196,32 @@ class TestMockPipeline:
 
     def test_sessions_stitched_in_one_frame(self, photos_dir, tmp_path):
         """视频与照片两个会话拼进同一场景: 总范围应覆盖两个锚点区域"""
-        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                        web_dir=tmp_path / "web", engine="mock",
-                        reg_engine="mock")
+        m = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="mock",
+            reg_engine="mock",
+        )
         extent_x = m["bounds"]["max"][0] - m["bounds"]["min"][0]
         assert extent_x > 80  # 两会话网格间距 80m, 拼接后范围必然更大
 
     def test_lod_counts_decrease(self, photos_dir, tmp_path):
-        reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                    web_dir=tmp_path / "web", engine="mock", reg_engine="mock")
-        counts = [len(GaussianScene.load_ply(tmp_path / "web" / f"recon_lod{i}.ply"))
-                  for i in range(3)]
+        reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="mock",
+            reg_engine="mock",
+        )
+        counts = [
+            len(GaussianScene.load_ply(tmp_path / "web" / f"recon_lod{i}.ply")) for i in range(3)
+        ]
         assert counts[0] < counts[1] < counts[2]
 
 
 class TestImportEngine:
-    def test_reconstruct_rejects_bare_splat_dict_at_api_boundary(
-        self, photos_dir, tmp_path
-    ):
+    def test_reconstruct_rejects_bare_splat_dict_at_api_boundary(self, photos_dir, tmp_path):
         with pytest.raises(TypeError, match="SplatInput"):
             reconstruct(
                 photos_dir=photos_dir,
@@ -204,9 +232,7 @@ class TestImportEngine:
                 splat_map={"video_vid_A": "scene.ply"},  # type: ignore[arg-type]
             )
 
-    def test_manifest_core_bounds_keeps_framing_off_the_floaters(
-        self, photos_dir, tmp_path
-    ):
+    def test_manifest_core_bounds_keeps_framing_off_the_floaters(self, photos_dir, tmp_path):
         """viewer 的 framing.mjs 由 manifest.bounds 推导【相机/裁剪面/雾/地面网格】。
         真实 3DGS 必带漂浮物: 实测一个 Brush 实训重建 (67878 高斯) 的 bounds 是
         1328x877x720m, 而 Z 向 90% 分位仅 52.6m —— 被噪声撑大 13 倍。照 bounds 取景,
@@ -216,25 +242,34 @@ class TestImportEngine:
         core_bounds 是【附加】取景提示, 且覆盖率是【实测】而非从分位数推算。
         """
         rng = np.random.default_rng(5)
-        core = np.column_stack([rng.uniform(0, 20, 1500), rng.uniform(0, 20, 1500),
-                                rng.uniform(0, 6, 1500)])
+        core = np.column_stack(
+            [rng.uniform(0, 20, 1500), rng.uniform(0, 20, 1500), rng.uniform(0, 6, 1500)]
+        )
         floaters = np.array([[300.0, 260.0, 200.0], [-280.0, -240.0, -190.0]])
         xyz = np.vstack([core, floaters])
         ext_ply = tmp_path / "floaty.ply"
         GaussianScene(xyz, np.full((len(xyz), 3), 0.5)).save_ply(ext_ply, flavor="3dgs")
 
-        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                        web_dir=tmp_path / "web", engine="import", reg_engine="mock",
-                        splat_map=[SplatInput(session_id="video_vid_A",
-                                              path=str(ext_ply),
-                                              source_frame=_mock_source_frame())],
-                        dedup_voxel=0.0)
+        m = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            reg_engine="mock",
+            splat_map=[
+                SplatInput(
+                    session_id="video_vid_A", path=str(ext_ply), source_frame=_mock_source_frame()
+                )
+            ],
+            dedup_voxel=0.0,
+        )
 
         # bounds 仍是全量真相: 漂浮物在内, 绝不因为难看就砍掉
         assert m["bounds"]["max"][2] > 150.0
         cb = m["core_bounds"]
-        assert np.array(cb["max"])[2] - np.array(cb["min"])[2] < 20.0, \
+        assert np.array(cb["max"])[2] - np.array(cb["min"])[2] < 20.0, (
             "core_bounds 须把 Z 向漂浮物排除在取景之外"
+        )
 
         # 覆盖率是实测数, 不是拿 axis_percentile 冒充 (三轴联合覆盖 < 单轴分位)
         lo, hi = np.array(cb["min"]), np.array(cb["max"])
@@ -245,25 +280,28 @@ class TestImportEngine:
 
     def test_import_aligns_by_session(self, photos_dir, tmp_path):
         rng = np.random.default_rng(2)
-        ext = GaussianScene(rng.uniform(0, 10, (800, 3)),
-                            rng.uniform(0, 1, (800, 3)))
+        ext = GaussianScene(rng.uniform(0, 10, (800, 3)), rng.uniform(0, 1, (800, 3)))
         ext_ply = tmp_path / "ext.ply"
         ext.save_ply(ext_ply, flavor="3dgs")
 
-        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                        web_dir=tmp_path / "web", engine="import",
-                        reg_engine="mock",
-                        splat_map=[SplatInput(
-                            session_id="video_vid_A",
-                            path=str(ext_ply),
-                            source_frame=_mock_source_frame(),
-                        )],
-                        dedup_voxel=0.0)
+        m = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            reg_engine="mock",
+            splat_map=[
+                SplatInput(
+                    session_id="video_vid_A",
+                    path=str(ext_ply),
+                    source_frame=_mock_source_frame(),
+                )
+            ],
+            dedup_voxel=0.0,
+        )
         assert m["gaussian_count"] == 800
 
-    def test_manifest_preserves_lossy_edits_from_imported_ply(
-        self, photos_dir, tmp_path
-    ):
+    def test_manifest_preserves_lossy_edits_from_imported_ply(self, photos_dir, tmp_path):
         edit = {
             "operation": "outlier_trim",
             "lossy": True,
@@ -300,9 +338,7 @@ class TestImportEngine:
         )
 
         assert manifest["lossy_edits"] == [edit]
-        persisted = json.loads(
-            (tmp_path / "web/recon_manifest.json").read_text(encoding="utf-8")
-        )
+        persisted = json.loads((tmp_path / "web/recon_manifest.json").read_text(encoding="utf-8"))
         assert persisted["lossy_edits"] == [edit]
 
     def test_import_into_aligned_world_is_metric_aligned(self, photos_dir, tmp_path):
@@ -321,24 +357,39 @@ class TestImportEngine:
             TransformMethod,
         )
 
-        centres = {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
-                   "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
-        session = CaptureSession(session_id="s0", kind="photo_batch",
-                                 source="photos", images=list(centres))
+        centres = {
+            "a.jpg": (0.0, 0.0, 0.0),
+            "b.jpg": (10.0, 0.0, 0.0),
+            "c.jpg": (0.0, 10.0, 1.0),
+            "d.jpg": (3.0, 4.0, 8.0),
+        }
+        session = CaptureSession(
+            session_id="s0", kind="photo_batch", source="photos", images=list(centres)
+        )
         reg = RegistrationResult(
-            schema_version=2, engine="colmap",
-            pose_frame=_arbitrary_source_frame(), world_frame=None,
-            alignment_status=AlignmentStatus.UNALIGNED, sessions=[session],
-            poses=[CameraPose(image=img, session_id="s0", quat_wxyz=[1, 0, 0, 0],
-                              t_xyz=list(xyz),
-                              intrinsics=CameraIntrinsics.from_fov(640, 480))
-                   for img, xyz in centres.items()])
+            schema_version=2,
+            engine="colmap",
+            pose_frame=_arbitrary_source_frame(),
+            world_frame=None,
+            alignment_status=AlignmentStatus.UNALIGNED,
+            sessions=[session],
+            poses=[
+                CameraPose(
+                    image=img,
+                    session_id="s0",
+                    quat_wxyz=[1, 0, 0, 0],
+                    t_xyz=list(xyz),
+                    intrinsics=CameraIntrinsics.from_fov(640, 480),
+                )
+                for img, xyz in centres.items()
+            ],
+        )
         origin = GeoAnchor(lat=26.0, lon=119.0, alt=50.0)
         aligned = align_registration(
             reg,
-            [ControlPoint(label=img, image=img, enu_xyz=xyz)
-             for img, xyz in centres.items()],
-            geo_origin=origin, max_rms_m=2.0,
+            [ControlPoint(label=img, image=img, enu_xyz=xyz) for img, xyz in centres.items()],
+            geo_origin=origin,
+            max_rms_m=2.0,
         )
 
         rng = np.random.default_rng(11)
@@ -346,23 +397,39 @@ class TestImportEngine:
         ext_ply = tmp_path / "trained.ply"
         ext.save_ply(ext_ply, flavor="3dgs")
         trainer_frame = CoordinateFrame(
-            frame_id="trainer-local", handedness=Handedness.RIGHT,
-            axes=AxisConvention.LOCAL_Z_UP, units=CoordinateUnits.METERS,
-            metric_status=MetricStatus.METRIC, geo_aligned=GeoAlignment.UNALIGNED,
-            provenance=FrameProvenance.MEASURED, evidence=["trainer export contract"])
+            frame_id="trainer-local",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.MEASURED,
+            evidence=["trainer export contract"],
+        )
         transform = FrameTransform(
-            source_frame="trainer-local", target_frame="world-enu",
-            sim3=Sim3(scale=1.0, quat_wxyz=[1.0, 0.0, 0.0, 0.0],
-                      t_xyz=[0.0, 0.0, 0.0]),
-            method=TransformMethod.EXTERNAL_SIM3, evidence=["control-point fit"])
+            source_frame="trainer-local",
+            target_frame="world-enu",
+            sim3=Sim3(scale=1.0, quat_wxyz=[1.0, 0.0, 0.0, 0.0], t_xyz=[0.0, 0.0, 0.0]),
+            method=TransformMethod.EXTERNAL_SIM3,
+            evidence=["control-point fit"],
+        )
 
         m = reconstruct(
-            photos_dir=photos_dir, out_dir=tmp_path / "recon",
-            web_dir=tmp_path / "web", engine="import", registration=aligned,
-            splat_map=[SplatInput(session_id=reg.sessions[0].session_id,
-                                  path=str(ext_ply), source_frame=trainer_frame,
-                                  transform=transform)],
-            dedup_voxel=0.0)
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            registration=aligned,
+            splat_map=[
+                SplatInput(
+                    session_id=reg.sessions[0].session_id,
+                    path=str(ext_ply),
+                    source_frame=trainer_frame,
+                    transform=transform,
+                )
+            ],
+            dedup_voxel=0.0,
+        )
 
         contract = m["coordinate_contract"]
         assert contract["target_frame"]["frame_id"] == "world-enu"
@@ -393,8 +460,7 @@ class TestImportEngine:
         PlyData([pd["vertex"]], text=False, byte_order="<").write(str(ply))
 
         def run(*args):
-            proc = subprocess.run([sys.executable, *args], cwd=root,
-                                  capture_output=True, text=True)
+            proc = subprocess.run([sys.executable, *args], cwd=root, capture_output=True, text=True)
             assert proc.returncode == 0, proc.stderr
             return proc
 
@@ -402,12 +468,20 @@ class TestImportEngine:
         run("scripts/prepare_import.py", str(ply), "--out-dir", str(tmp_path / "recon"))
 
         reg = RegistrationResult.model_validate_json(
-            (tmp_path / "recon" / "registration.json").read_text(encoding="utf-8"))
+            (tmp_path / "recon" / "registration.json").read_text(encoding="utf-8")
+        )
         splat = SplatInput.model_validate_json(
-            (tmp_path / "recon" / "splat-input.json").read_text(encoding="utf-8"))
+            (tmp_path / "recon" / "splat-input.json").read_text(encoding="utf-8")
+        )
         manifest = reconstruct(
-            photos_dir=tmp_path, out_dir=tmp_path / "out", web_dir=tmp_path / "web",
-            engine="import", registration=reg, splat_map=[splat], dedup_voxel=0)
+            photos_dir=tmp_path,
+            out_dir=tmp_path / "out",
+            web_dir=tmp_path / "web",
+            engine="import",
+            registration=reg,
+            splat_map=[splat],
+            dedup_voxel=0,
+        )
 
         assert manifest["gaussian_count"] == 300
         assert manifest["provenance"]["synthetic"] is False
@@ -418,9 +492,14 @@ class TestImportEngine:
         chunks.json, chunks.json 带本次重建挣得的 geometry_usability —— 无需手工传
         --recon-manifest, 杜绝忘记而丢信任标签。分块无损 (总点数守恒)。"""
         web = tmp_path / "web"
-        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                        web_dir=web, engine="mock", reg_engine="mock",
-                        chunk_size_m=50.0)
+        m = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=web,
+            engine="mock",
+            reg_engine="mock",
+            chunk_size_m=50.0,
+        )
         ref = m["artifacts"]["chunks"]
         assert ref["chunk_size_m"] == 50.0
         assert ref["total_chunks"] >= 1
@@ -429,22 +508,27 @@ class TestImportEngine:
         assert chunks["total_points"] == m["gaussian_count"], "分块须无损"
         assert ref["total_chunks"] == chunks["total_chunks"]
         # provenance 自动随行, 且与本次重建判定一致 (分块绝不升级信任)
-        assert (chunks["source"]["geometry_usability"]
-                == m["provenance"]["geometry_usability"])
+        assert chunks["source"]["geometry_usability"] == m["provenance"]["geometry_usability"]
         assert chunks["source"]["full_3dgs"] is True
         assert chunks["source"]["render_fidelity"] == "full-3dgs"
-        assert (web / ref["manifest"]).parent.joinpath(
-            chunks["chunks"][0]["ply_file"]).is_file()
+        assert (web / ref["manifest"]).parent.joinpath(chunks["chunks"][0]["ply_file"]).is_file()
 
     def test_no_chunk_size_produces_no_chunks(self, photos_dir, tmp_path):
         """默认不分块: 不写 chunks 产物, manifest 不含该引用 (additive, 行为不变)。"""
-        m = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "recon",
-                        web_dir=tmp_path / "web", engine="mock", reg_engine="mock")
+        m = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="mock",
+            reg_engine="mock",
+        )
         assert "chunks" not in m["artifacts"]
         assert not (tmp_path / "web" / "chunks").exists()
 
     def test_sh_reconstruction_metric_align_through_rotation_without_flatten(
-        self, photos_dir, tmp_path,
+        self,
+        photos_dir,
+        tmp_path,
     ):
         # End-to-end real-data-workflow.md step 3: a REAL 3DGS with higher-order SH,
         # imported through a NON-identity-rotation Sim3 into an ENU-aligned world.
@@ -461,57 +545,92 @@ class TestImportEngine:
             TransformMethod,
         )
 
-        centres = {"a.jpg": (0.0, 0.0, 0.0), "b.jpg": (10.0, 0.0, 0.0),
-                   "c.jpg": (0.0, 10.0, 1.0), "d.jpg": (3.0, 4.0, 8.0)}
-        session = CaptureSession(session_id="s0", kind="photo_batch",
-                                 source="photos", images=list(centres))
+        centres = {
+            "a.jpg": (0.0, 0.0, 0.0),
+            "b.jpg": (10.0, 0.0, 0.0),
+            "c.jpg": (0.0, 10.0, 1.0),
+            "d.jpg": (3.0, 4.0, 8.0),
+        }
+        session = CaptureSession(
+            session_id="s0", kind="photo_batch", source="photos", images=list(centres)
+        )
         reg = RegistrationResult(
-            schema_version=2, engine="colmap",
-            pose_frame=_arbitrary_source_frame(), world_frame=None,
-            alignment_status=AlignmentStatus.UNALIGNED, sessions=[session],
-            poses=[CameraPose(image=img, session_id="s0", quat_wxyz=[1, 0, 0, 0],
-                              t_xyz=list(xyz),
-                              intrinsics=CameraIntrinsics.from_fov(640, 480))
-                   for img, xyz in centres.items()])
+            schema_version=2,
+            engine="colmap",
+            pose_frame=_arbitrary_source_frame(),
+            world_frame=None,
+            alignment_status=AlignmentStatus.UNALIGNED,
+            sessions=[session],
+            poses=[
+                CameraPose(
+                    image=img,
+                    session_id="s0",
+                    quat_wxyz=[1, 0, 0, 0],
+                    t_xyz=list(xyz),
+                    intrinsics=CameraIntrinsics.from_fov(640, 480),
+                )
+                for img, xyz in centres.items()
+            ],
+        )
         aligned = align_registration(
             reg,
-            [ControlPoint(label=img, image=img, enu_xyz=xyz)
-             for img, xyz in centres.items()],
-            geo_origin=GeoAnchor(lat=26.0, lon=119.0, alt=50.0), max_rms_m=2.0,
+            [ControlPoint(label=img, image=img, enu_xyz=xyz) for img, xyz in centres.items()],
+            geo_origin=GeoAnchor(lat=26.0, lon=119.0, alt=50.0),
+            max_rms_m=2.0,
         )
 
         rng = np.random.default_rng(11)
         n = 600
-        sh_scene = GaussianScene(rng.uniform(0, 10, (n, 3)), rng.uniform(0, 1, (n, 3)),
-                                 sh_rest=rng.uniform(-0.2, 0.2, (n, 9)))  # degree 1 SH
+        sh_scene = GaussianScene(
+            rng.uniform(0, 10, (n, 3)),
+            rng.uniform(0, 1, (n, 3)),
+            sh_rest=rng.uniform(-0.2, 0.2, (n, 9)),
+        )  # degree 1 SH
         assert sh_scene.sh_degree == 1
         trainer_frame = CoordinateFrame(
-            frame_id="trainer-local", handedness=Handedness.RIGHT,
-            axes=AxisConvention.LOCAL_Z_UP, units=CoordinateUnits.METERS,
-            metric_status=MetricStatus.METRIC, geo_aligned=GeoAlignment.UNALIGNED,
-            provenance=FrameProvenance.MEASURED, evidence=["trainer export contract"])
+            frame_id="trainer-local",
+            handedness=Handedness.RIGHT,
+            axes=AxisConvention.LOCAL_Z_UP,
+            units=CoordinateUnits.METERS,
+            metric_status=MetricStatus.METRIC,
+            geo_aligned=GeoAlignment.UNALIGNED,
+            provenance=FrameProvenance.MEASURED,
+            evidence=["trainer export contract"],
+        )
         half = np.radians(15)  # 非恒等旋转 (30° 绕 Z), 模拟真实 sfm-local→ENU 对齐
         transform = FrameTransform(
-            source_frame="trainer-local", target_frame="world-enu",
-            sim3=Sim3(scale=1.0, quat_wxyz=[np.cos(half), 0.0, 0.0, np.sin(half)],
-                      t_xyz=[0.0, 0.0, 0.0]),
-            method=TransformMethod.EXTERNAL_SIM3, evidence=["control-point fit"])
+            source_frame="trainer-local",
+            target_frame="world-enu",
+            sim3=Sim3(
+                scale=1.0, quat_wxyz=[np.cos(half), 0.0, 0.0, np.sin(half)], t_xyz=[0.0, 0.0, 0.0]
+            ),
+            method=TransformMethod.EXTERNAL_SIM3,
+            evidence=["control-point fit"],
+        )
 
         ply = tmp_path / "trained.ply"
         sh_scene.save_ply(ply, flavor="3dgs")
         m = reconstruct(
-            photos_dir=photos_dir, out_dir=tmp_path / "recon",
-            web_dir=tmp_path / "web", engine="import", registration=aligned,
-            splat_map=[SplatInput(session_id="s0", path=str(ply),
-                                  source_frame=trainer_frame, transform=transform)],
-            dedup_voxel=0.0)
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "recon",
+            web_dir=tmp_path / "web",
+            engine="import",
+            registration=aligned,
+            splat_map=[
+                SplatInput(
+                    session_id="s0", path=str(ply), source_frame=trainer_frame, transform=transform
+                )
+            ],
+            dedup_voxel=0.0,
+        )
         # SH + 旋转 → 直接到达 metric-aligned (Wigner-D 保留视角相关颜色)
         assert m["coordinate_contract"]["alignment_status"] == "aligned"
         assert m["provenance"]["synthetic"] is False
         assert m["provenance"]["geometry_usability"] == "metric-aligned"
 
     def test_flatten_ply_sh_script_produces_rotation_safe_degree0_ply(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         # scripts/flatten_ply_sh.py drops f_rest_* keeping DC (view-independent
         # base colour). SH rotation (Wigner-D) is now implemented, so flatten is
@@ -524,15 +643,21 @@ class TestImportEngine:
         root = Path(__file__).resolve().parent.parent
         rng = np.random.default_rng(5)
         n = 200
-        scene = GaussianScene(rng.uniform(0, 5, (n, 3)), rng.uniform(0, 1, (n, 3)),
-                              sh_rest=rng.uniform(-0.2, 0.2, (n, 9)))  # degree 1
+        scene = GaussianScene(
+            rng.uniform(0, 5, (n, 3)),
+            rng.uniform(0, 1, (n, 3)),
+            sh_rest=rng.uniform(-0.2, 0.2, (n, 9)),
+        )  # degree 1
         ply = tmp_path / "sh_trained.ply"
         scene.save_ply(ply, flavor="3dgs")
         assert GaussianScene.load_ply(ply).sh_degree == 1
 
         proc = subprocess.run(
             [sys.executable, "scripts/flatten_ply_sh.py", str(ply)],
-            cwd=root, capture_output=True, text=True)
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
         assert proc.returncode == 0, proc.stderr
 
         flat = GaussianScene.load_ply(ply)
@@ -553,27 +678,44 @@ class TestImportEngine:
         root = Path(__file__).resolve().parent.parent
         rng = np.random.default_rng(7)
         ply = tmp_path / "synthetic_trained.ply"
-        GaussianScene(
-            rng.uniform(0, 5, (60, 3)), rng.uniform(0, 1, (60, 3))
-        ).save_ply(ply, flavor="3dgs")
+        GaussianScene(rng.uniform(0, 5, (60, 3)), rng.uniform(0, 1, (60, 3))).save_ply(
+            ply, flavor="3dgs"
+        )
 
         proc = subprocess.run(
-            [sys.executable, "scripts/prepare_import.py", str(ply),
-             "--out-dir", str(tmp_path / "recon"), "--synthetic"],
-            cwd=root, capture_output=True, text=True)
+            [
+                sys.executable,
+                "scripts/prepare_import.py",
+                str(ply),
+                "--out-dir",
+                str(tmp_path / "recon"),
+                "--synthetic",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
         assert proc.returncode == 0, proc.stderr
 
         reg = RegistrationResult.model_validate_json(
-            (tmp_path / "recon" / "registration.json").read_text(encoding="utf-8"))
+            (tmp_path / "recon" / "registration.json").read_text(encoding="utf-8")
+        )
         splat = SplatInput.model_validate_json(
-            (tmp_path / "recon" / "splat-input.json").read_text(encoding="utf-8"))
+            (tmp_path / "recon" / "splat-input.json").read_text(encoding="utf-8")
+        )
         assert splat.source_frame.provenance is FrameProvenance.SYNTHETIC
         # Declaring synthetic must not smuggle in a metric upgrade.
         assert splat.source_frame.metric_status is MetricStatus.ARBITRARY
 
         manifest = reconstruct(
-            photos_dir=tmp_path, out_dir=tmp_path / "out", web_dir=tmp_path / "web",
-            engine="import", registration=reg, splat_map=[splat], dedup_voxel=0)
+            photos_dir=tmp_path,
+            out_dir=tmp_path / "out",
+            web_dir=tmp_path / "web",
+            engine="import",
+            registration=reg,
+            splat_map=[splat],
+            dedup_voxel=0,
+        )
         assert manifest["provenance"]["synthetic"] is True
         assert manifest["provenance"]["geometry_usability"] == "preview-proxy"
 
@@ -593,11 +735,13 @@ class TestImportEngine:
                 web_dir=tmp_path / "web",
                 engine="import",
                 reg_engine="mock",
-                splat_map=[SplatInput(
-                    session_id="video_vid_A",
-                    path=str(source),
-                    source_frame=_mock_source_frame(),
-                )],
+                splat_map=[
+                    SplatInput(
+                        session_id="video_vid_A",
+                        path=str(source),
+                        source_frame=_mock_source_frame(),
+                    )
+                ],
                 dedup_voxel=0,
             )
 
@@ -636,9 +780,7 @@ class TestImportEngine:
             provenance=FrameProvenance.MEASURED,
             evidence=["survey-control"],
         )
-        session = CaptureSession(
-            session_id="s0", kind="photo_batch", source="photos", images=[]
-        )
+        session = CaptureSession(session_id="s0", kind="photo_batch", source="photos", images=[])
         registration = RegistrationResult(
             engine="colmap",
             pose_frame=target_frame,
@@ -661,11 +803,13 @@ class TestImportEngine:
             web_dir=tmp_path / "web",
             engine="import",
             reg_engine="colmap",
-            splat_map=[SplatInput(
-                session_id="s0",
-                path=str(source),
-                source_frame=source_frame,
-            )],
+            splat_map=[
+                SplatInput(
+                    session_id="s0",
+                    path=str(source),
+                    source_frame=source_frame,
+                )
+            ],
             dedup_voxel=0,
         )
 
@@ -710,9 +854,7 @@ class TestImportEngine:
                 label="adversarial scene",
             )
 
-    def test_global_transform_extends_every_branch_with_topological_union(
-        self, tmp_path
-    ):
+    def test_global_transform_extends_every_branch_with_topological_union(self, tmp_path):
         transform_a = FrameTransform(
             source_frame="scan-A",
             target_frame="world",
@@ -772,9 +914,7 @@ class TestImportEngine:
         assert loaded.applied_transform_ids == scene.applied_transform_ids
         assert loaded.applied_transform_paths == scene.applied_transform_paths
 
-    def test_full_artifact_reports_high_order_sh_and_extra_attributes(
-        self, photos_dir, tmp_path
-    ):
+    def test_full_artifact_reports_high_order_sh_and_extra_attributes(self, photos_dir, tmp_path):
         scene = GaussianScene(
             [[0, 0, 0], [1, 2, 3]],
             [[0.2, 0.4, 0.6], [0.3, 0.5, 0.7]],
@@ -792,11 +932,13 @@ class TestImportEngine:
             web_dir=tmp_path / "web",
             engine="import",
             reg_engine="mock",
-            splat_map=[SplatInput(
-                session_id="video_vid_A",
-                path=str(source),
-                source_frame=_mock_source_frame(),
-            )],
+            splat_map=[
+                SplatInput(
+                    session_id="video_vid_A",
+                    path=str(source),
+                    source_frame=_mock_source_frame(),
+                )
+            ],
             dedup_voxel=0,
         )
 
@@ -807,9 +949,13 @@ class TestImportEngine:
 
     def test_import_requires_splat_map(self, photos_dir, tmp_path):
         with pytest.raises(ValueError, match="splat"):
-            reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "r",
-                        web_dir=tmp_path / "w", engine="import",
-                        reg_engine="mock")
+            reconstruct(
+                photos_dir=photos_dir,
+                out_dir=tmp_path / "r",
+                web_dir=tmp_path / "w",
+                engine="import",
+                reg_engine="mock",
+            )
 
     def test_mock_rejects_splat_map_instead_of_recording_unapplied_transform(
         self, photos_dir, tmp_path
@@ -821,16 +967,16 @@ class TestImportEngine:
                 web_dir=tmp_path / "w",
                 engine="mock",
                 reg_engine="mock",
-                splat_map=[SplatInput(
-                    session_id="video_vid_A",
-                    path="never-read.ply",
-                    source_frame=_mock_source_frame(),
-                )],
+                splat_map=[
+                    SplatInput(
+                        session_id="video_vid_A",
+                        path="never-read.ply",
+                        source_frame=_mock_source_frame(),
+                    )
+                ],
             )
 
-    def test_non_metric_target_requires_zero_dedup_voxel(
-        self, photos_dir, tmp_path, monkeypatch
-    ):
+    def test_non_metric_target_requires_zero_dedup_voxel(self, photos_dir, tmp_path, monkeypatch):
         from pipeline.recon_schema import (
             AlignmentStatus,
             CameraIntrinsics,
@@ -848,19 +994,21 @@ class TestImportEngine:
             pose_frame=source,
             alignment_status=AlignmentStatus.UNALIGNED,
             sessions=[session],
-            poses=[CameraPose(
-                image="one.jpg",
-                session_id="s0",
-                quat_wxyz=[1, 0, 0, 0],
-                t_xyz=[0, 0, 0],
-                intrinsics=CameraIntrinsics.from_fov(32, 32),
-            )],
+            poses=[
+                CameraPose(
+                    image="one.jpg",
+                    session_id="s0",
+                    quat_wxyz=[1, 0, 0, 0],
+                    t_xyz=[0, 0, 0],
+                    intrinsics=CameraIntrinsics.from_fov(32, 32),
+                )
+            ],
         )
         monkeypatch.setattr("pipeline.reconstruct.register", lambda *args, **kwargs: reg)
         ply = tmp_path / "arbitrary.ply"
-        GaussianScene(
-            [[0, 0, 0]], [[1, 0, 0]], frame_id="sfm-local", units="arbitrary"
-        ).save_ply(ply, flavor="3dgs")
+        GaussianScene([[0, 0, 0]], [[1, 0, 0]], frame_id="sfm-local", units="arbitrary").save_ply(
+            ply, flavor="3dgs"
+        )
 
         with pytest.raises(ValueError, match="dedup_voxel.*meters|non-metric"):
             reconstruct(
@@ -869,9 +1017,7 @@ class TestImportEngine:
                 web_dir=tmp_path / "w",
                 engine="import",
                 reg_engine="colmap",
-                splat_map=[SplatInput(
-                    session_id="s0", path=str(ply), source_frame=source
-                )],
+                splat_map=[SplatInput(session_id="s0", path=str(ply), source_frame=source)],
             )
 
     def test_spatial_parameters_name_target_frame_units(self, photos_dir, tmp_path):
@@ -891,9 +1037,7 @@ class TestImportEngine:
             "replace_margin": None,
         }
 
-    def test_import_manifest_audits_only_the_applied_transform(
-        self, photos_dir, tmp_path
-    ):
+    def test_import_manifest_audits_only_the_applied_transform(self, photos_dir, tmp_path):
         source_frame = _arbitrary_source_frame()
         source = tmp_path / "source.ply"
         GaussianScene(
@@ -916,12 +1060,14 @@ class TestImportEngine:
             web_dir=tmp_path / "w",
             engine="import",
             reg_engine="mock",
-            splat_map=[SplatInput(
-                session_id="video_vid_A",
-                path=str(source),
-                source_frame=source_frame,
-                transform=transform,
-            )],
+            splat_map=[
+                SplatInput(
+                    session_id="video_vid_A",
+                    path=str(source),
+                    source_frame=source_frame,
+                    transform=transform,
+                )
+            ],
             dedup_voxel=0,
         )
         contract = manifest["coordinate_contract"]
@@ -931,23 +1077,14 @@ class TestImportEngine:
             transform.transform_id
         ]
         assert contract["applied_transform_ids"] == [transform.transform_id]
-        assert contract["ancestry"][0]["applied_transform_ids"] == [
+        assert contract["ancestry"][0]["applied_transform_ids"] == [transform.transform_id]
+        assert [step["transform_id"] for step in contract["ancestry"][0]["transform_path"]] == [
             transform.transform_id
         ]
-        assert [
-            step["transform_id"]
-            for step in contract["ancestry"][0]["transform_path"]
-        ] == [transform.transform_id]
 
-    def test_sibling_import_transforms_are_separate_ancestry_paths(
-        self, photos_dir, tmp_path
-    ):
-        source_a = _arbitrary_source_frame().model_copy(
-            update={"frame_id": "scan-A"}
-        )
-        source_b = _arbitrary_source_frame().model_copy(
-            update={"frame_id": "scan-B"}
-        )
+    def test_sibling_import_transforms_are_separate_ancestry_paths(self, photos_dir, tmp_path):
+        source_a = _arbitrary_source_frame().model_copy(update={"frame_id": "scan-A"})
+        source_b = _arbitrary_source_frame().model_copy(update={"frame_id": "scan-B"})
         inputs = []
         expected_ids = {}
         for session_id, source_frame, offset in (
@@ -969,12 +1106,14 @@ class TestImportEngine:
                 evidence=[f"control:{session_id}"],
             )
             expected_ids[session_id] = transform.transform_id
-            inputs.append(SplatInput(
-                session_id=session_id,
-                path=str(path),
-                source_frame=source_frame,
-                transform=transform,
-            ))
+            inputs.append(
+                SplatInput(
+                    session_id=session_id,
+                    path=str(path),
+                    source_frame=source_frame,
+                    transform=transform,
+                )
+            )
 
         manifest = reconstruct(
             photos_dir=photos_dir,
@@ -993,33 +1132,39 @@ class TestImportEngine:
         }
 
         assert contract["transform_chain"] == []
-        assert {
-            item["transform_id"] for item in contract["transform_catalog"]
-        } == set(expected_ids.values())
+        assert {item["transform_id"] for item in contract["transform_catalog"]} == set(
+            expected_ids.values()
+        )
         for session_id, transform_id in expected_ids.items():
             assert ancestry[session_id]["applied_transform_ids"] == [transform_id]
-            assert [
-                step["transform_id"]
-                for step in ancestry[session_id]["transform_path"]
-            ] == [transform_id]
+            assert [step["transform_id"] for step in ancestry[session_id]["transform_path"]] == [
+                transform_id
+            ]
 
 
 class TestProgressiveSharpen:
     def test_base_scene_region_replaced(self, photos_dir, tmp_path):
         """可变清晰: 二次重建应替换基底场景对应区域而非简单叠加"""
-        m1 = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "r1",
-                         web_dir=tmp_path / "w1", engine="mock",
-                         reg_engine="mock")
+        m1 = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "r1",
+            web_dir=tmp_path / "w1",
+            engine="mock",
+            reg_engine="mock",
+        )
         base_ply = tmp_path / "r1" / "scene_full.ply"
-        m2 = reconstruct(photos_dir=photos_dir, out_dir=tmp_path / "r2",
-                         web_dir=tmp_path / "w2", engine="mock",
-                         reg_engine="mock", base_scene=base_ply)
+        m2 = reconstruct(
+            photos_dir=photos_dir,
+            out_dir=tmp_path / "r2",
+            web_dir=tmp_path / "w2",
+            engine="mock",
+            reg_engine="mock",
+            base_scene=base_ply,
+        )
         # 同一输入的新重建覆盖同一区域 → 总量不应翻倍
         assert m2["gaussian_count"] < m1["gaussian_count"] * 1.5
 
-    def test_base_scene_unknown_transform_history_fails_closed(
-        self, photos_dir, tmp_path
-    ):
+    def test_base_scene_unknown_transform_history_fails_closed(self, photos_dir, tmp_path):
         base = GaussianScene(
             [[0, 0, 0]],
             [[1, 0, 0]],
@@ -1040,9 +1185,7 @@ class TestProgressiveSharpen:
                 base_scene=base_path,
             )
 
-    def test_bare_base_scene_without_provenance_stays_preview_only(
-        self, tmp_path, monkeypatch
-    ):
+    def test_bare_base_scene_without_provenance_stays_preview_only(self, tmp_path, monkeypatch):
         measured_frame = CoordinateFrame(
             frame_id="shared-world",
             handedness=Handedness.RIGHT,
@@ -1053,9 +1196,7 @@ class TestProgressiveSharpen:
             provenance=FrameProvenance.MEASURED,
             evidence=["survey-control:v1"],
         )
-        session = CaptureSession(
-            session_id="s0", kind="photo_batch", source="photos", images=[]
-        )
+        session = CaptureSession(session_id="s0", kind="photo_batch", source="photos", images=[])
         registration = RegistrationResult(
             engine="colmap",
             pose_frame=measured_frame,
@@ -1063,9 +1204,7 @@ class TestProgressiveSharpen:
             sessions=[session],
             poses=[],
         )
-        monkeypatch.setattr(
-            "pipeline.reconstruct.register", lambda *args, **kwargs: registration
-        )
+        monkeypatch.setattr("pipeline.reconstruct.register", lambda *args, **kwargs: registration)
         base_path = tmp_path / "uncontracted-base.ply"
         GaussianScene(
             [[0, 0, 0]],
@@ -1087,11 +1226,13 @@ class TestProgressiveSharpen:
             web_dir=tmp_path / "web",
             engine="import",
             reg_engine="colmap",
-            splat_map=[SplatInput(
-                session_id="s0",
-                path=str(source_path),
-                source_frame=measured_frame,
-            )],
+            splat_map=[
+                SplatInput(
+                    session_id="s0",
+                    path=str(source_path),
+                    source_frame=measured_frame,
+                )
+            ],
             base_scene=base_path,
             dedup_voxel=0,
             replace_margin=0,
@@ -1103,18 +1244,14 @@ class TestProgressiveSharpen:
         assert base_ancestry["kind"] == "base-scene"
         assert base_ancestry["source_frame"]["provenance"] == "unknown"
 
-    def test_branched_output_can_be_reused_as_base_scene(
-        self, photos_dir, tmp_path
-    ):
+    def test_branched_output_can_be_reused_as_base_scene(self, photos_dir, tmp_path):
         inputs = []
         expected_paths = []
         for session_id, frame_id, offset in (
             ("video_vid_A", "scan-A", 0.0),
             ("photos_batch_0", "scan-B", 20.0),
         ):
-            source_frame = _arbitrary_source_frame().model_copy(
-                update={"frame_id": frame_id}
-            )
+            source_frame = _arbitrary_source_frame().model_copy(update={"frame_id": frame_id})
             source_path = tmp_path / f"{frame_id}.ply"
             GaussianScene(
                 [[offset, 0, 0]],
@@ -1129,12 +1266,14 @@ class TestProgressiveSharpen:
                 method="external-sim3",
                 evidence=[f"control:{session_id}"],
             )
-            inputs.append(SplatInput(
-                session_id=session_id,
-                path=str(source_path),
-                source_frame=source_frame,
-                transform=transform,
-            ))
+            inputs.append(
+                SplatInput(
+                    session_id=session_id,
+                    path=str(source_path),
+                    source_frame=source_frame,
+                    transform=transform,
+                )
+            )
             expected_paths.append([transform.transform_id])
 
         reconstruct(
@@ -1165,8 +1304,7 @@ class TestProgressiveSharpen:
         base_ancestry = manifest["coordinate_contract"]["ancestry"][0]
         assert base_ancestry["kind"] == "base-scene"
         assert [
-            [step["transform_id"] for step in path]
-            for path in base_ancestry["transform_paths"]
+            [step["transform_id"] for step in path] for path in base_ancestry["transform_paths"]
         ] == expected_paths
         assert "transform_path" not in base_ancestry
 
@@ -1182,11 +1320,13 @@ class TestProgressiveSharpen:
         )
         contract = manifest["coordinate_contract"]
         chain_ids = [step["transform_id"] for step in contract["transform_chain"]]
-        ancestry_ids = list(dict.fromkeys(
-            transform_id
-            for ancestor in contract["ancestry"]
-            for transform_id in ancestor["applied_transform_ids"]
-        ))
+        ancestry_ids = list(
+            dict.fromkeys(
+                transform_id
+                for ancestor in contract["ancestry"]
+                for transform_id in ancestor["applied_transform_ids"]
+            )
+        )
 
         assert chain_ids == contract["applied_transform_ids"] == ancestry_ids
 
@@ -1200,16 +1340,15 @@ class TestVideoIngest:
         src = tmp_path / "input"
         src.mkdir()
         # 合成 2 秒 12fps 视频
-        vw = cv2.VideoWriter(str(src / "clip.mp4"),
-                             cv2.VideoWriter_fourcc(*"mp4v"), 12, (128, 96))
+        vw = cv2.VideoWriter(str(src / "clip.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 12, (128, 96))
         rng = np.random.default_rng(9)
         for _ in range(24):
             vw.write(rng.integers(0, 255, (96, 128, 3), dtype=np.uint8))
         vw.release()
         # 一张照片
         from PIL import Image
-        Image.fromarray(rng.integers(0, 255, (96, 128, 3), dtype=np.uint8)
-                        ).save(src / "photo.jpg")
+
+        Image.fromarray(rng.integers(0, 255, (96, 128, 3), dtype=np.uint8)).save(src / "photo.jpg")
 
         out = tmp_path / "photos"
         result = ingest_all(src, out, fps=4, blur_threshold=0)
@@ -1224,6 +1363,7 @@ class TestSha256FileIntegrity:
 
     def test_returns_correct_digest(self, tmp_path):
         from pipeline.reconstruct import _sha256_file
+
         data = b"hello world\n"
         path = tmp_path / "a.ply"
         path.write_bytes(data)
@@ -1271,3 +1411,50 @@ class TestSha256FileIntegrity:
             match="changed before hash|changed while",
         ):
             _sha256_file(original_path)
+
+
+class TestReconstructTrustReaderIntegrity:
+    """Security boundary tests for reconstruct trust-critical readers."""
+
+    def test_parse_splat_args_does_not_use_path_read_text(self, tmp_path, monkeypatch):
+        """RED->GREEN: _parse_splat_args must not use Path.read_text.
+
+        The splat JSON spec declares frame transforms and splat inputs; reading
+        it via Path.read_text leaves a check-then-reopen TOCTOU window. It must
+        go through _read_stable_bytes (single descriptor, identity recheck).
+        """
+        from pipeline.reconstruct import _parse_splat_args
+
+        spec = {
+            "session_id": "s0",
+            "frame_id": "f0",
+            "path": str(tmp_path / "splat.ply"),
+        }
+        target = tmp_path / "splat-input.json"
+        target.write_bytes(json.dumps(spec).encode("utf-8"))
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError("_parse_splat_args must not use Path.read_text")
+
+        monkeypatch.setattr(Path, "read_text", reject_read_text)
+        result = _parse_splat_args([str(target)])
+        assert len(result) == 1
+        assert result[0].session_id == "s0"
+
+    def test_read_stable_bytes_rejects_ancestor_reparse(self, tmp_path, monkeypatch):
+        """RED->GREEN: _read_stable_bytes must reject ancestor reparse points."""
+        import pipeline.reconstruct as rc
+        from pipeline.reconstruct import _read_stable_bytes
+
+        target = tmp_path / "reg.json"
+        target.write_bytes(b'{"schema_version": 2}')
+        sentinel = tmp_path / "ancestor-reparse"
+
+        def fake_first_linklike_path(root, leaf):
+            if Path(leaf) == target:
+                return sentinel
+            return rc.first_linklike_path(root, leaf)
+
+        monkeypatch.setattr(rc, "first_linklike_path", fake_first_linklike_path)
+        with pytest.raises(ValueError, match="常规非链接文件|无法访问"):
+            _read_stable_bytes(target, label="registration JSON")
