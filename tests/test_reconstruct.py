@@ -1508,3 +1508,48 @@ def test_manifest_write_does_not_follow_symlink_redirect(
     assert attacker_sidecar.read_text(encoding="utf-8").startswith("0" * 64), (
         "reconstruct wrote the sidecar through the symlink redirect"
     )
+
+
+def test_registration_json_write_does_not_follow_symlink_redirect(
+    photos_dir,
+    tmp_path,
+):
+    """RED->GREEN: caller-supplied registration.json write must not follow a symlink.
+
+    When reconstruct persists a caller-supplied registration to
+    ``out_dir/registration.json`` (the coordinate trust root), it must replace
+    any pre-placed symlink itself rather than write through it.
+    ``Path.write_text`` follows symlinks, which would let a TOCTOU attacker
+    redirect the trust-root write to an arbitrary location.
+    """
+    from pipeline.registration import register
+
+    reg = register(photos_dir, tmp_path / "reg-source.json", engine="mock")
+
+    out_dir = tmp_path / "recon"
+    out_dir.mkdir(parents=True)
+    registration_path = out_dir / "registration.json"
+    attacker = tmp_path / "attacker-registration.json"
+    attacker.write_text('{"pre-occupied": true}\n', encoding="utf-8")
+    try:
+        registration_path.symlink_to(attacker)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+    reconstruct(
+        photos_dir=photos_dir,
+        out_dir=out_dir,
+        web_dir=tmp_path / "web",
+        engine="mock",
+        reg_engine="mock",
+        registration=reg,
+    )
+
+    assert not registration_path.is_symlink(), (
+        "reconstruct wrote through the registration symlink instead of replacing it"
+    )
+    assert json.loads(attacker.read_text()) == {"pre-occupied": True}, (
+        "reconstruct wrote the registration trust root through the symlink redirect"
+    )

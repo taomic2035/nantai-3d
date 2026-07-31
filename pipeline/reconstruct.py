@@ -769,9 +769,13 @@ def reconstruct(
         # Consume a caller-supplied registration (e.g. a metric-aligned world-enu
         # result from pipeline.alignment) instead of recomputing sfm-local; the
         # caller owns its provenance/alignment evidence. Persisted LF for record.
+        # _publish_trust_root_atomic stages + fsync + atomic_replace so the
+        # coordinate trust-root write is durable and cannot be redirected
+        # through a pre-placed symlink.
         reg = registration
-        (out_dir / "registration.json").write_text(
-            reg.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n"
+        _publish_trust_root_atomic(
+            out_dir / "registration.json",
+            (reg.model_dump_json(indent=2) + "\n").encode(),
         )
     else:
         reg = register(
