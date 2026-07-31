@@ -19,12 +19,13 @@ import math
 import numbers
 import os
 import stat
+import tempfile
 from pathlib import Path, PurePosixPath
 
 import numpy as np
 from loguru import logger
 
-from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.durable_io import _is_linklike, first_linklike_path, write_file_atomic
 from pipeline.gaussian_scene import GaussianScene
 
 DEFAULT_CHUNK_SIZE_M = 50.0
@@ -149,19 +150,31 @@ def _file_sha256_and_size(path: Path) -> tuple[str, int]:
 
 
 def _atomic_save_ply(scene: GaussianScene, path: Path) -> None:
-    """Write a PLY beside its destination, then atomically replace it."""
+    """Write a PLY beside its destination, then atomically replace it.
+
+    Stages to a fresh ``mkstemp`` file (random name, no predictable symlink
+    target), ``fsync``-s, then ``os.replace`` to the destination.  The
+    previous ``path.with_name`` staging path was predictable and
+    ``save_ply`` follows symlinks via ``PlyData.write(str(path))``, so a
+    pre-placed dangling symlink would redirect the PLY bytes to an
+    attacker target.
+    """
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_name(f".{path.name}.tmp")
-    if staging.exists():
-        raise FileExistsError(f"chunk staging path already exists: {staging}")
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    os.close(staging_fd)
     try:
-        scene.save_ply(staging, flavor="3dgs")
-        os.replace(staging, path)
+        scene.save_ply(Path(staging_path), flavor="3dgs")
+        with open(staging_path, "r+b") as stream:
+            os.fsync(stream.fileno())
+        os.replace(staging_path, path)
     finally:
-        if staging.exists():
-            staging.unlink()
+        Path(staging_path).unlink(missing_ok=True)
 
 
 def _canonical_manifest_bytes(manifest: dict) -> bytes:
@@ -316,16 +329,10 @@ def partition_scene_to_chunks(
     }
     # newline="\n": 与 trust root (registration/recon_manifest/world manifest) 惯例统一,
     # 让 manifest 跨平台字节可复现 (Windows write_text 默认把 \n 转 \r\n)。
+    # write_file_atomic stages in a random mkstemp file + fsync + atomic_replace
+    # so a pre-placed symlink at the manifest path cannot redirect the write.
     manifest_path = out_dir / MANIFEST_NAME
-    staging_manifest = out_dir / f".{MANIFEST_NAME}.tmp"
-    if staging_manifest.exists():
-        raise FileExistsError(f"chunk manifest staging path already exists: {staging_manifest}")
-    try:
-        staging_manifest.write_bytes(_canonical_manifest_bytes(manifest))
-        os.replace(staging_manifest, manifest_path)
-    finally:
-        if staging_manifest.exists():
-            staging_manifest.unlink()
+    write_file_atomic(manifest_path, _canonical_manifest_bytes(manifest))
     logger.info(
         f"空间分块: {total_points} 高斯 → {len(chunks)} 块 "
         f"({chunk_size_m:g}m 网格) → {out_dir / MANIFEST_NAME}"

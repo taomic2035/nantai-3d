@@ -686,3 +686,26 @@ class TestSpatialChunkReaderIntegrity:
             (link_dir / chunk_file.name).write_bytes(chunk_file.read_bytes())
         with pytest.raises(FileNotFoundError, match="chunks.json"):
             verify_chunks_integrity(link_dir)
+
+    def test_manifest_write_does_not_follow_symlink_redirect(self, tmp_path):
+        """RED->GREEN: a pre-placed symlink at the manifest staging path
+        must not redirect the manifest write to an attacker target."""
+        from pipeline.spatial_chunk import MANIFEST_NAME
+
+        partition_scene_to_chunks(_scene(n=200), tmp_path, chunk_size_m=80.0)
+        # Remove the real manifest so partition can re-run; pre-place a
+        # dangling symlink at the predictable staging path.
+        (tmp_path / MANIFEST_NAME).unlink()
+        staging = tmp_path / f".{MANIFEST_NAME}.tmp"
+        attacker = tmp_path / "attacker-manifest.json"
+        try:
+            staging.symlink_to(attacker)
+        except OSError:
+            pytest.skip("symlink creation is unavailable")
+
+        partition_scene_to_chunks(_scene(n=200, seed=9), tmp_path, chunk_size_m=80.0)
+
+        assert not attacker.exists(), (
+            "partition_scene_to_chunks followed the staging symlink and "
+            "wrote the manifest to the attacker target"
+        )
