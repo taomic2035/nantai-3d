@@ -392,3 +392,90 @@ def test_staging_verifies_parent_directory_identity() -> None:
     assert "matches_real_directory_identity" in source, (
         "parent directory identity must be re-verified before staging"
     )
+
+
+def test_staging_rejects_parent_swap_after_identity_check(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: parent swap between identity check and staging open must fail closed.
+
+    ``matches_real_directory_identity`` checks the parent by path (lstat),
+    then ``os.open(staging)`` opens by path.  If the parent is swapped to a
+    symlink between these two calls, ``O_NOFOLLOW`` does NOT protect ancestor
+    components — the staging file is silently created in the redirected
+    location.  The materializer must re-verify the parent identity after
+    opening the staging descriptor and fail closed.
+    """
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    report, report_path, viewer_policy_path = _viewer_evidence(tmp_path)
+    output = tmp_path / "review" / "human-review-policy.json"
+    output.parent.mkdir(parents=True)
+
+    attacker_dir = tmp_path / "attacker"
+    attacker_dir.mkdir()
+
+    original_matches = human_review_inputs_module.matches_real_directory_identity
+    swap_done = [False]
+
+    def swapping_matches(path, expected):
+        result = original_matches(path, expected)
+        if (
+            result
+            and not swap_done[0]
+            and Path(path).absolute() == output.parent.absolute()
+        ):
+            swap_done[0] = True
+            backup = tmp_path / "review-backup"
+            try:
+                output.parent.rename(backup)
+                output.parent.symlink_to(attacker_dir)
+            except OSError:
+                if backup.exists():
+                    backup.rename(output.parent)
+                pytest.skip("symlink creation is not permitted")
+        return result
+
+    monkeypatch.setattr(
+        human_review_inputs_module,
+        "matches_real_directory_identity",
+        swapping_matches,
+    )
+
+    with pytest.raises(
+        HumanReviewInputError,
+        match="parent|changed|directory|staging",
+    ):
+        materialize_human_review_policy(
+            evidence_root=tmp_path,
+            viewer_policy_path=viewer_policy_path,
+            viewer_report_path=report_path,
+            output_path=output,
+        )
+
+    # The policy must not have been published to the redirected location.
+    assert not (attacker_dir / output.name).exists(), (
+        "policy was silently published to the attacker directory via a "
+        "symlinked parent (TOCTOU between identity check and staging open)"
+    )
+
+
+def test_staging_re_verifies_parent_identity_after_open() -> None:
+    """RED->GREEN: parent identity must be re-verified AFTER os.open(staging).
+
+    ``matches_real_directory_identity`` checks the parent by path (lstat)
+    before ``os.open(staging)`` opens by path.  ``O_NOFOLLOW`` only protects
+    the final path component — ancestor symlinks are still followed, so a
+    parent swap between the identity check and the open redirects the staging
+    file.  A post-open re-verification is required to close this TOCTOU.
+    """
+    source = inspect.getsource(
+        human_review_inputs_module.materialize_human_review_policy
+    )
+    open_index = source.index("staging_fd = os.open(")
+    after_open = source[open_index:]
+    assert "matches_real_directory_identity" in after_open, (
+        "parent directory identity must be re-verified AFTER os.open(staging) "
+        "to close the TOCTOU between path-based identity check and path-based open"
+    )

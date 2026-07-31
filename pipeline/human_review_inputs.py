@@ -295,6 +295,19 @@ def materialize_human_review_policy(
             | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_NOFOLLOW", 0),
         )
+        # Re-verify parent identity AFTER opening the staging descriptor.
+        # O_NOFOLLOW only protects the final path component; ancestor symlinks
+        # are still followed, so a parent swap between the pre-open check and
+        # os.open would redirect the staging file.  This post-open check
+        # closes that TOCTOU window.
+        if not matches_real_directory_identity(output.parent, parent_identity):
+            try:
+                os.close(staging_fd)
+            except OSError:
+                pass
+            raise HumanReviewInputError(
+                "human review policy output parent changed before staging"
+            )
         try:
             with os.fdopen(staging_fd, "wb") as stream:
                 stream.write(payload)
