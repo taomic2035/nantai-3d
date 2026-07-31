@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.durable_io import write_file_atomic  # noqa: E402
 from pipeline.real_scene_training import (  # noqa: E402
     RealSceneTrainingError,
     load_training_job_input_bytes,
@@ -238,9 +239,10 @@ def _detect_cuda_from_nvcc() -> str:
 # ============================================================
 
 def _write_json(path: Path, model) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(model.model_dump_json(indent=2) + "\n",
-                    encoding="utf-8", newline="\n")
+    # write_file_atomic stages + fsync + atomic_replace so the provenance
+    # trust-root write is durable and cannot be redirected through a
+    # pre-placed symlink.
+    write_file_atomic(path, (model.model_dump_json(indent=2) + "\n").encode())
 
 
 def _utc_now() -> datetime:

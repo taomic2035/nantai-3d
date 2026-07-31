@@ -707,3 +707,41 @@ class _FakeRun:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
+
+
+def test_request_write_does_not_follow_symlink_redirect(tmp_path: Path) -> None:
+    """RED->GREEN: training-request.json write must not follow a symlink redirect.
+
+    The request manifest is the provenance trust root.  If the output path is
+    pre-placed as a symlink, emit_training_provenance must replace the symlink
+    itself (write_file_atomic) rather than write through it.
+    """
+    images, _ply, config, _log, _n = _build_cloud_workspace(tmp_path)
+    out = tmp_path / "cloud"
+    output = out / "training-request.json"
+    attacker = tmp_path / "attacker-request.json"
+    attacker.write_text('{"pre-occupied": true}\n', encoding="utf-8")
+    try:
+        output.symlink_to(attacker)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+    proc = _run(
+        "request",
+        "--input", f"capture_manifest:{images}",
+        "--config-yml", str(config),
+        "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
+        "--max-resolution", "800", "--total-steps", "10000", "--seed", "42",
+        "--request-id", "req-symlink-001",
+        "--output", str(output),
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    assert not output.is_symlink(), (
+        "emit_training_provenance wrote through the symlink instead of replacing it"
+    )
+    assert json.loads(attacker.read_text(encoding="utf-8")) == {"pre-occupied": True}, (
+        "emit_training_provenance wrote the trust root through the symlink redirect"
+    )
