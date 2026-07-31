@@ -1837,9 +1837,9 @@ def _production_quality_snapshot(root: Path) -> dict[str, Any]:
     if journal_path is None:
         return invalid
     try:
-        journal_raw = journal_path.read_bytes()
-        if len(journal_raw) > MAX_JSON_BYTES:
-            return invalid
+        journal_raw = _stable_read_evidence_bytes(
+            journal_path, max_bytes=MAX_JSON_BYTES,
+        )
         journal = LocalProductionRenderJournal.model_validate_json(journal_raw)
         if (
             journal_raw
@@ -1849,7 +1849,7 @@ def _production_quality_snapshot(root: Path) -> dict[str, Any]:
             or journal_path.parent.name != journal.render_id
         ):
             return invalid
-    except (OSError, ValidationError):
+    except (OSError, ValidationError, ValueError):
         return invalid
 
     preflight_state = (
@@ -1911,10 +1911,12 @@ def _production_quality_snapshot(root: Path) -> dict[str, Any]:
             ],
         }
     try:
-        request_raw = request_path.read_bytes()
-        report_raw = report_path.read_bytes()
-        if max(len(request_raw), len(report_raw)) > MAX_JSON_BYTES:
-            raise ValueError("production quality evidence is too large")
+        request_raw = _stable_read_evidence_bytes(
+            request_path, max_bytes=MAX_JSON_BYTES,
+        )
+        report_raw = _stable_read_evidence_bytes(
+            report_path, max_bytes=MAX_JSON_BYTES,
+        )
         request = ProductionFrameQualityRequestV2.model_validate_json(request_raw)
         report = ProductionFrameQualityReportV2.model_validate_json(report_raw)
         canonical_report = canonical_production_frame_quality_report_v2_bytes(
@@ -2058,7 +2060,9 @@ def _release_snapshot(root: Path) -> dict[str, Any]:
         try:
             report = verify_production_release_tree(root)
             receipt = load_production_receipt_bytes(
-                production_path.read_bytes()
+                _stable_read_evidence_bytes(
+                    production_path, max_bytes=MAX_JSON_BYTES,
+                )
             )
             evidence_path = root.joinpath(
                 *PurePosixPath(
@@ -2066,7 +2070,9 @@ def _release_snapshot(root: Path) -> dict[str, Any]:
                 ).parts
             )
             evidence = load_public_evidence_bytes(
-                evidence_path.read_bytes()
+                _stable_read_evidence_bytes(
+                    evidence_path, max_bytes=MAX_JSON_BYTES,
+                )
             )
         except (
             OSError,

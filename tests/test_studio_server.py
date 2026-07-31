@@ -3806,3 +3806,41 @@ def test_stable_read_evidence_bytes_returns_correct_bytes(tmp_path: Path) -> Non
     evidence.write_bytes(payload)
     result = _stable_read_evidence_bytes(evidence, max_bytes=1024)
     assert result == payload
+
+
+def test_production_quality_snapshot_uses_stable_read_not_read_bytes() -> None:
+    """RED: _production_quality_snapshot must not use Path.read_bytes()
+    for journal/request/report evidence; it must use _stable_read_evidence_bytes
+    to eliminate the TOCTOU window between SHA verification and content reading."""
+    import inspect
+
+    from pipeline.studio_server import _production_quality_snapshot
+
+    source = inspect.getsource(_production_quality_snapshot)
+    assert ".read_bytes()" not in source, (
+        "_production_quality_snapshot must not use Path.read_bytes() for "
+        "evidence files; use _stable_read_evidence_bytes instead"
+    )
+    assert "_stable_read_evidence_bytes" in source, (
+        "_production_quality_snapshot must use _stable_read_evidence_bytes "
+        "for journal/request/report evidence"
+    )
+
+
+def test_release_snapshot_uses_stable_read_not_read_bytes() -> None:
+    """RED: _release_snapshot must not use Path.read_bytes() for the
+    production receipt or public evidence; it must use
+    _stable_read_evidence_bytes to eliminate the TOCTOU window."""
+    import inspect
+
+    from pipeline.studio_server import _release_snapshot
+
+    source = inspect.getsource(_release_snapshot)
+    assert ".read_bytes()" not in source, (
+        "_release_snapshot must not use Path.read_bytes() for production "
+        "receipt or evidence; use _stable_read_evidence_bytes instead"
+    )
+    assert "_stable_read_evidence_bytes" in source, (
+        "_release_snapshot must use _stable_read_evidence_bytes for "
+        "production receipt and evidence"
+    )
