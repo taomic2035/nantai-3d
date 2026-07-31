@@ -606,7 +606,12 @@ def _stream_regular_digest(
         raise RealSceneImportError(f"{label} is missing or link-like")
 
     try:
-        handle = os.open(candidate, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        handle = os.open(
+            candidate,
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
     except OSError as exc:
         raise RealSceneImportError(f"{label} cannot be read") from exc
     try:

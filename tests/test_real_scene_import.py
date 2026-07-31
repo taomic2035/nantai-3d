@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import stat
@@ -2054,3 +2055,23 @@ def test_validate_receipt_rejects_manifest_drift_after_digest(
             output_root / "import-receipt.json",
             output_root,
         )
+
+
+def test_stream_regular_digest_uses_no_follow() -> None:
+    """RED->GREEN: _stream_regular_digest must open with O_NOFOLLOW.
+
+    ``_read_regular_bytes`` uses ``O_NOFOLLOW`` to prevent the kernel
+    from following symlinks at open time.  ``_stream_regular_digest``
+    omits it, relying solely on post-open ``fstat`` identity
+    verification.  Adding ``O_NOFOLLOW`` aligns the two readers and
+    provides defense-in-depth against symlink swaps between ``lstat``
+    and ``open``.
+    """
+    source = inspect.getsource(import_module._stream_regular_digest)
+    open_index = source.index("os.open(")
+    after_open = source[open_index:]
+    assert "O_NOFOLLOW" in after_open, (
+        "_stream_regular_digest must use O_NOFOLLOW in its os.open call "
+        "to prevent symlink following at open time, matching "
+        "_read_regular_bytes"
+    )
