@@ -45,13 +45,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.durable_io import (  # noqa: E402
+    DurableIOError,
+    publish_file_noreplace,
+)
 from pipeline.recon_schema import RegistrationResult  # noqa: E402
 from pipeline.registration_quality import (  # noqa: E402
     RegistrationQualityPolicy,
@@ -64,9 +70,48 @@ from pipeline.registration_quality import (  # noqa: E402
 
 
 def _write_json(path: Path, model) -> None:
+    """Write a canonical JSON model via private staging + fsync + no-replace.
+
+    Rejects pre-occupied outputs to prevent silent overwrite of evidence
+    that may have been swapped in by a TOCTOU attacker.  Uses
+    ``pipeline.durable_io.publish_file_noreplace`` for a cross-platform
+    atomic no-replace publication with directory durability.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(model.model_dump_json(indent=2) + "\n",
-                    encoding="utf-8", newline="\n")
+    payload = (model.model_dump_json(indent=2) + "\n").encode("utf-8")
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(staging_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        publish_file_noreplace(staging_path, path)
+    except FileExistsError:
+        _discard_staging(staging_path)
+        raise SystemExit(
+            f"output already exists, refusing to overwrite: {path.name}"
+        ) from None
+    except DurableIOError as exc:
+        _discard_staging(staging_path)
+        if exc.published:
+            raise SystemExit(
+                f"output published but durability unconfirmed: {path.name}"
+            ) from exc
+        raise SystemExit(f"cannot write output: {path.name}") from exc
+    except OSError as exc:
+        _discard_staging(staging_path)
+        raise SystemExit(f"cannot write output: {path.name}") from exc
+
+
+def _discard_staging(staging_path: str) -> None:
+    try:
+        os.unlink(staging_path)
+    except OSError:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:

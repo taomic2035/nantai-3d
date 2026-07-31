@@ -397,3 +397,27 @@ class TestEmitRegistrationQualityErrors:
         )
         assert proc.returncode != 0
         assert "parse" in proc.stderr.lower()
+
+    def test_output_rejects_existing_file_fail_closed(self, tmp_path):
+        """RED: _write_json must not silently overwrite an existing file.
+
+        If the output path already exists, the CLI must fail closed rather
+        than silently replacing it. This prevents TOCTOU where a symlink
+        or pre-occupied file could redirect the write.
+        """
+        reg_json = tmp_path / "reg" / "registration.json"
+        _write_registration_json(reg_json, engine="mock")
+        policy_json = tmp_path / "reg" / "policy.json"
+        _write_policy_json(policy_json)
+        out = tmp_path / "report.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text('{"pre-occupied": true}\n', encoding="utf-8")
+
+        proc = _run_cli(
+            "--registration-json", str(reg_json),
+            "--policy", str(policy_json),
+            "--output", str(out),
+        )
+        assert proc.returncode != 0, (
+            "CLI must fail closed when output already exists"
+        )
