@@ -471,6 +471,48 @@ def test_prepare_from_registration_binds_one_aggregate_splat_transform(tmp_path)
     assert Path(splat.path) == source.absolute()
 
 
+def test_prepare_from_registration_does_not_follow_symlink_redirect(
+    tmp_path: Path,
+) -> None:
+    """RED->GREEN: prepare_from_registration must not write the registration
+    trust root through a pre-placed dangling symlink redirect.
+
+    ``_write_lf`` used ``Path.write_text``, which follows symlinks.  A
+    pre-placed dangling symlink at ``out_dir/registration.json`` would
+    redirect the coordinate trust-root bytes to an attacker target and leave
+    the operator's ``registration.json`` as the dangling link.  The same
+    vulnerability class was already closed for ``pipeline/registration.py``,
+    ``pipeline/alignment.py`` and ``pipeline/reconstruct.py``; this is the
+    parallel caller-supplied contract write path in the CLI helper.
+    """
+    source = _write_3dgs_ply(tmp_path / "source.ply")
+    registration = _aligned_registration()
+    out_dir = tmp_path / "contracts"
+    out_dir.mkdir()
+    reg_path = out_dir / "registration.json"
+    attacker_target = tmp_path / "stolen-registration.json"
+    try:
+        reg_path.symlink_to(attacker_target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+    prepare_from_registration(
+        source,
+        out_dir,
+        registration,
+        session_id="real-scene-trained",
+    )
+
+    assert not attacker_target.exists(), (
+        "prepare_from_registration followed the dangling symlink and "
+        "wrote the registration trust root to the attacker target"
+    )
+    assert reg_path.is_symlink() is False
+    assert reg_path.is_file()
+
+
 def _write_preview_training_stage(root: Path) -> SimpleNamespace:
     result_root = root / "local-brush"
     workspace = result_root / "workspace"

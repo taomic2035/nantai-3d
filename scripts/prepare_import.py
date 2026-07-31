@@ -62,6 +62,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.durable_io import write_file_atomic  # noqa: E402
 from pipeline.recon_schema import (  # noqa: E402
     AlignmentStatus,
     AxisConvention,
@@ -116,8 +117,12 @@ def _local_frame(
 
 
 def _write_lf(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text + "\n", encoding="utf-8", newline="\n")
+    # write_file_atomic stages in a random mkstemp file + fsync + atomic_replace
+    # so a pre-placed symlink at path is replaced itself rather than followed
+    # (Path.write_text follows symlinks and would redirect the trust-root
+    # bytes to an attacker target), and the publication is durable so a crash
+    # cannot leave a partial contract file on disk.
+    write_file_atomic(path, (text + "\n").encode("utf-8"))
 
 
 def prepare(
