@@ -20,8 +20,10 @@ The producer must:
 A structurally valid graph with multiple connected components is allowed;
 it is represented as ``fragmented`` by the viewer, not rejected here.
 """
+
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -179,8 +181,8 @@ class TestRoamingGraphHeader:
         graph = _two_room_graph()
         with pytest.raises(ValueError):
             graph.model_copy(
-                update={"trust": graph.trust.model_copy(
-                    update={"geometry": "metric-aligned"})})
+                update={"trust": graph.trust.model_copy(update={"geometry": "metric-aligned"})}
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -376,17 +378,31 @@ class TestRoamingGraphBuilder:
                 entry_room_id="r-1",
                 bindings=_bindings(),
                 rooms=(
-                    Room(room_id="r-1", label="A", kind="exterior",
-                         center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                    Room(room_id="r-1", label="B", kind="exterior",
-                         center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
+                    Room(
+                        room_id="r-1",
+                        label="A",
+                        kind="exterior",
+                        center_enu_m=(0, 0, 0),
+                        collision_proxy_sha256=_SHA_E,
+                    ),
+                    Room(
+                        room_id="r-1",
+                        label="B",
+                        kind="exterior",
+                        center_enu_m=(1, 0, 0),
+                        collision_proxy_sha256=_SHA_F,
+                    ),
                 ),
                 portals=(
-                    Portal(portal_id="p", room_ids=("r-1", "r-2"),
-                           endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
-                           clear_width_m=1.0, clear_height_m=2.0,
-                           collision_proxy_sha256=_SHA_G,
-                           source_input_sha256=_SHA_A),
+                    Portal(
+                        portal_id="p",
+                        room_ids=("r-1", "r-2"),
+                        endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
+                        clear_width_m=1.0,
+                        clear_height_m=2.0,
+                        collision_proxy_sha256=_SHA_G,
+                        source_input_sha256=_SHA_A,
+                    ),
                 ),
                 route_loops=(),
             )
@@ -398,24 +414,47 @@ class TestRoamingGraphBuilder:
                 entry_room_id="r-1",
                 bindings=_bindings(),
                 rooms=(
-                    Room(room_id="r-1", label="A", kind="exterior",
-                         center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                    Room(room_id="r-2", label="B", kind="exterior",
-                         center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
-                    Room(room_id="r-3", label="C", kind="exterior",
-                         center_enu_m=(2, 0, 0), collision_proxy_sha256=_SHA_G),
+                    Room(
+                        room_id="r-1",
+                        label="A",
+                        kind="exterior",
+                        center_enu_m=(0, 0, 0),
+                        collision_proxy_sha256=_SHA_E,
+                    ),
+                    Room(
+                        room_id="r-2",
+                        label="B",
+                        kind="exterior",
+                        center_enu_m=(1, 0, 0),
+                        collision_proxy_sha256=_SHA_F,
+                    ),
+                    Room(
+                        room_id="r-3",
+                        label="C",
+                        kind="exterior",
+                        center_enu_m=(2, 0, 0),
+                        collision_proxy_sha256=_SHA_G,
+                    ),
                 ),
                 portals=(
-                    Portal(portal_id="p", room_ids=("r-1", "r-2"),
-                           endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
-                           clear_width_m=1.0, clear_height_m=2.0,
-                           collision_proxy_sha256=_SHA_G,
-                           source_input_sha256=_SHA_A),
-                    Portal(portal_id="p", room_ids=("r-2", "r-3"),
-                           endpoints_enu_m=((1, 0, 0), (2, 0, 0)),
-                           clear_width_m=1.0, clear_height_m=2.0,
-                           collision_proxy_sha256=_SHA_G,
-                           source_input_sha256=_SHA_A),
+                    Portal(
+                        portal_id="p",
+                        room_ids=("r-1", "r-2"),
+                        endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
+                        clear_width_m=1.0,
+                        clear_height_m=2.0,
+                        collision_proxy_sha256=_SHA_G,
+                        source_input_sha256=_SHA_A,
+                    ),
+                    Portal(
+                        portal_id="p",
+                        room_ids=("r-2", "r-3"),
+                        endpoints_enu_m=((1, 0, 0), (2, 0, 0)),
+                        clear_width_m=1.0,
+                        clear_height_m=2.0,
+                        collision_proxy_sha256=_SHA_G,
+                        source_input_sha256=_SHA_A,
+                    ),
                 ),
                 route_loops=(),
             )
@@ -428,19 +467,38 @@ class TestRoamingGraphBuilder:
                 entry_room_id="r-1",
                 bindings=_bindings(),
                 rooms=(
-                    Room(room_id="r-1", label="A", kind="exterior",
-                         center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                    Room(room_id="r-2", label="B", kind="exterior",
-                         center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
-                    Room(room_id="r-3", label="C", kind="exterior",
-                         center_enu_m=(2, 0, 0), collision_proxy_sha256=_SHA_G),
+                    Room(
+                        room_id="r-1",
+                        label="A",
+                        kind="exterior",
+                        center_enu_m=(0, 0, 0),
+                        collision_proxy_sha256=_SHA_E,
+                    ),
+                    Room(
+                        room_id="r-2",
+                        label="B",
+                        kind="exterior",
+                        center_enu_m=(1, 0, 0),
+                        collision_proxy_sha256=_SHA_F,
+                    ),
+                    Room(
+                        room_id="r-3",
+                        label="C",
+                        kind="exterior",
+                        center_enu_m=(2, 0, 0),
+                        collision_proxy_sha256=_SHA_G,
+                    ),
                 ),
                 portals=(
-                    Portal(portal_id="p", room_ids=("r-1", "r-2"),
-                           endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
-                           clear_width_m=1.0, clear_height_m=2.0,
-                           collision_proxy_sha256=_SHA_G,
-                           source_input_sha256=_SHA_A),
+                    Portal(
+                        portal_id="p",
+                        room_ids=("r-1", "r-2"),
+                        endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
+                        clear_width_m=1.0,
+                        clear_height_m=2.0,
+                        collision_proxy_sha256=_SHA_G,
+                        source_input_sha256=_SHA_A,
+                    ),
                     # r-3 has no portal
                 ),
                 route_loops=(),
@@ -453,17 +511,31 @@ class TestRoamingGraphBuilder:
                 entry_room_id="r-1",
                 bindings=_bindings(),
                 rooms=(
-                    Room(room_id="r-1", label="A", kind="exterior",
-                         center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                    Room(room_id="r-2", label="B", kind="exterior",
-                         center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
+                    Room(
+                        room_id="r-1",
+                        label="A",
+                        kind="exterior",
+                        center_enu_m=(0, 0, 0),
+                        collision_proxy_sha256=_SHA_E,
+                    ),
+                    Room(
+                        room_id="r-2",
+                        label="B",
+                        kind="exterior",
+                        center_enu_m=(1, 0, 0),
+                        collision_proxy_sha256=_SHA_F,
+                    ),
                 ),
                 portals=(
-                    Portal(portal_id="p", room_ids=("r-1", "r-ghost"),
-                           endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
-                           clear_width_m=1.0, clear_height_m=2.0,
-                           collision_proxy_sha256=_SHA_G,
-                           source_input_sha256=_SHA_A),
+                    Portal(
+                        portal_id="p",
+                        room_ids=("r-1", "r-ghost"),
+                        endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
+                        clear_width_m=1.0,
+                        clear_height_m=2.0,
+                        collision_proxy_sha256=_SHA_G,
+                        source_input_sha256=_SHA_A,
+                    ),
                 ),
                 route_loops=(),
             )
@@ -475,17 +547,31 @@ class TestRoamingGraphBuilder:
                 entry_room_id="r-ghost",
                 bindings=_bindings(),
                 rooms=(
-                    Room(room_id="r-1", label="A", kind="exterior",
-                         center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                    Room(room_id="r-2", label="B", kind="exterior",
-                         center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
+                    Room(
+                        room_id="r-1",
+                        label="A",
+                        kind="exterior",
+                        center_enu_m=(0, 0, 0),
+                        collision_proxy_sha256=_SHA_E,
+                    ),
+                    Room(
+                        room_id="r-2",
+                        label="B",
+                        kind="exterior",
+                        center_enu_m=(1, 0, 0),
+                        collision_proxy_sha256=_SHA_F,
+                    ),
                 ),
                 portals=(
-                    Portal(portal_id="p", room_ids=("r-1", "r-2"),
-                           endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
-                           clear_width_m=1.0, clear_height_m=2.0,
-                           collision_proxy_sha256=_SHA_G,
-                           source_input_sha256=_SHA_A),
+                    Portal(
+                        portal_id="p",
+                        room_ids=("r-1", "r-2"),
+                        endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
+                        clear_width_m=1.0,
+                        clear_height_m=2.0,
+                        collision_proxy_sha256=_SHA_G,
+                        source_input_sha256=_SHA_A,
+                    ),
                 ),
                 route_loops=(),
             )
@@ -509,8 +595,13 @@ class TestRoamingGraphBuilder:
                 entry_room_id="r-1",
                 bindings=_bindings(),
                 rooms=(
-                    Room(room_id="r-1", label="A", kind="exterior",
-                         center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
+                    Room(
+                        room_id="r-1",
+                        label="A",
+                        kind="exterior",
+                        center_enu_m=(0, 0, 0),
+                        collision_proxy_sha256=_SHA_E,
+                    ),
                 ),
                 portals=(),
                 route_loops=(),
@@ -523,10 +614,20 @@ class TestRoamingGraphBuilder:
                 entry_room_id="r-1",
                 bindings=_bindings(),
                 rooms=(
-                    Room(room_id="r-1", label="A", kind="exterior",
-                         center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                    Room(room_id="r-2", label="B", kind="exterior",
-                         center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
+                    Room(
+                        room_id="r-1",
+                        label="A",
+                        kind="exterior",
+                        center_enu_m=(0, 0, 0),
+                        collision_proxy_sha256=_SHA_E,
+                    ),
+                    Room(
+                        room_id="r-2",
+                        label="B",
+                        kind="exterior",
+                        center_enu_m=(1, 0, 0),
+                        collision_proxy_sha256=_SHA_F,
+                    ),
                 ),
                 portals=(),
                 route_loops=(),
@@ -545,29 +646,56 @@ class TestRoamingGraphLoops:
             entry_room_id="r-1",
             bindings=_bindings(),
             rooms=(
-                Room(room_id="r-1", label="A", kind="exterior",
-                     center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                Room(room_id="r-2", label="B", kind="exterior",
-                     center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
-                Room(room_id="r-3", label="C", kind="exterior",
-                     center_enu_m=(0.5, 1, 0), collision_proxy_sha256=_SHA_G),
+                Room(
+                    room_id="r-1",
+                    label="A",
+                    kind="exterior",
+                    center_enu_m=(0, 0, 0),
+                    collision_proxy_sha256=_SHA_E,
+                ),
+                Room(
+                    room_id="r-2",
+                    label="B",
+                    kind="exterior",
+                    center_enu_m=(1, 0, 0),
+                    collision_proxy_sha256=_SHA_F,
+                ),
+                Room(
+                    room_id="r-3",
+                    label="C",
+                    kind="exterior",
+                    center_enu_m=(0.5, 1, 0),
+                    collision_proxy_sha256=_SHA_G,
+                ),
             ),
             portals=(
-                Portal(portal_id="p-1-2", room_ids=("r-1", "r-2"),
-                       endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
-                       clear_width_m=1.0, clear_height_m=2.0,
-                       collision_proxy_sha256=_SHA_G,
-                       source_input_sha256=_SHA_A),
-                Portal(portal_id="p-2-3", room_ids=("r-2", "r-3"),
-                       endpoints_enu_m=((1, 0, 0), (0.5, 1, 0)),
-                       clear_width_m=1.0, clear_height_m=2.0,
-                       collision_proxy_sha256=_SHA_G,
-                       source_input_sha256=_SHA_A),
-                Portal(portal_id="p-3-1", room_ids=("r-3", "r-1"),
-                       endpoints_enu_m=((0.5, 1, 0), (0, 0, 0)),
-                       clear_width_m=1.0, clear_height_m=2.0,
-                       collision_proxy_sha256=_SHA_G,
-                       source_input_sha256=_SHA_A),
+                Portal(
+                    portal_id="p-1-2",
+                    room_ids=("r-1", "r-2"),
+                    endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
+                    clear_width_m=1.0,
+                    clear_height_m=2.0,
+                    collision_proxy_sha256=_SHA_G,
+                    source_input_sha256=_SHA_A,
+                ),
+                Portal(
+                    portal_id="p-2-3",
+                    room_ids=("r-2", "r-3"),
+                    endpoints_enu_m=((1, 0, 0), (0.5, 1, 0)),
+                    clear_width_m=1.0,
+                    clear_height_m=2.0,
+                    collision_proxy_sha256=_SHA_G,
+                    source_input_sha256=_SHA_A,
+                ),
+                Portal(
+                    portal_id="p-3-1",
+                    room_ids=("r-3", "r-1"),
+                    endpoints_enu_m=((0.5, 1, 0), (0, 0, 0)),
+                    clear_width_m=1.0,
+                    clear_height_m=2.0,
+                    collision_proxy_sha256=_SHA_G,
+                    source_input_sha256=_SHA_A,
+                ),
             ),
             route_loops=(),
         )
@@ -579,12 +707,15 @@ class TestRoamingGraphLoops:
     def test_valid_closed_loop_passes(self) -> None:
         triangle = self._three_room_triangle()
         # Find one A->B->C->A chain
-        e_ab = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-1" and e.to_room_id == "r-2")
-        e_bc = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-2" and e.to_room_id == "r-3")
-        e_ca = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-3" and e.to_room_id == "r-1")
+        e_ab = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-1" and e.to_room_id == "r-2"
+        )
+        e_bc = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-2" and e.to_room_id == "r-3"
+        )
+        e_ca = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-3" and e.to_room_id == "r-1"
+        )
         loop = RouteLoop(
             loop_id="triangle-abc",
             edge_ids=(e_ab.edge_id, e_bc.edge_id, e_ca.edge_id),
@@ -601,26 +732,31 @@ class TestRoamingGraphLoops:
 
     def test_loop_with_too_few_edges_rejected(self) -> None:
         triangle = self._three_room_triangle()
-        e_ab = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-1" and e.to_room_id == "r-2")
+        e_ab = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-1" and e.to_room_id == "r-2"
+        )
         with pytest.raises(ValueError):
             RouteLoop(loop_id="l", edge_ids=(e_ab.edge_id,))  # < 3
 
     def test_loop_with_duplicate_edge_rejected(self) -> None:
         triangle = self._three_room_triangle()
-        e_ab = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-1" and e.to_room_id == "r-2")
-        e_bc = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-2" and e.to_room_id == "r-3")
+        e_ab = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-1" and e.to_room_id == "r-2"
+        )
+        e_bc = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-2" and e.to_room_id == "r-3"
+        )
         with pytest.raises(ValueError):
             RouteLoop(loop_id="l", edge_ids=(e_ab.edge_id, e_bc.edge_id, e_ab.edge_id))
 
     def test_loop_with_dangling_edge_rejected(self) -> None:
         triangle = self._three_room_triangle()
-        e_ab = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-1" and e.to_room_id == "r-2")
-        e_bc = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-2" and e.to_room_id == "r-3")
+        e_ab = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-1" and e.to_room_id == "r-2"
+        )
+        e_bc = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-2" and e.to_room_id == "r-3"
+        )
         with pytest.raises(RoamingGraphError):
             build_roaming_graph(
                 graph_id="g",
@@ -629,20 +765,24 @@ class TestRoamingGraphLoops:
                 rooms=triangle.rooms,
                 portals=triangle.portals,
                 route_loops=(
-                    RouteLoop(loop_id="l",
-                              edge_ids=(e_ab.edge_id, e_bc.edge_id, "nonexistent-edge")),
+                    RouteLoop(
+                        loop_id="l", edge_ids=(e_ab.edge_id, e_bc.edge_id, "nonexistent-edge")
+                    ),
                 ),
             )
 
     def test_open_loop_rejected(self) -> None:
         """Chain A->B->C->B does not close (last.to != first.from)."""
         triangle = self._three_room_triangle()
-        e_ab = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-1" and e.to_room_id == "r-2")
-        e_bc = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-2" and e.to_room_id == "r-3")
-        e_cb = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-3" and e.to_room_id == "r-2")
+        e_ab = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-1" and e.to_room_id == "r-2"
+        )
+        e_bc = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-2" and e.to_room_id == "r-3"
+        )
+        e_cb = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-3" and e.to_room_id == "r-2"
+        )
         with pytest.raises(RoamingGraphError):
             build_roaming_graph(
                 graph_id="g",
@@ -651,20 +791,22 @@ class TestRoamingGraphLoops:
                 rooms=triangle.rooms,
                 portals=triangle.portals,
                 route_loops=(
-                    RouteLoop(loop_id="l",
-                              edge_ids=(e_ab.edge_id, e_bc.edge_id, e_cb.edge_id)),
+                    RouteLoop(loop_id="l", edge_ids=(e_ab.edge_id, e_bc.edge_id, e_cb.edge_id)),
                 ),
             )
 
     def test_broken_loop_rejected(self) -> None:
         """Chain A->B then C->A (B.to != C.from) is broken."""
         triangle = self._three_room_triangle()
-        e_ab = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-1" and e.to_room_id == "r-2")
-        e_ca = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-3" and e.to_room_id == "r-1")
-        e_ac = next(e for e in triangle.directed_edges
-                    if e.from_room_id == "r-1" and e.to_room_id == "r-3")
+        e_ab = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-1" and e.to_room_id == "r-2"
+        )
+        e_ca = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-3" and e.to_room_id == "r-1"
+        )
+        e_ac = next(
+            e for e in triangle.directed_edges if e.from_room_id == "r-1" and e.to_room_id == "r-3"
+        )
         with pytest.raises(RoamingGraphError):
             build_roaming_graph(
                 graph_id="g",
@@ -673,8 +815,7 @@ class TestRoamingGraphLoops:
                 rooms=triangle.rooms,
                 portals=triangle.portals,
                 route_loops=(
-                    RouteLoop(loop_id="l",
-                              edge_ids=(e_ab.edge_id, e_ca.edge_id, e_ac.edge_id)),
+                    RouteLoop(loop_id="l", edge_ids=(e_ab.edge_id, e_ca.edge_id, e_ac.edge_id)),
                 ),
             )
 
@@ -749,8 +890,12 @@ class TestRoamingGraphSerialization:
         blob = serialize_roaming_graph(graph)
         # Forbidden readiness / trust language.
         forbidden = [
-            "360-ready", "360-ready-evidence", "coverage-complete",
-            "arbitrary-coordinate-ready", "metric-aligned", "accepted",
+            "360-ready",
+            "360-ready-evidence",
+            "coverage-complete",
+            "arbitrary-coordinate-ready",
+            "metric-aligned",
+            "accepted",
         ]
         lower = blob.lower()
         for word in forbidden:
@@ -772,26 +917,54 @@ class TestRoamingGraphFragmented:
             entry_room_id="r-1",
             bindings=_bindings(),
             rooms=(
-                Room(room_id="r-1", label="A", kind="exterior",
-                     center_enu_m=(0, 0, 0), collision_proxy_sha256=_SHA_E),
-                Room(room_id="r-2", label="B", kind="exterior",
-                     center_enu_m=(1, 0, 0), collision_proxy_sha256=_SHA_F),
-                Room(room_id="r-3", label="C", kind="exterior",
-                     center_enu_m=(100, 0, 0), collision_proxy_sha256=_SHA_G),
-                Room(room_id="r-4", label="D", kind="exterior",
-                     center_enu_m=(101, 0, 0), collision_proxy_sha256=_SHA_A),
+                Room(
+                    room_id="r-1",
+                    label="A",
+                    kind="exterior",
+                    center_enu_m=(0, 0, 0),
+                    collision_proxy_sha256=_SHA_E,
+                ),
+                Room(
+                    room_id="r-2",
+                    label="B",
+                    kind="exterior",
+                    center_enu_m=(1, 0, 0),
+                    collision_proxy_sha256=_SHA_F,
+                ),
+                Room(
+                    room_id="r-3",
+                    label="C",
+                    kind="exterior",
+                    center_enu_m=(100, 0, 0),
+                    collision_proxy_sha256=_SHA_G,
+                ),
+                Room(
+                    room_id="r-4",
+                    label="D",
+                    kind="exterior",
+                    center_enu_m=(101, 0, 0),
+                    collision_proxy_sha256=_SHA_A,
+                ),
             ),
             portals=(
-                Portal(portal_id="p-1-2", room_ids=("r-1", "r-2"),
-                       endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
-                       clear_width_m=1.0, clear_height_m=2.0,
-                       collision_proxy_sha256=_SHA_G,
-                       source_input_sha256=_SHA_A),
-                Portal(portal_id="p-3-4", room_ids=("r-3", "r-4"),
-                       endpoints_enu_m=((100, 0, 0), (101, 0, 0)),
-                       clear_width_m=1.0, clear_height_m=2.0,
-                       collision_proxy_sha256=_SHA_G,
-                       source_input_sha256=_SHA_A),
+                Portal(
+                    portal_id="p-1-2",
+                    room_ids=("r-1", "r-2"),
+                    endpoints_enu_m=((0, 0, 0), (1, 0, 0)),
+                    clear_width_m=1.0,
+                    clear_height_m=2.0,
+                    collision_proxy_sha256=_SHA_G,
+                    source_input_sha256=_SHA_A,
+                ),
+                Portal(
+                    portal_id="p-3-4",
+                    room_ids=("r-3", "r-4"),
+                    endpoints_enu_m=((100, 0, 0), (101, 0, 0)),
+                    clear_width_m=1.0,
+                    clear_height_m=2.0,
+                    collision_proxy_sha256=_SHA_G,
+                    source_input_sha256=_SHA_A,
+                ),
             ),
             route_loops=(),
         )
@@ -805,8 +978,7 @@ class TestRoamingGraphFragmented:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(shutil.which("node") is None,
-                    reason="node not installed")
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_python_output_accepted_by_js_validator(tmp_path) -> None:
     """Build the canonical 2-room graph in Python, serialize to canonical
     LF JSON, then feed the bytes into the browser-side
@@ -848,11 +1020,14 @@ import('./roaming-graph.mjs').then(async (mod) => {
     result = subprocess.run(
         ["node", "--input-type=module", "-e", js],
         cwd=str(Path(__file__).resolve().parent.parent / "web" / "viewer"),
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert result.returncode == 0, (
         f"JS validator rejected Python output: rc={result.returncode}\n"
-        f"stdout={result.stdout}\nstderr={result.stderr}")
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
     summary = json.loads(result.stdout.strip().splitlines()[-1])
     assert summary["isRoamingGraph"] is True
     assert summary["status"] == "graph-connected"
@@ -863,3 +1038,81 @@ import('./roaming-graph.mjs').then(async (mod) => {
     assert summary["loop_count"] == 0
     assert "modeled-unverified" in summary["provenance_label"]
     assert "graph only" in summary["provenance_label"]
+
+
+class TestEmitRoamingGraphManifestReadOnce:
+    """The manifest is the trust root for the roaming graph: its bytes feed
+    the parsed rooms/portals/bindings AND its SHA is reported as
+    ``collision_manifest_sha256``. Re-reading the manifest by name for SHA
+    verification or for bindings creates a check-then-reopen window where the
+    parsed manifest could diverge from the verified bytes. The manifest must
+    be read once through a stable descriptor; its SHA must be computed from
+    those same bytes and reused for every downstream consumer.
+    """
+
+    @staticmethod
+    def _minimal_manifest() -> dict:
+        return {
+            "input_blend_sha256": _SHA_A,
+            "input_plan_sha256": _SHA_C,
+            "input_build_id": "build-001",
+            "input_build_report_sha256": _SHA_B,
+            "reciprocal_route_module_plan_sha256": _SHA_C,
+            "rooms": [
+                {
+                    "room_id": "room-a",
+                    "label": "Room A",
+                    "kind": "exterior",
+                    "center_enu_m": [0.0, 0.0, 0.0],
+                    "collision_proxy_sha256": _SHA_E,
+                },
+            ],
+            "portals": [],
+        }
+
+    @staticmethod
+    def _write_manifest(tmp_path: Path, manifest: dict) -> Path:
+        blob = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        path = tmp_path / "roaming-graph-manifest.json"
+        path.write_bytes(blob)
+        sha = hashlib.sha256(blob).hexdigest()
+        (tmp_path / "roaming-graph-manifest.sha256").write_text(sha + "\n", encoding="utf-8")
+        return path
+
+    def test_load_manifest_does_not_reread_for_sha_verification(self, tmp_path, monkeypatch):
+        """RED: _load_manifest must compute the manifest SHA from the same
+        bytes it parses, not re-read the file by name for SHA verification."""
+        path = self._write_manifest(tmp_path, self._minimal_manifest())
+
+        sha_calls: list[Path] = []
+        orig_sha256_file = emit_roaming_graph._sha256_file
+
+        def spy(p: Path) -> str:
+            sha_calls.append(p)
+            return orig_sha256_file(p)
+
+        monkeypatch.setattr(emit_roaming_graph, "_sha256_file", spy)
+
+        manifest = emit_roaming_graph._load_manifest(path)
+
+        # The stored SHA must match the bytes that were parsed.
+        assert manifest["_manifest_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        # The manifest must NOT have been re-read by name for SHA verification.
+        assert path not in sha_calls, (
+            "manifest was re-read by name for SHA verification — the parsed "
+            "bytes could diverge from the verified bytes (check-then-reopen)"
+        )
+
+    def test_build_bindings_reuses_stored_manifest_sha(self, tmp_path, monkeypatch):
+        """RED: _build_bindings must reuse the stored _manifest_sha256, not
+        re-read the manifest file by name for collision_manifest_sha256."""
+        path = self._write_manifest(tmp_path, self._minimal_manifest())
+        manifest = emit_roaming_graph._load_manifest(path)
+
+        def guard(p: Path) -> str:
+            raise AssertionError(f"_build_bindings re-read manifest by name for SHA: {p}")
+
+        monkeypatch.setattr(emit_roaming_graph, "_sha256_file", guard)
+
+        bindings = emit_roaming_graph._build_bindings(manifest)
+        assert bindings.collision_manifest_sha256 == manifest["_manifest_sha256"]

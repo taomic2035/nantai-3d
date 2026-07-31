@@ -36,6 +36,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -48,9 +50,7 @@ from pipeline.synthetic_village.roaming_graph import (
     serialize_roaming_graph,
 )
 
-DEFAULT_OUTPUT_ROOT = Path(
-    ".nantai-studio/synthetic-village/hybrid-v4-candidates/roaming-graphs"
-)
+DEFAULT_OUTPUT_ROOT = Path(".nantai-studio/synthetic-village/hybrid-v4-candidates/roaming-graphs")
 
 
 class EmitGraphError(RuntimeError):
@@ -62,9 +62,94 @@ class EmitGraphError(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
+def _stable_open(path: Path):
+    """Open a provenance input through a single O_NOFOLLOW descriptor.
+
+    ``lstat`` verifies the path is a regular file, ``os.open`` with
+    ``O_NOFOLLOW`` opens the descriptor without following symlinks, and
+    ``fstat`` re-verifies that the opened descriptor is the same regular file
+    (type, inode, device) so a symlink swap between check and open is rejected.
+    The descriptor is bound to the inode at open time, so a path swap during a
+    streaming read cannot alter the bytes already being read.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise EmitGraphError(f"input cannot be inspected: {path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise EmitGraphError(f"input is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            os.close(descriptor)
+            raise EmitGraphError(f"input changed before read: {path}")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read whole-file provenance bytes through a stable O_NOFOLLOW descriptor.
+
+    Mirrors the identity contract used across the pipeline: ``lstat`` (regular
+    file), ``O_NOFOLLOW`` open, ``fstat`` identity re-check (type via
+    ``stat.S_IFMT``, inode, device), a verified read, and a post-read ``lstat``
+    recheck to detect a swap between open and return.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise EmitGraphError(f"input cannot be inspected: {path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise EmitGraphError(f"input is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb")
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise EmitGraphError(f"input changed before read: {path}")
+        payload = stream.read()
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise EmitGraphError(f"input changed during read: {path}") from exc
+    if (
+        stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise EmitGraphError(f"input changed during read: {path}")
+    return payload
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with _stable_open(path) as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -104,7 +189,7 @@ def _is_sha256(value) -> bool:
 def _load_manifest(manifest_path: Path) -> dict:
     if not manifest_path.is_file():
         raise EmitGraphError(f"manifest not found: {manifest_path}")
-    raw = manifest_path.read_bytes()
+    raw = _stable_read_bytes(manifest_path)
     if not raw or len(raw) > 16 * 1024 * 1024:
         raise EmitGraphError("manifest bytes are absent or unbounded")
     try:
@@ -120,12 +205,15 @@ def _load_manifest(manifest_path: Path) -> dict:
     declared_sha = sha_path.read_text(encoding="utf-8").strip()
     if not _is_sha256(declared_sha):
         raise EmitGraphError(f"manifest sidecar SHA is not 64-hex: {declared_sha!r}")
-    actual_sha = _sha256_file(manifest_path)
+    # Compute the SHA from the SAME bytes that were parsed, so the manifest
+    # dict and the verified SHA cannot diverge (no check-then-reopen by name).
+    actual_sha = _sha256_bytes(raw)
     if actual_sha != declared_sha:
         raise EmitGraphError(
             f"manifest file SHA disagrees with sidecar: "
             f"actual={actual_sha} declared={declared_sha}",
         )
+    manifest["_manifest_sha256"] = actual_sha
     return manifest
 
 
@@ -139,12 +227,11 @@ def _revalidate_manifest_inputs(
     the actual build request / build report / plan bytes."""
     if not build_request_path.is_file():
         raise EmitGraphError(f"build request not found: {build_request_path}")
-    raw = build_request_path.read_bytes()
+    raw = _stable_read_bytes(build_request_path)
     if not raw or len(raw) > 64 * 1024 * 1024:
         raise EmitGraphError("build request bytes are absent or unbounded")
     try:
-        build_request = json.loads(
-            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+        build_request = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EmitGraphError(f"build request is not valid JSON: {exc}") from exc
     # Re-derive plan SHA from the build request's plan bytes.
@@ -154,8 +241,8 @@ def _revalidate_manifest_inputs(
     plan_sha = _sha256_bytes(_canonical_bytes(plan))
     if plan_sha != manifest["input_plan_sha256"]:
         raise EmitGraphError(
-            f"plan SHA disagrees: actual={plan_sha} "
-            f"manifest={manifest['input_plan_sha256']}")
+            f"plan SHA disagrees: actual={plan_sha} manifest={manifest['input_plan_sha256']}"
+        )
     if plan_sha != build_request.get("reciprocal_route_module_plan_sha256"):
         raise EmitGraphError(
             "build request plan SHA disagrees with plan bytes",
@@ -172,7 +259,8 @@ def _revalidate_manifest_inputs(
     if report_sha != manifest["input_build_report_sha256"]:
         raise EmitGraphError(
             f"build report file SHA disagrees: actual={report_sha} "
-            f"manifest={manifest['input_build_report_sha256']}")
+            f"manifest={manifest['input_build_report_sha256']}"
+        )
     return build_request
 
 
@@ -188,17 +276,17 @@ def _build_rooms(manifest: dict) -> list[Room]:
     rooms = []
     for index, row in enumerate(rows):
         try:
-            rooms.append(Room(
-                room_id=row["room_id"],
-                label=row["label"],
-                kind=row["kind"],
-                center_enu_m=tuple(row["center_enu_m"]),
-                collision_proxy_sha256=row["collision_proxy_sha256"],
-            ))
+            rooms.append(
+                Room(
+                    room_id=row["room_id"],
+                    label=row["label"],
+                    kind=row["kind"],
+                    center_enu_m=tuple(row["center_enu_m"]),
+                    collision_proxy_sha256=row["collision_proxy_sha256"],
+                )
+            )
         except KeyError as exc:
-            raise EmitGraphError(
-                f"rooms[{index}] missing required field {exc.args[0]!r}"
-            ) from exc
+            raise EmitGraphError(f"rooms[{index}] missing required field {exc.args[0]!r}") from exc
         except (TypeError, ValueError) as exc:
             raise EmitGraphError(f"rooms[{index}] is invalid: {exc}") from exc
     return rooms
@@ -211,18 +299,20 @@ def _build_portals(manifest: dict) -> list[Portal]:
     portals = []
     for index, row in enumerate(rows):
         try:
-            portals.append(Portal(
-                portal_id=row["portal_id"],
-                room_ids=tuple(row["room_ids"]),
-                endpoints_enu_m=(
-                    tuple(row["endpoints_enu_m"][0]),
-                    tuple(row["endpoints_enu_m"][1]),
-                ),
-                clear_width_m=float(row["clear_width_m"]),
-                clear_height_m=float(row["clear_height_m"]),
-                collision_proxy_sha256=row["collision_proxy_sha256"],
-                source_input_sha256=row["source_input_sha256"],
-            ))
+            portals.append(
+                Portal(
+                    portal_id=row["portal_id"],
+                    room_ids=tuple(row["room_ids"]),
+                    endpoints_enu_m=(
+                        tuple(row["endpoints_enu_m"][0]),
+                        tuple(row["endpoints_enu_m"][1]),
+                    ),
+                    clear_width_m=float(row["clear_width_m"]),
+                    clear_height_m=float(row["clear_height_m"]),
+                    collision_proxy_sha256=row["collision_proxy_sha256"],
+                    source_input_sha256=row["source_input_sha256"],
+                )
+            )
         except KeyError as exc:
             raise EmitGraphError(
                 f"portals[{index}] missing required field {exc.args[0]!r}"
@@ -237,8 +327,7 @@ def _build_bindings(manifest: dict) -> GraphBindings:
         scene_artifact_sha256=manifest["input_blend_sha256"],
         build_report_sha256=manifest["input_build_report_sha256"],
         source_plan_sha256=manifest["reciprocal_route_module_plan_sha256"],
-        collision_manifest_sha256=_sha256_file(
-            Path(manifest["_manifest_path"])),
+        collision_manifest_sha256=manifest["_manifest_sha256"],
     )
 
 
@@ -292,20 +381,20 @@ def _persist_graph(
     out_path = out_dir / "roaming-graph.json"
     out_path.write_bytes(blob)
     # Sidecar SHA for independent verification.
-    (out_dir / "roaming-graph.json.sha256").write_text(
-        graph_sha + "\n", encoding="utf-8")
+    (out_dir / "roaming-graph.json.sha256").write_text(graph_sha + "\n", encoding="utf-8")
     return out_path
 
 
 def _revalidate_graph(out_path: Path, expected_sha: str) -> None:
-    actual_sha = _sha256_file(out_path)
+    # Read once through a stable descriptor: the SHA is computed and the JSON
+    # is parsed from the SAME bytes, so a swap between hash and parse cannot
+    # let an unverified payload pass a valid SHA check.
+    raw = _stable_read_bytes(out_path)
+    actual_sha = _sha256_bytes(raw)
     if actual_sha != expected_sha:
         raise EmitGraphError(
-            f"persisted graph SHA disagrees: actual={actual_sha} "
-            f"expected={expected_sha}",
+            f"persisted graph SHA disagrees: actual={actual_sha} expected={expected_sha}",
         )
-    # Re-parse the JSON to confirm it's still valid.
-    raw = out_path.read_bytes()
     try:
         json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -322,23 +411,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         description="Emit a roaming-graph v1 artifact from a Blender manifest.",
     )
     parser.add_argument(
-        "--manifest", required=True, type=Path,
+        "--manifest",
+        required=True,
+        type=Path,
         help="Path to roaming-graph-manifest.json produced by the Blender emitter.",
     )
     parser.add_argument(
-        "--build-request", required=True, type=Path,
+        "--build-request",
+        required=True,
+        type=Path,
         help="Path to reciprocal-route-build-request.json (the exact build's plan source).",
     )
     parser.add_argument(
-        "--graph-id", required=True,
+        "--graph-id",
+        required=True,
         help="Stable lowercase-hyphenated graph_id (e.g. courtyard-gallery-side-passage-v1).",
     )
     parser.add_argument(
-        "--entry-room-id", required=True,
+        "--entry-room-id",
+        required=True,
         help="Stable lowercase-hyphenated entry_room_id.",
     )
     parser.add_argument(
-        "--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT,
+        "--output-root",
+        type=Path,
+        default=DEFAULT_OUTPUT_ROOT,
         help=f"Private output root (default: {DEFAULT_OUTPUT_ROOT}).",
     )
     return parser.parse_args(argv)
@@ -348,10 +445,8 @@ def main(argv: list[str]) -> int:
     args = _parse_args(argv)
     try:
         manifest = _load_manifest(args.manifest)
-        manifest["_manifest_path"] = str(args.manifest.resolve())
         _revalidate_manifest_inputs(manifest, args.build_request)
-        graph_sha, graph_blob = _emit_graph(
-            manifest, args.graph_id, args.entry_room_id)
+        graph_sha, graph_blob = _emit_graph(manifest, args.graph_id, args.entry_room_id)
         out_path = _persist_graph(graph_blob, graph_sha, args.output_root)
         _revalidate_graph(out_path, graph_sha)
         print(f"graph_sha256={graph_sha}")
@@ -361,7 +456,7 @@ def main(argv: list[str]) -> int:
         print(f"plan_sha256={manifest['input_plan_sha256']}")
         print(f"build_report_sha256={manifest['input_build_report_sha256']}")
         print(f"blend_sha256={manifest['input_blend_sha256']}")
-        print(f"collision_manifest_sha256={_sha256_file(args.manifest)}")
+        print(f"collision_manifest_sha256={manifest['_manifest_sha256']}")
         print(f"room_count={len(manifest['rooms'])}")
         print(f"portal_count={len(manifest['portals'])}")
         return 0
