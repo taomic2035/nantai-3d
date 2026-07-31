@@ -26,7 +26,11 @@ from pydantic import ValidationError
 
 from pipeline.synthetic_village.prop_geometry_v2 import (
     BATCH35_SOURCE_SHAS,
+    CANONICAL_ALLOWED_INTERSECTIONS,
+    EXACT_COUNT_KINDS,
+    MIN_COUNT_KINDS,
     PROP_SLOTS_V2,
+    REQUIRED_SEMANTIC_KINDS,
     PropGeometryV2Error,
     PropGeometryV2Plan,
     PropPart,
@@ -487,3 +491,135 @@ def test_trust_fields_are_literal_locked():
     assert plan.coverage_use == "forbidden"
     assert plan.clearance_use == "forbidden-as-evidence"
     assert plan.trust_effect == "none"
+
+
+# ---------------------------------------------------------------------------
+# REVIEW-CODEX-037: frozen / fail-closed boundary must not be bypassable.
+# ---------------------------------------------------------------------------
+
+
+def test_model_copy_update_cannot_promote_trust_field() -> None:
+    """RED: model_copy(update=...) must re-validate; a promoted stage must
+    raise instead of silently producing an accepted plan."""
+    plan = build_prop_geometry_v2_plan()
+    with pytest.raises(ValidationError):
+        plan.model_copy(update={"stage": "accepted"})
+
+
+def test_model_copy_update_cannot_swap_source_sha() -> None:
+    """RED: model_copy(update=...) must re-run slot validators, so a
+    wrong source_image_sha256 must be rejected. A field-level type
+    violation raises ValidationError; a business-rule violation (source
+    SHA mismatch) raises PropGeometryV2Error — both are valid rejections."""
+    from pipeline.synthetic_village.prop_geometry_v2 import (
+        PropGeometryV2Error,
+    )
+
+    slot = PROP_SLOTS_V2["prop-water-jar-01"]
+    with pytest.raises((ValidationError, PropGeometryV2Error)):
+        slot.model_copy(update={"source_image_sha256": "0" * 64})
+
+
+def test_module_level_source_sha_table_is_immutable() -> None:
+    """RED: BATCH35_SOURCE_SHAS must not be mutable in place."""
+    with pytest.raises(TypeError):
+        BATCH35_SOURCE_SHAS["prop-water-jar-01"] = "0" * 64
+
+
+def test_module_level_semantic_count_tables_are_immutable() -> None:
+    """RED: required-kind, exact-count and min-count contract tables must
+    be immutable at every level (REVIEW-CODEX-037 P1)."""
+    with pytest.raises(TypeError):
+        REQUIRED_SEMANTIC_KINDS["prop-water-jar-01"] = frozenset()
+    with pytest.raises(TypeError):
+        EXACT_COUNT_KINDS["prop-handcart-01"] = {}
+    # Inner count table must also be immutable.
+    with pytest.raises(TypeError):
+        EXACT_COUNT_KINDS["prop-handcart-01"]["wheel"] = 99
+    with pytest.raises(TypeError):
+        MIN_COUNT_KINDS["prop-farming-tools-01"] = {}
+    with pytest.raises(TypeError):
+        MIN_COUNT_KINDS["prop-farming-tools-01"]["tool-head"] = 1
+
+
+def test_module_level_intersection_table_is_immutable() -> None:
+    """RED: CANONICAL_ALLOWED_INTERSECTIONS must not be mutable in place."""
+    with pytest.raises(TypeError):
+        CANONICAL_ALLOWED_INTERSECTIONS["prop-water-jar-01"] = frozenset()
+
+
+def test_prop_slots_v2_table_is_immutable() -> None:
+    """RED: PROP_SLOTS_V2 must not support pop/del/update."""
+    with pytest.raises((TypeError, AttributeError)):
+        PROP_SLOTS_V2.pop("prop-water-jar-01")  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        del PROP_SLOTS_V2["prop-water-jar-01"]
+
+
+def test_plan_slot_plans_container_is_immutable() -> None:
+    """RED: a built plan's slot_plans must not be mutable in place; a
+    validated plan must not lose a required slot without an exception."""
+    plan = build_prop_geometry_v2_plan()
+    with pytest.raises((TypeError, AttributeError)):
+        plan.slot_plans.pop("prop-water-jar-01")  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        plan.slot_plans["prop-bogus-01"] = plan.slot_plans["prop-water-jar-01"]
+
+
+def test_finalize_for_build_revalidates_complete_slot() -> None:
+    """RED: finalize_for_build must produce a re-validated slot; the
+    collision proxy SHA is bound and all slot validators re-run."""
+    slot = PROP_SLOTS_V2["prop-water-jar-01"]
+    finalized = slot.finalize_for_build("a" * 64)
+    assert finalized.collision_proxy_sha256 == "a" * 64
+    # finalize_for_build must not bypass the source-SHA lock: feeding a
+    # bad SHA through model_copy must still reject. The source-SHA
+    # mismatch is a business-rule violation (PropGeometryV2Error), not
+    # a field-level type error (ValidationError); both are valid rejections.
+    from pipeline.synthetic_village.prop_geometry_v2 import (
+        PropGeometryV2Error,
+    )
+
+    with pytest.raises((ValidationError, PropGeometryV2Error)):
+        slot.model_copy(
+            update={
+                "collision_proxy_sha256": "a" * 64,
+                "source_image_sha256": "0" * 64,
+            }
+        )
+
+
+def test_metric_and_rotation_tuples_reject_booleans() -> None:
+    """RED: bool components must not be silently coerced to 1.0/0.0 in
+    metric transform, rotation or bounds tuples (REVIEW-CODEX-037 P2)."""
+    base = dict(
+        part_id="bool-probe",
+        material_slot_id="material-clay-brick-01",
+        collision_role="solid",
+        render_bounds_m=(0.5, 0.5, 0.5),
+    )
+    with pytest.raises(ValidationError):
+        PropPart(local_transform_m=(True, 0.0, 0.0), **base)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        PropPart(local_rotation_euler_deg=(0.0, False, 0.0), **base)  # type: ignore[arg-type]
+    bounds_base = dict(
+        part_id="bool-probe",
+        material_slot_id="material-clay-brick-01",
+        collision_role="solid",
+        local_transform_m=(0.0, 0.0, 0.0),
+    )
+    with pytest.raises(ValidationError):
+        PropPart(render_bounds_m=(0.5, 0.5, True), **bounds_base)  # type: ignore[arg-type]
+
+
+def test_canonical_serialization_remains_deterministic_after_repair() -> None:
+    """RED: after the immutability/revalidation repair, the canonical
+    serialization must remain byte-stable across calls and still round-trip."""
+    first = serialize_prop_geometry_v2_plan(build_prop_geometry_v2_plan())
+    second = serialize_prop_geometry_v2_plan(build_prop_geometry_v2_plan())
+    assert first == second
+    import json
+    parsed = json.loads(first.decode("utf-8"))
+    assert parsed["stage"] == "design-only"
+    assert parsed["trust_effect"] == "none"
+    assert len(parsed["slot_plans"]) == 8

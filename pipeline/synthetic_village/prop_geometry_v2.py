@@ -43,9 +43,18 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -76,7 +85,7 @@ SUPPORTED_SLOT_IDS: frozenset[str] = frozenset({
 #: Source image SHA-256 per slot, locked to FEEDBACK-IMAGE2-040
 #: `Accepted modeling inputs`. Changing one of these is a contract break
 #: and must produce a new schema version.
-BATCH35_SOURCE_SHAS: dict[str, str] = {
+BATCH35_SOURCE_SHAS: Mapping[str, str] = MappingProxyType({
     "prop-water-jar-01":
         "30caa127934742e64889ea2dc5055b4c34a72174736ea999cc26e057d60149c6",
     "prop-firewood-stack-01":
@@ -93,11 +102,11 @@ BATCH35_SOURCE_SHAS: dict[str, str] = {
         "0634f7d9ae8287dfecb00f61064f250c4ff6585e09a4f0eea56c1581577422b1",
     "prop-handcart-01":
         "3f5e83b734cb707e2011804ff33733752f07210e6c05c421dacfb0e232af0e39",
-}
+})
 
 #: Semantic kinds required per slot per FEEDBACK-IMAGE2-040 §4. The plan
 #: builder rejects a slot plan that does not include at least these kinds.
-REQUIRED_SEMANTIC_KINDS: dict[str, frozenset[str]] = {
+REQUIRED_SEMANTIC_KINDS: Mapping[str, frozenset[str]] = MappingProxyType({
     "prop-water-jar-01": frozenset({"body", "rim", "opening", "foot"}),
     "prop-firewood-stack-01": frozenset({"frame", "log"}),
     "prop-bamboo-basket-01": frozenset({
@@ -114,23 +123,23 @@ REQUIRED_SEMANTIC_KINDS: dict[str, frozenset[str]] = {
     "prop-handcart-01": frozenset({
         "bed", "wheel", "spoke", "axle", "handle", "brace", "rest",
     }),
-}
+})
 
 #: Slots that require an exact wheel count (FEEDBACK-IMAGE2-040 §4:
 #: "cart bed/two spoked wheels/axle/handles/braces/rests"). Wrong count
 #: must fail closed.
-EXACT_COUNT_KINDS: dict[str, dict[str, int]] = {
-    "prop-handcart-01": {"wheel": 2},
-}
+EXACT_COUNT_KINDS: Mapping[str, Mapping[str, int]] = MappingProxyType({
+    "prop-handcart-01": MappingProxyType({"wheel": 2}),
+})
 
 #: Slots that require a minimum count per semantic kind (e.g. at least
 #: four distinct tool heads/handles for ``prop-farming-tools-01``).
-MIN_COUNT_KINDS: dict[str, dict[str, int]] = {
-    "prop-farming-tools-01": {"tool-head": 4, "handle": 4},
-    "prop-wooden-bench-01": {"pegs": 4},
-    "prop-grain-rack-01": {"brace": 4},
-    "prop-handcart-01": {"spoke": 8, "brace": 2, "rest": 2},
-}
+MIN_COUNT_KINDS: Mapping[str, Mapping[str, int]] = MappingProxyType({
+    "prop-farming-tools-01": MappingProxyType({"tool-head": 4, "handle": 4}),
+    "prop-wooden-bench-01": MappingProxyType({"pegs": 4}),
+    "prop-grain-rack-01": MappingProxyType({"brace": 4}),
+    "prop-handcart-01": MappingProxyType({"spoke": 8, "brace": 2, "rest": 2}),
+})
 
 
 def _pair(left: str, right: str) -> tuple[str, str]:
@@ -157,10 +166,10 @@ _HANDCART_SPOKES = {
 # Strictly declared volumetric AABB intersections for canonical structural
 # joints. A new or removed overlap changes the observed set and is rejected;
 # generated image panels never authorize an undeclared intersection.
-CANONICAL_ALLOWED_INTERSECTIONS: dict[
+CANONICAL_ALLOWED_INTERSECTIONS: Mapping[
     str,
     frozenset[tuple[str, str]],
-] = {
+] = MappingProxyType({
     "prop-water-jar-01": frozenset({
         _pair("water-jar-body", "water-jar-foot"),
     }),
@@ -255,7 +264,7 @@ CANONICAL_ALLOWED_INTERSECTIONS: dict[
             for side in ("left", "right")
         ),
     }),
-}
+})
 
 # Maximum absolute coordinate (m) for any local transform component or
 # render bound. Props are small (under 2 m); anything beyond 10 m is a
@@ -280,6 +289,27 @@ class _Frozen(BaseModel):
         validate_assignment=True,
         str_strip_whitespace=False,
     )
+
+    def model_copy(  # type: ignore[override]
+        self,
+        *,
+        update: dict[str, object] | None = None,
+        deep: bool = False,
+    ) -> _Frozen:
+        """Re-validate on copy to prevent silent trust-field promotion.
+
+        Pydantic's default ``model_copy(update=...)`` bypasses every
+        validator, so a ``Literal["design-only"]`` stage could be silently
+        promoted to ``"accepted"`` and a locked source SHA could be swapped
+        without detection. We force full re-validation through
+        ``model_validate`` so any update that violates the trust boundary
+        raises instead of producing an invalid copy.
+        """
+        if not update:
+            return super().model_copy(deep=deep)
+        data: dict[str, object] = self.model_dump()
+        data.update(update)
+        return type(self).model_validate(data)  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +362,30 @@ class PropPart(_Frozen):
     #: to enforce the per-slot required-kind coverage. Defaults to
     #: ``part`` so parts without a more specific kind still validate.
     semantic_kind: str = Field(default="part", pattern=STABLE_ID_PATTERN)
+
+    @field_validator(
+        "local_transform_m",
+        "local_rotation_euler_deg",
+        "render_bounds_m",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_in_numeric_tuples(cls, value: object) -> object:
+        """Reject bool components before Pydantic coerces them to 1.0/0.0.
+
+        ``bool`` is a subclass of ``int`` in Python, so without this
+        check ``local_transform_m=(True, 0.0, 0.0)`` silently becomes
+        ``(1.0, 0.0, 0.0)`` — an ambiguous input that should fail closed
+        before geometry emission (REVIEW-CODEX-037 P2).
+        """
+        if isinstance(value, (list, tuple)):
+            for i, c in enumerate(value):
+                if isinstance(c, bool):
+                    raise ValueError(
+                        f"boolean at index {i} is not a valid numeric "
+                        f"coordinate; use an explicit float or int")
+        return value
+
     @model_validator(mode="after")
     def _validate_part(self) -> PropPart:
         _validate_finite_tuple(self.local_transform_m, "local_transform_m")
@@ -373,6 +427,18 @@ class PropSlotPlan(_Frozen):
         default="",
         pattern=OPTIONAL_SHA256_PATTERN,
     )
+
+    @field_validator("envelope_m", mode="before")
+    @classmethod
+    def _reject_bool_in_envelope(cls, value: object) -> object:
+        """Reject bool components in the envelope tuple before coercion."""
+        if isinstance(value, (list, tuple)):
+            for i, c in enumerate(value):
+                if isinstance(c, bool):
+                    raise ValueError(
+                        f"boolean at index {i} is not a valid envelope "
+                        f"dimension; use an explicit float or int")
+        return value
 
     @model_validator(mode="after")
     def _validate_slot_plan(self) -> PropSlotPlan:
@@ -557,6 +623,21 @@ class PropGeometryV2Plan(_Frozen):
     trust_effect: Literal["none"] = "none"
     slot_plans: dict[str, PropSlotPlan]
 
+    @field_serializer("slot_plans")
+    def _serialize_slot_plans(
+        self,
+        value: Mapping[str, PropSlotPlan],
+    ) -> dict[str, PropSlotPlan]:
+        """Convert MappingProxyType back to dict for clean serialization.
+
+        Without this, ``model_dump()`` warns that it expected ``dict`` but
+        received ``mappingproxy``. The runtime value is a
+        ``MappingProxyType`` (set in ``_validate_plan`` for immutability),
+        but the serialized output must be a plain dict so JSON
+        serialization and ``model_validate`` round-trips stay stable.
+        """
+        return dict(value)
+
     @model_validator(mode="after")
     def _validate_plan(self) -> PropGeometryV2Plan:
         if set(self.slot_plans.keys()) != SUPPORTED_SLOT_IDS:
@@ -573,6 +654,15 @@ class PropGeometryV2Plan(_Frozen):
                 "slot_plans keys must match their embedded slot_id values; "
                 f"mismatches={mismatched_keys}"
             )
+        # Wrap slot_plans in a read-only MappingProxyType so that
+        # pop/del/item-assignment fail with TypeError. ``frozen=True``
+        # prevents attribute reassignment but not in-place dict mutation;
+        # this closes that gap (REVIEW-CODEX-037 P1).
+        object.__setattr__(
+            self,
+            "slot_plans",
+            MappingProxyType(dict(self.slot_plans)),
+        )
         return self
 
 
@@ -1242,7 +1332,7 @@ def _handcart_plan() -> PropSlotPlan:
 
 
 #: The frozen canonical plans for all eight slots.
-PROP_SLOTS_V2: dict[str, PropSlotPlan] = {
+PROP_SLOTS_V2: Mapping[str, PropSlotPlan] = MappingProxyType({
     "prop-water-jar-01": _water_jar_plan(),
     "prop-firewood-stack-01": _firewood_stack_plan(),
     "prop-bamboo-basket-01": _bamboo_basket_plan(),
@@ -1251,7 +1341,7 @@ PROP_SLOTS_V2: dict[str, PropSlotPlan] = {
     "prop-grain-rack-01": _grain_rack_plan(),
     "prop-stone-trough-01": _stone_trough_plan(),
     "prop-handcart-01": _handcart_plan(),
-}
+})
 
 
 def build_prop_geometry_v2_plan() -> PropGeometryV2Plan:
