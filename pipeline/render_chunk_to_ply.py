@@ -19,6 +19,7 @@ import numpy as np
 from loguru import logger
 from plyfile import PlyData, PlyElement
 
+from pipeline.chunk_scheduler import _read_layout_bytes_stable
 from pipeline.schema import ChunkLayout
 from pipeline.synthetic_village.infinite_terrain import (
     TERRAIN_ALGORITHM_ID,
@@ -762,11 +763,12 @@ def render_chunkset(
     for cx in range(x_min, x_max):
         for cy in range(y_min, y_max):
             layout_file = layouts_dir / f"chunk_{cx}_{cy}.json"
-            if not layout_file.exists():
+            payload = _read_layout_bytes_stable(layout_file)
+            if payload is None:
                 logger.warning(f"跳过缺失 layout: {layout_file}")
                 continue
 
-            layout = ChunkLayout(**json.loads(layout_file.read_text(encoding="utf-8")))
+            layout = ChunkLayout.model_validate_json(payload)
             world_seeds.add(layout.world_seed)
             if mock_reproducible:
                 regen = MockLayoutGenerator(layout.world_seed).generate_chunk(cx, cy)

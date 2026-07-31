@@ -8,6 +8,7 @@
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 from io import BytesIO
@@ -515,3 +516,111 @@ def test_centered_bake_includes_negative_chunks(tmp_path):
     coords = {(c["x"], c["y"]) for c in manifest["chunks"]}
     assert (-1, -1) in coords
     assert manifest["baked_extent"] == {"x_min": -1, "x_max": 1, "y_min": -1, "y_max": 1}
+
+
+# ============================================================
+# render_chunkset layout stable descriptor (security)
+# ============================================================
+
+
+class TestRenderChunksetLayoutStableDescriptor:
+    """RED->GREEN: render_chunkset must read layouts through a single O_NOFOLLOW descriptor.
+
+    The persisted chunk layout JSON feeds the renderer that produces Gaussian
+    point clouds consumed by the Viewer.  Opening it by name via
+    ``Path.read_text`` leaves a TOCTOU window between ``Path.exists`` and the
+    read, and a symlinked layout file is followed silently.
+    """
+
+    def test_rejects_symlink_layout(self, tmp_path):
+        from pipeline.chunk_scheduler import ChunkLayoutReadError
+
+        layouts = tmp_path / 'layouts'
+        _write_mock_layouts(layouts, (0, 1, 0, 1))
+        target = layouts / 'chunk_0_0.json'
+        real_backup = layouts / 'real_chunk_0_0.json'
+        target.rename(real_backup)
+        try:
+            os.symlink(real_backup, target)
+        except OSError as exc:
+            pytest.skip(f'symlink creation unavailable: {exc}')
+
+        with pytest.raises(ChunkLayoutReadError):
+            render_chunkset(
+                layouts_dir=layouts,
+                output_dir=tmp_path / 'web',
+                chunk_range=(0, 1, 0, 1),
+                assets_dir=None,
+                lod_levels={0: 0.1},
+            )
+
+    def test_does_not_use_path_open_or_read_text_for_layouts(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        layouts = tmp_path / 'layouts'
+        _write_mock_layouts(layouts, (0, 1, 0, 1))
+
+        _real_path_open = Path.open
+
+        def reject_open(self, *args, **kwargs):
+            mode = args[0] if args else kwargs.get('mode', 'r')
+            if mode in ('r', 'rb', 'rt', 'r+b', 'r+'):
+                raise AssertionError(
+                    'render_chunkset must not use Path.open for reading layouts'
+                )
+            return _real_path_open(self, *args, **kwargs)
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError(
+                'render_chunkset must not use Path.read_text for layouts'
+            )
+
+        monkeypatch.setattr(Path, 'open', reject_open)
+        monkeypatch.setattr(Path, 'read_text', reject_read_text)
+
+        manifest = render_chunkset(
+            layouts_dir=layouts,
+            output_dir=tmp_path / 'web',
+            chunk_range=(0, 1, 0, 1),
+            assets_dir=None,
+            lod_levels={0: 0.1},
+        )
+        assert len(manifest['chunks']) == 1
+
+    def test_detects_swap_between_lstat_and_open(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from pipeline.chunk_scheduler import ChunkLayoutReadError
+
+        layouts = tmp_path / 'layouts'
+        _write_mock_layouts(layouts, (0, 1, 0, 1))
+        target = layouts / 'chunk_0_0.json'
+
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                target.write_text(
+                    json.dumps({'different': True, 'swapped': True}),
+                    encoding='utf-8',
+                    newline='\n',
+                )
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, 'open', swapping_open)
+
+        with pytest.raises(ChunkLayoutReadError, match='changed|identity'):
+            render_chunkset(
+                layouts_dir=layouts,
+                output_dir=tmp_path / 'web',
+                chunk_range=(0, 1, 0, 1),
+                assets_dir=None,
+                lod_levels={0: 0.1},
+            )
