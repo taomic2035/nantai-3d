@@ -9,6 +9,7 @@
 - 照片 EXIF 仅当真实携带时转发, 否则 exif_source="none"
 - 误导性 docstring 声明已移除
 """
+
 import hashlib
 import os
 import sys
@@ -36,9 +37,7 @@ from pipeline.ingest_manifest import (
 
 def _plain_photo(path: Path, seed: int = 0) -> None:
     rng = np.random.default_rng(seed)
-    Image.fromarray(
-        rng.integers(60, 200, (24, 32, 3), dtype=np.uint8)
-    ).save(path)
+    Image.fromarray(rng.integers(60, 200, (24, 32, 3), dtype=np.uint8)).save(path)
 
 
 def _exif_photo(path: Path) -> bool:
@@ -86,10 +85,7 @@ def _sha256(path: Path) -> str:
 
 def _output_images(output_dir: Path) -> list[Path]:
     """output_dir 下所有输出图 (排除清单文件)。"""
-    return sorted(
-        p for p in output_dir.rglob("*")
-        if p.is_file() and p.name != MANIFEST_FILENAME
-    )
+    return sorted(p for p in output_dir.rglob("*") if p.is_file() and p.name != MANIFEST_FILENAME)
 
 
 # ---------------------------------------------------------------------------
@@ -130,10 +126,21 @@ def test_ingest_params_reject_other_invalid_bounds(field, bad):
 
 
 @pytest.mark.parametrize(
-    "path", [
-        "", "/abs.jpg", "C:drive.jpg", "CON.jpg", "dir/AUX",
-        "../escape.jpg", "a\\b.jpg", "a/./b.jpg", 'bad?.jpg',
-        'bad*.jpg', 'bad<name>.jpg', 'bad|name.jpg', 'bad"name.jpg',
+    "path",
+    [
+        "",
+        "/abs.jpg",
+        "C:drive.jpg",
+        "CON.jpg",
+        "dir/AUX",
+        "../escape.jpg",
+        "a\\b.jpg",
+        "a/./b.jpg",
+        "bad?.jpg",
+        "bad*.jpg",
+        "bad<name>.jpg",
+        "bad|name.jpg",
+        'bad"name.jpg',
     ],
 )
 def test_source_paths_are_portable_relative_posix(path):
@@ -142,10 +149,21 @@ def test_source_paths_are_portable_relative_posix(path):
 
 
 @pytest.mark.parametrize(
-    "path", [
-        "", "/abs.jpg", "C:drive.jpg", "CON.jpg", "dir/AUX",
-        "../escape.jpg", "a\\b.jpg", "a/./b.jpg", 'bad?.jpg',
-        'bad*.jpg', 'bad<name>.jpg', 'bad|name.jpg', 'bad"name.jpg',
+    "path",
+    [
+        "",
+        "/abs.jpg",
+        "C:drive.jpg",
+        "CON.jpg",
+        "dir/AUX",
+        "../escape.jpg",
+        "a\\b.jpg",
+        "a/./b.jpg",
+        "bad?.jpg",
+        "bad*.jpg",
+        "bad<name>.jpg",
+        "bad|name.jpg",
+        'bad"name.jpg',
     ],
 )
 def test_output_paths_are_portable_relative_posix(path):
@@ -216,13 +234,15 @@ def _strict_photo_record(
         source_sha256=digest,
         kind="photo",
         bytes=len(payload),
-        outputs=(FrameMapping(
-            output_path=output_path,
-            output_sha256=digest,
-            output_bytes=len(payload),
-            source_frame_index=None,
-            preserves_source_bytes=True,
-        ),),
+        outputs=(
+            FrameMapping(
+                output_path=output_path,
+                output_sha256=digest,
+                output_bytes=len(payload),
+                source_frame_index=None,
+                preserves_source_bytes=True,
+            ),
+        ),
     )
 
 
@@ -254,7 +274,9 @@ def _strict_video_record(
                 preserves_source_bytes=False,
             )
             for output_path, frame_index in zip(
-                output_paths, frame_indexes, strict=True,
+                output_paths,
+                frame_indexes,
+                strict=True,
             )
         ),
     )
@@ -273,16 +295,19 @@ def test_source_kind_must_match_its_media_suffix():
 
 
 @pytest.mark.parametrize(
-    "bad", ["", "   ", "2026-99-99", "not-a-date", "2026:7:1 1:2:3"],
+    "bad",
+    ["", "   ", "2026-99-99", "not-a-date", "2026:7:1 1:2:3"],
 )
 def test_photo_exif_datetime_requires_real_exif_format(bad):
     base = _strict_photo_record()
     with pytest.raises(ValidationError, match="EXIF datetime"):
-        SourceRecord(**{
-            **base.model_dump(),
-            "exif_datetime": bad,
-            "exif_source": "photo-exif",
-        })
+        SourceRecord(
+            **{
+                **base.model_dump(),
+                "exif_datetime": bad,
+                "exif_source": "photo-exif",
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -293,7 +318,8 @@ def test_photo_exif_datetime_requires_real_exif_format(bad):
     ],
 )
 def test_video_mapping_requires_deterministic_paths_and_order(
-    frame_indexes, output_paths,
+    frame_indexes,
+    output_paths,
 ):
     with pytest.raises(ValidationError, match="deterministic|increasing"):
         _strict_video_record(
@@ -304,7 +330,10 @@ def test_video_mapping_requires_deterministic_paths_and_order(
 
 def test_manifest_enforces_max_frames_and_sampling_step():
     too_many_params = IngestParams(
-        fps=2, max_frames=1, blur_threshold=0, max_long_edge=2560,
+        fps=2,
+        max_frames=1,
+        blur_threshold=0,
+        max_long_edge=2560,
     )
     with pytest.raises(ValidationError, match="max_frames"):
         build_manifest(
@@ -314,7 +343,10 @@ def test_manifest_enforces_max_frames_and_sampling_step():
         )
 
     sampled_params = IngestParams(
-        fps=2, max_frames=10, blur_threshold=0, max_long_edge=2560,
+        fps=2,
+        max_frames=10,
+        blur_threshold=0,
+        max_long_edge=2560,
     )
     with pytest.raises(ValidationError, match="sampling step"):
         build_manifest(
@@ -326,7 +358,10 @@ def test_manifest_enforces_max_frames_and_sampling_step():
 
 def test_manifest_rejects_casefold_path_collisions():
     params = IngestParams(
-        fps=10, max_frames=10, blur_threshold=0, max_long_edge=2560,
+        fps=10,
+        max_frames=10,
+        blur_threshold=0,
+        max_long_edge=2560,
     )
     with pytest.raises(ValidationError, match="source paths must be unique"):
         build_manifest(
@@ -354,7 +389,10 @@ def test_manifest_rejects_casefold_path_collisions():
 
 def test_manifest_rejects_wrong_total_and_wrong_session():
     params = IngestParams(
-        fps=2, max_frames=300, blur_threshold=0, max_long_edge=2560,
+        fps=2,
+        max_frames=300,
+        blur_threshold=0,
+        max_long_edge=2560,
     )
     one = _strict_photo_record()
     common = {
@@ -366,11 +404,13 @@ def test_manifest_rejects_wrong_total_and_wrong_session():
     with pytest.raises(ValidationError, match="total_output_frames"):
         IngestManifest(**{**common, "total_output_frames": 2})
     with pytest.raises(ValidationError, match="session_id"):
-        IngestManifest(**{
-            **common,
-            "total_output_frames": 1,
-            "session_id": "ingest-" + "0" * 64,
-        })
+        IngestManifest(
+            **{
+                **common,
+                "total_output_frames": 1,
+                "session_id": "ingest-" + "0" * 64,
+            }
+        )
 
 
 def _write_strict_stage(tmp_path):
@@ -382,7 +422,10 @@ def _write_strict_stage(tmp_path):
     (input_dir / "photo.jpg").write_bytes(payload)
     (stage_dir / "photo.jpg").write_bytes(payload)
     params = IngestParams(
-        fps=2, max_frames=300, blur_threshold=0, max_long_edge=2560,
+        fps=2,
+        max_frames=300,
+        blur_threshold=0,
+        max_long_edge=2560,
     )
     manifest = build_manifest(
         created_utc=datetime.now(UTC),
@@ -390,7 +433,8 @@ def _write_strict_stage(tmp_path):
         sources=(_strict_photo_record(payload=payload),),
     )
     (stage_dir / MANIFEST_FILENAME).write_text(
-        manifest.model_dump_json(indent=2), encoding="utf-8",
+        manifest.model_dump_json(indent=2),
+        encoding="utf-8",
     )
     return input_dir, stage_dir, manifest
 
@@ -558,7 +602,8 @@ def test_nested_duplicate_basenames_keep_deterministic_relative_paths(tmp_path):
     assert (output_dir / "right/photo.jpg").is_file()
     manifest = ingest_contract.verify_ingest_artifact(output_dir, input_dir=input_dir)
     assert {item.outputs[0].output_path for item in manifest.sources} == {
-        "left/photo.jpg", "right/photo.jpg",
+        "left/photo.jpg",
+        "right/photo.jpg",
     }
 
 
@@ -694,7 +739,11 @@ class _ExifTag:
 
 
 def _fake_gps_tags(
-    *, lat_ref=None, lon_ref=None, altitude=None, altitude_ref=None,
+    *,
+    lat_ref=None,
+    lon_ref=None,
+    altitude=None,
+    altitude_ref=None,
 ):
     tags = {
         "GPS GPSLatitude": _ExifTag([_ExifRatio(31), _ExifRatio(14), _ExifRatio(0)]),
@@ -743,16 +792,21 @@ def test_gps_south_west_refs_preserve_negative_sign(tmp_path, monkeypatch):
     [(None, None), ("0", 25.0), ("1", -25.0)],
 )
 def test_gps_altitude_requires_an_explicit_direction_ref(
-    tmp_path, monkeypatch, altitude_ref, expected,
+    tmp_path,
+    monkeypatch,
+    altitude_ref,
+    expected,
 ):
     source = tmp_path / "photo.jpg"
     source.write_bytes(b"photo")
-    fake = SimpleNamespace(process_file=lambda *_args, **_kwargs: _fake_gps_tags(
-        lat_ref="N",
-        lon_ref="E",
-        altitude=25,
-        altitude_ref=altitude_ref,
-    ))
+    fake = SimpleNamespace(
+        process_file=lambda *_args, **_kwargs: _fake_gps_tags(
+            lat_ref="N",
+            lon_ref="E",
+            altitude=25,
+            altitude_ref=altitude_ref,
+        )
+    )
     monkeypatch.setitem(sys.modules, "exifread", fake)
 
     _, gps = ingest._read_photo_exif(source)
@@ -763,19 +817,26 @@ def test_gps_altitude_requires_an_explicit_direction_ref(
 
 def test_session_id_covers_output_and_provenance_evidence():
     params = IngestParams(
-        fps=2, max_frames=300, blur_threshold=0, max_long_edge=2560,
+        fps=2,
+        max_frames=300,
+        blur_threshold=0,
+        max_long_edge=2560,
     )
     base = _strict_photo_record()
-    first = SourceRecord(**{
-        **base.model_dump(),
-        "exif_datetime": "2026:07:15 10:20:30",
-        "exif_source": "photo-exif",
-    })
-    second = SourceRecord(**{
-        **base.model_dump(),
-        "exif_datetime": "2026:07:15 10:20:31",
-        "exif_source": "photo-exif",
-    })
+    first = SourceRecord(
+        **{
+            **base.model_dump(),
+            "exif_datetime": "2026:07:15 10:20:30",
+            "exif_source": "photo-exif",
+        }
+    )
+    second = SourceRecord(
+        **{
+            **base.model_dump(),
+            "exif_datetime": "2026:07:15 10:20:31",
+            "exif_source": "photo-exif",
+        }
+    )
     assert ingest_contract.derive_session_id(params, (first,)) != (
         ingest_contract.derive_session_id(params, (second,))
     )
@@ -788,24 +849,31 @@ def test_session_id_covers_output_and_provenance_evidence():
         bytes=20,
         source_fps=10,
         duration_s=1,
-        outputs=(FrameMapping(
-            output_path="clip.mp4.frames/frame_000000.jpg",
-            output_sha256="b" * 64,
-            output_bytes=4,
-            source_frame_index=0,
-            preserves_source_bytes=False,
-        ),),
+        outputs=(
+            FrameMapping(
+                output_path="clip.mp4.frames/frame_000000.jpg",
+                output_sha256="b" * 64,
+                output_bytes=4,
+                source_frame_index=0,
+                preserves_source_bytes=False,
+            ),
+        ),
     )
-    video_two = SourceRecord(**{
-        **video_one.model_dump(),
-        "outputs": ({
-            **video_one.outputs[0].model_dump(),
-            "output_sha256": "c" * 64,
-        },),
-    })
+    video_two = SourceRecord(
+        **{
+            **video_one.model_dump(),
+            "outputs": (
+                {
+                    **video_one.outputs[0].model_dump(),
+                    "output_sha256": "c" * 64,
+                },
+            ),
+        }
+    )
     assert ingest_contract.derive_session_id(params, (video_one,)) != (
         ingest_contract.derive_session_id(params, (video_two,))
     )
+
 
 def test_manifest_written_and_valid(tmp_path):
     inp = tmp_path / "in"
@@ -877,9 +945,7 @@ def test_source_to_output_mapping_complete(tmp_path):
     out = tmp_path / "out"
 
     ingest_all(inp, out, fps=10.0, blur_threshold=0)
-    m = IngestManifest.model_validate_json(
-        (out / MANIFEST_FILENAME).read_text(encoding="utf-8")
-    )
+    m = IngestManifest.model_validate_json((out / MANIFEST_FILENAME).read_text(encoding="utf-8"))
 
     mapped = [fm.output_path for s in m.sources for fm in s.outputs]
     # 无重复
@@ -901,9 +967,7 @@ def test_output_sha_matches_bytes(tmp_path):
     out = tmp_path / "out"
 
     ingest_all(inp, out, fps=10.0, blur_threshold=0)
-    m = IngestManifest.model_validate_json(
-        (out / MANIFEST_FILENAME).read_text(encoding="utf-8")
-    )
+    m = IngestManifest.model_validate_json((out / MANIFEST_FILENAME).read_text(encoding="utf-8"))
 
     for s in m.sources:
         for fm in s.outputs:
@@ -920,9 +984,7 @@ def test_video_frames_record_provenance_loss(tmp_path):
     out = tmp_path / "out"
 
     ingest_all(inp, out, fps=10.0, blur_threshold=0)
-    m = IngestManifest.model_validate_json(
-        (out / MANIFEST_FILENAME).read_text(encoding="utf-8")
-    )
+    m = IngestManifest.model_validate_json((out / MANIFEST_FILENAME).read_text(encoding="utf-8"))
 
     vids = [s for s in m.sources if s.kind == "video"]
     assert vids, "应至少有一个视频源记录"
@@ -944,9 +1006,7 @@ def test_photo_exif_forwarded_when_present(tmp_path):
     out = tmp_path / "out"
 
     ingest_all(inp, out, blur_threshold=0)
-    m = IngestManifest.model_validate_json(
-        (out / MANIFEST_FILENAME).read_text(encoding="utf-8")
-    )
+    m = IngestManifest.model_validate_json((out / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     by_name = {s.source_path: s for s in m.sources}
 
     bare = by_name["bare.jpg"]
@@ -978,6 +1038,7 @@ class TestIngestManifestSha256FileIntegrity:
 
     def test_returns_correct_digest(self, tmp_path):
         from pipeline.ingest_manifest import sha256_file
+
         data = b"hello world\n"
         path = tmp_path / "a.bin"
         path.write_bytes(data)
@@ -996,9 +1057,7 @@ class TestIngestManifestSha256FileIntegrity:
                 return sentinel
             return original(root, leaf)
 
-        monkeypatch.setattr(
-            ingest_contract, "first_linklike_path", fake_first_linklike_path
-        )
+        monkeypatch.setattr(ingest_contract, "first_linklike_path", fake_first_linklike_path)
         with pytest.raises(
             IngestArtifactError,
             match="regular non-link file|redirected|unsafe",
@@ -1026,3 +1085,64 @@ class TestIngestManifestSha256FileIntegrity:
             match="changed before hash|changed while",
         ):
             sha256_file(original_path)
+
+
+# ---------------------------------------------------------------------------
+# GLM-021 Package: ingest source-side stable descriptor
+# ---------------------------------------------------------------------------
+
+
+class TestIngestSourceStableDescriptor:
+    """RED->GREEN: copy_photo and _read_photo_exif must not open source by name.
+
+    The source photo is a real-data trust input — EXIF metadata feeds GPS
+    coordinates which feed the coordinate contract. Opening by name via
+    ``Path.open`` leaves a TOCTOU window between any prior identity check
+    and the read; a symlinked source is followed silently.
+    """
+
+    def test_read_photo_exif_does_not_use_path_open(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """RED->GREEN: _read_photo_exif must not use Path.open for the source."""
+        source = tmp_path / "photo.jpg"
+        source.write_bytes(b"photo")
+        fake = SimpleNamespace(
+            process_file=lambda *_args, **_kwargs: _fake_gps_tags(
+                lat_ref="N",
+                lon_ref="E",
+            ),
+        )
+        monkeypatch.setitem(sys.modules, "exifread", fake)
+
+        def reject_open(*_args, **_kwargs):
+            raise AssertionError("_read_photo_exif must not use Path.open")
+
+        monkeypatch.setattr(Path, "open", reject_open)
+        _, gps = ingest._read_photo_exif(source)
+        assert gps is not None, "exifread should have returned fake GPS tags"
+
+    def test_copy_photo_does_not_use_path_open_for_source(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """RED->GREEN: copy_photo must not use Path.open for the source file."""
+        source = tmp_path / "input" / "photo.jpg"
+        source.parent.mkdir(parents=True)
+        payload = b"publication-safe-photo"
+        source.write_bytes(payload)
+        output_dir = tmp_path / "stage"
+        output_dir.mkdir()
+
+        def reject_open(self, *args, **kwargs):
+            if args and args[0] == "rb":
+                raise AssertionError("copy_photo must not use Path.open for the source")
+            return _real_path_open(self, *args, **kwargs)
+
+        _real_path_open = Path.open
+        monkeypatch.setattr(Path, "open", reject_open)
+        destination = ingest.copy_photo(source, output_dir, "photo.jpg")
+        assert destination.read_bytes() == payload

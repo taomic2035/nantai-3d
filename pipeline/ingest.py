@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 
 from loguru import logger
 
-from pipeline.durable_io import DurableIOError, publish_file_noreplace
+from pipeline.durable_io import DurableIOError, first_linklike_path, publish_file_noreplace
 from pipeline.ingest_manifest import (
     MANIFEST_FILENAME,
     PHOTO_SOURCE_SUFFIXES,
@@ -75,7 +75,60 @@ def is_video(path: Path) -> bool:
 
 
 def _is_linklike(path: Path) -> bool:
-    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+    try:
+        observed = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or int(getattr(observed, "st_file_attributes", 0)) & reparse_flag
+    ):
+        return True
+    try:
+        return bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
+def _stable_open_for_read(path: Path, *, label: str):
+    """Open a source file through a single ``O_NOFOLLOW`` descriptor.
+
+    Rejects symlinks, junctions, reparse points, non-regular files, and
+    detects identity drift between ``lstat`` and ``fstat`` (TOCTOU).
+    """
+    absolute = Path(path).expanduser().absolute()
+    try:
+        redirected = first_linklike_path(Path(absolute.anchor), absolute)
+        before = absolute.lstat()
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise IngestError(f"cannot read source {label}") from exc
+    if redirected is not None or _is_linklike(absolute) or not stat.S_ISREG(before.st_mode):
+        raise IngestError(f"source {label} is not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(absolute, flags)
+    except OSError as exc:
+        raise IngestError(f"cannot read source {label}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            os.close(descriptor)
+            raise IngestError(f"source {label} changed before read")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
 
 
 def _require_real_input_directory(raw_path: str | Path) -> Path:
@@ -121,10 +174,7 @@ def _fingerprint_inputs(input_dir: Path) -> dict[str, SourceFingerprint]:
                 raise IngestError("input contains a symlink or junction")
         for name in file_names:
             candidate = parent / name
-            if (
-                not candidate.is_file()
-                or candidate.suffix.lower() not in SUPPORTED_SOURCE_SUFFIXES
-            ):
+            if not candidate.is_file() or candidate.suffix.lower() not in SUPPORTED_SOURCE_SUFFIXES:
                 continue
             relative = candidate.relative_to(input_dir).as_posix()
             fingerprints[relative] = _stable_file_fingerprint(candidate)
@@ -219,9 +269,7 @@ def extract_video_frames(
                     )
                 output_name = f"frame_{saved:06d}.jpg"
                 output_path = output_dir / output_name
-                if not bool(cv2.imwrite(
-                    str(output_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 92]
-                )):
+                if not bool(cv2.imwrite(str(output_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 92])):
                     raise IngestError(f"failed to write video frame: {output_name}")
                 frame_map.append((output_name, source_index))
                 saved += 1
@@ -277,25 +325,21 @@ def copy_photo(photo_path: Path, output_dir: Path, relative_path: str) -> Path:
     )
     try:
         with os.fdopen(staging_fd, "wb") as staging:
-            with photo_path.open("rb") as source:
+            with _stable_open_for_read(photo_path, label=relative_path) as source:
                 shutil.copyfileobj(source, staging)
             staging.flush()
             os.fsync(staging.fileno())
         publish_file_noreplace(staging_path, destination)
     except FileExistsError:
         Path(staging_path).unlink(missing_ok=True)
-        raise IngestError(
-            f"deterministic photo output already exists: {relative_path}"
-        ) from None
+        raise IngestError(f"deterministic photo output already exists: {relative_path}") from None
     except DurableIOError as exc:
         Path(staging_path).unlink(missing_ok=True)
         if exc.published:
             raise IngestError(
                 f"photo copy published but durability unconfirmed: {relative_path}"
             ) from exc
-        raise IngestError(
-            f"photo copy publication failed: {relative_path}"
-        ) from exc
+        raise IngestError(f"photo copy publication failed: {relative_path}") from exc
     except OSError as exc:
         Path(staging_path).unlink(missing_ok=True)
         raise IngestError(f"photo copy failed: {relative_path}") from exc
@@ -308,7 +352,7 @@ def _read_photo_exif(path: Path) -> tuple[str | None, GpsObservation | None]:
     try:
         import exifread
 
-        with path.open("rb") as stream:
+        with _stable_open_for_read(path, label="photo source") as stream:
             tags = exifread.process_file(stream, details=False)
         captured_at = str(tags.get("EXIF DateTimeOriginal", "")).strip() or None
 
@@ -326,21 +370,35 @@ def _read_photo_exif(path: Path) -> tuple[str | None, GpsObservation | None]:
         longitude_ref = tags.get("GPS GPSLongitudeRef")
         gps = None
         if (
-            latitude and longitude and latitude_ref and longitude_ref
+            latitude
+            and longitude
+            and latitude_ref
+            and longitude_ref
             and str(latitude_ref) in {"N", "S"}
             and str(longitude_ref) in {"E", "W"}
         ):
             altitude_tag = tags.get("GPS GPSAltitude")
             altitude_ref = tags.get("GPS GPSAltitudeRef")
             altitude = None
-            if altitude_tag and altitude_ref and str(altitude_ref) in {
-                "0", "1", "Above sea level", "Above Sea Level",
-                "Below sea level", "Below Sea Level",
-            }:
+            if (
+                altitude_tag
+                and altitude_ref
+                and str(altitude_ref)
+                in {
+                    "0",
+                    "1",
+                    "Above sea level",
+                    "Above Sea Level",
+                    "Below sea level",
+                    "Below Sea Level",
+                }
+            ):
                 value = altitude_tag.values[0]
                 altitude = float(value.num) / value.den
                 if str(altitude_ref) in {
-                    "1", "Below sea level", "Below Sea Level",
+                    "1",
+                    "Below sea level",
+                    "Below Sea Level",
                 }:
                     altitude = -altitude
             gps = GpsObservation(
@@ -413,22 +471,26 @@ def ingest_all(
             if output_size != fingerprint.size or output_sha != fingerprint.sha256:
                 raise IngestError(f"photo copy does not match source: {relative_path}")
             captured_at, gps = _read_photo_exif(source_path)
-            records.append(SourceRecord(
-                source_path=relative_path,
-                source_sha256=fingerprint.sha256,
-                kind="photo",
-                bytes=fingerprint.size,
-                exif_datetime=captured_at,
-                gps=gps,
-                exif_source="photo-exif" if captured_at or gps else "none",
-                outputs=(FrameMapping(
-                    output_path=relative_path,
-                    output_sha256=output_sha,
-                    output_bytes=output_size,
-                    source_frame_index=None,
-                    preserves_source_bytes=True,
-                ),),
-            ))
+            records.append(
+                SourceRecord(
+                    source_path=relative_path,
+                    source_sha256=fingerprint.sha256,
+                    kind="photo",
+                    bytes=fingerprint.size,
+                    exif_datetime=captured_at,
+                    gps=gps,
+                    exif_source="photo-exif" if captured_at or gps else "none",
+                    outputs=(
+                        FrameMapping(
+                            output_path=relative_path,
+                            output_sha256=output_sha,
+                            output_bytes=output_size,
+                            source_frame_index=None,
+                            preserves_source_bytes=True,
+                        ),
+                    ),
+                )
+            )
             photo_results.append(relative_path)
             continue
 
@@ -446,30 +508,36 @@ def ingest_all(
         for output_name, source_index in stats["frame_map"]:
             path = video_output / output_name
             output_size, output_sha = _measured_output(path)
-            mappings.append(FrameMapping(
-                output_path=f"{output_root_relative}/{output_name}",
-                output_sha256=output_sha,
-                output_bytes=output_size,
-                source_frame_index=source_index,
-                preserves_source_bytes=False,
-            ))
-        records.append(SourceRecord(
-            source_path=relative_path,
-            source_sha256=fingerprint.sha256,
-            kind="video",
-            bytes=fingerprint.size,
-            exif_datetime=None,
-            gps=None,
-            exif_source="none",
-            source_fps=stats["source_fps"],
-            duration_s=stats["duration_s"],
-            outputs=tuple(mappings),
-        ))
-        video_results.append({
-            "video": relative_path,
-            "output_dir": str(video_output),
-            **{key: value for key, value in stats.items() if key != "frame_map"},
-        })
+            mappings.append(
+                FrameMapping(
+                    output_path=f"{output_root_relative}/{output_name}",
+                    output_sha256=output_sha,
+                    output_bytes=output_size,
+                    source_frame_index=source_index,
+                    preserves_source_bytes=False,
+                )
+            )
+        records.append(
+            SourceRecord(
+                source_path=relative_path,
+                source_sha256=fingerprint.sha256,
+                kind="video",
+                bytes=fingerprint.size,
+                exif_datetime=None,
+                gps=None,
+                exif_source="none",
+                source_fps=stats["source_fps"],
+                duration_s=stats["duration_s"],
+                outputs=tuple(mappings),
+            )
+        )
+        video_results.append(
+            {
+                "video": relative_path,
+                "output_dir": str(video_output),
+                **{key: value for key, value in stats.items() if key != "frame_map"},
+            }
+        )
 
     after_processing = _fingerprint_inputs(source_root)
     if after_processing != before:
