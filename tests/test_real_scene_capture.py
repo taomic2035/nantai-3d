@@ -924,3 +924,29 @@ def test_prepare_real_capture_hides_dataset_download_error_details(
     assert private_detail not in str(exc_info.value)
     assert exc_info.value.__cause__ is not None
     assert private_detail in str(exc_info.value.__cause__)
+
+
+# ============================================================
+# RED → GREEN: _write_model_json no-replace publication
+# ============================================================
+
+
+def test_write_model_json_rejects_existing_output(tmp_path: Path) -> None:
+    """RED->GREEN: _write_model_json must fail closed when output exists.
+
+    Without no-replace publication, a pre-occupied or symlinked output could
+    silently redirect the quality report write (TOCTOU).
+    """
+    from pydantic import BaseModel
+
+    class _StubModel(BaseModel):
+        value: int = 42
+
+    out = tmp_path / "quality-report.json"
+    out.write_text('{"pre-occupied": true}', encoding="utf-8")
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="already exists",
+    ):
+        real_scene_capture._write_model_json(out, _StubModel())

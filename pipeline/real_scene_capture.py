@@ -10,11 +10,16 @@ import hashlib
 import os
 import shutil
 import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-from pipeline.durable_io import first_linklike_path
+from pipeline.durable_io import (
+    DurableIOError,
+    first_linklike_path,
+    publish_file_noreplace,
+)
 from pipeline.ingest import ingest_all
 from pipeline.ingest_manifest import (
     MANIFEST_FILENAME,
@@ -543,14 +548,51 @@ def prepare_local_capture(
 
 
 def _write_model_json(path: Path, model) -> bytes:
+    """Write a canonical JSON model via private staging + fsync + no-replace.
+
+    Uses ``publish_file_noreplace`` from ``pipeline.durable_io`` for a
+    cross-platform atomic no-replace publication with directory durability,
+    preventing a TOCTOU attacker from silently swapping evidence.
+    """
     payload = (model.model_dump_json(indent=2) + "\n").encode("utf-8")
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
     try:
-        path.write_bytes(payload)
-    except OSError as exc:
+        with os.fdopen(staging_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        publish_file_noreplace(staging_path, path)
+    except FileExistsError:
+        _discard_staging(staging_path)
         raise RealSceneCaptureError(
-            f"cannot write {path.name}"
+            "quality report output already exists"
+        ) from None
+    except DurableIOError as exc:
+        _discard_staging(staging_path)
+        if exc.published:
+            raise RealSceneCaptureError(
+                "quality report published but durability unconfirmed"
+            ) from exc
+        raise RealSceneCaptureError(
+            "cannot write quality report"
+        ) from exc
+    except OSError as exc:
+        _discard_staging(staging_path)
+        raise RealSceneCaptureError(
+            "cannot write quality report"
         ) from exc
     return payload
+
+
+def _discard_staging(staging_path: str) -> None:
+    try:
+        os.unlink(staging_path)
+    except OSError:
+        pass
 
 
 def run_real_sfm(
