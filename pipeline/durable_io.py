@@ -13,6 +13,7 @@ import ctypes
 import os
 import stat
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -232,6 +233,42 @@ def atomic_replace(source: str | Path, destination: str | Path) -> None:
             "replacement was published but directory sync failed",
             published=True,
         ) from exc
+
+
+def write_file_atomic(
+    destination: str | Path,
+    payload: bytes,
+) -> None:
+    """Atomically publish *payload* to *destination* with full durability.
+
+    Stage the bytes in a sibling temporary file, ``fsync`` it, then
+    ``atomic_replace`` the destination.  ``atomic_replace`` replaces any
+    pre-placed symlink itself rather than writing through it (which
+    ``Path.write_bytes`` would follow), and the staging + fsync makes the
+    publication durable so a crash cannot leave a partial file on disk while
+    an in-memory digest already attests different bytes.  Re-run semantics
+    are preserved (an existing destination is overwritten).
+    """
+
+    destination_path = Path(destination).absolute()
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{destination_path.name}.",
+        suffix=".tmp",
+        dir=destination_path.parent,
+    )
+    try:
+        with os.fdopen(staging_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        atomic_replace(staging_path, destination_path)
+    except BaseException:
+        try:
+            os.unlink(staging_path)
+        except OSError:
+            pass
+        raise
 
 
 def publish_file_noreplace(

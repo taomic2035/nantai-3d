@@ -123,6 +123,36 @@ class TestMockRegistration:
         assert parsed.engine == "mock"
         assert len(parsed.poses) == 12
 
+    def test_register_write_does_not_follow_symlink_redirect(
+        self, photos_dir, tmp_path
+    ):
+        """RED->GREEN: register() must not write registration.json through a symlink.
+
+        registration.json is the coordinate trust root.  If the output path is
+        pre-placed as a symlink pointing outside its directory, register() must
+        replace the symlink itself (atomic_replace) rather than write through it.
+        ``Path.write_text`` follows symlinks, which would let a TOCTOU attacker
+        redirect the trust-root write to an arbitrary location.
+        """
+        out = tmp_path / "registration.json"
+        attacker = tmp_path / "attacker-registration.json"
+        attacker.write_text('{"pre-occupied": true}\n', encoding="utf-8")
+        try:
+            out.symlink_to(attacker)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is unavailable")
+            raise
+
+        register(photos_dir, out, engine="mock")
+
+        assert not out.is_symlink(), (
+            "register wrote through the symlink instead of replacing it"
+        )
+        assert json.loads(attacker.read_text()) == {"pre-occupied": True}, (
+            "register wrote the trust root through the symlink redirect"
+        )
+
 
 def _quat_to_mat(q):
     w, x, y, z = np.array(q) / np.linalg.norm(q)

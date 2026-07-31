@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
-from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.durable_io import _is_linklike, first_linklike_path, write_file_atomic
 from pipeline.recon_schema import (
     AlignmentStatus,
     AxisConvention,
@@ -977,11 +977,15 @@ def register(
 
     if out_json:
         out_json = Path(out_json)
-        out_json.parent.mkdir(parents=True, exist_ok=True)
         # LF (not Windows CRLF): registration.json is a coordinate trust root;
         # byte-reproducibility keeps its digest stable across OSes. Consumers
         # read it via json.loads, so line endings are semantically neutral.
-        out_json.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
+        # write_file_atomic stages + fsync + atomic_replace so the write is
+        # durable and cannot be redirected through a pre-placed symlink.
+        write_file_atomic(
+            out_json,
+            (result.model_dump_json(indent=2) + "\n").encode(),
+        )
         logger.info(f"配准结果已写入: {out_json} ({len(result.poses)} 个位姿)")
     return result
 

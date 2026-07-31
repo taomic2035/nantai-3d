@@ -44,7 +44,7 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.durable_io import _is_linklike, first_linklike_path, write_file_atomic
 from pipeline.recon_schema import (
     AlignmentStatus,
     AxisConvention,
@@ -1508,8 +1508,11 @@ def main(argv: list[str] | None = None) -> int:
             ) from exc
         raise
     # LF: registration.json is a trust root; keep it byte-reproducible across OSes.
-    Path(args.out).write_text(
-        aligned.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n"
+    # write_file_atomic stages + fsync + atomic_replace so the write is durable
+    # and cannot be redirected through a pre-placed symlink.
+    write_file_atomic(
+        args.out,
+        (aligned.model_dump_json(indent=2) + "\n").encode(),
     )
     print(f"[OK] aligned registration written to {args.out}")
     return 0

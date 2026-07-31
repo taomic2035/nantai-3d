@@ -14,6 +14,7 @@ from pipeline.durable_io import (
     atomic_replace,
     publish_directory_noreplace,
     publish_file_noreplace,
+    write_file_atomic,
 )
 
 
@@ -276,3 +277,45 @@ def test_linklike_detects_real_windows_junction_without_is_junction(
             text=True,
         )
         assert removed.returncode == 0, removed.stderr
+
+
+def test_write_file_atomic_publishes_payload_and_overwrites_existing(
+    tmp_path: Path,
+) -> None:
+    """GREEN: write_file_atomic must publish exact bytes, replacing any prior file."""
+    destination = tmp_path / "trust_root.json"
+    destination.write_bytes(b"old bytes\n")
+
+    write_file_atomic(destination, b"new canonical bytes\n")
+
+    assert destination.read_bytes() == b"new canonical bytes\n"
+
+
+def test_write_file_atomic_does_not_follow_symlink_redirect(
+    tmp_path: Path,
+) -> None:
+    """RED->GREEN: write_file_atomic must replace a pre-placed symlink, not write through it.
+
+    Path.write_bytes follows symlinks, so a TOCTOU attacker could redirect the
+    write to an arbitrary location.  write_file_atomic stages + fsync +
+    atomic_replace, which replaces the symlink itself.
+    """
+    destination = tmp_path / "trust_root.json"
+    attacker = tmp_path / "attacker.json"
+    attacker.write_bytes(b"attacker-original\n")
+    try:
+        destination.symlink_to(attacker)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+    write_file_atomic(destination, b"real trust root bytes\n")
+
+    assert not destination.is_symlink(), (
+        "write_file_atomic wrote through the symlink instead of replacing it"
+    )
+    assert destination.read_bytes() == b"real trust root bytes\n"
+    assert attacker.read_bytes() == b"attacker-original\n", (
+        "write_file_atomic wrote through the symlink redirect"
+    )
