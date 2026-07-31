@@ -81,6 +81,27 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read a file through a single descriptor with O_NOFOLLOW."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        payload = stream.read()
+    return payload
+
+
 def _probe_script_sha256(probe_script_path: Path) -> str:
     """SHA-256 of the probe Blender script bytes.
 
@@ -232,7 +253,7 @@ def run_reciprocal_route_probe(
         timeout_s=timeout_s,
     )
 
-    report_bytes = report_path.read_bytes()
+    report_bytes = _stable_read_bytes(report_path)
     report = ReciprocalRouteProbeReport.model_validate_json(report_bytes)
 
     verify_reciprocal_route_probe_report(

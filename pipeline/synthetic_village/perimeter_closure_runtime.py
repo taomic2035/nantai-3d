@@ -129,6 +129,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read a file through a single descriptor with O_NOFOLLOW."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        payload = stream.read()
+    return payload
+
+
 def _canonical_registry_sha256(
     registry: tuple[canary.ObjectRegistryEntry, ...],
 ) -> str:
@@ -312,7 +333,7 @@ def load_perimeter_closure_runtime_request(
 ) -> PerimeterClosureRuntimeRequest:
     path = Path(path)
     try:
-        raw = path.read_bytes()
+        raw = _stable_read_bytes(path)
         if not raw or len(raw) > canary.MAX_BUILD_REPORT_BYTES:
             raise PerimeterClosureRuntimeError(
                 "perimeter-closure runtime request bytes are absent or unbounded"
@@ -467,7 +488,7 @@ def load_perimeter_closure_build_report(
 ) -> PerimeterClosureBuildReport:
     path = Path(path)
     try:
-        raw = path.read_bytes()
+        raw = _stable_read_bytes(path)
         if not raw or len(raw) > canary.MAX_BUILD_REPORT_BYTES:
             raise PerimeterClosureRuntimeError(
                 "perimeter-closure build report bytes are absent or unbounded"
@@ -651,7 +672,7 @@ def _load_batch24_manifest(path: Path) -> tuple[dict[str, object], str]:
         label="Batch24 manifest",
     )
     try:
-        raw = path.read_bytes()
+        raw = _stable_read_bytes(path)
         if not raw or len(raw) > canary.MAX_BUILD_REPORT_BYTES:
             raise PerimeterClosureRuntimeError(
                 "Batch24 manifest bytes are absent or unbounded"
@@ -842,7 +863,7 @@ def _verify_existing_build(
     request: PerimeterClosureRuntimeRequest,
 ) -> PerimeterClosureBuildReport:
     _verify_exact_output_layout(directory)
-    if (directory / PERIMETER_CLOSURE_REQUEST_NAME).read_bytes() != (
+    if _stable_read_bytes(directory / PERIMETER_CLOSURE_REQUEST_NAME) != (
         canonical_perimeter_closure_runtime_request_bytes(request)
     ):
         raise PerimeterClosureRuntimeError(

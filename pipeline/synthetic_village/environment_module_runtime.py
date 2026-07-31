@@ -164,6 +164,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read a file through a single descriptor with O_NOFOLLOW."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        payload = stream.read()
+    return payload
+
+
 def _canonical_registry_sha256(
     registry: tuple[canary.ObjectRegistryEntry, ...],
 ) -> str:
@@ -522,7 +543,7 @@ def load_environment_module_build_report(
 
     path = Path(path)
     try:
-        raw = path.read_bytes()
+        raw = _stable_read_bytes(path)
     except OSError as exc:
         raise EnvironmentModuleRuntimeError(
             "module build report cannot be read",
@@ -615,7 +636,7 @@ def _verify_existing_build(
     request: EnvironmentModuleRuntimeRequest,
 ) -> EnvironmentModuleBuildReport:
     _verify_exact_build_layout(directory)
-    request_bytes = (directory / ENVIRONMENT_MODULE_REQUEST_NAME).read_bytes()
+    request_bytes = _stable_read_bytes(directory / ENVIRONMENT_MODULE_REQUEST_NAME)
     if request_bytes != canonical_environment_module_runtime_request_bytes(request):
         raise EnvironmentModuleRuntimeError(
             "existing module build request bytes disagree",

@@ -3275,7 +3275,21 @@ def _read_stable_metadata(path: Path, *, label: str) -> bytes:
     before = path.stat()
     if before.st_size <= 0 or before.st_size > MAX_RENDER_METADATA_BYTES:
         raise CanaryBuildError(f"{label} size is invalid")
-    with path.open("rb") as stream:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
         opened = os.fstat(stream.fileno())
         if _stat_signature(before) != _stat_signature(opened):
             raise CanaryBuildError(f"{label} changed before bounded read")

@@ -252,6 +252,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read a file through a single descriptor with O_NOFOLLOW."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        payload = stream.read()
+    return payload
+
+
 def _journal_from_payload(payload: dict[str, object]) -> ReciprocalProductionBatchJournal:
     unsigned = ReciprocalProductionBatchJournal.model_construct(
         journal_sha256="0" * 64,
@@ -273,7 +294,7 @@ def load_reciprocal_production_batch_journal(
 
     path = Path(path)
     try:
-        raw = path.read_bytes()
+        raw = _stable_read_bytes(path)
         if not raw or len(raw) > canary.MAX_BUILD_REPORT_BYTES:
             raise ReciprocalProductionBatchError(
                 "reciprocal batch journal bytes are absent or unbounded",
