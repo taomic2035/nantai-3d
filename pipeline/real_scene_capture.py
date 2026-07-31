@@ -358,10 +358,29 @@ def _stable_copy(
     )
     try:
         with os.fdopen(staging_fd, "wb") as staging:
-            shutil.copyfileobj(source_path.open("rb"), staging)
+            # os.open + O_NOFOLLOW: do not reopen source by name via Path.open,
+            # which follows symlinks and reopens a TOCTOU window after the
+            # initial lstat. _sha256_file already uses this safe open pattern.
+            source_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(
+                os, "O_NOFOLLOW", 0
+            )
+            source_descriptor = os.open(source_path, source_flags)
+            try:
+                source_stream = os.fdopen(source_descriptor, "rb", buffering=0)
+            except OSError:
+                try:
+                    os.close(source_descriptor)
+                except OSError:
+                    pass
+                raise
+            with source_stream:
+                shutil.copyfileobj(source_stream, staging)
             staging.flush()
             os.fsync(staging.fileno())
-        after = source_path.stat()
+            # lstat (not stat): stat() follows symlinks, so a symlink swap
+            # would report the target's identity and could bypass the
+            # identity check if the target matches.
+            after = source_path.lstat()
     except OSError as exc:
         _discard_staging(staging_path)
         raise RealSceneCaptureError("source media copy failed") from exc

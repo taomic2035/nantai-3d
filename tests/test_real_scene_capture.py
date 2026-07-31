@@ -976,3 +976,39 @@ def test_stable_copy_rejects_existing_destination(tmp_path: Path) -> None:
             expected_bytes=len(payload),
             expected_sha256=expected_sha,
         )
+
+
+def test_stable_copy_does_not_reopen_source_by_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: _stable_copy must not reopen the source by name.
+
+    ``Path.open`` follows symlinks, so reopening the source by name after
+    the initial lstat creates a TOCTOU window.  The copy must read from a
+    descriptor opened with ``O_NOFOLLOW`` (matching ``_sha256_file``),
+    not from ``Path.open``.
+    """
+    source = tmp_path / "source.bin"
+    payload = b"source-media-bytes"
+    source.write_bytes(payload)
+    expected_sha = hashlib.sha256(payload).hexdigest()
+
+    dest = tmp_path / "output" / "copy.bin"
+    original_open = Path.open
+
+    def fail_path_open(self, *args, **kwargs):
+        if self == source:
+            pytest.fail(
+                "_stable_copy reopened source via Path.open (follows symlinks)"
+            )
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_path_open)
+
+    real_scene_capture._stable_copy(
+        source,
+        dest,
+        expected_bytes=len(payload),
+        expected_sha256=expected_sha,
+    )
