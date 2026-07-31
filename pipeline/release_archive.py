@@ -417,6 +417,92 @@ def stable_regular_file_digest(
     )
 
 
+def stable_regular_file_bytes(
+    path: Path,
+    *,
+    maximum_bytes: int | None = None,
+) -> tuple[bytes, FileDigest]:
+    """Read one stable non-link regular file and return its bytes + digest.
+
+    Same TOCTOU-safe pattern as ``stable_regular_file_digest`` (lstat,
+    O_NOFOLLOW, post-open fstat identity check, bounded read, post-read
+    lstat drift check) but also returns the file bytes so callers never
+    need to reopen by name after hashing.
+    """
+
+    source = Path(path)
+    if (
+        maximum_bytes is not None
+        and (
+            isinstance(maximum_bytes, bool)
+            or not isinstance(maximum_bytes, int)
+            or maximum_bytes < 0
+        )
+    ):
+        raise ReleaseArchiveError("file maximum must be a non-negative integer")
+    try:
+        path_before = source.lstat()
+    except OSError as exc:
+        raise ReleaseArchiveError("release file is unavailable") from exc
+    if stat.S_ISLNK(path_before.st_mode):
+        raise ReleaseArchiveError("release file must not be a link")
+    if not stat.S_ISREG(path_before.st_mode):
+        raise ReleaseArchiveError("release file must be regular")
+    if maximum_bytes is not None and path_before.st_size > maximum_bytes:
+        raise ReleaseArchiveError("release file exceeds its maximum byte length")
+
+    digest = hashlib.sha256()
+    byte_length = 0
+    payload = bytearray()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise ReleaseArchiveError("release file cannot be read") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise ReleaseArchiveError("release file cannot be read") from exc
+    try:
+        with stream:
+            descriptor_before = os.fstat(stream.fileno())
+            if _stat_signature(path_before) != _stat_signature(descriptor_before):
+                raise ReleaseArchiveError("release file changed before read")
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                payload.extend(chunk)
+                byte_length += len(chunk)
+                if maximum_bytes is not None and byte_length > maximum_bytes:
+                    raise ReleaseArchiveError(
+                        "release file exceeds its maximum byte length"
+                    )
+            descriptor_after = os.fstat(stream.fileno())
+        path_after = source.lstat()
+    except ReleaseArchiveError:
+        raise
+    except OSError as exc:
+        raise ReleaseArchiveError("release file cannot be read") from exc
+
+    expected = _stat_signature(path_before)
+    if (
+        expected != _stat_signature(descriptor_after)
+        or expected != _stat_signature(path_after)
+        or byte_length != path_before.st_size
+    ):
+        raise ReleaseArchiveError("release file changed during read")
+    return bytes(payload), FileDigest(
+        byte_length=byte_length,
+        sha256=digest.hexdigest(),
+    )
+
+
 def deterministic_zip_info(
     path: str,
     *,

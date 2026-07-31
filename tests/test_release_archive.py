@@ -19,6 +19,7 @@ from pipeline.release_archive import (
     inspect_zip_members,
     preflight_zip_central_directory,
     safe_posix_member_path,
+    stable_regular_file_bytes,
     stable_regular_file_digest,
 )
 
@@ -628,3 +629,39 @@ def test_zip_inspection_preserves_legal_utf8_names(tmp_path) -> None:
     names = tuple(row.path.as_posix() for row in observed)
     assert "nantai-runtime/web/\xe9.txt" in names
     assert "nantai-runtime/\u5c71\u6751.txt" in names
+
+
+# ============================================================
+# RED → GREEN: stable_regular_file_bytes TOCTOU-safe read
+# ============================================================
+
+
+def test_stable_regular_file_bytes_returns_matching_hash_and_bytes(
+    tmp_path: Path,
+) -> None:
+    """stable_regular_file_bytes must return bytes whose SHA-256 matches the
+    returned digest, proving no reopen is needed after hashing.
+    """
+    payload = b"TOCTOU-safe payload content"
+    source = tmp_path / "evidence.bin"
+    source.write_bytes(payload)
+
+    raw, digest = stable_regular_file_bytes(source)
+
+    assert raw == payload
+    assert digest.byte_length == len(payload)
+    assert digest.sha256 == hashlib.sha256(payload).hexdigest()
+
+
+def test_stable_regular_file_bytes_rejects_symlink(tmp_path: Path) -> None:
+    """stable_regular_file_bytes must reject a symlinked file (O_NOFOLLOW)."""
+    target = tmp_path / "real.bin"
+    target.write_bytes(b"real-content")
+    link = tmp_path / "link.bin"
+    try:
+        os.symlink(target, link)
+    except OSError:
+        pytest.skip("symlink not supported on this platform")
+
+    with pytest.raises(ReleaseArchiveError, match="link|regular"):
+        stable_regular_file_bytes(link)

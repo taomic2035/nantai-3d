@@ -26,6 +26,7 @@ from pipeline.release_archive import (
     canonical_json_bytes,
     deterministic_zip_info,
     safe_posix_member_path,
+    stable_regular_file_bytes,
     stable_regular_file_digest,
 )
 
@@ -294,12 +295,14 @@ def verify_release_tree(root: str | Path) -> ReleaseVerification:
     """Verify one extracted release tree and return its non-promoting report."""
     project_root = Path(root)
     manifest_path = project_root / RELEASE_MANIFEST_NAME
-    if manifest_path.is_symlink():
-        raise ReleaseVerificationError("release receipt symlink is forbidden")
-    if not manifest_path.is_file():
-        raise ReleaseVerificationError("release receipt is missing")
+    try:
+        manifest_bytes, _ = stable_regular_file_bytes(manifest_path)
+    except Exception as exc:
+        raise ReleaseVerificationError(
+            "release receipt is missing or unsafe"
+        ) from exc
 
-    receipt = _validated_receipt_from_bytes(manifest_path.read_bytes())
+    receipt = _validated_receipt_from_bytes(manifest_bytes)
     declared_paths = {item["path"] for item in receipt["artifacts"]}
     total_bytes = 0
     for item in receipt["artifacts"]:
@@ -340,17 +343,21 @@ def verify_release_tree(root: str | Path) -> ReleaseVerification:
 
     checksums_path = project_root / CHECKSUMS_NAME
     if checksums_path.exists():
-        if checksums_path.is_symlink() or not checksums_path.is_file():
-            raise ReleaseVerificationError("release checksum file is unsafe")
+        try:
+            checksum_bytes, _ = stable_regular_file_bytes(checksums_path)
+        except Exception as exc:
+            raise ReleaseVerificationError(
+                "release checksum file is unsafe"
+            ) from exc
         checksum_rows = [
             f"{item['sha256']}  {item['path']}\n"
             for item in receipt["artifacts"]
         ]
         checksum_rows.append(
-            f"{sha256_file(manifest_path)}  {RELEASE_MANIFEST_NAME}\n"
+            f"{_sha256_bytes(manifest_bytes)}  {RELEASE_MANIFEST_NAME}\n"
         )
         expected_checksums = "".join(sorted(checksum_rows)).encode("utf-8")
-        if checksums_path.read_bytes() != expected_checksums:
+        if checksum_bytes != expected_checksums:
             raise ReleaseVerificationError("release checksum file is changed or noncanonical")
 
     return ReleaseVerification(
@@ -365,16 +372,16 @@ def verify_release_tree(root: str | Path) -> ReleaseVerification:
 
 
 def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
-    if path.is_symlink():
-        raise ReleaseVerificationError(f"symlink {label} is forbidden: {path}")
-    if not path.is_file():
-        raise ReleaseVerificationError(f"missing {label}: {path}")
     try:
-        payload = json.loads(path.read_bytes())
+        raw, _ = stable_regular_file_bytes(path)
+    except Exception as exc:
+        raise ReleaseVerificationError(f"{label} is missing or unsafe") from exc
+    try:
+        payload = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ReleaseVerificationError(f"invalid {label} JSON: {path}: {exc}") from exc
+        raise ReleaseVerificationError(f"invalid {label} JSON: {exc}") from exc
     if not isinstance(payload, dict):
-        raise ReleaseVerificationError(f"{label} root must be an object: {path}")
+        raise ReleaseVerificationError(f"{label} root must be an object")
     return payload
 
 
@@ -527,7 +534,7 @@ def _collect_asset_payloads(
     _add_payload(
         payloads,
         registry_path.relative_to(root).as_posix(),
-        registry_path.read_bytes(),
+        stable_regular_file_bytes(registry_path)[0],
         "asset-registry",
     )
     for asset_id, raw in sorted(assets.items()):
@@ -539,9 +546,15 @@ def _collect_asset_payloads(
             raise ReleaseVerificationError(f"asset payload path is invalid: {asset_id}")
         relative = f"assets/{ply}"
         path = _checked_source_file(root, relative, label="registry asset")
-        if not isinstance(expected_sha, str) or sha256_file(path) != expected_sha:
+        try:
+            asset_bytes, asset_digest = stable_regular_file_bytes(path)
+        except Exception as exc:
+            raise ReleaseVerificationError(
+                f"registry asset is unreadable: {asset_id}"
+            ) from exc
+        if not isinstance(expected_sha, str) or asset_digest.sha256 != expected_sha:
             raise ReleaseVerificationError(f"registry asset SHA-256 mismatch: {asset_id}")
-        _add_payload(payloads, relative, path.read_bytes(), "registry-asset")
+        _add_payload(payloads, relative, asset_bytes, "registry-asset")
     return len(assets)
 
 
@@ -629,19 +642,25 @@ def _collect_reconstruction_payloads(
             raise ReleaseVerificationError(f"reconstruction path is invalid: {role}")
         relative = f"web/data/recon/{relative_name}"
         path = _checked_source_file(root, relative, label=role)
+        try:
+            recon_bytes, recon_digest = stable_regular_file_bytes(path)
+        except Exception as exc:
+            raise ReleaseVerificationError(
+                f"reconstruction artifact is unreadable: {relative}"
+            ) from exc
         if (
             isinstance(expected_bytes, bool)
             or not isinstance(expected_bytes, int)
-            or path.stat().st_size != expected_bytes
+            or recon_digest.byte_length != expected_bytes
             or not isinstance(expected_sha, str)
-            or sha256_file(path) != expected_sha
+            or recon_digest.sha256 != expected_sha
         ):
             raise ReleaseVerificationError(f"reconstruction artifact mismatch: {relative}")
-        _add_payload(payloads, relative, path.read_bytes(), role)
+        _add_payload(payloads, relative, recon_bytes, role)
     _add_payload(
         payloads,
         manifest_path.relative_to(root).as_posix(),
-        manifest_path.read_bytes(),
+        stable_regular_file_bytes(manifest_path)[0],
         "reconstruction-manifest",
     )
     return expected_gaussians
@@ -676,19 +695,25 @@ def _collect_model_payloads(
         raise ReleaseVerificationError("model preview path is invalid")
     relative = f"web/data/recon/model-preview/{name}"
     path = _checked_source_file(root, relative, label="model preview")
+    try:
+        model_bytes, model_digest = stable_regular_file_bytes(path)
+    except Exception as exc:
+        raise ReleaseVerificationError(
+            "model preview payload is unreadable"
+        ) from exc
     if (
         isinstance(expected_bytes, bool)
         or not isinstance(expected_bytes, int)
-        or path.stat().st_size != expected_bytes
+        or model_digest.byte_length != expected_bytes
         or not isinstance(expected_sha, str)
-        or sha256_file(path) != expected_sha
+        or model_digest.sha256 != expected_sha
     ):
         raise ReleaseVerificationError("model preview payload mismatch")
-    _add_payload(payloads, relative, path.read_bytes(), "model-preview")
+    _add_payload(payloads, relative, model_bytes, "model-preview")
     _add_payload(
         payloads,
         manifest_path.relative_to(root).as_posix(),
-        manifest_path.read_bytes(),
+        stable_regular_file_bytes(manifest_path)[0],
         "model-preview-manifest",
     )
 
