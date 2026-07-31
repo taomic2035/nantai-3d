@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import struct
 import subprocess
 import tempfile
@@ -586,6 +587,34 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def _stable_read_bytes(path: Path, *, max_bytes: int) -> bytes:
+    """Read a file through a single descriptor with O_NOFOLLOW."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            raise KtxToolchainError(
+                f"file is not a bounded regular file: {path.name}"
+            )
+        payload = stream.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise KtxToolchainError(f"file exceeds its maximum: {path.name}")
+    return payload
+
+
 def _run_bounded(
     command: tuple[str, ...],
     *,
@@ -860,16 +889,13 @@ def _default_compile_runner(
 
 def _read_compilation_output(path: Path, *, label: str) -> bytes:
     try:
-        expected = path.stat().st_size
-        if expected < 1 or expected > KTX_MAX_BYTES:
-            raise KtxToolchainError(f"{label} byte length is invalid")
-        payload = path.read_bytes()
+        payload = _stable_read_bytes(path, max_bytes=KTX_MAX_BYTES)
     except KtxToolchainError:
         raise
     except OSError as exc:
         raise KtxToolchainError(f"{label} cannot be read") from exc
-    if len(payload) != expected:
-        raise KtxToolchainError(f"{label} changed during bounded read")
+    if len(payload) < 1:
+        raise KtxToolchainError(f"{label} byte length is invalid")
     return payload
 
 
@@ -2015,8 +2041,12 @@ def prepare_private_windows_ktx_runtime(
     )
     receipt_path = installed_root / KTX_RECEIPT_NAME
     canonical = canonical_ktx_tool_receipt_bytes(receipt)
-    if receipt_path.exists():
-        if receipt_path.read_bytes() != canonical:
+    try:
+        existing = _stable_read_bytes(receipt_path, max_bytes=KTX_MAX_PROCESS_OUTPUT)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if existing != canonical:
             raise KtxToolchainError(
                 "existing Windows KTX receipt disagrees with runtime"
             )
@@ -2108,8 +2138,12 @@ def prepare_private_ktx_runtime(
     )
     receipt_path = output_root / KTX_RECEIPT_NAME
     canonical = canonical_ktx_tool_receipt_bytes(receipt)
-    if receipt_path.exists():
-        if receipt_path.read_bytes() != canonical:
+    try:
+        existing = _stable_read_bytes(receipt_path, max_bytes=KTX_MAX_PROCESS_OUTPUT)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if existing != canonical:
             raise KtxToolchainError("existing KTX receipt disagrees with runtime")
     else:
         with receipt_path.open("xb") as stream:
@@ -2128,8 +2162,8 @@ def load_ktx_tool_receipt(
 ) -> AnyKtxToolReceipt:
     path = Path(path).expanduser().absolute()
     try:
-        raw = path.read_bytes()
-        if len(raw) < 1 or len(raw) > KTX_MAX_PROCESS_OUTPUT:
+        raw = _stable_read_bytes(path, max_bytes=KTX_MAX_PROCESS_OUTPUT)
+        if len(raw) < 1:
             raise KtxToolchainError("KTX receipt byte length is invalid")
         payload = json.loads(raw)
         if not isinstance(payload, dict):
