@@ -41,11 +41,13 @@ Usage::
 For mock-engine registrations (no COLMAP sparse dir), omit ``--sparse-dir``;
 the report will have ``engine='mock'`` and no model_enumeration.
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -67,6 +69,58 @@ from pipeline.registration_quality import (  # noqa: E402
     policy_canonical_sha256,
     validate_registration_quality,
 )
+
+
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read an authoritative input through a single O_NOFOLLOW descriptor.
+
+    ``lstat`` verifies the path is a regular file, ``os.open`` with
+    ``O_NOFOLLOW`` opens the descriptor without following symlinks, and
+    ``fstat`` re-verifies that the opened descriptor is the same regular file
+    (type, inode, device) so a symlink swap between check and open is rejected.
+    A post-read ``lstat`` recheck detects a swap between open and return.  The
+    authoritative bytes (registration.json / capture manifest / policy) feed
+    the SHAs printed into the quality report, so a symlinked input must not be
+    hashed as if it were the intended regular file.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"input cannot be inspected: {path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit(f"input is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb")
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise SystemExit(f"input changed before read: {path}")
+        payload = stream.read()
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"input changed during read: {path}") from exc
+    if (
+        stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise SystemExit(f"input changed during read: {path}")
+    return payload
 
 
 def _write_json(path: Path, model) -> None:
@@ -92,15 +146,11 @@ def _write_json(path: Path, model) -> None:
         publish_file_noreplace(staging_path, path)
     except FileExistsError:
         _discard_staging(staging_path)
-        raise SystemExit(
-            f"output already exists, refusing to overwrite: {path.name}"
-        ) from None
+        raise SystemExit(f"output already exists, refusing to overwrite: {path.name}") from None
     except DurableIOError as exc:
         _discard_staging(staging_path)
         if exc.published:
-            raise SystemExit(
-                f"output published but durability unconfirmed: {path.name}"
-            ) from exc
+            raise SystemExit(f"output published but durability unconfirmed: {path.name}") from exc
         raise SystemExit(f"cannot write output: {path.name}") from exc
     except OSError as exc:
         _discard_staging(staging_path)
@@ -116,28 +166,48 @@ def _discard_staging(staging_path: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Emit registration quality report from COLMAP artifacts.")
-    ap.add_argument("--registration-json", required=True,
-                    help="registration.json produced by pipeline.registration "
-                         "or pipeline.reconstruct (RegistrationResult JSON)")
-    ap.add_argument("--sparse-dir", default=None,
-                    help="COLMAP sparse/ directory (required for engine=colmap; "
-                         "omit for mock-engine registrations)")
-    ap.add_argument("--capture-manifest", default=None,
-                    help="capture_manifest.json (optional; binds capture "
-                         "provenance to the quality report)")
-    ap.add_argument("--policy", required=True,
-                    help="RegistrationQualityPolicy JSON (all 5 thresholds)")
-    ap.add_argument("--total-input-images", type=int, default=None,
-                    help="total input image count for sparse enumeration "
-                         "(default: derive from registration sessions)")
-    ap.add_argument("--invocation-succeeded", action="store_true",
-                    default=True,
-                    help="mark the COLMAP invocation as succeeded (default; "
-                         "omit only if the SfM run itself crashed)")
-    ap.add_argument("--no-invocation-succeeded", dest="invocation_succeeded",
-                    action="store_false",
-                    help="mark the invocation as failed (crashed SfM)")
+        description="Emit registration quality report from COLMAP artifacts."
+    )
+    ap.add_argument(
+        "--registration-json",
+        required=True,
+        help="registration.json produced by pipeline.registration "
+        "or pipeline.reconstruct (RegistrationResult JSON)",
+    )
+    ap.add_argument(
+        "--sparse-dir",
+        default=None,
+        help="COLMAP sparse/ directory (required for engine=colmap; "
+        "omit for mock-engine registrations)",
+    )
+    ap.add_argument(
+        "--capture-manifest",
+        default=None,
+        help="capture_manifest.json (optional; binds capture provenance to the quality report)",
+    )
+    ap.add_argument(
+        "--policy", required=True, help="RegistrationQualityPolicy JSON (all 5 thresholds)"
+    )
+    ap.add_argument(
+        "--total-input-images",
+        type=int,
+        default=None,
+        help="total input image count for sparse enumeration "
+        "(default: derive from registration sessions)",
+    )
+    ap.add_argument(
+        "--invocation-succeeded",
+        action="store_true",
+        default=True,
+        help="mark the COLMAP invocation as succeeded (default; "
+        "omit only if the SfM run itself crashed)",
+    )
+    ap.add_argument(
+        "--no-invocation-succeeded",
+        dest="invocation_succeeded",
+        action="store_false",
+        help="mark the invocation as failed (crashed SfM)",
+    )
     ap.add_argument(
         "--engine-version",
         default=None,
@@ -148,32 +218,32 @@ def main(argv: list[str] | None = None) -> int:
             "does not provide or override version evidence"
         ),
     )
-    ap.add_argument("--output", default="quality-report.json",
-                    help="output quality-report.json path")
+    ap.add_argument(
+        "--output", default="quality-report.json", help="output quality-report.json path"
+    )
     args = ap.parse_args(argv)
 
     # ── Load registration.json bytes (authoritative) ──
     reg_path = Path(args.registration_json)
     if not reg_path.is_file():
         raise SystemExit(f"registration.json not found: {reg_path}")
-    reg_bytes = reg_path.read_bytes()
+    reg_bytes = _stable_read_bytes(reg_path)
     try:
         registration = RegistrationResult.model_validate_json(reg_bytes)
     except Exception as exc:
-        raise SystemExit(
-            f"registration.json does not parse as RegistrationResult: {exc}"
-        ) from exc
-    print(f"[REG] engine={registration.engine}  poses={len(registration.poses)}  "
-          f"sessions={len(registration.sessions)}  "
-          f"sha256={hashlib.sha256(reg_bytes).hexdigest()[:16]}...")
+        raise SystemExit(f"registration.json does not parse as RegistrationResult: {exc}") from exc
+    print(
+        f"[REG] engine={registration.engine}  poses={len(registration.poses)}  "
+        f"sessions={len(registration.sessions)}  "
+        f"sha256={hashlib.sha256(reg_bytes).hexdigest()[:16]}..."
+    )
 
     # ── Load policy (authoritative) ──
     policy_path = Path(args.policy)
     if not policy_path.is_file():
         raise SystemExit(f"policy not found: {policy_path}")
     try:
-        policy = RegistrationQualityPolicy.model_validate_json(
-            policy_path.read_text(encoding="utf-8"))
+        policy = RegistrationQualityPolicy.model_validate_json(_stable_read_bytes(policy_path))
     except Exception as exc:
         raise SystemExit(f"policy does not parse: {exc}") from exc
     print(f"[POLICY] sha256={policy_canonical_sha256(policy)[:16]}...")
@@ -185,18 +255,19 @@ def main(argv: list[str] | None = None) -> int:
         cm_path = Path(args.capture_manifest)
         if not cm_path.is_file():
             raise SystemExit(f"capture manifest not found: {cm_path}")
-        capture_manifest_bytes = cm_path.read_bytes()
+        capture_manifest_bytes = _stable_read_bytes(cm_path)
         try:
             from pipeline.studio_revisions import CaptureRevisionManifest
-            capture_manifest = CaptureRevisionManifest.model_validate_json(
-                capture_manifest_bytes)
+
+            capture_manifest = CaptureRevisionManifest.model_validate_json(capture_manifest_bytes)
         except Exception as exc:
-            raise SystemExit(
-                f"capture manifest does not parse: {exc}") from exc
-        print(f"[CAPTURE] sha256="
-              f"{hashlib.sha256(capture_manifest_bytes).hexdigest()[:16]}...  "
-              f"sources={capture_manifest.source_count}  "
-              f"outputs={capture_manifest.output_count}")
+            raise SystemExit(f"capture manifest does not parse: {exc}") from exc
+        print(
+            f"[CAPTURE] sha256="
+            f"{hashlib.sha256(capture_manifest_bytes).hexdigest()[:16]}...  "
+            f"sources={capture_manifest.source_count}  "
+            f"outputs={capture_manifest.output_count}"
+        )
 
     # ── Enumerate sparse models (engine=colmap only) ──
     sparse_enum: SparseModelEnumeration | None = None
@@ -204,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.sparse_dir:
             raise SystemExit(
                 "engine='colmap' requires --sparse-dir (COLMAP sparse/ "
-                "directory containing <index>/images.txt + points3D.txt)")
+                "directory containing <index>/images.txt + points3D.txt)"
+            )
         sparse_dir = Path(args.sparse_dir)
         if not sparse_dir.is_dir():
             raise SystemExit(f"sparse directory not found: {sparse_dir}")
@@ -217,19 +289,22 @@ def main(argv: list[str] | None = None) -> int:
             if total_input == 0:
                 raise SystemExit(
                     "cannot derive total_input_images from registration "
-                    "(sessions have no images); pass --total-input-images")
+                    "(sessions have no images); pass --total-input-images"
+                )
         sparse_enum = enumerate_sparse_models(sparse_dir, total_input)
-        print(f"[SPARSE] models={len(sparse_enum.models)}  "
-              f"selected={sparse_enum.selected_model_index}  "
-              f"rule={sparse_enum.selection_rule}  "
-              f"total_input={sparse_enum.total_input_images}")
+        print(
+            f"[SPARSE] models={len(sparse_enum.models)}  "
+            f"selected={sparse_enum.selected_model_index}  "
+            f"rule={sparse_enum.selection_rule}  "
+            f"total_input={sparse_enum.total_input_images}"
+        )
         for m in sparse_enum.models:
-            print(f"  model[{m.model_index}]: "
-                  f"images={m.image_count}  points3d={m.point3d_count}")
+            print(f"  model[{m.model_index}]: images={m.image_count}  points3d={m.point3d_count}")
     elif args.sparse_dir:
         raise SystemExit(
             f"--sparse-dir not allowed for engine={registration.engine!r} "
-            "(only engine='colmap' binds sparse model evidence)")
+            "(only engine='colmap' binds sparse model evidence)"
+        )
 
     # ── Build the report (derives every field from authoritative artifacts) ──
     report = build_registration_quality_report(
@@ -255,23 +330,29 @@ def main(argv: list[str] | None = None) -> int:
     # ── Write ──
     _write_json(Path(args.output), report)
     print(f"[REPORT] wrote {args.output}")
-    print(f"  registered_count={report.registered_count}  "
-          f"total={report.total_input_images}  "
-          f"ratio={report.registered_ratio:.3f}")
-    print(f"  quality_accepted={report.quality_accepted}  "
-          f"training_allowed={report.training_allowed}")
+    print(
+        f"  registered_count={report.registered_count}  "
+        f"total={report.total_input_images}  "
+        f"ratio={report.registered_ratio:.3f}"
+    )
+    print(
+        f"  quality_accepted={report.quality_accepted}  training_allowed={report.training_allowed}"
+    )
     if report.rejection_reasons:
         print("  rejection_reasons:")
         for r in report.rejection_reasons:
             print(f"    - {r}")
-    print(f"  report_sha256="
-          f"{hashlib.sha256(report.model_dump_json().encode()).hexdigest()[:16]}...")
+    print(
+        f"  report_sha256={hashlib.sha256(report.model_dump_json().encode()).hexdigest()[:16]}..."
+    )
     # Honest boundary reminder.
     print()
-    print("Trust boundary: quality_accepted/training_allowed only proves the "
-          "registration satisfies the coverage policy. It does NOT prove the "
-          "photos are real, the coverage is geometrically sufficient for 3DGS, "
-          "or the scale is metric.")
+    print(
+        "Trust boundary: quality_accepted/training_allowed only proves the "
+        "registration satisfies the coverage policy. It does NOT prove the "
+        "photos are real, the coverage is geometrically sufficient for 3DGS, "
+        "or the scale is metric."
+    )
     return 0
 
 
