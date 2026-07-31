@@ -317,7 +317,7 @@ def _safe_regular_payload(
         return (
             value.st_dev,
             value.st_ino,
-            value.st_mode,
+            stat.S_IFMT(value.st_mode),
             value.st_size,
             value.st_mtime_ns,
         )

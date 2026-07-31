@@ -95,7 +95,7 @@ def _stable_payload(
         return (
             value.st_dev,
             value.st_ino,
-            value.st_mode,
+            stat.S_IFMT(value.st_mode),
             value.st_size,
             value.st_mtime_ns,
         )
@@ -746,7 +746,7 @@ def extract_production_release_archive(
         return (
             value.st_dev,
             value.st_ino,
-            value.st_mode,
+            stat.S_IFMT(value.st_mode),
             value.st_size,
             value.st_mtime_ns,
         )
@@ -1002,7 +1002,7 @@ def verify_production_release_archive(
         return (
             value.st_dev,
             value.st_ino,
-            value.st_mode,
+            stat.S_IFMT(value.st_mode),
             value.st_size,
             value.st_mtime_ns,
         )

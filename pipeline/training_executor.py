@@ -531,7 +531,7 @@ def _stat_signature(
     return (
         result.st_dev,
         result.st_ino,
-        result.st_mode,
+        stat.S_IFMT(result.st_mode),
         result.st_size,
         result.st_mtime_ns,
         int(getattr(result, "st_file_attributes", 0))

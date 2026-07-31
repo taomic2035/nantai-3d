@@ -193,7 +193,7 @@ def _signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
     return (
         value.st_dev,
         value.st_ino,
-        value.st_mode,
+        stat.S_IFMT(value.st_mode),
         value.st_size,
         value.st_mtime_ns,
     )
