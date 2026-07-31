@@ -36,11 +36,14 @@ Usage (result, after export)::
         --trainer nerfstudio-splatfacto --trainer-version 0.1.0 \\
         --output training-result.json
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -71,10 +74,97 @@ from pipeline.training_provenance import (  # noqa: E402
 # Content-addressing helpers
 # ============================================================
 
+
+def _stable_open(path: Path):
+    """Open a provenance input through a single O_NOFOLLOW descriptor.
+
+    ``lstat`` verifies the path is a regular file, ``os.open`` with
+    ``O_NOFOLLOW`` opens the descriptor without following symlinks, and
+    ``fstat`` re-verifies that the opened descriptor is the same regular file
+    (type, inode, device) so a symlink swap between check and open is rejected.
+    The descriptor is bound to the inode at open time, so a path swap during a
+    streaming read cannot alter the bytes already being read.  Provenance
+    inputs must be regular files at the literal path — symlinks are rejected.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise OSError(f"provenance input cannot be inspected: {path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"provenance input is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            os.close(descriptor)
+            raise OSError(f"provenance input changed before read: {path}")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read whole-file provenance bytes through a stable O_NOFOLLOW descriptor.
+
+    Mirrors the studio_server identity contract: lstat (regular file),
+    ``O_NOFOLLOW`` open, ``fstat`` identity re-check (type+inode+device), a
+    bounded-then-verified read, and a post-read ``lstat`` recheck to detect a
+    swap between open and return.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise OSError(f"provenance input cannot be inspected: {path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"provenance input is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb")
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise OSError(f"provenance input changed before read: {path}")
+        payload = stream.read()
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise OSError(f"provenance input changed during read: {path}") from exc
+    if (
+        stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise OSError(f"provenance input changed during read: {path}")
+    return payload
+
+
 def _file_sha256_and_size(path: Path) -> tuple[str, int]:
     h = hashlib.sha256()
     size = 0
-    with path.open("rb") as f:
+    with _stable_open(path) as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
             size += len(chunk)
@@ -125,7 +215,7 @@ def _input_bytes_for_validation(path: Path) -> bytes:
     """
     if path.is_dir():
         return _dir_content_bytes(path)
-    return path.read_bytes()
+    return _stable_read_bytes(path)
 
 
 def _load_result_input_bytes(
@@ -138,26 +228,17 @@ def _load_result_input_bytes(
                 prepared_bundle,
             )
             if verified.request != request:
-                raise SystemExit(
-                    "training request differs from prepared bundle"
-                )
+                raise SystemExit("training request differs from prepared bundle")
             return load_training_job_input_bytes(verified)
         except RealSceneTrainingError as exc:
-            raise SystemExit(
-                f"prepared training bundle verification failed: {exc}"
-            ) from exc
+            raise SystemExit(f"prepared training bundle verification failed: {exc}") from exc
 
     input_bytes_by_path: dict[str, bytes] = {}
     for binding in request.input_bindings:
         path = Path(binding.artifact_path)
         if not path.exists():
-            raise SystemExit(
-                "input artefact no longer exists at declared path: "
-                f"{path}"
-            )
-        input_bytes_by_path[binding.artifact_path] = (
-            _input_bytes_for_validation(path)
-        )
+            raise SystemExit(f"input artefact no longer exists at declared path: {path}")
+        input_bytes_by_path[binding.artifact_path] = _input_bytes_for_validation(path)
     return input_bytes_by_path
 
 
@@ -170,7 +251,7 @@ def _parse_ply_header(path: Path) -> tuple[int, int]:
     """
     f_rest_count = 0
     vertex_count = 0
-    with path.open("rb") as f:
+    with _stable_open(path) as f:
         for raw in f:
             line = raw.decode("utf-8", errors="replace").rstrip()
             if line == "end_header":
@@ -183,28 +264,33 @@ def _parse_ply_header(path: Path) -> tuple[int, int]:
     if vertex_count == 0:
         raise ValueError(f"PLY header has no 'element vertex' line: {path}")
     n_coeffs = f_rest_count // 3 + 1
-    degree = int(round(n_coeffs ** 0.5)) - 1
+    degree = int(round(n_coeffs**0.5)) - 1
     if (degree + 1) ** 2 != n_coeffs:
-        raise ValueError(
-            f"f_rest count {f_rest_count} does not form a complete SH degree")
+        raise ValueError(f"f_rest count {f_rest_count} does not form a complete SH degree")
     return vertex_count, max(degree, 0)
 
 
 def _detect_gpu() -> tuple[str, int, str, str]:
     """Auto-detect GPU via nvidia-smi.  Raises if unavailable (no placeholder)."""
+
     def _query(query: str) -> str:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=" + query, "--format=csv,noheader,nounits",
-             "-i", "0"],
-            capture_output=True, text=True, check=True)
+            ["nvidia-smi", "--query-gpu=" + query, "--format=csv,noheader,nounits", "-i", "0"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         return out.stdout.strip().splitlines()[0]
 
     name = _query("name")
     mem_mib = int(float(_query("memory.total")))
     # driver + cuda versions
     out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader",
-         "-i", "0"], capture_output=True, text=True, check=True)
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader", "-i", "0"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     driver = out.stdout.strip().splitlines()[0]
     cuda = _query("cuda_version") if _nvidia_smi_has_cuda() else _detect_cuda_from_nvcc()
     return name, mem_mib, cuda, driver
@@ -213,8 +299,11 @@ def _detect_gpu() -> tuple[str, int, str, str]:
 def _nvidia_smi_has_cuda() -> bool:
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader",
-             "-i", "0"], capture_output=True, text=True, check=True)
+            ["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader", "-i", "0"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         return bool(out.stdout.strip())
     except Exception:
         return False
@@ -222,8 +311,7 @@ def _nvidia_smi_has_cuda() -> bool:
 
 def _detect_cuda_from_nvcc() -> str:
     try:
-        out = subprocess.run(["nvcc", "--version"], capture_output=True,
-                             text=True, check=True)
+        out = subprocess.run(["nvcc", "--version"], capture_output=True, text=True, check=True)
         m = re.search(r"release\s+([\d.]+)", out.stdout + out.stderr)
         if m:
             return m.group(1)
@@ -231,12 +319,14 @@ def _detect_cuda_from_nvcc() -> str:
         pass
     raise RuntimeError(
         "cannot determine CUDA version (nvidia-smi and nvcc both unavailable); "
-        "pass --cuda-version explicitly")
+        "pass --cuda-version explicitly"
+    )
 
 
 # ============================================================
 # canonical JSON write (LF, pretty, sorted fields via model_dump_json)
 # ============================================================
+
 
 def _write_json(path: Path, model) -> None:
     # write_file_atomic stages + fsync + atomic_replace so the provenance
@@ -268,31 +358,34 @@ def _parse_iso_utc(value: str) -> datetime:
 # request subcommand
 # ============================================================
 
+
 def _cmd_request(args: argparse.Namespace) -> int:
     config_path = Path(args.config_yml)
     if not config_path.is_file():
         raise SystemExit(f"config.yml not found: {config_path}")
-    config_bytes = config_path.read_bytes()
+    config_bytes = _stable_read_bytes(config_path)
     requested_config_sha = hashlib.sha256(config_bytes).hexdigest()
-    print(f"[CONFIG] {config_path}  sha256={requested_config_sha[:12]}...  "
-          f"size={len(config_bytes)}")
+    print(
+        f"[CONFIG] {config_path}  sha256={requested_config_sha[:12]}...  size={len(config_bytes)}"
+    )
 
     bindings: list[TrainingInputBinding] = []
     for spec in args.input:
         kind, _, raw_path = spec.partition(":")
         if not kind or not raw_path:
-            raise SystemExit(
-                f"--input must be 'kind:path'; got {spec!r}")
+            raise SystemExit(f"--input must be 'kind:path'; got {spec!r}")
         p = Path(raw_path)
         if not p.exists():
             raise SystemExit(f"input path does not exist: {p}")
         sha, size = _input_sha256_and_size(p)
-        bindings.append(TrainingInputBinding(
-            artifact_kind=kind,
-            artifact_sha256=sha,
-            artifact_path=str(p).replace("\\", "/"),
-            artifact_size_bytes=size,
-        ))
+        bindings.append(
+            TrainingInputBinding(
+                artifact_kind=kind,
+                artifact_sha256=sha,
+                artifact_path=str(p).replace("\\", "/"),
+                artifact_size_bytes=size,
+            )
+        )
         print(f"[INPUT] {kind}: {p}  sha256={sha[:12]}...  size={size}")
 
     config = TrainingConfig(
@@ -320,9 +413,9 @@ def _cmd_request(args: argparse.Namespace) -> int:
 # result subcommand
 # ============================================================
 
+
 def _cmd_result(args: argparse.Namespace) -> int:
-    request = TrainingRequest.model_validate_json(
-        Path(args.request).read_text(encoding="utf-8"))
+    request = TrainingRequest.model_validate_json(Path(args.request).read_text(encoding="utf-8"))
 
     # PLY bytes: required for completed runs, empty for failed/interrupted.
     ply_path_str = args.ply
@@ -330,12 +423,12 @@ def _cmd_result(args: argparse.Namespace) -> int:
         ply = Path(ply_path_str)
         if not ply.is_file():
             raise SystemExit(f"PLY not found: {ply}")
-        ply_bytes = ply.read_bytes()
+        ply_bytes = _stable_read_bytes(ply)
     else:
         if args.exit_code == 0:
             raise SystemExit(
-                "--ply is required when --exit-code is 0 "
-                "(a completed run must produce a PLY)")
+                "--ply is required when --exit-code is 0 (a completed run must produce a PLY)"
+            )
         ply_bytes = b""
         ply = None
 
@@ -351,33 +444,30 @@ def _cmd_result(args: argparse.Namespace) -> int:
     config_path = Path(args.config_yml)
     if not config_path.is_file():
         raise SystemExit(f"config.yml not found: {config_path}")
-    config_bytes = config_path.read_bytes()
+    config_bytes = _stable_read_bytes(config_path)
 
     # Log bytes.
     log_path = Path(args.log)
     if not log_path.is_file():
         raise SystemExit(f"log not found: {log_path}")
-    log_bytes = log_path.read_bytes()
+    log_bytes = _stable_read_bytes(log_path)
 
     dataparser_transform_path: Path | None = None
     dataparser_transform_bytes: bytes | None = None
     if args.dataparser_transform is not None:
         dataparser_transform_path = Path(args.dataparser_transform)
         if not dataparser_transform_path.is_file():
-            raise SystemExit(
-                "dataparser transform not found: "
-                f"{dataparser_transform_path}"
-            )
-        dataparser_transform_bytes = (
-            dataparser_transform_path.read_bytes()
-        )
+            raise SystemExit(f"dataparser transform not found: {dataparser_transform_path}")
+        dataparser_transform_bytes = _stable_read_bytes(dataparser_transform_path)
         if not dataparser_transform_bytes:
             raise SystemExit("dataparser transform is empty")
 
     # GPU environment.  If every field is supplied explicitly, use them;
     # otherwise auto-detect via nvidia-smi and apply any explicit overrides.
-    gpu_all_explicit = all(v is not None for v in (
-        args.gpu_name, args.gpu_memory_mb, args.cuda_version, args.driver_version))
+    gpu_all_explicit = all(
+        v is not None
+        for v in (args.gpu_name, args.gpu_memory_mb, args.cuda_version, args.driver_version)
+    )
     if gpu_all_explicit:
         gpu_name = args.gpu_name
         cuda = args.cuda_version
@@ -407,11 +497,14 @@ def _cmd_result(args: argparse.Namespace) -> int:
 
     trainer_drift: TrainerDriftRecord | None = None
     if args.trainer_drift_reason:
-        if actual_trainer_name == request.training_config.trainer_name and \
-                actual_trainer_version == request.training_config.trainer_version:
+        if (
+            actual_trainer_name == request.training_config.trainer_name
+            and actual_trainer_version == request.training_config.trainer_version
+        ):
             raise SystemExit(
                 "--trainer-drift-reason supplied but actual trainer matches "
-                "the request — no drift occurred")
+                "the request — no drift occurred"
+            )
         trainer_drift = TrainerDriftRecord(
             requested_trainer_name=request.training_config.trainer_name,
             requested_trainer_version=request.training_config.trainer_version,
@@ -423,11 +516,7 @@ def _cmd_result(args: argparse.Namespace) -> int:
     # Re-read input artefact bytes for closure verification.
     input_bytes_by_path = _load_result_input_bytes(
         request,
-        (
-            Path(args.prepared_bundle)
-            if args.prepared_bundle is not None
-            else None
-        ),
+        (Path(args.prepared_bundle) if args.prepared_bundle is not None else None),
     )
 
     # Timestamps.
@@ -449,7 +538,8 @@ def _cmd_result(args: argparse.Namespace) -> int:
             f"exit_code={exit_code} but PLY is non-empty "
             f"({len(ply_bytes)} bytes); failed/interrupted runs cannot "
             "produce a trained PLY — remove the --ply argument or use a "
-            "zero-byte placeholder")
+            "zero-byte placeholder"
+        )
 
     result = build_training_result(
         request=request,
@@ -464,8 +554,7 @@ def _cmd_result(args: argparse.Namespace) -> int:
         input_bytes_by_path=input_bytes_by_path,
         gpu_environment=env,
         exit_code=exit_code,
-        actual_ply_path=(str(ply).replace("\\", "/") if ply is not None
-                         else "no-ply-failed-run"),
+        actual_ply_path=(str(ply).replace("\\", "/") if ply is not None else "no-ply-failed-run"),
         actual_config_path=str(config_path).replace("\\", "/"),
         actual_log_path=str(log_path).replace("\\", "/"),
         error_message=error_message,
@@ -482,9 +571,11 @@ def _cmd_result(args: argparse.Namespace) -> int:
     _write_json(Path(args.output), result)
     sha = result_canonical_sha256(result)
     print(f"[RESULT] wrote {args.output}  canonical_sha256={sha}")
-    print(f"         ply_sha256={hashlib.sha256(ply_bytes).hexdigest()}  "
-          f"gaussians={gaussian_count}  sh_degree={sh_degree}  "
-          f"state={result.training_status.state}")
+    print(
+        f"         ply_sha256={hashlib.sha256(ply_bytes).hexdigest()}  "
+        f"gaussians={gaussian_count}  sh_degree={sh_degree}  "
+        f"state={result.training_status.state}"
+    )
     return 0
 
 
@@ -492,29 +583,42 @@ def _cmd_result(args: argparse.Namespace) -> int:
 # CLI
 # ============================================================
 
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
-        description="Emit cloud-GPU training provenance manifests.")
+    ap = argparse.ArgumentParser(description="Emit cloud-GPU training provenance manifests.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     rq = sub.add_parser("request", help="emit training-request.json (pre-training)")
-    rq.add_argument("--input", action="append", required=True, metavar="KIND:PATH",
-                    help="content-addressed input binding (repeatable); "
-                         "KIND in capture_manifest/registration_json/"
-                         "registration_quality_report/sparse_model_dir; "
-                         "PATH may be a file or directory (dir → deterministic "
-                         "content hash)")
-    rq.add_argument("--config-yml", required=True,
-                    help="config.yml whose SHA-256 becomes "
-                         "requested_config_sha256; the result subcommand must "
-                         "bind a config with the same SHA (unless drift allowed)")
-    rq.add_argument("--trainer", required=True,
-                    choices=["nerfstudio-splatfacto", "brush", "gsplat", "inria"])
+    rq.add_argument(
+        "--input",
+        action="append",
+        required=True,
+        metavar="KIND:PATH",
+        help="content-addressed input binding (repeatable); "
+        "KIND in capture_manifest/registration_json/"
+        "registration_quality_report/sparse_model_dir; "
+        "PATH may be a file or directory (dir → deterministic "
+        "content hash)",
+    )
+    rq.add_argument(
+        "--config-yml",
+        required=True,
+        help="config.yml whose SHA-256 becomes "
+        "requested_config_sha256; the result subcommand must "
+        "bind a config with the same SHA (unless drift allowed)",
+    )
+    rq.add_argument(
+        "--trainer", required=True, choices=["nerfstudio-splatfacto", "brush", "gsplat", "inria"]
+    )
     rq.add_argument("--trainer-version", required=True)
     rq.add_argument("--max-resolution", type=int, default=800)
     rq.add_argument("--total-steps", type=int, default=10000)
-    rq.add_argument("--seed", type=int, required=True,
-                    help="random seed (required — no seed = not reproducible)")
+    rq.add_argument(
+        "--seed",
+        type=int,
+        required=True,
+        help="random seed (required — no seed = not reproducible)",
+    )
     rq.add_argument("--request-id", default=None)
     rq.add_argument("--output", default="training-request.json")
 
@@ -523,43 +627,48 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument(
         "--prepared-bundle",
         default=None,
-        help=(
-            "verified production training-job.zip supplying authoritative "
-            "request input bytes"
-        ),
+        help=("verified production training-job.zip supplying authoritative request input bytes"),
     )
-    rs.add_argument("--ply", default=None,
-                    help="trained point_cloud.ply; may be omitted when "
-                         "--exit-code != 0 (failed/interrupted run with no PLY)")
+    rs.add_argument(
+        "--ply",
+        default=None,
+        help="trained point_cloud.ply; may be omitted when "
+        "--exit-code != 0 (failed/interrupted run with no PLY)",
+    )
     rs.add_argument("--config-yml", required=True, help="nerfstudio config.yml")
     rs.add_argument("--log", required=True, help="training log file")
     rs.add_argument(
         "--dataparser-transform",
         default=None,
-        help=(
-            "optional dataparser_transforms.json to bind into the result"
-        ),
+        help=("optional dataparser_transforms.json to bind into the result"),
     )
-    rs.add_argument("--trainer", required=True,
-                    choices=["nerfstudio-splatfacto", "brush", "gsplat", "inria"])
+    rs.add_argument(
+        "--trainer", required=True, choices=["nerfstudio-splatfacto", "brush", "gsplat", "inria"]
+    )
     rs.add_argument("--trainer-version", required=True)
     rs.add_argument("--gpu-name", default=None)
     rs.add_argument("--gpu-memory-mb", type=int, default=None)
     rs.add_argument("--cuda-version", default=None)
     rs.add_argument("--driver-version", default=None)
-    rs.add_argument("--exit-code", type=int, default=0,
-                    help="trainer process exit code (default 0 = completed); "
-                         "non-zero + non-empty PLY is rejected; non-zero with "
-                         "no PLY yields failed/interrupted state")
-    rs.add_argument("--error-message", default=None,
-                    help="error message; required when exit-code != 0")
-    rs.add_argument("--started-at", default=None,
-                    help="ISO-8601 UTC start time (default: now)")
-    rs.add_argument("--finished-at", default=None,
-                    help="ISO-8601 UTC finish time (default: now)")
-    rs.add_argument("--trainer-drift-reason", default=None,
-                    help="if supplied, record a TrainerDriftRecord with this "
-                         "reason; requires actual trainer != requested trainer")
+    rs.add_argument(
+        "--exit-code",
+        type=int,
+        default=0,
+        help="trainer process exit code (default 0 = completed); "
+        "non-zero + non-empty PLY is rejected; non-zero with "
+        "no PLY yields failed/interrupted state",
+    )
+    rs.add_argument(
+        "--error-message", default=None, help="error message; required when exit-code != 0"
+    )
+    rs.add_argument("--started-at", default=None, help="ISO-8601 UTC start time (default: now)")
+    rs.add_argument("--finished-at", default=None, help="ISO-8601 UTC finish time (default: now)")
+    rs.add_argument(
+        "--trainer-drift-reason",
+        default=None,
+        help="if supplied, record a TrainerDriftRecord with this "
+        "reason; requires actual trainer != requested trainer",
+    )
     rs.add_argument("--result-id", default=None)
     rs.add_argument("--output", default="training-result.json")
 

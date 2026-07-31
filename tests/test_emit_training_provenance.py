@@ -9,6 +9,7 @@ The hardened P0.2 contract requires actual PLY / config / log / input bytes
 to be supplied to the validator, so these tests gather the same bytes the
 emit script read and feed them back through ``validate_training_provenance``.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,10 @@ _ROOT = Path(__file__).resolve().parent.parent
 def _run(*args: str) -> subprocess.CompletedProcess:
     proc = subprocess.run(
         [sys.executable, "scripts/emit_training_provenance.py", *args],
-        cwd=_ROOT, capture_output=True, text=True)
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+    )
     return proc
 
 
@@ -62,11 +66,9 @@ def _build_cloud_workspace(tmp_path: Path) -> tuple[Path, Path, Path, Path, int]
 
     config = tmp_path / "cloud" / "outputs" / "config.yml"
     config.parent.mkdir(parents=True)
-    config.write_text("trainer: splatfacto\nmax_res: 800\nsteps: 10000\n",
-                      encoding="utf-8")
+    config.write_text("trainer: splatfacto\nmax_res: 800\nsteps: 10000\n", encoding="utf-8")
     log = tmp_path / "cloud" / "training.log"
-    log.write_text("step 0 loss 0.5\nstep 9999 loss 0.01\nDONE\n",
-                   encoding="utf-8")
+    log.write_text("step 0 loss 0.5\nstep 9999 loss 0.01\nDONE\n", encoding="utf-8")
     return images, ply, config, log, n
 
 
@@ -86,6 +88,7 @@ def _gather_input_bytes(request: TrainingRequest) -> dict[str, bytes]:
             for f in files:
                 rel = str(f.relative_to(p)).replace("\\", "/")
                 import hashlib as _hl
+
                 sha = _hl.sha256(f.read_bytes()).hexdigest()
                 size = f.stat().st_size
                 parts.append(f"{rel}\0{size}\0{sha}\n".encode())
@@ -102,28 +105,29 @@ class TestEmitTrainingProvenance:
         monkeypatch,
     ):
         request = TrainingRequest.model_validate_json(
-            json.dumps({
-                "request_id": "prepared-request",
-                "created_at_utc": "2026-07-26T00:00:00Z",
-                "input_bindings": [
-                    {
-                        "artifact_kind": "held_out_split",
-                        "artifact_sha256": "a" * 64,
-                        "artifact_path":
-                            "training/held-out-split.json",
-                        "artifact_size_bytes": 7,
-                    }
-                ],
-                "training_config": {
-                    "trainer_name": "nerfstudio-splatfacto",
-                    "trainer_version": "1.1.5",
-                    "max_resolution": 1600,
-                    "total_steps": 30000,
-                    "random_seed": 42,
-                },
-                "expected_output_format": "inria-3dgs-ply",
-                "requested_config_sha256": "b" * 64,
-            })
+            json.dumps(
+                {
+                    "request_id": "prepared-request",
+                    "created_at_utc": "2026-07-26T00:00:00Z",
+                    "input_bindings": [
+                        {
+                            "artifact_kind": "held_out_split",
+                            "artifact_sha256": "a" * 64,
+                            "artifact_path": "training/held-out-split.json",
+                            "artifact_size_bytes": 7,
+                        }
+                    ],
+                    "training_config": {
+                        "trainer_name": "nerfstudio-splatfacto",
+                        "trainer_version": "1.1.5",
+                        "max_resolution": 1600,
+                        "total_steps": 30000,
+                        "random_seed": 42,
+                    },
+                    "expected_output_format": "inria-3dgs-ply",
+                    "requested_config_sha256": "b" * 64,
+                }
+            )
         )
         expected = {"training/held-out-split.json": b"split\n"}
         bundle_path = tmp_path / "training-job.zip"
@@ -139,10 +143,13 @@ class TestEmitTrainingProvenance:
             lambda bundle: expected,
         )
 
-        assert emit_module._load_result_input_bytes(
-            request,
-            bundle_path,
-        ) == expected
+        assert (
+            emit_module._load_result_input_bytes(
+                request,
+                bundle_path,
+            )
+            == expected
+        )
 
         different = request.model_copy(
             update={"request_id": "different-request"},
@@ -158,35 +165,65 @@ class TestEmitTrainingProvenance:
         out = tmp_path / "cloud"
         dataparser_transform = out / "dataparser_transforms.json"
         dataparser_transform.write_text(
-            '{"scale":1.0,"transform":[[1,0,0,0],[0,1,0,0],'
-            '[0,0,1,0],[0,0,0,1]]}\n',
+            '{"scale":1.0,"transform":[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}\n',
             encoding="ascii",
         )
 
         req_proc = _run(
             "request",
-            "--input", f"capture_manifest:{images}",
-            "--config-yml", str(config),
-            "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-            "--max-resolution", "800", "--total-steps", "10000", "--seed", "42",
-            "--request-id", "req-rt-001",
-            "--output", str(out / "training-request.json"))
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--max-resolution",
+            "800",
+            "--total-steps",
+            "10000",
+            "--seed",
+            "42",
+            "--request-id",
+            "req-rt-001",
+            "--output",
+            str(out / "training-request.json"),
+        )
         assert req_proc.returncode == 0, req_proc.stderr
         assert "canonical_sha256=" in req_proc.stdout
 
         res_proc = _run(
             "result",
-            "--request", str(out / "training-request.json"),
-            "--ply", str(ply),
-            "--config-yml", str(config),
-            "--log", str(log),
-            "--dataparser-transform", str(dataparser_transform),
-            "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-            "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-            "--cuda-version", "11.8", "--driver-version", "525.60.13",
-            "--result-id", "res-rt-001",
-            "--started-at", "2026-07-23T01:00:00Z",
-            "--output", str(out / "training-result.json"))
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--dataparser-transform",
+            str(dataparser_transform),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--result-id",
+            "res-rt-001",
+            "--started-at",
+            "2026-07-23T01:00:00Z",
+            "--output",
+            str(out / "training-result.json"),
+        )
         assert res_proc.returncode == 0, res_proc.stderr
         assert f"gaussians={n}" in res_proc.stdout
         assert "sh_degree=3" in res_proc.stdout
@@ -194,9 +231,11 @@ class TestEmitTrainingProvenance:
 
         # Load + validate byte-exact.
         request = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
         ply_bytes = ply.read_bytes()
         config_bytes = config.read_bytes()
         log_bytes = log.read_bytes()
@@ -204,26 +243,25 @@ class TestEmitTrainingProvenance:
 
         # No exception == content closure verified.
         validate_training_provenance(
-            result, request,
+            result,
+            request,
             actual_ply_bytes=ply_bytes,
             actual_config_bytes=config_bytes,
             actual_log_bytes=log_bytes,
-            actual_dataparser_transform_bytes=(
-                dataparser_transform.read_bytes()
-            ),
+            actual_dataparser_transform_bytes=(dataparser_transform.read_bytes()),
             input_bytes_by_path=input_bytes,
         )
 
         trust = derive_training_trust(
-            result, request,
+            result,
+            request,
             actual_ply_bytes=ply_bytes,
             actual_config_bytes=config_bytes,
             actual_log_bytes=log_bytes,
-            actual_dataparser_transform_bytes=(
-                dataparser_transform.read_bytes()
-            ),
+            actual_dataparser_transform_bytes=(dataparser_transform.read_bytes()),
             input_bytes_by_path=input_bytes,
-            registration_quality_passed=False)
+            registration_quality_passed=False,
+        )
         assert trust.content_closed is True
         # is_trustworthy stays False because registration_quality_passed=False
         # (prepare_import doesn't run the SfM gate) — honest.
@@ -244,18 +282,30 @@ class TestEmitTrainingProvenance:
         out2 = tmp_path / "r2"
 
         for o in (out, out2):
-            p = _run("request",
-                     "--input", f"capture_manifest:{images}",
-                     "--config-yml", str(config),
-                     "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1",
-                     "--seed", "1", "--output", str(o / "training-request.json"))
+            p = _run(
+                "request",
+                "--input",
+                f"capture_manifest:{images}",
+                "--config-yml",
+                str(config),
+                "--trainer",
+                "nerfstudio-splatfacto",
+                "--trainer-version",
+                "0.1",
+                "--seed",
+                "1",
+                "--output",
+                str(o / "training-request.json"),
+            )
             assert p.returncode == 0, p.stderr
 
         # Same inputs -> identical input binding SHA (deterministic dir hash).
         r1 = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         r2 = TrainingRequest.model_validate_json(
-            (out2 / "training-request.json").read_text(encoding="utf-8"))
+            (out2 / "training-request.json").read_text(encoding="utf-8")
+        )
         assert r1.input_bindings[0].artifact_sha256 == r2.input_bindings[0].artifact_sha256
         # requested_config_sha256 also deterministic for identical config bytes.
         assert r1.requested_config_sha256 == r2.requested_config_sha256
@@ -264,28 +314,59 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        _run("result",
-             "--request", str(out / "training-request.json"),
-             "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-             "--cuda-version", "11.8", "--driver-version", "525.60.13",
-             "--output", str(out / "training-result.json"))
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--output",
+            str(out / "training-result.json"),
+        )
 
         request = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
 
         # Tamper the PLY bytes the validator sees.
         with pytest.raises(ValueError, match="primary_ply_sha256 mismatch|PLY bytes mismatch"):
             validate_training_provenance(
-                result, request,
+                result,
+                request,
                 actual_ply_bytes=ply.read_bytes() + b"\x00",
                 actual_config_bytes=config.read_bytes(),
                 actual_log_bytes=log.read_bytes(),
@@ -298,29 +379,60 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        _run("result",
-             "--request", str(out / "training-request.json"),
-             "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-             "--cuda-version", "11.8", "--driver-version", "525.60.13",
-             "--output", str(out / "training-result.json"))
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--output",
+            str(out / "training-result.json"),
+        )
 
         request = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
 
         # Tamper config bytes the validator sees.
         tampered = config.read_bytes() + b"\n# tampered\n"
         with pytest.raises(ValueError, match="actual_config_sha256 mismatch"):
             validate_training_provenance(
-                result, request,
+                result,
+                request,
                 actual_ply_bytes=ply.read_bytes(),
                 actual_config_bytes=tampered,
                 actual_log_bytes=log.read_bytes(),
@@ -333,28 +445,59 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        _run("result",
-             "--request", str(out / "training-request.json"),
-             "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-             "--cuda-version", "11.8", "--driver-version", "525.60.13",
-             "--output", str(out / "training-result.json"))
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--output",
+            str(out / "training-result.json"),
+        )
 
         request = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
 
         tampered = log.read_bytes() + b"extra line\n"
         with pytest.raises(ValueError, match="training_log_sha256 mismatch"):
             validate_training_provenance(
-                result, request,
+                result,
+                request,
                 actual_ply_bytes=ply.read_bytes(),
                 actual_config_bytes=config.read_bytes(),
                 actual_log_bytes=tampered,
@@ -368,18 +511,48 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        proc = _run("result",
-                    "--request", str(out / "training-request.json"),
-                    "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-                    "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-                    "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-                    "--cuda-version", "11.8", "--driver-version", "525.60.13",
-                    "--exit-code", "1", "--error-message", "trainer crashed")
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        proc = _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--exit-code",
+            "1",
+            "--error-message",
+            "trainer crashed",
+        )
         assert proc.returncode != 0
         assert "non-empty" in proc.stderr or "non-empty" in proc.stdout
 
@@ -393,29 +566,62 @@ class TestEmitTrainingProvenance:
         empty_ply.parent.mkdir(parents=True, exist_ok=True)
         empty_ply.write_bytes(b"")
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        proc = _run("result",
-                    "--request", str(out / "training-request.json"),
-                    "--ply", str(empty_ply), "--config-yml", str(config),
-                    "--log", str(log),
-                    "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-                    "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-                    "--cuda-version", "11.8", "--driver-version", "525.60.13",
-                    "--exit-code", "1", "--error-message", "trainer crashed",
-                    "--output", str(out / "training-result.json"))
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        proc = _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(empty_ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--exit-code",
+            "1",
+            "--error-message",
+            "trainer crashed",
+            "--output",
+            str(out / "training-result.json"),
+        )
         assert proc.returncode == 0, proc.stderr
         assert "state=failed" in proc.stdout
 
         request = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
         validate_training_provenance(
-            result, request,
+            result,
+            request,
             actual_ply_bytes=b"",
             actual_config_bytes=config.read_bytes(),
             actual_log_bytes=log.read_bytes(),
@@ -423,12 +629,14 @@ class TestEmitTrainingProvenance:
         )
         assert result.training_status.state == "failed"
         trust = derive_training_trust(
-            result, request,
+            result,
+            request,
             actual_ply_bytes=b"",
             actual_config_bytes=config.read_bytes(),
             actual_log_bytes=log.read_bytes(),
             input_bytes_by_path=_gather_input_bytes(request),
-            registration_quality_passed=True)
+            registration_quality_passed=True,
+        )
         # failed run -> content_closed False (state != completed)
         assert trust.content_closed is False
         assert trust.is_trustworthy is False
@@ -437,11 +645,20 @@ class TestEmitTrainingProvenance:
         """--config-yml is required for request (requested_config_sha256)."""
         images, _ply, _config, _log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
-        proc = _run("request",
-                    "--input", f"capture_manifest:{images}",
-                    # no --config-yml
-                    "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-                    "--seed", "42", "--output", str(out / "training-request.json"))
+        proc = _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            # no --config-yml
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
         assert proc.returncode != 0
         assert "config" in proc.stderr.lower() or "config" in proc.stdout.lower()
 
@@ -451,28 +668,59 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
         # Result uses brush trainer instead of nerfstudio-splatfacto.
-        proc = _run("result",
-                    "--request", str(out / "training-request.json"),
-                    "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-                    "--trainer", "brush", "--trainer-version", "brush 0.3.0",
-                    "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-                    "--cuda-version", "11.8", "--driver-version", "525.60.13",
-                    "--output", str(out / "training-result.json"))
+        proc = _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "brush",
+            "--trainer-version",
+            "brush 0.3.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--output",
+            str(out / "training-result.json"),
+        )
         assert proc.returncode == 0, proc.stderr  # emit builds the result
 
         request = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
         with pytest.raises(ValueError, match="trainer drift"):
             validate_training_provenance(
-                result, request,
+                result,
+                request,
                 actual_ply_bytes=ply.read_bytes(),
                 actual_config_bytes=config.read_bytes(),
                 actual_log_bytes=log.read_bytes(),
@@ -485,28 +733,61 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        proc = _run("result",
-                    "--request", str(out / "training-request.json"),
-                    "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-                    "--trainer", "brush", "--trainer-version", "brush 0.3.0",
-                    "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-                    "--cuda-version", "11.8", "--driver-version", "525.60.13",
-                    "--trainer-drift-reason", "cloud image upgraded to brush",
-                    "--output", str(out / "training-result.json"))
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        proc = _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "brush",
+            "--trainer-version",
+            "brush 0.3.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--trainer-drift-reason",
+            "cloud image upgraded to brush",
+            "--output",
+            str(out / "training-result.json"),
+        )
         assert proc.returncode == 0, proc.stderr
 
         request = TrainingRequest.model_validate_json(
-            (out / "training-request.json").read_text(encoding="utf-8"))
+            (out / "training-request.json").read_text(encoding="utf-8")
+        )
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
         from pipeline.training_provenance import TrainingDriftPolicy
+
         validate_training_provenance(
-            result, request,
+            result,
+            request,
             actual_ply_bytes=ply.read_bytes(),
             actual_config_bytes=config.read_bytes(),
             actual_log_bytes=log.read_bytes(),
@@ -515,7 +796,8 @@ class TestEmitTrainingProvenance:
         )
         # trainer_identified stays False even though closure is valid.
         trust = derive_training_trust(
-            result, request,
+            result,
+            request,
             actual_ply_bytes=ply.read_bytes(),
             actual_config_bytes=config.read_bytes(),
             actual_log_bytes=log.read_bytes(),
@@ -533,18 +815,46 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        proc = _run("result",
-                    "--request", str(out / "training-request.json"),
-                    "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-                    "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-                    "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-                    "--cuda-version", "11.8", "--driver-version", "525.60.13",
-                    "--trainer-drift-reason", "should not be here")
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        proc = _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--trainer-drift-reason",
+            "should not be here",
+        )
         assert proc.returncode != 0
         assert "no drift" in proc.stderr.lower() or "no drift" in proc.stdout.lower()
 
@@ -556,49 +866,92 @@ class TestEmitTrainingProvenance:
         images, ply, config, log, _n = _build_cloud_workspace(tmp_path)
         out = tmp_path / "cloud"
 
-        _run("request",
-             "--input", f"capture_manifest:{images}",
-             "--config-yml", str(config),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--seed", "42", "--output", str(out / "training-request.json"))
-        _run("result",
-             "--request", str(out / "training-request.json"),
-             "--ply", str(ply), "--config-yml", str(config), "--log", str(log),
-             "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-             "--gpu-name", "Tesla T4", "--gpu-memory-mb", "15109",
-             "--cuda-version", "11.8", "--driver-version", "525.60.13",
-             "--started-at", "2026-07-23T01:00:00Z",
-             "--output", str(out / "training-result.json"))
+        _run(
+            "request",
+            "--input",
+            f"capture_manifest:{images}",
+            "--config-yml",
+            str(config),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--seed",
+            "42",
+            "--output",
+            str(out / "training-request.json"),
+        )
+        _run(
+            "result",
+            "--request",
+            str(out / "training-request.json"),
+            "--ply",
+            str(ply),
+            "--config-yml",
+            str(config),
+            "--log",
+            str(log),
+            "--trainer",
+            "nerfstudio-splatfacto",
+            "--trainer-version",
+            "0.1.0",
+            "--gpu-name",
+            "Tesla T4",
+            "--gpu-memory-mb",
+            "15109",
+            "--cuda-version",
+            "11.8",
+            "--driver-version",
+            "525.60.13",
+            "--started-at",
+            "2026-07-23T01:00:00Z",
+            "--output",
+            str(out / "training-result.json"),
+        )
 
         from pipeline.recon_schema import RegistrationResult
+
         recon_dir = tmp_path / "recon"
         prep = subprocess.run(
-            [sys.executable, "scripts/prepare_import.py", str(ply),
-             "--out-dir", str(recon_dir),
-             "--training-result", str(out / "training-result.json"),
-             "--training-request", str(out / "training-request.json")],
-            cwd=_ROOT, capture_output=True, text=True)
-        assert prep.returncode == 0, \
-            f"prepare_import.py failed: {prep.stderr[:500]}"
+            [
+                sys.executable,
+                "scripts/prepare_import.py",
+                str(ply),
+                "--out-dir",
+                str(recon_dir),
+                "--training-result",
+                str(out / "training-result.json"),
+                "--training-request",
+                str(out / "training-request.json"),
+            ],
+            cwd=_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert prep.returncode == 0, f"prepare_import.py failed: {prep.stderr[:500]}"
 
         reg = RegistrationResult.model_validate_json(
-            (recon_dir / "registration.json").read_text(encoding="utf-8"))
+            (recon_dir / "registration.json").read_text(encoding="utf-8")
+        )
         evidence = reg.pose_frame.evidence
         result = TrainingResult.model_validate_json(
-            (out / "training-result.json").read_text(encoding="utf-8"))
+            (out / "training-result.json").read_text(encoding="utf-8")
+        )
         result_sha = result_canonical_sha256(result)
         # Without registration quality args, only content-only receipt is added.
         expected = f"training_content_closed.v1={result_sha}"
         assert expected in evidence, f"missing {expected!r}; got {evidence}"
         # Trusted prefix must NOT be present (is_trustworthy=False without RQ).
         trusted = f"training_provenance.v1={result_sha}"
-        assert trusted not in evidence, \
+        assert trusted not in evidence, (
             f"trusted prefix present without registration quality: {evidence}"
+        )
 
 
 # ============================================================
 # GPU auto-detection helpers (unit-level, monkeypatched subprocess)
 # ============================================================
+
 
 class TestGpuAutoDetection:
     """Cover _detect_gpu / _nvidia_smi_has_cuda / _detect_cuda_from_nvcc.
@@ -619,7 +972,8 @@ class TestGpuAutoDetection:
 
         monkeypatch.setattr(
             "scripts.emit_training_provenance.subprocess.run",
-            lambda *a, **k: _Fake(stdout="11.8\n"))
+            lambda *a, **k: _Fake(stdout="11.8\n"),
+        )
         assert etp._nvidia_smi_has_cuda() is True
 
     def test_nvidia_smi_has_cuda_false_when_command_fails(self, monkeypatch):
@@ -628,8 +982,7 @@ class TestGpuAutoDetection:
         def _raise(*a, **k):
             raise FileNotFoundError("nvidia-smi not found")
 
-        monkeypatch.setattr(
-            "scripts.emit_training_provenance.subprocess.run", _raise)
+        monkeypatch.setattr("scripts.emit_training_provenance.subprocess.run", _raise)
         assert etp._nvidia_smi_has_cuda() is False
 
     def test_nvidia_smi_has_cuda_false_when_stdout_empty(self, monkeypatch):
@@ -642,8 +995,8 @@ class TestGpuAutoDetection:
                 self.returncode = 0
 
         monkeypatch.setattr(
-            "scripts.emit_training_provenance.subprocess.run",
-            lambda *a, **k: _Fake())
+            "scripts.emit_training_provenance.subprocess.run", lambda *a, **k: _Fake()
+        )
         assert etp._nvidia_smi_has_cuda() is False
 
     def test_detect_cuda_from_nvcc_extracts_version(self, monkeypatch):
@@ -654,12 +1007,13 @@ class TestGpuAutoDetection:
                 self.stdout = ""
                 self.stderr = (
                     "nvcc: NVIDIA (R) Cuda compiler driver\n"
-                    "Cuda compilation tools, release 12.2, V12.2.140\n")
+                    "Cuda compilation tools, release 12.2, V12.2.140\n"
+                )
                 self.returncode = 0
 
         monkeypatch.setattr(
-            "scripts.emit_training_provenance.subprocess.run",
-            lambda *a, **k: _Fake())
+            "scripts.emit_training_provenance.subprocess.run", lambda *a, **k: _Fake()
+        )
         assert etp._detect_cuda_from_nvcc() == "12.2"
 
     def test_detect_cuda_from_nvcc_raises_when_unavailable(self, monkeypatch):
@@ -668,8 +1022,7 @@ class TestGpuAutoDetection:
         def _raise(*a, **k):
             raise FileNotFoundError("nvcc not found")
 
-        monkeypatch.setattr(
-            "scripts.emit_training_provenance.subprocess.run", _raise)
+        monkeypatch.setattr("scripts.emit_training_provenance.subprocess.run", _raise)
         with pytest.raises(RuntimeError, match="cannot determine CUDA version"):
             etp._detect_cuda_from_nvcc()
 
@@ -683,17 +1036,19 @@ class TestGpuAutoDetection:
         # 3. driver_version query
         # 4. _nvidia_smi_has_cuda() -> cuda_version probe (non-empty => True)
         # 5. _query("cuda_version") (since has_cuda returned True)
-        responses = iter([
-            _FakeRun("Tesla T4\n"),        # 1. name
-            _FakeRun("15109\n"),            # 2. memory.total
-            _FakeRun("525.60.13\n"),        # 3. driver_version
-            _FakeRun("11.8\n"),             # 4. _nvidia_smi_has_cuda probe
-            _FakeRun("11.8\n"),             # 5. _query("cuda_version")
-        ])
+        responses = iter(
+            [
+                _FakeRun("Tesla T4\n"),  # 1. name
+                _FakeRun("15109\n"),  # 2. memory.total
+                _FakeRun("525.60.13\n"),  # 3. driver_version
+                _FakeRun("11.8\n"),  # 4. _nvidia_smi_has_cuda probe
+                _FakeRun("11.8\n"),  # 5. _query("cuda_version")
+            ]
+        )
 
         monkeypatch.setattr(
-            "scripts.emit_training_provenance.subprocess.run",
-            lambda *a, **k: next(responses))
+            "scripts.emit_training_provenance.subprocess.run", lambda *a, **k: next(responses)
+        )
         name, mem, cuda, driver = etp._detect_gpu()
         assert name == "Tesla T4"
         assert mem == 15109
@@ -703,6 +1058,7 @@ class TestGpuAutoDetection:
 
 class _FakeRun:
     """Minimal subprocess.CompletedProcess substitute for monkeypatching."""
+
     def __init__(self, stdout: str, stderr: str = "", returncode: int = 0):
         self.stdout = stdout
         self.stderr = stderr
@@ -730,12 +1086,24 @@ def test_request_write_does_not_follow_symlink_redirect(tmp_path: Path) -> None:
 
     proc = _run(
         "request",
-        "--input", f"capture_manifest:{images}",
-        "--config-yml", str(config),
-        "--trainer", "nerfstudio-splatfacto", "--trainer-version", "0.1.0",
-        "--max-resolution", "800", "--total-steps", "10000", "--seed", "42",
-        "--request-id", "req-symlink-001",
-        "--output", str(output),
+        "--input",
+        f"capture_manifest:{images}",
+        "--config-yml",
+        str(config),
+        "--trainer",
+        "nerfstudio-splatfacto",
+        "--trainer-version",
+        "0.1.0",
+        "--max-resolution",
+        "800",
+        "--total-steps",
+        "10000",
+        "--seed",
+        "42",
+        "--request-id",
+        "req-symlink-001",
+        "--output",
+        str(output),
     )
     assert proc.returncode == 0, proc.stderr
 
@@ -745,3 +1113,49 @@ def test_request_write_does_not_follow_symlink_redirect(tmp_path: Path) -> None:
     assert json.loads(attacker.read_text(encoding="utf-8")) == {"pre-occupied": True}, (
         "emit_training_provenance wrote the trust root through the symlink redirect"
     )
+
+
+def test_stable_read_bytes_rejects_non_regular_inputs(tmp_path: Path) -> None:
+    """RED->GREEN: provenance input reads must refuse non-regular files.
+
+    ``_stable_read_bytes`` is the trust anchor for config/PLY/log/manifest
+    bytes hashed into the provenance manifest. It must reject missing paths
+    and directories (and symlinks, covered by the next test) so a redirected
+    input cannot be hashed as if it were the intended regular file.
+    """
+    import scripts.emit_training_provenance as emit_module
+
+    missing = tmp_path / "missing.bin"
+    with pytest.raises(OSError):
+        emit_module._stable_read_bytes(missing)
+
+    directory = tmp_path / "dir"
+    directory.mkdir()
+    with pytest.raises(OSError):
+        emit_module._stable_read_bytes(directory)
+
+    regular = tmp_path / "regular.bin"
+    regular.write_bytes(b"provenance-bytes")
+    assert emit_module._stable_read_bytes(regular) == b"provenance-bytes"
+
+
+def test_stable_read_bytes_rejects_symlinked_input(tmp_path: Path) -> None:
+    """RED->GREEN: a symlinked provenance input must not be followed.
+
+    A symlinked config/PLY/log would otherwise have its target hashed into
+    the trust root. ``O_NOFOLLOW`` + ``lstat`` rejects the symlink at the
+    literal path.
+    """
+    import scripts.emit_training_provenance as emit_module
+
+    target = tmp_path / "real-config.yml"
+    target.write_text("trainer: splatfacto\n", encoding="utf-8")
+    link = tmp_path / "config.yml"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+    with pytest.raises(OSError):
+        emit_module._stable_read_bytes(link)
