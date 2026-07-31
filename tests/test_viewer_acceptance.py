@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -1004,3 +1005,73 @@ def test_read_evidence_bytes_rejects_ancestor_reparse(
             evidence,
             label="test",
         )
+
+
+def test_write_decision_re_verifies_parent_identity_after_open() -> None:
+    """RED->GREEN: parent identity must be re-verified AFTER os.open(staging).
+
+    ``matches_real_directory_identity`` checks the parent by path (lstat)
+    before ``os.open(staging)`` opens by path.  ``O_NOFOLLOW`` only protects
+    the final component — ancestor symlinks are followed, so a parent swap
+    between the identity check and the open redirects the staging file.  A
+    post-open re-verification is required to close this TOCTOU.
+    """
+    source = inspect.getsource(
+        viewer_acceptance_module._write_decision_noreplace
+    )
+    open_index = source.index("staging_fd = os.open(")
+    after_open = source[open_index:]
+    assert "matches_real_directory_identity" in after_open, (
+        "parent directory identity must be re-verified AFTER os.open(staging) "
+        "to close the TOCTOU between path-based identity check and path-based open"
+    )
+
+
+def test_stable_bound_file_tolerates_cross_surface_mode_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """RED->GREEN: fstat/lstat st_mode permission bits may differ on Windows.
+
+    ``_stable_bound_file`` compares full ``st_mode`` across surfaces (fstat vs
+    lstat).  On Windows, permission bits can legitimately differ between
+    path-surface and descriptor-surface stat for the same file.  The
+    cross-surface comparison must use only the file type (``S_IFMT``), not
+    the full ``st_mode``, matching the pattern in ``_read_evidence_bytes``.
+    """
+    payload = b'{"artifact":true}\n'
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_bytes(payload)
+
+    binding = ViewerCaptureArtifactBinding(
+        path="artifact.json",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        byte_length=len(payload),
+    )
+
+    original_fstat = os.fstat
+
+    def mode_drifting_fstat(fd):
+        observed = original_fstat(fd)
+        # Flip permission bits but keep file type (S_IFMT) identical
+        new_mode = (observed.st_mode & ~0o777) | 0o600
+        return SimpleNamespace(
+            st_dev=observed.st_dev,
+            st_ino=observed.st_ino,
+            st_mode=new_mode,
+            st_size=observed.st_size,
+            st_mtime_ns=observed.st_mtime_ns,
+            st_ctime_ns=observed.st_ctime_ns,
+            st_file_attributes=getattr(observed, "st_file_attributes", 0),
+        )
+
+    monkeypatch.setattr(
+        viewer_acceptance_module.os, "fstat", mode_drifting_fstat
+    )
+
+    result = viewer_acceptance_module._stable_bound_file(
+        tmp_path,
+        binding,
+        label="test artifact",
+    )
+    assert result == payload

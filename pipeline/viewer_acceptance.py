@@ -198,6 +198,19 @@ def _write_decision_noreplace(destination: Path, payload: bytes) -> None:
             | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_NOFOLLOW", 0),
         )
+        # Re-verify parent identity AFTER opening the staging descriptor.
+        # O_NOFOLLOW only protects the final path component; ancestor
+        # symlinks are still followed, so a parent swap between the
+        # pre-open check and os.open would redirect the staging file.
+        # This post-open check closes that TOCTOU window.
+        if not matches_real_directory_identity(destination.parent, parent_identity):
+            try:
+                os.close(staging_fd)
+            except OSError:
+                pass
+            raise ViewerAcceptanceError(
+                "decision output parent changed before staging"
+            )
         try:
             with os.fdopen(staging_fd, "wb") as stream:
                 stream.write(payload)
@@ -1054,7 +1067,7 @@ def _stable_bound_file(
             item.st_ino,
             item.st_size,
             item.st_mtime_ns,
-            item.st_mode,
+            stat.S_IFMT(item.st_mode),
         )
 
     if (
