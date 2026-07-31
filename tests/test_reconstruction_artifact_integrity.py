@@ -1061,3 +1061,77 @@ class TestManifestReaderIntegrity:
 
         with pytest.raises(_ArtifactIntegrityError, match="regular non-link file|inspected"):
             _read_stable_bytes(target, label="manifest")
+
+
+# ---------------------------------------------------------------------------
+# GLM-021 Package: read_ply_lossy_edits stable descriptor
+# ---------------------------------------------------------------------------
+
+
+class TestReadPlyLossyEditsStableDescriptor:
+    """RED->GREEN: read_ply_lossy_edits must use a single O_NOFOLLOW descriptor.
+
+    The PLY header carries ``nantai_meta.lossy_edits`` which is reconciled
+    against the manifest's declared lineage. Opening the PLY by name via
+    ``Path.open`` leaves a TOCTOU window between any prior SHA check and the
+    header read; a symlinked PLY is followed silently.
+    """
+
+    def _write_valid_ply(self, path: Path) -> bytes:
+        payload = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nend_header\n0\n"
+        path.write_bytes(payload)
+        return payload
+
+    def test_rejects_symlink_ply(self, tmp_path: Path) -> None:
+        """RED->GREEN: a symlinked PLY must be rejected, not followed."""
+        from pipeline.lossy_lineage import LossyLineageError, read_ply_lossy_edits
+
+        real = tmp_path / "real.ply"
+        self._write_valid_ply(real)
+        link = tmp_path / "link.ply"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(LossyLineageError):
+            read_ply_lossy_edits(link)
+
+    def test_does_not_use_path_open(self, tmp_path: Path, monkeypatch) -> None:
+        """RED->GREEN: must not open the PLY by name via Path.open."""
+        from pipeline.lossy_lineage import read_ply_lossy_edits
+
+        ply = tmp_path / "scene.ply"
+        self._write_valid_ply(ply)
+
+        def reject_open(*_args, **_kwargs):
+            raise AssertionError("read_ply_lossy_edits must not use Path.open")
+
+        monkeypatch.setattr(Path, "open", reject_open)
+        result = read_ply_lossy_edits(ply)
+        assert result is None  # no nantai_meta comment in this PLY
+
+    def test_detects_swap_between_lstat_and_open(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        """RED->GREEN: detect a path swap between lstat and os.open."""
+        from pipeline.lossy_lineage import LossyLineageError, read_ply_lossy_edits
+
+        original_path = tmp_path / "scene.ply"
+        self._write_valid_ply(original_path)
+
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                original_path.write_bytes(b"ply\nformat ascii 1.0\nend_header\n")
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+
+        with pytest.raises(LossyLineageError, match="changed|identity"):
+            read_ply_lossy_edits(original_path)
