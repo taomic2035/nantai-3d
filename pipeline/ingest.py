@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +21,7 @@ from pathlib import Path, PurePosixPath
 
 from loguru import logger
 
+from pipeline.durable_io import DurableIOError, publish_file_noreplace
 from pipeline.ingest_manifest import (
     MANIFEST_FILENAME,
     PHOTO_SOURCE_SUFFIXES,
@@ -246,13 +249,56 @@ def extract_video_frames(
 
 
 def copy_photo(photo_path: Path, output_dir: Path, relative_path: str) -> Path:
-    """Copy a photo to its deterministic source-relative staged path."""
+    """Copy a photo to its deterministic source-relative staged path.
+
+    The bytes are staged in a sibling temporary file, ``fsync``-ed, then
+    published via ``publish_file_noreplace`` so a pre-placed symlink (or any
+    pre-existing entry) at the destination cannot redirect the write.  This
+    closes the check-then-reopen window that ``destination.exists()`` +
+    ``shutil.copy2`` would open: ``copy2`` follows symlinks, so a dangling
+    link that ``exists()`` reports as absent would silently write the photo
+    bytes to the attacker target.
+    """
 
     destination = output_dir.joinpath(*PurePosixPath(relative_path).parts)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        raise IngestError(f"deterministic photo output already exists: {relative_path}")
-    shutil.copy2(photo_path, destination)
+
+    try:
+        source_stat = photo_path.lstat()
+    except OSError as exc:
+        raise IngestError(f"cannot read source photo: {relative_path}") from exc
+    if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
+        raise IngestError(f"source photo is not a regular file: {relative_path}")
+
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    try:
+        with os.fdopen(staging_fd, "wb") as staging:
+            with photo_path.open("rb") as source:
+                shutil.copyfileobj(source, staging)
+            staging.flush()
+            os.fsync(staging.fileno())
+        publish_file_noreplace(staging_path, destination)
+    except FileExistsError:
+        Path(staging_path).unlink(missing_ok=True)
+        raise IngestError(
+            f"deterministic photo output already exists: {relative_path}"
+        ) from None
+    except DurableIOError as exc:
+        Path(staging_path).unlink(missing_ok=True)
+        if exc.published:
+            raise IngestError(
+                f"photo copy published but durability unconfirmed: {relative_path}"
+            ) from exc
+        raise IngestError(
+            f"photo copy publication failed: {relative_path}"
+        ) from exc
+    except OSError as exc:
+        Path(staging_path).unlink(missing_ok=True)
+        raise IngestError(f"photo copy failed: {relative_path}") from exc
     return destination
 
 

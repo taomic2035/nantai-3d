@@ -826,6 +826,32 @@ def test_manifest_written_and_valid(tmp_path):
     assert m.total_output_frames == 2
 
 
+def test_copy_photo_does_not_follow_symlink_redirect(tmp_path):
+    """RED->GREEN: copy_photo must reject a dangling symlink destination,
+    not follow it and write photo bytes to the attacker target."""
+    source = tmp_path / "input" / "photo.jpg"
+    source.parent.mkdir(parents=True)
+    payload = b"publication-safe-photo"
+    source.write_bytes(payload)
+    output_dir = tmp_path / "stage"
+    output_dir.mkdir()
+    attacker_target = tmp_path / "attacker-stolen.jpg"
+    destination = output_dir / "photo.jpg"
+    try:
+        destination.symlink_to(attacker_target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+    with pytest.raises(ingest.IngestError, match="already exists|symlink|link"):
+        ingest.copy_photo(source, output_dir, "photo.jpg")
+
+    assert not attacker_target.exists(), (
+        "copy_photo wrote the photo bytes through the symlink redirect"
+    )
+
+
 def test_session_id_deterministic(tmp_path):
     def build(root_name, fps):
         inp = tmp_path / f"in_{root_name}"
