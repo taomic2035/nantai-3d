@@ -43,9 +43,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
+import stat
 import struct
 import time
 import uuid
@@ -134,6 +136,37 @@ NORMAL_UNIT_LENGTH_TOLERANCE = 1e-3
 
 class CoverageAuditError(RuntimeError):
     """覆盖审计的稳定公开失败 —— 证据不足或不自洽时一律硬失败, 绝不出报告。"""
+
+
+_MAX_EVIDENCE_BYTES = 512 * 1024 * 1024
+
+
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read an evidence file through a single descriptor with O_NOFOLLOW."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_EVIDENCE_BYTES:
+            raise CoverageAuditError(
+                f"evidence file is not a bounded regular file: {path.name}"
+            )
+        payload = stream.read(_MAX_EVIDENCE_BYTES + 1)
+    if len(payload) > _MAX_EVIDENCE_BYTES:
+        raise CoverageAuditError(f"evidence file exceeds its maximum: {path.name}")
+    return payload
 
 
 # --------------------------------------------------------------------------
@@ -576,7 +609,9 @@ def _read_instance_mask(path: Path, *, expected_sha256: str, camera_id: str) -> 
     """读取一帧实例掩码, 并先按 journal 声明的 sha256 挣回信任。"""
 
     try:
-        raw = path.read_bytes()
+        raw = _stable_read_bytes(path)
+    except CoverageAuditError:
+        raise
     except OSError as exc:
         raise CoverageAuditError(f"instance mask unreadable for {camera_id}: {exc}") from exc
     digest = hashlib.sha256(raw).hexdigest()
@@ -585,7 +620,7 @@ def _read_instance_mask(path: Path, *, expected_sha256: str, camera_id: str) -> 
             f"instance mask for {camera_id} does not match the journal digest",
         )
     try:
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(raw)) as image:
             image.load()
             if image.mode != "I;16":
                 raise CoverageAuditError(
@@ -609,7 +644,9 @@ def _read_normal_map(path: Path, *, expected_sha256: str, camera_id: str) -> np.
     """
 
     try:
-        raw = path.read_bytes()
+        raw = _stable_read_bytes(path)
+    except CoverageAuditError:
+        raise
     except OSError as exc:
         raise CoverageAuditError(f"normal map unreadable for {camera_id}: {exc}") from exc
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
@@ -715,7 +752,7 @@ def _load_component_centers(build_directory: Path, build_report_artifacts: Mappi
     expected = build_report_artifacts.get(GLB_NAME)
     if expected is None or not path.is_file():
         return {}, None
-    raw = path.read_bytes()
+    raw = _stable_read_bytes(path)
     digest = hashlib.sha256(raw).hexdigest()
     if digest != expected:
         raise CoverageAuditError("village-canary.glb does not match the build report digest")
@@ -769,7 +806,9 @@ def _camera_centers(
             )
         path = render_root / record.path
         try:
-            raw = path.read_bytes()
+            raw = _stable_read_bytes(path)
+        except CoverageAuditError:
+            raise
         except OSError as exc:
             raise CoverageAuditError(
                 f"camera metadata unreadable for {camera_id}: {exc}",
