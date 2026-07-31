@@ -1458,3 +1458,53 @@ class TestReconstructTrustReaderIntegrity:
         monkeypatch.setattr(rc, "first_linklike_path", fake_first_linklike_path)
         with pytest.raises(ValueError, match="常规非链接文件|无法访问"):
             _read_stable_bytes(target, label="registration JSON")
+
+
+def test_manifest_write_does_not_follow_symlink_redirect(
+    photos_dir,
+    tmp_path,
+):
+    """RED->GREEN: recon_manifest.json write must not follow a symlink redirect.
+
+    recon_manifest.json is the coordinate/provenance trust root.  If it is
+    pre-placed as a symlink pointing outside web_dir, reconstruct must replace
+    the symlink itself (atomic_replace) rather than write through it.
+    ``Path.write_text`` follows symlinks, which would let a TOCTOU attacker
+    redirect the trust-root write to an arbitrary location.
+    """
+    web_dir = tmp_path / "web"
+    web_dir.mkdir(parents=True)
+    manifest_path = web_dir / "recon_manifest.json"
+    sidecar_path = web_dir / "recon_manifest.sha256"
+    attacker_manifest = tmp_path / "attacker-manifest.json"
+    attacker_sidecar = tmp_path / "attacker-manifest.sha256"
+    attacker_manifest.write_text('{"pre-occupied": true}\n', encoding="utf-8")
+    attacker_sidecar.write_text("0" * 64 + "  recon_manifest.json\n", encoding="utf-8")
+    try:
+        manifest_path.symlink_to(attacker_manifest)
+        sidecar_path.symlink_to(attacker_sidecar)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+    reconstruct(
+        photos_dir=photos_dir,
+        out_dir=tmp_path / "recon",
+        web_dir=web_dir,
+        engine="mock",
+        reg_engine="mock",
+    )
+
+    assert not manifest_path.is_symlink(), (
+        "reconstruct wrote through the manifest symlink instead of replacing it"
+    )
+    assert not sidecar_path.is_symlink(), (
+        "reconstruct wrote through the sidecar symlink instead of replacing it"
+    )
+    assert json.loads(attacker_manifest.read_text()) == {"pre-occupied": True}, (
+        "reconstruct wrote the trust root through the symlink redirect"
+    )
+    assert attacker_sidecar.read_text(encoding="utf-8").startswith("0" * 64), (
+        "reconstruct wrote the sidecar through the symlink redirect"
+    )

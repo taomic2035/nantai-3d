@@ -29,13 +29,14 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 import numpy as np
 from loguru import logger
 from pydantic import ValidationError
 
-from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.durable_io import _is_linklike, atomic_replace, first_linklike_path
 from pipeline.gaussian_scene import GaussianScene, ordered_transform_ids
 from pipeline.recon_schema import (
     AlignmentStatus,
@@ -301,6 +302,36 @@ def _sha256_file(path: Path) -> str:
     ):
         raise _ReconstructIntegrityError("file changed while being hashed")
     return digest.hexdigest()
+
+
+def _publish_trust_root_atomic(path: Path, payload: bytes) -> None:
+    """Publish one trust-root file via private staging + fsync + atomic_replace.
+
+    The manifest and its digest sidecar are the coordinate/provenance trust
+    root; writing them via ``Path.write_text`` follows symlinks and is not
+    atomic, so a TOCTOU attacker could redirect the write through a pre-placed
+    symlink or observe a partial write after a crash.  Stage the bytes in a
+    sibling temporary file, ``fsync`` it, then atomically replace the
+    destination (which also replaces any pre-placed symlink rather than
+    writing through it).
+    """
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(staging_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        atomic_replace(staging_path, path)
+    except BaseException:
+        try:
+            os.unlink(staging_path)
+        except OSError:
+            pass
+        raise
 
 
 def _artifact_descriptor(
@@ -1078,14 +1109,18 @@ def reconstruct(
     # newline="\n": recon_manifest.json is the coordinate/provenance trust root;
     # writing LF (not Windows CRLF) keeps it byte-reproducible across OSes, so its
     # digest is stable for the CI cross-platform check and any future signing.
+    # _publish_trust_root_atomic stages + fsync + atomic_replace so the write is
+    # durable and cannot be redirected through a pre-placed symlink.
     payload = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
-    manifest_path.write_text(payload, encoding="utf-8", newline="\n")
+    payload_bytes = payload.encode()
+    _publish_trust_root_atomic(manifest_path, payload_bytes)
     # Sidecar digest (sha256sum-compatible) turns the byte-reproducible manifest
     # into a verifiable/signable integrity root, complementing the per-artifact
     # SHA-256 it already carries. It attests the manifest itself is intact.
-    manifest_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    (web_dir / "recon_manifest.sha256").write_text(
-        f"{manifest_digest}  recon_manifest.json\n", encoding="utf-8", newline="\n"
+    manifest_digest = hashlib.sha256(payload_bytes).hexdigest()
+    _publish_trust_root_atomic(
+        web_dir / "recon_manifest.sha256",
+        f"{manifest_digest}  recon_manifest.json\n".encode(),
     )
     logger.info(
         f"重建完成: {len(merged)} 高斯 | LOD {list(lod_files)} | manifest → {manifest_path}"
