@@ -9,6 +9,12 @@ get_visible_chunks 视野调度 / simulate_player_walk 模拟行走)。
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
+import pytest
+
 from pipeline.chunk_scheduler import ChunkScheduler, LRUChunkCache
 from pipeline.mock_layout import MockLayoutGenerator
 from pipeline.schema import ChunkLayout
@@ -248,3 +254,105 @@ class TestSimulatePlayerWalk:
         assert total == 5  # 5 步, 每步 1 chunk (view_radius=0)
         assert stats["generated"] == 3
         assert stats["cached_hits"] == 2
+
+
+# ============================================================
+# Disk-loaded layout stable descriptor (security)
+# ============================================================
+
+
+class TestDiskLoadStableDescriptor:
+    """RED->GREEN: disk-loaded chunk layouts must use a single O_NOFOLLOW descriptor.
+
+    The persisted chunk layout JSON feeds the renderer that produces Gaussian
+    point clouds. Opening it by name via ``Path.read_text`` leaves a TOCTOU
+    window between ``Path.exists`` and the read, and a symlinked layout file
+    is followed silently.  The read must go through a single ``O_NOFOLLOW``
+    descriptor with pre/post identity verification.
+    """
+
+    @staticmethod
+    def _persist_layout(scheduler, chunk_x: int, chunk_y: int) -> ChunkLayout:
+        """Generate and persist a layout so the disk path exists."""
+        layout = scheduler.layout_gen.generate_chunk(chunk_x, chunk_y)
+        target = scheduler.layouts_dir / f"chunk_{chunk_x}_{chunk_y}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            layout.model_dump_json(indent=2),
+            encoding="utf-8",
+            newline="\n",
+        )
+        return layout
+
+    def test_rejects_symlink_layout(self, tmp_path):
+        from pipeline.chunk_scheduler import ChunkLayoutReadError
+
+        layouts = tmp_path / "layouts"
+        layouts.mkdir()
+        scheduler = ChunkScheduler(world_seed=42, layouts_dir=layouts)
+        self._persist_layout(scheduler, 0, 0)
+
+        target = layouts / "chunk_0_0.json"
+        real_backup = layouts / "real_chunk_0_0.json"
+        target.rename(real_backup)
+        try:
+            os.symlink(real_backup, target)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+
+        with pytest.raises(ChunkLayoutReadError):
+            scheduler.get_or_generate(0, 0)
+
+    def test_disk_load_does_not_use_path_open_or_read_text(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        layouts = tmp_path / "layouts"
+        layouts.mkdir()
+        scheduler = ChunkScheduler(world_seed=42, layouts_dir=layouts)
+        layout = self._persist_layout(scheduler, 0, 0)
+
+        def reject(*_args, **_kwargs):
+            raise AssertionError("disk load must not use Path.open or Path.read_text")
+
+        monkeypatch.setattr(Path, "open", reject)
+        monkeypatch.setattr(Path, "read_text", reject)
+
+        loaded = scheduler.get_or_generate(0, 0)
+        assert loaded.model_dump_json() == layout.model_dump_json()
+
+    def test_disk_load_detects_swap_between_lstat_and_open(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from pipeline.chunk_scheduler import ChunkLayoutReadError
+
+        layouts = tmp_path / "layouts"
+        layouts.mkdir()
+        scheduler = ChunkScheduler(world_seed=42, layouts_dir=layouts)
+        self._persist_layout(scheduler, 0, 0)
+
+        target = layouts / "chunk_0_0.json"
+        swap_payload = json.dumps({"different": True, "swapped": True})
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                # Swap file content (different size → identity mismatch
+                # between the pre-open lstat and the post-open fstat).
+                target.write_text(
+                    swap_payload,
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+
+        with pytest.raises(ChunkLayoutReadError, match="changed|identity"):
+            scheduler.get_or_generate(0, 0)

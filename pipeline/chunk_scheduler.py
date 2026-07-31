@@ -7,7 +7,9 @@ L2 Chunk 调度器 - 无限世界的核心机制
 - LRU 缓存避免内存膨胀
 - 边界对齐 (道路/水系跨 chunk 接续)
 """
-import json
+
+import os
+import stat
 from collections import OrderedDict
 from pathlib import Path
 
@@ -15,6 +17,92 @@ from loguru import logger
 
 from pipeline.mock_layout import MockLayoutGenerator
 from pipeline.schema import ChunkLayout
+
+
+class ChunkLayoutReadError(OSError):
+    """A persisted chunk layout could not be proven as a stable regular file."""
+
+
+_MAX_LAYOUT_BYTES = 16 * 1024 * 1024  # 16 MiB bound for chunk layout JSON
+
+
+def _stat_signature(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Cross-surface file identity (lstat vs fstat).
+
+    Only the file type bits of ``st_mode`` are compared, because permission
+    bits can differ between path-based and descriptor-based stat on some
+    platforms.
+    """
+    return (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat.S_IFMT(stat_result.st_mode),
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+    )
+
+
+def _read_layout_bytes_stable(path: Path) -> bytes | None:
+    """Read a chunk layout file through a single ``O_NOFOLLOW`` descriptor.
+
+    Returns ``None`` when the file does not exist (legitimate
+    "not-yet-generated" — caller falls through to regeneration).  Raises
+    ``ChunkLayoutReadError`` if the file is a symlink, non-regular, or its
+    identity changes between lstat and fstat (TOCTOU) — these are trust
+    violations that must not be silently masked by regeneration.
+    """
+    absolute = Path(path).expanduser().absolute()
+    try:
+        before = absolute.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ChunkLayoutReadError("chunk layout cannot be inspected") from exc
+
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ChunkLayoutReadError("chunk layout is not a regular file")
+    if before.st_size > _MAX_LAYOUT_BYTES:
+        raise ChunkLayoutReadError("chunk layout exceeds bounded read limit")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(absolute, flags)
+    except OSError as exc:
+        raise ChunkLayoutReadError("chunk layout cannot be opened") from exc
+
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _stat_signature(opened) != _stat_signature(before):
+            raise ChunkLayoutReadError("chunk layout changed before read")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+    try:
+        with stream:
+            payload = stream.read(_MAX_LAYOUT_BYTES + 1)
+            descriptor_after = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise ChunkLayoutReadError("chunk layout cannot be read") from exc
+
+    try:
+        after = absolute.lstat()
+    except OSError as exc:
+        raise ChunkLayoutReadError("chunk layout cannot be reinspected") from exc
+
+    if (
+        _stat_signature(opened) != _stat_signature(descriptor_after)
+        or _stat_signature(before) != _stat_signature(after)
+        or len(payload) > _MAX_LAYOUT_BYTES
+        or len(payload) != before.st_size
+    ):
+        raise ChunkLayoutReadError("chunk layout changed during read")
+
+    return payload
 
 
 class LRUChunkCache:
@@ -86,8 +174,9 @@ class ChunkScheduler:
         # 2. 从磁盘加载 (已生成)
         if self.layouts_dir:
             f = self.layouts_dir / f"chunk_{chunk_x}_{chunk_y}.json"
-            if f.exists():
-                layout = ChunkLayout(**json.loads(f.read_text(encoding="utf-8")))
+            payload = _read_layout_bytes_stable(f)
+            if payload is not None:
+                layout = ChunkLayout.model_validate_json(payload)
                 self.cache.put(key, layout)
                 self.stats["cached_hits"] += 1
                 return layout
@@ -102,14 +191,11 @@ class ChunkScheduler:
             f = self.layouts_dir / f"chunk_{chunk_x}_{chunk_y}.json"
             f.parent.mkdir(parents=True, exist_ok=True)
             # newline="\n": layout 缓存跨平台/跨进程字节可复现 (render-on-demand 一致性)
-            f.write_text(layout.model_dump_json(indent=2),
-                         encoding="utf-8", newline="\n")
+            f.write_text(layout.model_dump_json(indent=2), encoding="utf-8", newline="\n")
 
         return layout
 
-    def get_visible_chunks(
-        self, player_x: float, player_y: float
-    ) -> list[ChunkLayout]:
+    def get_visible_chunks(self, player_x: float, player_y: float) -> list[ChunkLayout]:
         """获取玩家视野半径内的所有 chunk (核心调度)"""
         cx, cy = self.world_to_chunk(player_x, player_y)
 
@@ -143,11 +229,14 @@ class ChunkScheduler:
             x = start[0] + (end[0] - start[0]) * t
             y = start[1] + (end[1] - start[1]) * t
             chunks = self.get_visible_chunks(x, y)
-            results.append({
-                "step": i, "pos": [round(x, 1), round(y, 1)],
-                "active_chunks": len(chunks),
-                "stats": dict(self.stats),
-            })
+            results.append(
+                {
+                    "step": i,
+                    "pos": [round(x, 1), round(y, 1)],
+                    "active_chunks": len(chunks),
+                    "stats": dict(self.stats),
+                }
+            )
             logger.debug(f"step {i}: pos=({x:.0f},{y:.0f}), 活跃={len(chunks)}")
         return {"steps": results, "final_stats": dict(self.stats)}
 
@@ -165,9 +254,7 @@ if __name__ == "__main__":
         layouts_dir="layouts",
     )
 
-    result = scheduler.simulate_player_walk(
-        start=(0, 0), end=(1000, 1000), steps=10
-    )
+    result = scheduler.simulate_player_walk(start=(0, 0), end=(1000, 1000), steps=10)
 
     print("\n最终统计:")
     for k, v in result["final_stats"].items():
