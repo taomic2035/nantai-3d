@@ -60,6 +60,7 @@ import json
 import numbers
 import os
 import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,7 +69,12 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
-from pipeline.durable_io import _is_linklike, first_linklike_path
+from pipeline.durable_io import (
+    DurableIOError,
+    _is_linklike,
+    first_linklike_path,
+    publish_file_noreplace,
+)
 from pipeline.gaussian_scene import GaussianScene
 
 TRIM_MANIFEST_SUFFIX = ".trim_manifest.json"
@@ -514,12 +520,12 @@ def trim_scene(
     if report.kept_points == 0:
         raise ValueError(
             "剔除后场景为空: 该阈值会丢掉全部高斯, 拒绝写出空产物。请放宽阈值。")
-    if out_path.exists():
+    if out_path.exists() or out_path.is_symlink():
         raise ValueError(
             f"输出已存在, 拒绝覆盖 (剔除是有损的, 覆盖会毁掉原产物): {out_path}")
 
     manifest_path = out_path.parent / (out_path.name + TRIM_MANIFEST_SUFFIX)
-    if manifest_path.exists():
+    if manifest_path.exists() or manifest_path.is_symlink():
         raise ValueError(f"剔除 manifest 已存在, 拒绝覆盖: {manifest_path}")
 
     trimmed = scene._subset(np.where(report.keep_mask)[0])
@@ -541,7 +547,34 @@ def trim_scene(
         # 回溯到完整 sidecar (逐规则明细/分位分布/告警都在那里)。
         "trim_id": trim_id,
     }]
-    trimmed.save_ply(out_path, flavor=flavor)
+    # Stage the PLY to a sibling temp file, fsync, then publish via
+    # publish_file_noreplace so a pre-placed symlink at out_path cannot
+    # redirect the write.  save_ply uses PlyData.write(str(path)) which
+    # follows symlinks; staging to a fresh mkstemp file eliminates the
+    # attack surface, and publish_file_noreplace atomically fails closed
+    # if the destination already exists (including as a symlink).
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ply_staging_fd, ply_staging_path = tempfile.mkstemp(
+        prefix=f".{out_path.name}.",
+        suffix=".tmp",
+        dir=out_path.parent,
+    )
+    os.close(ply_staging_fd)
+    try:
+        trimmed.save_ply(Path(ply_staging_path), flavor=flavor)
+        with open(ply_staging_path, "r+b") as ply_stream:
+            os.fsync(ply_stream.fileno())
+        publish_file_noreplace(ply_staging_path, out_path)
+    except FileExistsError:
+        Path(ply_staging_path).unlink(missing_ok=True)
+        raise ValueError(
+            f"输出已存在, 拒绝覆盖 (剔除是有损的, 覆盖会毁掉原产物): {out_path}"
+        ) from None
+    except (DurableIOError, OSError) as exc:
+        Path(ply_staging_path).unlink(missing_ok=True)
+        raise _TrimIntegrityError(
+            f"PLY publication failed: {out_path.name}"
+        ) from exc
 
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -587,9 +620,33 @@ def trim_scene(
             "sidecar 时会丢失详细统计，但不会丢失内嵌摘要。"),
     }
     # newline="\n": 与 registration/recon_manifest/chunks.json 惯例统一, 跨平台字节可复现。
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False),
-        encoding="utf-8", newline="\n")
+    # Stage + fsync + publish_file_noreplace: a pre-placed symlink at
+    # manifest_path cannot redirect the write, and the no-replace publish
+    # preserves the "拒绝覆盖" contract atomically.
+    manifest_bytes = (
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    manifest_staging_fd, manifest_staging_path = tempfile.mkstemp(
+        prefix=f".{manifest_path.name}.",
+        suffix=".tmp",
+        dir=manifest_path.parent,
+    )
+    try:
+        with os.fdopen(manifest_staging_fd, "wb") as manifest_stream:
+            manifest_stream.write(manifest_bytes)
+            manifest_stream.flush()
+            os.fsync(manifest_stream.fileno())
+        publish_file_noreplace(manifest_staging_path, manifest_path)
+    except FileExistsError:
+        Path(manifest_staging_path).unlink(missing_ok=True)
+        raise ValueError(
+            f"剔除 manifest 已存在, 拒绝覆盖: {manifest_path}"
+        ) from None
+    except (DurableIOError, OSError) as exc:
+        Path(manifest_staging_path).unlink(missing_ok=True)
+        raise _TrimIntegrityError(
+            f"manifest publication failed: {manifest_path.name}"
+        ) from exc
 
     report.written = True
     report.output_path = out_path

@@ -380,6 +380,36 @@ class TestLossyEditIsRecordedInPlyBytes:
         assert "只记录在这份 sidecar" not in disclosure
         assert "不含剔除记录" not in disclosure
 
+
+class TestSymlinkSafeWrite:
+    """trim_scene must not follow a symlink redirect at the output path."""
+
+    def test_ply_write_rejects_dangling_symlink_destination(
+        self, clustered_scene, tmp_path,
+    ):
+        """RED->GREEN: a dangling symlink at out_path must fail closed,
+        not follow the link and write PLY bytes to the attacker target."""
+        out = tmp_path / "trimmed.ply"
+        attacker_target = tmp_path / "stolen.ply"
+        try:
+            out.symlink_to(attacker_target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is unavailable")
+            raise
+
+        with pytest.raises((ValueError, Exception), match="exist|symlink|link|publish"):
+            trim_scene(
+                clustered_scene, out,
+                rules=[OccupancyRule(voxel_size=5.0, min_occupancy=2)],
+                confirm=True,
+            )
+
+        assert not attacker_target.exists(), (
+            "trim_scene followed the dangling symlink and wrote PLY bytes "
+            "to the attacker target"
+        )
+
     def test_untrimmed_ply_records_nothing(self, clustered_scene, tmp_path):
         """没剔过就不该凭空多出记录 (空列表 == 没有记录)。"""
         p = tmp_path / "plain.ply"
