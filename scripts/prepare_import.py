@@ -54,6 +54,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -220,10 +222,96 @@ def prepare_from_registration(
 # ============================================================
 
 
+def _stable_open(path: Path):
+    """Open a provenance input through a single O_NOFOLLOW descriptor.
+
+    ``lstat`` verifies the path is a regular file, ``os.open`` with
+    ``O_NOFOLLOW`` opens the descriptor without following symlinks, and
+    ``fstat`` re-verifies that the opened descriptor is the same regular file
+    (type, inode, device) so a symlink swap between check and open is rejected.
+    The descriptor is bound to the inode at open time, so a path swap during a
+    streaming read cannot alter the bytes already being read.  Provenance
+    inputs must be regular files at the literal path — symlinks are rejected.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise OSError(f"provenance input cannot be inspected: {path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"provenance input is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            os.close(descriptor)
+            raise OSError(f"provenance input changed before read: {path}")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read whole-file provenance bytes through a stable O_NOFOLLOW descriptor.
+
+    Mirrors the studio_server identity contract: lstat (regular file),
+    ``O_NOFOLLOW`` open, ``fstat`` identity re-check (type+inode+device), a
+    verified read, and a post-read ``lstat`` recheck to detect a swap between
+    open and return.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise OSError(f"provenance input cannot be inspected: {path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"provenance input is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb")
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise OSError(f"provenance input changed before read: {path}")
+        payload = stream.read()
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise OSError(f"provenance input changed during read: {path}") from exc
+    if (
+        stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise OSError(f"provenance input changed during read: {path}")
+    return payload
+
+
 def _file_sha256_and_size(path: Path) -> tuple[str, int]:
     h = hashlib.sha256()
     size = 0
-    with path.open("rb") as f:
+    with _stable_open(path) as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
             size += len(chunk)
@@ -245,7 +333,7 @@ def _input_bytes_for_validation(path: Path) -> bytes:
     """Authoritative bytes for closure verification (file bytes or dir manifest)."""
     if path.is_dir():
         return _dir_content_bytes(path)
-    return path.read_bytes()
+    return _stable_read_bytes(path)
 
 
 def _read_binding_path_or_fail(path_str: str, label: str) -> bytes:
@@ -293,7 +381,7 @@ def _validate_training_provenance(
     result = TrainingResult.model_validate_json(training_result_path.read_text(encoding="utf-8"))
 
     # PLY bytes from the local --ply argument (authoritative for the trained PLY).
-    ply_bytes = ply.read_bytes()
+    ply_bytes = _stable_read_bytes(ply)
 
     # Config bytes from the result's training_config_yml binding path.
     config_bindings = [
@@ -390,15 +478,15 @@ def _validate_registration_quality(
         validate_registration_quality,
     )
 
-    report_bytes = registration_quality_report_path.read_bytes()
+    report_bytes = _stable_read_bytes(registration_quality_report_path)
     report = RegistrationQualityReport.model_validate_json(report_bytes)
-    registration_json_bytes = registration_json_path.read_bytes()
-    policy_bytes = registration_quality_policy_path.read_bytes()
+    registration_json_bytes = _stable_read_bytes(registration_json_path)
+    policy_bytes = _stable_read_bytes(registration_quality_policy_path)
     policy = RegistrationQualityPolicy.model_validate_json(policy_bytes)
 
     capture_manifest_bytes: bytes | None = None
     if capture_manifest_path is not None:
-        capture_manifest_bytes = capture_manifest_path.read_bytes()
+        capture_manifest_bytes = _stable_read_bytes(capture_manifest_path)
 
     sparse_enumeration: SparseModelEnumeration | None = None
     if sparse_model_dir_path is not None:

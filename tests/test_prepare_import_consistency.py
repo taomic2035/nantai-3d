@@ -13,12 +13,15 @@ Provenance safety contract:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from pipeline.splat_provenance import SplatConsistency, Verdict
 from scripts.prepare_import import (
     _check_consistency,
     _load_sparse_enumeration,
+    _stable_read_bytes,
     _validate_registration_quality,
 )
 
@@ -282,26 +285,19 @@ class TestValidateRegistrationQualityShaBinding:
         monkeypatch,
     ):
         """RED: registration_quality_report must be read exactly once."""
-        from pathlib import Path
+        import scripts.prepare_import as prepare_import
 
         reg_json, policy_json, report_json = _build_rq_artifacts(tmp_path)
 
         read_calls: list[str] = []
-        original_read_bytes = Path.read_bytes
-        original_read_text = Path.read_text
+        original_stable_read = prepare_import._stable_read_bytes
 
-        def counting_read_bytes(self):
-            if self == report_json:
-                read_calls.append("read_bytes")
-            return original_read_bytes(self)
+        def counting_stable_read(path):
+            if path == report_json:
+                read_calls.append("stable_read_bytes")
+            return original_stable_read(path)
 
-        def counting_read_text(self, *args, **kwargs):
-            if self == report_json:
-                read_calls.append("read_text")
-            return original_read_text(self, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
-        monkeypatch.setattr(Path, "read_text", counting_read_text)
+        monkeypatch.setattr(prepare_import, "_stable_read_bytes", counting_stable_read)
 
         validated, _, _, _ = _validate_registration_quality(
             report_json,
@@ -335,3 +331,51 @@ class TestValidateRegistrationQualityShaBinding:
         assert validated is True
         expected_sha = hashlib.sha256(report_bytes).hexdigest()
         assert report_sha == expected_sha, "report SHA must match the bytes on disk"
+
+
+# ============================================================
+# _stable_read_bytes: provenance input trust anchor
+# ============================================================
+
+
+def test_stable_read_bytes_rejects_non_regular_inputs(tmp_path: Path) -> None:
+    """RED->GREEN: provenance input reads must refuse non-regular files.
+
+    ``_stable_read_bytes`` is the trust anchor for PLY / registration.json /
+    quality-report / policy / capture-manifest bytes hashed into the import
+    contract. It must reject missing paths and directories (and symlinks,
+    covered by the next test) so a redirected input cannot be hashed as if it
+    were the intended regular file.
+    """
+    missing = tmp_path / "missing.bin"
+    with pytest.raises(OSError):
+        _stable_read_bytes(missing)
+
+    directory = tmp_path / "dir"
+    directory.mkdir()
+    with pytest.raises(OSError):
+        _stable_read_bytes(directory)
+
+    regular = tmp_path / "regular.bin"
+    regular.write_bytes(b"provenance-bytes")
+    assert _stable_read_bytes(regular) == b"provenance-bytes"
+
+
+def test_stable_read_bytes_rejects_symlinked_input(tmp_path: Path) -> None:
+    """RED->GREEN: a symlinked provenance input must not be followed.
+
+    A symlinked PLY/registration/policy would otherwise have its target hashed
+    into the import contract. ``O_NOFOLLOW`` + ``lstat`` rejects the symlink at
+    the literal path.
+    """
+    target = tmp_path / "real.ply"
+    target.write_bytes(b"ply-bytes")
+    link = tmp_path / "splat.ply"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+    with pytest.raises(OSError):
+        _stable_read_bytes(link)
