@@ -177,9 +177,9 @@ class DerivedMaterialRecord(FrozenModel):
 
 
 class DerivedMaterialBundle(FrozenModel):
-    schema_version: Literal[
-        "nantai.synthetic-village.derived-material-bundle.v1"
-    ] = MATERIAL_BUNDLE_SCHEMA
+    schema_version: Literal["nantai.synthetic-village.derived-material-bundle.v1"] = (
+        MATERIAL_BUNDLE_SCHEMA
+    )
     bundle_id: Sha256
     synthetic: Literal[True] = True
     source_pack_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -288,22 +288,14 @@ def _feather_opposite_edges(
             low = source[:, offset, :]
             high = source[:, -1 - offset, :]
             midpoint = (low + high) * 0.5
-            output[:, offset, :] = (
-                midpoint * (1.0 - keep_original) + low * keep_original
-            )
-            output[:, -1 - offset, :] = (
-                midpoint * (1.0 - keep_original) + high * keep_original
-            )
+            output[:, offset, :] = midpoint * (1.0 - keep_original) + low * keep_original
+            output[:, -1 - offset, :] = midpoint * (1.0 - keep_original) + high * keep_original
         else:
             low = source[offset, :, :]
             high = source[-1 - offset, :, :]
             midpoint = (low + high) * 0.5
-            output[offset, :, :] = (
-                midpoint * (1.0 - keep_original) + low * keep_original
-            )
-            output[-1 - offset, :, :] = (
-                midpoint * (1.0 - keep_original) + high * keep_original
-            )
+            output[offset, :, :] = midpoint * (1.0 - keep_original) + low * keep_original
+            output[-1 - offset, :, :] = midpoint * (1.0 - keep_original) + high * keep_original
     return np.clip(np.rint(output), 0, 255).astype(np.uint8)
 
 
@@ -330,12 +322,7 @@ def _lift_dark_timber_shadows(image: Image.Image) -> Image.Image:
 
 def _luminance(rgb: np.ndarray) -> np.ndarray:
     values = rgb.astype(np.uint16)
-    return (
-        values[..., 0] * 54
-        + values[..., 1] * 183
-        + values[..., 2] * 19
-        + 128
-    ) >> 8
+    return (values[..., 0] * 54 + values[..., 1] * 183 + values[..., 2] * 19 + 128) >> 8
 
 
 def _sobel(luminance: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -348,22 +335,8 @@ def _sobel(luminance: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     bottom_left = np.roll(np.roll(values, -1, axis=0), 1, axis=1)
     bottom = np.roll(values, -1, axis=0)
     bottom_right = np.roll(np.roll(values, -1, axis=0), -1, axis=1)
-    gradient_x = (
-        -top_left
-        + top_right
-        - 2 * left
-        + 2 * right
-        - bottom_left
-        + bottom_right
-    )
-    gradient_y = (
-        -top_left
-        - 2 * top
-        - top_right
-        + bottom_left
-        + 2 * bottom
-        + bottom_right
-    )
+    gradient_x = -top_left + top_right - 2 * left + 2 * right - bottom_left + bottom_right
+    gradient_y = -top_left - 2 * top - top_right + bottom_left + 2 * bottom + bottom_right
     return gradient_x, gradient_y
 
 
@@ -425,7 +398,10 @@ def _map_descriptor(
 def _write_object(root: Path, descriptor: MaterialMapDescriptor, payload: bytes) -> None:
     path = root / descriptor.object_path
     if path.exists():
-        if not path.is_file() or path.read_bytes() != payload:
+        if not path.is_file() or _is_linklike(path):
+            raise MaterialBundleError("derived object conflicts with its content address")
+        existing = _read_stable_file(path, maximum_bytes=len(payload), label="derived object")
+        if existing != payload:
             raise MaterialBundleError("derived object conflicts with its content address")
         return
     path.write_bytes(payload)
@@ -495,28 +471,60 @@ def _prepare_real_directory(raw_path: Path, *, label: str) -> Path:
     return _require_real_directory(path, label=label)
 
 
-def _stat_signature(path: Path) -> tuple[int, int, int, int, int]:
-    stat = path.stat()
-    return (
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_size,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
-    )
-
-
 def _read_stable_file(path: Path, *, maximum_bytes: int, label: str) -> bytes:
+    """Read a bundle file through one descriptor with O_NOFOLLOW.
+
+    Identity is verified by file type, inode and device across the
+    ``lstat``/``fstat`` surfaces and by length after reading. Timestamps are
+    excluded: Windows reports ``st_mtime_ns``/``st_ctime_ns`` at different
+    precisions through path stat vs. handle stat, which would otherwise cause
+    false swap detections.
+    """
     path = Path(path)
-    if _is_linklike(path) or not path.is_file():
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise MaterialBundleError(f"{label} is missing or redirected") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
         raise MaterialBundleError(f"{label} is missing or redirected")
-    before = _stat_signature(path)
-    if before[2] <= 0 or before[2] > maximum_bytes:
+    if before.st_size > maximum_bytes:
         raise MaterialBundleError(f"{label} size is invalid")
-    with path.open("rb") as stream:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+            or opened.st_size > maximum_bytes
+        ):
+            raise MaterialBundleError(f"{label} changed before bounded read")
         payload = stream.read(maximum_bytes + 1)
-    after = _stat_signature(path)
-    if before != after or len(payload) != before[2] or len(payload) > maximum_bytes:
+        after_open = os.fstat(stream.fileno())
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise MaterialBundleError(f"{label} changed during bounded read") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
+        or opened.st_ino != after_open.st_ino
+        or opened.st_dev != after_open.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+        or len(payload) > maximum_bytes
+    ):
         raise MaterialBundleError(f"{label} changed during bounded read")
     return payload
 
@@ -532,7 +540,13 @@ def _material_slot_contracts() -> dict[str, str]:
 def _source_image(record, visual_pack_root: Path) -> Image.Image:
     path = visual_pack_root / record.object_path
     try:
-        payload = path.read_bytes()
+        payload = _read_stable_file(
+            path,
+            maximum_bytes=MAX_DERIVED_MAP_BYTES,
+            label="material source",
+        )
+    except MaterialBundleError:
+        raise
     except OSError as exc:
         raise MaterialBundleError(f"material source cannot be read: {record.slot_id}") from exc
     if len(payload) != record.bytes or hashlib.sha256(payload).hexdigest() != record.sha256:
@@ -714,9 +728,14 @@ def verify_prepared_material_bundle(root: Path) -> DerivedMaterialBundle:
                 )
             with Image.open(io.BytesIO(payload)) as image:
                 image.load()
-                if image.format != "PNG" or image.mode != "RGB" or image.size != (
-                    MAP_SIZE,
-                    MAP_SIZE,
+                if (
+                    image.format != "PNG"
+                    or image.mode != "RGB"
+                    or image.size
+                    != (
+                        MAP_SIZE,
+                        MAP_SIZE,
+                    )
                 ):
                     raise MaterialBundleError(
                         f"derived material object format is invalid: {object_path}",
@@ -757,11 +776,13 @@ def _material_bundle_stat_signature(
     root: Path,
     bundle: DerivedMaterialBundle,
 ) -> tuple[tuple[str, int, int, int, int, int, int], ...]:
-    object_paths = sorted({
-        descriptor.object_path
-        for record in bundle.records
-        for descriptor in (record.base_color, record.normal, record.orm)
-    })
+    object_paths = sorted(
+        {
+            descriptor.object_path
+            for record in bundle.records
+            for descriptor in (record.base_color, record.normal, record.orm)
+        }
+    )
     rows = []
     for relative, expected_directory in (
         (MATERIAL_BUNDLE_MANIFEST, False),
@@ -777,23 +798,21 @@ def _material_bundle_stat_signature(
             raise MaterialBundleError(
                 "material bundle snapshot is unavailable",
             ) from exc
-        if (
-            expected_directory
-            and not stat.S_ISDIR(metadata.st_mode)
-        ) or (
-            not expected_directory
-            and not stat.S_ISREG(metadata.st_mode)
+        if (expected_directory and not stat.S_ISDIR(metadata.st_mode)) or (
+            not expected_directory and not stat.S_ISREG(metadata.st_mode)
         ):
             raise MaterialBundleError("material bundle snapshot type changed")
-        rows.append((
-            relative,
-            metadata.st_mode,
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_size,
-            metadata.st_mtime_ns,
-            metadata.st_ctime_ns,
-        ))
+        rows.append(
+            (
+                relative,
+                metadata.st_mode,
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+        )
     return tuple(rows)
 
 
@@ -824,10 +843,7 @@ def read_verified_material_map(
         maximum_bytes=MAX_DERIVED_MAP_BYTES,
         label=f"material map {slot_id}/{role}",
     )
-    if (
-        len(payload) != descriptor.bytes
-        or hashlib.sha256(payload).hexdigest() != descriptor.sha256
-    ):
+    if len(payload) != descriptor.bytes or hashlib.sha256(payload).hexdigest() != descriptor.sha256:
         raise MaterialBundleError("material map bytes do not match verified evidence")
     return payload
 

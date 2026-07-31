@@ -37,8 +37,7 @@ from tests.synthetic_material_fixtures import (
 
 def _palette() -> tuple[tuple[int, int, int], ...]:
     return tuple(
-        (3605 + index % 320, 3650 + index % 280, 3700 + index % 240)
-        for index in range(256)
+        (3605 + index % 320, 3650 + index % 280, 3700 + index % 240) for index in range(256)
     )
 
 
@@ -81,9 +80,7 @@ def test_macro_sampler_is_stable_across_negative_lattice_boundaries() -> None:
         (_palette(), 20.0, "not-a-sha"),
         (
             tuple(
-                (4507, green, blue)
-                if index == 0
-                else (red, green, blue)
+                (4507, green, blue) if index == 0 else (red, green, blue)
                 for index, (red, green, blue) in enumerate(_palette())
             ),
             20.0,
@@ -146,11 +143,7 @@ def test_surface_plan_detail_counts_corridor_and_envelope_are_bounded(
         build_scene_plan(),
         bundle.final_directory,
     )
-    counts = Counter(
-        detail.detail_class
-        for path in plan.path_plans
-        for detail in path.details
-    )
+    counts = Counter(detail.detail_class for path in plan.path_plans for detail in path.details)
     counts["rut-run"] = sum(len(path.rut_runs) for path in plan.path_plans)
     assert set(counts) == set(MAX_DETAIL_COUNTS)
     assert all(counts[key] <= maximum for key, maximum in MAX_DETAIL_COUNTS.items())
@@ -159,11 +152,7 @@ def test_surface_plan_detail_counts_corridor_and_envelope_are_bounded(
         for path in plan.path_plans
         for detail in path.details
     )
-    assert all(
-        0.65 <= detail.scale <= 0.90
-        for path in plan.path_plans
-        for detail in path.details
-    )
+    assert all(0.65 <= detail.scale <= 0.90 for path in plan.path_plans for detail in path.details)
     assert all(
         run.start_arc_length_m + run.length_m <= path.path_length_m + 1e-9
         for path in plan.path_plans
@@ -281,3 +270,18 @@ def test_surface_plan_is_process_independent(tmp_path: Path) -> None:
     ]
     assert outputs[0] == outputs[1]
     assert len(outputs[0]) == 64
+
+
+def test_runtime_module_hash_uses_stable_read_path() -> None:
+    """The runtime module self-hash must not bypass the O_NOFOLLOW read path.
+
+    Regression contract for the symlink-following gap that ``Path.read_bytes``
+    would otherwise reopen on the runtime module trust reference.
+    """
+    import inspect
+
+    from pipeline.synthetic_village import surface_realism
+
+    source = inspect.getsource(surface_realism.build_surface_realism_plan)
+    assert "RUNTIME_MODULE.read_bytes()" not in source
+    assert "_stable_read_bytes(RUNTIME_MODULE)" in source

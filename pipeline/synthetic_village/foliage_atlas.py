@@ -6,7 +6,9 @@ import hashlib
 import io
 import json
 import math
+import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
@@ -99,11 +101,7 @@ class FoliageAtlasObject(FrozenModel):
             or parsed.is_absolute()
         ):
             raise ValueError("foliage atlas path must be content-addressed")
-        expected_semantics = (
-            ("srgb", "RGBA")
-            if self.role == "base_color"
-            else ("non-color", "RGB")
-        )
+        expected_semantics = ("srgb", "RGBA") if self.role == "base_color" else ("non-color", "RGB")
         if (self.colour_space, self.pixel_mode) != expected_semantics:
             raise ValueError("foliage atlas role has invalid image semantics")
         return self
@@ -130,11 +128,15 @@ class FoliageAtlasRecord(FrozenModel):
     @model_validator(mode="after")
     def _exact_record_contract(self) -> FoliageAtlasRecord:
         expected_shape = FOLIAGE_SHAPES.get(self.slot_id)
-        if expected_shape is None or (
-            self.shape_id,
-            self.coverage_min,
-            self.coverage_max,
-        ) != expected_shape:
+        if (
+            expected_shape is None
+            or (
+                self.shape_id,
+                self.coverage_min,
+                self.coverage_max,
+            )
+            != expected_shape
+        ):
             raise ValueError("foliage atlas slot shape contract is invalid")
         if not self.coverage_min <= self.alpha_coverage <= self.coverage_max:
             raise ValueError("foliage atlas alpha coverage is outside its band")
@@ -158,13 +160,9 @@ class FoliageAtlasRecord(FrozenModel):
 
 
 class FoliageAtlasSet(FrozenModel):
-    schema_version: Literal[
-        "nantai.synthetic-village.foliage-atlas-set.v1"
-    ] = FOLIAGE_ATLAS_SCHEMA
+    schema_version: Literal["nantai.synthetic-village.foliage-atlas-set.v1"] = FOLIAGE_ATLAS_SCHEMA
     atlas_set_id: Sha256
-    algorithm_id: Literal[
-        "deterministic-foliage-cutout-v1"
-    ] = FOLIAGE_ATLAS_ALGORITHM_ID
+    algorithm_id: Literal["deterministic-foliage-cutout-v1"] = FOLIAGE_ATLAS_ALGORITHM_ID
     source_material_bundle_id: Sha256
     source_material_manifest_sha256: Sha256
     pillow_version: str = Field(min_length=1)
@@ -284,12 +282,8 @@ def _cell_mask(shape: ShapeId, angle_degrees: float) -> np.ndarray:
             leaf_angle = math.radians(leaf_angle_degrees)
             leaf_cosine = math.cos(leaf_angle)
             leaf_sine = math.sin(leaf_angle)
-            leaf_x = (
-                leaf_cosine * rotated_x + leaf_sine * rotated_y
-            ) / 0.92
-            leaf_y = (
-                -leaf_sine * rotated_x + leaf_cosine * rotated_y - offset
-            ) / 0.72
+            leaf_x = (leaf_cosine * rotated_x + leaf_sine * rotated_y) / 0.92
+            leaf_y = (-leaf_sine * rotated_x + leaf_cosine * rotated_y - offset) / 0.72
             high_mask |= np.asarray(
                 _inside_leaf(shape, leaf_x, leaf_y),
                 dtype=bool,
@@ -324,9 +318,7 @@ def _sample_cell(
     origin: tuple[int, int],
     angle_degrees: float,
 ) -> np.ndarray:
-    axis = np.arange(CELL_SIZE_PX, dtype=np.float64) - (
-        CELL_SIZE_PX - 1
-    ) / 2.0
+    axis = np.arange(CELL_SIZE_PX, dtype=np.float64) - (CELL_SIZE_PX - 1) / 2.0
     x, y = np.meshgrid(axis, axis)
     angle = math.radians(angle_degrees)
     cosine = math.cos(angle)
@@ -428,10 +420,7 @@ def _decode_source_map(
     expected_sha256: str,
     expected_bytes: int,
 ) -> np.ndarray:
-    if (
-        len(payload) != expected_bytes
-        or hashlib.sha256(payload).hexdigest() != expected_sha256
-    ):
+    if len(payload) != expected_bytes or hashlib.sha256(payload).hexdigest() != expected_sha256:
         raise FoliageAtlasError("source material map bytes changed")
     try:
         with Image.open(io.BytesIO(payload)) as image:
@@ -481,35 +470,69 @@ def _atlas_object(
 def _write_object(root: Path, descriptor: FoliageAtlasObject, payload: bytes) -> None:
     path = root / descriptor.object_path
     if path.exists():
-        if not path.is_file() or path.is_symlink() or path.read_bytes() != payload:
+        if not path.is_file() or path.is_symlink():
+            raise FoliageAtlasError("foliage atlas content address conflicts")
+        existing = _read_stable_output(path, maximum_bytes=len(payload))
+        if existing != payload:
             raise FoliageAtlasError("foliage atlas content address conflicts")
         return
     path.write_bytes(payload)
 
 
 def _read_stable_output(path: Path, *, maximum_bytes: int) -> bytes:
-    if path.is_symlink() or not path.is_file() or path.resolve(strict=True) != path:
+    """Read an atlas output through one descriptor with O_NOFOLLOW.
+
+    Identity is verified by file type, inode and device across the
+    ``lstat``/``fstat`` surfaces and by length after reading. Timestamps are
+    deliberately excluded: Windows reports ``st_mtime_ns``/``st_ctime_ns`` at
+    different precisions through ``GetFileAttributesEx`` (path stat) and
+    ``GetFileInformationByHandle`` (descriptor stat), which would otherwise
+    produce false swap detections.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise FoliageAtlasError("foliage atlas output object is redirected") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
         raise FoliageAtlasError("foliage atlas output object is redirected")
-    before = path.stat()
-    if before.st_size <= 0 or before.st_size > maximum_bytes:
+    if before.st_size > maximum_bytes:
         raise FoliageAtlasError("foliage atlas output size is invalid")
-    payload = path.read_bytes()
-    after = path.stat()
-    before_signature = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    )
-    after_signature = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    )
-    if before_signature != after_signature or len(payload) != before.st_size:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+            or opened.st_size > maximum_bytes
+        ):
+            raise FoliageAtlasError("foliage atlas output object changed before read")
+        payload = stream.read(maximum_bytes + 1)
+        after_open = os.fstat(stream.fileno())
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise FoliageAtlasError("foliage atlas output changed during verification") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
+        or opened.st_ino != after_open.st_ino
+        or opened.st_dev != after_open.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+        or len(payload) > maximum_bytes
+    ):
         raise FoliageAtlasError("foliage atlas output changed during verification")
     return payload
 
@@ -707,7 +730,10 @@ def build_foliage_atlas_set(
         manifest_bytes = canonical_foliage_atlas_set_bytes(manifest)
         (output / FOLIAGE_ATLAS_MANIFEST).write_bytes(manifest_bytes)
         reloaded = FoliageAtlasSet.model_validate_json(
-            (output / FOLIAGE_ATLAS_MANIFEST).read_bytes(),
+            _read_stable_output(
+                output / FOLIAGE_ATLAS_MANIFEST,
+                maximum_bytes=len(manifest_bytes),
+            ),
         )
         if reloaded != manifest:
             raise FoliageAtlasError("foliage atlas manifest changed after writing")

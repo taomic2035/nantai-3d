@@ -6,6 +6,8 @@ import hashlib
 import io
 import json
 import math
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -43,10 +45,7 @@ MAX_DETAIL_COUNTS = {
     "rut-run": 96,
 }
 RUNTIME_MODULE = (
-    Path(__file__).resolve().parents[2]
-    / "scripts"
-    / "blender"
-    / "surface_realism_runtime.py"
+    Path(__file__).resolve().parents[2] / "scripts" / "blender" / "surface_realism_runtime.py"
 )
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -149,13 +148,9 @@ class PathSurfacePlan(FrozenModel):
             or {detail.detail_class for detail in self.details}
             != {"stone-fragment", "leaf-card", "damp-patch"}
             or not self.rut_runs
+            or any(detail.arc_length_m > self.path_length_m for detail in self.details)
             or any(
-                detail.arc_length_m > self.path_length_m
-                for detail in self.details
-            )
-            or any(
-                run.start_arc_length_m + run.length_m
-                > self.path_length_m + 1e-9
+                run.start_arc_length_m + run.length_m > self.path_length_m + 1e-9
                 for run in self.rut_runs
             )
         ):
@@ -164,9 +159,9 @@ class PathSurfacePlan(FrozenModel):
 
 
 class SurfaceRealismPlan(FrozenModel):
-    schema_version: Literal[
+    schema_version: Literal["nantai.synthetic-village.surface-realism-plan.v1"] = (
         "nantai.synthetic-village.surface-realism-plan.v1"
-    ] = "nantai.synthetic-village.surface-realism-plan.v1"
+    )
     plan_sha256: Sha256
     profile_id: Literal["source-consistent-multiscale-surface-v1"]
     algorithm_id: Literal["source-palette-world-macro-path-detail-v1"]
@@ -188,10 +183,7 @@ class SurfaceRealismPlan(FrozenModel):
     def _complete_content_identity(self) -> Self:
         if tuple(row.slot_id for row in self.macro_palettes) != ACTIVE_MACRO_SLOTS:
             raise ValueError("surface macro material slots are incomplete")
-        expected_paths = tuple(
-            f"path-network-{index:03d}"
-            for index in range(1, 7)
-        )
+        expected_paths = tuple(f"path-network-{index:03d}" for index in range(1, 7))
         if tuple(row.object_id for row in self.path_plans) != expected_paths:
             raise ValueError("surface path identities are incomplete")
         actual = hashlib.sha256(
@@ -248,12 +240,32 @@ def canonical_surface_realism_plan_bytes(
     )
 
 
+def _stable_read_bytes(path: Path) -> bytes:
+    """Read a file through a single descriptor with O_NOFOLLOW."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("surface realism input is not a regular file")
+        payload = stream.read()
+    return payload
+
+
 def _read_verified_base_color(
     root: Path,
     record: DerivedMaterialRecord,
 ) -> Image.Image:
     path = root / record.base_color.object_path
-    raw = path.read_bytes()
+    raw = _stable_read_bytes(path)
     if (
         len(raw) != record.base_color.bytes
         or hashlib.sha256(raw).hexdigest() != record.base_color.sha256
@@ -282,10 +294,7 @@ def _macro_palette(
     for channel_index in range(3):
         linear = Image.new("F", image.size)
         linear.putdata(
-            [
-                _srgb_to_linear(pixel[channel_index])
-                for pixel in image.get_flattened_data()
-            ],
+            [_srgb_to_linear(pixel[channel_index]) for pixel in image.get_flattened_data()],
         )
         channels.append(
             tuple(
@@ -429,11 +438,7 @@ def _rut_candidates(
         candidates.append(_Candidate(digest=digest, record=record))
     if not candidates:
         raise ValueError(f"surface path is too short for a rut: {path.object_id}")
-    accepted = tuple(
-        candidate
-        for candidate in candidates
-        if candidate.digest[0] < 112
-    )
+    accepted = tuple(candidate for candidate in candidates if candidate.digest[0] < 112)
     if accepted:
         return accepted
     return (min(candidates, key=lambda candidate: candidate.digest),)
@@ -448,10 +453,7 @@ def _cap_candidates(
         object_id: min(candidates, key=lambda candidate: candidate.digest)
         for object_id, candidates in by_path.items()
     }
-    selected_keys = {
-        (object_id, required[object_id].record)
-        for object_id in required
-    }
+    selected_keys = {(object_id, required[object_id].record) for object_id in required}
     optional = sorted(
         (
             (candidate.digest, object_id, candidate)
@@ -465,9 +467,7 @@ def _cap_candidates(
         selected_keys.add((object_id, candidate.record))
     return {
         object_id: tuple(
-            candidate
-            for candidate in candidates
-            if (object_id, candidate.record) in selected_keys
+            candidate for candidate in candidates if (object_id, candidate.record) in selected_keys
         )
         for object_id, candidates in by_path.items()
     }
@@ -476,11 +476,7 @@ def _cap_candidates(
 def _path_plans(scene_plan: ScenePlan) -> tuple[PathSurfacePlan, ...]:
     paths = tuple(
         sorted(
-            (
-                item
-                for item in scene_plan.objects
-                if item.semantic_class == "path"
-            ),
+            (item for item in scene_plan.objects if item.semantic_class == "path"),
             key=lambda item: item.object_id,
         ),
     )
@@ -532,10 +528,7 @@ def _path_plans(scene_plan: ScenePlan) -> tuple[PathSurfacePlan, ...]:
         )
         rut_records = tuple(
             sorted(
-                (
-                    candidate.record
-                    for candidate in ruts[path.object_id]
-                ),
+                (candidate.record for candidate in ruts[path.object_id]),
                 key=lambda record: record.rut_id,
             ),
         )
@@ -563,7 +556,7 @@ def build_surface_realism_plan(
     records = {record.slot_id: record for record in bundle.records}
     if any(slot_id not in records for slot_id in ACTIVE_MACRO_SLOTS):
         raise ValueError("surface macro material inputs are incomplete")
-    runtime_bytes = RUNTIME_MODULE.read_bytes()
+    runtime_bytes = _stable_read_bytes(RUNTIME_MODULE)
     payload = {
         "schema_version": "nantai.synthetic-village.surface-realism-plan.v1",
         "profile_id": SURFACE_PROFILE_V1,
@@ -574,8 +567,7 @@ def build_surface_realism_plan(
         "terrain_period_m": TERRAIN_PERIOD_M,
         "ground_period_m": GROUND_PERIOD_M,
         "macro_palettes": tuple(
-            _macro_palette(material_bundle_root, records[slot_id])
-            for slot_id in ACTIVE_MACRO_SLOTS
+            _macro_palette(material_bundle_root, records[slot_id]) for slot_id in ACTIVE_MACRO_SLOTS
         ),
         "path_plans": _path_plans(scene_plan),
     }
