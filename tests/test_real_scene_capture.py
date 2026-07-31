@@ -950,3 +950,29 @@ def test_write_model_json_rejects_existing_output(tmp_path: Path) -> None:
         match="already exists",
     ):
         real_scene_capture._write_model_json(out, _StubModel())
+
+
+def test_stable_copy_rejects_existing_destination(tmp_path: Path) -> None:
+    """RED->GREEN: _stable_copy must fail closed when destination exists.
+
+    Without no-replace publication, a pre-occupied or symlinked destination
+    could silently redirect the copy (TOCTOU).
+    """
+    source = tmp_path / "source.bin"
+    payload = b"source-media-bytes"
+    source.write_bytes(payload)
+    expected_sha = hashlib.sha256(payload).hexdigest()
+
+    dest = tmp_path / "output.bin"
+    dest.write_text("pre-occupied", encoding="utf-8")
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="already exists",
+    ):
+        real_scene_capture._stable_copy(
+            source,
+            dest,
+            expected_bytes=len(payload),
+            expected_sha256=expected_sha,
+        )

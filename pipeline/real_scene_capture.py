@@ -351,10 +351,19 @@ def _stable_copy(
         raise RealSceneCaptureError("source media sha256 changed before copy")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
     try:
-        shutil.copyfile(source_path, destination, follow_symlinks=False)
+        with os.fdopen(staging_fd, "wb") as staging:
+            shutil.copyfileobj(source_path.open("rb"), staging)
+            staging.flush()
+            os.fsync(staging.fileno())
         after = source_path.stat()
     except OSError as exc:
+        _discard_staging(staging_path)
         raise RealSceneCaptureError("source media copy failed") from exc
     if (
         before.st_dev,
@@ -367,10 +376,33 @@ def _stable_copy(
         after.st_size,
         after.st_mtime_ns,
     ):
+        _discard_staging(staging_path)
         raise RealSceneCaptureError("source media changed while copying")
-    copied_bytes, copied_sha = _sha256_file(destination)
+    copied_bytes, copied_sha = _sha256_file(Path(staging_path))
     if copied_bytes != expected_bytes or copied_sha != expected_sha256:
+        _discard_staging(staging_path)
         raise RealSceneCaptureError("copied source media failed byte verification")
+    try:
+        publish_file_noreplace(staging_path, destination)
+    except FileExistsError:
+        _discard_staging(staging_path)
+        raise RealSceneCaptureError(
+            "destination already exists"
+        ) from None
+    except DurableIOError as exc:
+        _discard_staging(staging_path)
+        if exc.published:
+            raise RealSceneCaptureError(
+                "copy published but durability unconfirmed"
+            ) from exc
+        raise RealSceneCaptureError(
+            "copy publication failed"
+        ) from exc
+    except OSError as exc:
+        _discard_staging(staging_path)
+        raise RealSceneCaptureError(
+            "copy publication failed"
+        ) from exc
 
 
 def prepare_real_capture(
