@@ -1373,3 +1373,24 @@ def test_validate_real_scene_acceptance_oserror_does_not_leak_absolute_path(
     assert str(tmp_path) not in message, f"absolute path leaked in error message: {message}"
     assert "private" not in message, f"private path segment leaked in error message: {message}"
     assert "secret-evidence" not in message, f"private filename leaked in error message: {message}"
+
+
+def test_record_review_identity_ignores_permission_bits_cross_surface() -> None:
+    """RED: _identity must compare only file type (S_IFMT), not full st_mode.
+
+    Windows reports st_mode permission bits at different values through
+    lstat (GetFileAttributesEx) vs fstat (GetFileInformationByHandle), so a
+    cross-surface comparison that includes permission bits would falsely
+    reject an unchanged file as "changed while reading".
+    """
+    import os
+
+    import scripts.record_real_scene_review as record_review
+
+    # Same dev/ino/type/size, different permission bits (rw-rw-rw- vs rwxrwxrwx).
+    base = os.stat_result([stat.S_IFREG | 0o666, 100, 200, 1, 0, 0, 4096, 0, 0, 0])
+    diff_perms = os.stat_result([stat.S_IFREG | 0o777, 100, 200, 1, 0, 0, 4096, 0, 0, 0])
+    assert record_review._identity(base) == record_review._identity(diff_perms), (
+        "cross-surface identity must ignore permission bits — Windows "
+        "reports them differently through lstat vs fstat"
+    )
