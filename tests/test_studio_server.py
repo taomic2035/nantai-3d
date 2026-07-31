@@ -3739,3 +3739,70 @@ class TestHttpContract:
                 "status": 405,
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU: evidence files must be read through a single stable descriptor.
+# ---------------------------------------------------------------------------
+
+
+def test_stable_read_evidence_bytes_uses_o_nofollow() -> None:
+    """RED: _stable_read_evidence_bytes must use O_NOFOLLOW to prevent
+    symlink following at the evidence boundary."""
+    import inspect
+
+    from pipeline.studio_server import _stable_read_evidence_bytes
+
+    source = inspect.getsource(_stable_read_evidence_bytes)
+    assert "O_NOFOLLOW" in source, (
+        "_stable_read_evidence_bytes must use O_NOFOLLOW to prevent symlink following"
+    )
+
+
+def test_sha256_file_uses_o_nofollow_not_path_open() -> None:
+    """RED: _sha256_file must use os.open with O_NOFOLLOW, not Path.open
+    which follows symlinks."""
+    import inspect
+
+    from pipeline.studio_server import _sha256_file
+
+    source = inspect.getsource(_sha256_file)
+    assert "O_NOFOLLOW" in source, (
+        "_sha256_file must use O_NOFOLLOW to prevent symlink following"
+    )
+    assert "path.open" not in source, (
+        "_sha256_file must not use Path.open which follows symlinks"
+    )
+
+
+def test_stable_read_evidence_bytes_rejects_non_regular_file(tmp_path: Path) -> None:
+    """_stable_read_evidence_bytes must reject a directory (not a regular
+    file) with ValueError."""
+    from pipeline.studio_server import _stable_read_evidence_bytes
+
+    directory = tmp_path / "not-a-file"
+    directory.mkdir()
+    with pytest.raises(ValueError, match="not a bounded regular file"):
+        _stable_read_evidence_bytes(directory, max_bytes=1024)
+
+
+def test_stable_read_evidence_bytes_rejects_oversized_file(tmp_path: Path) -> None:
+    """_stable_read_evidence_bytes must reject a file larger than
+    max_bytes."""
+    from pipeline.studio_server import _stable_read_evidence_bytes
+
+    large_file = tmp_path / "large.bin"
+    large_file.write_bytes(b"x" * 100)
+    with pytest.raises(ValueError, match="not a bounded regular file"):
+        _stable_read_evidence_bytes(large_file, max_bytes=50)
+
+
+def test_stable_read_evidence_bytes_returns_correct_bytes(tmp_path: Path) -> None:
+    """_stable_read_evidence_bytes must return the exact file content."""
+    from pipeline.studio_server import _stable_read_evidence_bytes
+
+    payload = b'{"test": true}\n'
+    evidence = tmp_path / "evidence.json"
+    evidence.write_bytes(payload)
+    result = _stable_read_evidence_bytes(evidence, max_bytes=1024)
+    assert result == payload

@@ -285,11 +285,106 @@ class PathAccessError(ValueError):
 
 
 def _sha256_file(path: Path) -> str:
+    """Compute SHA-256 of a file using a single descriptor with O_NOFOLLOW.
+
+    Uses ``os.open`` with ``O_NOFOLLOW`` instead of ``Path.open`` to
+    prevent symlink following at every call site that still uses this
+    helper.
+    """
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise OSError("cannot open evidence file for hashing") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _stable_read_evidence_bytes(path: Path, *, max_bytes: int) -> bytes:
+    """Read evidence bytes through a single file descriptor.
+
+    This eliminates the TOCTOU window between SHA verification and
+    content reading: the caller reads the file once via a stable
+    descriptor, computes SHA from the returned bytes, and uses the same
+    bytes for model validation.
+
+    Uses ``O_NOFOLLOW`` to prevent symlink following, and verifies file
+    identity (inode, device, type) before and after reading to detect
+    file swaps.
+    """
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ValueError("evidence file cannot be inspected") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+        raise ValueError("evidence file is not a bounded regular file")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("evidence file cannot be opened") from exc
+    payload = bytearray()
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise ValueError("evidence file changed before read")
+        try:
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except OSError as exc:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise ValueError("evidence file cannot be read") from exc
+        with stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise ValueError("evidence file exceeds byte limit")
+            read_fstat = os.fstat(stream.fileno())
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError("evidence file cannot be read") from exc
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise ValueError("evidence file changed after read") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(read_fstat.st_mode)
+        or opened.st_ino != read_fstat.st_ino
+        or opened.st_dev != read_fstat.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise ValueError("evidence file changed while being read")
+    return bytes(payload)
 
 
 def _iso_mtime(path: Path) -> str:
@@ -1467,31 +1562,47 @@ def _reciprocal_production_quality_snapshot(
             }
             if any(path is None for path in resolved.values()):
                 raise ValueError("reciprocal batch evidence is incomplete")
+            # Read each evidence file once through a stable single
+            # descriptor, then verify SHA from the SAME bytes used for
+            # model validation. This eliminates the TOCTOU window between
+            # _sha256_file (which reopened by name via Path.open) and
+            # read_bytes() (which also reopened by name).
+            preflight_request_raw = _stable_read_evidence_bytes(
+                resolved["preflight_request"], max_bytes=MAX_JSON_BYTES,
+            )
+            preflight_report_raw = _stable_read_evidence_bytes(
+                resolved["preflight_report"], max_bytes=MAX_JSON_BYTES,
+            )
+            render_request_raw = _stable_read_evidence_bytes(
+                resolved["render_request"], max_bytes=MAX_JSON_BYTES,
+            )
+            render_report_raw = _stable_read_evidence_bytes(
+                resolved["render_report"], max_bytes=MAX_JSON_BYTES,
+            )
+            quality_request_raw = _stable_read_evidence_bytes(
+                resolved["quality_request"], max_bytes=MAX_JSON_BYTES,
+            )
+            quality_report_raw = _stable_read_evidence_bytes(
+                resolved["quality_report"], max_bytes=MAX_JSON_BYTES,
+            )
+            camera_journal_raw = _stable_read_evidence_bytes(
+                resolved["journal"], max_bytes=MAX_JSON_BYTES,
+            )
             if (
-                _sha256_file(resolved["preflight_request"])
+                hashlib.sha256(preflight_request_raw).hexdigest()
                 != entry.preflight_request_sha256
-                or _sha256_file(resolved["preflight_report"])
+                or hashlib.sha256(preflight_report_raw).hexdigest()
                 != entry.preflight_report_sha256
-                or _sha256_file(resolved["render_request"])
+                or hashlib.sha256(render_request_raw).hexdigest()
                 != entry.render_request_sha256
-                or _sha256_file(resolved["render_report"])
+                or hashlib.sha256(render_report_raw).hexdigest()
                 != entry.render_report_sha256
-                or _sha256_file(resolved["quality_request"])
+                or hashlib.sha256(quality_request_raw).hexdigest()
                 != entry.quality_request_sha256
-                or _sha256_file(resolved["quality_report"])
+                or hashlib.sha256(quality_report_raw).hexdigest()
                 != entry.quality_report_sha256
             ):
                 raise ValueError("reciprocal batch evidence digest disagrees")
-
-            camera_journal_raw = resolved["journal"].read_bytes()
-            quality_request_raw = resolved["quality_request"].read_bytes()
-            quality_report_raw = resolved["quality_report"].read_bytes()
-            if max(
-                len(camera_journal_raw),
-                len(quality_request_raw),
-                len(quality_report_raw),
-            ) > MAX_JSON_BYTES:
-                raise ValueError("reciprocal batch evidence is too large")
             camera_journal = ReciprocalProductionCameraJournal.model_validate_json(
                 camera_journal_raw,
             )
