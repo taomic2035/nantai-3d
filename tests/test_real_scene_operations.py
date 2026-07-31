@@ -2436,3 +2436,26 @@ def test_verify_matching_immutable_file_rejects_ancestor_reparse(
         match="immutable|redirected|unsafe",
     ):
         operations_module._verify_matching_immutable_file(config, payload)
+
+
+# ============================================================
+# RED → GREEN: _write_evidence no-replace publication
+# ============================================================
+
+
+def test_write_evidence_rejects_existing_output(tmp_path: Path) -> None:
+    """RED->GREEN: _write_evidence must fail closed when output exists.
+
+    Without no-replace publication, a pre-occupied or symlinked output could
+    silently redirect the evidence write (TOCTOU).
+    """
+    from pipeline.real_scene_capture import RealSceneCaptureError
+
+    out = tmp_path / "evidence.json"
+    out.write_text('{"pre-occupied": true}', encoding="utf-8")
+
+    with pytest.raises(
+        RealSceneCaptureError,
+        match="already exists",
+    ):
+        operations_module._write_evidence(out, b'{"new": true}')

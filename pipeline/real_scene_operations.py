@@ -300,6 +300,52 @@ def _stable_read_bytes(
     return payload
 
 
+def _discard_staging(staging_path: str) -> None:
+    try:
+        os.unlink(staging_path)
+    except OSError:
+        pass
+
+
+def _write_evidence(path: Path, payload: bytes) -> None:
+    """Write evidence bytes via private staging + fsync + no-replace publish.
+
+    Prevents a TOCTOU attacker from silently swapping or pre-occupying the
+    output via a symlink or existing file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging_fd, staging_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(staging_fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        publish_file_noreplace(staging_path, path)
+    except FileExistsError:
+        _discard_staging(staging_path)
+        raise RealSceneCaptureError(
+            "evidence output already exists"
+        ) from None
+    except DurableIOError as exc:
+        _discard_staging(staging_path)
+        if exc.published:
+            raise RealSceneCaptureError(
+                "evidence published but durability unconfirmed"
+            ) from exc
+        raise RealSceneCaptureError(
+            "cannot write evidence"
+        ) from exc
+    except OSError as exc:
+        _discard_staging(staging_path)
+        raise RealSceneCaptureError(
+            "cannot write evidence"
+        ) from exc
+
+
 def _verify_matching_immutable_file(
     path: Path,
     expected: bytes,
@@ -650,7 +696,7 @@ class RealScenePipelineOperations:
                 stage_root,
             )
             rights_copy = stage_root / "capture-rights-receipt.json"
-            rights_copy.write_bytes(canonical_model_bytes(rights))
+            _write_evidence(rights_copy, canonical_model_bytes(rights))
             artifacts = _regular_files(stage_root)
         except (OSError, ValueError, RealSceneCaptureError) as exc:
             return StageExecution(
@@ -679,7 +725,10 @@ class RealScenePipelineOperations:
         except (OSError, ValidationError) as exc:
             raise RealSceneCaptureError(f"registration quality policy is invalid: {exc}") from exc
         stage_root.mkdir(parents=True, exist_ok=True)
-        (stage_root / "registration-quality-policy.json").write_bytes(canonical_model_bytes(policy))
+        _write_evidence(
+            stage_root / "registration-quality-policy.json",
+            canonical_model_bytes(policy),
+        )
         return policy
 
     def _prepared_capture(
@@ -726,8 +775,9 @@ class RealScenePipelineOperations:
                 dataset_receipt_sha256=(capture.dataset_receipt_sha256),
                 capture_manifest_sha256=(capture.capture.manifest_digest),
             )
-            (stage_root / "prepared-capture-evidence.json").write_bytes(
-                canonical_model_bytes(prepared_evidence)
+            _write_evidence(
+                stage_root / "prepared-capture-evidence.json",
+                canonical_model_bytes(prepared_evidence),
             )
             artifacts = _regular_files(stage_root)
         except (OSError, ValueError, RealSceneCaptureError) as exc:
@@ -1392,7 +1442,7 @@ class RealScenePipelineOperations:
             )
             stage_root.mkdir(parents=True)
             source_path = stage_root / "source.json"
-            source_path.write_bytes(canonical_model_bytes(self.source))
+            _write_evidence(source_path, canonical_model_bytes(self.source))
             failure_candidates.append(source_path)
 
             viewer_policy = self._acceptance_option_path(
