@@ -126,7 +126,21 @@ class ReciprocalRouteMaterialBinding(FrozenModel):
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()

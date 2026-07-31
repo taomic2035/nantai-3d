@@ -533,3 +533,45 @@ def test_runner_publishes_exact_three_files_and_reuses_verified_build(
     )
     assert reused.report == result.report
     assert calls == 1
+
+
+def test_synthetic_village_sha256_file_helpers_use_o_nofollow() -> None:
+    """RED: every synthetic_village _sha256_file must use O_NOFOLLOW to
+    prevent symlink following at the trust boundary."""
+    import inspect
+
+    from pipeline.synthetic_village import (
+        canary,
+        environment_module_runtime,
+        ktx2_toolchain,
+        local_orbit_runner,
+        perimeter_closure_audit,
+        perimeter_closure_runtime,
+        reciprocal_route_batch,
+        reciprocal_route_module_runtime,
+        reciprocal_route_probe_runner,
+        reciprocal_route_production,
+    )
+
+    modules = [
+        canary,
+        environment_module_runtime,
+        ktx2_toolchain,
+        local_orbit_runner,
+        perimeter_closure_audit,
+        perimeter_closure_runtime,
+        reciprocal_route_batch,
+        reciprocal_route_module_runtime,
+        reciprocal_route_probe_runner,
+        reciprocal_route_production,
+    ]
+    for module in modules:
+        source = inspect.getsource(module._sha256_file)
+        assert "O_NOFOLLOW" in source, (
+            f"{module.__name__}._sha256_file must use O_NOFOLLOW to "
+            f"prevent symlink following"
+        )
+        assert ".open(" not in source or "os.fdopen" in source, (
+            f"{module.__name__}._sha256_file must not use Path.open; "
+            f"use os.open + os.fdopen instead"
+        )

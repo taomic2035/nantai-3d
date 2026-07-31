@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -57,9 +58,23 @@ DEFAULT_PROBE_TIMEOUT_S = 3600
 def _sha256_file(path: Path) -> str:
     """SHA-256 of a file's bytes (chunked to avoid loading 150 MB at once)."""
     h = hashlib.sha256()
-    with path.open("rb") as f:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    with stream:
         while True:
-            chunk = f.read(1024 * 1024)  # 1 MB
+            chunk = stream.read(1024 * 1024)  # 1 MB
             if not chunk:
                 break
             h.update(chunk)

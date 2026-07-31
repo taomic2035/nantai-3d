@@ -555,8 +555,25 @@ def canonical_ktx_texture_cache_entry_bytes(
 def _sha256_file(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        with path.open("rb") as stream:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise KtxToolchainError(f"KTX file cannot be read: {path.name}") from exc
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
                 size += len(chunk)
