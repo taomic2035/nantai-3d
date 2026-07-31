@@ -472,7 +472,7 @@ def _collect_runtime_payloads(
         if _is_excluded(relative, lock["runtime_exclusions"]):
             continue
         path = _checked_source_file(root, relative, label="tracked runtime file")
-        _add_payload(payloads, relative, path.read_bytes(), "runtime")
+        _add_payload(payloads, relative, stable_regular_file_bytes(path)[0], "runtime")
     required_roots = {"LICENSE", "README.md", "make.py", "pyproject.toml"}
     missing = sorted(required_roots - payloads.keys())
     if missing:
@@ -595,7 +595,7 @@ def _collect_world_payloads(
             referenced.add(f"web/data/{candidate}")
     for relative in sorted(referenced):
         path = _checked_source_file(root, relative, label="world chunk")
-        _add_payload(payloads, relative, path.read_bytes(), "world-chunk")
+        _add_payload(payloads, relative, stable_regular_file_bytes(path)[0], "world-chunk")
 
     projected = json.loads(json.dumps(manifest))
     if "mesh_grid" in projected:

@@ -523,6 +523,43 @@ def test_verify_release_tree_rejects_unexpected_runtime_file(tmp_path: Path) -> 
         verify_release_tree(tmp_path)
 
 
+def test_collect_runtime_payloads_uses_stable_read_not_read_bytes() -> None:
+    """RED: _collect_runtime_payloads must not use Path.read_bytes() for
+    release payloads; it must use stable_regular_file_bytes to eliminate
+    the TOCTOU window between _checked_source_file and the subsequent read."""
+    import inspect
+
+    from pipeline.preview_release import _collect_runtime_payloads
+
+    source = inspect.getsource(_collect_runtime_payloads)
+    assert ".read_bytes()" not in source, (
+        "_collect_runtime_payloads must not use Path.read_bytes() for "
+        "release payloads; use stable_regular_file_bytes instead"
+    )
+    assert "stable_regular_file_bytes" in source, (
+        "_collect_runtime_payloads must use stable_regular_file_bytes "
+        "for release payloads"
+    )
+
+
+def test_collect_world_payloads_uses_stable_read_not_read_bytes() -> None:
+    """RED: _collect_world_payloads must not use Path.read_bytes() for
+    world chunk payloads; it must use stable_regular_file_bytes."""
+    import inspect
+
+    from pipeline.preview_release import _collect_world_payloads
+
+    source = inspect.getsource(_collect_world_payloads)
+    assert ".read_bytes()" not in source, (
+        "_collect_world_payloads must not use Path.read_bytes() for "
+        "world chunk payloads; use stable_regular_file_bytes instead"
+    )
+    assert "stable_regular_file_bytes" in source, (
+        "_collect_world_payloads must use stable_regular_file_bytes "
+        "for world chunk payloads"
+    )
+
+
 def test_verify_release_tree_allows_only_declared_runtime_mutable_outputs(
     tmp_path: Path,
 ) -> None:
