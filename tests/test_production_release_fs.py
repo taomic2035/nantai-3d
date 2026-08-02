@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -64,7 +65,7 @@ def test_non_linux_rejects_before_first_mutation(
 
 
 @pytest.mark.skipif(
-    os.name != "posix",
+    sys.platform != "linux",
     reason="Linux dirfd semantics are required",
 )
 def test_created_file_failure_is_retained_and_reported(
@@ -96,7 +97,7 @@ def test_created_file_failure_is_retained_and_reported(
 
 
 @pytest.mark.skipif(
-    os.name != "posix",
+    sys.platform != "linux",
     reason="Linux dirfd semantics are required",
 )
 def test_components_are_single_names_and_no_replace(
@@ -117,7 +118,7 @@ def test_components_are_single_names_and_no_replace(
 
 
 @pytest.mark.skipif(
-    os.name != "posix",
+    sys.platform != "linux",
     reason="Linux dirfd semantics are required",
 )
 def test_post_create_fsync_failure_reports_exact_retained_file(
@@ -147,7 +148,7 @@ def test_post_create_fsync_failure_reports_exact_retained_file(
 
 
 @pytest.mark.skipif(
-    os.name != "posix",
+    sys.platform != "linux",
     reason="Linux dirfd semantics are required",
 )
 def test_child_name_swap_is_detected_against_held_file(
