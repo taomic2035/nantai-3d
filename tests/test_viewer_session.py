@@ -463,8 +463,10 @@ def test_require_absent_rejects_symlink(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlink creation is not permitted")
 
-    with pytest.raises(ViewerSessionError, match="already exists"):
+    with pytest.raises(ViewerSessionError) as exc_info:
         session_module._require_absent(link, label="test")
+    assert str(link) not in str(exc_info.value)
+    assert str(target) not in str(exc_info.value)
 
 
 def test_require_regular_file_rejects_symlinked_parent(

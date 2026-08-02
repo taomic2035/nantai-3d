@@ -398,7 +398,7 @@ class TestSymlinkSafeWrite:
                 pytest.skip("Windows symlink privilege is unavailable")
             raise
 
-        with pytest.raises((ValueError, Exception), match="exist|symlink|link|publish"):
+        with pytest.raises(ValueError):
             trim_scene(
                 clustered_scene, out,
                 rules=[OccupancyRule(voxel_size=5.0, min_occupancy=2)],
@@ -409,6 +409,7 @@ class TestSymlinkSafeWrite:
             "trim_scene followed the dangling symlink and wrote PLY bytes "
             "to the attacker target"
         )
+        assert out.is_symlink(), "trim_scene replaced the attacker-controlled link"
 
     def test_untrimmed_ply_records_nothing(self, clustered_scene, tmp_path):
         """没剔过就不该凭空多出记录 (空列表 == 没有记录)。"""
