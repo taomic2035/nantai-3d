@@ -277,6 +277,14 @@ jobs:
             tests/test_production_cuda_image_contract.py \
             tests/test_production_cuda_image_workflow.py
 
+      - name: Test macOS canonical temporary evidence replay
+        if: matrix.os == 'macos-latest'
+        run: |
+          python -m pytest -q --noconftest \
+            tests/test_real_scene_import.py::test_production_import_is_metric_chunked_and_content_closed \
+            tests/test_real_scene_acceptance.py::test_aggregate_reopens_original_production_runtime_evidence \
+            tests/test_remote_result_fetch_v2.py::test_fetch_v2_derives_render_decision_and_closure_after_archive_verification
+
       - name: Test private Linux append-only Production mutations
         if: matrix.os == 'ubuntu-latest'
         run: |

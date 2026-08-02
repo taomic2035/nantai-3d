@@ -1072,7 +1072,7 @@ def _verify_production_closure_evidence(
         with tempfile.TemporaryDirectory(
             prefix="nantai-import-render-",
         ) as temporary:
-            evaluation_root = Path(temporary) / "run"
+            evaluation_root = Path(temporary).resolve(strict=True) / "run"
             split_path = (
                 evaluation_root
                 / "prepared/evidence/held-out-split.json"

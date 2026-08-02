@@ -1648,7 +1648,7 @@ def _validate_packaged_render_evaluation(
     with tempfile.TemporaryDirectory(
         prefix="nantai-accept-render-",
     ) as temporary:
-        view = Path(temporary) / "run"
+        view = Path(temporary).resolve(strict=True) / "run"
 
         def write(relative: str, payload: bytes) -> None:
             path = view.joinpath(*PurePosixPath(relative).parts)

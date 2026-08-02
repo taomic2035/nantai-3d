@@ -1941,7 +1941,7 @@ def _validate_downloaded_evaluation(
     with tempfile.TemporaryDirectory(
         prefix="nantai-render-eval-",
     ) as temporary:
-        root = Path(temporary) / "run"
+        root = Path(temporary).resolve(strict=True) / "run"
         (root / "prepared/evidence").mkdir(parents=True)
         (root / "prepared/images").mkdir()
         (root / "result/render-evaluation").mkdir(parents=True)

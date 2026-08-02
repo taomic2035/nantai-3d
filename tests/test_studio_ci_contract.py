@@ -139,3 +139,23 @@ def test_ci_uses_only_repository_locked_browser_installers():
     assert "@latest" not in combined
     assert "npm install -g" not in combined
     assert "npx playwright" not in workflow
+
+
+def test_production_contract_replays_canonical_temp_evidence_on_macos():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    contract_job = _workflow_job(workflow, "production-release-contract")
+
+    step = contract_job.split(
+        "- name: Test macOS canonical temporary evidence replay",
+        1,
+    )[1].split("- name:", 1)[0]
+    assert "if: matrix.os == 'macos-latest'" in step
+    for test_node in (
+        "tests/test_real_scene_import.py::"
+        "test_production_import_is_metric_chunked_and_content_closed",
+        "tests/test_real_scene_acceptance.py::"
+        "test_aggregate_reopens_original_production_runtime_evidence",
+        "tests/test_remote_result_fetch_v2.py::"
+        "test_fetch_v2_derives_render_decision_and_closure_after_archive_verification",
+    ):
+        assert test_node in step
