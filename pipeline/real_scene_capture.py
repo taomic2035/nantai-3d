@@ -39,11 +39,13 @@ from pipeline.real_dataset_fetch import (
 )
 from pipeline.recon_schema import (
     AxisConvention,
+    CaptureSession,
     CoordinateUnits,
     FrameProvenance,
+    GeoAnchor,
     RegistrationResult,
 )
-from pipeline.registration import register
+from pipeline.registration import _read_gps, register
 from pipeline.registration_quality import (
     RegistrationQualityPolicy,
     RegistrationQualityReport,
@@ -646,6 +648,95 @@ def _discard_staging(staging_path: str) -> None:
         pass
 
 
+def _capture_sessions(capture: PreparedRealCapture) -> list[CaptureSession]:
+    """Derive complete SfM sessions from verified capture provenance.
+
+    Directory shape is not source provenance: a nested photo directory and an
+    extracted video-frame directory can occupy the same depth.  The capture
+    manifest records the exact source kind and ordinal, so the formal path uses
+    that evidence instead of rescanning path names heuristically.
+    """
+
+    manifest = capture.capture.manifest
+    by_source: dict[int, list] = {
+        ordinal: [] for ordinal in range(manifest.source_count)
+    }
+    for payload in manifest.payloads:
+        by_source[payload.source_ordinal].append(payload)
+
+    sessions: list[CaptureSession] = []
+    photo_images: list[str] = []
+    for source_ordinal in range(manifest.source_count):
+        payloads = sorted(
+            by_source[source_ordinal],
+            key=lambda payload: payload.logical_path,
+        )
+        if not payloads:
+            raise RealSceneCaptureError(
+                "capture manifest source has no payloads"
+            )
+        source_kind = payloads[0].source_kind
+        if any(payload.source_kind != source_kind for payload in payloads):
+            raise RealSceneCaptureError(
+                "capture manifest source kind is inconsistent"
+            )
+        images = [payload.logical_path for payload in payloads]
+        if source_kind == "video-frame":
+            sessions.append(
+                CaptureSession(
+                    session_id=f"video_capture_source_{source_ordinal}",
+                    kind="video",
+                    source=f"capture-source-{source_ordinal}",
+                    images=images,
+                )
+            )
+        else:
+            photo_images.extend(images)
+
+    if photo_images:
+        gps_observations = [
+            observation
+            for observation in (
+                _read_gps(
+                    capture.payload_root.joinpath(
+                        *PurePosixPath(image).parts
+                    )
+                )
+                for image in photo_images
+            )
+            if observation is not None
+        ]
+        geo_anchor = None
+        if gps_observations:
+            count = len(gps_observations)
+            geo_anchor = GeoAnchor(
+                lat=sum(item.lat for item in gps_observations) / count,
+                lon=sum(item.lon for item in gps_observations) / count,
+                alt=sum(item.alt for item in gps_observations) / count,
+            )
+        sessions.append(
+            CaptureSession(
+                session_id="photos_batch_0",
+                kind="photo_batch",
+                source="verified-capture",
+                images=sorted(photo_images),
+                geo_anchor=geo_anchor,
+            )
+        )
+
+    session_images = [
+        image for session in sessions for image in session.images
+    ]
+    manifest_images = [
+        payload.logical_path for payload in manifest.payloads
+    ]
+    if sorted(session_images) != sorted(manifest_images):
+        raise RealSceneCaptureError(
+            "capture sessions do not cover the capture manifest exactly"
+        )
+    return sessions
+
+
 def run_real_sfm(
     capture: PreparedRealCapture,
     run_root: Path,
@@ -668,6 +759,7 @@ def run_real_sfm(
             out_json=registration_path,
             engine="colmap",
             workspace=colmap_root,
+            sessions=_capture_sessions(capture),
         )
     except Exception as exc:
         raise RealSceneCaptureError("COLMAP registration failed") from exc

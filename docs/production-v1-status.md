@@ -38,6 +38,7 @@ scene identity，因此仍是 Preview，不是 Production V1。
 | 能力 | 状态 |
 |---|---|
 | 真实数据 source/rights/receipt | caller 已实现，缺正式素材输入 |
+| 图视频混合 capture session | 正式 SfM 从已验证 capture manifest 的 source kind/ordinal 派生完整会话；嵌套目录不再由路径层级猜测，待正式混合素材实跑 |
 | fresh COLMAP 与注册质量门 | canary 已实跑，正式素材尚未运行 |
 | 本地 Brush preview | 真实照片 internal canary 已贯通训练与导入，只能 preview-only |
 | 远程 submit/poll/fetch/reconnect | lifecycle receipt、恢复语义与固定演练 registry 已关闭；远程固定演练 job 已通过 |

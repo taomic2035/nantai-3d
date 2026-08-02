@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import pipeline.real_scene_capture as real_scene_capture
+from pipeline.ingest_manifest import IngestParams
 from pipeline.real_dataset import (
     CaptureRightsReceipt,
     DatasetLock,
@@ -22,6 +23,7 @@ from pipeline.real_dataset import (
 )
 from pipeline.real_dataset_fetch import DatasetDownloadError
 from pipeline.real_scene_capture import (
+    PreparedRealCapture,
     RealSceneCaptureError,
     prepare_local_capture,
     prepare_real_capture,
@@ -39,7 +41,12 @@ from pipeline.recon_schema import (
 )
 from pipeline.registration import mock_register
 from pipeline.registration_quality import RegistrationQualityPolicy
-from pipeline.studio_revisions import canonical_manifest_bytes
+from pipeline.studio_revisions import (
+    CapturePayload,
+    CaptureRevisionManifest,
+    PreparedCaptureBundle,
+    canonical_manifest_bytes,
+)
 
 _REVISION = "4" * 40
 
@@ -294,6 +301,130 @@ def _write_registration(path: Path, registration) -> None:
         encoding="utf-8",
         newline="\n",
     )
+
+
+def _prepared_nested_mixed_capture(root: Path) -> PreparedRealCapture:
+    payloads = {
+        "session-a/photo.jpg": b"photo",
+        "session-a/orbit.mp4.frames/frame_000000.jpg": b"video-frame-a",
+        "session-a/orbit.mp4.frames/frame_000001.jpg": b"video-frame-b",
+    }
+    bundle = root / "capture" / "bundle"
+    payload_root = bundle / "payload"
+    payload_root.mkdir(parents=True)
+    for logical_path, content in payloads.items():
+        target = payload_root.joinpath(*logical_path.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    def capture_payload(
+        logical_path: str,
+        *,
+        source_kind: str,
+        source_ordinal: int,
+        frame_index: int | None = None,
+    ) -> CapturePayload:
+        content = payloads[logical_path]
+        return CapturePayload(
+            logical_path=logical_path,
+            sha256=hashlib.sha256(content).hexdigest(),
+            byte_length=len(content),
+            source_kind=source_kind,
+            source_ordinal=source_ordinal,
+            frame_index=frame_index,
+        )
+
+    capture_manifest = CaptureRevisionManifest(
+        revision_id="capture-" + "1" * 32,
+        created_utc=datetime(2026, 8, 2, 4, 1, tzinfo=UTC),
+        provenance="measured",
+        synthetic=False,
+        source_count=2,
+        output_count=3,
+        ingest_session_id="ingest-" + "d" * 64,
+        ingest_manifest_sha256="e" * 64,
+        ingest_parameters=IngestParams(
+            fps=2.0,
+            max_frames=300,
+            blur_threshold=80.0,
+            max_long_edge=2560,
+        ),
+        payloads=(
+            capture_payload(
+                "session-a/photo.jpg",
+                source_kind="photo",
+                source_ordinal=0,
+            ),
+            capture_payload(
+                "session-a/orbit.mp4.frames/frame_000000.jpg",
+                source_kind="video-frame",
+                source_ordinal=1,
+                frame_index=0,
+            ),
+            capture_payload(
+                "session-a/orbit.mp4.frames/frame_000001.jpg",
+                source_kind="video-frame",
+                source_ordinal=1,
+                frame_index=15,
+            ),
+        ),
+    )
+    manifest_bytes = canonical_manifest_bytes(capture_manifest)
+    (bundle / "manifest.json").write_bytes(manifest_bytes)
+    prepared_bundle = PreparedCaptureBundle(
+        manifest=capture_manifest,
+        manifest_digest=hashlib.sha256(manifest_bytes).hexdigest(),
+        bundle=bundle,
+    )
+    return PreparedRealCapture(
+        source_sha256="a" * 64,
+        dataset_receipt_sha256="b" * 64,
+        selected_paths=(
+            "session-a/orbit.mp4",
+            "session-a/photo.jpg",
+        ),
+        capture=prepared_bundle,
+    )
+
+
+def test_sfm_preserves_all_nested_mixed_capture_sources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared = _prepared_nested_mixed_capture(tmp_path)
+
+    def fake_colmap_register(
+        photos_dir,
+        workspace,
+        *,
+        sessions,
+        **kwargs,
+    ):
+        del workspace, kwargs
+        return mock_register(photos_dir, sessions=sessions)
+
+    monkeypatch.setattr(
+        "pipeline.registration.colmap_register",
+        fake_colmap_register,
+    )
+
+    result = run_real_sfm(prepared, tmp_path / "run", _policy())
+
+    assert {pose.image for pose in result.registration.poses} == {
+        "session-a/photo.jpg",
+        "session-a/orbit.mp4.frames/frame_000000.jpg",
+        "session-a/orbit.mp4.frames/frame_000001.jpg",
+    }
+    assert {
+        session.kind: set(session.images)
+        for session in result.registration.sessions
+    } == {
+        "photo_batch": {"session-a/photo.jpg"},
+        "video": {
+            "session-a/orbit.mp4.frames/frame_000000.jpg",
+            "session-a/orbit.mp4.frames/frame_000001.jpg",
+        },
+    }
 
 
 def _write_sparse_model(

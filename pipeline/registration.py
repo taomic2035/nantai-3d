@@ -962,6 +962,7 @@ def register(
     engine: str = "auto",
     workspace: str | Path = "recon/colmap_ws",
     colmap_use_gpu: bool = False,
+    sessions: list[CaptureSession] | None = None,
 ) -> RegistrationResult:
     """配准入口: engine = auto | colmap | mock (colmap_use_gpu 默认 CPU, 可靠优先)"""
     if engine == "auto":
@@ -969,9 +970,14 @@ def register(
         logger.info(f"配准引擎自动选择: {engine}")
 
     if engine == "colmap":
-        result = colmap_register(photos_dir, workspace, use_gpu=colmap_use_gpu)
+        result = colmap_register(
+            photos_dir,
+            workspace,
+            sessions=sessions,
+            use_gpu=colmap_use_gpu,
+        )
     elif engine == "mock":
-        result = mock_register(photos_dir)
+        result = mock_register(photos_dir, sessions=sessions)
     else:
         raise ValueError(f"未知引擎: {engine}")
 
