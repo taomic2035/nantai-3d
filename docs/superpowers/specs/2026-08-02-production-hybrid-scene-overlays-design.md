@@ -2,8 +2,8 @@
 
 Date: 2026-08-02
 
-Status: selected direction approved by the user on 2026-08-02; written
-specification pending user review
+Status: selected direction and written specification approved by the user on
+2026-08-02
 
 Program objective: complete the original replaceable-assets promise without
 rewriting or misrepresenting a real Gaussian reconstruction. A verified real
