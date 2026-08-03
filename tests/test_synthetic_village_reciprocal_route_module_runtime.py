@@ -2289,3 +2289,59 @@ class TestProbeRequestStableDescriptor:
         monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
         result = runtime._load_build_request(target)
         assert result["build_id"] == "a" * 64
+
+
+class TestApplyReciprocalRouteRequestStableDescriptor:
+    """RED->GREEN: apply_reciprocal_route_modules._load_request must read the
+    reciprocal-route runtime request through a single ``O_NOFOLLOW`` descriptor,
+    not ``Path.read_bytes``.
+
+    The previous implementation opened the request file once via
+    ``Path.read_bytes`` to parse the JSON and again via ``_sha256_file`` to
+    compute the digest that is bound to the request.  Between the two opens an
+    attacker could swap the file so the digest matched the original while the
+    parsed JSON came from the swapped file -- a false cryptographic binding.
+    ``_load_request`` now reads through ``_stable_read_and_sha256`` which
+    computes the SHA from the SAME bytes it returns, and refuses to follow
+    symlinks via ``O_NOFOLLOW``.
+    """
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict) -> bytes:
+        raw = canary._canonical_json_bytes(payload)
+        path.write_bytes(raw)
+        return raw
+
+    def test_load_request_rejects_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = _load_runtime_module(monkeypatch)
+        real = tmp_path / "real-request.json"
+        self._write_json(real, {"valid": True})
+        link = tmp_path / "link-request.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(runtime.RuntimeBuildError):
+            runtime._load_request(link)
+
+    def test_load_request_does_not_use_path_read_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = _load_runtime_module(monkeypatch)
+        target = tmp_path / "request.json"
+        self._write_json(target, {"valid": True})
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError(
+                    "_load_request must not use Path.read_bytes"
+                )
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        result = runtime._load_request(target)
+        assert result == {"valid": True}
