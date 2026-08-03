@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -346,3 +347,55 @@ def test_neighbor_seam_validator_rejects_geometry_gap(
     results[1]["previous_seam_actual_m"] = (1.3, 0.0, 0.0)
     with pytest.raises(runtime.RuntimeBuildError, match="neighbor seam"):
         runtime._validate_neighbor_seams(results, max_gap_m=0.2)
+
+
+class TestPerimeterClosureRequestStableDescriptor:
+    """RED->GREEN: _load_request must read the perimeter-closure request through
+    a single ``O_NOFOLLOW`` descriptor, not ``Path.read_bytes``.
+
+    The previous implementation opened the file once via ``Path.read_bytes`` to
+    parse the JSON and again via ``_sha256_file`` to compute the digest that is
+    bound to the request.  Between the two opens an attacker could swap the file
+    so the digest matched the original while the parsed JSON came from the
+    swapped file -- a false cryptographic binding.  ``_load_request`` now reads
+    through ``_stable_read_and_sha256`` which computes the SHA from the SAME
+    bytes it returns, and refuses to follow symlinks.
+    """
+
+    @staticmethod
+    def _write_canonical_json(path: Path, runtime: ModuleType, payload: dict) -> bytes:
+        raw = runtime._canonical_bytes(payload)
+        path.write_bytes(raw)
+        return raw
+
+    def test_load_request_rejects_symlink(
+        self, tmp_path: Path, runtime: ModuleType,
+    ) -> None:
+        real = tmp_path / "real-request.json"
+        self._write_canonical_json(real, runtime, {"valid": True})
+        link = tmp_path / "link-request.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(runtime.RuntimeBuildError):
+            runtime._load_request(link)
+
+    def test_load_request_does_not_use_path_read_bytes(
+        self, tmp_path: Path, runtime: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "request.json"
+        self._write_canonical_json(target, runtime, {"valid": True})
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError(
+                    "_load_request must not use Path.read_bytes"
+                )
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        result = runtime._load_request(target)
+        assert result == {"valid": True}
