@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -273,13 +275,79 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
 
 
 def _read_json(path: Path) -> bytes:
-    expected_size = path.stat().st_size
-    if expected_size <= 0 or expected_size > MAX_DEFAULT_RESOURCE_BYTES:
-        raise ValueError(f"default resource size is invalid: {path.name}")
-    with path.open("rb") as stream:
-        raw = stream.read(MAX_DEFAULT_RESOURCE_BYTES + 1)
-    if len(raw) != expected_size or len(raw) > MAX_DEFAULT_RESOURCE_BYTES:
-        raise ValueError(f"default resource changed during bounded read: {path.name}")
+    """Read a default resource JSON file through a single O_NOFOLLOW descriptor.
+
+    Pre-checks with ``lstat`` to reject symlinks and Windows reparse points
+    and to bound the read by ``MAX_DEFAULT_RESOURCE_BYTES``.  The actual
+    content read goes through the SAME descriptor, with ``fstat`` identity
+    checks before and after reading and a post-read ``lstat`` recheck,
+    eliminating the check-then-reopen TOCTOU window of ``stat`` + ``open``.
+    """
+    try:
+        before = path.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError(f"default resource is absent: {path.name}") from exc
+    except OSError as exc:
+        raise ValueError(f"default resource cannot be inspected: {path.name}") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > MAX_DEFAULT_RESOURCE_BYTES
+    ):
+        raise ValueError(f"default resource is not a bounded regular file: {path.name}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"default resource cannot be opened: {path.name}") from exc
+    payload = bytearray()
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise ValueError(
+                f"default resource changed before read: {path.name}"
+            )
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > MAX_DEFAULT_RESOURCE_BYTES:
+                    raise ValueError(
+                        f"default resource exceeds bounded read limit: {path.name}"
+                    )
+            read_fstat = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise ValueError(f"default resource cannot be read: {path.name}") from exc
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise ValueError(
+            f"default resource cannot be reinspected: {path.name}"
+        ) from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(read_fstat.st_mode)
+        or opened.st_ino != read_fstat.st_ino
+        or opened.st_dev != read_fstat.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise ValueError(f"default resource changed during read: {path.name}")
+    raw = bytes(payload)
     json.loads(
         raw.decode("utf-8"),
         object_pairs_hook=_reject_duplicate_keys,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -57,6 +58,7 @@ from pipeline.synthetic_village.canary import (
 from pipeline.synthetic_village.defaults import (
     DEFAULT_RECIPE_PATH,
     DEFAULT_VISUAL_SLOTS_PATH,
+    _read_json,
 )
 from pipeline.synthetic_village.elevated_topology import (
     ElevatedTopologyPlan,
@@ -2967,3 +2969,56 @@ def test_render_canary_cli_uses_private_defaults_and_prints_resume_counts(
         "rendered_count": 2,
         "reused_count": 22,
     }
+
+
+class TestDefaultResourceReadStableDescriptor:
+    """RED->GREEN: _read_json must read default resource files through a
+    single ``O_NOFOLLOW`` descriptor, not ``stat`` + ``open``.
+
+    The previous implementation called ``path.stat()`` to check the size and
+    then ``path.open("rb")`` to read the content.  Between the two opens an
+    attacker with filesystem access could replace the file with a symlink or
+    swap the content.  ``_read_json`` now uses ``lstat`` + ``O_NOFOLLOW`` +
+    ``fstat`` identity checks to eliminate the check-then-reopen TOCTOU
+    window.
+    """
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict) -> bytes:
+        raw = (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+        path.write_bytes(raw)
+        return raw
+
+    def test_read_json_rejects_symlink(self, tmp_path: Path) -> None:
+        real = tmp_path / "real.json"
+        self._write_json(real, {"valid": True})
+        link = tmp_path / "link.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(ValueError):
+            _read_json(link)
+
+    def test_read_json_does_not_use_path_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.json"
+        self._write_json(target, {"valid": True})
+
+        original_open = Path.open
+
+        def reject_open(self, *args, **kwargs):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if mode in ("r", "rb", "rt", "r+b", "r+"):
+                raise AssertionError(
+                    "_read_json must not use Path.open for reading"
+                )
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", reject_open)
+        raw = _read_json(target)
+        assert json.loads(raw.decode("utf-8")) == {"valid": True}
