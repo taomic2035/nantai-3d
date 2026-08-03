@@ -2152,6 +2152,35 @@ def _stable_file_sha(
         return bound.byte_length, bound.sha256
 
 
+def _read_bound_hashed_file_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    allow_empty: bool = False,
+) -> tuple[bytes, int, str]:
+    """Read a bounded file's bytes through a single ``O_NOFOLLOW`` descriptor.
+
+    Returns the bytes payload along with ``byte_length`` and ``sha256``,
+    eliminating the check-then-reopen TOCTOU window of ``Path.read_bytes``
+    followed by ``lstat``.  The bytes are read from the SAME descriptor that
+    was used to compute the SHA256, with pre/post ``lstat`` and ``fstat``
+    identity checks performed by ``_open_bound_hashed_file``.
+    """
+    with _open_bound_hashed_file(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+        allow_empty=allow_empty,
+    ) as bound:
+        payload = bound.stream.read()
+    if len(payload) != bound.byte_length:
+        raise RemoteResultBundleError(
+            f"{label} cannot be reread consistently"
+        )
+    return payload, bound.byte_length, bound.sha256
+
+
 @contextmanager
 def _open_bound_zip_archive(
     path: Path,
@@ -2266,19 +2295,13 @@ def build_remote_result_bundle(
     binding_by_path = {member.path: member for member in members}
     contract_payloads: dict[str, bytes] = {}
     for name in _EVALUATION_FIXED_MEMBERS & actual_names:
-        source, expected_size, expected_sha, signature = sources[name]
-        try:
-            payload = source.read_bytes()
-            after = source.lstat()
-        except OSError as exc:
-            raise RemoteResultBundleError(
-                "remote evaluation contract cannot be read"
-            ) from exc
-        if (
-            _stat_signature(after) != signature
-            or len(payload) != expected_size
-            or hashlib.sha256(payload).hexdigest() != expected_sha
-        ):
+        source, expected_size, expected_sha, _signature = sources[name]
+        payload, measured_size, measured_sha = _read_bound_hashed_file_bytes(
+            source,
+            label=f"remote evaluation contract {name}",
+            max_bytes=_ONE_MIB,
+        )
+        if measured_size != expected_size or measured_sha != expected_sha:
             raise RemoteResultBundleError(
                 "remote evaluation contract changed while being read"
             )
@@ -2289,14 +2312,11 @@ def build_remote_result_bundle(
         container_identity=container_identity,
     )
     expected_container = (container_identity + "\n").encode("ascii")
-    try:
-        container_bytes = (
-            root / "container-identity.txt"
-        ).read_bytes()
-    except OSError as exc:
-        raise RemoteResultBundleError(
-            "container identity cannot be reread"
-        ) from exc
+    container_bytes, _size, _sha = _read_bound_hashed_file_bytes(
+        root / "container-identity.txt",
+        label="result container identity",
+        max_bytes=_ONE_MIB,
+    )
     if container_bytes != expected_container:
         raise RemoteResultBundleError(
             "result container identity bytes mismatch"
@@ -2412,19 +2432,17 @@ def _read_bound_result_contract(
     name: str,
 ) -> bytes:
     try:
-        source, expected_size, expected_sha, signature = sources[name]
-        payload = source.read_bytes()
-        after = source.lstat()
-    except (KeyError, OSError) as exc:
+        source, expected_size, expected_sha, _signature = sources[name]
+    except KeyError as exc:
         raise RemoteResultBundleError(
             f"production result contract is unavailable: {name}"
         ) from exc
-    if (
-        len(payload) > 1024 * 1024
-        or _stat_signature(after) != signature
-        or len(payload) != expected_size
-        or hashlib.sha256(payload).hexdigest() != expected_sha
-    ):
+    payload, measured_size, measured_sha = _read_bound_hashed_file_bytes(
+        source,
+        label=f"production result contract {name}",
+        max_bytes=_ONE_MIB,
+    )
+    if measured_size != expected_size or measured_sha != expected_sha:
         raise RemoteResultBundleError(
             f"production result contract changed while read: {name}"
         )

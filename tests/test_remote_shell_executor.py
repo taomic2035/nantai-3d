@@ -4751,3 +4751,128 @@ def test_load_remote_container_lifecycle_receipt_rejects_ancestor_reparse(
         match="regular file|redirected|unsafe|immutable",
     ):
         remote_module.load_remote_container_lifecycle_receipt(path)
+
+
+class TestReadBoundHashedFileBytesStableDescriptor:
+    """RED->GREEN: contract reads must go through a single ``O_NOFOLLOW``
+    descriptor, not ``Path.read_bytes`` + ``lstat``.
+
+    ``_read_bound_result_contract`` and the container-identity read in
+    ``build_remote_result_bundle`` previously opened the file via
+    ``Path.read_bytes()``, which follows symlinks and has no identity
+    verification between the path check and the read.  They now route
+    through ``_read_bound_hashed_file_bytes`` which uses ``lstat`` +
+    ``O_NOFOLLOW`` + ``fstat`` identity checks to eliminate the
+    check-then-reopen TOCTOU window.
+    """
+
+    def test_returns_payload_size_and_sha(self, tmp_path: Path) -> None:
+        payload = b'{"valid": true}\n'
+        target = tmp_path / "contract.json"
+        target.write_bytes(payload)
+
+        result = remote_module._read_bound_hashed_file_bytes(
+            target,
+            label="test contract",
+            max_bytes=remote_module._ONE_MIB,
+        )
+        assert result == (payload, len(payload), _sha(payload))
+
+    def test_rejects_symlink(self, tmp_path: Path) -> None:
+        real = tmp_path / "real.json"
+        real.write_bytes(b'{"valid": true}\n')
+        link = tmp_path / "link.json"
+        try:
+            link.symlink_to(real)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable")
+
+        with pytest.raises(RemoteResultBundleError):
+            remote_module._read_bound_hashed_file_bytes(
+                link,
+                label="test contract",
+                max_bytes=remote_module._ONE_MIB,
+            )
+
+    def test_does_not_use_path_read_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "contract.json"
+        target.write_bytes(b'{"valid": true}\n')
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError(
+                    "_read_bound_hashed_file_bytes must not use Path.read_bytes"
+                )
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        payload, size, digest = remote_module._read_bound_hashed_file_bytes(
+            target,
+            label="test contract",
+            max_bytes=remote_module._ONE_MIB,
+        )
+        assert payload == b'{"valid": true}\n'
+        assert size == len(payload)
+        assert digest == _sha(payload)
+
+
+class TestReadBoundResultContractStableDescriptor:
+    """RED->GREEN: ``_read_bound_result_contract`` must reject symlinked
+    contract files instead of following them via ``Path.read_bytes``."""
+
+    def test_rejects_symlink(self, tmp_path: Path) -> None:
+        payload = b'{"valid": true}\n'
+        target = tmp_path / "target.json"
+        target.write_bytes(payload)
+        link = tmp_path / "link.json"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable")
+
+        sources = {
+            "link.json": (
+                link,
+                len(payload),
+                _sha(payload),
+                remote_module._stat_signature(link.lstat()),
+            )
+        }
+
+        with pytest.raises(RemoteResultBundleError):
+            remote_module._read_bound_result_contract(sources, "link.json")
+
+    def test_does_not_use_path_read_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        payload = b'{"valid": true}\n'
+        target = tmp_path / "contract.json"
+        target.write_bytes(payload)
+
+        sources = {
+            "contract.json": (
+                target,
+                len(payload),
+                _sha(payload),
+                remote_module._stat_signature(target.lstat()),
+            )
+        }
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError(
+                    "_read_bound_result_contract must not use Path.read_bytes"
+                )
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        result = remote_module._read_bound_result_contract(
+            sources, "contract.json"
+        )
+        assert result == payload
