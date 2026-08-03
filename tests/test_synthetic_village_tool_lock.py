@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import stat
 import zipfile
 from pathlib import Path
@@ -511,3 +512,83 @@ def test_cli_accepts_exact_ktx_4_4_2_install_flag():
         ["--install-ktx-4.4.2"],
     )
     assert args.install_ktx_4_4_2 is True
+
+
+class TestReadBoundedJsonStableDescriptor:
+    """RED->GREEN: ``_read_bounded_json`` must read JSON input through a
+    single ``O_NOFOLLOW`` descriptor, not ``stat`` + ``open``.
+
+    The previous implementation called ``path.stat()`` (which follows
+    symlinks) to check the size and then ``path.open("rb")`` (which also
+    follows symlinks) to read the content, creating a check-then-reopen
+    TOCTOU window.  ``_read_bounded_json`` now uses ``lstat`` +
+    ``O_NOFOLLOW`` + ``fstat`` identity checks to eliminate the window.
+    """
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict) -> bytes:
+        raw = (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+        path.write_bytes(raw)
+        return raw
+
+    def test_rejects_symlink(self, tmp_path: Path) -> None:
+        real = tmp_path / "real.json"
+        self._write_json(real, {"valid": True})
+        link = tmp_path / "link.json"
+        try:
+            os.symlink(real, link)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable")
+        with pytest.raises(tool_lock.ToolLockError):
+            tool_lock._read_bounded_json(
+                link, maximum_bytes=tool_lock.MAX_LOCK_BYTES,
+            )
+
+    def test_does_not_use_path_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.json"
+        self._write_json(target, {"valid": True})
+
+        original_open = Path.open
+
+        def reject_open(self, *args, **kwargs):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if mode in ("r", "rb", "rt", "r+b", "r+"):
+                raise AssertionError(
+                    "_read_bounded_json must not use Path.open for reading"
+                )
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", reject_open)
+        raw, payload = tool_lock._read_bounded_json(
+            target, maximum_bytes=tool_lock.MAX_LOCK_BYTES,
+        )
+        assert payload == {"valid": True}
+        assert b'"valid": true' in raw
+
+    def test_does_not_use_path_stat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.json"
+        self._write_json(target, {"valid": True})
+
+        original_stat = Path.stat
+
+        def reject_stat(self, *args, **kwargs):
+            follow_symlinks = kwargs.get("follow_symlinks", True)
+            if self == target and follow_symlinks is not False:
+                raise AssertionError(
+                    "_read_bounded_json must not use Path.stat (follows symlinks)"
+                )
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", reject_stat)
+        raw, payload = tool_lock._read_bounded_json(
+            target, maximum_bytes=tool_lock.MAX_LOCK_BYTES,
+        )
+        assert payload == {"valid": True}
+        assert b'"valid": true' in raw
