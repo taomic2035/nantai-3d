@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Literal
@@ -1378,22 +1379,42 @@ def load_scene_plan(path: Path) -> ScenePlan:
     path = Path(path).absolute()
     try:
         parent = path.parent
-        if _is_linklike(path) or _is_linklike(parent) or parent.resolve(strict=True) != parent:
+        if _is_linklike(parent) or parent.resolve(strict=True) != parent:
             raise ScenePlanError("scene plan path has a redirected leaf or parent")
-        before = path.stat()
-        if before.st_size <= 0 or before.st_size > MAX_SCENE_PLAN_BYTES:
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > MAX_SCENE_PLAN_BYTES
+        ):
             raise ScenePlanError("scene plan size is invalid")
-        with path.open("rb") as stream:
-            opened = os.fstat(stream.fileno())
-            if _stat_signature(before) != _stat_signature(opened):
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+                or _stat_signature(opened) != _stat_signature(before)
+            ):
                 raise ScenePlanError("scene plan changed before bounded read")
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        with stream:
             raw = stream.read(MAX_SCENE_PLAN_BYTES + 1)
             after_open = os.fstat(stream.fileno())
-        after = path.stat()
+        after = path.lstat()
         if (
             len(raw) != before.st_size
             or len(raw) > MAX_SCENE_PLAN_BYTES
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
             or _stat_signature(opened) != _stat_signature(after_open)
+            or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
             or _stat_signature(before) != _stat_signature(after)
         ):
             raise ScenePlanError("scene plan changed during bounded read")
