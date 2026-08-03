@@ -191,9 +191,11 @@ def _runtime_paths(argv):
 
 
 def _load_request(path: Path) -> dict:
-    raw = path.read_bytes()
-    if not raw or len(raw) > 16 * 1024 * 1024:
-        raise ManifestBuildError("request bytes are absent or unbounded")
+    raw, _sha = _stable_read_and_sha256(
+        path, max_bytes=16 * 1024 * 1024, label="manifest request",
+    )
+    if not raw:
+        raise ManifestBuildError("request bytes are absent")
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -331,9 +333,13 @@ def _validate_portal_spec(portal: dict) -> None:
 
 
 def _load_build_request(build_request_path: Path) -> dict:
-    raw = build_request_path.read_bytes()
-    if not raw or len(raw) > 64 * 1024 * 1024:
-        raise ManifestBuildError("build request bytes are absent or unbounded")
+    raw, _sha = _stable_read_and_sha256(
+        build_request_path,
+        max_bytes=64 * 1024 * 1024,
+        label="reciprocal-route-build-request",
+    )
+    if not raw:
+        raise ManifestBuildError("build request bytes are absent")
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
