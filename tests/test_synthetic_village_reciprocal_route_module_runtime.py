@@ -18,6 +18,7 @@ import importlib.util
 import inspect
 import json
 import math
+import os
 import subprocess
 import sys
 import uuid
@@ -2099,3 +2100,125 @@ def test_run_build_rejects_tampered_report_identity(
         import shutil
 
         shutil.rmtree(build_root, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# _load_and_validate_build_report: stable descriptor (security).
+# ---------------------------------------------------------------------------
+
+
+class TestProbeBuildReportStableDescriptor:
+    """RED->GREEN: _load_and_validate_build_report must read the build report
+    through a single O_NOFOLLOW descriptor so the SHA and the parsed JSON come
+    from the SAME bytes.
+
+    The previous implementation called ``_sha256_file`` (one ``path.open``)
+    and then ``path.read_bytes()`` (a second ``path.open``).  Between the two
+    opens an attacker could swap the file: the SHA would match the original
+    while the parsed JSON came from the swapped file -- a false cryptographic
+    binding.
+    """
+
+    @staticmethod
+    def _probe_request(blend_dir: Path, report_bytes: bytes) -> dict:
+        report_sha = hashlib.sha256(report_bytes).hexdigest()
+        return {
+            "input_blend_path": str(blend_dir / "scene.blend"),
+            "input_build_report_sha256": report_sha,
+            "input_build_id": "a" * 64,
+            "input_blend_sha256": "b" * 64,
+            "input_plan_sha256": "c" * 64,
+        }
+
+    @staticmethod
+    def _valid_report_bytes(build_id: str, blend_sha: str, plan_sha: str) -> bytes:
+        payload = {
+            "build_id": build_id,
+            "artifact": {"name": "scene", "kind": "blender-scene", "sha256": blend_sha},
+            "reciprocal_route_module_plan_sha256": plan_sha,
+        }
+        return canary._canonical_json_bytes(payload)
+
+    def test_rejects_symlink_build_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = _load_probe_runtime_module(monkeypatch)
+        report_bytes = self._valid_report_bytes("a" * 64, "b" * 64, "c" * 64)
+        real = tmp_path / "real-report.json"
+        real.write_bytes(report_bytes)
+        link = tmp_path / "reciprocal-route-build-report.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+
+        (tmp_path / "scene.blend").write_bytes(b"")
+
+        probe_request = self._probe_request(tmp_path, report_bytes)
+        with pytest.raises(runtime.ProbeBuildError):
+            runtime._load_and_validate_build_report(probe_request)
+
+    def test_does_not_use_path_read_bytes_for_build_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = _load_probe_runtime_module(monkeypatch)
+        report_bytes = self._valid_report_bytes("a" * 64, "b" * 64, "c" * 64)
+        report_path = tmp_path / "reciprocal-route-build-report.json"
+        report_path.write_bytes(report_bytes)
+        (tmp_path / "scene.blend").write_bytes(b"")
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == report_path:
+                raise AssertionError(
+                    "build report must not be read via a separate Path.read_bytes"
+                )
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+
+        probe_request = self._probe_request(tmp_path, report_bytes)
+        report = runtime._load_and_validate_build_report(probe_request)
+        assert report["build_id"] == "a" * 64
+
+    def test_sha_binds_parsed_bytes_not_a_separate_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The SHA must be computed from the SAME bytes that are parsed.
+
+        With the previous two-open pattern (_sha256_file + read_bytes), an
+        attacker could swap the file between the hash open and the parse open:
+        the SHA would match the original while the parsed JSON came from the
+        swapped file.  The stable read computes the SHA from the same bytes it
+        returns for parsing, so any swap that changes the content causes the
+        SHA to disagree with the expected value -- even when the swapped JSON
+        carries the SAME identity fields (build_id, artifact.sha256, plan_sha)
+        that the field-level validator would otherwise accept.
+        """
+        runtime = _load_probe_runtime_module(monkeypatch)
+        original_bytes = self._valid_report_bytes("a" * 64, "b" * 64, "c" * 64)
+        # Same identity fields, different extra content -> field checks would
+        # pass, but the SHA (from the original) must not bind the swapped bytes.
+        swapped_payload = json.loads(original_bytes.decode("utf-8"))
+        swapped_payload["counts"] = {"module_mesh_objects": 999}
+        swapped_bytes = canary._canonical_json_bytes(swapped_payload)
+        report_path = tmp_path / "reciprocal-route-build-report.json"
+        report_path.write_bytes(original_bytes)
+        (tmp_path / "scene.blend").write_bytes(b"")
+
+        original_open = os.open
+        swap_count = 0
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1 and Path(path) == report_path:
+                report_path.write_bytes(swapped_bytes)
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+
+        probe_request = self._probe_request(tmp_path, original_bytes)
+        with pytest.raises(runtime.ProbeBuildError):
+            runtime._load_and_validate_build_report(probe_request)

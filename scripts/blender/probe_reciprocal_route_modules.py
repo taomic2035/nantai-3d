@@ -41,6 +41,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -194,6 +195,78 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _stable_read_and_sha256(
+    path: Path, *, max_bytes: int, label: str,
+) -> tuple[bytes, str]:
+    """Read ``path`` through a single ``O_NOFOLLOW`` descriptor and compute
+    its SHA-256 from the SAME bytes.
+
+    This closes the false-binding TOCTOU where ``_sha256_file`` opened the
+    file once for hashing and ``read_bytes`` opened it again for parsing:
+    between the two opens an attacker could swap the file so the hash matched
+    the original while the parsed content came from the swapped file.
+
+    Returns ``(raw_bytes, sha256_hex)``.  Raises ``ProbeBuildError`` on any
+    identity mismatch, symlink, non-regular file, or over-size read.
+    """
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        raise ProbeBuildError(f"{label} not found") from None
+    except OSError as exc:
+        raise ProbeBuildError(f"{label} cannot be inspected") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+        raise ProbeBuildError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ProbeBuildError(f"{label} cannot be opened") from exc
+    digest = hashlib.sha256()
+    payload = bytearray()
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise ProbeBuildError(f"{label} changed before read")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise ProbeBuildError(f"{label} exceeds bounded read limit")
+                digest.update(chunk)
+            read_fstat = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise ProbeBuildError(f"{label} cannot be read") from exc
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise ProbeBuildError(f"{label} cannot be reinspected") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(read_fstat.st_mode)
+        or opened.st_ino != read_fstat.st_ino
+        or opened.st_dev != read_fstat.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise ProbeBuildError(f"{label} changed during read")
+    return bytes(payload), digest.hexdigest()
 
 
 def _is_sha256(value) -> bool:
@@ -379,19 +452,22 @@ def _load_and_validate_build_report(probe_request: dict) -> dict:
 
     blend_path = Path(probe_request["input_blend_path"]).resolve()
     build_report_path = blend_path.parent / "reciprocal-route-build-report.json"
-    if not build_report_path.is_file():
-        raise ProbeBuildError(
-            f"reciprocal-route-build-report.json not found at {build_report_path}",
-        )
-    file_sha = _sha256_file(build_report_path)
+    # Read the build report through a single O_NOFOLLOW descriptor so the SHA
+    # and the parsed JSON come from the SAME bytes.  The previous pattern
+    # (_sha256_file + read_bytes) opened the file twice, allowing a swap
+    # between the hash and the parse -- a false cryptographic binding.
+    raw, file_sha = _stable_read_and_sha256(
+        build_report_path,
+        max_bytes=64 * 1024 * 1024,
+        label="reciprocal-route-build-report.json",
+    )
+    if not raw:
+        raise ProbeBuildError("build report bytes are absent")
     if file_sha != probe_request["input_build_report_sha256"]:
         raise ProbeBuildError(
             "probe request input_build_report_sha256 disagrees with "
             "reciprocal-route-build-report.json file SHA",
         )
-    raw = build_report_path.read_bytes()
-    if not raw or len(raw) > 64 * 1024 * 1024:
-        raise ProbeBuildError("build report bytes are absent or unbounded")
     try:
         build_report = json.loads(
             raw.decode("utf-8"),
