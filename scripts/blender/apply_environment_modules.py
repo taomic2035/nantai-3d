@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -140,6 +141,69 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _stable_read_and_sha256(path, *, max_bytes, label):
+    """Read ``path`` through a single ``O_NOFOLLOW`` descriptor and compute
+    its SHA-256 from the SAME bytes, preventing symlink following and
+    check-then-reopen TOCTOU swaps."""
+    path = Path(path)
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        raise RuntimeBuildError(f"{label} not found") from None
+    except OSError as exc:
+        raise RuntimeBuildError(f"{label} cannot be inspected") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+        raise RuntimeBuildError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeBuildError(f"{label} cannot be opened") from exc
+    digest = hashlib.sha256()
+    payload = bytearray()
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise RuntimeBuildError(f"{label} changed before read")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise RuntimeBuildError(f"{label} exceeds bounded read limit")
+                digest.update(chunk)
+            read_fstat = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise RuntimeBuildError(f"{label} cannot be read") from exc
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise RuntimeBuildError(f"{label} cannot be reinspected") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(read_fstat.st_mode)
+        or opened.st_ino != read_fstat.st_ino
+        or opened.st_dev != read_fstat.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise RuntimeBuildError(f"{label} changed during read")
+    return bytes(payload), digest.hexdigest()
+
+
 def _is_sha256(value):
     return (
         isinstance(value, str)
@@ -178,9 +242,11 @@ def _runtime_paths(argv):
 
 
 def _load_request(path):
-    raw = path.read_bytes()
-    if not raw or len(raw) > 16 * 1024 * 1024:
-        raise RuntimeBuildError("request bytes are absent or unbounded")
+    raw, _sha = _stable_read_and_sha256(
+        path, max_bytes=16 * 1024 * 1024, label="environment-module request",
+    )
+    if not raw:
+        raise RuntimeBuildError("request bytes are absent")
     try:
         request = json.loads(
             raw.decode("utf-8"),
