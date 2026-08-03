@@ -2222,3 +2222,70 @@ class TestProbeBuildReportStableDescriptor:
         probe_request = self._probe_request(tmp_path, original_bytes)
         with pytest.raises(runtime.ProbeBuildError):
             runtime._load_and_validate_build_report(probe_request)
+
+
+class TestProbeRequestStableDescriptor:
+    """RED->GREEN: _load_request and _load_build_request must read through a
+    single O_NOFOLLOW descriptor, not Path.read_bytes."""
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict) -> bytes:
+        raw = canary._canonical_json_bytes(payload)
+        path.write_bytes(raw)
+        return raw
+
+    def test_load_request_rejects_symlink(self, tmp_path, monkeypatch):
+        runtime = _load_probe_runtime_module(monkeypatch)
+        real = tmp_path / "real-request.json"
+        self._write_json(real, {"valid": True})
+        link = tmp_path / "link-request.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(runtime.ProbeBuildError):
+            runtime._load_request(link)
+
+    def test_load_request_does_not_use_path_read_bytes(self, tmp_path, monkeypatch):
+        runtime = _load_probe_runtime_module(monkeypatch)
+        target = tmp_path / "request.json"
+        self._write_json(target, {"probe_script_sha256": "a" * 64})
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError("_load_request must not use Path.read_bytes")
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        result = runtime._load_request(target)
+        assert result["probe_script_sha256"] == "a" * 64
+
+    def test_load_build_request_rejects_symlink(self, tmp_path, monkeypatch):
+        runtime = _load_probe_runtime_module(monkeypatch)
+        real = tmp_path / "real-build-request.json"
+        self._write_json(real, {"build_id": "a" * 64})
+        link = tmp_path / "link-build-request.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(runtime.ProbeBuildError):
+            runtime._load_build_request(link)
+
+    def test_load_build_request_does_not_use_path_read_bytes(self, tmp_path, monkeypatch):
+        runtime = _load_probe_runtime_module(monkeypatch)
+        target = tmp_path / "build-request.json"
+        self._write_json(target, {"build_id": "a" * 64})
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError("_load_build_request must not use Path.read_bytes")
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        result = runtime._load_build_request(target)
+        assert result["build_id"] == "a" * 64
