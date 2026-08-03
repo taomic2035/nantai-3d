@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import shutil
 import struct
 from pathlib import Path
@@ -676,3 +677,62 @@ def test_publish_mesh_bundle_is_absent_only_and_rejects_tampering(
             build_tool_id="pytest-mesh-builder-v1",
         )
     assert not _mesh_staging_directories(work_root)
+
+
+class TestReadStableFileStableDescriptor:
+    """RED->GREEN: ``_read_stable_file`` must read through a single
+    ``O_NOFOLLOW`` descriptor, not ``stat`` + ``open``.
+
+    The previous implementation called ``path.is_file()`` (which follows
+    symlinks), ``_stat_signature(path)`` (which calls ``path.stat()`` and
+    follows symlinks) and then ``path.open("rb")`` (which also follows
+    symlinks) to read the content, creating a check-then-reopen TOCTOU
+    window.  ``_read_stable_file`` now uses ``lstat`` + ``O_NOFOLLOW`` +
+    ``fstat`` identity checks to eliminate the window.
+    """
+
+    @staticmethod
+    def _write_bytes(path: Path, payload: bytes) -> bytes:
+        path.write_bytes(payload)
+        return payload
+
+    def test_rejects_symlink(self, tmp_path: Path) -> None:
+        real = tmp_path / "real.glb"
+        self._write_bytes(real, b"trusted GLB content")
+        link = tmp_path / "link.glb"
+        try:
+            os.symlink(real, link)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable")
+        with pytest.raises(MeshAssetBundleError):
+            mesh_asset_bundle._read_stable_file(
+                link,
+                maximum_bytes=mesh_asset_bundle.MAX_MESH_TEMPLATE_GLB_BYTES,
+                label="test input",
+            )
+
+    def test_does_not_use_path_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.glb"
+        payload = self._write_bytes(target, b"trusted GLB content")
+
+        original_open = Path.open
+
+        def reject_open(self, *args, **kwargs):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if mode in ("r", "rb", "rt", "r+b", "r+"):
+                raise AssertionError(
+                    "_read_stable_file must not use Path.open for reading"
+                )
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", reject_open)
+        assert (
+            mesh_asset_bundle._read_stable_file(
+                target,
+                maximum_bytes=mesh_asset_bundle.MAX_MESH_TEMPLATE_GLB_BYTES,
+                label="test input",
+            )
+            == payload
+        )
