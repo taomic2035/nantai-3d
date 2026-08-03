@@ -6,6 +6,8 @@ import hashlib
 import io
 import json
 import math
+import os
+import stat
 import struct
 from collections import Counter
 from dataclasses import dataclass
@@ -213,25 +215,75 @@ def _stat_signature(path: Path) -> tuple[int, int, int, int, int]:
 
 
 def _read_stable_file(path: Path, *, maximum_bytes: int) -> bytes:
+    """Read a bounded GLB file through a single ``O_NOFOLLOW`` descriptor.
+
+    Pre-checks with ``lstat`` to reject symlinks and Windows reparse points
+    and to bound the read by ``maximum_bytes``.  The actual content read goes
+    through the SAME descriptor, with ``fstat`` identity checks before and
+    after reading and a post-read ``lstat`` recheck, eliminating the
+    check-then-reopen TOCTOU window of ``stat`` + ``open``.
+    """
     path = Path(path).expanduser().absolute()
     try:
         resolved = path.resolve(strict=True)
     except OSError as exc:
         raise GlbMaterialAuditError("GLB path is not a real file") from exc
-    if _is_linklike(path) or not path.is_file() or resolved != path:
+    if resolved != path:
         raise GlbMaterialAuditError("GLB path is redirected or not a real file")
     try:
-        before = _stat_signature(path)
-        if before[2] <= 0 or before[2] > maximum_bytes:
-            raise GlbMaterialAuditError("GLB file size is outside the audit bound")
-        with path.open("rb") as stream:
-            raw = stream.read(maximum_bytes + 1)
-        after = _stat_signature(path)
-    except GlbMaterialAuditError:
-        raise
+        before = path.lstat()
+    except OSError as exc:
+        raise GlbMaterialAuditError("GLB path is not a real file") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum_bytes
+    ):
+        raise GlbMaterialAuditError(
+            "GLB path is redirected or not a regular file within the audit bound",
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
     except OSError as exc:
         raise GlbMaterialAuditError("GLB file cannot be read stably") from exc
-    if before != after or len(raw) != before[2] or len(raw) > maximum_bytes:
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise GlbMaterialAuditError("GLB file changed before read")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            raw = stream.read(maximum_bytes + 1)
+            read_fstat = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise GlbMaterialAuditError("GLB file cannot be read stably") from exc
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise GlbMaterialAuditError("GLB file cannot be read stably") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(read_fstat.st_mode)
+        or opened.st_ino != read_fstat.st_ino
+        or opened.st_dev != read_fstat.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(raw) != before.st_size
+        or len(raw) > maximum_bytes
+    ):
         raise GlbMaterialAuditError("GLB file changed during bounded read")
     return raw
 
