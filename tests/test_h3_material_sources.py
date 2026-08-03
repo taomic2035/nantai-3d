@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+import pipeline.synthetic_village.h3_material_sources as h3_sources
 from pipeline.synthetic_village.h3_material_sources import (
     H3_CANDIDATE_AUDIT_ALGORITHM_ID,
     H3_GENERATION_POLICY_ID,
@@ -384,3 +386,78 @@ def test_load_source_pack_rejects_extra_empty_directory(tmp_path: Path) -> None:
 
     with pytest.raises(H3MaterialSourceError, match="directory closure"):
         load_h3_source_pack(prepared.root)
+
+
+class TestReadStableBytesStableDescriptor:
+    """RED->GREEN: ``_read_stable_bytes`` must read through a single
+    ``O_NOFOLLOW`` descriptor, not ``stat`` + ``open``.
+
+    The previous implementation called ``path.stat()`` (which follows
+    symlinks) to check the size and then ``path.open("rb")`` (which also
+    follows symlinks) to read the content, creating a check-then-reopen
+    TOCTOU window.  ``_read_stable_bytes`` now uses ``lstat`` +
+    ``O_NOFOLLOW`` + ``fstat`` identity checks to eliminate the window.
+    """
+
+    def test_rejects_symlink(self, tmp_path: Path) -> None:
+        real = tmp_path / "real.bin"
+        real.write_bytes(b'{"valid": true}\n')
+        link = tmp_path / "link.bin"
+        try:
+            os.symlink(real, link)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable")
+        with pytest.raises(H3MaterialSourceError):
+            h3_sources._read_stable_bytes(
+                link,
+                maximum_bytes=4 * 1024 * 1024,
+                label="test input",
+            )
+
+    def test_does_not_use_path_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.bin"
+        target.write_bytes(b'{"valid": true}\n')
+
+        original_open = Path.open
+
+        def reject_open(self, *args, **kwargs):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if mode in ("r", "rb", "rt", "r+b", "r+"):
+                raise AssertionError(
+                    "_read_stable_bytes must not use Path.open for reading"
+                )
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", reject_open)
+        payload = h3_sources._read_stable_bytes(
+            target,
+            maximum_bytes=4 * 1024 * 1024,
+            label="test input",
+        )
+        assert payload == b'{"valid": true}\n'
+
+    def test_does_not_use_path_stat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.bin"
+        target.write_bytes(b'{"valid": true}\n')
+
+        original_stat = Path.stat
+
+        def reject_stat(self, *args, **kwargs):
+            follow_symlinks = kwargs.get("follow_symlinks", True)
+            if self == target and follow_symlinks is not False:
+                raise AssertionError(
+                    "_read_stable_bytes must not use Path.stat (follows symlinks)"
+                )
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", reject_stat)
+        payload = h3_sources._read_stable_bytes(
+            target,
+            maximum_bytes=4 * 1024 * 1024,
+            label="test input",
+        )
+        assert payload == b'{"valid": true}\n'
