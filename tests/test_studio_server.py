@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import subprocess
 import threading
 import warnings
@@ -3739,6 +3740,84 @@ class TestHttpContract:
                 "status": 405,
             },
         }
+
+
+# ============================================================
+# _read_json stable descriptor (security)
+# ============================================================
+
+
+class TestReadJsonStableDescriptor:
+    """RED->GREEN: _read_json must read through a single O_NOFOLLOW descriptor.
+
+    ``_read_json`` reads registration, registry, and manifest JSON files that
+    feed trust-boundary decisions in Studio.  Opening them by name via
+    ``Path.read_text`` leaves a TOCTOU window between ``Path.is_file`` and the
+    read, and a symlinked JSON file is followed silently.
+    """
+
+    def test_rejects_symlink_json(self, tmp_path):
+        real = tmp_path / 'real.json'
+        real.write_text(json.dumps({'trust': 'leaked'}), encoding='utf-8')
+        link = tmp_path / 'link.json'
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f'symlink creation unavailable: {exc}')
+
+        value, error = studio_server_module._read_json(link)
+        assert value is None
+        assert error is not None
+
+    def test_does_not_use_path_read_text(self, tmp_path, monkeypatch):
+        target = tmp_path / 'manifest.json'
+        target.write_text(json.dumps({'chunks': []}), encoding='utf-8')
+
+        def reject_read_text(*_args, **_kwargs):
+            raise AssertionError('_read_json must not use Path.read_text')
+
+        _real_open = Path.open
+
+        def reject_open(self, *args, **kwargs):
+            mode = args[0] if args else kwargs.get('mode', 'r')
+            if mode in ('r', 'rb', 'rt', 'r+b', 'r+'):
+                raise AssertionError(
+                    '_read_json must not use Path.open for reading'
+                )
+            return _real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, 'read_text', reject_read_text)
+        monkeypatch.setattr(Path, 'open', reject_open)
+
+        value, error = studio_server_module._read_json(target)
+        assert error is None
+        assert value == {'chunks': []}
+
+    def test_detects_swap_between_lstat_and_open(self, tmp_path, monkeypatch):
+        target = tmp_path / 'manifest.json'
+        target.write_text(
+            json.dumps({'original': True}), encoding='utf-8'
+        )
+
+        swap_count = 0
+        original_open = os.open
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1:
+                target.write_text(
+                    json.dumps({'swapped': True}),
+                    encoding='utf-8',
+                    newline='\n',
+                )
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, 'open', swapping_open)
+
+        value, error = studio_server_module._read_json(target)
+        assert value is None
+        assert error is not None
 
 
 # ---------------------------------------------------------------------------

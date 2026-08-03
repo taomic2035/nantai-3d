@@ -392,13 +392,31 @@ def _iso_mtime(path: Path) -> str:
 
 
 def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
-    if not path.is_file():
-        return None, "missing"
+    """Read a trust-boundary JSON file through a single O_NOFOLLOW descriptor.
+
+    Pre-checks with ``lstat`` only to translate ``FileNotFoundError`` and
+    over-size into the historical error labels; the actual content read goes
+    through ``_stable_read_evidence_bytes`` so the descriptor used for SHA and
+    validation is the same one inspected before/after reading, eliminating the
+    check-then-reopen TOCTOU window of ``Path.is_file`` + ``Path.read_text``.
+    """
     try:
-        if path.stat().st_size > MAX_JSON_BYTES:
-            return None, "too-large"
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        before = path.lstat()
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError:
+        return None, "invalid-json"
+    if not stat.S_ISREG(before.st_mode):
+        return None, "invalid-json"
+    if before.st_size > MAX_JSON_BYTES:
+        return None, "too-large"
+    try:
+        payload = _stable_read_evidence_bytes(path, max_bytes=MAX_JSON_BYTES)
+    except ValueError:
+        return None, "invalid-json"
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
         return None, "invalid-json"
     if not isinstance(value, dict):
         return None, "invalid-shape"
