@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -1384,3 +1385,61 @@ def test_blender_adapter_normalizes_only_exact_hidden_topology_proxies(
         match="topology proxy",
     ):
         blender_adapter._prepare_topology_proxies(proxies)
+
+
+class TestAuditRequestStableDescriptor:
+    """RED->GREEN: _stable_read_request must read the audit request through a
+    single ``O_NOFOLLOW`` descriptor, not ``Path.read_bytes``.
+
+    The previous implementation in ``main()`` opened the audit request via
+    ``Path.read_bytes()``, which follows symlinks and has no identity
+    verification between the path check and the read.  ``_stable_read_request``
+    pre-checks with ``lstat`` to reject symlinks and Windows reparse points,
+    opens with ``O_NOFOLLOW``, and verifies file identity before and after the
+    bounded read, eliminating the check-then-reopen TOCTOU window.
+    """
+
+    @staticmethod
+    def _write_canonical_json(path: Path, runtime: ModuleType, payload: dict) -> bytes:
+        raw = runtime._canonical_bytes(payload)
+        path.write_bytes(raw)
+        return raw
+
+    def test_stable_read_request_rejects_symlink(
+        self, tmp_path: Path, blender_adapter: ModuleType,
+    ) -> None:
+        real = tmp_path / "real-request.json"
+        self._write_canonical_json(real, blender_adapter, {"valid": True})
+        link = tmp_path / "link-request.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        with pytest.raises(blender_adapter.RuntimeAuditError):
+            blender_adapter._stable_read_request(
+                link, max_bytes=blender_adapter.MAX_REQUEST_BYTES,
+                label="audit request",
+            )
+
+    def test_stable_read_request_does_not_use_path_read_bytes(
+        self, tmp_path: Path, blender_adapter: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "request.json"
+        self._write_canonical_json(target, blender_adapter, {"valid": True})
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == target:
+                raise AssertionError(
+                    "_stable_read_request must not use Path.read_bytes"
+                )
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+        raw = blender_adapter._stable_read_request(
+            target, max_bytes=blender_adapter.MAX_REQUEST_BYTES,
+            label="audit request",
+        )
+        assert raw == blender_adapter._canonical_bytes({"valid": True})

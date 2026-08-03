@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -85,6 +86,9 @@ class RuntimeAuditError(RuntimeError):
     """Stable failure raised before exact-266 audit evidence publication."""
 
 
+MAX_REQUEST_BYTES = 16 * 1024 * 1024
+
+
 def _canonical_bytes(payload):
     return (
         json.dumps(
@@ -96,6 +100,86 @@ def _canonical_bytes(payload):
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _is_reparse_point(path):
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except (FileNotFoundError, OSError):
+        return False
+    return path.is_symlink() or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
+
+
+def _stable_read_request(path, *, max_bytes, label):
+    """Read ``path`` through a single ``O_NOFOLLOW`` descriptor.
+
+    Pre-checks with ``lstat`` to reject symlinks and Windows reparse points
+    and to bound the read by ``max_bytes``.  The actual content read goes
+    through the SAME descriptor, with ``fstat`` identity checks before and
+    after reading and a post-read ``lstat`` recheck, eliminating the
+    check-then-reopen TOCTOU window of ``Path.read_bytes``.
+    """
+    path = Path(path)
+    if _is_reparse_point(path):
+        raise RuntimeAuditError(f"{label} path is redirected")
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        raise RuntimeAuditError(f"{label} not found") from None
+    except OSError as exc:
+        raise RuntimeAuditError(f"{label} cannot be inspected") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+        raise RuntimeAuditError(f"{label} is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeAuditError(f"{label} cannot be opened") from exc
+    payload = bytearray()
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise RuntimeAuditError(f"{label} changed before read")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
+                    raise RuntimeAuditError(
+                        f"{label} exceeds bounded read limit"
+                    )
+            read_fstat = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise RuntimeAuditError(f"{label} cannot be read") from exc
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise RuntimeAuditError(f"{label} cannot be reinspected") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(read_fstat.st_mode)
+        or opened.st_ino != read_fstat.st_ino
+        or opened.st_dev != read_fstat.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
+    ):
+        raise RuntimeAuditError(f"{label} changed during read")
+    return bytes(payload)
 
 
 def _sha256_file(path):
@@ -723,7 +807,11 @@ def _prepare_topology_proxies(objects):
 def main():
     mode, request_path, output_path = _runtime_mode_args(sys.argv)
     try:
-        raw = request_path.read_bytes()
+        raw = _stable_read_request(
+            request_path,
+            max_bytes=MAX_REQUEST_BYTES,
+            label="audit request",
+        )
         request = json.loads(
             raw.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_keys,
