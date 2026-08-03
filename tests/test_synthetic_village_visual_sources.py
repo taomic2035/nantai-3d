@@ -742,3 +742,75 @@ class TestReadBoundedJsonStableDescriptor:
         )
         assert payload == {"valid": True}
         assert b'"valid": true' in raw
+
+
+class TestSha256FileStableDescriptor:
+    """RED->GREEN: ``sha256_file`` must hash through a single ``O_NOFOLLOW``
+    descriptor, not ``path.open("rb")``.
+
+    The previous implementation called ``path.open("rb")`` (which follows
+    symlinks) and streamed the content into ``hashlib.sha256``.  An attacker
+    with filesystem access could swap the path for a symlink between any
+    surrounding ``stat``/``is_file`` checks and the ``open`` call, or replace
+    the content while the hash was being computed, producing a
+    check-then-reopen TOCTOU window on every trust-boundary hash
+    verification (existing object hash, staged object hash, source image
+    digest).  ``sha256_file`` now uses ``lstat`` + ``O_NOFOLLOW`` + ``fstat``
+    identity checks to eliminate the window.
+    """
+
+    @staticmethod
+    def _write_bytes(path: Path, payload: bytes) -> bytes:
+        path.write_bytes(payload)
+        return payload
+
+    def test_rejects_symlink(self, tmp_path: Path) -> None:
+        real = tmp_path / "real.bin"
+        self._write_bytes(real, b"trusted content")
+        link = tmp_path / "link.bin"
+        try:
+            link.symlink_to(real)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable")
+        with pytest.raises(VisualSourceError):
+            visual_sources.sha256_file(link)
+
+    def test_does_not_use_path_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.bin"
+        payload = self._write_bytes(target, b"trusted content")
+        expected = hashlib.sha256(payload).hexdigest()
+
+        original_open = Path.open
+
+        def reject_open(self, *args, **kwargs):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if mode in ("r", "rb", "rt", "r+b", "r+"):
+                raise AssertionError(
+                    "sha256_file must not use Path.open for reading"
+                )
+            return original_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", reject_open)
+        assert visual_sources.sha256_file(target) == expected
+
+    def test_does_not_use_path_stat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "resource.bin"
+        payload = self._write_bytes(target, b"trusted content")
+        expected = hashlib.sha256(payload).hexdigest()
+
+        original_stat = Path.stat
+
+        def reject_stat(self, *args, **kwargs):
+            follow_symlinks = kwargs.get("follow_symlinks", True)
+            if self == target and follow_symlinks is not False:
+                raise AssertionError(
+                    "sha256_file must not use Path.stat (follows symlinks)"
+                )
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", reject_stat)
+        assert visual_sources.sha256_file(target) == expected
