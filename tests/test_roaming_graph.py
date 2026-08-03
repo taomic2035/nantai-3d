@@ -24,10 +24,14 @@ it is represented as ``fragmented`` by the viewer, not rejected here.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1116,3 +1120,137 @@ class TestEmitRoamingGraphManifestReadOnce:
 
         bindings = emit_roaming_graph._build_bindings(manifest)
         assert bindings.collision_manifest_sha256 == manifest["_manifest_sha256"]
+
+
+# ---------------------------------------------------------------------------
+# emit_roaming_graph_manifest: _load_and_validate_build_report stable descriptor.
+# ---------------------------------------------------------------------------
+
+
+def _load_manifest_runtime_module(monkeypatch: pytest.MonkeyPatch):
+    """Load the Blender manifest script while stubbing its Blender-only imports."""
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts/blender/emit_roaming_graph_manifest.py"
+    spec = importlib.util.spec_from_file_location(
+        "_test_emit_roaming_graph_manifest", script_path,
+    )
+    assert spec is not None and spec.loader is not None
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace())
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    return runtime
+
+
+class TestManifestBuildReportStableDescriptor:
+    """RED->GREEN: _load_and_validate_build_report must read the build report
+    through a single O_NOFOLLOW descriptor so the SHA and the parsed JSON come
+    from the SAME bytes.
+
+    The previous implementation read bytes via ``path.read_bytes`` (one open)
+    and then computed the SHA via ``_sha256_file`` (a second open).  Between
+    the two opens an attacker could swap the file: the parsed JSON came from
+    the swapped file while the SHA matched the original -- a false
+    cryptographic binding.
+    """
+
+    @staticmethod
+    def _manifest_request(blend_dir: Path, report_bytes: bytes) -> dict:
+        report_sha = hashlib.sha256(report_bytes).hexdigest()
+        return {
+            "input_blend_path": str(blend_dir / "scene.blend"),
+            "input_build_report_sha256": report_sha,
+            "input_build_id": "a" * 64,
+            "input_blend_sha256": "b" * 64,
+        }
+
+    @staticmethod
+    def _valid_report_bytes(build_id: str, blend_sha: str) -> bytes:
+        payload = json.dumps(
+            {
+                "build_id": build_id,
+                "artifact": {"name": "scene", "kind": "blender-scene", "sha256": blend_sha},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (payload + "\n").encode("utf-8")
+
+    def test_rejects_symlink_build_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = _load_manifest_runtime_module(monkeypatch)
+        report_bytes = self._valid_report_bytes("a" * 64, "b" * 64)
+        real = tmp_path / "real-report.json"
+        real.write_bytes(report_bytes)
+        link = tmp_path / "reciprocal-route-build-report.json"
+        try:
+            os.symlink(real, link)
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+
+        (tmp_path / "scene.blend").write_bytes(b"")
+
+        request = self._manifest_request(tmp_path, report_bytes)
+        with pytest.raises(runtime.ManifestBuildError):
+            runtime._load_and_validate_build_report(request)
+
+    def test_does_not_use_path_read_bytes_for_build_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = _load_manifest_runtime_module(monkeypatch)
+        report_bytes = self._valid_report_bytes("a" * 64, "b" * 64)
+        report_path = tmp_path / "reciprocal-route-build-report.json"
+        report_path.write_bytes(report_bytes)
+        (tmp_path / "scene.blend").write_bytes(b"")
+
+        original_read_bytes = Path.read_bytes
+
+        def reject_read_bytes(self, *args, **kwargs):
+            if self == report_path:
+                raise AssertionError(
+                    "build report must not be read via a separate Path.read_bytes"
+                )
+            return original_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+
+        request = self._manifest_request(tmp_path, report_bytes)
+        report = runtime._load_and_validate_build_report(request)
+        assert report["build_id"] == "a" * 64
+
+    def test_sha_binds_parsed_bytes_not_a_separate_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The SHA must be computed from the SAME bytes that are parsed.
+
+        Swapping the file between the pre-check lstat and the os.open must be
+        detected even when the swapped JSON carries the SAME identity fields
+        (build_id, artifact.sha256) -- the SHA must bind the full bytes, not
+        just the fields the validator happens to check.
+        """
+        runtime = _load_manifest_runtime_module(monkeypatch)
+        original_bytes = self._valid_report_bytes("a" * 64, "b" * 64)
+        swapped_payload = json.loads(original_bytes.decode("utf-8"))
+        swapped_payload["counts"] = {"module_mesh_objects": 999}
+        swapped_bytes = (
+            json.dumps(swapped_payload, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        report_path = tmp_path / "reciprocal-route-build-report.json"
+        report_path.write_bytes(original_bytes)
+        (tmp_path / "scene.blend").write_bytes(b"")
+
+        original_open = os.open
+        swap_count = 0
+
+        def swapping_open(path, flags, *args, **kwargs):
+            nonlocal swap_count
+            swap_count += 1
+            if swap_count == 1 and Path(path) == report_path:
+                report_path.write_bytes(swapped_bytes)
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", swapping_open)
+
+        request = self._manifest_request(tmp_path, original_bytes)
+        with pytest.raises(runtime.ManifestBuildError):
+            runtime._load_and_validate_build_report(request)
