@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
+import stat
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -412,37 +414,59 @@ def _read_regular_file(
     _real_directory(path.parent, label=f"{label} directory")
     try:
         resolved = path.resolve(strict=True)
-        before = path.stat()
-        if (
-            _is_linklike(path)
-            or not path.is_file()
-            or resolved != path
-            or before.st_size <= 0
-            or before.st_size > maximum_bytes
-        ):
-            raise MeshAssetBuildError(f"{label} is not a bounded regular file")
-        with path.open("rb") as stream:
-            payload = stream.read(maximum_bytes + 1)
-        after = path.stat()
-    except MeshAssetBuildError:
-        raise
     except OSError as exc:
         raise MeshAssetBuildError(f"{label} cannot be read stably") from exc
-    signatures = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    ), (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    )
+    if resolved != path:
+        raise MeshAssetBuildError(f"{label} is not a bounded regular file")
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise MeshAssetBuildError(f"{label} cannot be read stably") from exc
     if (
-        signatures[0] != signatures[1]
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum_bytes
+    ):
+        raise MeshAssetBuildError(f"{label} is not a bounded regular file")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise MeshAssetBuildError(f"{label} cannot be read stably") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise MeshAssetBuildError(f"{label} changed before bounded read")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            payload = stream.read(maximum_bytes + 1)
+            after_open = os.fstat(stream.fileno())
+        after = path.lstat()
+    except OSError as exc:
+        raise MeshAssetBuildError(f"{label} cannot be read stably") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
+        or opened.st_ino != after_open.st_ino
+        or opened.st_dev != after_open.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
         or len(payload) != before.st_size
         or len(payload) > maximum_bytes
     ):
