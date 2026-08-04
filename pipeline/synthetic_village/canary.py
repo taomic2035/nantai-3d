@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -1657,22 +1658,46 @@ def load_build_report(path: Path) -> BuildReport:
     path = Path(path).absolute()
     try:
         parent = _require_real_directory(path.parent, label="build report directory")
-        if _is_linklike(path) or path.parent != parent:
+        if path.parent != parent:
             raise CanaryBuildError("build report path has a redirected leaf or parent")
-        before = path.stat()
-        if before.st_size <= 0 or before.st_size > MAX_BUILD_REPORT_BYTES:
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > MAX_BUILD_REPORT_BYTES
+        ):
             raise CanaryBuildError("build report size is invalid")
-        with path.open("rb") as stream:
-            opened = os.fstat(stream.fileno())
-            if _stat_signature(before) != _stat_signature(opened):
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+                or _stat_signature(opened) != _stat_signature(before)
+            ):
                 raise CanaryBuildError("build report changed before bounded read")
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        with stream:
             raw = stream.read(MAX_BUILD_REPORT_BYTES + 1)
             after_open = os.fstat(stream.fileno())
-        after = path.stat()
+        after = path.lstat()
         if (
             len(raw) != before.st_size
             or len(raw) > MAX_BUILD_REPORT_BYTES
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
             or _stat_signature(opened) != _stat_signature(after_open)
+            or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
             or _stat_signature(before) != _stat_signature(after)
         ):
             raise CanaryBuildError("build report changed during bounded read")
@@ -1695,22 +1720,46 @@ def load_textured_build_report(path: Path) -> TexturedBuildReport:
     path = Path(path).absolute()
     try:
         parent = _require_real_directory(path.parent, label="textured build report directory")
-        if _is_linklike(path) or path.parent != parent:
+        if path.parent != parent:
             raise CanaryBuildError("textured build report path is redirected")
-        before = path.stat()
-        if before.st_size <= 0 or before.st_size > MAX_BUILD_REPORT_BYTES:
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > MAX_BUILD_REPORT_BYTES
+        ):
             raise CanaryBuildError("textured build report size is invalid")
-        with path.open("rb") as stream:
-            opened = os.fstat(stream.fileno())
-            if _stat_signature(before) != _stat_signature(opened):
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+                or _stat_signature(opened) != _stat_signature(before)
+            ):
                 raise CanaryBuildError("textured build report changed before bounded read")
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        with stream:
             raw = stream.read(MAX_BUILD_REPORT_BYTES + 1)
             after_open = os.fstat(stream.fileno())
-        after = path.stat()
+        after = path.lstat()
         if (
             len(raw) != before.st_size
             or len(raw) > MAX_BUILD_REPORT_BYTES
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
             or _stat_signature(opened) != _stat_signature(after_open)
+            or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
             or _stat_signature(before) != _stat_signature(after)
         ):
             raise CanaryBuildError("textured build report changed during bounded read")
@@ -1728,23 +1777,61 @@ def load_textured_build_report(path: Path) -> TexturedBuildReport:
 
 
 def _sha256_stable_artifact(path: Path) -> tuple[str, int]:
-    if _is_linklike(path) or not path.is_file():
-        raise CanaryBuildError(f"artifact is missing or redirected: {path.name}")
-    before = path.stat()
-    if before.st_size <= 0 or before.st_size > MAX_ARTIFACT_BYTES:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise CanaryBuildError(
+            f"artifact is missing or redirected: {path.name}",
+        ) from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > MAX_ARTIFACT_BYTES
+    ):
         raise CanaryBuildError(f"artifact size is invalid: {path.name}")
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        opened = os.fstat(stream.fileno())
-        if _stat_signature(before) != _stat_signature(opened):
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CanaryBuildError(
+            f"artifact is missing or redirected: {path.name}",
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or _stat_signature(opened) != _stat_signature(before)
+        ):
             raise CanaryBuildError(f"artifact changed before hashing: {path.name}")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    digest = hashlib.sha256()
+    with stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
             digest.update(chunk)
         after_open = os.fstat(stream.fileno())
-    after = path.stat()
-    if _stat_signature(opened) != _stat_signature(after_open) or _stat_signature(
-        before
-    ) != _stat_signature(after):
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise CanaryBuildError(
+            f"artifact changed while hashing: {path.name}",
+        ) from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
+        or _stat_signature(opened) != _stat_signature(after_open)
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or _stat_signature(before) != _stat_signature(after)
+    ):
         raise CanaryBuildError(f"artifact changed while hashing: {path.name}")
     return digest.hexdigest(), before.st_size
 
@@ -2478,23 +2565,61 @@ def _prepare_private_work_root(repo_root: Path, work_root: Path | None) -> Path:
 def _snapshot_regular_file(path: Path) -> _FileSnapshot:
     path = Path(path).absolute()
     _require_real_directory(path.parent, label="canary input directory")
-    if _is_linklike(path) or not path.is_file():
-        raise CanaryBuildError(f"canary input is missing or redirected: {path.name}")
-    before = path.stat()
-    if before.st_size <= 0 or before.st_size > MAX_ARTIFACT_BYTES:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise CanaryBuildError(
+            f"canary input is missing or redirected: {path.name}",
+        ) from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > MAX_ARTIFACT_BYTES
+    ):
         raise CanaryBuildError(f"canary input size is invalid: {path.name}")
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        opened = os.fstat(stream.fileno())
-        if _stat_signature(before) != _stat_signature(opened):
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CanaryBuildError(
+            f"canary input is missing or redirected: {path.name}",
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or _stat_signature(opened) != _stat_signature(before)
+        ):
             raise CanaryBuildError(f"canary input changed before hashing: {path.name}")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    digest = hashlib.sha256()
+    with stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
             digest.update(chunk)
         after_open = os.fstat(stream.fileno())
-    after = path.stat()
-    if _stat_signature(opened) != _stat_signature(after_open) or _stat_signature(
-        before
-    ) != _stat_signature(after):
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise CanaryBuildError(
+            f"canary input changed while hashing: {path.name}",
+        ) from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
+        or _stat_signature(opened) != _stat_signature(after_open)
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or _stat_signature(before) != _stat_signature(after)
+    ):
         raise CanaryBuildError(f"canary input changed while hashing: {path.name}")
     return _FileSnapshot(
         path=path,
@@ -3270,10 +3395,18 @@ def run_textured_canary_build(
 def _read_stable_metadata(path: Path, *, label: str) -> bytes:
     path = Path(path).absolute()
     parent = _require_real_directory(path.parent, label=f"{label} directory")
-    if path.parent != parent or _is_linklike(path) or not path.is_file():
+    if path.parent != parent:
         raise CanaryBuildError(f"{label} is missing or redirected")
-    before = path.stat()
-    if before.st_size <= 0 or before.st_size > MAX_RENDER_METADATA_BYTES:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise CanaryBuildError(f"{label} is missing or redirected") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > MAX_RENDER_METADATA_BYTES
+    ):
         raise CanaryBuildError(f"{label} size is invalid")
     flags = (
         os.O_RDONLY
@@ -3282,24 +3415,32 @@ def _read_stable_metadata(path: Path, *, label: str) -> bytes:
     )
     descriptor = os.open(path, flags)
     try:
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or _stat_signature(opened) != _stat_signature(before)
+        ):
+            raise CanaryBuildError(f"{label} changed before bounded read")
         stream = os.fdopen(descriptor, "rb", buffering=0)
-    except OSError:
+    except BaseException:
         try:
             os.close(descriptor)
         except OSError:
             pass
         raise
     with stream:
-        opened = os.fstat(stream.fileno())
-        if _stat_signature(before) != _stat_signature(opened):
-            raise CanaryBuildError(f"{label} changed before bounded read")
         raw = stream.read(MAX_RENDER_METADATA_BYTES + 1)
         after_open = os.fstat(stream.fileno())
-    after = path.stat()
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise CanaryBuildError(f"{label} changed during bounded read") from exc
     if (
         len(raw) != before.st_size
         or len(raw) > MAX_RENDER_METADATA_BYTES
+        or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
         or _stat_signature(opened) != _stat_signature(after_open)
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
         or _stat_signature(before) != _stat_signature(after)
     ):
         raise CanaryBuildError(f"{label} changed during bounded read")
