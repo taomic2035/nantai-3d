@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -486,27 +487,56 @@ def _canonical_historical_local_glb_audit_bytes(
 
 def _read_stable_file(path: Path, *, maximum_bytes: int, label: str) -> bytes:
     path = Path(path).absolute()
-    if canary._is_linklike(path) or not path.is_file():
-        raise LocalTexturedPreviewError(f"{label} is missing or redirected")
     try:
-        before = canary._stat_signature(path.stat())
-        if before[2] <= 0 or before[2] > maximum_bytes:
-            raise LocalTexturedPreviewError(f"{label} size is invalid")
-        with path.open("rb") as stream:
-            opened = canary._stat_signature(os.fstat(stream.fileno()))
-            if opened != before:
-                raise LocalTexturedPreviewError(f"{label} changed before bounded read")
-            payload = stream.read(maximum_bytes + 1)
-            after_open = canary._stat_signature(os.fstat(stream.fileno()))
-        after = canary._stat_signature(path.stat())
-    except LocalTexturedPreviewError:
-        raise
+        before = path.lstat()
     except OSError as exc:
         raise LocalTexturedPreviewError(f"{label} cannot be read safely") from exc
     if (
-        opened != after_open
-        or before != after
-        or len(payload) != before[2]
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum_bytes
+    ):
+        raise LocalTexturedPreviewError(f"{label} is missing or redirected")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise LocalTexturedPreviewError(f"{label} cannot be read safely") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
+            or opened.st_ino != before.st_ino
+            or opened.st_dev != before.st_dev
+        ):
+            raise LocalTexturedPreviewError(f"{label} changed before bounded read")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            payload = stream.read(maximum_bytes + 1)
+            after_open = os.fstat(stream.fileno())
+        after = path.lstat()
+    except OSError as exc:
+        raise LocalTexturedPreviewError(f"{label} cannot be read safely") from exc
+    if (
+        stat.S_IFMT(opened.st_mode) != stat.S_IFMT(after_open.st_mode)
+        or opened.st_ino != after_open.st_ino
+        or opened.st_dev != after_open.st_dev
+        or stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+        or before.st_ino != after.st_ino
+        or before.st_dev != after.st_dev
+        or len(payload) != before.st_size
         or len(payload) > maximum_bytes
     ):
         raise LocalTexturedPreviewError(f"{label} changed during bounded read")
